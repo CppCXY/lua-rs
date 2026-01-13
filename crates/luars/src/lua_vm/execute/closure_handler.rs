@@ -97,22 +97,22 @@ fn find_or_create_upvalue(
 /// Based on Lua's luaF_close (lfunc.c)
 pub fn close_upvalues_at_level(lua_state: &mut LuaState, level: usize) -> LuaResult<()> {
     // Collect upvalues to close (can't borrow mutably while iterating)
-    let upvalues_to_close: Vec<_> = lua_state
-        .vm_mut()
-        .object_pool
-        .iter_upvalues()
-        .filter_map(|(id, upval)| {
-            if let Some(stack_idx) = upval.data.get_stack_index() {
-                if stack_idx >= level {
-                    Some((id, stack_idx))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
+    // let upvalues_to_close: Vec<_> = lua_state
+    //     .vm_mut()
+    //     .object_pool
+    //     .iter_upvalues()
+    //     .filter_map(|(id, upval)| {
+    //         if let Some(stack_idx) = upval.data.get_stack_index() {
+    //             if stack_idx >= level {
+    //                 Some((id, stack_idx))
+    //             } else {
+    //                 None
+    //             }
+    //         } else {
+    //             None
+    //         }
+    //     })
+    //     .collect();
 
     // Close each upvalue
     for (upval_id, stack_idx) in upvalues_to_close {

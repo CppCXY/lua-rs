@@ -38,6 +38,7 @@ mod const_string;
 mod gc_id;
 mod gc_object;
 mod object_pool;
+mod string_interner;
 
 use crate::lua_value::{Chunk, LuaValue, LuaValueKind};
 pub use gc_id::*;
@@ -268,45 +269,45 @@ impl GC {
         // for the current cycle, preventing premature collection if
         // the cycle advances (Atomic/Sweep) before the object is anchored.
 
-        match gc_id {
+        match gc_id.gc_type() {
             // Leaves: Can be marked Black immediately (no outgoing refs to scan)
-            GcId::StringId(id) => {
-                if let Some(s) = pool.get_string_gc_mut(id) {
+            GcObjectType::String => {
+                if let Some(s) = pool.get_mut(gc_id) {
                     s.header.make_black();
                 }
             }
-            GcId::BinaryId(id) => {
-                if let Some(b) = pool.binaries.get_mut(id.0) {
+            GcObjectType::Binary => {
+                if let Some(b) = pool.get_mut(gc_id) {
                     b.header.make_black();
                 }
             }
             // Complex objects: Mark Gray and schedule for scanning
-            GcId::TableId(id) => {
-                if let Some(t) = pool.tables.get_mut(id.0) {
+            GcObjectType::Table => {
+                if let Some(t) = pool.get_mut(gc_id) {
                     t.header.make_gray();
                     self.gray.push(gc_id);
                 }
             }
-            GcId::FunctionId(id) => {
-                if let Some(f) = pool.functions.get_mut(id.0) {
+            GcObjectType::Function => {
+                if let Some(f) = pool.get_mut(gc_id) {
                     f.header.make_gray();
                     self.gray.push(gc_id);
                 }
             }
-            GcId::UpvalueId(id) => {
-                if let Some(u) = pool.upvalues.get_mut(id.0) {
+            GcObjectType::Upvalue => {
+                if let Some(u) = pool.get_mut(gc_id) {
                     u.header.make_gray();
                     self.gray.push(gc_id);
                 }
             }
-            GcId::UserdataId(id) => {
-                if let Some(u) = pool.userdata.get_mut(id.0) {
+            GcObjectType::Userdata => {
+                if let Some(u) = pool.get_mut(gc_id) {
                     u.header.make_gray();
                     self.gray.push(gc_id);
                 }
             }
-            GcId::ThreadId(id) => {
-                if let Some(t) = pool.threads.get_mut(id.0) {
+            GcObjectType::Thread => {
+                if let Some(t) = pool.get_mut(gc_id) {
                     t.header.make_gray();
                     self.gray.push(gc_id);
                 }
@@ -549,24 +550,9 @@ impl GC {
     fn make_all_white(&mut self, pool: &mut ObjectPool) {
         let white = self.current_white;
 
-        for (_id, table) in pool.tables.iter_mut() {
-            if !table.header.is_fixed() {
-                table.header.make_white(white);
-            }
-        }
-        for (_id, func) in pool.functions.iter_mut() {
-            if !func.header.is_fixed() {
-                func.header.make_white(white);
-            }
-        }
-        for (_id, upval) in pool.upvalues.iter_mut() {
-            if !upval.header.is_fixed() {
-                upval.header.make_white(white);
-            }
-        }
-        for (_id, string) in pool.iter_strings_mut() {
-            if !string.header.is_fixed() {
-                string.header.make_white(white);
+        for (_, gc_object) in pool.gc_pool.iter_mut() {
+            if !gc_object.header.is_fixed() {
+                gc_object.header.make_white(white);
             }
         }
     }
@@ -576,7 +562,7 @@ impl GC {
         match value.kind() {
             LuaValueKind::Table => {
                 if let Some(id) = value.as_table_id() {
-                    if let Some(t) = pool.tables.get_mut(id.0) {
+                    if let Some(t) = pool.get_mut(id.into()) {
                         if t.header.is_white() {
                             t.header.make_gray();
                             self.gray.push(GcId::TableId(id));
@@ -586,7 +572,7 @@ impl GC {
             }
             LuaValueKind::Function => {
                 if let Some(id) = value.as_function_id() {
-                    if let Some(f) = pool.functions.get_mut(id.0) {
+                    if let Some(f) = pool.get_mut(id.into()) {
                         if f.header.is_white() {
                             f.header.make_gray();
                             self.gray.push(GcId::FunctionId(id));
@@ -596,10 +582,40 @@ impl GC {
             }
             LuaValueKind::String => {
                 if let Some(id) = value.as_string_id() {
-                    if let Some(s) = pool.get_string_gc_mut(id) {
+                    if let Some(s) = pool.get_mut(id.into()) {
                         // Strings are leaves - mark black directly (but only if white)
                         if s.header.is_white() {
                             s.header.make_black();
+                        }
+                    }
+                }
+            }
+            LuaValueKind::Binary => {
+                if let Some(id) = value.as_binary_id() {
+                    if let Some(b) = pool.get_mut(id.into()) {
+                        // Binaries are leaves - mark black directly (but only if white)
+                        if b.header.is_white() {
+                            b.header.make_black();
+                        }
+                    }
+                }
+            }
+            LuaValueKind::Userdata => {
+                if let Some(id) = value.as_userdata_id() {
+                    if let Some(u) = pool.get_mut(id.into()) {
+                        if u.header.is_white() {
+                            u.header.make_gray();
+                            self.gray.push(GcId::UserdataId(id));
+                        }
+                    }
+                }
+            }
+            LuaValueKind::Thread => {
+                if let Some(id) = value.as_thread_id() {
+                    if let Some(t) = pool.get_mut(id.into()) {
+                        if t.header.is_white() {
+                            t.header.make_gray();
+                            self.gray.push(GcId::ThreadId(id));
                         }
                     }
                 }
@@ -618,15 +634,6 @@ impl GC {
         // Recursively mark constants in child protos (nested functions)
         for child_chunk in &chunk.child_protos {
             self.mark_chunk_constants(child_chunk, pool);
-        }
-    }
-
-    fn mark_table_id(&mut self, table_id: TableId, pool: &mut ObjectPool) {
-        if let Some(t) = pool.tables.get_mut(table_id.0) {
-            if t.header.is_white() {
-                t.header.make_gray();
-                self.gray.push(GcId::TableId(table_id));
-            }
         }
     }
 

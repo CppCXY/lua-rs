@@ -8,7 +8,7 @@ pub mod opcode;
 mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
-use crate::gc::{GC, GcFunction, GcId, TableId, UpvalueId};
+use crate::gc::{GC, GcId, TableId, UpvalueId};
 use crate::lua_value::{Chunk, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::execute::lua_execute;
@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{GcUpvalue, LuaFunction, ObjectPool, lib_registry};
+use crate::{lib_registry, FunctionBody, LuaFunction, ObjectPool, Upvalue};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -78,7 +78,7 @@ impl LuaVM {
         vm.registry = registry;
         if let Some(registry_id) = registry.as_table_id() {
             // Fix the registry table so it's never collected
-            vm.object_pool.fix_table(registry_id);
+            vm.object_pool.fix_gc_object(registry_id.into());
         }
 
         // Set _G to point to the global table itself
@@ -86,7 +86,7 @@ impl LuaVM {
         vm.global = globals_value;
         if let Some(globals_id) = globals_value.as_table_id() {
             // Fix the global table so it's never collected
-            vm.object_pool.fix_table(globals_id);
+            vm.object_pool.fix_gc_object(globals_id.into());
         }
 
         vm.set_global("_G", globals_value);
@@ -610,7 +610,7 @@ impl LuaVM {
         let id = value.as_function_id().unwrap();
         self.gc.track_object(
             GcId::FunctionId(id),
-            std::mem::size_of::<GcFunction>(),
+            std::mem::size_of::<FunctionBody>(),
             &mut self.object_pool,
         );
         value
@@ -622,7 +622,7 @@ impl LuaVM {
         let id = self.object_pool.create_upvalue_open(stack_index);
         self.gc.track_object(
             GcId::UpvalueId(id),
-            std::mem::size_of::<GcUpvalue>(),
+            std::mem::size_of::<Upvalue>(),
             &mut self.object_pool,
         );
         id
@@ -634,7 +634,7 @@ impl LuaVM {
         let id = self.object_pool.create_upvalue_closed(value);
         self.gc.track_object(
             GcId::UpvalueId(id),
-            std::mem::size_of::<GcUpvalue>(),
+            std::mem::size_of::<Upvalue>(),
             &mut self.object_pool,
         );
         id
@@ -838,7 +838,7 @@ impl LuaVM {
         // 6. Open upvalues
         for upval_id in self.main_state.get_open_upvalues() {
             if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
-                if let Some(val) = uv.data.get_closed_value() {
+                if let Some(val) = uv.get_closed_value() {
                     roots.push(val);
                 }
             }
@@ -903,11 +903,8 @@ impl LuaVM {
     }
 
     // ============ Protected Call (pcall/xpcall) ============
-    // DEPRECATED: These methods are kept for backward compatibility
-    // New code should use LuaState::pcall/xpcall directly
 
     /// Execute a function with protected call (pcall semantics)
-    /// DEPRECATED: Use lua_state.pcall() instead
     /// Note: Yields are NOT caught by pcall - they propagate through
     pub fn protected_call(
         &mut self,
@@ -919,7 +916,6 @@ impl LuaVM {
     }
 
     /// ULTRA-OPTIMIZED pcall for CFunction calls
-    /// DEPRECATED: Use lua_state.pcall_stack_based() instead
     /// Works directly on the stack without any Vec allocations
     /// Returns: (success, result_count) where results are on stack
     #[inline]
@@ -933,7 +929,6 @@ impl LuaVM {
     }
 
     /// Protected call with error handler (xpcall semantics)
-    /// DEPRECATED: Use lua_state.xpcall() instead
     /// The error handler is called if an error occurs
     /// Note: Yields are NOT caught by xpcall - they propagate through
     pub fn protected_call_with_handler(

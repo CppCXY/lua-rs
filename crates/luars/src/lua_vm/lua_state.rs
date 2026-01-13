@@ -740,7 +740,9 @@ impl LuaState {
 
         // Ensure physical stack is large enough (Lua's luaD_reallocstack equivalent)
         if current_top >= self.stack.len() {
-            self.stack.resize(current_top + 1, LuaValue::nil());
+            // 1.5 x growth strategy
+            let new_size = current_top + current_top / 2;
+            self.stack.resize(new_size, LuaValue::nil());
         }
 
         // Write at logical top position (L->top.p->value = value)

@@ -31,7 +31,7 @@
 use crate::gc::{FunctionId, StringId, TableId, ThreadId, UserdataId};
 use crate::lua_value::LuaUserdata;
 use crate::lua_vm::{CFunction, LuaState};
-use crate::{BinaryId, FunctionBody, LuaTable};
+use crate::{BinaryId, FunctionBody, GcId, LuaTable};
 
 // ============ Basic type tags (bits 0-3) ============
 // From lua.h

@@ -233,37 +233,84 @@ impl GcHeader {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Gc<T> {
-    pub header: GcHeader,
-    pub data: Box<T>, // Use Box to ensure stable pointer even when Pool array grows
+// ============ GC-managed Objects ============
+pub enum GcPtrObject {
+    String(Box<String>),
+    Table(Box<LuaTable>),
+    Function(Box<FunctionBody>),
+    Upvalue(Box<Upvalue>),
+    Thread(Box<LuaState>),
+    Userdata(Box<LuaUserdata>),
+    Binary(Box<Vec<u8>>),
 }
 
-impl<T> Gc<T> {
-    /// Create a new GC object with default header
-    pub fn new(data: T) -> Self {
-        Gc {
-            header: GcHeader::default(),
-            data: Box::new(data),
+impl GcPtrObject {
+    /// Get type tag of this object
+    #[inline(always)]
+    pub fn as_str_ptr(&self) -> Option<*const String> {
+        match self {
+            GcPtrObject::String(s) => Some(s.as_ref() as *const String),
+            _ => None,
         }
     }
 
-    /// Get raw pointer to data (stable across Pool reallocations)
-    #[inline(always)]
-    pub fn as_ptr(&self) -> *const T {
-        self.data.as_ref() as *const T
+    pub fn as_table_ptr(&self) -> Option<*const LuaTable> {
+        match self {
+            GcPtrObject::Table(t) => Some(t.as_ref() as *const LuaTable),
+            _ => None,
+        }
     }
 
-    /// Get mutable raw pointer to data
-    #[inline(always)]
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.data.as_mut() as *mut T
+    pub fn as_function_ptr(&self) -> Option<*const FunctionBody> {
+        match self {
+            GcPtrObject::Function(f) => Some(f.as_ref() as *const FunctionBody),
+            _ => None,
+        }
+    }
+
+    pub fn as_upvalue_ptr(&self) -> Option<*const Upvalue> {
+        match self {
+            GcPtrObject::Upvalue(u) => Some(u.as_ref() as *const Upvalue),
+            _ => None,
+        }
+    }
+
+    pub fn as_thread_ptr(&self) -> Option<*const LuaState> {
+        match self {
+            GcPtrObject::Thread(t) => Some(t.as_ref() as *const LuaState),
+            _ => None,
+        }
+    }
+
+    pub fn as_userdata_ptr(&self) -> Option<*const LuaUserdata> {
+        match self {
+            GcPtrObject::Userdata(u) => Some(u.as_ref() as *const LuaUserdata),
+            _ => None,
+        }
+    }
+
+    pub fn as_binary_ptr(&self) -> Option<*const Vec<u8>> {
+        match self {
+            GcPtrObject::Binary(b) => Some(b.as_ref() as *const Vec<u8>),
+            _ => None,
+        }
     }
 }
 
-// ============ GC-managed Objects ============
+pub struct GcObject {
+    pub header: GcHeader,
+    pub ptr: GcPtrObject,
+}
 
-pub type GcTable = Gc<LuaTable>;
+impl GcObject {
+    /// Create a new GC object with default header
+    pub fn new(ptr: GcPtrObject) -> Self {
+        GcObject {
+            header: GcHeader::default(),
+            ptr,
+        }
+    }
+}
 
 /// Function body - either Lua bytecode or C function
 pub enum FunctionBody {
@@ -273,8 +320,6 @@ pub enum FunctionBody {
     /// C function (native Rust function) with cached upvalues
     CClosure(CFunction, Vec<CachedUpvalue>),
 }
-
-pub type GcFunction = Gc<FunctionBody>;
 
 impl FunctionBody {
     /// Check if this is a C function (any C variant)
@@ -345,8 +390,6 @@ pub enum Upvalue {
     Closed(LuaValue),
 }
 
-pub type GcUpvalue = Gc<Upvalue>;
-
 impl Upvalue {
     /// Check if this upvalue points to the given absolute stack index
     #[inline]
@@ -388,13 +431,141 @@ impl Upvalue {
     }
 }
 
-/// String with embedded GC header
-pub type GcString = Gc<String>;
+/// Simple Vec-based pool for small objects
+/// - Direct O(1) indexing with no chunking overhead
+/// - Free list for slot reuse
+/// - Objects stored inline in Vec
+pub struct GcPool {
+    gc_list: Vec<Option<GcObject>>,
+    free_list: Vec<u32>,
+    count: usize,
+}
 
-/// Binary data with embedded GC header
-pub type GcBinary = Gc<Vec<u8>>;
+impl GcPool {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            gc_list: Vec::new(),
+            free_list: Vec::new(),
+            count: 0,
+        }
+    }
 
-/// Thread (coroutine) with embedded GC header
-pub type GcThread = Gc<LuaState>;
+    #[inline]
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            gc_list: Vec::with_capacity(cap),
+            free_list: Vec::with_capacity(cap / 8),
+            count: 0,
+        }
+    }
 
-pub type GcUserdata = Gc<LuaUserdata>;
+    /// Allocate a new object and return its ID
+    #[inline]
+    pub fn alloc(&mut self, value: GcObject) -> u32 {
+        self.count += 1;
+
+        if let Some(free_id) = self.free_list.pop() {
+            self.gc_list[free_id as usize] = Some(value);
+            return free_id;
+        }
+
+        let id = self.gc_list.len() as u32;
+        self.gc_list.push(Some(value));
+        id
+    }
+
+    /// Get immutable reference by ID
+    #[inline(always)]
+    pub fn get(&self, id: u32) -> Option<&GcObject> {
+        self.gc_list.get(id as usize).and_then(|opt| opt.as_ref())
+    }
+
+    /// Get mutable reference by ID
+    #[inline(always)]
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut GcObject> {
+        self.gc_list
+            .get_mut(id as usize)
+            .and_then(|opt| opt.as_mut())
+    }
+
+    /// Free a slot (mark for reuse)
+    #[inline]
+    pub fn free(&mut self, id: u32) {
+        if let Some(slot) = self.gc_list.get_mut(id as usize) {
+            if slot.is_some() {
+                *slot = None;
+                self.free_list.push(id);
+                self.count -= 1;
+            }
+        }
+    }
+
+    /// Get number of free slots in the free list
+    #[inline]
+    pub fn free_slots_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    /// Trim trailing None values from the pool to reduce iteration overhead
+    /// This removes None values from the end of the data vec
+    pub fn trim_tail(&mut self) {
+        // Remove trailing None values
+        while self.gc_list.last().map_or(false, |v| v.is_none()) {
+            self.gc_list.pop();
+        }
+        // Remove free list entries that are now out of bounds
+        let max_valid = self.gc_list.len() as u32;
+        self.free_list.retain(|&id| id < max_valid);
+    }
+
+    /// Check if a slot is occupied
+    #[inline(always)]
+    pub fn is_valid(&self, id: u32) -> bool {
+        self.gc_list
+            .get(id as usize)
+            .map(|opt| opt.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Current number of live objects
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Iterate over all live objects
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &GcObject)> {
+        self.gc_list
+            .iter()
+            .enumerate()
+            .filter_map(|(id, opt)| opt.as_ref().map(|v| (id as u32, v)))
+    }
+
+    /// Iterate over all live objects mutably
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut GcObject)> {
+        self.gc_list
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(id, opt)| opt.as_mut().map(|v| (id as u32, v)))
+    }
+
+    /// Shrink internal storage
+    pub fn shrink_to_fit(&mut self) {
+        self.gc_list.shrink_to_fit();
+        self.free_list.shrink_to_fit();
+    }
+
+    /// Clear all objects
+    pub fn clear(&mut self) {
+        self.gc_list.clear();
+        self.free_list.clear();
+        self.count = 0;
+    }
+}
+
+impl Default for GcPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}

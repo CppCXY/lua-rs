@@ -9,323 +9,22 @@
 // 6. GC headers embedded in objects for mark-sweep
 
 use crate::gc::gc_object::{CachedUpvalue, FunctionBody};
+use crate::gc::string_interner::StringInterner;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption, TmKind};
 use crate::{
-    BinaryId, FunctionId, GcBinary, GcFunction, GcHeader, GcString, GcTable, GcThread, GcUpvalue,
-    GcUserdata, LuaTable, LuaValue, StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
+    BinaryId, FunctionId, GcId, GcObject, GcObjectType, GcPool, GcPtrObject, LuaTable, LuaValue,
+    StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
 };
-use std::collections::HashMap;
 use std::rc::Rc;
-
-// ============ Pool Storage ============
-
-/// Simple Vec-based pool for small objects
-/// - Direct O(1) indexing with no chunking overhead
-/// - Free list for slot reuse
-/// - Objects stored inline in Vec
-pub struct Pool<T> {
-    data: Vec<Option<T>>,
-    free_list: Vec<u32>,
-    count: usize,
-}
-
-impl<T> Pool<T> {
-    #[inline]
-    pub fn new() -> Self {
-        Self {
-            data: Vec::new(),
-            free_list: Vec::new(),
-            count: 0,
-        }
-    }
-
-    #[inline]
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(cap),
-            free_list: Vec::with_capacity(cap / 8),
-            count: 0,
-        }
-    }
-
-    /// Allocate a new object and return its ID
-    #[inline]
-    pub fn alloc(&mut self, value: T) -> u32 {
-        self.count += 1;
-
-        if let Some(free_id) = self.free_list.pop() {
-            self.data[free_id as usize] = Some(value);
-            return free_id;
-        }
-
-        let id = self.data.len() as u32;
-        self.data.push(Some(value));
-        id
-    }
-
-    /// Get immutable reference by ID
-    #[inline(always)]
-    pub fn get(&self, id: u32) -> Option<&T> {
-        self.data.get(id as usize).and_then(|opt| opt.as_ref())
-    }
-
-    /// Get reference by ID without bounds checking
-    /// SAFETY: id must be a valid index from alloc() and not freed
-    #[inline(always)]
-    pub unsafe fn get_unchecked(&self, id: u32) -> &T {
-        unsafe {
-            self.data
-                .get_unchecked(id as usize)
-                .as_ref()
-                .unwrap_unchecked()
-        }
-    }
-
-    /// Get mutable reference by ID
-    #[inline(always)]
-    pub fn get_mut(&mut self, id: u32) -> Option<&mut T> {
-        self.data.get_mut(id as usize).and_then(|opt| opt.as_mut())
-    }
-
-    /// Get mutable reference by ID without bounds checking
-    /// SAFETY: id must be a valid index from alloc() and not freed
-    #[inline(always)]
-    pub unsafe fn get_mut_unchecked(&mut self, id: u32) -> &mut T {
-        unsafe {
-            self.data
-                .get_unchecked_mut(id as usize)
-                .as_mut()
-                .unwrap_unchecked()
-        }
-    }
-
-    /// Free a slot (mark for reuse)
-    #[inline]
-    pub fn free(&mut self, id: u32) {
-        if let Some(slot) = self.data.get_mut(id as usize) {
-            if slot.is_some() {
-                *slot = None;
-                self.free_list.push(id);
-                self.count -= 1;
-            }
-        }
-    }
-
-    /// Get number of free slots in the free list
-    #[inline]
-    pub fn free_slots_count(&self) -> usize {
-        self.free_list.len()
-    }
-
-    /// Trim trailing None values from the pool to reduce iteration overhead
-    /// This removes None values from the end of the data vec
-    pub fn trim_tail(&mut self) {
-        // Remove trailing None values
-        while self.data.last().map_or(false, |v| v.is_none()) {
-            self.data.pop();
-        }
-        // Remove free list entries that are now out of bounds
-        let max_valid = self.data.len() as u32;
-        self.free_list.retain(|&id| id < max_valid);
-    }
-
-    /// Check if a slot is occupied
-    #[inline(always)]
-    pub fn is_valid(&self, id: u32) -> bool {
-        self.data
-            .get(id as usize)
-            .map(|opt| opt.is_some())
-            .unwrap_or(false)
-    }
-
-    /// Current number of live objects
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.count
-    }
-
-    /// Iterate over all live objects
-    pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
-        self.data
-            .iter()
-            .enumerate()
-            .filter_map(|(id, opt)| opt.as_ref().map(|v| (id as u32, v)))
-    }
-
-    /// Iterate over all live objects mutably
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
-        self.data
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(id, opt)| opt.as_mut().map(|v| (id as u32, v)))
-    }
-
-    /// Shrink internal storage
-    pub fn shrink_to_fit(&mut self) {
-        self.data.shrink_to_fit();
-        self.free_list.shrink_to_fit();
-    }
-
-    /// Clear all objects
-    pub fn clear(&mut self) {
-        self.data.clear();
-        self.free_list.clear();
-        self.count = 0;
-    }
-}
-
-impl<T> Default for Pool<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Keep Arena as an alias for backward compatibility
-pub type Arena<T> = Pool<T>;
-
-// ============ String Interner (Complete Interning) ============
-
-/// Complete string interner - ALL strings are interned for maximum performance
-/// - Same content always returns same StringId
-/// - StringId equality = content equality (no string comparison needed)
-/// - O(1) hash lookup for new strings
-/// - GC can collect unused strings via mark-sweep
-struct StringInterner {
-    // StringId -> String data (Vec-based for O(1) access)
-    strings: Pool<GcString>,
-
-    // Content -> StringId mapping for deduplication
-    // Key is (hash, start_idx) where start_idx is index into strings pool
-    // This avoids storing string content twice
-    map: HashMap<u64, Vec<u32>>, // hash -> list of StringIds with that hash
-
-    small_string_limit: usize, // Max length for small strings (stored inline)
-}
-
-impl StringInterner {
-    fn new(small_string_limit: usize) -> Self {
-        Self {
-            strings: Pool::with_capacity(256),
-            map: HashMap::with_capacity(256),
-            small_string_limit,
-        }
-    }
-
-    /// Intern a string - returns existing StringId if already interned, creates new otherwise
-    fn intern(&mut self, s: &str) -> (LuaValue, bool) {
-        self.intern_owned(s.to_string())
-    }
-
-    /// Intern an owned string (avoids clone)
-    fn intern_owned(&mut self, s: String) -> (LuaValue, bool) {
-        if s.len() > self.small_string_limit {
-            // Large string - store in Box to avoid large stack usage
-            let gc_string = GcString {
-                header: GcHeader::default(),
-                data: Box::new(s),
-            };
-            let ptr = gc_string.data.as_ref() as *const String;
-            let id = self.strings.alloc(gc_string);
-            let str_id = StringId(id);
-            return (LuaValue::string(str_id, ptr), true);
-        }
-
-        let hash = Self::hash_string(&s);
-
-        // Check if already interned
-        if let Some(ids) = self.map.get(&hash) {
-            for &id in ids {
-                if let Some(gs) = self.strings.get(id) {
-                    if gs.data.as_str() == s.as_str() {
-                        let str_id = StringId(id);
-                        let ptr = gs.data.as_ref() as *const String;
-                        // Found! Drop the owned string
-                        return (LuaValue::string(str_id, ptr), false);
-                    }
-                }
-            }
-        }
-
-        // Not found - use owned string directly
-        let gc_string = GcString {
-            header: GcHeader::default(),
-            data: Box::new(s),
-        };
-        let ptr = gc_string.data.as_ref() as *const String;
-        let id = self.strings.alloc(gc_string);
-        let str_id = StringId(id);
-        self.map.entry(hash).or_insert_with(Vec::new).push(id);
-
-        (LuaValue::string(str_id, ptr), true)
-    }
-
-    /// Get string by ID
-    #[inline(always)]
-    fn get(&self, id: StringId) -> Option<&GcString> {
-        self.strings.get(id.0)
-    }
-
-    #[inline(always)]
-    fn get_mut(&mut self, id: StringId) -> Option<&mut GcString> {
-        self.strings.get_mut(id.0)
-    }
-
-    /// Fast hash function - FNV-1a for good distribution
-    #[inline(always)]
-    fn hash_string(s: &str) -> u64 {
-        let bytes = s.as_bytes();
-        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
-        for &byte in bytes {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3); // FNV prime
-        }
-        hash
-    }
-
-    /// Remove dead strings (called by GC)
-    fn remove_dead(&mut self, id: StringId) {
-        let hash = if let Some(gs) = self.strings.get(id.0) {
-            Self::hash_string(&gs.data)
-        } else {
-            return; // Already removed
-        };
-        self.strings.free(id.0);
-
-        // Remove from map
-        if let Some(ids) = self.map.get_mut(&hash) {
-            ids.retain(|&i| i != id.0);
-            if ids.is_empty() {
-                self.map.remove(&hash);
-            }
-        }
-    }
-
-    /// Iterate over all strings
-    fn iter(&self) -> impl Iterator<Item = (u32, &GcString)> {
-        self.strings.iter()
-    }
-
-    /// Iterate over all strings (mutable)
-    fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut GcString)> {
-        self.strings.iter_mut()
-    }
-}
-
-// ============ Object Pool V3 ============
 
 /// High-performance object pool for the Lua VM
 /// - Small objects (String, Function, Upvalue) use Pool<T> with direct Vec storage
 /// - Large objects (Table, Thread) use BoxPool<T> to avoid copy on resize
 /// - ALL strings are interned via StringInterner for O(1) equality checks
 pub struct ObjectPool {
-    strings: StringInterner, // Private - use create_string() to intern
-    pub binaries: Pool<GcBinary>,
-    pub tables: Pool<GcTable>,
-    pub functions: Pool<GcFunction>,
-    pub upvalues: Pool<GcUpvalue>,
-    pub userdata: Pool<GcUserdata>,
-    pub threads: Pool<GcThread>,
+    strings: StringInterner,    // Private - use create_string() to intern
+    pub(crate) gc_pool: GcPool, // General GC pool for all objects
     // Pre-cached metamethod name StringIds (like Lua's G(L)->tmname[])
     // These are created at initialization and never collected
     // Stored as StringId to avoid repeated hash lookup in hot paths
@@ -371,12 +70,7 @@ impl ObjectPool {
     pub fn new(option: SafeOption) -> Self {
         let mut pool = Self {
             strings: StringInterner::new(option.small_string_limit),
-            binaries: Pool::with_capacity(8),
-            tables: Pool::with_capacity(64),
-            functions: Pool::with_capacity(32),
-            upvalues: Pool::with_capacity(32),
-            userdata: Pool::new(),
-            threads: Pool::with_capacity(8),
+            gc_pool: GcPool::new(),
             // Placeholder values - will be initialized below
             tm_index: LuaValue::nil(),
             tm_newindex: LuaValue::nil(),
@@ -455,40 +149,40 @@ impl ObjectPool {
 
         // Fix all metamethod name strings - they should never be collected
         // (like Lua's luaC_fix in luaT_init)
-        pool.fix_string(pool.tm_index.as_string_id().unwrap());
-        pool.fix_string(pool.tm_newindex.as_string_id().unwrap());
-        pool.fix_string(pool.tm_call.as_string_id().unwrap());
-        pool.fix_string(pool.tm_tostring.as_string_id().unwrap());
-        pool.fix_string(pool.tm_len.as_string_id().unwrap());
-        pool.fix_string(pool.tm_pairs.as_string_id().unwrap());
-        pool.fix_string(pool.tm_ipairs.as_string_id().unwrap());
-        pool.fix_string(pool.tm_gc.as_string_id().unwrap());
-        pool.fix_string(pool.tm_close.as_string_id().unwrap());
-        pool.fix_string(pool.tm_mode.as_string_id().unwrap());
-        pool.fix_string(pool.tm_name.as_string_id().unwrap());
-        pool.fix_string(pool.tm_eq.as_string_id().unwrap());
-        pool.fix_string(pool.tm_lt.as_string_id().unwrap());
-        pool.fix_string(pool.tm_le.as_string_id().unwrap());
-        pool.fix_string(pool.tm_add.as_string_id().unwrap());
-        pool.fix_string(pool.tm_sub.as_string_id().unwrap());
-        pool.fix_string(pool.tm_mul.as_string_id().unwrap());
-        pool.fix_string(pool.tm_div.as_string_id().unwrap());
-        pool.fix_string(pool.tm_mod.as_string_id().unwrap());
-        pool.fix_string(pool.tm_pow.as_string_id().unwrap());
-        pool.fix_string(pool.tm_unm.as_string_id().unwrap());
-        pool.fix_string(pool.tm_idiv.as_string_id().unwrap());
-        pool.fix_string(pool.tm_band.as_string_id().unwrap());
-        pool.fix_string(pool.tm_bor.as_string_id().unwrap());
-        pool.fix_string(pool.tm_bxor.as_string_id().unwrap());
-        pool.fix_string(pool.tm_bnot.as_string_id().unwrap());
-        pool.fix_string(pool.tm_shl.as_string_id().unwrap());
-        pool.fix_string(pool.tm_shr.as_string_id().unwrap());
-        pool.fix_string(pool.tm_concat.as_string_id().unwrap());
-        pool.fix_string(pool.tm_metatable.as_string_id().unwrap());
-        pool.fix_string(pool.str_suspended.as_string_id().unwrap());
-        pool.fix_string(pool.str_running.as_string_id().unwrap());
-        pool.fix_string(pool.str_normal.as_string_id().unwrap());
-        pool.fix_string(pool.str_dead.as_string_id().unwrap());
+        pool.fix_gc_object(pool.tm_index.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_newindex.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_call.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_tostring.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_len.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_pairs.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_ipairs.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_gc.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_close.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_mode.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_name.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_eq.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_lt.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_le.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_add.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_sub.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_mul.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_div.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_mod.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_pow.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_unm.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_idiv.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_band.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_bor.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_bxor.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_bnot.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_shl.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_shr.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_concat.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.tm_metatable.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.str_suspended.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.str_running.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.str_normal.as_string_id().unwrap().into());
+        pool.fix_gc_object(pool.str_dead.as_string_id().unwrap().into());
 
         pool
     }
@@ -577,67 +271,64 @@ impl ObjectPool {
     /// Create string (COMPLETE INTERNING - all strings)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     pub fn create_string(&mut self, s: &str) -> (LuaValue, bool) {
-        self.strings.intern(s)
+        self.strings.intern(s, &mut self.gc_pool)
     }
 
     /// Create string from owned String (avoids clone if already interned)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     pub fn create_string_owned(&mut self, s: String) -> (LuaValue, bool) {
-        self.strings.intern_owned(s)
+        self.strings.intern(&s, &mut self.gc_pool)
+    }
+
+    pub fn get_string_value(&self, id: StringId) -> Option<LuaValue> {
+        let gc_obj = self.gc_pool.get(id.0)?;
+        let ptr = match &gc_obj.ptr {
+            GcPtrObject::String(s) => s.as_ref() as *const String,
+            _ => return None,
+        };
+        Some(LuaValue::string(id, ptr))
     }
 
     /// Create a binary value from Vec<u8>
     #[inline]
     pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
-        let gc_binary = GcBinary {
-            header: GcHeader::default(),
-            data: Box::new(data),
-        };
-        let id = self.binaries.alloc(gc_binary);
+        let gc_binary = GcObject::new(GcPtrObject::Binary(Box::new(data)));
+        let ptr = gc_binary.ptr.as_binary_ptr().unwrap();
+        let id = self.gc_pool.alloc(gc_binary);
         let binary_id = BinaryId(id);
-
-        // Get pointer after allocation to ensure it's stable
-        let ptr = self
-            .binaries
-            .get(id)
-            .map(|gb| gb.data.as_ref() as *const Vec<u8>)
-            .expect("Just allocated binary should exist");
 
         LuaValue::binary(binary_id, ptr)
     }
 
     #[inline(always)]
     pub fn get_binary(&self, id: BinaryId) -> Option<&[u8]> {
-        self.binaries.get(id.0).map(|gb| gb.data.as_slice())
+        self.gc_pool.get(id.0).and_then(|go| match &go.ptr {
+            GcPtrObject::Binary(b) => Some(b.as_ref().as_slice()),
+            _ => None,
+        })
     }
 
     #[inline(always)]
     pub fn get_binary_value(&self, id: BinaryId) -> Option<LuaValue> {
-        let gb = self.binaries.get(id.0)?;
-        let ptr = gb.data.as_ref() as *const Vec<u8>;
+        let gc_obj = self.gc_pool.get(id.0)?;
+        let ptr = match &gc_obj.ptr {
+            GcPtrObject::Binary(b) => b.as_ref() as *const Vec<u8>,
+            _ => return None,
+        };
         Some(LuaValue::binary(id, ptr))
     }
 
     #[inline(always)]
     pub fn get_string(&self, id: StringId) -> Option<&str> {
-        self.strings.get(id).map(|gs| gs.data.as_ref().as_str())
+        self.gc_pool.get(id.0).and_then(|go| match &go.ptr {
+            GcPtrObject::String(s) => Some(s.as_ref().as_str()),
+            _ => None,
+        })
     }
 
     #[inline(always)]
     pub fn contains_string(&self, id: StringId) -> bool {
-        self.strings.get(id).is_some()
-    }
-
-    #[inline(always)]
-    pub fn get_string_value(&self, id: StringId) -> Option<LuaValue> {
-        let gs = self.strings.get(id)?;
-        let ptr = gs.data.as_ref() as *const String;
-        Some(LuaValue::string(id, ptr))
-    }
-
-    #[inline(always)]
-    pub(crate) fn get_string_gc_mut(&mut self, id: StringId) -> Option<&mut GcString> {
-        self.strings.get_mut(id)
+        self.gc_pool.get(id.0).is_some()
     }
 
     /// Create a substring from an existing string (optimized for string.sub)
@@ -645,106 +336,82 @@ impl ObjectPool {
     /// With complete interning, substrings are automatically deduplicated.
     #[inline]
     pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
-        let string_id = match s_value.as_string_id() {
-            Some(id) => id,
-            None => return self.create_string("").0, // Not a string, return empty
+        let string = match s_value.as_str() {
+            Some(s) => s,
+            None => return self.create_string("").0,
         };
         // Extract substring info first
         let substring = {
-            let Some(gs) = self.strings.get(string_id) else {
-                return self.create_string("").0;
-            };
-            let s = gs.data.as_str();
-
             // Clamp indices
-            let start = start.min(s.len());
-            let end = end.min(s.len());
+            let start = start.min(string.len());
+            let end = end.min(string.len());
 
             if start >= end {
                 return self.create_string("").0;
             }
 
             // Fast path: return original if full range
-            if start == 0 && end == s.len() {
+            if start == 0 && end == string.len() {
                 return s_value;
             }
 
             // Copy substring to avoid borrowing issue
-            s[start..end].to_string()
+            &string[start..end]
         };
 
         // Intern the substring - will be deduplicated if it already exists
-        self.create_string_owned(substring).0
+        self.create_string(substring).0
     }
 
     /// Mark a string as fixed (never collected) - like Lua's luaC_fix()
     /// Used for metamethod names and other permanent strings
     #[inline]
-    pub fn fix_string(&mut self, id: StringId) {
-        if let Some(gs) = self.strings.get_mut(id) {
-            gs.header.set_fixed();
-            gs.header.make_black(); // Always considered marked
+    pub fn fix_gc_object(&mut self, id: GcId) {
+        if let Some(go) = self.gc_pool.get_mut(id.index()) {
+            go.header.set_fixed();
+            go.header.make_black(); // Always considered marked
         }
     }
-
-    /// Mark a table as fixed (never collected)
-    #[inline]
-    pub fn fix_table(&mut self, id: TableId) {
-        if let Some(gt) = self.tables.get_mut(id.0) {
-            gt.header.set_fixed();
-            gt.header.make_black();
-        }
-    }
-
-    // ==================== Iteration (for GC) ====================
-
-    /// Iterate over all strings (for GC marking/sweeping)
-    pub fn iter_strings(&self) -> impl Iterator<Item = (u32, &GcString)> {
-        self.strings.iter()
-    }
-
-    /// Iterate over all strings (mutable, for GC marking)
-    pub fn iter_strings_mut(&mut self) -> impl Iterator<Item = (u32, &mut GcString)> {
-        self.strings.iter_mut()
-    }
-
     // ==================== Table Operations ====================
 
     #[inline]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let gc_table = GcTable {
-            header: GcHeader::default(),
-            data: Box::new(LuaTable::new(array_size as u32, hash_size as u32)),
-        };
-        let ptr = gc_table.data.as_ref() as *const LuaTable;
-        let table_id = TableId(self.tables.alloc(gc_table));
+        let gc_table = GcObject::new(GcPtrObject::Table(Box::new(LuaTable::new(
+            array_size as u32,
+            hash_size as u32,
+        ))));
+        let ptr = gc_table.ptr.as_table_ptr().unwrap();
+        let id = self.gc_pool.alloc(gc_table);
+        let table_id = TableId(id);
         LuaValue::table(table_id, ptr)
-    }
-
-    #[inline]
-    pub fn create_table_default(&mut self) -> TableId {
-        let gc_table = GcTable {
-            header: GcHeader::default(),
-            data: Box::new(LuaTable::new(0, 0)),
-        };
-        TableId(self.tables.alloc(gc_table))
     }
 
     #[inline(always)]
     pub fn get_table(&self, id: TableId) -> Option<&LuaTable> {
-        self.tables.get(id.0).map(|gt| gt.data.as_ref())
+        let table = self.gc_pool.get(id.0)?;
+        match &table.ptr {
+            GcPtrObject::Table(t) => Some(t.as_ref()),
+            _ => None,
+        }
     }
 
     #[inline(always)]
     pub fn get_table_value(&self, id: TableId) -> Option<LuaValue> {
-        let table = self.tables.get(id.0)?;
-        let ptr = table.data.as_ref() as *const LuaTable;
+        let table = self.gc_pool.get(id.0)?;
+        let ptr = match &table.ptr {
+            GcPtrObject::Table(t) => t.as_ref() as *const LuaTable,
+            _ => return None,
+        };
         Some(LuaValue::table(id, ptr))
     }
 
     #[inline(always)]
     pub fn get_table_mut(&mut self, id: TableId) -> Option<&mut LuaTable> {
-        self.tables.get_mut(id.0).map(|gt| gt.data.as_mut())
+        let table = self.gc_pool.get_mut(id.0)?;
+        match &mut table.ptr {
+            GcPtrObject::Table(t) => Some(t.as_mut()),
+            _ => None,
+        }
     }
 
     // ==================== Function Operations ====================
@@ -754,25 +421,21 @@ impl ObjectPool {
     #[inline]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         // Build cached upvalues with direct pointers
-        let upvalues: Vec<CachedUpvalue> = upvalue_ids
-            .into_iter()
-            .map(|id| {
-                let ptr = self
-                    .upvalues
-                    .get(id.0)
-                    .map(|uv| uv.data.as_ref() as *const Upvalue)
-                    .unwrap_or(std::ptr::null());
-                CachedUpvalue::new(id, ptr)
-            })
-            .collect();
+        let mut upvalues: Vec<CachedUpvalue> = vec![];
+        for id in upvalue_ids {
+            if let Some(uv) = self.gc_pool.get(id.0) {
+                let ptr = uv.ptr.as_upvalue_ptr().unwrap();
+                upvalues.push(CachedUpvalue::new(id, ptr));
+            }
+        }
 
-        let gc_func = GcFunction {
-            header: GcHeader::default(),
-            data: Box::new(FunctionBody::Lua(chunk, upvalues)),
-        };
-        let ptr = gc_func.data.as_ref() as *const FunctionBody;
-        let id = FunctionId(self.functions.alloc(gc_func));
-        LuaValue::function(id, ptr)
+        let gc_func = GcObject::new(GcPtrObject::Function(Box::new(FunctionBody::Lua(
+            chunk, upvalues,
+        ))));
+        let ptr = gc_func.ptr.as_function_ptr().unwrap();
+        let id = self.gc_pool.alloc(gc_func);
+        let func_id = FunctionId(id);
+        LuaValue::function(func_id, ptr)
     }
 
     /// Create a C closure (native function with upvalues)
@@ -780,73 +443,58 @@ impl ObjectPool {
     #[inline]
     pub fn create_c_closure(&mut self, func: CFunction, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         // Build cached upvalues with direct pointers
-        let cached_upvalues: Vec<CachedUpvalue> = upvalue_ids
-            .into_iter()
-            .map(|id| {
-                let ptr = self
-                    .upvalues
-                    .get(id.0)
-                    .map(|uv| uv.data.as_ref() as *const Upvalue)
-                    .unwrap_or(std::ptr::null());
-                CachedUpvalue::new(id, ptr)
-            })
-            .collect();
+        let mut upvalues: Vec<CachedUpvalue> = vec![];
+        for id in upvalue_ids {
+            if let Some(uv) = self.gc_pool.get(id.0) {
+                let ptr = uv.ptr.as_upvalue_ptr().unwrap();
+                upvalues.push(CachedUpvalue::new(id, ptr));
+            }
+        }
 
-        let gc_func = GcFunction {
-            header: GcHeader::default(),
-            data: Box::new(FunctionBody::CClosure(func, cached_upvalues)),
-        };
-        let ptr = gc_func.data.as_ref() as *const FunctionBody;
-        let id = FunctionId(self.functions.alloc(gc_func));
-        LuaValue::function(id, ptr)
-    }
-
-    #[inline(always)]
-    pub(crate) fn get_function(&self, id: FunctionId) -> Option<&GcFunction> {
-        self.functions.get(id.0)
+        let gc_func = GcObject::new(GcPtrObject::Function(Box::new(FunctionBody::CClosure(
+            func, upvalues,
+        ))));
+        let ptr = gc_func.ptr.as_function_ptr().unwrap();
+        let id = self.gc_pool.alloc(gc_func);
+        let func_id = FunctionId(id);
+        LuaValue::function(func_id, ptr)
     }
 
     // ==================== Upvalue Operations ====================
 
     /// Create an open upvalue pointing to a stack location
-    /// CRITICAL: Must call update_upvalue_ptr after this to set v_ptr
     #[inline]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let upvalue = Upvalue::Open(stack_index);
 
-        let gc_uv = GcUpvalue {
-            header: GcHeader::default(),
-            data: Box::new(upvalue),
-        };
-        UpvalueId(self.upvalues.alloc(gc_uv))
+        let gc_uv = GcObject::new(GcPtrObject::Upvalue(Box::new(upvalue)));
+        UpvalueId(self.gc_pool.alloc(gc_uv))
     }
 
     /// Create a closed upvalue with a value
     #[inline]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let upvalue = Upvalue::Closed(value);
-        let gc_uv = GcUpvalue {
-            header: GcHeader::default(),
-            data: Box::new(upvalue),
-        };
-        UpvalueId(self.upvalues.alloc(gc_uv))
+        let gc_uv = GcObject::new(GcPtrObject::Upvalue(Box::new(upvalue)));
+        UpvalueId(self.gc_pool.alloc(gc_uv))
     }
 
     #[inline(always)]
-    pub(crate) fn get_upvalue(&self, id: UpvalueId) -> Option<&GcUpvalue> {
-        self.upvalues.get(id.0)
+    pub(crate) fn get_upvalue(&self, id: UpvalueId) -> Option<&Upvalue> {
+        let gc_obj = self.gc_pool.get(id.0)?;
+        match &gc_obj.ptr {
+            GcPtrObject::Upvalue(upvalue) => Some(upvalue.as_ref()),
+            _ => None,
+        }
     }
 
     #[inline(always)]
-    pub(crate) fn get_upvalue_mut(&mut self, id: UpvalueId) -> Option<&mut GcUpvalue> {
-        self.upvalues.get_mut(id.0)
-    }
-
-    /// Iterator over all upvalues
-    pub fn iter_upvalues(&self) -> impl Iterator<Item = (UpvalueId, &GcUpvalue)> {
-        self.upvalues
-            .iter()
-            .map(|(idx, upval)| (UpvalueId(idx), upval))
+    pub(crate) fn get_upvalue_mut(&mut self, id: UpvalueId) -> Option<&mut Upvalue> {
+        let gc_obj = self.gc_pool.get_mut(id.0)?;
+        match &mut gc_obj.ptr {
+            GcPtrObject::Upvalue(upvalue) => Some(upvalue.as_mut()),
+            _ => None,
+        }
     }
 
     /// Create upvalue from LuaUpvalue
@@ -863,31 +511,29 @@ impl ObjectPool {
 
     #[inline]
     pub fn create_userdata(&mut self, userdata: LuaUserdata) -> LuaValue {
-        let gc_userdata = GcUserdata {
-            header: GcHeader::default(),
-            data: Box::new(userdata),
-        };
-        let ptr = gc_userdata.data.as_ref() as *const LuaUserdata;
-        let id = UserdataId(self.userdata.alloc(gc_userdata));
+        let gc_userdata = GcObject::new(GcPtrObject::Userdata(Box::new(userdata)));
+        let ptr = gc_userdata.ptr.as_userdata_ptr().unwrap();
+        let id = UserdataId(self.gc_pool.alloc(gc_userdata));
         LuaValue::userdata(id, ptr)
     }
 
     #[inline(always)]
-    pub fn get_userdata_mut(&mut self, id: UserdataId) -> Option<&mut GcUserdata> {
-        self.userdata.get_mut(id.0)
+    pub fn get_userdata_mut(&mut self, id: UserdataId) -> Option<&mut LuaUserdata> {
+        self.gc_pool
+            .get_mut(id.0)
+            .and_then(|gc_obj| match &mut gc_obj.ptr {
+                GcPtrObject::Userdata(userdata) => Some(userdata.as_mut()),
+                _ => None,
+            })
     }
 
     // ==================== Thread Operations ====================
 
     #[inline]
     pub fn create_thread(&mut self, thread: LuaState) -> LuaValue {
-        let box_thread = Box::new(thread);
-        let gc_thread = GcThread {
-            header: GcHeader::default(),
-            data: box_thread,
-        };
-        let ptr = gc_thread.data.as_ref() as *const LuaState;
-        let id = ThreadId(self.threads.alloc(gc_thread));
+        let gc_thread = GcObject::new(GcPtrObject::Thread(Box::new(thread)));
+        let ptr = gc_thread.ptr.as_thread_ptr().unwrap();
+        let id = ThreadId(self.gc_pool.alloc(gc_thread));
         let l = self.get_thread_mut(id).unwrap();
         l.set_thread_id(id);
 
@@ -896,154 +542,61 @@ impl ObjectPool {
 
     #[inline(always)]
     pub fn get_thread_value(&self, id: ThreadId) -> Option<LuaValue> {
-        let thread = self.threads.get(id.0)?;
-        let ptr = thread.data.as_ref() as *const LuaState;
+        let gc = self.gc_pool.get(id.0)?;
+        let ptr = match &gc.ptr {
+            GcPtrObject::Thread(t) => t.as_ref() as *const LuaState,
+            _ => return None,
+        };
         Some(LuaValue::thread(id, ptr))
     }
 
     #[inline(always)]
     pub fn get_thread_mut(&mut self, id: ThreadId) -> Option<&mut LuaState> {
-        self.threads.get_mut(id.0).map(|gt| gt.data.as_mut())
+        self.gc_pool
+            .get_mut(id.0)
+            .and_then(|gc_obj| match &mut gc_obj.ptr {
+                GcPtrObject::Thread(t) => Some(t.as_mut()),
+                _ => None,
+            })
     }
     // ==================== GC Support ====================
 
     /// Clear all mark bits before GC mark phase (make all objects white)
     pub fn clear_marks(&mut self) {
-        for (_, gs) in self.iter_strings_mut() {
+        for (_, gs) in self.gc_pool.iter_mut() {
             gs.header.make_white(0);
-        }
-        for (_, gt) in self.tables.iter_mut() {
-            gt.header.make_white(0);
-        }
-        for (_, gf) in self.functions.iter_mut() {
-            gf.header.make_white(0);
-        }
-        for (_, gu) in self.upvalues.iter_mut() {
-            gu.header.make_white(0);
-        }
-        for (_, gth) in self.threads.iter_mut() {
-            gth.header.make_white(0);
-        }
-    }
-
-    /// Sweep phase: free all unmarked (white) objects
-    pub fn sweep(&mut self) {
-        // Collect IDs to free (can't free while iterating)
-        // White objects are unmarked and should be collected
-        let strings_to_free: Vec<u32> = self
-            .iter_strings()
-            .filter(|(_, gs)| gs.header.is_white())
-            .map(|(id, _)| id)
-            .collect();
-        let tables_to_free: Vec<u32> = self
-            .tables
-            .iter()
-            .filter(|(_, gt)| gt.header.is_white())
-            .map(|(id, _)| id)
-            .collect();
-        let functions_to_free: Vec<u32> = self
-            .functions
-            .iter()
-            .filter(|(_, gf)| gf.header.is_white())
-            .map(|(id, _)| id)
-            .collect();
-        let upvalues_to_free: Vec<u32> = self
-            .upvalues
-            .iter()
-            .filter(|(_, gu)| gu.header.is_white())
-            .map(|(id, _)| id)
-            .collect();
-        let threads_to_free: Vec<u32> = self
-            .threads
-            .iter()
-            .filter(|(_, gth)| gth.header.is_white())
-            .map(|(id, _)| id)
-            .collect();
-
-        // Free collected IDs
-        for id in strings_to_free {
-            // Remove from intern map - StringInterner handles this
-            self.strings.remove_dead(StringId(id));
-        }
-        for id in tables_to_free {
-            self.tables.free(id);
-        }
-        for id in functions_to_free {
-            self.functions.free(id);
-        }
-        for id in upvalues_to_free {
-            self.upvalues.free(id);
-        }
-        for id in threads_to_free {
-            self.threads.free(id);
         }
     }
 
     pub fn shrink_to_fit(&mut self) {
         // StringInterner manages its own internal structures
-        self.tables.shrink_to_fit();
-        self.functions.shrink_to_fit();
-        self.upvalues.shrink_to_fit();
-        self.threads.shrink_to_fit();
+        self.gc_pool.shrink_to_fit();
     }
 
-    // ==================== Remove Operations (for GC) ====================
+    pub fn get(&self, id: GcId) -> Option<&GcObject> {
+        self.gc_pool.get(id.index())
+    }
 
-    #[inline]
-    pub fn remove_string(&mut self, id: StringId) {
-        self.strings.remove_dead(id);
+    pub fn get_mut(&mut self, id: GcId) -> Option<&mut GcObject> {
+        self.gc_pool.get_mut(id.index())
     }
 
     #[inline]
-    pub fn remove_table(&mut self, id: TableId) {
-        self.tables.free(id.0);
-    }
-
-    #[inline]
-    pub fn remove_function(&mut self, id: FunctionId) {
-        self.functions.free(id.0);
-    }
-
-    #[inline]
-    pub fn remove_upvalue(&mut self, id: UpvalueId) {
-        self.upvalues.free(id.0);
-    }
-
-    #[inline]
-    pub fn remove_userdata(&mut self, id: UserdataId) {
-        self.userdata.free(id.0);
-    }
-
-    #[inline]
-    pub fn remove_thread(&mut self, id: ThreadId) {
-        self.threads.free(id.0);
-    }
-
-    // ==================== Statistics ====================
-
-    #[inline]
-    pub fn string_count(&self) -> usize {
-        self.strings.strings.len()
-    }
-    #[inline]
-    pub fn table_count(&self) -> usize {
-        self.tables.len()
-    }
-    #[inline]
-    pub fn function_count(&self) -> usize {
-        self.functions.len()
-    }
-    #[inline]
-    pub fn upvalue_count(&self) -> usize {
-        self.upvalues.len()
-    }
-    #[inline]
-    pub fn userdata_count(&self) -> usize {
-        self.userdata.len()
-    }
-    #[inline]
-    pub fn thread_count(&self) -> usize {
-        self.threads.len()
+    pub fn remove(&mut self, id: GcId) {
+        match id.gc_type() {
+            GcObjectType::String => {
+                if let Some(s_object) = self.gc_pool.get(id.index())
+                    && let GcPtrObject::String(s) = &s_object.ptr
+                {
+                    // Remove from string interner first
+                    self.strings.remove_dead_intern(StringId(id.index()), &s);
+                    self.gc_pool.free(id.index());
+                }
+            }
+            _ => {
+                self.gc_pool.free(id.index());
+            }
+        }
     }
 }
 
@@ -1056,43 +609,6 @@ impl Default for ObjectPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_arena_basic() {
-        let mut arena: Arena<i32> = Arena::new();
-
-        let id1 = arena.alloc(42);
-        let id2 = arena.alloc(100);
-
-        assert_eq!(arena.get(id1).copied(), Some(42));
-        assert_eq!(arena.get(id2).copied(), Some(100));
-
-        // Free id1
-        arena.free(id1);
-        assert!(!arena.is_valid(id1));
-
-        // Allocate should reuse id1's slot
-        let id3 = arena.alloc(200);
-        assert_eq!(id3, id1);
-        assert_eq!(arena.get(id3).copied(), Some(200));
-    }
-
-    #[test]
-    fn test_arena_iteration() {
-        let mut arena: Arena<i32> = Arena::new();
-
-        arena.alloc(1);
-        arena.alloc(2);
-        let id3 = arena.alloc(3);
-        arena.alloc(4);
-
-        // Free middle element
-        arena.free(id3);
-
-        // Should iterate over 3 elements (1, 2, 4)
-        let values: Vec<i32> = arena.iter().map(|(_, v)| *v).collect();
-        assert_eq!(values, vec![1, 2, 4]);
-    }
 
     #[test]
     fn test_string_interning() {

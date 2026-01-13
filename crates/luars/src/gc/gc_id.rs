@@ -93,3 +93,53 @@ impl GcId {
         }
     }
 }
+
+impl From<StringId> for GcId {
+    #[inline(always)]
+    fn from(id: StringId) -> Self {
+        GcId::StringId(id)
+    }
+}
+
+impl From<TableId> for GcId {
+    #[inline(always)]
+    fn from(id: TableId) -> Self {
+        GcId::TableId(id)
+    }
+}
+
+impl From<FunctionId> for GcId {
+    #[inline(always)]
+    fn from(id: FunctionId) -> Self {
+        GcId::FunctionId(id)
+    }
+}
+
+impl From<UpvalueId> for GcId {
+    #[inline(always)]
+    fn from(id: UpvalueId) -> Self {
+        GcId::UpvalueId(id)
+    }
+}
+
+impl From<ThreadId> for GcId {
+    #[inline(always)]
+    fn from(id: ThreadId) -> Self {
+        GcId::ThreadId(id)
+    }
+}
+
+impl From<UserdataId> for GcId {
+    #[inline(always)]
+    fn from(id: UserdataId) -> Self {
+        GcId::UserdataId(id)
+    }
+}
+
+impl From<BinaryId> for GcId {
+    #[inline(always)]
+    fn from(id: BinaryId) -> Self {
+        GcId::BinaryId(id)
+    }
+}
+
