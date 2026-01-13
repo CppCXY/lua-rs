@@ -763,7 +763,13 @@ impl LuaState {
         // Ensure physical stack is large enough (Lua's luaD_reallocstack equivalent)
         if current_top >= self.stack.len() {
             // 1.5 x growth strategy
-            let new_size = current_top + current_top / 2;
+            let mut new_size = current_top + current_top / 2;
+            if new_size < current_top + 1 {
+                new_size = current_top + 1;
+            }
+            if new_size > self.safe_option.max_stack_size {
+                new_size = self.safe_option.max_stack_size;
+            }
             self.stack.resize(new_size, LuaValue::nil());
         }
 

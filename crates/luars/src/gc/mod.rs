@@ -1020,90 +1020,26 @@ impl GC {
     /// Forward barrier (luaC_barrier_)
     /// Called when a black object 'o' is modified to point to white object 'v'
     /// This maintains the invariant: black objects cannot point to white objects
-    ///
-    /// From Lua 5.5:
-    /// - If keepinvariant: mark 'v' immediately (restores invariant)
-    /// - In generational mode: if 'o' is old, make 'v' OLD0 (generational invariant)
-    /// - In sweep phase (incremental): make 'o' white to avoid repeated barriers
     pub fn barrier(&mut self, o_id: GcId, v_id: GcId, pool: &mut ObjectPool) {
         // Check if 'o' is black and 'v' is white
-        let (o_is_black, o_is_old, v_is_white) = match (o_id, v_id) {
-            (GcId::UpvalueId(oid), GcId::TableId(vid)) => {
-                let o_black = pool
-                    .upvalues
-                    .get(oid.0)
-                    .map(|o| o.header.is_black())
-                    .unwrap_or(false);
-                let o_old = pool
-                    .upvalues
-                    .get(oid.0)
-                    .map(|o| o.header.is_old())
-                    .unwrap_or(false);
-                let v_white = pool
-                    .tables
-                    .get(vid.0)
-                    .map(|v| v.header.is_white())
-                    .unwrap_or(false);
-                (o_black, o_old, v_white)
-            }
-            (GcId::UpvalueId(oid), GcId::FunctionId(vid)) => {
-                let o_black = pool
-                    .upvalues
-                    .get(oid.0)
-                    .map(|o| o.header.is_black())
-                    .unwrap_or(false);
-                let o_old = pool
-                    .upvalues
-                    .get(oid.0)
-                    .map(|o| o.header.is_old())
-                    .unwrap_or(false);
-                let v_white = pool
-                    .functions
-                    .get(vid.0)
-                    .map(|v| v.header.is_white())
-                    .unwrap_or(false);
-                (o_black, o_old, v_white)
-            }
-            (GcId::UpvalueId(oid), GcId::StringId(vid)) => {
-                let o_black = pool
-                    .upvalues
-                    .get(oid.0)
-                    .map(|o| o.header.is_black())
-                    .unwrap_or(false);
-                let o_old = pool
-                    .upvalues
-                    .get(oid.0)
-                    .map(|o| o.header.is_old())
-                    .unwrap_or(false);
-                let v_white = pool
-                    .get_string_gc_mut(vid)
-                    .map(|v| v.header.is_white())
-                    .unwrap_or(false);
-                (o_black, o_old, v_white)
-            }
-            (GcId::TableId(oid), GcId::TableId(vid)) => {
-                let o_black = pool
-                    .tables
-                    .get(oid.0)
-                    .map(|o| o.header.is_black())
-                    .unwrap_or(false);
-                let o_old = pool
-                    .tables
-                    .get(oid.0)
-                    .map(|o| o.header.is_old())
-                    .unwrap_or(false);
-                let v_white = pool
-                    .tables
-                    .get(vid.0)
-                    .map(|v| v.header.is_white())
-                    .unwrap_or(false);
-                (o_black, o_old, v_white)
-            }
-            _ => return, // Unsupported combination
+        let (o_black, o_old) = if let Some(o) = pool.get(o_id) {
+            (o.header.is_black(), o.header.is_old())
+        } else {
+            return;
         };
 
-        if !o_is_black || !v_is_white {
-            return; // No barrier needed
+        if !o_black {
+            return;
+        }
+
+        let v_white = if let Some(v) = pool.get(v_id) {
+            v.header.is_white()
+        } else {
+            return;
+        };
+
+        if !v_white {
+            return;
         }
 
         // Must keep invariant during mark phase
@@ -1112,36 +1048,16 @@ impl GC {
             self.mark_object(v_id, pool);
 
             // Generational invariant: if 'o' is old, make 'v' OLD0
-            if o_is_old {
-                match v_id {
-                    GcId::TableId(id) => {
-                        if let Some(t) = pool.tables.get_mut(id.0) {
-                            t.header.make_old0();
-                        }
-                    }
-                    GcId::FunctionId(id) => {
-                        if let Some(f) = pool.functions.get_mut(id.0) {
-                            f.header.make_old0();
-                        }
-                    }
-                    _ => {}
+            if o_old {
+                if let Some(v) = pool.get_mut(v_id) {
+                    v.header.make_old0();
                 }
             }
         } else if self.gc_state.is_sweep_phase() {
             // In incremental sweep: make 'o' white to avoid repeated barriers
             if self.gc_kind != GcKind::GenMinor {
-                match o_id {
-                    GcId::UpvalueId(id) => {
-                        if let Some(o) = pool.upvalues.get_mut(id.0) {
-                            o.header.make_white(self.current_white);
-                        }
-                    }
-                    GcId::TableId(id) => {
-                        if let Some(o) = pool.tables.get_mut(id.0) {
-                            o.header.make_white(self.current_white);
-                        }
-                    }
-                    _ => {}
+                if let Some(o) = pool.get_mut(o_id) {
+                    o.header.make_white(self.current_white);
                 }
             }
         }
@@ -1151,24 +1067,11 @@ impl GC {
     /// Called when a black object 'o' is modified to point to white object
     /// Instead of marking the white object, we mark 'o' as gray again
     /// Used for tables and other objects that may have many modifications
-    ///
-    /// From Lua 5.5:
-    /// - Link 'o' into grayagain list for re-traversal
-    /// - If 'o' is old (generational): set age to TOUCHED1
-    /// - If already TOUCHED2: just make it gray (will become TOUCHED1)
     pub fn barrier_back(&mut self, o_id: GcId, pool: &mut ObjectPool) {
-        let (is_black, age) = match o_id {
-            GcId::TableId(id) => pool
-                .tables
-                .get(id.0)
-                .map(|o| (o.header.is_black(), o.header.age()))
-                .unwrap_or((false, 0)),
-            GcId::UpvalueId(id) => pool
-                .upvalues
-                .get(id.0)
-                .map(|o| (o.header.is_black(), o.header.age()))
-                .unwrap_or((false, 0)),
-            _ => return,
+        let (is_black, age) = if let Some(o) = pool.get(o_id) {
+            (o.header.is_black(), o.header.age())
+        } else {
+            return;
         };
 
         if !is_black {
@@ -1187,18 +1090,8 @@ impl GC {
 
         // If TOUCHED2: just make gray (will become TOUCHED1 at end of cycle)
         if age == G_TOUCHED2 {
-            match o_id {
-                GcId::TableId(id) => {
-                    if let Some(o) = pool.tables.get_mut(id.0) {
-                        o.header.make_gray();
-                    }
-                }
-                GcId::UpvalueId(id) => {
-                    if let Some(o) = pool.upvalues.get_mut(id.0) {
-                        o.header.make_gray();
-                    }
-                }
-                _ => {}
+            if let Some(o) = pool.get_mut(o_id) {
+                o.header.make_gray();
             }
         } else {
             // Link into grayagain and make gray
@@ -1206,69 +1099,34 @@ impl GC {
                 self.grayagain.push(o_id);
             }
 
-            match o_id {
-                GcId::TableId(id) => {
-                    if let Some(o) = pool.tables.get_mut(id.0) {
-                        o.header.make_gray();
-                    }
-                }
-                GcId::UpvalueId(id) => {
-                    if let Some(o) = pool.upvalues.get_mut(id.0) {
-                        o.header.make_gray();
-                    }
-                }
-                _ => {}
+            if let Some(o) = pool.get_mut(o_id) {
+                o.header.make_gray();
             }
         }
 
         // If old in generational mode: mark as TOUCHED1
         if age >= G_OLD0 {
-            match o_id {
-                GcId::TableId(id) => {
-                    if let Some(o) = pool.tables.get_mut(id.0) {
-                        o.header.make_touched1();
-                    }
-                }
-                GcId::UpvalueId(id) => {
-                    if let Some(o) = pool.upvalues.get_mut(id.0) {
-                        o.header.make_touched1();
-                    }
-                }
-                _ => {}
+            if let Some(o) = pool.get_mut(o_id) {
+                o.header.make_touched1();
             }
         }
     }
 
     /// Mark an object (helper for barrier)
     fn mark_object(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
-        match gc_id {
-            GcId::TableId(id) => {
-                if let Some(t) = pool.tables.get_mut(id.0) {
-                    if t.header.is_white() {
-                        t.header.make_gray();
+        if let Some(obj) = pool.get_mut(gc_id) {
+            // Only need to mark if it is white
+            if obj.header.is_white() {
+                match obj.ptr {
+                    GcPtrObject::String(_) | GcPtrObject::Binary(_) => {
+                        obj.header.make_black(); // Leaves become black immediately
+                    }
+                    _ => {
+                        obj.header.make_gray(); // Others become gray
                         self.gray.push(gc_id);
                     }
                 }
             }
-            GcId::FunctionId(id) => {
-                if let Some(f) = pool.functions.get_mut(id.0) {
-                    if f.header.is_white() {
-                        f.header.make_gray();
-                        self.gray.push(gc_id);
-                    }
-                }
-            }
-            GcId::StringId(id) => {
-                if let Some(s) = pool.get_string_gc_mut(id) {
-                    s.header.make_black(); // Strings are leaves
-                }
-            }
-            GcId::BinaryId(id) => {
-                if let Some(b) = pool.binaries.get_mut(id.0) {
-                    b.header.make_black(); // Binary data is a leaf
-                }
-            }
-            _ => {}
         }
     }
 }
