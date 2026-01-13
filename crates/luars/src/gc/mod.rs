@@ -468,23 +468,20 @@ impl GC {
             GcState::SwpAllGc => {
                 let complete = self.sweep_step(pool, fast);
                 if complete {
-                    self.gc_state = GcState::SwpFinObj;
+                    // Only one gc_pool, skip finobj and tobefnz phases
+                    self.gc_state = GcState::SwpEnd;
                 }
                 StepResult::Work(100) // GCSWEEPMAX equivalent
             }
             GcState::SwpFinObj => {
-                let complete = self.sweep_step(pool, fast);
-                if complete {
-                    self.gc_state = GcState::SwpToBeFnz;
-                }
-                StepResult::Work(100)
+                // Skip: we don't have separate finobj list
+                self.gc_state = GcState::SwpToBeFnz;
+                StepResult::Work(1)
             }
             GcState::SwpToBeFnz => {
-                let complete = self.sweep_step(pool, fast);
-                if complete {
-                    self.gc_state = GcState::SwpEnd;
-                }
-                StepResult::Work(100)
+                // Skip: we don't have separate tobefnz list
+                self.gc_state = GcState::SwpEnd;
+                StepResult::Work(1)
             }
             GcState::SwpEnd => {
                 self.gc_state = GcState::CallFin;
@@ -877,10 +874,10 @@ impl GC {
                     let gc_id = obj.trans_to_gcid(slot_index);
                     dead_ids.push(gc_id);
                 }
-                count += 1;  // Only count actual objects, not empty slots
             }
             
             self.sweep_index += 1;
+            count += 1;  // Count every slot, not just objects, to avoid infinite loops
         }
 
         // Remove dead objects (do this after iteration to avoid concurrent modification)
@@ -918,7 +915,9 @@ impl GC {
         roots: &[LuaValue],
         pool: &mut ObjectPool,
     ) {
-        const MAX_ITERATIONS: usize = 1000;
+        // Increase MAX_ITERATIONS to handle large object pools
+        // With 100 objects per sweep step, we need more iterations for large heaps
+        const MAX_ITERATIONS: usize = 100000;
         let mut iterations = 0;
 
         // Already at target state? Done.
