@@ -687,6 +687,13 @@ impl GcPool {
         self.count
     }
 
+    /// Total capacity of the gc_list Vec (including empty slots)
+    /// Used by sweep_step to iterate through all slots
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.gc_list.len()
+    }
+
     /// Iterate over all live objects
     pub fn iter(&self) -> impl Iterator<Item = (GcId, &GcObject)> {
         self.gc_list

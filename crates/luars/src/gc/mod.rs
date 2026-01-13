@@ -175,6 +175,11 @@ pub struct GC {
     /// Objects to be revisited at atomic phase
     pub grayagain: Vec<GcId>,
 
+    // === Sweep state ===
+    /// Current position in sweep (like Lua 5.5's sweepgc pointer)
+    /// This ensures we don't re-scan the same objects
+    sweep_index: usize,
+
     // === Generational collector pointers ===
     /// Points to first survival object in allgc list
     pub survival: Option<usize>,
@@ -229,6 +234,7 @@ impl GC {
             ],
             gray: Vec::with_capacity(128),
             grayagain: Vec::with_capacity(64),
+            sweep_index: 0,
             survival: None,
             old1: None,
             reallyold: None,
@@ -838,36 +844,55 @@ impl GC {
     /// Enter sweep phase (like entersweep in Lua 5.5)
     pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
+        self.sweep_index = 0; // Reset sweep position
     }
 
     /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
     /// Returns true if sweep is complete (no more objects to sweep)
+    /// 
+    /// Port of Lua 5.5's sweepstep: maintains sweep position (sweepgc pointer)
+    /// to avoid re-scanning already-swept objects
     fn sweep_step(&mut self, pool: &mut ObjectPool, fast: bool) -> bool {
         let max_sweep = if fast { usize::MAX } else { 100 }; // GCSWEEPMAX
-        let mut swept = 0;
+        let mut count = 0;
 
         // Get the "other white" - objects from the previous GC cycle that weren't marked
         let other_white = 1 - self.current_white;
 
-        // Sweep tables
-        let dead: Vec<_> = pool
-            .gc_pool
-            .iter()
-            .filter(|(_, t)| !t.header.is_fixed() && t.header.is_dead(other_white))
-            .map(|(id, _)| id)
-            .take(max_sweep)
-            .collect();
-
-        for id in dead {
-            let size = self.estimate_object_size(id, pool) as usize;
-            pool.remove(id);
-            self.record_deallocation(size);
-            self.stats.objects_collected += 1;
-            swept += 1;
+        // Total number of slots in the gc_list Vec (not just live objects)
+        let total_slots = pool.gc_pool.capacity();
+        
+        let mut dead_ids = Vec::new();
+        
+        // Continue from where we left off (like Lua's sweepgc pointer)
+        // Sweep through Vec slots directly (some may be None)
+        while self.sweep_index < total_slots && count < max_sweep {
+            let slot_index = self.sweep_index as u32;
+            
+            // Check if this slot has an object
+            if let Some(obj) = pool.gc_pool.get(slot_index) {
+                // Check if object is dead (other white and not fixed)
+                if !obj.header.is_fixed() && obj.header.is_dead(other_white) {
+                    // Convert slot_index to GcId using the object's type
+                    let gc_id = obj.trans_to_gcid(slot_index);
+                    dead_ids.push(gc_id);
+                }
+                count += 1;  // Only count actual objects, not empty slots
+            }
+            
+            self.sweep_index += 1;
         }
 
-        // Return true if we didn't find enough objects to sweep (sweep complete)
-        swept < max_sweep
+        // Remove dead objects (do this after iteration to avoid concurrent modification)
+        for gc_id in dead_ids {
+            let size = self.estimate_object_size(gc_id, pool) as usize;
+            pool.remove(gc_id);
+            self.record_deallocation(size);
+            self.stats.objects_collected += 1;
+        }
+
+        // Return true if we've reached the end of all slots
+        self.sweep_index >= total_slots
     }
 
     /// Set pause (like setpause in Lua 5.5)
