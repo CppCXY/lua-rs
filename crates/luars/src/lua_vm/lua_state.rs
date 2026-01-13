@@ -1108,23 +1108,24 @@ impl LuaState {
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save error handler and function on stack
-        let handler_idx = self.stack.len();
-        self.stack.push(err_handler);
+        // Use stack_top to track positions (Fix stack overflow/drift)
+        let handler_idx = self.stack_top;
+        self.push_value(err_handler)?;
 
         let initial_depth = self.call_depth();
-        let func_idx = self.stack.len();
-        self.stack.push(func);
+        let func_idx = self.stack_top;
+        self.push_value(func)?;
 
         let nargs = args.len();
         for arg in args {
-            self.stack.push(arg);
+            self.push_value(arg)?;
         }
 
         // Create call frame, expecting all return values
         let base = func_idx + 1;
         if let Err(_) = self.push_frame(func, base, nargs, -1) {
             // Error during setup
-            self.stack.truncate(handler_idx);
+            self.set_top(handler_idx);
             let error_msg = std::mem::take(&mut self.error_msg);
             let err_str = self.create_string(&error_msg);
             return Ok((false, vec![err_str]));
@@ -1135,15 +1136,21 @@ impl LuaState {
 
         match result {
             Ok(()) => {
-                // Success - collect results from func_idx to stack top
+                // Success - collect results
+                // Execution (via RETURN) sets stack_top to end of results
+                // Results start at func_idx (replacing func and args)
                 let mut results = Vec::new();
-                for i in func_idx..self.stack.len() {
-                    if let Some(val) = self.stack_get(i) {
-                        results.push(val);
+                let top = self.stack_top;
+                
+                if top > func_idx {
+                    for i in func_idx..top {
+                        if let Some(val) = self.stack_get(i) {
+                            results.push(val);
+                        }
                     }
                 }
 
-                self.stack.truncate(handler_idx);
+                self.set_top(handler_idx);
                 Ok((true, results))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
@@ -1163,19 +1170,20 @@ impl LuaState {
                 }
 
                 // Set up error handler call
-                self.stack.truncate(handler_idx + 1); // Keep error handler
+                // Reset stack to [handler]
+                self.set_top(handler_idx + 1);
 
                 // Push error message as argument
                 let err_value = self.create_string(&error_msg);
-                self.stack.push(err_value);
+                self.push_value(err_value)?;
 
-                // Get handler and create frame, expecting all return values
+                // Get handler and create frame
                 let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
                 let handler_base = handler_idx + 1;
 
                 if let Err(_) = self.push_frame(handler, handler_base, 1, -1) {
                     // Error handler setup failed
-                    self.stack.truncate(handler_idx);
+                    self.set_top(handler_idx);
                     let final_err =
                         self.create_string(&format!("error in error handling: {}", error_msg));
                     return Ok((false, vec![final_err]));
@@ -1186,11 +1194,17 @@ impl LuaState {
 
                 match handler_result {
                     Ok(()) => {
-                        // Error handler succeeded - collect results from handler_idx
+                        // Error handler succeeded
+                        // Results start at handler_idx (replacing handler)
+                        // Stack top is at end of results
                         let mut results = Vec::new();
-                        for i in handler_idx..self.stack.len() {
-                            if let Some(val) = self.stack_get(i) {
-                                results.push(val);
+                        let top = self.stack_top;
+                        
+                        if top > handler_idx {
+                            for i in handler_idx..top {
+                                if let Some(val) = self.stack_get(i) {
+                                    results.push(val);
+                                }
                             }
                         }
 
@@ -1198,12 +1212,12 @@ impl LuaState {
                             results.push(self.create_string(&error_msg));
                         }
 
-                        self.stack.truncate(handler_idx);
+                        self.set_top(handler_idx);
                         Ok((false, results))
                     }
                     Err(_) => {
                         // Error handler failed
-                        self.stack.truncate(handler_idx);
+                        self.set_top(handler_idx);
                         let final_err =
                             self.create_string(&format!("error in error handling: {}", error_msg));
                         Ok((false, vec![final_err]))
