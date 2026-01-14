@@ -538,9 +538,11 @@ impl GC {
                 if let Some(id) = value.as_table_id() {
                     if let Some(t) = pool.get_mut(id.into()) {
                         // Fixed objects are always "reachable" but still need their children marked
-                        // Add them directly to gray list without checking color
+                        // Add them directly to gray list without checking color (but only if not black)
                         if t.header.is_fixed() {
-                            self.gray.push(GcId::TableId(id));
+                            if !t.header.is_black() {
+                                self.gray.push(GcId::TableId(id));
+                            }
                         } else if t.header.is_white() {
                             t.header.make_gray();
                             self.gray.push(GcId::TableId(id));
@@ -551,8 +553,12 @@ impl GC {
             LuaValueKind::Function => {
                 if let Some(id) = value.as_function_id() {
                     if let Some(f) = pool.get_mut(id.into()) {
+                        // For fixed objects: only add to gray if not already black
+                        // For normal objects: only add to gray if white
                         if f.header.is_fixed() {
-                            self.gray.push(GcId::FunctionId(id));
+                            if !f.header.is_black() {
+                                self.gray.push(GcId::FunctionId(id));
+                            }
                         } else if f.header.is_white() {
                             f.header.make_gray();
                             self.gray.push(GcId::FunctionId(id));
@@ -605,7 +611,7 @@ impl GC {
     }
 
     /// Mark all constants in a chunk and its nested chunks (like Lua 5.5's traverseproto)
-    fn mark_chunk_constants(&mut self, chunk: &Chunk, pool: &mut ObjectPool) {
+    fn mark_chunk_constants(&mut self, chunk: &Chunk, pool: &mut ObjectPool, _func_id: FunctionId) {
         // Mark all constants in this chunk
         for constant in &chunk.constants {
             self.mark_value(constant, pool);
@@ -613,7 +619,7 @@ impl GC {
 
         // Recursively mark constants in child protos (nested functions)
         for child_chunk in &chunk.child_protos {
-            self.mark_chunk_constants(child_chunk, pool);
+            self.mark_chunk_constants(child_chunk, pool, _func_id);
         }
     }
 
@@ -703,12 +709,24 @@ impl GC {
                 return 1 + entries.len() as isize;
             }
             GcId::FunctionId(id) => {
+                // Check if this function is fixed and already processed
+                let (is_fixed, is_black) = if let Some(gc_func) = pool.get(id.into()) {
+                    (gc_func.header.is_fixed(), gc_func.header.is_black())
+                } else {
+                    return 0;
+                };
+                
+                if is_fixed && is_black {
+                    return 0; // Already traversed in previous cycle
+                }
+                
                 // First mark the function black and get references to data we need
                 let (upvalues, chunk) = if let Some(gc_func) = pool.get_mut(id.into()) {
                     gc_func.header.make_black();
                     let func = gc_func.ptr.as_function_mut().unwrap();
                     let upvalues = func.cached_upvalues().clone(); // Clone Vec<UpvalueId>
                     let chunk = func.chunk().map(|c| c.clone()); // Clone Rc<Chunk>
+                    
                     (upvalues, chunk)
                 } else {
                     return 0;
@@ -726,7 +744,7 @@ impl GC {
 
                 // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
                 if let Some(chunk) = chunk {
-                    self.mark_chunk_constants(&chunk, pool);
+                    self.mark_chunk_constants(&chunk, pool, id);
                     return 1
                         + upvalues.len() as isize
                         + chunk.constants.len() as isize
