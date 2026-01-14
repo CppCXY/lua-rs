@@ -300,6 +300,17 @@ impl GC {
         self.total_bytes += size_signed;
         self.gc_debt += size_signed;
         self.stats.bytes_allocated += size;
+
+        // Track large allocations
+        if size > 20000 {
+            eprintln!(
+                "[GC TRACK] Large object {:?} size={}, total_bytes: {} -> {}",
+                gc_id,
+                size,
+                self.total_bytes - size_signed,
+                self.total_bytes
+            );
+        }
     }
 
     /// Check if GC should run (debt > 0)
@@ -431,6 +442,11 @@ impl GC {
 
         self.gc_stopem = true; // Prevent reentrancy
 
+        eprintln!(
+            "[GC STEP] Before: state={:?}, sweep_index={}",
+            self.gc_state, self.sweep_index
+        );
+
         let result = match self.gc_state {
             GcState::Pause => {
                 self.restart_collection(roots, pool);
@@ -492,6 +508,10 @@ impl GC {
 
     /// Restart collection (like restartcollection in Lua 5.5)
     fn restart_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+        eprintln!(
+            "[GC STATE] restart_collection: sweep_index={}, total_bytes={}",
+            self.sweep_index, self.total_bytes
+        );
         self.stats.collection_count += 1;
         self.gray.clear();
         self.grayagain.clear();
@@ -596,84 +616,17 @@ impl GC {
     fn propagate_mark(&mut self, pool: &mut ObjectPool) -> isize {
         if let Some(gc_id) = self.gray.pop() {
             let _ = self.mark_one(gc_id, pool);
-            // Note: work returned by mark_one is the traversal work (number of objects/fields)
-            // But gc_marked should track the SIZE of marked objects (like Lua's GCmarked)
-            // We use the estimated size as the work cost, consistent with Lua's behavior (step size in KB)
-            let size = self.estimate_object_size(gc_id, pool);
+            // Use the size stored in GcObject (same as track_object and sweep)
+            // This ensures consistency across all GC operations
+            let size = if let Some(obj) = pool.gc_pool.get(gc_id.index()) {
+                obj.size() as isize
+            } else {
+                0
+            };
             self.gc_marked += size;
             size
         } else {
             0
-        }
-    }
-
-    /// Estimate object size for GC accounting (like objsize in Lua)
-    /// Returns estimated memory usage including dynamically allocated internal data
-    fn estimate_object_size(&self, gc_id: GcId, pool: &ObjectPool) -> isize {
-        match gc_id {
-            GcId::TableId(id) => {
-                // Table size = base struct + entries
-                // Each entry (array or hash) takes roughly 32-64 bytes
-                if let Some(gc_obj) = pool.get(id.into()) {
-                    if let Some(table) = gc_obj.ptr.as_table_ptr() {
-                        let table = unsafe { &*table };
-                        let entry_count = table.len() as isize;
-                        // Base overhead: 256 bytes
-                        // Each entry: 48 bytes average (LuaValue is ~24 bytes, hash overhead ~24)
-                        256 + entry_count * 48
-                    } else {
-                        256
-                    }
-                } else {
-                    256
-                }
-            }
-            GcId::FunctionId(id) => {
-                // Function size = base + upvalues + chunk data
-                if let Some(gc_obj) = pool.get(id.into()) {
-                    if let Some(func) = gc_obj.ptr.as_function_ptr() {
-                        let func = unsafe { &*func };
-                        let upvalue_count = func.cached_upvalues().len() as isize;
-                        let base = 256; // Base struct
-                        let upvalues = upvalue_count * 64;
-
-                        // If has chunk, estimate chunk size
-                        let chunk_size = if let Some(chunk) = func.chunk() {
-                            // Instructions, constants, upvalue info, line info, etc.
-                            let instr_size = chunk.code.len() as isize * 8;
-                            let const_size = chunk.constants.len() as isize * 32;
-                            let child_size = chunk.child_protos.len() as isize * 512;
-                            let line_size = chunk.line_info.len() as isize * 4;
-                            instr_size + const_size + child_size + line_size + 512
-                        } else {
-                            128 // C function
-                        };
-
-                        base + upvalues + chunk_size
-                    } else {
-                        512
-                    }
-                } else {
-                    512
-                }
-            }
-            GcId::UpvalueId(_) => 64,
-            GcId::StringId(id) => {
-                if let Some(s) = pool.get_string(id) {
-                    64 + s.len() as isize // Increased base overhead
-                } else {
-                    64
-                }
-            }
-            GcId::BinaryId(id) => {
-                if let Some(b) = pool.get_binary(id) {
-                    64 + b.len() as isize
-                } else {
-                    64
-                }
-            }
-            GcId::UserdataId(_) => 512, // Increased significantly
-            GcId::ThreadId(_) => 4096,  // Thread + Stack, increased significantly
         }
     }
 
@@ -870,7 +823,12 @@ impl GC {
     }
 
     /// Enter sweep phase (like entersweep in Lua 5.5)
-    pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
+    pub fn enter_sweep(&mut self, pool: &mut ObjectPool) {
+        let capacity = pool.gc_pool.capacity();
+        eprintln!(
+            "[GC STATE] enter_sweep: sweep_index={} -> 0, total_bytes={}, gc_pool.capacity()={}",
+            self.sweep_index, self.total_bytes, capacity
+        );
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
 
@@ -883,23 +841,39 @@ impl GC {
     /// Port of Lua 5.5's sweepstep: maintains sweep position (sweepgc pointer)
     /// to avoid re-scanning already-swept objects
     fn sweep_step(&mut self, pool: &mut ObjectPool, fast: bool) -> bool {
-        let max_sweep = if fast { usize::MAX } else { 100 };        let mut count = 0;
+        let max_sweep = if fast { usize::MAX } else { 100 };
+        let mut count = 0;
         let other_white = 1 - self.current_white;
 
-        // Total number of slots in the gc_list Vec (not just live objects)
-        let total_slots = pool.gc_pool.capacity();
+        // Get current total slots (may grow during sweep if new objects are allocated)
+        // In Lua 5.5, sweepgc iterates through linked list which naturally includes all objects
+        // Here we must re-check capacity to handle objects allocated during sweep
+        let current_total_slots = pool.gc_pool.capacity();
 
         let mut dead_ids = Vec::new();
 
         // Continue from where we left off (like Lua's sweepgc pointer)
         // Sweep through Vec slots directly (some may be None)
-        while self.sweep_index < total_slots && count < max_sweep {
+        while self.sweep_index < current_total_slots && count < max_sweep {
             let slot_index = self.sweep_index as u32;
 
             // Check if this slot has an object
             if let Some(obj) = pool.gc_pool.get(slot_index) {
                 // Check if object is dead (other white and not fixed)
-                if !obj.header.is_fixed() && obj.header.is_dead(other_white) {
+                let is_dead = obj.header.is_dead(other_white);
+                if obj.size() > 20000 {
+                    eprintln!(
+                        "[GC SWEEP CHECK] Large object slot={} size={}, marked={:08b}, is_dead={}, is_fixed={}, current_white={}, other_white={}",
+                        slot_index,
+                        obj.size(),
+                        obj.header.marked,
+                        is_dead,
+                        obj.header.is_fixed(),
+                        self.current_white,
+                        other_white
+                    );
+                }
+                if !obj.header.is_fixed() && is_dead {
                     // Convert slot_index to GcId using the object's type
                     let gc_id = obj.trans_to_gcid(slot_index);
                     dead_ids.push(gc_id);
@@ -911,26 +885,32 @@ impl GC {
         }
 
         for gc_id in &dead_ids {
-            let size = if let Some(obj) = pool.gc_pool.get(gc_id.index()) {
-                obj.size() as usize
-            } else {
-                0
-            };
-            pool.remove(*gc_id);
-            self.total_bytes = self.total_bytes.saturating_sub(size as isize);
-            self.stats.bytes_freed += size;
-            self.stats.objects_collected += 1;
+            let size = pool.remove(*gc_id);
+            if size > 0 {
+                self.total_bytes = self.total_bytes.saturating_sub(size as isize);
+                self.stats.bytes_freed += size;
+                self.stats.objects_collected += 1;
+            }
         }
 
-        // Return true if we've reached the end of all slots
-        self.sweep_index >= total_slots
+        // Return true if we've reached the end of all current slots
+        // Note: new objects may be allocated after this sweep_step, so we check again next time
+        let complete = self.sweep_index >= current_total_slots;
+        if complete || self.sweep_index == 0 {
+            eprintln!(
+                "[GC SWEEP] sweep_step complete={}, sweep_index={}/{}, dead_count={}",
+                complete,
+                self.sweep_index,
+                current_total_slots,
+                dead_ids.len()
+            );
+        }
+        complete
     }
 
-    /// Set pause (like setpause in Lua 5.5)
     pub fn set_pause(&mut self) {
-        let threshold = self.apply_param(PAUSE, self.gc_marked);
+        let threshold = self.apply_param(PAUSE, self.total_bytes);
         let debt = threshold - self.total_bytes;
-        // Don't force debt to be non-negative! Negative debt means we have budget before next GC
         self.set_debt(debt);
     }
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
@@ -994,10 +974,6 @@ impl GC {
 
     /// Full generation collection (like fullgen in Lua 5.5)
     pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        // For generational mode, do a major collection
-        // Similar to fullinc in Lua 5.5
-
-        // Restart collection
         self.restart_collection(roots, pool);
 
         // Mark all roots
@@ -1005,15 +981,13 @@ impl GC {
             self.propagate_mark(pool);
         }
 
-        // CRITICAL: Must flip current_white before sweep!
-        // This is normally done in atomic(), but we're doing a direct full sweep
+        // Flip white and sweep
         self.current_white ^= 1;
-
-        // Sweep using run_until_state
         self.enter_sweep(pool);
         self.run_until_state(GcState::CallFin, roots, pool);
         self.run_until_state(GcState::Pause, roots, pool);
 
+        // set_pause uses total_bytes (actual memory after sweep) as base
         self.set_pause();
     }
 

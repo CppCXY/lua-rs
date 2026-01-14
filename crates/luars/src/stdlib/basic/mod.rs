@@ -658,14 +658,17 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
     match opt.as_str() {
         "collect" => {
-            // LUA_GCCOLLECT: Full GC cycle
             l.vm_mut().collect_garbage();
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "count" => {
             let gc = &l.vm_mut().gc;
-            let kb = gc.total_bytes.max(0) as f64 / 1024.0;
+            let total = gc.total_bytes;
+            if total <= 0 {
+                eprintln!("[WARNING] gcinfo: total_bytes={}", total);
+            }
+            let kb = total.max(0) as f64 / 1024.0;
             l.push_value(LuaValue::number(kb))?;
             Ok(1)
         }

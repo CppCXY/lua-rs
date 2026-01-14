@@ -470,8 +470,8 @@ impl GcObject {
         }
     }
 
-    pub fn size(&self) -> u32 {
-        self.header.size
+    pub fn size(&self) -> usize {
+        self.header.size as usize
     }
 
     pub fn trans_to_gcid(&self, id: u32) -> GcId {
@@ -640,6 +640,10 @@ impl GcPool {
         }
 
         let id = self.gc_list.len() as u32;
+        if value.size() > 20000 {
+            eprintln!("[GC ALLOC] Large object id={}, size={}, new_len={}", 
+                id, value.size(), id + 1);
+        }
         self.gc_list.push(Some(value));
         id
     }
@@ -660,14 +664,18 @@ impl GcPool {
 
     /// Free a slot (mark for reuse)
     #[inline]
-    pub fn free(&mut self, id: u32) {
+    pub fn free(&mut self, id: u32) -> usize {
         if let Some(slot) = self.gc_list.get_mut(id as usize) {
             if slot.is_some() {
+                let size = slot.as_ref().unwrap().size();
                 *slot = None;
                 self.free_list.push(id);
                 self.count -= 1;
+                return size;
             }
         }
+
+        0
     }
 
     /// Get number of free slots in the free list
