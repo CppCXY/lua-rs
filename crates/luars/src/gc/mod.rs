@@ -393,7 +393,7 @@ impl GC {
     /// Check if an object needs finalization (__gc metamethod)
     /// Only tables, userdata, and threads can have __gc
     fn needs_finalization(&self, gc_id: GcId, pool: &ObjectPool) -> bool {
-        match gc_id {
+        let result = match gc_id {
             GcId::TableId(table_id) => {
                 // Check if table has __gc metamethod
                 if let Some(table_value) = pool.get_table_value(table_id) {
@@ -436,7 +436,9 @@ impl GC {
                 false
             }
             _ => false, // Other types don't support __gc
-        }
+        };
+        eprintln!("[GC DEBUG] needs_finalization({:?}) = {}", gc_id, result);
+        result
     }
 
     /// Collect and clean all weak tables in the system
@@ -445,6 +447,8 @@ impl GC {
     fn collect_weak_tables(&mut self, pool: &mut ObjectPool) {
         let total_slots = pool.gc_pool.capacity();
         let mut weak_tables_to_clean = Vec::new();
+        
+
         
         // First, collect all weak tables
         for slot_index in 0..total_slots {
@@ -497,10 +501,13 @@ impl GC {
 
     /// Clean a single weak table by removing entries with dead keys/values
     fn clean_weak_table(&self, table_id: TableId, weak_keys: bool, weak_values: bool, pool: &mut ObjectPool) {
+        eprintln!("[GC DEBUG] clean_weak_table: table={:?}, weak_keys={}, weak_values={}", table_id, weak_keys, weak_values);
+        
         // Collect entries to check
         let entries = if let Some(table) = pool.get_table_mut(table_id) {
             table.iter_all()
         } else {
+            eprintln!("[GC DEBUG] clean_weak_table: table not found");
             return;
         };
 
@@ -513,7 +520,9 @@ impl GC {
             // Check key
             if weak_keys {
                 if let Some(key_id) = Self::value_to_gc_id_static(&key) {
-                    if self.is_object_dead(key_id, pool) {
+                    let is_dead = self.is_object_dead(key_id, pool);
+                    eprintln!("[GC DEBUG]   Key {:?} is_dead={}", key_id, is_dead);
+                    if is_dead {
                         should_remove = true;
                     }
                 }
@@ -522,17 +531,22 @@ impl GC {
             // Check value
             if !should_remove && weak_values {
                 if let Some(val_id) = Self::value_to_gc_id_static(&value) {
-                    if self.is_object_dead(val_id, pool) {
+                    let is_dead = self.is_object_dead(val_id, pool);
+                    eprintln!("[GC DEBUG]   Value {:?} is_dead={}", val_id, is_dead);
+                    if is_dead {
                         should_remove = true;
                     }
                 }
             }
 
             if should_remove {
+                eprintln!("[GC DEBUG]   Will remove entry with key {:?}", key);
                 keys_to_remove.push(key);
             }
         }
 
+        eprintln!("[GC DEBUG] clean_weak_table: {} entries to remove", keys_to_remove.len());
+        
         // Remove dead entries
         if let Some(table) = pool.get_table_mut(table_id) {
             for key in keys_to_remove {
@@ -654,12 +668,14 @@ impl GC {
 
         let result = match self.gc_state {
             GcState::Pause => {
+                eprintln!("[GC DEBUG] State: Pause -> Propagate");
                 self.restart_collection(roots, pool);
                 self.gc_state = GcState::Propagate;
                 StepResult::Work(1)
             }
             GcState::Propagate => {
                 if fast || self.gray.is_empty() {
+                    eprintln!("[GC DEBUG] State: Propagate -> EnterAtomic");
                     self.gc_state = GcState::EnterAtomic;
                     StepResult::Work(1)
                 } else {
@@ -668,6 +684,7 @@ impl GC {
                 }
             }
             GcState::EnterAtomic => {
+                eprintln!("[GC DEBUG] State: EnterAtomic -> calling atomic()");
                 self.atomic(roots, pool);
                 self.enter_sweep(pool);
                 StepResult::Atomic
@@ -854,11 +871,22 @@ impl GC {
                     return 0;
                 };
 
-                // Then mark them (this may mutably borrow pool again)
+                // Check if this is a weak table
+                let weak_mode = self.get_weak_mode(id, pool);
+                
+                // Mark entries (respecting weak mode)
                 for (k, v) in &entries {
-                    self.mark_value(k, pool);
-                    self.mark_value(v, pool);
+                    // Don't mark weak keys
+                    if !weak_mode.as_ref().map(|(wk, _)| *wk).unwrap_or(false) {
+                        self.mark_value(k, pool);
+                    }
+                    // Don't mark weak values  
+                    if !weak_mode.as_ref().map(|(_, wv)| *wv).unwrap_or(false) {
+                        self.mark_value(v, pool);
+                    }
                 }
+                
+                // Always mark metatable (we need it to check __mode)
                 if let Some(mt_id) = metatable
                     && let Some(mt) = pool.get_table_value(mt_id)
                 {
@@ -1070,14 +1098,18 @@ impl GC {
                     
                     // Check if object needs finalization (__gc metamethod)
                     if self.needs_finalization(gc_id, pool) {
+                        // Debug output
+                        eprintln!("[GC DEBUG] Found object needing finalization: {:?}", gc_id);
+                        
                         // TODO: Check if already finalized (FINALIZED flag)
                         // For now, add all objects with __gc to finalization list
                         to_finalize.push(gc_id);
-                        // Resurrect object by changing to current white
-                        // This gives it one more GC cycle to be collected after __gc runs
-                        if let Some(obj_mut) = pool.gc_pool.get_mut(slot_index) {
-                            obj_mut.header.change_white();
-                        }
+                        
+                        // Resurrect object: mark it and all its references (including metatable)
+                        // This ensures the object and everything it references survives this GC cycle
+                        // so the finalizer can access them safely
+                        self.mark_one(gc_id, pool);
+                        eprintln!("[GC DEBUG] Resurrected (marked) object {:?}", gc_id);
                     } else {
                         dead_ids.push(gc_id);
                     }
@@ -1089,7 +1121,9 @@ impl GC {
         }
 
         // Add to pending actions
+        eprintln!("[GC DEBUG] sweep_step done: {} objects to finalize", to_finalize.len());
         self.pending_actions.to_finalize.extend(to_finalize);
+        eprintln!("[GC DEBUG] pending_actions now has {} to_finalize", self.pending_actions.to_finalize.len());
 
         // Actually remove dead objects (those without finalizers)
         for gc_id in &dead_ids {
@@ -1180,7 +1214,13 @@ impl GC {
         }
 
         // Flip white and sweep
+        eprintln!("[GC DEBUG] full_generation: Flipping white");
         self.current_white ^= 1;
+        
+        // Collect weak tables AFTER flipping white (same as atomic phase)
+        eprintln!("[GC DEBUG] full_generation: Calling collect_weak_tables");
+        self.collect_weak_tables(pool);
+        
         self.enter_sweep(pool);
         self.run_until_state(GcState::CallFin, roots, pool);
         self.run_until_state(GcState::Pause, roots, pool);

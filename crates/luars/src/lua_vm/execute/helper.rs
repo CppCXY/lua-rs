@@ -598,7 +598,9 @@ pub fn get_metamethod_event(
     value: &LuaValue,
     event: &str,
 ) -> Option<LuaValue> {
+    eprintln!("[GC DEBUG] get_metamethod_event: value kind = {:?}, event = {}", value.kind(), event);
     let mt = get_metatable(lua_state, value)?;
+    eprintln!("[GC DEBUG] get_metamethod_event: found metatable");
     get_metamethod_from_metatable(lua_state, mt, event)
 }
 
@@ -629,14 +631,20 @@ pub fn get_binop_metamethod(
 
 /// Get metatable for any value type
 pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
+    eprintln!("[GC DEBUG] get_metatable: value kind = {:?}", value.kind());
     if value.is_string() {
+        eprintln!("[GC DEBUG] get_metatable: is string");
         return lua_state.vm_mut().string_mt;
     } else if let Some(table) = value.as_table_mut() {
+        eprintln!("[GC DEBUG] get_metatable: is table");
         let mt_id = table.get_metatable();
+        eprintln!("[GC DEBUG] get_metatable: mt_id = {:?}", mt_id);
         return lua_state.vm_mut().object_pool.get_table_value(mt_id?);
     } else if let Some(ud) = value.as_userdata_mut() {
+        eprintln!("[GC DEBUG] get_metatable: is userdata");
         return Some(ud.get_metatable());
     }
 
+    eprintln!("[GC DEBUG] get_metatable: no metatable found");
     None
 }

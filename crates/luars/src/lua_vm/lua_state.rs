@@ -1377,8 +1377,11 @@ impl LuaState {
     }
 
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
+        println!("[GC] collect_garbage called");
         let vm = unsafe { &mut *self.vm };
+        println!("[GC] Calling vm.full_gc(false)");
         vm.full_gc(false);
+        println!("[GC] full_gc returned");
 
         // Process any accumulated GC actions (finalizers, weak tables, etc.)
         if vm.gc.has_pending_actions() {
@@ -1391,6 +1394,8 @@ impl LuaState {
 
     /// Process actions returned by GC (call finalizers, clean weak tables)
     fn process_gc_actions(&mut self, actions: GcActions) -> LuaResult<()> {
+        eprintln!("[GC DEBUG] process_gc_actions called with {} to_finalize", actions.to_finalize.len());
+        
         if actions.to_finalize.is_empty() {
             return Ok(());
         }
@@ -1421,13 +1426,18 @@ impl LuaState {
         use crate::gc::GcPtrObject;
         use crate::lua_vm::get_metamethod_event;
 
+        eprintln!("[GC DEBUG] call_finalizers: processing {} objects", to_finalize.len());
+        
         for gc_id in to_finalize {
             // Convert GcId to LuaValue
             let obj_value = match gc_id {
                 GcId::TableId(id) => {
+                    eprintln!("[GC DEBUG] Converting TableId({:?}) to LuaValue", id);
                     if let Some(val) = self.vm_mut().object_pool.get_table_value(id) {
+                        eprintln!("[GC DEBUG] Successfully got table value");
                         val
                     } else {
+                        eprintln!("[GC DEBUG] Failed to get table value - skipping");
                         continue;
                     }
                 }
@@ -1466,7 +1476,9 @@ impl LuaState {
             };
 
             // Get __gc metamethod
+            eprintln!("[GC DEBUG] Getting __gc for {:?}", gc_id);
             if let Some(gc_method) = get_metamethod_event(self, &obj_value, "__gc") {
+                eprintln!("[GC DEBUG] Found __gc method, calling it for {:?}", gc_id);
                 // Call __gc(obj) using pcall to handle errors safely
                 let result = self.pcall(gc_method, vec![obj_value]);
 

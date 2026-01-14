@@ -764,10 +764,12 @@ impl LuaVM {
     /// Perform a full GC cycle (like luaC_fullgc in Lua 5.5)
     /// This is the internal version that can be called in emergency situations
     fn full_gc(&mut self, is_emergency: bool) {
+        println!("[GC] full_gc called, is_emergency={}", is_emergency);
         let old_emergency = self.gc.gc_emergency;
         self.gc.gc_emergency = is_emergency;
 
         // Dispatch based on GC mode (from luaC_fullgc)
+        println!("[GC] gc_kind = {:?}", self.gc.gc_kind);
         match self.gc.gc_kind {
             GcKind::GenMinor => {
                 self.full_gen();
@@ -788,8 +790,10 @@ impl LuaVM {
 
     /// Full GC cycle for incremental mode (like fullinc in Lua 5.5)
     fn full_inc(&mut self) {
+        println!("[GC] === full_inc starting ===");
         // Collect roots
         let roots = self.collect_roots();
+        println!("[GC] Collected {} roots", roots.len());
 
         // If we're keeping invariant (in marking phase), sweep first
         if self.gc.keep_invariant() {
