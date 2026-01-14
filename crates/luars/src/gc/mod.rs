@@ -532,18 +532,15 @@ impl GC {
     }
 
     /// Mark a value (add to gray list if collectable)
+    /// Like Lua 5.5's markvalue: "{ if (valiswhite(o)) reallymarkobject(g,gcvalue(o)); }"
+    /// Fixed objects are GRAY, so they naturally skip the white check
     fn mark_value(&mut self, value: &LuaValue, pool: &mut ObjectPool) {
         match value.kind() {
             LuaValueKind::Table => {
                 if let Some(id) = value.as_table_id() {
                     if let Some(t) = pool.get_mut(id.into()) {
-                        // Fixed objects are always "reachable" but still need their children marked
-                        // Add them directly to gray list without checking color (but only if not black)
-                        if t.header.is_fixed() {
-                            if !t.header.is_black() {
-                                self.gray.push(GcId::TableId(id));
-                            }
-                        } else if t.header.is_white() {
+                        // Only mark white objects (fixed objects are gray, so they're skipped)
+                        if t.header.is_white() {
                             t.header.make_gray();
                             self.gray.push(GcId::TableId(id));
                         }
@@ -553,13 +550,8 @@ impl GC {
             LuaValueKind::Function => {
                 if let Some(id) = value.as_function_id() {
                     if let Some(f) = pool.get_mut(id.into()) {
-                        // For fixed objects: only add to gray if not already black
-                        // For normal objects: only add to gray if white
-                        if f.header.is_fixed() {
-                            if !f.header.is_black() {
-                                self.gray.push(GcId::FunctionId(id));
-                            }
-                        } else if f.header.is_white() {
+                        // Only mark white objects (fixed objects are gray, so they're skipped)
+                        if f.header.is_white() {
                             f.header.make_gray();
                             self.gray.push(GcId::FunctionId(id));
                         }
@@ -569,9 +561,10 @@ impl GC {
             LuaValueKind::String => {
                 if let Some(id) = value.as_string_id() {
                     if let Some(s) = pool.get_mut(id.into()) {
-                        // Strings are leaves - mark black directly (but only if white)
+                        // Fixed strings (metamethod names) are gray forever, skip them
+                        // Only mark white strings (fixed are gray, so naturally skipped)
                         if s.header.is_white() {
-                            s.header.make_black();
+                            s.header.make_black(); // Strings are leaves
                         }
                     }
                 }
@@ -665,18 +658,13 @@ impl GC {
     }
 
     /// Mark one object and traverse its references
+    /// Like Lua 5.5's propagatemark: "nw2black(o);" then traverse
+    /// Sets object to BLACK before traversing children
     fn mark_one(&mut self, gc_id: GcId, pool: &mut ObjectPool) -> isize {
         match gc_id {
             GcId::TableId(id) => {
-                // First check if this object is already black (happens for fixed objects or already marked)
+                // Set to black first, then traverse (like Lua 5.5 propagatemark)
                 let (entries, metatable) = if let Some(gc_table) = pool.get_mut(id.into()) {
-                    let was_black = gc_table.header.is_black();
-                    
-                    // If fixed and already black, skip traversal
-                    if gc_table.header.is_fixed() && was_black {
-                        return 0; // Already traversed, nothing to do
-                    }
-                    
                     gc_table.header.make_black();
                     
                     let table = match gc_table.ptr.as_table_mut() {
@@ -709,18 +697,8 @@ impl GC {
                 return 1 + entries.len() as isize;
             }
             GcId::FunctionId(id) => {
-                // Check if this function is fixed and already processed
-                let (is_fixed, is_black) = if let Some(gc_func) = pool.get(id.into()) {
-                    (gc_func.header.is_fixed(), gc_func.header.is_black())
-                } else {
-                    return 0;
-                };
-                
-                if is_fixed && is_black {
-                    return 0; // Already traversed in previous cycle
-                }
-                
-                // First mark the function black and get references to data we need
+                // Mark the function black and get references to data we need
+                // (Fixed functions should never reach here - they stay gray forever)
                 let (upvalues, chunk) = if let Some(gc_func) = pool.get_mut(id.into()) {
                     gc_func.header.make_black();
                     let func = gc_func.ptr.as_function_mut().unwrap();

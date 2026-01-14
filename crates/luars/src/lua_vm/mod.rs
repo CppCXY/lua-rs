@@ -76,19 +76,10 @@ impl LuaVM {
         // Registry is a GC root and protects all values stored in it
         let registry = vm.create_table(2, 8);
         vm.registry = registry;
-        if let Some(registry_id) = registry.as_table_id() {
-            // Fix the registry table so it's never collected
-            vm.object_pool.fix_gc_object(registry_id.into());
-        }
 
         // Set _G to point to the global table itself
         let globals_value = vm.create_table(0, 20);
         vm.global = globals_value;
-        if let Some(globals_id) = globals_value.as_table_id() {
-            // Fix the global table so it's never collected
-            vm.object_pool.fix_gc_object(globals_id.into());
-        }
-
         vm.set_global("_G", globals_value);
         vm.set_global("_ENV", globals_value);
 

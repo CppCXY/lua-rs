@@ -380,11 +380,12 @@ impl ObjectPool {
 
     /// Mark a string as fixed (never collected) - like Lua's luaC_fix()
     /// Used for metamethod names and other permanent strings
+    /// In Lua 5.5: "set2gray(o); /* they will be gray forever */"
     #[inline]
     pub fn fix_gc_object(&mut self, id: GcId) {
         if let Some(go) = self.gc_pool.get_mut(id.index()) {
             go.header.set_fixed();
-            go.header.make_black(); // Always considered marked
+            go.header.make_gray(); // Gray forever, like Lua 5.5
         }
     }
     // ==================== Table Operations ====================
