@@ -305,7 +305,8 @@ impl ObjectPool {
     /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_binary(&mut self, data: Vec<u8>, current_white: u8) -> LuaValue {
-        let gc_binary = GcObject::with_white(GcPtrObject::Binary(Box::new(data)), current_white);
+        let size = (64 + data.len()) as u32;
+        let gc_binary = GcObject::with_white(GcPtrObject::Binary(Box::new(data)), current_white, size);
         let ptr = gc_binary.ptr.as_binary_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_binary);
         let binary_id = BinaryId(id);
@@ -393,10 +394,15 @@ impl ObjectPool {
     /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize, current_white: u8) -> LuaValue {
+        // Calculate size: base overhead + estimated capacity
+        // Use max(array_size, hash_size) as estimated capacity
+        let capacity = array_size.max(hash_size);
+        let size = (256 + capacity * 48) as u32;
+        
         let gc_table = GcObject::with_white(GcPtrObject::Table(Box::new(LuaTable::new(
             array_size as u32,
             hash_size as u32,
-        ))), current_white);
+        ))), current_white, size);
         let ptr = gc_table.ptr.as_table_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_table);
         let table_id = TableId(id);
@@ -439,6 +445,14 @@ impl ObjectPool {
     /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>, current_white: u8) -> LuaValue {
+        // Calculate size: base + upvalues + chunk data
+        let upvalue_count = upvalue_ids.len();
+        let instr_size = chunk.code.len() * 8;
+        let const_size = chunk.constants.len() * 32;
+        let child_size = chunk.child_protos.len() * 512;
+        let line_size = chunk.line_info.len() * 4;
+        let size = (256 + upvalue_count * 64 + instr_size + const_size + child_size + line_size + 512) as u32;
+        
         // Build cached upvalues with direct pointers
         let mut upvalues: Vec<CachedUpvalue> = vec![];
         for id in upvalue_ids {
@@ -450,7 +464,7 @@ impl ObjectPool {
 
         let gc_func = GcObject::with_white(GcPtrObject::Function(Box::new(FunctionBody::Lua(
             chunk, upvalues,
-        ))), current_white);
+        ))), current_white, size);
         let ptr = gc_func.ptr.as_function_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_func);
         let func_id = FunctionId(id);
@@ -472,9 +486,10 @@ impl ObjectPool {
             }
         }
 
+        let size = (256 + upvalues.len() * 64) as u32;
         let gc_func = GcObject::with_white(GcPtrObject::Function(Box::new(FunctionBody::CClosure(
             func, upvalues,
-        ))), current_white);
+        ))), current_white, size);
         let ptr = gc_func.ptr.as_function_ptr().unwrap();
         let id = self.gc_pool.alloc(gc_func);
         let func_id = FunctionId(id);
@@ -489,8 +504,8 @@ impl ObjectPool {
     #[inline]
     pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> UpvalueId {
         let upvalue = Upvalue::Open(stack_index);
-
-        let gc_uv = GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white);
+        let size = 64;
+        let gc_uv = GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white, size);
         UpvalueId(self.gc_pool.alloc(gc_uv))
     }
 
@@ -500,7 +515,8 @@ impl ObjectPool {
     #[inline]
     pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> UpvalueId {
         let upvalue = Upvalue::Closed(value);
-        let gc_uv = GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white);
+        let size = 64;
+        let gc_uv = GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white, size);
         UpvalueId(self.gc_pool.alloc(gc_uv))
     }
 
@@ -539,7 +555,8 @@ impl ObjectPool {
     /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_userdata(&mut self, userdata: LuaUserdata, current_white: u8) -> LuaValue {
-        let gc_userdata = GcObject::with_white(GcPtrObject::Userdata(Box::new(userdata)), current_white);
+        let size = 512;
+        let gc_userdata = GcObject::with_white(GcPtrObject::Userdata(Box::new(userdata)), current_white, size);
         let ptr = gc_userdata.ptr.as_userdata_ptr().unwrap();
         let id = UserdataId(self.gc_pool.alloc(gc_userdata));
         LuaValue::userdata(id, ptr)
@@ -560,7 +577,8 @@ impl ObjectPool {
     /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> LuaValue {
-        let gc_thread = GcObject::with_white(GcPtrObject::Thread(Box::new(thread)), current_white);
+        let size = 4096; // Fixed size for thread (including stack)
+        let gc_thread = GcObject::with_white(GcPtrObject::Thread(Box::new(thread)), current_white, size);
         let ptr = gc_thread.ptr.as_thread_ptr().unwrap();
         let id = ThreadId(self.gc_pool.alloc(gc_thread));
         let l = self.get_thread_mut(id).unwrap();

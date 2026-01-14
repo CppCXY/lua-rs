@@ -245,7 +245,7 @@ impl LuaVM {
     /// This allows string methods to be called with : syntax (e.g., str:upper())
     pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) {
         // Create a metatable with __index pointing to the string library
-        let mt_value = self.object_pool.create_table(0, 1, self.gc.current_white);
+        let mt_value = self.create_table(0, 1);
 
         // Set __index to point to the string library
         let index_key = self.create_string("__index");

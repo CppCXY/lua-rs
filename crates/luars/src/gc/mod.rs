@@ -34,15 +34,12 @@
 //
 // Tri-color invariant: Black objects cannot point to white objects
 
-mod const_string;
 mod gc_id;
 mod gc_object;
 mod object_pool;
 mod string_interner;
 
-use crate::{
-    lua_value::{Chunk, LuaValue, LuaValueKind},
-};
+use crate::lua_value::{Chunk, LuaValue, LuaValueKind};
 pub use gc_id::*;
 pub use gc_object::*;
 pub use object_pool::*;
@@ -269,18 +266,18 @@ impl GC {
 
     /// Track a new object allocation (like luaC_newobj in Lua)
     /// This increments debt - when debt becomes positive, GC should run
-    /// 
+    ///
     /// **CRITICAL**: Objects are created WHITE by ObjectPool.create_*() with current_white.
     /// This function ONLY tracks memory accounting - it does NOT modify object colors.
     /// The tri-color invariant is maintained by write barriers, not by track_object.
-    /// 
+    ///
     /// Port of lgc.c: luaC_newobj creates objects as WHITE, then links to allgc list.
     /// Barriers will mark them BLACK/GRAY if needed when stored into reachable objects.
     #[inline]
     pub fn track_object(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
         // Objects are already created as WHITE by ObjectPool.create_*()
         // We do NOT modify color here - this is ONLY for memory accounting
-        // 
+        //
         // The Lua 5.5 way:
         // 1. luaC_newobj() creates object as WHITE (current white)
         // 2. Object is linked to allgc list
@@ -291,26 +288,18 @@ impl GC {
         // Our previous code INCORRECTLY marked objects as GRAY/BLACK here,
         // which violates Lua's design and prevents collection of unreachable objects.
 
-        // Calculate precise size using estimate_object_size (like Lua's luaC_newobj with exact sz)
-        let size = self.estimate_object_size(gc_id, pool) as usize;
-        
-        // Update debt tracking (Port of lgc.c: luaE_setdebt)
+        // Use the size stored in GcObject (calculated at creation time)
+        // This ensures perfect consistency with sweep deallocation
+        let size = if let Some(obj) = pool.gc_pool.get(gc_id.index()) {
+            obj.size() as usize
+        } else {
+            0
+        };
+
         let size_signed = size as isize;
-        self.total_bytes += size_signed * 2;
+        self.total_bytes += size_signed;
         self.gc_debt += size_signed;
         self.stats.bytes_allocated += size;
-    }
-
-    /// Record a deallocation
-    #[inline]
-    pub fn record_deallocation(&mut self, size: usize) {
-        let size_signed = size as isize;
-        // CRITICAL: Must match track_object's * 2 to keep totalbytes accurate
-        self.total_bytes = self.total_bytes.saturating_sub(size_signed * 2);
-        // Do NOT change debt when deallocating during sweep
-        // Changing debt would disturb the cycle control
-        // self.gc_debt += size_signed;
-        self.stats.bytes_freed += size;
     }
 
     /// Check if GC should run (debt > 0)
@@ -320,18 +309,12 @@ impl GC {
     }
 
     /// Set GC debt (like luaE_setdebt in Lua)
+    /// gc_debt > 0: need GC
+    /// gc_debt < 0: have budget before next GC
     pub fn set_debt(&mut self, debt: isize) {
-        const MAX_DEBT: isize = isize::MAX / 2;
-        let real_bytes = self.total_bytes - self.gc_debt;
-
-        let debt = if debt > MAX_DEBT - real_bytes {
-            MAX_DEBT - real_bytes
-        } else {
-            debt
-        };
-
-        self.total_bytes = real_bytes + debt;
-        self.gc_debt = self.total_bytes - real_bytes;
+        // Simply set the debt - don't modify total_bytes!
+        // total_bytes tracks actual memory, gc_debt tracks GC scheduling
+        self.gc_debt = debt;
     }
 
     /// Apply GC parameter (like applygcparam in Lua)
@@ -653,7 +636,7 @@ impl GC {
                         let upvalue_count = func.cached_upvalues().len() as isize;
                         let base = 256; // Base struct
                         let upvalues = upvalue_count * 64;
-                        
+
                         // If has chunk, estimate chunk size
                         let chunk_size = if let Some(chunk) = func.chunk() {
                             // Instructions, constants, upvalue info, line info, etc.
@@ -665,7 +648,7 @@ impl GC {
                         } else {
                             128 // C function
                         };
-                        
+
                         base + upvalues + chunk_size
                     } else {
                         512
@@ -689,8 +672,8 @@ impl GC {
                     64
                 }
             }
-            GcId::UserdataId(_) => 512,  // Increased significantly
-            GcId::ThreadId(_) => 4096,   // Thread + Stack, increased significantly
+            GcId::UserdataId(_) => 512, // Increased significantly
+            GcId::ThreadId(_) => 4096,  // Thread + Stack, increased significantly
         }
     }
 
@@ -703,21 +686,17 @@ impl GC {
                 // Set to black first, then traverse (like Lua 5.5 propagatemark)
                 let (entries, metatable) = if let Some(gc_table) = pool.get_mut(id.into()) {
                     gc_table.header.make_black();
-                    
+
                     let table = match gc_table.ptr.as_table_mut() {
                         Some(t) => t,
-                        None => {
-                            eprintln!("[GC] WARNING: Table {:?} has no table pointer!", id);
-                            return 0;
-                        }
+                        None => return 0,
                     };
-                    
+
                     let entries: Vec<_> = table.iter_all();
                     let metatable = table.get_metatable();
 
                     (entries, metatable)
                 } else {
-                    eprintln!("[GC] WARNING: Could not get table {:?} from pool!", id);
                     return 0;
                 };
 
@@ -741,7 +720,7 @@ impl GC {
                     let func = gc_func.ptr.as_function_mut().unwrap();
                     let upvalues = func.cached_upvalues().clone(); // Clone Vec<UpvalueId>
                     let chunk = func.chunk().map(|c| c.clone()); // Clone Rc<Chunk>
-                    
+
                     (upvalues, chunk)
                 } else {
                     return 0;
@@ -894,32 +873,29 @@ impl GC {
     pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
-        
+
         let _old_white = self.current_white;
     }
 
     /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
     /// Returns true if sweep is complete (no more objects to sweep)
-    /// 
+    ///
     /// Port of Lua 5.5's sweepstep: maintains sweep position (sweepgc pointer)
     /// to avoid re-scanning already-swept objects
     fn sweep_step(&mut self, pool: &mut ObjectPool, fast: bool) -> bool {
-        let max_sweep = if fast { usize::MAX } else { 100 }; // GCSWEEPMAX
-        let mut count = 0;
-
-        // Get the "other white" - objects from the previous GC cycle that weren't marked
+        let max_sweep = if fast { usize::MAX } else { 100 };        let mut count = 0;
         let other_white = 1 - self.current_white;
 
         // Total number of slots in the gc_list Vec (not just live objects)
         let total_slots = pool.gc_pool.capacity();
-        
+
         let mut dead_ids = Vec::new();
-        
+
         // Continue from where we left off (like Lua's sweepgc pointer)
         // Sweep through Vec slots directly (some may be None)
         while self.sweep_index < total_slots && count < max_sweep {
             let slot_index = self.sweep_index as u32;
-            
+
             // Check if this slot has an object
             if let Some(obj) = pool.gc_pool.get(slot_index) {
                 // Check if object is dead (other white and not fixed)
@@ -929,16 +905,20 @@ impl GC {
                     dead_ids.push(gc_id);
                 }
             }
-            
+
             self.sweep_index += 1;
-            count += 1;  // Count every slot, not just objects, to avoid infinite loops
+            count += 1; // Count every slot, not just objects, to avoid infinite loops
         }
 
-        // Remove dead objects (do this after iteration to avoid concurrent modification)
-        for gc_id in dead_ids {
-            let size = self.estimate_object_size(gc_id, pool) as usize;
-            pool.remove(gc_id);
-            self.record_deallocation(size);
+        for gc_id in &dead_ids {
+            let size = if let Some(obj) = pool.gc_pool.get(gc_id.index()) {
+                obj.size() as usize
+            } else {
+                0
+            };
+            pool.remove(*gc_id);
+            self.total_bytes = self.total_bytes.saturating_sub(size as isize);
+            self.stats.bytes_freed += size;
             self.stats.objects_collected += 1;
         }
 

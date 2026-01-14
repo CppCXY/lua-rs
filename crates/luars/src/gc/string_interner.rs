@@ -66,7 +66,8 @@ impl StringInterner {
         }
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
-        let gc_string = GcObject::with_white(GcPtrObject::String(Box::new(s.to_string())), current_white);
+        let size = (64 + s.len()) as u32;
+        let gc_string = GcObject::with_white(GcPtrObject::String(Box::new(s.to_string())), current_white, size);
         let ptr = gc_string.ptr.as_str_ptr().unwrap();
         let id = gc_pool.alloc(gc_string);
         let str_id = StringId(id);

@@ -664,11 +664,8 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "count" => {
-            // LUA_GCCOUNT + LUA_GCCOUNTB: Return memory in KB (with fraction)
-            // Like Lua 5.5: gettotalbytes(g) = GCtotalbytes - GCdebt
             let gc = &l.vm_mut().gc;
-            let real_bytes = (gc.total_bytes - gc.gc_debt).max(0) as f64;
-            let kb = real_bytes / 1024.0;
+            let kb = gc.total_bytes.max(0) as f64 / 1024.0;
             l.push_value(LuaValue::number(kb))?;
             Ok(1)
         }

@@ -104,6 +104,7 @@ pub const MASKGCBITS: u8 = MASKCOLORS | AGEBITS;
 #[repr(C)]
 pub struct GcHeader {
     pub marked: u8, // Color and age bits combined
+    pub size: u32,   // Size of the object in bytes (for memory tracking)
 }
 
 impl Default for GcHeader {
@@ -114,6 +115,7 @@ impl Default for GcHeader {
         // Port of lgc.c: New objects MUST be created with luaC_white(g)
         GcHeader {
             marked: G_NEW, // Age 0, no color bits set (gray state - WRONG for new objects!)
+            size: 0,
         }
     }
 }
@@ -126,10 +128,11 @@ impl GcHeader {
     /// **CRITICAL**: All new GC objects MUST use this constructor with current_white from GC
     /// Using Default::default() creates incorrect GRAY objects that may be prematurely collected
     #[inline(always)]
-    pub fn with_white(current_white: u8) -> Self {
+    pub fn with_white(current_white: u8, size: u32) -> Self {
         debug_assert!(current_white == 0 || current_white == 1, "current_white must be 0 or 1");
         GcHeader {
             marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
+            size,
         }
     }
 
@@ -453,16 +456,22 @@ pub struct GcObject {
 }
 
 impl GcObject {
-    /// Create a new GC object with proper white color
+    /// Create a new GC object with proper white color and size
     /// Port of lgc.c: luaC_newobj - all new objects MUST be created as current white
     /// 
     /// **CRITICAL**: current_white MUST come from GC.current_white to ensure
     /// objects are marked with the correct color for the current cycle
-    pub fn with_white(ptr: GcPtrObject, current_white: u8) -> Self {
+    /// 
+    /// size: The estimated memory size of this object (including heap allocations)
+    pub fn with_white(ptr: GcPtrObject, current_white: u8, size: u32) -> Self {
         GcObject {
-            header: GcHeader::with_white(current_white),
+            header: GcHeader::with_white(current_white, size),
             ptr,
         }
+    }
+
+    pub fn size(&self) -> u32 {
+        self.header.size
     }
 
     pub fn trans_to_gcid(&self, id: u32) -> GcId {
