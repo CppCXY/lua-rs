@@ -313,6 +313,69 @@ pub trait LuaTableImpl {
     fn len(&self) -> usize;
 }
 
+impl LuaTable {
+    /// Remove entries with dead (collectible) keys or values
+    /// Used by weak table cleanup during GC
+    /// - weak_keys: if true, remove entries whose keys are dead GC objects
+    /// - weak_values: if true, remove entries whose values are dead GC objects
+    /// - is_dead: closure to check if a GcId is dead
+    pub fn remove_weak_entries_with_checker<F>(&mut self, weak_keys: bool, weak_values: bool, mut is_dead: F)
+    where
+        F: FnMut(crate::gc::GcId) -> bool,
+    {
+        // Collect all keys to remove
+        let mut keys_to_remove = Vec::new();
+
+        // Iterate over all entries
+        let entries = self.iter_all();
+        for (key, value) in entries {
+            let mut should_remove = false;
+
+            // Check if key should cause removal (for weak keys)
+            if weak_keys {
+                if let Some(gc_id) = Self::value_to_gc_id(&key) {
+                    if is_dead(gc_id) {
+                        should_remove = true;
+                    }
+                }
+            }
+
+            // Check if value should cause removal (for weak values)
+            if !should_remove && weak_values {
+                if let Some(gc_id) = Self::value_to_gc_id(&value) {
+                    if is_dead(gc_id) {
+                        should_remove = true;
+                    }
+                }
+            }
+
+            if should_remove {
+                keys_to_remove.push(key);
+            }
+        }
+
+        // Remove marked keys
+        for key in keys_to_remove {
+            self.raw_set(&key, LuaValue::nil());
+        }
+    }
+
+    /// Convert LuaValue to GcId for dead object checking
+    fn value_to_gc_id(value: &LuaValue) -> Option<crate::gc::GcId> {
+        use crate::lua_value::LuaValueKind;
+        use crate::gc::GcId;
+
+        match value.kind() {
+            LuaValueKind::String => value.as_string_id().map(GcId::StringId),
+            LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
+            LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
+            LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
+            LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
+            _ => None,
+        }
+    }
+}
+
 pub enum LuaTableDetail {
     // TypedArray(LuaTypedArray),
     ValueArray(LuaValueArray),

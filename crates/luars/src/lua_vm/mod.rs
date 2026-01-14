@@ -200,7 +200,7 @@ impl LuaVM {
 
         // Check GC after VM execution completes (like Lua's luaC_checkGC after returning to caller)
         // At this point, all return values are collected and safe from collection
-        self.main_state.check_gc();
+        self.main_state.check_gc()?;
 
         Ok(results)
     }

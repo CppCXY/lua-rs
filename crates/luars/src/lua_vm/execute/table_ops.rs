@@ -130,7 +130,7 @@ pub fn exec_settable(
                 lua_state.set_top(required_top);
             }
 
-            lua_state.check_gc();
+            lua_state.check_gc()?;
             return Ok(());
         }
     }
@@ -258,7 +258,7 @@ pub fn exec_seti(
         if !table.has_metatable() {
             // Fast path: no __newindex, directly set
             table.set_int(b as i64, value);
-            lua_state.check_gc();
+            lua_state.check_gc()?;
         } else {
             // Slow path: has __newindex metamethod
             let key = LuaValue::integer(b as i64);
@@ -396,7 +396,7 @@ pub fn exec_setfield(
                 lua_state.set_top(required_top);
             }
 
-            lua_state.check_gc();
+            lua_state.check_gc()?;
             return Ok(());
         }
     }

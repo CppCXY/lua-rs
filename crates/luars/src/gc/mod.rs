@@ -375,6 +375,24 @@ impl GC {
         self.gc_stopem = false;
     }
 
+    /// Check if a GcId represents a dead object (will be collected)
+    /// Used by weak table cleanup to identify dead keys/values
+    pub fn is_object_dead(&self, gc_id: GcId, pool: &ObjectPool) -> bool {
+        if let Some(obj) = pool.gc_pool.get(gc_id.index()) {
+            // Fixed objects are never dead
+            if obj.header.is_fixed() {
+                return false;
+            }
+            // Calculate other_white (the white that will be collected)
+            let other_white = gc_object::GcHeader::otherwhite(self.current_white);
+            // Object is dead if it's marked with other_white
+            obj.header.is_dead(other_white)
+        } else {
+            // Object doesn't exist = dead
+            true
+        }
+    }
+
     // ============ Core GC Implementation ============
 
     /// Main GC step function (like luaC_step in Lua 5.5)
