@@ -300,17 +300,6 @@ impl GC {
         self.total_bytes += size_signed;
         self.gc_debt += size_signed;
         self.stats.bytes_allocated += size;
-
-        // Track large allocations
-        if size > 20000 {
-            eprintln!(
-                "[GC TRACK] Large object {:?} size={}, total_bytes: {} -> {}",
-                gc_id,
-                size,
-                self.total_bytes - size_signed,
-                self.total_bytes
-            );
-        }
     }
 
     /// Check if GC should run (debt > 0)
@@ -442,11 +431,6 @@ impl GC {
 
         self.gc_stopem = true; // Prevent reentrancy
 
-        eprintln!(
-            "[GC STEP] Before: state={:?}, sweep_index={}",
-            self.gc_state, self.sweep_index
-        );
-
         let result = match self.gc_state {
             GcState::Pause => {
                 self.restart_collection(roots, pool);
@@ -508,10 +492,6 @@ impl GC {
 
     /// Restart collection (like restartcollection in Lua 5.5)
     fn restart_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        eprintln!(
-            "[GC STATE] restart_collection: sweep_index={}, total_bytes={}",
-            self.sweep_index, self.total_bytes
-        );
         self.stats.collection_count += 1;
         self.gray.clear();
         self.grayagain.clear();
@@ -823,12 +803,7 @@ impl GC {
     }
 
     /// Enter sweep phase (like entersweep in Lua 5.5)
-    pub fn enter_sweep(&mut self, pool: &mut ObjectPool) {
-        let capacity = pool.gc_pool.capacity();
-        eprintln!(
-            "[GC STATE] enter_sweep: sweep_index={} -> 0, total_bytes={}, gc_pool.capacity()={}",
-            self.sweep_index, self.total_bytes, capacity
-        );
+    pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
 
@@ -860,20 +835,7 @@ impl GC {
             // Check if this slot has an object
             if let Some(obj) = pool.gc_pool.get(slot_index) {
                 // Check if object is dead (other white and not fixed)
-                let is_dead = obj.header.is_dead(other_white);
-                if obj.size() > 20000 {
-                    eprintln!(
-                        "[GC SWEEP CHECK] Large object slot={} size={}, marked={:08b}, is_dead={}, is_fixed={}, current_white={}, other_white={}",
-                        slot_index,
-                        obj.size(),
-                        obj.header.marked,
-                        is_dead,
-                        obj.header.is_fixed(),
-                        self.current_white,
-                        other_white
-                    );
-                }
-                if !obj.header.is_fixed() && is_dead {
+                if !obj.header.is_fixed() && obj.header.is_dead(other_white) {
                     // Convert slot_index to GcId using the object's type
                     let gc_id = obj.trans_to_gcid(slot_index);
                     dead_ids.push(gc_id);
@@ -895,17 +857,7 @@ impl GC {
 
         // Return true if we've reached the end of all current slots
         // Note: new objects may be allocated after this sweep_step, so we check again next time
-        let complete = self.sweep_index >= current_total_slots;
-        if complete || self.sweep_index == 0 {
-            eprintln!(
-                "[GC SWEEP] sweep_step complete={}, sweep_index={}/{}, dead_count={}",
-                complete,
-                self.sweep_index,
-                current_total_slots,
-                dead_ids.len()
-            );
-        }
-        complete
+        self.sweep_index >= current_total_slots
     }
 
     pub fn set_pause(&mut self) {

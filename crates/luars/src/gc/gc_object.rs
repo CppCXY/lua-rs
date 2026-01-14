@@ -640,10 +640,6 @@ impl GcPool {
         }
 
         let id = self.gc_list.len() as u32;
-        if value.size() > 20000 {
-            eprintln!("[GC ALLOC] Large object id={}, size={}, new_len={}", 
-                id, value.size(), id + 1);
-        }
         self.gc_list.push(Some(value));
         id
     }

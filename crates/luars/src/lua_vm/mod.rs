@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{lib_registry, ObjectPool};
+use crate::{ObjectPool, lib_registry};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -276,10 +276,8 @@ impl LuaVM {
         let value = self.object_pool.create_thread(thread, current_white);
         let id = value.as_thread_id().unwrap();
         // Track thread for GC (IMPORTANT: threads are large objects!)
-        self.gc.track_object(
-            GcId::ThreadId(id),
-            &mut self.object_pool,
-        );
+        self.gc
+            .track_object(GcId::ThreadId(id), &mut self.object_pool);
         value
     }
 
@@ -489,7 +487,17 @@ impl LuaVM {
     #[inline]
     pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
         let current_white = self.gc.current_white;
-        self.object_pool.create_substring(s_value, start, end, current_white)
+        let (value, is_new) = self
+            .object_pool
+            .create_substring(s_value, start, end, current_white);
+
+        if is_new {
+            let s_id = value.as_string_id().unwrap();
+            self.gc
+                .track_object(GcId::StringId(s_id), &mut self.object_pool);
+        }
+
+        value
     }
 
     /// Get string by LuaValue (resolves ID from object pool)
@@ -539,7 +547,9 @@ impl LuaVM {
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let current_white = self.gc.current_white;
-        let value = self.object_pool.create_table(array_size, hash_size, current_white);
+        let value = self
+            .object_pool
+            .create_table(array_size, hash_size, current_white);
         let id = value.as_table_id().unwrap();
         // Track object for GC - calculates precise size and updates gc_debt
         self.gc
@@ -590,10 +600,8 @@ impl LuaVM {
         let current_white = self.gc.current_white;
         let value = self.object_pool.create_userdata(data, current_white);
         let id = value.as_userdata_id().unwrap();
-        self.gc.track_object(
-            GcId::UserdataId(id),
-            &mut self.object_pool,
-        );
+        self.gc
+            .track_object(GcId::UserdataId(id), &mut self.object_pool);
         value
     }
 
@@ -602,12 +610,12 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
         let current_white = self.gc.current_white;
-        let value = self.object_pool.create_function(chunk, upvalue_ids, current_white);
+        let value = self
+            .object_pool
+            .create_function(chunk, upvalue_ids, current_white);
         let id = value.as_function_id().unwrap();
-        self.gc.track_object(
-            GcId::FunctionId(id),
-            &mut self.object_pool,
-        );
+        self.gc
+            .track_object(GcId::FunctionId(id), &mut self.object_pool);
         value
     }
 
@@ -622,12 +630,12 @@ impl LuaVM {
             .collect();
 
         let current_white = self.gc.current_white;
-        let value = self.object_pool.create_c_closure(func, upvalue_ids, current_white);
+        let value = self
+            .object_pool
+            .create_c_closure(func, upvalue_ids, current_white);
         let id = value.as_function_id().unwrap();
-        self.gc.track_object(
-            GcId::FunctionId(id),
-            &mut self.object_pool,
-        );
+        self.gc
+            .track_object(GcId::FunctionId(id), &mut self.object_pool);
         value
     }
 
@@ -635,11 +643,11 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
         let current_white = self.gc.current_white;
-        let id = self.object_pool.create_upvalue_open(stack_index, current_white);
-        self.gc.track_object(
-            GcId::UpvalueId(id),
-            &mut self.object_pool,
-        );
+        let id = self
+            .object_pool
+            .create_upvalue_open(stack_index, current_white);
+        self.gc
+            .track_object(GcId::UpvalueId(id), &mut self.object_pool);
         id
     }
 
@@ -648,10 +656,8 @@ impl LuaVM {
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
         let current_white = self.gc.current_white;
         let id = self.object_pool.create_upvalue_closed(value, current_white);
-        self.gc.track_object(
-            GcId::UpvalueId(id),
-            &mut self.object_pool,
-        );
+        self.gc
+            .track_object(GcId::UpvalueId(id), &mut self.object_pool);
         id
     }
 

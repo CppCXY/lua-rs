@@ -358,10 +358,10 @@ impl ObjectPool {
         start: usize,
         end: usize,
         current_white: u8,
-    ) -> LuaValue {
+    ) -> (LuaValue, bool) {
         let string = match s_value.as_str() {
             Some(s) => s,
-            None => return self.create_string("", current_white).0,
+            None => return self.create_string("", current_white),
         };
         // Extract substring info first
         let substring = {
@@ -370,12 +370,12 @@ impl ObjectPool {
             let end = end.min(string.len());
 
             if start >= end {
-                return self.create_string("", current_white).0;
+                return self.create_string("", current_white);
             }
 
             // Fast path: return original if full range
             if start == 0 && end == string.len() {
-                return s_value;
+                return (s_value, false);
             }
 
             // Copy substring to avoid borrowing issue
@@ -383,7 +383,7 @@ impl ObjectPool {
         };
 
         // Intern the substring - will be deduplicated if it already exists
-        self.create_string(substring, current_white).0
+        self.create_string(substring, current_white)
     }
 
     /// Mark a string as fixed (never collected) - like Lua's luaC_fix()

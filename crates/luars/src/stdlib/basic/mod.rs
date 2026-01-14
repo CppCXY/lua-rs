@@ -665,9 +665,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         "count" => {
             let gc = &l.vm_mut().gc;
             let total = gc.total_bytes;
-            if total <= 0 {
-                eprintln!("[WARNING] gcinfo: total_bytes={}", total);
-            }
             let kb = total.max(0) as f64 / 1024.0;
             l.push_value(LuaValue::number(kb))?;
             Ok(1)
@@ -749,9 +746,8 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // Switch to generational mode
             vm.gc.gc_kind = crate::gc::GcKind::GenMinor;
 
-            // Push previous mode name
-            let (mode_value, _) = vm.object_pool.create_string(old_mode, vm.gc.current_white);
-
+            // Push previous mode name (must track if new)
+            let mode_value = vm.create_string(old_mode);
             l.push_value(mode_value)?;
             Ok(1)
         }
@@ -767,8 +763,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // Switch to incremental mode (like luaC_changemode in Lua 5.5)
             vm.gc.change_to_incremental_mode(&mut vm.object_pool);
 
-            // Push previous mode name
-            let (mode_value, _) = vm.object_pool.create_string(old_mode, vm.gc.current_white);
+            let mode_value = vm.create_string(old_mode);
             l.push_value(mode_value)?;
             Ok(1)
         }
