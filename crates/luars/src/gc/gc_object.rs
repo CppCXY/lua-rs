@@ -229,8 +229,15 @@ impl GcHeader {
     #[inline(always)]
     pub fn make_white(&mut self, current_white: u8) {
         debug_assert!(current_white == 0 || current_white == 1, "current_white must be 0 or 1");
+        let old_marked = self.marked;
         // Clear all color bits, then set the appropriate white bit
         self.marked = (self.marked & !MASKCOLORS) | (1 << (WHITE0BIT + current_white));
+        
+        // Debug logging for specific objects
+        if old_marked & (1 << BLACKBIT) != 0 {
+            // Object was black before, log the change
+            // We'll add object ID logging at call site
+        }
     }
 
     /// Make object gray (clear all color bits, keep age)

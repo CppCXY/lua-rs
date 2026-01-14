@@ -515,7 +515,7 @@ impl GC {
         self.make_all_white(pool);
 
         // Mark roots
-        for value in roots {
+        for value in roots.iter() {
             self.mark_value(value, pool);
         }
     }
@@ -524,7 +524,7 @@ impl GC {
     fn make_all_white(&mut self, pool: &mut ObjectPool) {
         let white = self.current_white;
 
-        for (_, gc_object) in pool.gc_pool.iter_mut() {
+        for (_obj_id, gc_object) in pool.gc_pool.iter_mut() {
             if !gc_object.header.is_fixed() {
                 gc_object.header.make_white(white);
             }
@@ -537,7 +537,11 @@ impl GC {
             LuaValueKind::Table => {
                 if let Some(id) = value.as_table_id() {
                     if let Some(t) = pool.get_mut(id.into()) {
-                        if t.header.is_white() {
+                        // Fixed objects are always "reachable" but still need their children marked
+                        // Add them directly to gray list without checking color
+                        if t.header.is_fixed() {
+                            self.gray.push(GcId::TableId(id));
+                        } else if t.header.is_white() {
                             t.header.make_gray();
                             self.gray.push(GcId::TableId(id));
                         }
@@ -547,7 +551,9 @@ impl GC {
             LuaValueKind::Function => {
                 if let Some(id) = value.as_function_id() {
                     if let Some(f) = pool.get_mut(id.into()) {
-                        if f.header.is_white() {
+                        if f.header.is_fixed() {
+                            self.gray.push(GcId::FunctionId(id));
+                        } else if f.header.is_white() {
                             f.header.make_gray();
                             self.gray.push(GcId::FunctionId(id));
                         }
@@ -656,18 +662,31 @@ impl GC {
     fn mark_one(&mut self, gc_id: GcId, pool: &mut ObjectPool) -> isize {
         match gc_id {
             GcId::TableId(id) => {
-                // First collect entries and metatable to mark
+                // First check if this object is already black (happens for fixed objects or already marked)
                 let (entries, metatable) = if let Some(gc_table) = pool.get_mut(id.into()) {
+                    let was_black = gc_table.header.is_black();
+                    
+                    // If fixed and already black, skip traversal
+                    if gc_table.header.is_fixed() && was_black {
+                        return 0; // Already traversed, nothing to do
+                    }
+                    
                     gc_table.header.make_black();
+                    
                     let table = match gc_table.ptr.as_table_mut() {
                         Some(t) => t,
-                        None => return 0,
+                        None => {
+                            eprintln!("[GC] WARNING: Table {:?} has no table pointer!", id);
+                            return 0;
+                        }
                     };
+                    
                     let entries: Vec<_> = table.iter_all();
                     let metatable = table.get_metatable();
 
                     (entries, metatable)
                 } else {
+                    eprintln!("[GC] WARNING: Could not get table {:?} from pool!", id);
                     return 0;
                 };
 
@@ -842,6 +861,8 @@ impl GC {
     pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
+        
+        let _old_white = self.current_white;
     }
 
     /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
