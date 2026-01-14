@@ -9,10 +9,10 @@ use crate::gc::UpvalueId;
 use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
-use crate::lua_vm::execute::lua_execute_until;
+use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, GcId, LuaTable, LuaVM, ThreadId};
+use crate::{Chunk, GcActions, GcId, LuaTable, LuaVM, ThreadId};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -448,7 +448,7 @@ impl LuaState {
         // We scan to find the cutoff point.
         let mut count = 0;
         let len = self.open_upvalues_list.len();
-        
+
         while count < len {
             let upval_id = self.open_upvalues_list[count];
             // Check if this upvalue points to a stack index >= level
@@ -475,15 +475,21 @@ impl LuaState {
             // Perform the close operation for each
             for upval_id in to_close {
                 // 1. Identify stack index (must check before closing as closing removes it)
-                let stack_idx_opt = object_pool.get_upvalue(upval_id).and_then(|u| u.get_stack_index());
-                
+                let stack_idx_opt = object_pool
+                    .get_upvalue(upval_id)
+                    .and_then(|u| u.get_stack_index());
+
                 if let Some(stack_idx) = stack_idx_opt {
                     // 2. Remove from map (maintain consistency)
                     self.open_upvalues_map.remove(&stack_idx);
-                    
+
                     // 3. Capture value from stack
-                    let value = self.stack.get(stack_idx).copied().unwrap_or(LuaValue::nil());
-                    
+                    let value = self
+                        .stack
+                        .get(stack_idx)
+                        .copied()
+                        .unwrap_or(LuaValue::nil());
+
                     // 4. Close the upvalue (move value to heap)
                     if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
                         upval.close(value);
@@ -1141,7 +1147,7 @@ impl LuaState {
                 // Results start at func_idx (replacing func and args)
                 let mut results = Vec::new();
                 let top = self.stack_top;
-                
+
                 if top > func_idx {
                     for i in func_idx..top {
                         if let Some(val) = self.stack_get(i) {
@@ -1199,7 +1205,7 @@ impl LuaState {
                         // Stack top is at end of results
                         let mut results = Vec::new();
                         let top = self.stack_top;
-                        
+
                         if top > handler_idx {
                             for i in handler_idx..top {
                                 if let Some(val) = self.stack_get(i) {
@@ -1295,7 +1301,7 @@ impl LuaState {
             // This simulates the yield function returning normally
             let actual_nresults = args.len();
             for (i, arg) in args.into_iter().enumerate() {
-                let _ = self.stack_set(func_idx + i, arg);
+                self.stack_set(func_idx + i, arg)?;
             }
 
             // Update stack top and current frame's top
@@ -1307,7 +1313,7 @@ impl LuaState {
             }
 
             // Execute until yield or completion
-            let result = crate::lua_vm::execute::lua_execute(self);
+            let result = execute::lua_execute(self);
 
             match result {
                 Ok(()) => {
@@ -1355,6 +1361,57 @@ impl LuaState {
             LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
             _ => None,
         }
+    }
+
+    pub fn check_gc(&mut self) {
+        let vm = unsafe { &mut *self.vm };
+        vm.check_gc();
+
+        // Process any accumulated GC actions (finalizers, weak tables, etc.)
+        if vm.gc.has_pending_actions() {
+            let actions = vm.gc.take_pending_actions();
+            self.process_gc_actions(actions);
+        }
+    }
+
+    pub fn collect_garbage(&mut self) {
+        let vm = unsafe { &mut *self.vm };
+        vm.full_gc(false);
+
+        // Process any accumulated GC actions (finalizers, weak tables, etc.)
+        if vm.gc.has_pending_actions() {
+            let actions = vm.gc.take_pending_actions();
+            self.process_gc_actions(actions);
+        }
+    }
+
+    /// Process actions returned by GC (call finalizers, clean weak tables)
+    fn process_gc_actions(&mut self, actions: GcActions) {
+        if actions.to_finalize.is_empty() && actions.weak_tables.is_empty() {
+            return;
+        }
+
+        // Enter finalizer mode - stop GC during finalizer execution
+        // This prevents objects from being collected while their finalizers run
+        self.vm_mut().gc.enter_finalizer_mode();
+
+        // TODO: Call __gc finalizers
+        if !actions.to_finalize.is_empty() {
+            // For each object that needs finalization:
+            // 1. Check if it has __gc metamethod
+            // 2. Call the metamethod with object as parameter
+            // 3. Mark object as finalized to prevent re-finalization
+        }
+
+        // TODO: Clean weak tables
+        if !actions.weak_tables.is_empty() {
+            // For each weak table:
+            // 1. Check __mode field ('k', 'v', or 'kv')
+            // 2. Remove entries with dead keys/values
+        }
+
+        // Exit finalizer mode - resume normal GC
+        self.vm_mut().gc.exit_finalizer_mode();
     }
 }
 

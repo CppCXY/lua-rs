@@ -1017,7 +1017,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     stack[base + a] = value;
                     
                     // GC check after table creation (like Lua 5.5 OP_NEWTABLE)
-                    lua_state.vm_mut().check_gc();
+                    lua_state.check_gc();
                 }
                 OpCode::GetTable => {
                     table_ops::exec_gettable(lua_state, instr, base, frame_idx, &mut pc)?;
@@ -1649,7 +1649,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     }
                     
                     // GC check after concatenation (like Lua 5.5 OP_CONCAT)
-                    lua_state.vm_mut().check_gc();
+                    lua_state.check_gc();
                 }
 
                 // ============================================================

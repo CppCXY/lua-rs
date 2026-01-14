@@ -451,7 +451,7 @@ pub fn call_metamethod(
     // **CRITICAL**: Check GC after metamethod call (like Lua 5.5 does after function calls)
     // Without this, repeated table allocations in __add cause memory to grow indefinitely,
     // making allocations progressively slower
-    lua_state.vm_mut().check_gc();
+    lua_state.check_gc();
 
     Ok(result)
 }

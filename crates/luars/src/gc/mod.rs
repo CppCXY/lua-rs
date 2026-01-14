@@ -44,6 +44,17 @@ pub use gc_id::*;
 pub use gc_object::*;
 pub use object_pool::*;
 
+/// Actions that GC needs VM to perform after a GC step
+/// This allows GC to mark objects for finalization or weak table cleanup
+/// without needing access to LuaState during the GC phase
+#[derive(Default, Debug)]
+pub struct GcActions {
+    /// Objects that need their __gc finalizer called
+    pub to_finalize: Vec<GcId>,
+    /// Weak tables that need key/value cleanup
+    pub weak_tables: Vec<gc_id::TableId>,
+}
+
 // GC Parameters (from lua.h)
 pub const PAUSE: usize = 0; // Pause between GC cycles (default 200%)
 pub const STEPMUL: usize = 1; // GC speed multiplier (default 200)
@@ -161,6 +172,11 @@ pub struct GC {
     /// GC stopped by user (gcstp in Lua, GCSTPUSR bit)
     pub gc_stopped: bool,
 
+    // === Pending actions (for finalizers and weak tables) ===
+    /// Accumulated actions that need VM to process
+    /// This is filled during GC steps and retrieved by VM later
+    pending_actions: GcActions,
+
     // === GC parameters (from gcparams[LUA_GCPN]) ===
     pub gc_params: [i32; GCPARAM_COUNT],
 
@@ -220,6 +236,7 @@ impl GC {
             gc_emergency: false,
             gc_stopem: false,
             gc_stopped: false,
+            pending_actions: GcActions::default(),
             gc_params: [
                 DEFAULT_PAUSE,      // PAUSE = 0
                 DEFAULT_STEPMUL,    // STEPMUL = 1
@@ -333,11 +350,37 @@ impl GC {
         &self.stats
     }
 
+    // ============ Pending Actions Management ============
+
+    /// Get accumulated GC actions that need VM processing
+    /// This retrieves and clears the pending actions
+    pub fn take_pending_actions(&mut self) -> GcActions {
+        std::mem::take(&mut self.pending_actions)
+    }
+
+    /// Check if there are pending actions waiting for VM
+    pub fn has_pending_actions(&self) -> bool {
+        !self.pending_actions.to_finalize.is_empty() 
+            || !self.pending_actions.weak_tables.is_empty()
+    }
+
+    /// Enter finalizer execution mode - temporarily stop GC to prevent
+    /// objects from being collected while their finalizers are running
+    pub fn enter_finalizer_mode(&mut self) {
+        self.gc_stopem = true;
+    }
+
+    /// Exit finalizer execution mode - resume normal GC operation
+    pub fn exit_finalizer_mode(&mut self) {
+        self.gc_stopem = false;
+    }
+
     // ============ Core GC Implementation ============
 
     /// Main GC step function (like luaC_step in Lua 5.5)
+    /// Actions are accumulated in pending_actions, retrieve with take_pending_actions()
     pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        self.step_internal(roots, pool, false);
+        self.step_internal(roots, pool, false)
     }
 
     /// Internal step function with force parameter
@@ -355,7 +398,7 @@ impl GC {
         // Dispatch based on GC mode (like Lua 5.5 luaC_step)
         match self.gc_kind {
             GcKind::Inc | GcKind::GenMajor => {
-                self.inc_step(roots, pool);
+                self.inc_step(roots, pool)
             }
             GcKind::GenMinor => {
                 self.young_collection(roots, pool);

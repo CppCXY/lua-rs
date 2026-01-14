@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{ObjectPool, lib_registry};
+use crate::{lib_registry, GcKind, ObjectPool};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -200,7 +200,7 @@ impl LuaVM {
 
         // Check GC after VM execution completes (like Lua's luaC_checkGC after returning to caller)
         // At this point, all return values are collected and safe from collection
-        self.check_gc();
+        self.main_state.check_gc();
 
         Ok(results)
     }
@@ -761,14 +761,6 @@ impl LuaVM {
     }
 
     // ============ GC Management ============
-
-    /// Perform garbage collection (like luaC_fullgc in Lua 5.5)
-    /// Performs a complete GC cycle, running until pause state is reached
-    /// If isemergency is true, avoids operations that might change interpreter state
-    pub fn collect_garbage(&mut self) {
-        self.full_gc(false);
-    }
-
     /// Perform a full GC cycle (like luaC_fullgc in Lua 5.5)
     /// This is the internal version that can be called in emergency situations
     fn full_gc(&mut self, is_emergency: bool) {
@@ -777,17 +769,17 @@ impl LuaVM {
 
         // Dispatch based on GC mode (from luaC_fullgc)
         match self.gc.gc_kind {
-            crate::gc::GcKind::GenMinor => {
+            GcKind::GenMinor => {
                 self.full_gen();
             }
-            crate::gc::GcKind::Inc => {
+            GcKind::Inc => {
                 self.full_inc();
             }
-            crate::gc::GcKind::GenMajor => {
+            GcKind::GenMajor => {
                 // Temporarily switch to incremental mode
-                self.gc.gc_kind = crate::gc::GcKind::Inc;
+                self.gc.gc_kind = GcKind::Inc;
                 self.full_inc();
-                self.gc.gc_kind = crate::gc::GcKind::GenMajor;
+                self.gc.gc_kind = GcKind::GenMajor;
             }
         }
 

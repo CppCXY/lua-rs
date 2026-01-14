@@ -658,7 +658,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
     match opt.as_str() {
         "collect" => {
-            l.vm_mut().collect_garbage();
+            l.collect_garbage();
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
