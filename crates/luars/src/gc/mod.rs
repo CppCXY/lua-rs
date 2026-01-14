@@ -41,7 +41,6 @@ mod object_pool;
 mod string_interner;
 
 use crate::{
-    LuaTable,
     lua_value::{Chunk, LuaValue, LuaValueKind},
 };
 pub use gc_id::*;
@@ -278,7 +277,7 @@ impl GC {
     /// Port of lgc.c: luaC_newobj creates objects as WHITE, then links to allgc list.
     /// Barriers will mark them BLACK/GRAY if needed when stored into reachable objects.
     #[inline]
-    pub fn track_object(&mut self, _gc_id: GcId, size: usize, _pool: &mut ObjectPool) {
+    pub fn track_object(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
         // Objects are already created as WHITE by ObjectPool.create_*()
         // We do NOT modify color here - this is ONLY for memory accounting
         // 
@@ -292,6 +291,9 @@ impl GC {
         // Our previous code INCORRECTLY marked objects as GRAY/BLACK here,
         // which violates Lua's design and prevents collection of unreachable objects.
 
+        // Calculate precise size using estimate_object_size (like Lua's luaC_newobj with exact sz)
+        let size = self.estimate_object_size(gc_id, pool) as usize;
+        
         // Update debt tracking (Port of lgc.c: luaE_setdebt)
         let size_signed = size as isize;
         self.total_bytes += size_signed * 2;
@@ -303,7 +305,8 @@ impl GC {
     #[inline]
     pub fn record_deallocation(&mut self, size: usize) {
         let size_signed = size as isize;
-        self.total_bytes = self.total_bytes.saturating_sub(size_signed);
+        // CRITICAL: Must match track_object's * 2 to keep totalbytes accurate
+        self.total_bytes = self.total_bytes.saturating_sub(size_signed * 2);
         // Do NOT change debt when deallocating during sweep
         // Changing debt would disturb the cycle control
         // self.gc_debt += size_signed;
@@ -511,23 +514,13 @@ impl GC {
         self.grayagain.clear();
         self.gc_marked = 0;
 
-        // Mark all objects as white
-        self.make_all_white(pool);
+        // Flip current_white first (atomic phase already flipped it, but double-check)
+        // Objects from last cycle are now "other white" and will be collected if not marked
+        // NO need to make_all_white - objects are already white from last cycle!
 
         // Mark roots
         for value in roots.iter() {
             self.mark_value(value, pool);
-        }
-    }
-
-    /// Make all objects white (prepare for new cycle)
-    fn make_all_white(&mut self, pool: &mut ObjectPool) {
-        let white = self.current_white;
-
-        for (_obj_id, gc_object) in pool.gc_pool.iter_mut() {
-            if !gc_object.header.is_fixed() {
-                gc_object.header.make_white(white);
-            }
         }
     }
 
@@ -632,28 +625,72 @@ impl GC {
     }
 
     /// Estimate object size for GC accounting (like objsize in Lua)
-    /// TODO: Improve size estimation based on actual object data
+    /// Returns estimated memory usage including dynamically allocated internal data
     fn estimate_object_size(&self, gc_id: GcId, pool: &ObjectPool) -> isize {
         match gc_id {
-            GcId::TableId(_) => std::mem::size_of::<LuaTable>() as isize, // Reasonable average for test tables
-            GcId::FunctionId(_) => std::mem::size_of::<FunctionBody>() as isize, // Base + some upvalues
-            GcId::UpvalueId(_) => 64,                                            // Fixed size
+            GcId::TableId(id) => {
+                // Table size = base struct + entries
+                // Each entry (array or hash) takes roughly 32-64 bytes
+                if let Some(gc_obj) = pool.get(id.into()) {
+                    if let Some(table) = gc_obj.ptr.as_table_ptr() {
+                        let table = unsafe { &*table };
+                        let entry_count = table.len() as isize;
+                        // Base overhead: 256 bytes
+                        // Each entry: 48 bytes average (LuaValue is ~24 bytes, hash overhead ~24)
+                        256 + entry_count * 48
+                    } else {
+                        256
+                    }
+                } else {
+                    256
+                }
+            }
+            GcId::FunctionId(id) => {
+                // Function size = base + upvalues + chunk data
+                if let Some(gc_obj) = pool.get(id.into()) {
+                    if let Some(func) = gc_obj.ptr.as_function_ptr() {
+                        let func = unsafe { &*func };
+                        let upvalue_count = func.cached_upvalues().len() as isize;
+                        let base = 256; // Base struct
+                        let upvalues = upvalue_count * 64;
+                        
+                        // If has chunk, estimate chunk size
+                        let chunk_size = if let Some(chunk) = func.chunk() {
+                            // Instructions, constants, upvalue info, line info, etc.
+                            let instr_size = chunk.code.len() as isize * 8;
+                            let const_size = chunk.constants.len() as isize * 32;
+                            let child_size = chunk.child_protos.len() as isize * 512;
+                            let line_size = chunk.line_info.len() as isize * 4;
+                            instr_size + const_size + child_size + line_size + 512
+                        } else {
+                            128 // C function
+                        };
+                        
+                        base + upvalues + chunk_size
+                    } else {
+                        512
+                    }
+                } else {
+                    512
+                }
+            }
+            GcId::UpvalueId(_) => 64,
             GcId::StringId(id) => {
                 if let Some(s) = pool.get_string(id) {
-                    32 + s.len() as isize
+                    64 + s.len() as isize // Increased base overhead
                 } else {
                     64
                 }
             }
             GcId::BinaryId(id) => {
                 if let Some(b) = pool.get_binary(id) {
-                    32 + b.len() as isize
+                    64 + b.len() as isize
                 } else {
                     64
                 }
             }
-            GcId::UserdataId(_) => 128,
-            GcId::ThreadId(_) => 512, // Thread + Stack
+            GcId::UserdataId(_) => 512,  // Increased significantly
+            GcId::ThreadId(_) => 4096,   // Thread + Stack, increased significantly
         }
     }
 
@@ -987,6 +1024,10 @@ impl GC {
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
+
+        // CRITICAL: Must flip current_white before sweep!
+        // This is normally done in atomic(), but we're doing a direct full sweep
+        self.current_white ^= 1;
 
         // Sweep using run_until_state
         self.enter_sweep(pool);

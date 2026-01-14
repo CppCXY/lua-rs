@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{lib_registry, FunctionBody, LuaFunction, ObjectPool, Upvalue};
+use crate::{lib_registry, ObjectPool};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -273,7 +273,14 @@ impl LuaVM {
 
         // Create thread in ObjectPool and return LuaValue
         let current_white = self.gc.current_white;
-        self.object_pool.create_thread(thread, current_white)
+        let value = self.object_pool.create_thread(thread, current_white);
+        let id = value.as_thread_id().unwrap();
+        // Track thread for GC (IMPORTANT: threads are large objects!)
+        self.gc.track_object(
+            GcId::ThreadId(id),
+            &mut self.object_pool,
+        );
+        value
     }
 
     /// Resume a coroutine - DEPRECATED: Use thread_state.resume() instead
@@ -449,35 +456,31 @@ impl LuaVM {
         let current_white = self.gc.current_white;
         let (value, is_new) = self.object_pool.create_string(s, current_white);
         if is_new {
-            let size = 32 + s.len();
             let s_id = value.as_string_id().unwrap();
             self.gc
-                .track_object(GcId::StringId(s_id), size, &mut self.object_pool);
+                .track_object(GcId::StringId(s_id), &mut self.object_pool);
         }
         value
     }
 
     pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
-        let len = data.len();
         let current_white = self.gc.current_white;
         let value = self.object_pool.create_binary(data, current_white);
         let id = value.as_binary_id().unwrap();
         self.gc
-            .track_object(GcId::BinaryId(id), 32 + len, &mut self.object_pool);
+            .track_object(GcId::BinaryId(id), &mut self.object_pool);
         value
     }
 
     /// Create string from owned String (avoids clone for non-interned strings)
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
-        let len = s.len();
         let current_white = self.gc.current_white;
         let (value, is_new) = self.object_pool.create_string_owned(s, current_white);
         if is_new {
-            let size = 32 + len;
             let s_id = value.as_string_id().unwrap();
             self.gc
-                .track_object(GcId::StringId(s_id), size, &mut self.object_pool);
+                .track_object(GcId::StringId(s_id), &mut self.object_pool);
         }
         value
     }
@@ -538,9 +541,9 @@ impl LuaVM {
         let current_white = self.gc.current_white;
         let value = self.object_pool.create_table(array_size, hash_size, current_white);
         let id = value.as_table_id().unwrap();
-        // Track object for GC - sets to current white and updates gc_debt
+        // Track object for GC - calculates precise size and updates gc_debt
         self.gc
-            .track_object(GcId::TableId(id), 256, &mut self.object_pool);
+            .track_object(GcId::TableId(id), &mut self.object_pool);
         value
     }
 
@@ -589,7 +592,6 @@ impl LuaVM {
         let id = value.as_userdata_id().unwrap();
         self.gc.track_object(
             GcId::UserdataId(id),
-            std::mem::size_of::<LuaUserdata>(),
             &mut self.object_pool,
         );
         value
@@ -604,7 +606,6 @@ impl LuaVM {
         let id = value.as_function_id().unwrap();
         self.gc.track_object(
             GcId::FunctionId(id),
-            std::mem::size_of::<LuaFunction>(),
             &mut self.object_pool,
         );
         value
@@ -625,7 +626,6 @@ impl LuaVM {
         let id = value.as_function_id().unwrap();
         self.gc.track_object(
             GcId::FunctionId(id),
-            std::mem::size_of::<FunctionBody>(),
             &mut self.object_pool,
         );
         value
@@ -638,7 +638,6 @@ impl LuaVM {
         let id = self.object_pool.create_upvalue_open(stack_index, current_white);
         self.gc.track_object(
             GcId::UpvalueId(id),
-            std::mem::size_of::<Upvalue>(),
             &mut self.object_pool,
         );
         id
@@ -651,7 +650,6 @@ impl LuaVM {
         let id = self.object_pool.create_upvalue_closed(value, current_white);
         self.gc.track_object(
             GcId::UpvalueId(id),
-            std::mem::size_of::<Upvalue>(),
             &mut self.object_pool,
         );
         id
