@@ -45,14 +45,12 @@ pub use gc_object::*;
 pub use object_pool::*;
 
 /// Actions that GC needs VM to perform after a GC step
-/// This allows GC to mark objects for finalization or weak table cleanup
-/// without needing access to LuaState during the GC phase
+/// This allows GC to mark objects for finalization
+/// Weak tables are now cleaned directly during GC atomic phase
 #[derive(Default, Debug)]
 pub struct GcActions {
     /// Objects that need their __gc finalizer called
-    pub to_finalize: Vec<GcId>,
-    /// Weak tables that need key/value cleanup
-    pub weak_tables: Vec<gc_id::TableId>,
+    pub to_finalize: Vec<GcId>
 }
 
 // GC Parameters (from lua.h)
@@ -360,8 +358,7 @@ impl GC {
 
     /// Check if there are pending actions waiting for VM
     pub fn has_pending_actions(&self) -> bool {
-        !self.pending_actions.to_finalize.is_empty() 
-            || !self.pending_actions.weak_tables.is_empty()
+        !self.pending_actions.to_finalize.is_empty()
     }
 
     /// Enter finalizer execution mode - temporarily stop GC to prevent
@@ -390,6 +387,169 @@ impl GC {
         } else {
             // Object doesn't exist = dead
             true
+        }
+    }
+
+    /// Check if an object needs finalization (__gc metamethod)
+    /// Only tables, userdata, and threads can have __gc
+    fn needs_finalization(&self, gc_id: GcId, pool: &ObjectPool) -> bool {
+        match gc_id {
+            GcId::TableId(table_id) => {
+                // Check if table has __gc metamethod
+                if let Some(table_value) = pool.get_table_value(table_id) {
+                    if let Some(table) = table_value.as_table() {
+                        if let Some(mt_id) = table.get_metatable() {
+                            if let Some(mt) = pool.get_table_value(mt_id) {
+                                if let Some(mt_table) = mt.as_table() {
+                                    let gc_key = pool.tm_gc.clone();
+                                    return mt_table.raw_get(&gc_key).is_some() 
+                                        && !mt_table.raw_get(&gc_key).unwrap().is_nil();
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            GcId::UserdataId(id) => {
+                // Check if userdata has __gc metamethod
+                if let Some(gc_obj) = pool.gc_pool.get(id.0) {
+                    if let GcPtrObject::Userdata(ud) = &gc_obj.ptr {
+                        let metatable = ud.get_metatable();
+                        if let Some(mt_table) = metatable.as_table() {
+                            let gc_key = pool.tm_gc.clone();
+                            return mt_table.raw_get(&gc_key).is_some() 
+                                && !mt_table.raw_get(&gc_key).unwrap().is_nil();
+                        }
+                    }
+                }
+                false
+            }
+            GcId::ThreadId(id) => {
+                // Threads don't typically have __gc in standard Lua, but check anyway
+                if let Some(gc_obj) = pool.gc_pool.get(id.0) {
+                    if let GcPtrObject::Thread(_) = &gc_obj.ptr {
+                        // TODO: Check if thread has __gc if you support it
+                        return false;
+                    }
+                }
+                false
+            }
+            _ => false, // Other types don't support __gc
+        }
+    }
+
+    /// Collect and clean all weak tables in the system
+    /// This should be called during atomic phase, before white flip
+    /// Weak tables are cleaned directly here, not deferred to VM
+    fn collect_weak_tables(&mut self, pool: &mut ObjectPool) {
+        let total_slots = pool.gc_pool.capacity();
+        let mut weak_tables_to_clean = Vec::new();
+        
+        // First, collect all weak tables
+        for slot_index in 0..total_slots {
+            if let Some(obj) = pool.gc_pool.get(slot_index as u32) {
+                // Only check alive tables (not dead)
+                let other_white = 1 - self.current_white;
+                if !obj.header.is_dead(other_white) {
+                    let gc_id = obj.trans_to_gcid(slot_index as u32);
+                    if let GcId::TableId(table_id) = gc_id {
+                        // Check if it's a weak table and get the mode
+                        if let Some((weak_keys, weak_values)) = self.get_weak_mode(table_id, pool) {
+                            weak_tables_to_clean.push((table_id, weak_keys, weak_values));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Now clean each weak table
+        // We do this in a separate loop to avoid borrow conflicts
+        for (table_id, weak_keys, weak_values) in weak_tables_to_clean {
+            self.clean_weak_table(table_id, weak_keys, weak_values, pool);
+        }
+    }
+
+    /// Get weak mode for a table (returns None if not weak, or Some((weak_keys, weak_values)))
+    fn get_weak_mode(&self, table_id: TableId, pool: &ObjectPool) -> Option<(bool, bool)> {
+        if let Some(table_value) = pool.get_table_value(table_id) {
+            if let Some(table) = table_value.as_table() {
+                if let Some(mt_id) = table.get_metatable() {
+                    if let Some(mt) = pool.get_table_value(mt_id) {
+                        if let Some(mt_table) = mt.as_table() {
+                            let mode_key = pool.tm_mode.clone();
+                            if let Some(mode_value) = mt_table.raw_get(&mode_key) {
+                                if let Some(mode_str) = mode_value.as_str() {
+                                    let weak_keys = mode_str.contains('k');
+                                    let weak_values = mode_str.contains('v');
+                                    if weak_keys || weak_values {
+                                        return Some((weak_keys, weak_values));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Clean a single weak table by removing entries with dead keys/values
+    fn clean_weak_table(&self, table_id: TableId, weak_keys: bool, weak_values: bool, pool: &mut ObjectPool) {
+        // Collect entries to check
+        let entries = if let Some(table) = pool.get_table_mut(table_id) {
+            table.iter_all()
+        } else {
+            return;
+        };
+
+        let mut keys_to_remove = Vec::new();
+
+        // Check each entry
+        for (key, value) in entries {
+            let mut should_remove = false;
+
+            // Check key
+            if weak_keys {
+                if let Some(key_id) = Self::value_to_gc_id_static(&key) {
+                    if self.is_object_dead(key_id, pool) {
+                        should_remove = true;
+                    }
+                }
+            }
+
+            // Check value
+            if !should_remove && weak_values {
+                if let Some(val_id) = Self::value_to_gc_id_static(&value) {
+                    if self.is_object_dead(val_id, pool) {
+                        should_remove = true;
+                    }
+                }
+            }
+
+            if should_remove {
+                keys_to_remove.push(key);
+            }
+        }
+
+        // Remove dead entries
+        if let Some(table) = pool.get_table_mut(table_id) {
+            for key in keys_to_remove {
+                table.raw_set(&key, LuaValue::nil());
+            }
+        }
+    }
+
+    /// Static helper to convert LuaValue to GcId
+    fn value_to_gc_id_static(value: &LuaValue) -> Option<GcId> {
+        match value.kind() {
+            LuaValueKind::String => value.as_string_id().map(GcId::StringId),
+            LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
+            LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
+            LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
+            LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
+            _ => None,
         }
     }
 
@@ -864,6 +1024,10 @@ impl GC {
 
         // Flip white color for next cycle
         self.current_white ^= 1;
+
+        // Collect weak tables AFTER flipping white
+        // Now objects with old white are considered dead
+        self.collect_weak_tables(pool);
     }
 
     /// Enter sweep phase (like entersweep in Lua 5.5)
@@ -890,6 +1054,7 @@ impl GC {
         let current_total_slots = pool.gc_pool.capacity();
 
         let mut dead_ids = Vec::new();
+        let mut to_finalize = Vec::new();
 
         // Continue from where we left off (like Lua's sweepgc pointer)
         // Sweep through Vec slots directly (some may be None)
@@ -902,7 +1067,20 @@ impl GC {
                 if !obj.header.is_fixed() && obj.header.is_dead(other_white) {
                     // Convert slot_index to GcId using the object's type
                     let gc_id = obj.trans_to_gcid(slot_index);
-                    dead_ids.push(gc_id);
+                    
+                    // Check if object needs finalization (__gc metamethod)
+                    if self.needs_finalization(gc_id, pool) {
+                        // TODO: Check if already finalized (FINALIZED flag)
+                        // For now, add all objects with __gc to finalization list
+                        to_finalize.push(gc_id);
+                        // Resurrect object by changing to current white
+                        // This gives it one more GC cycle to be collected after __gc runs
+                        if let Some(obj_mut) = pool.gc_pool.get_mut(slot_index) {
+                            obj_mut.header.change_white();
+                        }
+                    } else {
+                        dead_ids.push(gc_id);
+                    }
                 }
             }
 
@@ -910,6 +1088,10 @@ impl GC {
             count += 1; // Count every slot, not just objects, to avoid infinite loops
         }
 
+        // Add to pending actions
+        self.pending_actions.to_finalize.extend(to_finalize);
+
+        // Actually remove dead objects (those without finalizers)
         for gc_id in &dead_ids {
             let size = pool.remove(*gc_id);
             if size > 0 {

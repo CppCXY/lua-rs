@@ -12,7 +12,7 @@ use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, GcActions, GcId, LuaTable, LuaVM, TableId, ThreadId};
+use crate::{Chunk, GcActions, GcId, LuaTable, LuaVM, ThreadId};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -1391,7 +1391,7 @@ impl LuaState {
 
     /// Process actions returned by GC (call finalizers, clean weak tables)
     fn process_gc_actions(&mut self, actions: GcActions) -> LuaResult<()> {
-        if actions.to_finalize.is_empty() && actions.weak_tables.is_empty() {
+        if actions.to_finalize.is_empty() {
             return Ok(());
         }
 
@@ -1401,17 +1401,18 @@ impl LuaState {
 
         // Call __gc finalizers
         if !actions.to_finalize.is_empty() {
-            self.call_finalizers(actions.to_finalize)?;
+            match self.call_finalizers(actions.to_finalize) {
+                Ok(()) => {}
+                Err(e) => {
+                    // Exit finalizer mode before returning error
+                    self.vm_mut().gc.exit_finalizer_mode();
+                    return Err(e);
+                }
+            };
         }
-
-        // Clean weak tables
-        if !actions.weak_tables.is_empty() {
-            self.clean_weak_tables(actions.weak_tables)?;
-        }
-
         // Exit finalizer mode - resume normal GC
         self.vm_mut().gc.exit_finalizer_mode();
-        
+
         Ok(())
     }
 
@@ -1468,121 +1469,20 @@ impl LuaState {
             if let Some(gc_method) = get_metamethod_event(self, &obj_value, "__gc") {
                 // Call __gc(obj) using pcall to handle errors safely
                 let result = self.pcall(gc_method, vec![obj_value]);
-                
+
                 // Ignore errors in finalizers (as per Lua 5.x behavior)
                 // The error is silently dropped to prevent cascade failures
                 if let Ok((success, _)) = result {
                     if !success {
-                        return Err(self.error(format!(
-                            "error in __gc finalizer for object {:?}",
-                            gc_id
-                        )));
+                        return Err(
+                            self.error(format!("error in __gc finalizer for object {:?}", gc_id))
+                        );
                     }
                 }
             }
         }
-        
+
         Ok(())
-    }
-
-    /// Clean weak tables by removing entries with dead keys/values
-    fn clean_weak_tables(&mut self, weak_tables: Vec<TableId>) -> LuaResult<()> {
-        use crate::lua_vm::get_metatable;
-
-        for table_id in weak_tables {
-            // Get the table's __mode metamethod to determine weakness
-            let table_value = if let Some(val) = self.vm_mut().object_pool.get_table_value(table_id) {
-                val
-            } else {
-                continue;
-            };
-
-            // Get metatable and check __mode field
-            let mode_str = if let Some(mt_value) = get_metatable(self, &table_value) {
-                // Get __mode field from metatable
-                if let Some(mt_table) = mt_value.as_table() {
-                    let mode_key = self.vm_mut().object_pool.tm_mode.clone();
-                    if let Some(mode_value) = mt_table.raw_get(&mode_key) {
-                        if let Some(s) = mode_value.as_str() {
-                            s.to_string()
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-
-            // Check mode string for 'k' (weak keys) and 'v' (weak values)
-            let weak_keys = mode_str.contains('k');
-            let weak_values = mode_str.contains('v');
-
-            if !weak_keys && !weak_values {
-                continue;
-            }
-
-            // Get mutable reference to the table and clean dead entries
-            // We need to access both gc and object_pool, so we use unsafe to split the borrow
-            let vm = unsafe { &mut *self.vm };
-            
-            // We need to first collect dead status before modifying the table
-            // to avoid concurrent borrow issues
-            let mut dead_entries: std::collections::HashMap<crate::gc::GcId, bool> = std::collections::HashMap::new();
-            
-            // Collect all GC IDs from the table and check if they're dead
-            if let Some(table) = vm.object_pool.get_table_mut(table_id) {
-                let entries = table.iter_all();
-                for (key, value) in entries {
-                    // Check key
-                    if weak_keys {
-                        if let Some(key_id) = Self::lua_value_to_gc_id(&key) {
-                            if !dead_entries.contains_key(&key_id) {
-                                let is_dead = vm.gc.is_object_dead(key_id, &vm.object_pool);
-                                dead_entries.insert(key_id, is_dead);
-                            }
-                        }
-                    }
-                    // Check value
-                    if weak_values {
-                        if let Some(val_id) = Self::lua_value_to_gc_id(&value) {
-                            if !dead_entries.contains_key(&val_id) {
-                                let is_dead = vm.gc.is_object_dead(val_id, &vm.object_pool);
-                                dead_entries.insert(val_id, is_dead);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Now remove entries based on collected dead status
-            if let Some(table) = vm.object_pool.get_table_mut(table_id) {
-                let is_dead_checker = |gc_id: crate::gc::GcId| -> bool {
-                    *dead_entries.get(&gc_id).unwrap_or(&false)
-                };
-                table.remove_weak_entries_with_checker(weak_keys, weak_values, is_dead_checker);
-            }
-        }
-        
-        Ok(())
-    }
-
-    /// Helper to convert LuaValue to GcId
-    fn lua_value_to_gc_id(value: &LuaValue) -> Option<GcId> {
-        use crate::lua_value::LuaValueKind;
-
-        match value.kind() {
-            LuaValueKind::String => value.as_string_id().map(GcId::StringId),
-            LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
-            LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
-            LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
-            LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
-            _ => None,
-        }
     }
 }
 
