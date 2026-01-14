@@ -650,11 +650,14 @@ impl GC {
                 // (Fixed functions should never reach here - they stay gray forever)
                 let (upvalues, chunk) = if let Some(gc_func) = pool.get_mut(id.into()) {
                     gc_func.header.make_black();
-                    let func = gc_func.ptr.as_function_mut().unwrap();
-                    let upvalues = func.cached_upvalues().clone(); // Clone Vec<UpvalueId>
-                    let chunk = func.chunk().map(|c| c.clone()); // Clone Rc<Chunk>
-
-                    (upvalues, chunk)
+                    if let Some(func) = gc_func.ptr.as_function_mut() {
+                        let upvalues = func.cached_upvalues().clone(); // Clone Vec<UpvalueId>
+                        let chunk = func.chunk().map(|c| c.clone()); // Clone Rc<Chunk>
+                        (upvalues, chunk)
+                    } else {
+                        // This shouldn't happen - FunctionId should always point to a Function
+                        return 0;
+                    }
                 } else {
                     return 0;
                 };
