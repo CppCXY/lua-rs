@@ -28,33 +28,24 @@ pub fn handle_call(
     b: usize,
     c: usize,
 ) -> LuaResult<FrameAction> {
-    // CRITICAL: Sync stack_top with frame.top before reading arguments
-    // During normal execution, frame.top tracks the current top, but stack_top
-    // may lag behind. We need to sync them before function calls.
-    if let Some(frame) = lua_state.current_frame() {
-        let frame_top = frame.top;
-        lua_state.set_top(frame_top);
-    }
-
+    // Get function position
+    let func_idx = base + a;
+    
+    // Calculate nargs and set stack_top
+    // Port of Lua 5.5's OP_CALL: if (b != 0) L->top.p = ra + b;
     let nargs = if b == 0 {
-        // Variable args: use current frame's top
-        // Arguments are from base+a+1 to current frame's top
-        let func_idx = base + a;
-        let first_arg = func_idx + 1;
-
-        // Get current frame's top (not global stack top!)
-        let frame_top = if let Some(frame) = lua_state.current_frame() {
-            frame.top
-        } else {
-            lua_state.get_top() // Fallback to logical stack top
-        };
-
-        if frame_top > first_arg {
-            frame_top - first_arg
+        // Variable args: stack_top was already set by previous instruction
+        // Arguments are from func_idx+1 to stack_top
+        let current_top = lua_state.get_top();
+        if current_top > func_idx + 1 {
+            current_top - func_idx - 1
         } else {
             0
         }
     } else {
+        // Fixed args: set stack_top to func_idx + b
+        // b includes the function itself, so args = b - 1
+        lua_state.set_top(func_idx + b);
         b - 1
     };
 
@@ -65,7 +56,6 @@ pub fn handle_call(
     };
 
     // Get function to call
-    let func_idx = base + a;
     let func = lua_state
         .stack_get(func_idx)
         .ok_or_else(|| lua_state.error("CALL: function not found".to_string()))?;

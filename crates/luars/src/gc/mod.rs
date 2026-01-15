@@ -600,14 +600,22 @@ impl GC {
         };
 
         let mut keys_to_remove = Vec::new();
+        let total_entries = entries.len();
         
         for (key, _value) in entries {
             if let Some(key_id) = Self::value_to_gc_id_static(&key) {
                 if self.is_cleared(key_id, pool) {
+                    eprintln!("[CLEAR_KEYS] Removing key {:?} (white)", key);
                     keys_to_remove.push(key);
+                } else {
+                    eprintln!("[CLEAR_KEYS] Keeping key {:?} (marked)", key);
                 }
+            } else {
+                eprintln!("[CLEAR_KEYS] Keeping key {:?} (not GC object)", key);
             }
         }
+        
+        eprintln!("[CLEAR_KEYS] Removing {} out of {} keys", keys_to_remove.len(), total_entries);
         
         // Remove entries with dead keys
         if let Some(table) = pool.get_table_mut(table_id) {

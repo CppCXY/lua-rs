@@ -155,6 +155,8 @@ impl LuaState {
         // Calculate nextraargs for vararg functions
         // nextraargs = number of arguments passed beyond the function's fixed parameters
         let mut nextraargs = 0;
+        let mut maxstacksize = nparams; // Default for C functions
+        
         if let Some(func) = func.as_lua_function() {
             if let Some(chunk) = func.chunk() {
                 // For Lua functions with prototypes
@@ -164,11 +166,16 @@ impl LuaState {
                 } else {
                     0
                 };
+                
+                // CRITICAL: frame_top should be base + maxstacksize (not base + nparams)
+                // This is the maximum stack size that the function may use
+                // See luaD_precall in ldo.c:731: fsize = p->maxstacksize
+                maxstacksize = chunk.max_stack_size as usize;
             }
         };
 
-        // Calculate frame top
-        let frame_top = base + nparams;
+        // Calculate frame top: base + maxstacksize (Lua 5.5: ci->top = func + 1 + fsize)
+        let frame_top = base + maxstacksize;
 
         // OPTIMIZATION: Reuse existing CallInfo if available, otherwise allocate new
         if self.call_depth < self.call_stack.len() {
@@ -200,9 +207,11 @@ impl LuaState {
         // Increment depth (like moving L->ci pointer)
         self.call_depth += 1;
 
-        // CRITICAL: Sync stack_top with new frame's top
-        // This ensures C functions see correct stack_top for push_value
-        self.set_top(frame_top);
+        // NOTE: Do NOT set stack_top here!
+        // For Lua functions: stack_top should remain at the position after all passed arguments
+        // (including vararg). luaD_precall in Lua 5.5 does NOT modify L->top.
+        // For C functions: caller is responsible for setting correct stack_top.
+        // ci->top is the LIMIT (base + maxstacksize), not the current top.
 
         Ok(())
     }

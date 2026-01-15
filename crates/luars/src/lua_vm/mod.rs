@@ -832,6 +832,11 @@ impl LuaVM {
         }
 
         // 4. All values in the logical stack (0..stack_top)
+        // CRITICAL: Use actual stack_top, NOT limited to ci->top
+        // For vararg functions, stack_top can legitimately exceed ci->top
+        // ci->top is the maximum stack USAGE, but vararg ARGUMENTS are beyond that
+        // Lua 5.5: luaV_execute asserts "base <= L->top.p && L->top.p <= L->stack_last.p"
+        // It does NOT limit L->top to ci->top!
         let stack_top = self.main_state.get_top();
         for i in 0..stack_top {
             if let Some(value) = self.main_state.stack_get(i) {
@@ -857,6 +862,7 @@ impl LuaVM {
             }
         }
 
+        eprintln!("[ROOTS] Total roots: {}", roots.len());
         roots
     }
 

@@ -96,9 +96,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
         let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
         let mut base = lua_state.get_frame_base(frame_idx);
 
-        // Sync stack top
-        let frame_top = lua_state.get_call_info(frame_idx).top;
-        lua_state.set_top(frame_top);
+        // NOTE: Do NOT force stack_top = frame_top here!
+        // stack_top should remain where luaD_precall left it (after all arguments including vararg)
+        // frame_top (ci->top) is the MAXIMUM, not the current top
+        // Lua 5.5's luaV_execute does NOT modify L->top at entry
 
         // Pre-grow stack
         let needed_size = base + chunk.max_stack_size;

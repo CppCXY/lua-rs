@@ -131,13 +131,12 @@ pub fn exec_settable(
         }
     }
 
-    // CRITICAL: Update frame.top to protect all registers before calling metamethod
-    let max_reg = a.max(b).max(c) + 1;
-    let required_top = base + max_reg;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if required_top > call_info.top {
-        call_info.top = required_top;
-        lua_state.set_top(required_top);
+    // CRITICAL: Ensure stack_top protects call_info.top before calling metamethod
+    // call_info.top should NOT be modified - it's set once at function call
+    // See Lua 5.5's savestate macro: L->top.p = ci->top.p
+    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    if lua_state.get_top() < call_info_top {
+        lua_state.set_top(call_info_top);
     }
 
     // Slow path: has __newindex or not a table
@@ -226,13 +225,10 @@ pub fn exec_seti(
     let c = instr.get_c() as usize;
     let k = instr.get_k();
 
-    // CRITICAL: Update frame.top to protect all registers
-    let max_reg = a.max(c) + 1;
-    let required_top = base + max_reg;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if required_top > call_info.top {
-        call_info.top = required_top;
-        lua_state.set_top(required_top);
+    // CRITICAL: Ensure stack_top protects call_info.top
+    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    if lua_state.get_top() < call_info_top {
+        lua_state.set_top(call_info_top);
     }
 
     let stack = lua_state.stack();
