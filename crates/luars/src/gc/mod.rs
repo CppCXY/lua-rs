@@ -1633,9 +1633,16 @@ impl GC {
                 o.header.make_gray();
             }
         } else {
-            // Link into grayagain and make gray
-            if !self.grayagain.contains(&o_id) {
-                self.grayagain.push(o_id);
+            // In propagate/atomic phase: link into grayagain for re-traversal in current cycle
+            // In pause/sweep phase: link into gray for next cycle
+            let target_list = if self.gc_state == GcState::Pause || self.gc_state.is_sweep_phase() {
+                &mut self.gray
+            } else {
+                &mut self.grayagain
+            };
+            
+            if !target_list.contains(&o_id) {
+                target_list.push(o_id);
             }
 
             if let Some(o) = pool.get_mut(o_id) {

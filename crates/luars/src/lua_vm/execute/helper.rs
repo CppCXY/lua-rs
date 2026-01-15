@@ -467,6 +467,11 @@ pub fn store_to_metatable(
                 // Note: need to re-get as mutable table using as_table_mut
                 if let Some(table_ref) = t.as_table_mut() {
                     table_ref.raw_set(key, value);
+                    
+                    // CRITICAL: GC write barrier
+                    let table_gc_id = crate::GcId::TableId(t.hvalue());
+                    lua_state.gc_barrier_back(table_gc_id);
+                    
                     lua_state.check_gc()?;
                     return Ok(true);
                 }
@@ -499,6 +504,11 @@ pub fn store_to_metatable(
             // So if it was a table AND no TM found:
             if let Some(table_ref) = t.as_table_mut() {
                 table_ref.raw_set(key, value);
+                
+                // CRITICAL: GC write barrier
+                let table_gc_id = crate::GcId::TableId(t.hvalue());
+                lua_state.gc_barrier_back(table_gc_id);
+                
                 lua_state.check_gc()?;
                 return Ok(true);
             }

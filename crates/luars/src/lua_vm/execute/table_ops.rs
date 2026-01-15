@@ -126,17 +126,6 @@ pub fn exec_settable(
             let table_gc_id = GcId::TableId(ra.hvalue());
             lua_state.gc_barrier_back(table_gc_id);
 
-            // CRITICAL: Update frame.top to protect all registers before GC
-            // GC might be triggered by check_gc(), so we must ensure all used
-            // registers are included in the stack scan
-            let max_reg = a.max(b).max(c) + 1;
-            let required_top = base + max_reg;
-            let call_info = lua_state.get_call_info_mut(frame_idx);
-            if required_top > call_info.top {
-                call_info.top = required_top;
-                lua_state.set_top(required_top);
-            }
-
             lua_state.check_gc()?;
             return Ok(());
         }
@@ -397,15 +386,6 @@ pub fn exec_setfield(
             // CRITICAL: GC write barrier
             let table_gc_id = GcId::TableId(ra.hvalue());
             lua_state.gc_barrier_back(table_gc_id);
-
-            // CRITICAL: Update frame.top to protect all registers before GC
-            let max_reg = a.max(c) + 1;
-            let required_top = base + max_reg;
-            let call_info = lua_state.get_call_info_mut(frame_idx);
-            if required_top > call_info.top {
-                call_info.top = required_top;
-                lua_state.set_top(required_top);
-            }
 
             lua_state.check_gc()?;
             return Ok(());
