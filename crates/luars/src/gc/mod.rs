@@ -485,27 +485,15 @@ impl GC {
 
     /// Get weak mode for a table (returns None if not weak, or Some((weak_keys, weak_values)))
     fn get_weak_mode(&self, table_id: TableId, pool: &ObjectPool) -> Option<(bool, bool)> {
-        if let Some(table_value) = pool.get_table_value(table_id) {
-            if let Some(table) = table_value.as_table() {
-                if let Some(mt_id) = table.get_metatable() {
-                    if let Some(mt) = pool.get_table_value(mt_id) {
-                        if let Some(mt_table) = mt.as_table() {
-                            let mode_key = pool.tm_mode.clone();
-                            if let Some(mode_value) = mt_table.raw_get(&mode_key) {
-                                if let Some(mode_str) = mode_value.as_str() {
-                                    let weak_keys = mode_str.contains('k');
-                                    let weak_values = mode_str.contains('v');
-                                    if weak_keys || weak_values {
-                                        return Some((weak_keys, weak_values));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
+        let table = pool.get_table(table_id)?;
+        let meta_id = table.get_metatable()?;
+        let mode_key = pool.tm_mode.clone();
+        let metatable = pool.get_table(meta_id)?;
+        let weak = metatable.raw_get(&mode_key)?;
+        let weak_str = weak.as_str()?;
+        let weak_keys = weak_str.contains('k');
+        let weak_values = weak_str.contains('v');
+        Some((weak_keys, weak_values))
     }
 
     /// Static helper to convert LuaValue to GcId
