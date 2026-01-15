@@ -13,6 +13,7 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
+    GcId,
     lua_value::LuaValue,
     lua_vm::{Instruction, LuaResult, LuaState},
 };
@@ -118,6 +119,12 @@ pub fn exec_settable(
         if !table.has_metatable() {
             // Fast path: no metatable, directly set
             table.raw_set(&rb, val);
+
+            // CRITICAL: GC write barrier
+            // When modifying a BLACK table, we must call barrier_back to re-gray it
+            // This ensures weak tables are re-traversed in subsequent GC cycles
+            let table_gc_id = GcId::TableId(ra.hvalue());
+            lua_state.gc_barrier_back(table_gc_id);
 
             // CRITICAL: Update frame.top to protect all registers before GC
             // GC might be triggered by check_gc(), so we must ensure all used
@@ -386,6 +393,10 @@ pub fn exec_setfield(
         if !table.has_metatable() {
             // Fast path: no __newindex metamethod, directly set
             table.raw_set(&key, value);
+
+            // CRITICAL: GC write barrier
+            let table_gc_id = GcId::TableId(ra.hvalue());
+            lua_state.gc_barrier_back(table_gc_id);
 
             // CRITICAL: Update frame.top to protect all registers before GC
             let max_reg = a.max(c) + 1;

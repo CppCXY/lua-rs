@@ -1349,6 +1349,14 @@ impl LuaState {
         vm.gc.barrier(owner_gc_id, value_gc_id, &mut vm.object_pool);
     }
 
+    /// Backward GC barrier (luaC_barrierback in Lua 5.5)
+    /// Called when modifying a BLACK object (typically table) with new values
+    /// Instead of marking the value, re-gray the object for re-traversal
+    pub fn gc_barrier_back(&mut self, owner_gc_id: GcId) {
+        let vm = unsafe { &mut *self.vm };
+        vm.gc.barrier_back(owner_gc_id, &mut vm.object_pool);
+    }
+
     /// Convert LuaValue to GcId (if it's a GC-managed object)
     pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<GcId> {
         use crate::lua_value::LuaValueKind;

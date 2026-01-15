@@ -278,7 +278,6 @@ impl ObjectPool {
     /// Create string (COMPLETE INTERNING - all strings)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     pub fn create_string(&mut self, s: &str, current_white: u8) -> (LuaValue, bool) {
         self.strings.intern(s, &mut self.gc_pool, current_white)
     }
@@ -286,7 +285,6 @@ impl ObjectPool {
     /// Create string from owned String (avoids clone if already interned)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     pub fn create_string_owned(&mut self, s: String, current_white: u8) -> (LuaValue, bool) {
         self.strings.intern(&s, &mut self.gc_pool, current_white)
     }
@@ -302,7 +300,6 @@ impl ObjectPool {
 
     /// Create a binary value from Vec<u8>
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_binary(&mut self, data: Vec<u8>, current_white: u8) -> LuaValue {
         let size = (64 + data.len()) as u32;
@@ -350,7 +347,6 @@ impl ObjectPool {
     /// Returns the original string ID if the range covers the entire string.
     /// With complete interning, substrings are automatically deduplicated.
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_substring(
         &mut self,
@@ -398,7 +394,6 @@ impl ObjectPool {
     }
     // ==================== Table Operations ====================
 
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_table(
         &mut self,
@@ -455,7 +450,6 @@ impl ObjectPool {
     /// Create a Lua function (closure with bytecode chunk)
     /// Now caches upvalue pointers for direct access
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_function(
         &mut self,
@@ -496,7 +490,6 @@ impl ObjectPool {
     /// Create a C closure (native function with upvalues)
     /// Now caches upvalue pointers for direct access
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_c_closure(
         &mut self,
@@ -529,7 +522,6 @@ impl ObjectPool {
 
     /// Create an open upvalue pointing to a stack location
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> UpvalueId {
         let upvalue = Upvalue::Open(stack_index);
@@ -541,7 +533,6 @@ impl ObjectPool {
 
     /// Create a closed upvalue with a value
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> UpvalueId {
         let upvalue = Upvalue::Closed(value);
@@ -571,7 +562,6 @@ impl ObjectPool {
 
     /// Create upvalue from LuaUpvalue
     ///
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>, current_white: u8) -> UpvalueId {
         // Check if open and get stack index
         if upvalue.is_open() {
@@ -586,7 +576,6 @@ impl ObjectPool {
 
     // ==================== Userdata Operations ====================
 
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_userdata(&mut self, userdata: LuaUserdata, current_white: u8) -> LuaValue {
         let size = 512;
@@ -612,7 +601,6 @@ impl ObjectPool {
 
     // ==================== Thread Operations ====================
 
-    /// **IMPORTANT**: Requires current_white from GC to properly mark new objects
     #[inline]
     pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> LuaValue {
         let size = 4096; // Fixed size for thread (including stack)

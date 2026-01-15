@@ -31,6 +31,7 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
+    GcId,
     lua_value::{LUA_VFALSE, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
@@ -1527,6 +1528,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
                     if let Some(table) = table_value.as_table_mut() {
                         table.raw_set(&key, value);
+                        
+                        // CRITICAL: GC write barrier
+                        let table_gc_id = GcId::TableId(table_value.hvalue());
+                        lua_state.gc_barrier_back(table_gc_id);
                     } else {
                         // TODO: trigger metamethod for non-table
                     }
