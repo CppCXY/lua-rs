@@ -16,7 +16,7 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{lib_registry, GcKind, ObjectPool};
+use crate::{GcKind, ObjectPool, lib_registry};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -741,14 +741,15 @@ impl LuaVM {
     ///
     /// OPTIMIZATION: Fast path is inlined, slow path is separate function
     #[inline(always)]
-    fn check_gc(&mut self) {
+    fn check_gc(&mut self) -> bool {
         // Fast path: check if gc_debt > 0
         // Once debt becomes positive, trigger GC step
         if self.gc.gc_debt <= 0 {
-            return;
+            self.check_gc_step();
+            return true;
         }
 
-        self.check_gc_step();
+        false
     }
 
     /// Public method to force a GC step (for collectgarbage "step")
@@ -835,7 +836,7 @@ impl LuaVM {
         // CRITICAL FIX: Use MAX(stack_top, all ci->top) to ensure we collect ALL active values
         // During bytecode execution, temporary values may be created in registers beyond current stack_top
         // but within ci->top range. These MUST be collected as roots!
-        // 
+        //
         // Example: `a = {}` compiles to:
         //   NEWTABLE R[x]        -- creates table at R[x], extends stack_top to include R[x]
         //   SETTABUP _ENV "a" R[x]  -- but before this, other ops may shrink stack_top!
@@ -847,7 +848,7 @@ impl LuaVM {
                 max_top = max_top.max(frame.top);
             }
         }
-        
+
         for i in 0..max_top {
             if let Some(value) = self.main_state.stack_get(i) {
                 if !value.is_nil() {

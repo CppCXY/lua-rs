@@ -1380,9 +1380,9 @@ impl LuaState {
         }
     }
 
-    pub fn check_gc(&mut self) -> LuaResult<()> {
+    pub fn check_gc(&mut self) -> LuaResult<bool> {
         let vm = unsafe { &mut *self.vm };
-        vm.check_gc();
+        let do_step = vm.check_gc();
 
         // Process any accumulated GC actions (finalizers, weak tables, etc.)
         if vm.gc.has_pending_actions() {
@@ -1390,7 +1390,7 @@ impl LuaState {
             self.process_gc_actions(actions)?;
         }
 
-        Ok(())
+        Ok(do_step)
     }
 
     pub fn collect_garbage(&mut self) -> LuaResult<()> {

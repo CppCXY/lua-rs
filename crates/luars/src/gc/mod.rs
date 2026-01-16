@@ -62,10 +62,11 @@ pub const MINORMAJOR: usize = 4; // Shift from minor to major (default 100%)
 pub const MAJORMINOR: usize = 5; // Shift from major to minor (default 100%)
 pub const GCPARAM_COUNT: usize = 6;
 
-// Default GC parameters (from luaconf.h)
-const DEFAULT_PAUSE: i32 = 200; // 200%
-const DEFAULT_STEPMUL: i32 = 200; // 200%
-const DEFAULT_STEPSIZE: i32 = 13; // 13 KB
+// Default GC parameters (from Lua 5.5 lgc.h)
+// MUST match Lua 5.5 exactly for debugging consistency
+const DEFAULT_PAUSE: i32 = 200; // 200% (LUAI_GCPAUSE in lgc.h)
+const DEFAULT_STEPMUL: i32 = 200; // 200% (LUAI_GCMUL in lgc.h)
+const DEFAULT_STEPSIZE: i32 = 13; // 13 KB (LUAI_GCSTEPSIZE in lgc.h)
 const DEFAULT_MINORMUL: i32 = 20; // 20%
 const DEFAULT_MINORMAJOR: i32 = 100; // 100%
 const DEFAULT_MAJORMINOR: i32 = 100; // 100%
@@ -142,7 +143,8 @@ impl GcState {
 pub struct GC {
     // === Debt and memory tracking ===
     /// GCdebt from Lua: bytes allocated but not yet "paid for"
-    /// When debt > 0, a GC step should run
+    /// GC debt (like Lua 5.5 GCdebt)
+    /// When debt <= 0, a GC step should run (allocation decreases debt)
     pub gc_debt: isize,
 
     /// GCtotalbytes: total bytes allocated + debt
@@ -326,22 +328,43 @@ impl GC {
 
         let size_signed = size as isize;
         self.total_bytes += size_signed;
-        self.gc_debt += size_signed;
+        // Lua 5.5: allocation decreases debt (makes it more negative)
+        // When debt <= 0, GC is triggered
+        self.gc_debt -= size_signed;
         self.stats.bytes_allocated += size;
     }
 
     /// Check if GC should run (debt > 0)
     #[inline]
+    /// Check if GC should run (like Lua 5.5: G(L)->GCdebt <= 0)
     pub fn should_collect(&self) -> bool {
-        self.gc_debt > 0
+        self.gc_debt <= 0
     }
 
-    /// Set GC debt (like luaE_setdebt in Lua)
-    /// gc_debt > 0: need GC
-    /// gc_debt < 0: have budget before next GC
-    pub fn set_debt(&mut self, debt: isize) {
-        // Simply set the debt - don't modify total_bytes!
-        // total_bytes tracks actual memory, gc_debt tracks GC scheduling
+    // /*
+    // ** set GCdebt to a new value keeping the real number of allocated
+    // ** objects (GCtotalobjs - GCdebt) invariant and avoiding overflows in
+    // ** 'GCtotalobjs'.
+    // */
+    // void luaE_setdebt (global_State *g, l_mem debt) {
+    //   l_mem tb = gettotalbytes(g);
+    //   lua_assert(tb > 0);
+    //   if (debt > MAX_LMEM - tb)
+    //     debt = MAX_LMEM - tb;  /* will make GCtotalbytes == MAX_LMEM */
+    //   g->GCtotalbytes = tb + debt;
+    //   g->GCdebt = debt;
+    // }
+    pub fn set_debt(&mut self, mut debt: isize) {
+        // Port of Lua 5.5's luaE_setdebt from lstate.c
+        // Keep GCtotalobytes - GCdebt invariant (the real allocated bytes)
+        let tb = self.total_bytes;
+        const MAX_LMEM: isize = isize::MAX;
+        
+        // Avoid overflow in total_bytes
+        if debt > MAX_LMEM - tb {
+            debt = MAX_LMEM - tb;
+        }
+        
         self.gc_debt = debt;
     }
 
@@ -760,13 +783,22 @@ impl GC {
     /// Internal step function with force parameter
     /// If force=true, ignore gc_stopped flag (used by collectgarbage("step"))
     pub fn step_internal(&mut self, roots: &[LuaValue], pool: &mut ObjectPool, force: bool) {
+        // Lua 5.5 luaC_step:
+        // if (!gcrunning(g)) {
+        //   if (g->gcstp & GCSTPUSR) luaE_setdebt(g, 20000);
+        // } else { ... }
+        
         // Check if GC is stopped by user (unless forced)
         if !force && self.gc_stopped {
+            // Lua 5.5: set reasonable debt to avoid being called at every check
+            self.set_debt(20000);
             return;
         }
+        
         // If not forced, check debt
-        if !force && self.gc_debt <= 0 {
-            return; // No need to collect yet
+        // Lua 5.5: luaC_condGC only runs step when GCdebt <= 0
+        if !force && self.gc_debt > 0 {
+            return; // Still have budget, no need to collect
         }
 
         // Dispatch based on GC mode (like Lua 5.5 luaC_step)
@@ -780,22 +812,39 @@ impl GC {
     }
 
     /// Incremental GC step (like incstep in Lua 5.5)
+    /// 
+    /// From lgc.c (Lua 5.5):
+    /// ```c
+    /// static void incstep (lua_State *L, global_State *g) {
+    ///   l_mem stepsize = applygcparam(g, STEPSIZE, 100);
+    ///   l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
+    ///   l_mem stres;
+    ///   int fast = (work2do == 0);
+    ///   do {
+    ///     stres = singlestep(L, fast);
+    ///     if (stres == step2minor)
+    ///       return;
+    ///     else if (stres == step2pause || (stres == atomicstep && !fast))
+    ///       break;
+    ///     else
+    ///       work2do -= stres;
+    ///   } while (fast || work2do > 0);
+    ///   if (g->gcstate == GCSpause)
+    ///     setpause(g);
+    ///   else
+    ///     luaE_setdebt(g, stepsize);
+    /// }
+    /// ```
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        // Calculate step size (like Lua 5.5)
-        let stepsize = self.apply_param(STEPSIZE, 100) * 1024; // in bytes (isize)
-
-        // Calculate base work from debt, relying on updated accounting
-        let debt = self.gc_debt;
-        let stepmul = self.apply_param(STEPMUL, 200);
-
-        // Calculate effective work
-        // work2do = debt * stepmul / 100
-        let effective_debt = debt;
-
-        // Use i128 to prevent overflow when debt and stepmul are both very large
-        let mut work2do = ((effective_debt as i128 * stepmul as i128) / 100) as isize;
-
-        let fast = work2do == 0; // Special case: do full collection
+        // l_mem stepsize = applygcparam(g, STEPSIZE, 100);
+        let stepsize = self.apply_param(STEPSIZE, 100) * 1024;
+        
+        // l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
+        let ptr_size = std::mem::size_of::<*const ()>() as isize;
+        let mut work2do = self.apply_param(STEPMUL, stepsize / ptr_size);
+        
+        // int fast = (work2do == 0);
+        let fast = work2do == 0;
 
         // Repeat until enough work is done (like Lua 5.5's do-while loop)
         loop {
@@ -829,12 +878,13 @@ impl GC {
             }
         }
 
-        // Set debt for next step
+        // Set debt for next step (like Lua 5.5 incstep)
         if self.gc_state == GcState::Pause {
             self.set_pause();
         } else {
-            // Set negative debt to allow allocation before next GC step
-            self.set_debt(-stepsize);
+            // Lua 5.5: luaE_setdebt(g, stepsize);
+            // Set positive debt = buffer before next GC
+            self.set_debt(stepsize);
         }
     }
 
@@ -1722,8 +1772,18 @@ impl GC {
     }
 
     pub fn set_pause(&mut self) {
-        let threshold = self.apply_param(PAUSE, self.total_bytes);
-        let debt = threshold - self.total_bytes;
+        // Lua 5.5 lgc.c setpause:
+        // l_mem threshold = applygcparam(g, PAUSE, g->GCmarked);
+        // l_mem debt = threshold - gettotalbytes(g);
+        // if (debt < 0) debt = 0;
+        // luaE_setdebt(g, debt);
+        // 
+        // Key: threshold based on GCmarked (live bytes after collection), not total
+        let threshold = self.apply_param(PAUSE, self.gc_marked);
+        let mut debt = threshold - self.total_bytes;
+        if debt < 0 {
+            debt = 0; // Don't allow negative debt after pause
+        }
         self.set_debt(debt);
     }
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
@@ -2029,6 +2089,7 @@ impl GC {
 }
 
 /// Result of a GC step
+#[derive(Debug)]
 enum StepResult {
     Work(isize), // Amount of work done
     Pause,       // Reached pause state

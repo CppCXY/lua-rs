@@ -9,6 +9,7 @@ use std::rc::Rc;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event, get_metatable};
+use crate::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use require::lua_require;
 
 pub fn create_basic_lib() -> LibraryModule {
@@ -677,54 +678,70 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         }
         "restart" => {
             // LUA_GCRESTART: Restart collector
+            // From lapi.c: luaE_setdebt(g, 0); g->gcstp = 0;
+            // Exactly like Lua 5.5: debt=0 will trigger GC on next check
             l.vm_mut().gc.gc_stopped = false;
-            l.vm_mut().gc.set_debt(0); // Reset debt to allow GC to run
+            l.vm_mut().gc.set_debt(0);
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "step" => {
-            // LUA_GCSTEP: Single step with optional size argument (in KB)
-            // Like Lua 5.5's lapi.c:1203-1212
-            // NOTE: This should work even when GC is stopped (force=true)
+            // LUA_GCSTEP: Single step with optional size argument (in bytes)
+            // 
+            // From lapi.c (Lua 5.5): lines 1202-1214
+            // ```c
+            // case LUA_GCSTEP: {
+            //   lu_byte oldstp = g->gcstp;
+            //   l_mem n = cast(l_mem, va_arg(argp, size_t));
+            //   int work = 0;
+            //   g->gcstp = 0;
+            //   if (n <= 0)
+            //     n = g->GCdebt;
+            //   luaE_setdebt(g, g->GCdebt - n);
+            //   luaC_condGC(L, (void)0, work = 1);
+            //   if (work && g->gcstate == GCSpause)
+            //     res = 1;
+            //   g->gcstp = oldstp;
+            //   break;
+            // }
+            // ```
             let arg2 = l.get_arg(2);
-            let step_size_kb = arg2.and_then(|v| v.as_integer()).unwrap_or(0);
+            let n_arg = arg2.and_then(|v| v.as_integer()).unwrap_or(0);
 
-            // Save old state to check if we complete a cycle
-            let old_state = l.vm_mut().gc.gc_state;
+            // lu_byte oldstp = g->gcstp;
+            let old_stopped = l.vm_mut().gc.gc_stopped;
 
-            // Calculate n (bytes to subtract from debt)
-            // If n <= 0, use current GCdebt to force one basic step
-            let n = if step_size_kb <= 0 {
-                // If 0, use current debt (force standard step)
-                // If negative debt, we'll effectively use min_step
+            // l_mem n = cast(l_mem, va_arg(argp, size_t));
+            // if (n <= 0) n = g->GCdebt;
+            let n = if n_arg <= 0 {
                 l.vm_mut().gc.gc_debt
             } else {
-                (step_size_kb * 1024) as isize
+                n_arg as isize
             };
 
-            // Set debt to n to force proportional work
-            // set_debt preserves real_bytes, so this is safe
-            l.vm_mut().gc.set_debt(n);
+            // int work = 0;
+            let mut work = false;
 
-            // Perform the GC step with force=true (ignore gc_stopped)
-            let vm = l.vm_mut();
-            let roots = vm.collect_roots();
-            vm.gc.step_internal(&roots, &mut vm.object_pool, true);
+            // g->gcstp = 0;
+            l.vm_mut().gc.gc_stopped = false;
 
-            // Check if we completed a full cycle
-            // A full cycle means: either we reached Pause from non-Pause,
-            // or we started at Pause and went through at least one non-Pause state
-            let completed = {
-                let vm = l.vm_mut();
-                let current_state = vm.gc.gc_state;
+            // luaE_setdebt(g, g->GCdebt - n);
+            let old_debt = l.vm_mut().gc.gc_debt;
+            l.vm_mut().gc.set_debt(old_debt - n);
 
-                // If we started at Pause and are still at Pause, we didn't do a full cycle
-                // If we started at non-Pause and reached Pause, we completed a cycle
-                matches!(current_state, crate::gc::GcState::Pause)
-                    && !matches!(old_state, crate::gc::GcState::Pause)
-            };
+            // luaC_condGC(L, (void)0, work = 1);
+            // Expands to: if (G(L)->GCdebt <= 0) { luaC_step(L); work = 1; }
+            if l.check_gc()? {
+                work = true;
+            }
 
+            // g->gcstp = oldstp;
+            l.vm_mut().gc.gc_stopped = old_stopped;
+
+            // if (work && g->gcstate == GCSpause) res = 1;
+            let completed = work && matches!(l.vm_mut().gc.gc_state, GcState::Pause);
             l.push_value(LuaValue::boolean(completed))?;
+
             Ok(1)
         }
         "isrunning" => {
@@ -738,13 +755,13 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // LUA_GCGEN: Switch to generational mode
             let vm = l.vm_mut();
             let old_mode = match vm.gc.gc_kind {
-                crate::gc::GcKind::Inc => "incremental",
-                crate::gc::GcKind::GenMinor => "generational",
-                crate::gc::GcKind::GenMajor => "generational",
+                GcKind::Inc => "incremental",
+                GcKind::GenMinor => "generational",
+                GcKind::GenMajor => "generational",
             };
 
             // Switch to generational mode
-            vm.gc.gc_kind = crate::gc::GcKind::GenMinor;
+            vm.gc.gc_kind = GcKind::GenMinor;
 
             // Push previous mode name (must track if new)
             let mode_value = vm.create_string(old_mode);
@@ -755,9 +772,9 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // LUA_GCINC: Switch to incremental mode
             let vm = l.vm_mut();
             let old_mode = match vm.gc.gc_kind {
-                crate::gc::GcKind::Inc => "incremental",
-                crate::gc::GcKind::GenMinor => "generational",
-                crate::gc::GcKind::GenMajor => "generational",
+                GcKind::Inc => "incremental",
+                GcKind::GenMinor => "generational",
+                GcKind::GenMajor => "generational",
             };
 
             // Switch to incremental mode (like luaC_changemode in Lua 5.5)
@@ -787,12 +804,12 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             // Map parameter name to index
             let param_idx = match param_name.as_str() {
-                "minormul" => Some(crate::gc::MINORMUL), // 3: LUA_GCPMINORMUL
-                "majorminor" => Some(crate::gc::MAJORMINOR), // 5: LUA_GCPMAJORMINOR
-                "minormajor" => Some(crate::gc::MINORMAJOR), // 4: LUA_GCPMINORMAJOR
-                "pause" => Some(crate::gc::PAUSE),       // 0: LUA_GCPPAUSE
-                "stepmul" => Some(crate::gc::STEPMUL),   // 1: LUA_GCPSTEPMUL
-                "stepsize" => Some(crate::gc::STEPSIZE), // 2: LUA_GCPSTEPSIZE
+                "minormul" => Some(MINORMUL),     // 3: LUA_GCPMINORMUL
+                "majorminor" => Some(MAJORMINOR), // 5: LUA_GCPMAJORMINOR
+                "minormajor" => Some(MINORMAJOR), // 4: LUA_GCPMINORMAJOR
+                "pause" => Some(PAUSE),           // 0: LUA_GCPPAUSE
+                "stepmul" => Some(STEPMUL),       // 1: LUA_GCPSTEPMUL
+                "stepsize" => Some(STEPSIZE),     // 2: LUA_GCPSTEPSIZE
                 _ => None,
             };
 
