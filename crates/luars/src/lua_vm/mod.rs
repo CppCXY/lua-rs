@@ -862,7 +862,6 @@ impl LuaVM {
             }
         }
 
-        eprintln!("[ROOTS] Total roots: {}", roots.len());
         roots
     }
 

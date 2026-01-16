@@ -514,33 +514,40 @@ impl GC {
     /// Iterate ephemeron tables until convergence
     fn converge_ephemerons(&mut self, pool: &mut ObjectPool) {
         let mut changed = true;
+        let mut dir = false;
+        let mut iteration = 0;
+        const MAX_ITERATIONS: usize = 1000;
 
-        while changed {
+        while changed && iteration < MAX_ITERATIONS {
             let ephemeron_list = std::mem::take(&mut self.ephemeron);
+            self.ephemeron.clear();
             changed = false;
+            iteration += 1;
 
             for table_id in ephemeron_list {
-                // Traverse this ephemeron table
-                // If it marks any values, we need another iteration
                 if let Some(gc_table) = pool.get_mut(table_id.into()) {
                     gc_table.header.make_black();
                 }
 
-                // Re-traverse as ephemeron
-                let marked = self.traverse_ephemeron_atomic(table_id, pool);
+                let marked = self.traverse_ephemeron_atomic(table_id, pool, dir);
                 if marked {
-                    // Propagate any new marks
                     while !self.gray.is_empty() {
                         self.propagate_mark(pool);
                     }
                     changed = true;
                 }
             }
+            
+            dir = !dir;
+        }
+        
+        if iteration >= MAX_ITERATIONS {
+            eprintln!("WARNING: converge_ephemerons exceeded max iterations");
         }
     }
 
     /// Traverse ephemeron in atomic phase - returns true if any value was marked
-    fn traverse_ephemeron_atomic(&mut self, table_id: TableId, pool: &mut ObjectPool) -> bool {
+    fn traverse_ephemeron_atomic(&mut self, table_id: TableId, pool: &mut ObjectPool, inv: bool) -> bool {
         let entries = if let Some(table) = pool.get_table_mut(table_id) {
             table.iter_all()
         } else {
@@ -549,27 +556,35 @@ impl GC {
 
         let mut marked_any = false;
         let mut has_white_keys = false;
+        let mut has_white_white = false;
+        
+        let mut entry_list: Vec<_> = entries.into_iter().collect();
+        if inv {
+            entry_list.reverse();
+        }
 
-        for (k, v) in &entries {
-            let key_id = Self::value_to_gc_id_static(k);
-            let val_id = Self::value_to_gc_id_static(v);
+        for (k, v) in entry_list {
+            let key_id = Self::value_to_gc_id_static(&k);
+            let val_id = Self::value_to_gc_id_static(&v);
 
-            // Use is_cleared to check key (will mark strings)
             let key_is_cleared = key_id.map_or(false, |id| self.is_cleared(id, pool));
             let val_is_white = val_id.map_or(false, |id| self.is_white(id, pool));
 
             if key_is_cleared {
                 has_white_keys = true;
+                if val_is_white {
+                    has_white_white = true;
+                }
             } else if val_is_white {
-                // Key is alive, value is white - mark the value
-                self.mark_value(v, pool);
+                self.mark_value(&v, pool);
                 marked_any = true;
             }
         }
 
-        // If still has white keys, put back in ephemeron list
-        if has_white_keys {
+        if has_white_white {
             self.ephemeron.push(table_id);
+        } else if has_white_keys {
+            self.allweak.push(table_id);
         }
 
         marked_any
@@ -600,22 +615,14 @@ impl GC {
         };
 
         let mut keys_to_remove = Vec::new();
-        let total_entries = entries.len();
         
         for (key, _value) in entries {
             if let Some(key_id) = Self::value_to_gc_id_static(&key) {
                 if self.is_cleared(key_id, pool) {
-                    eprintln!("[CLEAR_KEYS] Removing key {:?} (white)", key);
                     keys_to_remove.push(key);
-                } else {
-                    eprintln!("[CLEAR_KEYS] Keeping key {:?} (marked)", key);
                 }
-            } else {
-                eprintln!("[CLEAR_KEYS] Keeping key {:?} (not GC object)", key);
             }
         }
-        
-        eprintln!("[CLEAR_KEYS] Removing {} out of {} keys", keys_to_remove.len(), total_entries);
         
         // Remove entries with dead keys
         if let Some(table) = pool.get_table_mut(table_id) {
@@ -628,14 +635,12 @@ impl GC {
     /// Port of Lua 5.5's clearbyvalues
     /// Clear entries with unmarked values from weak value tables
     fn clear_by_values(&mut self, pool: &mut ObjectPool) {
-        // Clear weak value tables
-        let weak_list = std::mem::take(&mut self.weak);
+        let weak_list = self.weak.clone();
         for table_id in weak_list {
             self.clear_table_by_values(table_id, pool);
         }
 
-        // Clear fully weak tables
-        let allweak_list = std::mem::take(&mut self.allweak);
+        let allweak_list = self.allweak.clone();
         for table_id in allweak_list {
             self.clear_table_by_values(table_id, pool);
         }
@@ -652,9 +657,21 @@ impl GC {
         let mut keys_to_remove = Vec::new();
 
         for (key, value) in entries {
-            if let Some(val_id) = Self::value_to_gc_id_static(&value) {
-                if self.is_cleared(val_id, pool) {
-                    keys_to_remove.push(key);
+            // In Lua weak table semantics:
+            // - Strings, numbers, booleans, nil are VALUES (never removed by weak tables)
+            // - Only tables, functions, threads, userdata are GC objects
+            // So we SKIP strings here
+            match value.kind() {
+                LuaValueKind::Table | LuaValueKind::Function | 
+                LuaValueKind::Thread | LuaValueKind::Userdata => {
+                    if let Some(val_id) = Self::value_to_gc_id_static(&value) {
+                        if self.is_cleared(val_id, pool) {
+                            keys_to_remove.push(key);
+                        }
+                    }
+                }
+                _ => {
+                    // String, Number, Boolean, Nil: never removed from weak value tables
                 }
             }
         }
