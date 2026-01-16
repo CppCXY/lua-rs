@@ -914,7 +914,6 @@ impl GC {
         // NOTE: Do NOT set gc_state here! It should be set by the caller (single_step)
         // Lua 5.5's restartcollection does not set gcstate
         
-        eprintln!("DEBUG restart_collection: Clearing gray (size={}) and grayagain (size={})", self.gray.len(), self.grayagain.len());
         self.gray.clear();
         self.grayagain.clear();
 
@@ -951,7 +950,6 @@ impl GC {
                     if let Some(t) = pool.get_mut(id.into()) {
                         // Only mark white objects (fixed objects are gray, so they're skipped)
                         if t.header.is_white() {
-                            eprintln!("DEBUG mark_value: Marking table {:?}, adding to gray", id);
                             t.header.make_gray();
                             self.gray.push(GcId::TableId(id));
                         }
@@ -1120,7 +1118,6 @@ impl GC {
         // In atomic phase, mark keys and check values
         let mut has_white_values = false;
 
-        eprintln!("DEBUG traverse_weak_value: table_id={:?}, {} entries", table_id, entries.len());
         for (k, v) in &entries {
             // Mark key (strong reference)
             self.mark_value(k, pool);
@@ -1130,15 +1127,11 @@ impl GC {
             // So we need to check the CURRENT state from pool, not the snapshot
             if let Some(val_id) = Self::value_to_gc_id_static(v) {
                 // Re-check if value is STILL white after marking the key
-                let is_white = self.is_white(val_id, pool);
-                eprintln!("  key={}, value={:?}, is_white={}", k, val_id, is_white);
-                if is_white {
+                if self.is_white(val_id, pool) {
                     has_white_values = true;
                 }
             }
         }
-
-        eprintln!("DEBUG traverse_weak_value: has_white_values={}", has_white_values);
 
         // If has white values, add to weak list for clearing
         if has_white_values {
@@ -1196,7 +1189,7 @@ impl GC {
     /// }
     /// ```
     fn traverse_ephemeron(&mut self, table_id: TableId, pool: &mut ObjectPool) -> isize {
-        eprintln!("DEBUG traverse_ephemeron: table_id={:?}, gc_state={:?}", table_id, self.gc_state);
+        eprintln!("DEBUG traverse_ephemeron: table={:?}, gc_state={:?}", table_id, self.gc_state);
         
         let (entries, metatable) = if let Some(gc_table) = pool.get_mut(table_id.into()) {
             gc_table.header.make_black();
@@ -1220,9 +1213,9 @@ impl GC {
         // - In Pause/Propagate phase: add to grayagain
         // - In Atomic phase: classify and route to correct list
         if self.gc_state == GcState::Propagate || self.gc_state == GcState::Pause {
-            eprintln!("DEBUG traverse_ephemeron: Adding table {:?} to grayagain", table_id);
+            eprintln!("DEBUG traverse_ephemeron: Adding to grayagain, before={}", self.grayagain.len());
             self.grayagain.push(GcId::TableId(table_id));
-            eprintln!("DEBUG traverse_ephemeron: grayagain now has {} items", self.grayagain.len());
+            eprintln!("DEBUG traverse_ephemeron: Added to grayagain, after={}", self.grayagain.len());
             return 1;
         }
 
@@ -1324,7 +1317,6 @@ impl GC {
     /// Propagate mark for one gray object (like propagatemark in Lua 5.5)
     fn propagate_mark(&mut self, pool: &mut ObjectPool) -> isize {
         if let Some(gc_id) = self.gray.pop() {
-            eprintln!("DEBUG propagate_mark: Processing {:?}, gc_state={:?}", gc_id, self.gc_state);
             let _ = self.mark_one(gc_id, pool);
             // Use the size stored in GcObject (same as track_object and sweep)
             // This ensures consistency across all GC operations
@@ -1349,7 +1341,7 @@ impl GC {
                 // Port of Lua 5.5's traversetable with weak table handling
                 // Check weak mode first to decide how to traverse
                 let weak_mode = self.get_weak_mode(id, pool);
-                eprintln!("DEBUG mark_one: table {:?}, weak_mode={:?}", id, weak_mode);
+                eprintln!("DEBUG mark_one: table={:?}, weak_mode={:?}, gc_state={:?}", id, weak_mode, self.gc_state);
 
                 match weak_mode {
                     None | Some((false, false)) => {
@@ -1499,6 +1491,7 @@ impl GC {
 
     /// Atomic phase (like atomic in Lua 5.5)
     fn atomic(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+        eprintln!("DEBUG atomic: entering with grayagain.len()={}", self.grayagain.len());
         self.gc_state = GcState::Atomic;
 
         // Mark roots again (they may have changed)
@@ -1762,43 +1755,37 @@ impl GC {
     /// 5. converge ephemerons
     /// 6. clear weak tables
     pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
-        // IMPORTANT: Set to Pause state before restart_collection
-        // so weak tables will be added to grayagain
-        self.gc_state = GcState::Pause;
+        eprintln!("DEBUG full_generation: ENTRY gc_state={:?}, grayagain.len()={}", self.gc_state, self.grayagain.len());
         
-        self.restart_collection(roots, pool);
-
-        // Mark all roots
+        // Lua 5.5's youngcollection assumes gcstate == GCSpropagate
+        // This means restart_collection has ALREADY been called before entering here
+        // DO NOT call restart_collection here - it would clear grayagain!
+        
+        // If we're in Pause state, we need to transition to Propagate first
+        if self.gc_state == GcState::Pause {
+            self.gc_state = GcState::Propagate;
+            // Clear gray list and mark roots
+            self.gray.clear();
+            // DON'T clear grayagain - it may have weak tables from previous marks
+            
+            // Mark all roots
+            for value in roots {
+                self.mark_value(value, pool);
+            }
+        }
+        
+        // Step 2: Propagate gray list (weak tables will be added to grayagain)
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
+        
+        eprintln!("DEBUG full_generation: After propagate, grayagain.len()={}", self.grayagain.len());
+        
+        // Step 3: Call atomic phase (like youngcollection does)
+        // atomic() will process grayagain, converge ephemerons, and clear weak tables
+        self.atomic(roots, pool);
 
-        // Set to Atomic state before processing grayagain (like atomic phase)
-        self.gc_state = GcState::Atomic;
-
-        // Process grayagain list (weak tables added during restart_collection)
-        let grayagain = std::mem::take(&mut self.grayagain);
-        eprintln!("DEBUG full_generation: Processing {} objects in grayagain", grayagain.len());
-        for (idx, gc_id) in grayagain.iter().enumerate() {
-            eprintln!("  grayagain[{}] = {:?}", idx, gc_id);
-            self.mark_one(*gc_id, pool);
-        }
-
-        // Propagate again
-        while !self.gray.is_empty() {
-            self.propagate_mark(pool);
-        }
-
-        // Process weak tables (same as atomic phase)
-        self.converge_ephemerons(pool);
-        self.clear_by_values(pool);
-        self.converge_ephemerons(pool);
-        self.clear_by_keys(pool);
-        self.clear_by_values(pool);
-
-        // Flip white and sweep
-        self.current_white ^= 1;
-
+        // Step 4: Sweep
         self.enter_sweep(pool);
         self.run_until_state(GcState::CallFin, roots, pool);
         self.run_until_state(GcState::Pause, roots, pool);
