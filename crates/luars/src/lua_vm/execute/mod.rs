@@ -1018,6 +1018,15 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
                     
+                    // CRITICAL: Ensure stack_top includes the register we just wrote to
+                    // stack_top points to "next available position", so valid range is [0, stack_top)
+                    // If we write to stack[base+a], stack_top must be AT LEAST base+a+1
+                    // This ensures the new table is visible to GC root collection
+                    let new_top = base + a + 1;
+                    if lua_state.get_top() < new_top {
+                        lua_state.set_top(new_top);
+                    }
+                    
                     // GC check after table creation (like Lua 5.5 OP_NEWTABLE)
                     lua_state.check_gc()?;
                 }

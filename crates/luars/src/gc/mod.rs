@@ -932,6 +932,10 @@ impl GC {
     fn restart_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         self.stats.collection_count += 1;
         
+        // CRITICAL: Reset sweep_index when starting a new cycle
+        // This ensures the next sweep will scan all objects from the beginning
+        self.sweep_index = 0;
+        
         // NOTE: Do NOT set gc_state here! It should be set by the caller
         // Lua 5.5's restartcollection does not set gcstate
         
@@ -1079,7 +1083,8 @@ impl GC {
                 Some(t) => t,
                 None => return 0,
             };
-            (table.iter_all(), table.get_metatable())
+            let entries_vec = table.iter_all();
+            (entries_vec, table.get_metatable())
         } else {
             return 0;
         };
@@ -1403,8 +1408,8 @@ impl GC {
             GcId::TableId(id) => {
                 // Port of Lua 5.5's traversetable with weak table handling
                 // Check weak mode first to decide how to traverse
+                
                 let weak_mode = self.get_weak_mode(id, pool);
-                eprintln!("DEBUG mark_one: table={:?}, weak_mode={:?}, gc_state={:?}", id, weak_mode, self.gc_state);
 
                 match weak_mode {
                     None | Some((false, false)) => {

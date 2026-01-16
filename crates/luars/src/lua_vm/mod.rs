@@ -831,14 +831,24 @@ impl LuaVM {
             roots.push(*mt);
         }
 
-        // 4. All values in the logical stack (0..stack_top)
-        // CRITICAL: Use actual stack_top, NOT limited to ci->top
-        // For vararg functions, stack_top can legitimately exceed ci->top
-        // ci->top is the maximum stack USAGE, but vararg ARGUMENTS are beyond that
-        // Lua 5.5: luaV_execute asserts "base <= L->top.p && L->top.p <= L->stack_last.p"
-        // It does NOT limit L->top to ci->top!
-        let stack_top = self.main_state.get_top();
-        for i in 0..stack_top {
+        // 4. All values in the logical stack
+        // CRITICAL FIX: Use MAX(stack_top, all ci->top) to ensure we collect ALL active values
+        // During bytecode execution, temporary values may be created in registers beyond current stack_top
+        // but within ci->top range. These MUST be collected as roots!
+        // 
+        // Example: `a = {}` compiles to:
+        //   NEWTABLE R[x]        -- creates table at R[x], extends stack_top to include R[x]
+        //   SETTABUP _ENV "a" R[x]  -- but before this, other ops may shrink stack_top!
+        //
+        // Lua 5.5 marks all slots from 0 to ci->top during GC root collection
+        let mut max_top = self.main_state.get_top();
+        for i in 0..self.main_state.call_depth() {
+            if let Some(frame) = self.main_state.get_frame(i) {
+                max_top = max_top.max(frame.top);
+            }
+        }
+        
+        for i in 0..max_top {
             if let Some(value) = self.main_state.stack_get(i) {
                 if !value.is_nil() {
                     roots.push(value);
