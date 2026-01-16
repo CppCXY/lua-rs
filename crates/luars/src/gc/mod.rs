@@ -338,11 +338,13 @@ impl GC {
 
         let size_signed = size as isize;
         
-        // Lua 5.5 lmem.c: g->GCdebt -= size (分配时减少debt，使其变负)
-        // 同时维护不变量：实际分配字节 = GCtotalbytes - GCdebt
-        self.total_bytes += size_signed;  // 实际分配增加
-        self.gc_debt -= size_signed;      // debt减少（变得更负）
-        // 结果：GCtotalbytes = total_bytes 保持不变量
+        // Lua 5.5 lmem.c luaM_malloc_:
+        //   g->GCdebt -= cast(l_mem, size);
+        // 只修改GCdebt，不修改GCtotalbytes！
+        // 不变量：真实内存 = GCtotalbytes - GCdebt
+        // 分配时：debt减少size，totalbytes不变，所以真实内存增加size
+        self.gc_debt -= size_signed;  // 分配减少debt
+        // total_bytes保持不变！只在set_debt时调整
         
         self.stats.bytes_allocated += size;
     }
@@ -1772,10 +1774,15 @@ impl GC {
         self.pending_actions.to_finalize.extend(to_finalize);
 
         // Actually remove dead objects (those without finalizers)
+        // Lua 5.5 lmem.c luaM_free_:
+        //   g->GCdebt += cast(l_mem, osize);
+        // 释放时增加GCdebt，不修改GCtotalbytes！
+        // 不变量：真实内存 = GCtotalbytes - GCdebt
+        // 释放时：debt增加size，totalbytes不变，所以真实内存减少size
         for gc_id in &dead_ids {
             let size = pool.remove(*gc_id);
             if size > 0 {
-                self.total_bytes = self.total_bytes.saturating_sub(size as isize);
+                self.gc_debt += size as isize;  // 释放增加debt
                 self.stats.bytes_freed += size;
                 self.stats.objects_collected += 1;
             }
@@ -1794,8 +1801,10 @@ impl GC {
         // luaE_setdebt(g, debt);
         // 
         // Key: threshold based on GCmarked (live bytes after collection), not total
+        // gettotalbytes(g) = GCtotalbytes - GCdebt
         let threshold = self.apply_param(PAUSE, self.gc_marked);
-        let mut debt = threshold - self.total_bytes;
+        let real_bytes = self.total_bytes - self.gc_debt;  // gettotalbytes
+        let mut debt = threshold - real_bytes;
         if debt < 0 {
             debt = 0; // Don't allow negative debt after pause
         }

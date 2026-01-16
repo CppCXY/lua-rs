@@ -664,9 +664,12 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "count" => {
+            // LUA_GCCOUNT: returns memory in use in Kbytes
+            // Lua 5.5 lapi.c line 1222: res = gettotalbytes(g);
+            // gettotalbytes(g) = (g)->GCtotalbytes - (g)->GCdebt (lstate.h line 435)
             let gc = &l.vm_mut().gc;
-            let total = gc.total_bytes;
-            let kb = total.max(0) as f64 / 1024.0;
+            let real_bytes = gc.total_bytes - gc.gc_debt;  // gettotalbytes
+            let kb = real_bytes.max(0) as f64 / 1024.0;
             l.push_value(LuaValue::number(kb))?;
             Ok(1)
         }
@@ -713,6 +716,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             // l_mem n = cast(l_mem, va_arg(argp, size_t));
             // if (n <= 0) n = g->GCdebt;
+            // Lua 5.5: 当n<=0时，使用当前debt值，这样 debt - n = 0 会触发GC
             let n = if n_arg <= 0 {
                 l.vm_mut().gc.gc_debt
             } else {
@@ -726,6 +730,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             l.vm_mut().gc.gc_stopped = false;
 
             // luaE_setdebt(g, g->GCdebt - n);
+            // 关键：这会让debt变为0（当n=debt时）或负数（当n>debt时）
             let old_debt = l.vm_mut().gc.gc_debt;
             l.vm_mut().gc.set_debt(old_debt - n);
 

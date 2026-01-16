@@ -401,10 +401,30 @@ impl ObjectPool {
         hash_size: usize,
         current_white: u8,
     ) -> LuaValue {
-        // Calculate size: base overhead + estimated capacity
-        // Use max(array_size, hash_size) as estimated capacity
-        let capacity = array_size.max(hash_size);
-        let size = (256 + capacity * 48) as u32;
+        // Lua 5.5 ltable.c luaH_size:
+        //   lu_mem sz = sizeof(Table) + concretesize(t->asize);
+        //   if (!isdummy(t)) sz += sizehash(t);
+        // 
+        // concretesize(size) = size * (sizeof(Value) + 1) + sizeof(unsigned)
+        //   = size * (16 + 1) + 4 = size * 17 + 4
+        // 
+        // sizehash(t) = sizenode(t) * sizeof(Node) + extraLastfree(t)
+        //   ≈ (1 << lsizenode) * 24 + (has_lastfree ? 8 : 0)
+        //   For simplicity, use hash_size * 24
+        // 
+        // sizeof(Table) ≈ 80 bytes (base struct)
+        let base_size = 80;
+        let array_bytes = if array_size > 0 {
+            array_size * 17 + 4
+        } else {
+            0
+        };
+        let hash_bytes = if hash_size > 0 {
+            hash_size * 24 + 8  // Node size + lastfree overhead
+        } else {
+            0
+        };
+        let size = (base_size + array_bytes + hash_bytes) as u32;
 
         let gc_table = GcObject::with_white(
             GcPtrObject::Table(Box::new(LuaTable::new(array_size as u32, hash_size as u32))),
