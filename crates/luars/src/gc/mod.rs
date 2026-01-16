@@ -303,6 +303,9 @@ impl GC {
     ///
     /// Port of lgc.c: luaC_newobj creates objects as WHITE, then links to allgc list.
     /// Barriers will mark them BLACK/GRAY if needed when stored into reachable objects.
+    ///
+    /// Lua 5.5内存分配：lmem.c中 g->GCdebt -= size (分配减少debt)
+    /// 维护不变量：GCtotalbytes = 实际分配字节 + GCdebt
     #[inline]
     pub fn track_object(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
         // Objects are already created as WHITE by ObjectPool.create_*()
@@ -327,10 +330,13 @@ impl GC {
         };
 
         let size_signed = size as isize;
-        self.total_bytes += size_signed;
-        // Lua 5.5: allocation decreases debt (makes it more negative)
-        // When debt <= 0, GC is triggered
-        self.gc_debt -= size_signed;
+        
+        // Lua 5.5 lmem.c: g->GCdebt -= size (分配时减少debt，使其变负)
+        // 同时维护不变量：实际分配字节 = GCtotalbytes - GCdebt
+        self.total_bytes += size_signed;  // 实际分配增加
+        self.gc_debt -= size_signed;      // debt减少（变得更负）
+        // 结果：GCtotalbytes = total_bytes 保持不变量
+        
         self.stats.bytes_allocated += size;
     }
 
@@ -356,15 +362,17 @@ impl GC {
     // }
     pub fn set_debt(&mut self, mut debt: isize) {
         // Port of Lua 5.5's luaE_setdebt from lstate.c
-        // Keep GCtotalobytes - GCdebt invariant (the real allocated bytes)
-        let tb = self.total_bytes;
+        // Keep the real allocated bytes (total_bytes - gc_debt) invariant
+        let real_bytes = self.total_bytes - self.gc_debt;
         const MAX_LMEM: isize = isize::MAX;
         
         // Avoid overflow in total_bytes
-        if debt > MAX_LMEM - tb {
-            debt = MAX_LMEM - tb;
+        if debt > MAX_LMEM - real_bytes {
+            debt = MAX_LMEM - real_bytes;
         }
         
+        // Maintain invariant: total_bytes = real_bytes + debt
+        self.total_bytes = real_bytes + debt;
         self.gc_debt = debt;
     }
 
