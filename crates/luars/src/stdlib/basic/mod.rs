@@ -716,9 +716,12 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             // l_mem n = cast(l_mem, va_arg(argp, size_t));
             // if (n <= 0) n = g->GCdebt;
-            // Lua 5.5: 当n<=0时，使用当前debt值，这样 debt - n = 0 会触发GC
+            // 修正：当n_arg<=0时，使用STEPSIZE作为默认步长
+            // 否则如果debt是负数，debt - debt = 0不会触发GC
+            let gc = &l.vm_mut().gc;
+            let stepsize = gc.apply_param(STEPSIZE, 100);
             let n = if n_arg <= 0 {
-                l.vm_mut().gc.gc_debt
+                stepsize
             } else {
                 n_arg as isize
             };
@@ -730,7 +733,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             l.vm_mut().gc.gc_stopped = false;
 
             // luaE_setdebt(g, g->GCdebt - n);
-            // 关键：这会让debt变为0（当n=debt时）或负数（当n>debt时）
             let old_debt = l.vm_mut().gc.gc_debt;
             l.vm_mut().gc.set_debt(old_debt - n);
 

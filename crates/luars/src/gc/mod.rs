@@ -386,7 +386,7 @@ impl GC {
     }
 
     /// Apply GC parameter (like applygcparam in Lua)
-    fn apply_param(&self, param_idx: usize, value: isize) -> isize {
+    pub(crate) fn apply_param(&self, param_idx: usize, value: isize) -> isize {
         let param = self.gc_params[param_idx];
         if param >= 0 {
             (value * param as isize) / 100
