@@ -86,10 +86,6 @@ impl LuaVM {
         // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
         vm.registry_set_integer(1, globals_value);
 
-        // Reset GC debt after initialization (like Lua's luaC_fullgc at start)
-        // The objects created during initialization should not count towards the first GC
-        vm.gc.gc_debt = -(8 * 1024);
-
         vm
     }
 
@@ -130,11 +126,6 @@ impl LuaVM {
 
     pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
         lib_registry::create_standard_registry(lib).load_all(self)?;
-
-        // Reset GC state after loading standard libraries
-        // Like Lua's initial full GC after loading base libs
-        self.gc.gc_debt = -(8 * 1024);
-
         Ok(())
     }
 

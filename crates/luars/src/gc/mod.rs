@@ -66,7 +66,14 @@ pub const GCPARAM_COUNT: usize = 6;
 // MUST match Lua 5.5 exactly for debugging consistency
 const DEFAULT_PAUSE: i32 = 200; // 200% (LUAI_GCPAUSE in lgc.h)
 const DEFAULT_STEPMUL: i32 = 200; // 200% (LUAI_GCMUL in lgc.h)
-const DEFAULT_STEPSIZE: i32 = 13; // 13 KB (LUAI_GCSTEPSIZE in lgc.h)
+// LUAI_GCSTEPSIZE = (200 * sizeof(Table))
+// 在Rust中Table大小约为80字节，所以 200 * 80 = 16000字节
+// 但参数存储的是"单位"，在applygcparam时会乘以参数
+// 实际上STEPSIZE存储的是200，表示"200 * 某个基础单位"
+// 看lgc.c: applygcparam(g, STEPSIZE, 100) 意思是 (STEPSIZE * 100) / 100 = STEPSIZE
+// 然后setgcparam(g, STEPSIZE, LUAI_GCSTEPSIZE) 存储的就是字节数
+// 所以应该存储字节数！
+const DEFAULT_STEPSIZE: i32 = 16000; // ~200 * sizeof(Table) bytes
 const DEFAULT_MINORMUL: i32 = 20; // 20%
 const DEFAULT_MINORMAJOR: i32 = 100; // 100%
 const DEFAULT_MAJORMINOR: i32 = 100; // 100%
@@ -290,7 +297,7 @@ impl GC {
         self.enter_sweep(pool);
 
         // Set debt for next step
-        let stepsize = self.apply_param(STEPSIZE, 100) * 1024;
+        let stepsize = self.apply_param(STEPSIZE, 100);
         self.set_debt(stepsize);
     }
 
@@ -845,7 +852,7 @@ impl GC {
     /// ```
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         // l_mem stepsize = applygcparam(g, STEPSIZE, 100);
-        let stepsize = self.apply_param(STEPSIZE, 100) * 1024;
+        let stepsize = self.apply_param(STEPSIZE, 100);
         
         // l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
         let ptr_size = std::mem::size_of::<*const ()>() as isize;
