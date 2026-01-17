@@ -2,6 +2,52 @@
 use crate::*;
 
 #[test]
+fn test_string_gsub_function() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute_string(
+        r#"
+        -- Test 1: Simple function replacement
+        local s1, n1 = string.gsub("hello world", "%w+", function(w)
+            return string.upper(w)
+        end)
+        assert(s1 == "HELLO WORLD")
+        assert(n1 == 2)
+
+        -- Test 2: Function with captures
+        local s2, n2 = string.gsub("foo=123 bar=456", "(%w+)=(%d+)", function(k, v)
+            return k .. ":" .. (tonumber(v) * 2)
+        end)
+        assert(s2 == "foo:246 bar:912")
+        assert(n2 == 2)
+
+        -- Test 3: Function returning nil keeps original
+        local s3, n3 = string.gsub("keep drop keep", "%w+", function(w)
+            if w == "drop" then return nil end
+            return w
+        end)
+        assert(s3 == "keep drop keep")
+        assert(n3 == 3)
+
+        -- Test 4: Function returning number
+        local s4, n4 = string.gsub("a b c", "%w", function(c)
+            return string.byte(c)
+        end)
+        assert(s4 == "97 98 99")
+        assert(n4 == 3)
+
+        -- Test 5: Limit replacements
+        local s5, n5 = string.gsub("aaaa", "a", function() return "b" end, 2)
+        assert(s5 == "bbaa")
+        assert(n5 == 2)
+    "#,
+    );
+
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_string_len() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
