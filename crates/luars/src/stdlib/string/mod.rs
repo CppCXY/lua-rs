@@ -339,8 +339,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Use optimized create_substring
-    let result_value = vm
-        .create_substring(s_value, start_byte, end_byte);
+    let result_value = vm.create_substring(s_value, start_byte, end_byte);
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -547,9 +546,58 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             Err(e) => Err(l.error(e)),
         }
     } else if repl_value.is_function() {
-        // Function replacement - currently not fully implemented
-        // TODO: Need proper protected call support for Lua functions in gsub
-        return Err(l.error("gsub with function replacement not yet fully implemented".to_string()));
+        let matches = pattern::find_all_matches(&s_str, &pattern, max);
+        let mut result = String::new();
+        let mut last_end = 0;
+        let mut count = 0;
+
+        for m in &matches {
+            result.push_str(&s_str[last_end..m.start]);
+
+            let args = if m.captures.is_empty() {
+                vec![l.create_string(&s_str[m.start..m.end])]
+            } else {
+                m.captures.iter().map(|cap| l.create_string(cap)).collect()
+            };
+
+            match l.pcall(repl_value.clone(), args) {
+                Ok((success, results)) => {
+                    if success && !results.is_empty() {
+                        let replacement = if results[0].is_nil() {
+                            s_str[m.start..m.end].to_string()
+                        } else if let Some(s) = results[0].as_str() {
+                            s.to_string()
+                        } else if let Some(n) = results[0].as_integer() {
+                            n.to_string()
+                        } else if let Some(n) = results[0].as_number() {
+                            n.to_string()
+                        } else {
+                            s_str[m.start..m.end].to_string()
+                        };
+                        result.push_str(&replacement);
+                    } else {
+                        return Err(l.error(format!(
+                            "error calling replacement function: {}",
+                            results
+                                .get(0)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown error")
+                        )));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+
+            last_end = m.end;
+            count += 1;
+        }
+
+        result.push_str(&s_str[last_end..]);
+
+        let result_val = l.create_string(&result);
+        l.push_value(result_val)?;
+        l.push_value(LuaValue::integer(count as i64))?;
+        Ok(2)
     } else if repl_value.is_table() {
         // Table replacement
         let matches = pattern::find_all_matches(&s_str, &pattern, max);
