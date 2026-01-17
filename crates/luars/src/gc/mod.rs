@@ -78,6 +78,92 @@ const DEFAULT_MINORMUL: i32 = 20; // 20%
 const DEFAULT_MINORMAJOR: i32 = 100; // 100%
 const DEFAULT_MAJORMINOR: i32 = 100; // 100%
 
+/// Maximum l_mem value (like MAX_LMEM in Lua 5.5)
+const MAX_LMEM: isize = isize::MAX;
+/// Compute ceil(log2(x)) for GC parameter encoding
+/// Port of luaO_ceillog2 from Lua 5.5 lobject.c
+fn ceil_log2(x: u32) -> u8 {
+    static LOG_2: [u8; 256] = [
+        0,1,2,2,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
+        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+    ];
+    let mut x = x.saturating_sub(1);
+    let mut l: u32 = 0;
+    while x >= 256 {
+        l += 8;
+        x >>= 8;
+    }
+    (l as u8) + LOG_2[x as usize]
+}
+
+/// Encode a percentage value 'p' as a floating-point byte (eeeexxxx).
+/// Port of luaO_codeparam from Lua 5.5 lobject.c
+/// 
+/// The exponent is represented using excess-7. Mimicking IEEE 754, the
+/// representation normalizes the number when possible, assuming an extra
+/// 1 before the mantissa (xxxx) and adding one to the exponent (eeee)
+/// to signal that. So, the real value is (1xxxx) * 2^(eeee - 7 - 1) if
+/// eeee != 0, and (xxxx) * 2^-7 otherwise (subnormal numbers).
+pub fn code_param(p: u32) -> u8 {
+    // Overflow check: maximum representable value
+    // (0x1F) << (0xF - 7 - 1) = 31 << 7 = 3968
+    // 3968 * 100 = 396800
+    if p >= ((0x1Fu64) << (0xF - 7 - 1)) as u32 * 100 {
+        return 0xFF; // Return maximum value on overflow
+    }
+    
+    // p' = (p * 128 + 99) / 100 (round up the division)
+    let p_scaled = ((p as u64) * 128 + 99) / 100;
+    
+    if p_scaled < 0x10 {
+        // Subnormal number: exponent bits are already zero
+        p_scaled as u8
+    } else {
+        // p >= 0x10 implies ceil(log2(p + 1)) >= 5
+        // Preserve 5 bits in 'p'
+        let log = ceil_log2((p_scaled + 1) as u32).saturating_sub(5);
+        let mantissa = ((p_scaled >> log) - 0x10) as u8;
+        let exponent = ((log as u8) + 1) << 4;
+        mantissa | exponent
+    }
+}
+
+/// Decode a floating-point byte back to approximate percentage
+/// Used for returning parameter values to Lua
+/// This is the inverse of code_param: given the encoded byte, return approximate percentage
+/// 
+/// The key insight is: apply_param(p, 100) ≈ original_percentage
+/// Because apply_param computes: x * percentage / 100
+/// So apply_param(p, 100) = 100 * percentage / 100 = percentage
+pub fn decode_param(p: u8) -> i32 {
+    let m = (p & 0xF) as isize;
+    let e = (p >> 4) as i32;
+    
+    // Compute what apply_param(p, 100) would return
+    // This gives us the original percentage value
+    let x: isize = 100;
+    
+    let (m_full, e_adj) = if e > 0 {
+        (m + 0x10, e - 1 - 7)
+    } else {
+        (m, -7)
+    };
+    
+    if e_adj >= 0 {
+        let e_adj = e_adj as u32;
+        ((x * m_full) << e_adj) as i32
+    } else {
+        let e_neg = (-e_adj) as u32;
+        ((x * m_full) >> e_neg) as i32
+    }
+}
+
 /// GC mode (from lgc.h)
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,7 +271,9 @@ pub struct GC {
     pending_actions: GcActions,
 
     // === GC parameters (from gcparams[LUA_GCPN]) ===
-    pub gc_params: [i32; GCPARAM_COUNT],
+    // Stored as compressed floating-point bytes (like Lua 5.5)
+    // Use code_param() to encode, apply_param() to apply
+    pub gc_params: [u8; GCPARAM_COUNT],
 
     // === Gray lists (for marking) ===
     /// Regular gray objects waiting to be visited
@@ -208,6 +296,12 @@ pub struct GC {
     /// Current position in sweep (like Lua 5.5's sweepgc pointer)
     /// This ensures we don't re-scan the same objects
     sweep_index: usize,
+    /// Target position for sweep completion (set at start of sweep phase)
+    /// This prevents chasing a growing capacity() during sweep
+    sweep_target: usize,
+    /// List of object IDs to sweep (collected at start of sweep phase)
+    /// This avoids iterating through sparse Vec slots
+    sweep_ids: Vec<GcId>,
 
     // === Generational collector pointers ===
     /// Points to first survival object in allgc list
@@ -255,12 +349,12 @@ impl GC {
             gc_stopped: false,
             pending_actions: GcActions::default(),
             gc_params: [
-                DEFAULT_PAUSE,      // PAUSE = 0
-                DEFAULT_STEPMUL,    // STEPMUL = 1
-                DEFAULT_STEPSIZE,   // STEPSIZE = 2
-                DEFAULT_MINORMUL,   // MINORMUL = 3
-                DEFAULT_MINORMAJOR, // MINORMAJOR = 4
-                DEFAULT_MAJORMINOR, // MAJORMINOR = 5
+                code_param(DEFAULT_PAUSE as u32),      // PAUSE = 0
+                code_param(DEFAULT_STEPMUL as u32),    // STEPMUL = 1
+                code_param(DEFAULT_STEPSIZE as u32),   // STEPSIZE = 2
+                code_param(DEFAULT_MINORMUL as u32),   // MINORMUL = 3
+                code_param(DEFAULT_MINORMAJOR as u32), // MINORMAJOR = 4
+                code_param(DEFAULT_MAJORMINOR as u32), // MAJORMINOR = 5
             ],
             gray: Vec::with_capacity(128),
             grayagain: Vec::with_capacity(64),
@@ -268,6 +362,8 @@ impl GC {
             ephemeron: Vec::new(),
             allweak: Vec::new(),
             sweep_index: 0,
+            sweep_target: 0,
+            sweep_ids: Vec::new(),
             survival: None,
             old1: None,
             reallyold: None,
@@ -373,7 +469,7 @@ impl GC {
         // Port of Lua 5.5's luaE_setdebt from lstate.c
         // Keep the real allocated bytes (total_bytes - gc_debt) invariant
         let real_bytes = self.total_bytes - self.gc_debt;
-        const MAX_LMEM: isize = isize::MAX;
+        
         
         // Avoid overflow in total_bytes
         if debt > MAX_LMEM - real_bytes {
@@ -385,14 +481,50 @@ impl GC {
         self.gc_debt = debt;
     }
 
-    /// Apply GC parameter (like applygcparam in Lua)
+    /// Apply GC parameter (like luaO_applyparam in Lua 5.5)
+    /// Parameters are stored as compressed floating-point bytes (eeeexxxx)
+    /// 
+    /// Port of luaO_applyparam from lobject.c:
+    /// Computes 'p' times 'x', where 'p' is a floating-point byte.
+    /// Returns MAX_LMEM on overflow to prevent extreme debt values.
     pub(crate) fn apply_param(&self, param_idx: usize, value: isize) -> isize {
-        let param = self.gc_params[param_idx];
-        if param >= 0 {
-            (value * param as isize) / 100
+        let p = self.gc_params[param_idx];
+        let x = value;
+        
+        let m = (p & 0xF) as isize;  // mantissa
+        let e = (p >> 4) as i32;     // exponent
+        
+        let (m_full, e_adj) = if e > 0 {
+            // Normalized number: add implicit 1 to mantissa
+            (m + 0x10, e - 1 - 7)
         } else {
-            // Negative parameters are divided, not multiplied
-            (value * 100) / (-param as isize)
+            // Subnormal number
+            (m, -7)
+        };
+        
+        if e_adj >= 0 {
+            let e_adj = e_adj as u32;
+            // Check for overflow before computing
+            let max_safe = (MAX_LMEM / 0x1F) >> e_adj;
+            if x < max_safe {
+                (x * m_full) << e_adj
+            } else {
+                // Real overflow - return maximum
+                MAX_LMEM
+            }
+        } else {
+            // Negative exponent
+            let e_neg = (-e_adj) as u32;
+            if x < MAX_LMEM / 0x1F {
+                // Multiplication cannot overflow, multiply first for precision
+                (x * m_full) >> e_neg
+            } else if (x >> e_neg) < MAX_LMEM / 0x1F {
+                // Cannot overflow after shift
+                (x >> e_neg) * m_full
+            } else {
+                // Real overflow
+                MAX_LMEM
+            }
         }
     }
 
@@ -859,6 +991,9 @@ impl GC {
         // l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
         let ptr_size = std::mem::size_of::<*const ()>() as isize;
         let mut work2do = self.apply_param(STEPMUL, stepsize / ptr_size);
+        let initial_work2do = work2do;
+        
+
         
         // int fast = (work2do == 0);
         let fast = work2do == 0;
@@ -896,6 +1031,7 @@ impl GC {
         }
 
         // Set debt for next step (like Lua 5.5 incstep)
+
         if self.gc_state == GcState::Pause {
             self.set_pause();
         } else {
@@ -903,6 +1039,7 @@ impl GC {
             // Set positive debt = buffer before next GC
             self.set_debt(stepsize);
         }
+
     }
 
     /// Single GC step (like singlestep in Lua 5.5)
@@ -960,7 +1097,7 @@ impl GC {
             GcState::CallFin => {
                 // In Lua 5.5, this would call finalizers if tobefnz is not empty
                 // For now, we immediately transition to Pause
-                // TODO: Implement proper finalizer calling
+                // The actual finalization happens via pending_actions processed by the VM
                 self.gc_state = GcState::Pause;
                 StepResult::Pause
             }
@@ -1089,6 +1226,8 @@ impl GC {
                         // Only mark white strings (fixed are gray, so naturally skipped)
                         if s.header.is_white() {
                             s.header.make_black(); // Strings are leaves
+                            // Update gc_marked for strings (they don't go through gray list)
+                            self.gc_marked += s.size() as isize;
                         }
                     }
                 }
@@ -1099,6 +1238,8 @@ impl GC {
                         // Binaries are leaves - mark black directly (but only if white)
                         if b.header.is_white() {
                             b.header.make_black();
+                            // Update gc_marked for binaries (they don't go through gray list)
+                            self.gc_marked += b.size() as isize;
                         }
                     }
                 }
@@ -1657,10 +1798,9 @@ impl GC {
         // Moving them to gray list effectively
         let grayagain = std::mem::take(&mut self.grayagain);
         for gc_id in grayagain {
-            self.mark_one(gc_id, pool);
-
-            // DRAIN GRAY IMMEDIATELY after each mark_one?
-            // Or just drain after all? Lua drains after all.
+            let size = self.mark_one(gc_id, pool);
+            // Update gc_marked for objects processed from grayagain
+            self.gc_marked += size;
         }
 
         // Propagate again to handle anything pushed by grayagain processing
@@ -1702,9 +1842,17 @@ impl GC {
     }
 
     /// Enter sweep phase (like entersweep in Lua 5.5)
-    pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
+    pub fn enter_sweep(&mut self, pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
+        
+        // Collect all object IDs at the start of sweep phase
+        // This avoids iterating through sparse Vec slots (capacity >> len)
+        // New objects created during sweep will have current_white, so won't be collected
+        self.sweep_ids = pool.gc_pool.iter().map(|(id, _)| id).collect();
+        self.sweep_target = self.sweep_ids.len();
+        
+
 
         let _old_white = self.current_white;
     }
@@ -1719,30 +1867,34 @@ impl GC {
         let mut count = 0;
         let other_white = 1 - self.current_white;
 
-        // Get current total slots (may grow during sweep if new objects are allocated)
-        // In Lua 5.5, sweepgc iterates through linked list which naturally includes all objects
-        // Here we must re-check capacity to handle objects allocated during sweep
-        let current_total_slots = pool.gc_pool.capacity();
+        // Use sweep_ids collected at start of sweep phase
+        // This avoids iterating through sparse Vec slots
+        let sweep_end = self.sweep_target;
 
         let mut dead_ids = Vec::new();
         let mut to_finalize = Vec::new();
 
-        // Continue from where we left off (like Lua's sweepgc pointer)
-        // Sweep through Vec slots directly (some may be None)
-        while self.sweep_index < current_total_slots && count < max_sweep {
-            let slot_index = self.sweep_index as u32;
+        // Continue from where we left off in sweep_ids
+        while self.sweep_index < sweep_end && count < max_sweep {
+            let gc_id = self.sweep_ids[self.sweep_index];
 
-            // Check if this slot has an object
-            if let Some(obj) = pool.gc_pool.get_mut(slot_index) {
+            // Check if this object still exists (it might have been collected already)
+            if let Some(obj) = pool.gc_pool.get_mut(gc_id.index()) {
                 // Check if object is dead (other white and not fixed)
                 if !obj.header.is_fixed() && obj.header.is_dead(other_white) {
                     // Dead object - mark for removal or finalization
-                    let gc_id = obj.trans_to_gcid(slot_index);
-
+                    
                     // Check if object needs finalization (__gc metamethod)
-                    if self.needs_finalization(gc_id, pool) {
-                        // TODO: Check if already finalized (FINALIZED flag)
-                        // For now, add all objects with __gc to finalization list
+                    // Also check if it's already been finalized (FINALIZED flag)
+                    let already_finalized = obj.header.to_finalize();
+                    let needs_fin = !already_finalized && self.needs_finalization(gc_id, pool);
+                    if needs_fin {
+                        // Mark object as pending finalization (FINALIZED flag)
+                        // This prevents __gc from being called twice
+                        if let Some(obj) = pool.get_mut(gc_id) {
+                            obj.header.set_finalized();
+                        }
+                        
                         to_finalize.push(gc_id);
 
                         // Resurrect object: mark it and all its references (including metatable)
@@ -1767,30 +1919,45 @@ impl GC {
             }
 
             self.sweep_index += 1;
-            count += 1; // Count every slot, not just objects, to avoid infinite loops
+            count += 1;
         }
 
         // Add to pending actions
         self.pending_actions.to_finalize.extend(to_finalize);
 
         // Actually remove dead objects (those without finalizers)
+        // BUT: filter out any objects that were resurrected by mark_one during finalization setup
+        // This can happen when a dead object's metatable was collected before the object with __gc
         // Lua 5.5 lmem.c luaM_free_:
         //   g->GCdebt += cast(l_mem, osize);
         // 释放时增加GCdebt，不修改GCtotalbytes！
         // 不变量：真实内存 = GCtotalbytes - GCdebt
         // 释放时：debt增加size，totalbytes不变，所以真实内存减少size
+        let dead_count = dead_ids.len();
+        let mut freed_bytes = 0usize;
         for gc_id in &dead_ids {
-            let size = pool.remove(*gc_id);
-            if size > 0 {
-                self.gc_debt += size as isize;  // 释放增加debt
-                self.stats.bytes_freed += size;
-                self.stats.objects_collected += 1;
+            // Check if the object was resurrected (no longer dead)
+            let still_dead = if let Some(obj) = pool.get(*gc_id) {
+                obj.header.is_dead(other_white)
+            } else {
+                false // Already removed somehow
+            };
+            
+            if still_dead {
+                let size = pool.remove(*gc_id);
+                if size > 0 {
+                    self.gc_debt += size as isize;  // 释放增加debt
+                    self.stats.bytes_freed += size;
+                    self.stats.objects_collected += 1;
+                    freed_bytes += size;
+                }
             }
         }
+        
+        let _ = (dead_count, freed_bytes); // suppress unused warnings
 
-        // Return true if we've reached the end of all current slots
-        // Note: new objects may be allocated after this sweep_step, so we check again next time
-        self.sweep_index >= current_total_slots
+        // Return true if we've reached the sweep target (set at start of sweep phase)
+        self.sweep_index >= sweep_end
     }
 
     pub fn set_pause(&mut self) {
@@ -1805,6 +1972,7 @@ impl GC {
         let threshold = self.apply_param(PAUSE, self.gc_marked);
         let real_bytes = self.total_bytes - self.gc_debt;  // gettotalbytes
         let mut debt = threshold - real_bytes;
+        
         if debt < 0 {
             debt = 0; // Don't allow negative debt after pause
         }
@@ -1962,30 +2130,69 @@ impl GC {
     }
 
     /// Set minor debt for generational mode
+    /// Port of Lua 5.5's setminordebt:
+    /// ```c
+    /// static void setminordebt (global_State *g) {
+    ///   luaE_setdebt(g, applygcparam(g, MINORMUL, g->GCmajorminor));
+    /// }
+    /// ```
     fn set_minor_debt(&mut self) {
-        // Use gc_marked as base if gc_majorminor is 0 (not yet set)
+        // Use gc_majorminor as base (number of bytes from last major collection)
+        // If not set yet, use a reasonable default
         let base = if self.gc_majorminor > 0 {
             self.gc_majorminor
         } else {
-            self.gc_marked.max(1024 * 1024) // Reasonable default: 1MB
+            // Use current gc_marked or a minimum base
+            self.gc_marked.max(64 * 1024) // 64KB minimum
         };
         let debt = self.apply_param(MINORMUL, base);
-        self.set_debt(-debt); // Negative = credit
+        self.set_debt(debt);
     }
 
-    /// Young collection for generational mode (placeholder)
+    /// Young collection for generational mode
+    /// Port of Lua 5.5's youngcollection:
+    /// ```c
+    /// static void youngcollection (lua_State *L, global_State *g) {
+    ///   lua_assert(g->gcstate == GCSpropagate);
+    ///   if (g->firstold1) {
+    ///     markold(g, g->firstold1, g->reallyold);
+    ///     g->firstold1 = NULL;
+    ///   }
+    ///   markold(g, g->finobj, g->finobjrold);
+    ///   markold(g, g->tobefnz, NULL);
+    ///   atomic(L);  /* will lose 'g->marked' */
+    ///   /* sweep nursery and get a pointer to its last live element */
+    ///   g->gcstate = GCSswpallgc;
+    ///   psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
+    ///   ...
+    ///   finishgencycle(L, g);
+    /// }
+    /// ```
     fn young_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         self.stats.minor_collections += 1;
 
-        // For now, just do a simple mark-sweep of young objects
+        // Start collection: mark roots
         self.restart_collection(roots, pool);
+        self.gc_state = GcState::Propagate;
 
+        // Propagate all marks
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
 
-        self.sweep_step(pool, true);
+        // CRITICAL: Call atomic phase!
+        // This flips current_white so sweep can identify dead objects
+        self.atomic(roots, pool);
 
+        // Enter sweep phase
+        self.enter_sweep(pool);
+        
+        // Complete sweep (fast mode = sweep everything)
+        while !self.sweep_step(pool, true) {
+            // Continue sweeping until complete
+        }
+
+        // Return to pause state, ready for next cycle
         self.gc_state = GcState::Pause;
     }
 

@@ -736,7 +736,27 @@ impl LuaVM {
         // Fast path: check if gc_debt > 0
         // Once debt becomes positive, trigger GC step
         if self.gc.gc_debt <= 0 {
-            self.check_gc_step();
+            // Skip if GC is stopped by user
+            if self.gc.gc_stopped {
+                return false;
+            }
+            
+            // Run GC steps until debt becomes positive or we complete a cycle
+            // This ensures GC makes progress even with small allocations
+            let mut steps = 0;
+            let max_steps = 100; // Limit to avoid infinite loops
+            
+            while self.gc.gc_debt <= 0 && steps < max_steps {
+                self.check_gc_step();
+                steps += 1;
+                
+                // If we completed a cycle (returned to Pause), we're done
+                // set_pause will set appropriate debt
+                if self.gc.gc_state == crate::GcState::Pause && steps > 1 {
+                    break;
+                }
+            }
+            
             return true;
         }
 

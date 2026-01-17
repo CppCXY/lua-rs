@@ -9,6 +9,7 @@ use std::rc::Rc;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event, get_metatable};
+use crate::gc::{code_param, decode_param};
 use crate::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use require::lua_require;
 
@@ -667,6 +668,11 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // LUA_GCCOUNT: returns memory in use in Kbytes
             // Lua 5.5 lapi.c line 1222: res = gettotalbytes(g);
             // gettotalbytes(g) = (g)->GCtotalbytes - (g)->GCdebt (lstate.h line 435)
+            
+            // CRITICAL: Check GC before returning count
+            // In Lua 5.5, luaC_checkGC is called on every API entry
+            l.check_gc()?;
+            
             let gc = &l.vm_mut().gc;
             let real_bytes = gc.total_bytes - gc.gc_debt;  // gettotalbytes
             let kb = real_bytes.max(0) as f64 / 1024.0;
@@ -733,8 +739,9 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             l.vm_mut().gc.gc_stopped = false;
 
             // luaE_setdebt(g, g->GCdebt - n);
+            // Use saturating subtraction to avoid overflow
             let old_debt = l.vm_mut().gc.gc_debt;
-            l.vm_mut().gc.set_debt(old_debt - n);
+            l.vm_mut().gc.set_debt(old_debt.saturating_sub(n));
 
             // luaC_condGC(L, (void)0, work = 1);
             // Expands to: if (G(L)->GCdebt <= 0) { luaC_step(L); work = 1; }
@@ -832,12 +839,14 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // Get old value and potentially set new value
             let old_value = {
                 let vm = l.vm_mut();
-                let old = vm.gc.gc_params[param_idx];
+                // Decode the compressed parameter to get actual percentage
+                let old = decode_param(vm.gc.gc_params[param_idx]);
 
                 // Set new value if provided
                 if let Some(new_val) = arg3 {
                     if let Some(new_int) = new_val.as_integer() {
-                        vm.gc.gc_params[param_idx] = new_int as i32;
+                        // Encode the new value using Lua 5.5's compressed format
+                        vm.gc.gc_params[param_idx] = code_param(new_int as u32);
                     }
                 }
 

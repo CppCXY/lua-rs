@@ -1485,17 +1485,10 @@ impl LuaState {
             // Get __gc metamethod
             if let Some(gc_method) = get_metamethod_event(self, &obj_value, "__gc") {
                 // Call __gc(obj) using pcall to handle errors safely
-                let result = self.pcall(gc_method, vec![obj_value]);
-
-                // Ignore errors in finalizers (as per Lua 5.x behavior)
-                // The error is silently dropped to prevent cascade failures
-                if let Ok((success, _)) = result {
-                    if !success {
-                        return Err(
-                            self.error(format!("error in __gc finalizer for object {:?}", gc_id))
-                        );
-                    }
-                }
+                // In Lua 5.x, errors in finalizers are silently ignored
+                // (the error message is discarded to prevent cascade failures)
+                let _result = self.pcall(gc_method, vec![obj_value]);
+                // Silently ignore any errors
             }
         }
 
