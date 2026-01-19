@@ -563,18 +563,17 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             match l.pcall(repl_value.clone(), args) {
                 Ok((success, results)) => {
                     if success && !results.is_empty() {
-                        let replacement = if results[0].is_nil() {
-                            s_str[m.start..m.end].to_string()
+                        if results[0].is_nil() {
+                            result.push_str(&s_str[m.start..m.end]);
                         } else if let Some(s) = results[0].as_str() {
-                            s.to_string()
+                            result.push_str(s);
                         } else if let Some(n) = results[0].as_integer() {
-                            n.to_string()
+                            result.push_str(&n.to_string());
                         } else if let Some(n) = results[0].as_number() {
-                            n.to_string()
+                            result.push_str(&n.to_string());
                         } else {
-                            s_str[m.start..m.end].to_string()
-                        };
-                        result.push_str(&replacement);
+                            result.push_str(&s_str[m.start..m.end]);
+                        }
                     } else {
                         return Err(l.error(format!(
                             "error calling replacement function: {}",
