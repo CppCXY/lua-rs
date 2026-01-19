@@ -306,63 +306,13 @@ pub fn lookup_from_metatable(
         // Get __index metamethod
         let tm = get_index_metamethod(lua_state, &t)?;
 
-        // If __index is a function, call it
+        // If __index is a function, call it using call_tm_res
         if tm.is_function() {
-            // Call metamethod: tm(t, key) -> result
-            // Similar to call_metamethod in metamethod.rs
-
-            // CRITICAL: Save current stack_top to restore later
-            let saved_top = lua_state.get_top();
-            let func_pos = saved_top;
-
-            // Ensure stack has enough space for function call
-            let needed_size = func_pos + 3;
-            if let Err(_) = lua_state.grow_stack(needed_size) {
-                return None;
+            // Use call_tm_res which correctly handles stack and Protect pattern
+            match crate::lua_vm::execute::metamethod::call_tm_res(lua_state, tm, t, *key) {
+                Ok(result) => return Some(result),
+                Err(_) => return None,
             }
-
-            // Push function and arguments onto stack
-            {
-                let stack = lua_state.stack_mut();
-                stack[func_pos] = tm;
-                stack[func_pos + 1] = t;
-                stack[func_pos + 2] = *key;
-            }
-            lua_state.set_top(func_pos + 3);
-
-            let caller_depth = lua_state.call_depth();
-            let new_base = func_pos + 1;
-
-            // Push frame and execute
-            match lua_state.push_frame(tm, new_base, 2, 1) {
-                Ok(_) => {}
-                Err(_) => {
-                    // Restore stack_top on error
-                    lua_state.set_top(saved_top);
-                    return None;
-                }
-            }
-
-            match crate::lua_vm::execute::lua_execute_until(lua_state, caller_depth) {
-                Ok(_) => {}
-                Err(_) => {
-                    // Restore stack_top on error
-                    lua_state.set_top(saved_top);
-                    return None;
-                }
-            }
-
-            // Get result from func_pos (where function was)
-            let result = {
-                let stack = lua_state.stack_mut();
-                stack[func_pos]
-            };
-
-            // CRITICAL: Restore saved stack_top, not func_pos
-            // This ensures caller's frame.top is not corrupted
-            lua_state.set_top(saved_top);
-
-            return Some(result);
         }
 
         // __index is a table, try to access tm[key]
