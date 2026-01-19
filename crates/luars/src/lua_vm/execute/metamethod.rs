@@ -56,7 +56,7 @@ pub fn try_unary_tm(
 
     if let Some(mm) = metamethod {
         // Call metamethod: mm(operand, operand) -> result
-        let result = call_metamethod(lua_state, mm, operand, operand)?;
+        let result = call_tm_res(lua_state, mm, operand, operand)?;
 
         // Store result
         let stack = lua_state.stack_mut();
@@ -303,6 +303,26 @@ pub fn handle_mmbink(
 
 /// Try binary metamethod
 /// Corresponds to luaT_trybinTM in ltm.c
+/// Like Lua 5.5's luaT_trybinTM:
+/// ```c
+/// void luaT_trybinTM (lua_State *L, const TValue *p1, const TValue *p2,
+///                     StkId res, TMS event) {
+///   if (l_unlikely(callbinTM(L, p1, p2, res, event) < 0)) {
+///     switch (event) {
+///       case TM_BAND: case TM_BOR: case TM_BXOR:
+///       case TM_SHL: case TM_SHR: case TM_BNOT: {
+///         if (ttisnumber(p1) && ttisnumber(p2))
+///           luaG_tointerror(L, p1, p2);
+///         else
+///           luaG_opinterror(L, p1, p2, "perform bitwise operation on");
+///       }
+///       /* calls never return, but to avoid warnings: *//* FALLTHROUGH */
+///       default:
+///         luaG_opinterror(L, p1, p2, "perform arithmetic on");
+///     }
+///   }
+/// }
+/// ```
 fn try_bin_tm(
     lua_state: &mut LuaState,
     p1: LuaValue,
@@ -310,15 +330,15 @@ fn try_bin_tm(
     tm: TmKind,
 ) -> LuaResult<LuaValue> {
     let tm_name = tm.name();
-
+    
     // Try to get metamethod from p1, then p2
     let metamethod = get_binop_metamethod(lua_state, &p1, tm_name)
         .or_else(|| get_binop_metamethod(lua_state, &p2, tm_name));
 
     if let Some(mm) = metamethod {
         // Call metamethod with (p1, p2) as arguments
-        call_metamethod(lua_state, mm, p1, p2)
-    } else {
+        call_tm_res(lua_state, mm, p1, p2)
+    } else{
         // No metamethod found, return error
         let msg = match tm {
             TmKind::Band
@@ -378,64 +398,53 @@ fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue>
 
 /// Call a metamethod with two arguments
 /// Based on Lua 5.5's luaT_callTMres - returns the result value directly
-pub fn call_metamethod(
+/// Port of Lua 5.5's luaT_callTMres from ltm.c:119
+/// ```c
+/// lu_byte luaT_callTMres (lua_State *L, const TValue *f, const TValue *p1,
+///                         const TValue *p2, StkId res) {
+///   ptrdiff_t result = savestack(L, res);
+///   StkId func = L->top.p;
+///   setobj2s(L, func, f);  /* push function (assume EXTRA_STACK) */
+///   setobj2s(L, func + 1, p1);  /* 1st argument */
+///   setobj2s(L, func + 2, p2);  /* 2nd argument */
+///   L->top.p += 3;
+///   /* metamethod may yield only when called from Lua code */
+///   if (isLuacode(L->ci))
+///     luaD_call(L, func, 1);
+///   else
+///     luaD_callnoyield(L, func, 1);
+///   res = restorestack(L, result);
+///   setobjs2s(L, res, --L->top.p);  /* move result to its place */
+///   return ttypetag(s2v(res));  /* return tag of the result */
+/// }
+/// ```
+pub fn call_tm_res(
     lua_state: &mut LuaState,
     metamethod: LuaValue,
     arg1: LuaValue,
     arg2: LuaValue,
 ) -> LuaResult<LuaValue> {
-    // Like Lua's luaT_callTMres:
-    // 1. Save result position offset
-    // 2. Push function and args at top.p
-    // 3. Call with luaD_call(L, func, 1) - nresults=1
-    // 4. Move result from top-1 to result position
-
-    // **CRITICAL**: Like Lua 5.5's Protect macro does `L->top.p = ci->top.p`
-    // We must set stack_top to the caller frame's top limit BEFORE pushing arguments.
-    // This ensures push_value won't overwrite active registers in the caller frame.
-    // Caller's registers are in [base, top), so pushing from top is safe.
-    let caller_frame_idx = lua_state.call_depth() - 1;
-    let caller_frame_top = lua_state.get_call_info(caller_frame_idx).top;
-    lua_state.set_top(caller_frame_top);
-
+    // Use current stack top - caller should have set up protection
     let func_pos = lua_state.get_top();
 
-    // Push function and arguments (now safe - won't overwrite caller's registers)
+    // Push function and arguments
     lua_state.push_value(metamethod)?;
     lua_state.push_value(arg1)?;
     lua_state.push_value(arg2)?;
 
-    // CRITICAL: Before calling another function, we must ensure the CALLER's frame PC
-    // is properly saved. This is what Lua 5.5's savepc(ci) does before luaD_call.
-    // Without this, when the callee returns, the caller will resume from the wrong PC.
-    // Note: The PC saving is already handled by execute_frame's loop, but we need
-    // to be extra careful here since we're recursively calling lua_execute.
-
-    // Now call: luaD_call pushes a frame, executes, pops frame, and places result at func_pos
-    // Our call_c_function does exactly this for C functions
-    // For Lua functions, we need similar treatment
-
+    // Call the metamethod
     if metamethod.is_cfunction() {
-        // C function: call_c_function handles everything
         call::call_c_function(lua_state, func_pos, 2, 1)?;
     } else if let Some(func_body) = metamethod.as_lua_function() {
         let is_lua = func_body.is_lua_function();
 
         if is_lua {
-            // Lua function: push frame and execute ONLY THIS FRAME
             let new_base = func_pos + 1;
-
-            // Record depth before pushing frame
             let caller_depth = lua_state.call_depth();
 
             lua_state.push_frame(metamethod, new_base, 2, 1)?;
-
-            // CRITICAL: Execute ONLY the new frame using lua_execute_until!
-            // This matches Lua 5.5's luaD_call behavior - execute only the called function
-            // After the called frame returns, we should be back at caller_depth
             lua_execute_until(lua_state, caller_depth)?;
         } else {
-            // GC C function
             call_c_function(lua_state, func_pos, 2, 1)?;
         }
     } else {
@@ -445,15 +454,70 @@ pub fn call_metamethod(
     // Get result from func_pos (where return handler placed it)
     let result = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
 
-    // Don't clean up the stack here - the caller (handle_mmbin) will manage it
-    // Calling set_top(func_pos) here would destroy values stored at higher positions
-
-    // **CRITICAL**: Check GC after metamethod call (like Lua 5.5 does after function calls)
-    // Without this, repeated table allocations in __add cause memory to grow indefinitely,
-    // making allocations progressively slower
-    lua_state.check_gc()?;
+    // Clean up stack - result is already copied
+    lua_state.set_top(func_pos);
 
     Ok(result)
+}
+
+/// Port of Lua 5.5's luaT_callTM from ltm.c:103
+/// Calls metamethod without expecting a return value
+/// ```c
+/// void luaT_callTM (lua_State *L, const TValue *f, const TValue *p1,
+///                   const TValue *p2, const TValue *p3) {
+///   StkId func = L->top.p;
+///   setobj2s(L, func, f);  /* push function (assume EXTRA_STACK) */
+///   setobj2s(L, func + 1, p1);  /* 1st argument */
+///   setobj2s(L, func + 2, p2);  /* 2nd argument */
+///   setobj2s(L, func + 3, p3);  /* 3rd argument */
+///   L->top.p = func + 4;
+///   /* metamethod may yield only when called from Lua code */
+///   if (isLuacode(L->ci))
+///     luaD_call(L, func, 0);
+///   else
+///     luaD_callnoyield(L, func, 0);
+/// }
+/// ```
+pub fn call_tm(
+    lua_state: &mut LuaState,
+    metamethod: LuaValue,
+    arg1: LuaValue,
+    arg2: LuaValue,
+    arg3: LuaValue,
+) -> LuaResult<()> {
+    let func_pos = lua_state.get_top();
+
+    // Push function and 3 arguments
+    lua_state.push_value(metamethod)?;
+    lua_state.push_value(arg1)?;
+    lua_state.push_value(arg2)?;
+    lua_state.push_value(arg3)?;
+
+    // Call with 0 results (nresults=0)
+    if metamethod.is_cfunction() {
+        call::call_c_function(lua_state, func_pos, 3, 0)?;
+    } else if let Some(func_body) = metamethod.as_lua_function() {
+        let is_lua = func_body.is_lua_function();
+
+        if is_lua {
+            let new_base = func_pos + 1;
+            let caller_depth = lua_state.call_depth();
+
+            lua_state.push_frame(metamethod, new_base, 3, 0)?;
+            lua_execute_until(lua_state, caller_depth)?;
+        } else {
+            call_c_function(lua_state, func_pos, 3, 0)?;
+        }
+    } else {
+        return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
+    }
+
+    // No return value to retrieve
+    // Clean up stack
+    lua_state.set_top(func_pos);
+
+    lua_state.check_gc()?;
+    Ok(())
 }
 
 /// Try comparison metamethod (for Lt and Le)
@@ -472,8 +536,8 @@ pub fn try_comp_tm(
 
     if let Some(mm) = metamethod {
         // Call metamethod and convert result to boolean
-        let result = call_metamethod(lua_state, mm, p1, p2)?;
-        // GC check is already done in call_metamethod
+        let result = call_tm_res(lua_state, mm, p1, p2)?;
+        // GC check is already done in luaT_callTMres
         Ok(Some(!result.is_falsy()))
     } else {
         Ok(None)
@@ -509,7 +573,7 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
         });
 
         if let Some(metamethod) = tm {
-            let result = call_metamethod(lua_state, metamethod, t1, t2)?;
+            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
             return Ok(!result.is_falsy());
         } else {
             return Ok(false);
@@ -532,7 +596,7 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
         });
 
         if let Some(metamethod) = tm {
-            let result = call_metamethod(lua_state, metamethod, t1, t2)?;
+            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
             return Ok(!result.is_falsy());
         } else {
             return Ok(false);

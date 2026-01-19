@@ -96,11 +96,6 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
         let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
         let mut base = lua_state.get_frame_base(frame_idx);
 
-        // NOTE: Do NOT force stack_top = frame_top here!
-        // stack_top should remain where luaD_precall left it (after all arguments including vararg)
-        // frame_top (ci->top) is the MAXIMUM, not the current top
-        // Lua 5.5's luaV_execute does NOT modify L->top at entry
-
         // Pre-grow stack
         let needed_size = base + chunk.max_stack_size;
         lua_state.grow_stack(needed_size)?;
@@ -1572,7 +1567,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             if let Some(mm) = helper::get_len_metamethod(lua_state, &rb) {
                                 // Call metamethod with Protect pattern
                                 save_pc!();
-                                let result = metamethod::call_metamethod(lua_state, mm, rb, rb)?;
+                                let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
                                 restore_state!();
                                 lua_state.stack_mut()[base + a] = result;
                             } else {
@@ -1589,7 +1584,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         // Other types: try __len metamethod
                         if let Some(mm) = helper::get_len_metamethod(lua_state, &rb) {
                             save_pc!();
-                            let result = metamethod::call_metamethod(lua_state, mm, rb, rb)?;
+                            let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
                             restore_state!();
                             lua_state.stack_mut()[base + a] = result;
                         } else {
@@ -1630,7 +1625,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                                 {
                                     save_pc!();
                                     let result =
-                                        metamethod::call_metamethod(lua_state, mm, v1, v2)?;
+                                        metamethod::call_tm_res(lua_state, mm, v1, v2)?;
                                     restore_state!();
 
                                     // Store result back and reduce count

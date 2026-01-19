@@ -141,7 +141,11 @@ pub fn exec_settable(
 
     // Slow path: has __newindex or not a table
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    helper::store_to_metatable(lua_state, &ra, &rb, val)?;
+    helper::finishset(lua_state, &ra, &rb, val)?;
+
+    // CRITICAL: Restore top after metamethod call
+    // The metamethod may have changed stack_top, so we need to reset it
+    lua_state.set_top(call_info_top);
 
     // Verify base hasn't changed
     let new_base = lua_state.get_frame_base(frame_idx);
@@ -255,7 +259,7 @@ pub fn exec_seti(
             // Slow path: has __newindex metamethod
             let key = LuaValue::integer(b as i64);
             lua_state.set_frame_pc(frame_idx, *pc as u32);
-            helper::store_to_metatable(lua_state, &ra, &key, value)?;
+            helper::finishset(lua_state, &ra, &key, value)?;
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {
                 return Err(lua_state.error("base changed in SETI".to_string()));
@@ -265,7 +269,7 @@ pub fn exec_seti(
         // Not a table, use __newindex metamethod
         let key = LuaValue::integer(b as i64);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        helper::store_to_metatable(lua_state, &ra, &key, value)?;
+        helper::finishset(lua_state, &ra, &key, value)?;
         let new_base = lua_state.get_frame_base(frame_idx);
         if new_base != base {
             return Err(lua_state.error("base changed in SETI".to_string()));
@@ -390,7 +394,7 @@ pub fn exec_setfield(
 
     // Slow path: has __newindex or not a table
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    helper::store_to_metatable(lua_state, &ra, &key, value)?;
+    helper::finishset(lua_state, &ra, &key, value)?;
 
     let new_base = lua_state.get_frame_base(frame_idx);
     if new_base != base {
