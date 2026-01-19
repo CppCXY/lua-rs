@@ -345,7 +345,7 @@ impl ObjectPool {
     /// In Lua 5.5: "set2gray(o); /* they will be gray forever */"
     #[inline]
     pub fn fix_gc_object(&mut self, id: GcId) {
-        if let Some(gc) = self.gc_pool.get_mut(id.index()) {
+        if let Some(gc) = self.gc_pool.get_mut(id.index() as usize) {
             gc.header_mut().set_fixed();
             gc.header_mut().make_gray(); // Gray forever, like Lua 5.5
         }
@@ -530,29 +530,27 @@ impl ObjectPool {
     }
 
     pub fn get(&self, id: GcId) -> Option<&GcObject> {
-        self.gc_pool.get(id.index())
+        self.gc_pool.get(id.index() as usize)
     }
 
     pub fn get_mut(&mut self, id: GcId) -> Option<&mut GcObject> {
-        self.gc_pool.get_mut(id.index())
+        self.gc_pool.get_mut(id.index() as usize)
     }
 
     #[inline]
-    pub fn remove(&mut self, id: GcId) -> usize {
+    pub fn remove(&mut self, id: GcId) {
         match id.gc_type() {
             GcObjectKind::String => {
-                if let Some(s_object) = self.gc_pool.get(id.index())
+                if let Some(s_object) = self.gc_pool.get(id.index() as usize)
                     && let GcObject::String(s) = &s_object
                 {
                     let ptr = s_object.as_str_ptr().unwrap();
                     // Remove from string interner first
                     self.strings.remove_dead_intern(ptr, &s.data);
-                    return self.gc_pool.free(id.index());
+                    self.gc_pool.free(id);
                 }
-
-                0
             }
-            _ => self.gc_pool.free(id.index()),
+            _ => self.gc_pool.free(id),
         }
     }
 }

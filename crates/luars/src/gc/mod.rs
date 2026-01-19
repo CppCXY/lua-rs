@@ -410,38 +410,11 @@ impl GC {
     /// Lua 5.5内存分配：lmem.c中 g->GCdebt -= size (分配减少debt)
     /// 维护不变量：GCtotalbytes = 实际分配字节 + GCdebt
     #[inline]
-    pub fn track_object(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
-        // Objects are already created as WHITE by ObjectPool.create_*()
-        // We do NOT modify color here - this is ONLY for memory accounting
-        //
-        // The Lua 5.5 way:
-        // 1. luaC_newobj() creates object as WHITE (current white)
-        // 2. Object is linked to allgc list
-        // 3. If stored to stack/table/etc, it's immediately reachable from roots
-        // 4. Next GC mark phase will mark it from roots
-        // 5. If NOT stored anywhere, it becomes garbage in current cycle (correct!)
-        //
-        // Our previous code INCORRECTLY marked objects as GRAY/BLACK here,
-        // which violates Lua's design and prevents collection of unreachable objects.
-
-        // Use the size stored in GcObject (calculated at creation time)
-        // This ensures perfect consistency with sweep deallocation
-        let size = if let Some(obj) = pool.gc_pool.get(gc_id.index()) {
-            obj.size() as usize
-        } else {
-            0
-        };
-
+    pub fn track_size(&mut self, size: usize) {
         let size_signed = size as isize;
         
         // Lua 5.5 lmem.c luaM_malloc_:
-        //   g->GCdebt -= cast(l_mem, size);
-        // 只修改GCdebt，不修改GCtotalbytes！
-        // 不变量：真实内存 = GCtotalbytes - GCdebt
-        // 分配时：debt减少size，totalbytes不变，所以真实内存增加size
         self.gc_debt -= size_signed;  // 分配减少debt
-        // total_bytes保持不变！只在set_debt时调整
-        
         self.stats.bytes_allocated += size;
     }
 

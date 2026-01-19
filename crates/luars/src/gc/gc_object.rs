@@ -9,7 +9,7 @@ use crate::{
 
 /// Cached upvalue - stores both ID and direct pointer for fast access
 /// Mimics Lua C's cl->upvals[i] which is a direct pointer to UpValue
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct CachedUpvalue {
     /// Direct pointer to the Upvalue object for fast access
     /// SAFETY: This pointer is valid as long as the Upvalue exists in ObjectPool
@@ -755,6 +755,14 @@ impl GcPool {
     #[inline]
     pub fn capacity(&self) -> usize {
         self.gc_list.capacity()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&GcObject> {
+        self.gc_list.get(index)
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut GcObject> {
+        self.gc_list.get_mut(index)
     }
 }
 
