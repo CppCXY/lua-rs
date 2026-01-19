@@ -1259,6 +1259,28 @@ impl LuaState {
 
             let func = self.stack[0];
 
+            // CRITICAL: Close all open upvalues in the function
+            // Open upvalues point to the parent thread's stack, which uses different indices
+            // For now, we close them to avoid cross-thread stack access issues
+            // TODO: Proper solution is to store ThreadId in Upvalue::Open
+            if let Some(func_body) = func.as_lua_function() {
+                let upvalue_ids: Vec<UpvalueId> = func_body.cached_upvalues().iter().map(|u| u.id).collect();
+                unsafe {
+                    let vm = &mut *self.vm;
+                    for upval_id in upvalue_ids {
+                        if let Some(upval) = vm.object_pool.get_upvalue(upval_id) {
+                            if let Some(stack_idx) = upval.get_stack_index() {
+                                // Get value from main thread's stack
+                                let value = vm.main_state.stack.get(stack_idx).copied().unwrap_or(LuaValue::nil());
+                                if let Some(upval_mut) = vm.object_pool.get_upvalue_mut(upval_id) {
+                                    upval_mut.close(value);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Push arguments
             for arg in args {
                 self.stack.push(arg);
@@ -1289,19 +1311,25 @@ impl LuaState {
         } else {
             // Resuming after yield
             // The yield function's frame is still on the stack, we need to:
-            // 1. Pop the yield frame
-            // 2. Place resume arguments as yield's return values
-            // 3. Continue execution from the caller's frame
+            // 1. Close upvalues for the yield frame
+            // 2. Pop the yield frame
+            // 3. Place resume arguments as yield's return values
+            // 4. Continue execution from the caller's frame
 
             // Get the yield frame info before popping
-            let (func_idx, _nresults) = if let Some(frame) = self.current_frame() {
+            let (func_idx, frame_base, _nresults) = if let Some(frame) = self.current_frame() {
                 // func_idx is base - 1 (where the yield function was called)
                 let func_idx = if frame.base > 0 { frame.base - 1 } else { 0 };
+                let frame_base = frame.base;
                 let nresults = frame.nresults;
-                (func_idx, nresults)
+                (func_idx, frame_base, nresults)
             } else {
                 return Err(self.error("cannot resume: no frame".to_string()));
             };
+
+            // CRITICAL: Close upvalues before popping the frame
+            // This ensures open upvalues don't point to invalid stack indices
+            self.close_upvalues(frame_base);
 
             // Pop the yield frame
             self.pop_frame();

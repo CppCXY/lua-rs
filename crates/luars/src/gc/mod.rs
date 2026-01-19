@@ -991,10 +991,6 @@ impl GC {
         // l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
         let ptr_size = std::mem::size_of::<*const ()>() as isize;
         let mut work2do = self.apply_param(STEPMUL, stepsize / ptr_size);
-        let initial_work2do = work2do;
-        
-
-        
         // int fast = (work2do == 0);
         let fast = work2do == 0;
 
