@@ -733,28 +733,36 @@ impl LuaVM {
     /// OPTIMIZATION: Fast path is inlined, slow path is separate function
     #[inline(always)]
     fn check_gc(&mut self) -> bool {
-        // Fast path: check if gc_debt > 0
-        // Once debt becomes positive, trigger GC step
+        // Port of Lua 5.5's luaC_condGC macro:
+        // #define luaC_condGC(L,pre,pos) \
+        //   { if (G(L)->GCdebt <= 0) { pre; luaC_step(L); pos;}; }
+        //
+        // CRITICAL: Only call GC step ONCE, not in a loop!
+        // luaC_step itself (via incstep) contains the logic to do enough work
+        
         if self.gc.gc_debt <= 0 {
             // Skip if GC is stopped by user
             if self.gc.gc_stopped {
                 return false;
             }
             
-            // Run GC steps until debt becomes positive or we complete a cycle
-            // This ensures GC makes progress even with small allocations
-            let mut steps = 0;
-            let max_steps = 100; // Limit to avoid infinite loops
+            // OPTIMIZATION: Only collect roots when needed!
+            // Lua 5.5 only accesses roots in specific states:
+            // - Pause: restartcollection() marks roots
+            // - EnterAtomic: atomic() marks roots again
+            // Other states (Propagate, Sweep, etc.) don't need roots!
+            let need_roots = matches!(
+                self.gc.gc_state, 
+                crate::GcState::Pause | crate::GcState::EnterAtomic
+            );
             
-            while self.gc.gc_debt <= 0 && steps < max_steps {
-                self.check_gc_step();
-                steps += 1;
-                
-                // If we completed a cycle (returned to Pause), we're done
-                // set_pause will set appropriate debt
-                if self.gc.gc_state == crate::GcState::Pause && steps > 1 {
-                    break;
-                }
+            if need_roots {
+                let roots = self.collect_roots();
+                self.gc.step(&roots, &mut self.object_pool);
+            } else {
+                // Pass empty roots for states that don't need them
+                // This avoids expensive stack traversal on every GC step!
+                self.gc.step(&[], &mut self.object_pool);
             }
             
             return true;
@@ -765,10 +773,8 @@ impl LuaVM {
 
     /// Public method to force a GC step (for collectgarbage "step")
     pub fn check_gc_step(&mut self) {
-        // Collect roots for GC (like luaC_step in Lua 5.5)
+        // Always collect roots for explicit GC step calls
         let roots = self.collect_roots();
-
-        // Perform GC step with complete root set
         self.gc.step(&roots, &mut self.object_pool);
     }
 
@@ -819,7 +825,7 @@ impl LuaVM {
             .run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
 
         // Set pause for next cycle
-        self.gc.set_pause();
+        self.gc.set_pause(&mut self.object_pool);
     }
 
     /// Full GC cycle for generational mode (like fullgen in Lua 5.5)

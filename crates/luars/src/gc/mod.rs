@@ -1029,7 +1029,7 @@ impl GC {
         // Set debt for next step (like Lua 5.5 incstep)
 
         if self.gc_state == GcState::Pause {
-            self.set_pause();
+            self.set_pause(pool);
         } else {
             // Lua 5.5: luaE_setdebt(g, stepsize);
             // Set positive debt = buffer before next GC
@@ -1041,10 +1041,10 @@ impl GC {
     /// Single GC step (like singlestep in Lua 5.5)
     fn single_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool, fast: bool) -> StepResult {
         if self.gc_stopem {
-            return StepResult::Work(0); // Emergency stop
+            return StepResult::Work(0);
         }
 
-        self.gc_stopem = true; // Prevent reentrancy
+        self.gc_stopem = true;
 
         let result = match self.gc_state {
             GcState::Pause => {
@@ -1842,15 +1842,11 @@ impl GC {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
         
-        // Collect all object IDs at the start of sweep phase
-        // This avoids iterating through sparse Vec slots (capacity >> len)
+        // Collect all live object IDs at the start of sweep phase
+        // With IndexMap, iter() only visits actual objects (no None holes!)
         // New objects created during sweep will have current_white, so won't be collected
         self.sweep_ids = pool.gc_pool.iter().map(|(id, _)| id).collect();
         self.sweep_target = self.sweep_ids.len();
-        
-
-
-        let _old_white = self.current_white;
     }
 
     /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
@@ -1956,23 +1952,24 @@ impl GC {
         self.sweep_index >= sweep_end
     }
 
-    pub fn set_pause(&mut self) {
+    pub fn set_pause(&mut self, pool: &mut ObjectPool) {
         // Lua 5.5 lgc.c setpause:
         // l_mem threshold = applygcparam(g, PAUSE, g->GCmarked);
         // l_mem debt = threshold - gettotalbytes(g);
         // if (debt < 0) debt = 0;
         // luaE_setdebt(g, debt);
-        // 
-        // Key: threshold based on GCmarked (live bytes after collection), not total
-        // gettotalbytes(g) = GCtotalbytes - GCdebt
         let threshold = self.apply_param(PAUSE, self.gc_marked);
-        let real_bytes = self.total_bytes - self.gc_debt;  // gettotalbytes
+        let real_bytes = self.total_bytes - self.gc_debt;
         let mut debt = threshold - real_bytes;
         
         if debt < 0 {
-            debt = 0; // Don't allow negative debt after pause
+            debt = 0;
         }
         self.set_debt(debt);
+        
+        // With IndexMap, no need to compact - it has no empty slots!
+        // shrink_to_fit() only reduces memory overhead, doesn't affect iteration
+        pool.gc_pool.shrink_to_fit();
     }
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
     /// During marking phase, the invariant must be kept
@@ -2122,7 +2119,7 @@ impl GC {
         self.run_until_state(GcState::Pause, roots, pool);
 
         // set_pause uses total_bytes (actual memory after sweep) as base
-        self.set_pause();
+        self.set_pause(pool);
     }
 
     /// Set minor debt for generational mode

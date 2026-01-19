@@ -1,5 +1,7 @@
 // ============ GC Header ============
 
+use ahash::RandomState;
+use indexmap::IndexMap;
 use std::rc::Rc;
 
 use crate::{
@@ -67,18 +69,18 @@ impl CachedUpvalue {
 // ============ GC Constants (from Lua 5.5 lgc.h) ============
 // Object ages for generational GC
 // Uses 3 bits (0-7) - stored in bits 0-2 of marked field
-pub const G_NEW: u8 = 0;      // Created in current cycle
+pub const G_NEW: u8 = 0; // Created in current cycle
 pub const G_SURVIVAL: u8 = 1; // Created in previous cycle (survived one minor)
-pub const G_OLD0: u8 = 2;     // Marked old by forward barrier in this cycle
-pub const G_OLD1: u8 = 3;     // First full cycle as old
-pub const G_OLD: u8 = 4;      // Really old object (not to be visited in minor)
+pub const G_OLD0: u8 = 2; // Marked old by forward barrier in this cycle
+pub const G_OLD1: u8 = 3; // First full cycle as old
+pub const G_OLD: u8 = 4; // Really old object (not to be visited in minor)
 pub const G_TOUCHED1: u8 = 5; // Old object touched this cycle
 pub const G_TOUCHED2: u8 = 6; // Old object touched in previous cycle
 
 // Color bit positions in marked field
-pub const WHITE0BIT: u8 = 3;  // Object is white (type 0)
-pub const WHITE1BIT: u8 = 4;  // Object is white (type 1)
-pub const BLACKBIT: u8 = 5;   // Object is black
+pub const WHITE0BIT: u8 = 3; // Object is white (type 0)
+pub const WHITE1BIT: u8 = 4; // Object is white (type 1)
+pub const BLACKBIT: u8 = 5; // Object is black
 pub const FINALIZEDBIT: u8 = 6; // Object has been marked for finalization
 
 // Bit masks
@@ -104,7 +106,7 @@ pub const MASKGCBITS: u8 = MASKCOLORS | AGEBITS;
 #[repr(C)]
 pub struct GcHeader {
     pub marked: u8, // Color and age bits combined
-    pub size: u32,   // Size of the object in bytes (for memory tracking)
+    pub size: u32,  // Size of the object in bytes (for memory tracking)
 }
 
 impl Default for GcHeader {
@@ -124,12 +126,15 @@ impl GcHeader {
     /// Create a new header with given white bit and age G_NEW
     /// Port of lgc.c: luaC_white(g) which returns (currentwhite & WHITEBITS)
     /// combined with makewhite(g,x) which sets white color for new objects
-    /// 
+    ///
     /// **CRITICAL**: All new GC objects MUST use this constructor with current_white from GC
     /// Using Default::default() creates incorrect GRAY objects that may be prematurely collected
     #[inline(always)]
     pub fn with_white(current_white: u8, size: u32) -> Self {
-        debug_assert!(current_white == 0 || current_white == 1, "current_white must be 0 or 1");
+        debug_assert!(
+            current_white == 0 || current_white == 1,
+            "current_white must be 0 or 1"
+        );
         GcHeader {
             marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
             size,
@@ -137,7 +142,7 @@ impl GcHeader {
     }
 
     // ============ Age Operations (generational GC) ============
-    
+
     /// Get object age (bits 0-2)
     /// Port of lgc.h: getage(o) returns (o->marked & AGEBITS)
     #[inline(always)]
@@ -161,7 +166,7 @@ impl GcHeader {
     }
 
     // ============ Color Operations (tri-color marking) ============
-    
+
     /// Check if object is white (either WHITE0 or WHITE1)
     /// Port of lgc.h: iswhite(x) macro
     #[inline(always)]
@@ -185,7 +190,7 @@ impl GcHeader {
     }
 
     // ============ Special Flags ============
-    
+
     /// Check if object is marked for finalization
     /// Port of lgc.h: tofinalize(x) macro
     #[inline(always)]
@@ -225,17 +230,20 @@ impl GcHeader {
     }
 
     // ============ Color Transitions ============
-    
+
     /// Make object white with given current_white (0 or 1)
     /// Port of lgc.c: makewhite(g,x) macro
     /// Sets object to current white color, preserving age
     #[inline(always)]
     pub fn make_white(&mut self, current_white: u8) {
-        debug_assert!(current_white == 0 || current_white == 1, "current_white must be 0 or 1");
+        debug_assert!(
+            current_white == 0 || current_white == 1,
+            "current_white must be 0 or 1"
+        );
         let old_marked = self.marked;
         // Clear all color bits, then set the appropriate white bit
         self.marked = (self.marked & !MASKCOLORS) | (1 << (WHITE0BIT + current_white));
-        
+
         // Debug logging for specific objects
         if old_marked & (1 << BLACKBIT) != 0 {
             // Object was black before, log the change
@@ -268,13 +276,16 @@ impl GcHeader {
     }
 
     // ============ Death Detection ============
-    
+
     /// Check if object is dead (has the "other" white bit set)
     /// Port of lgc.h: isdead(g,v) and isdeadm(ow,m) macros
     /// During sweep, objects with "other white" are garbage
     #[inline(always)]
     pub fn is_dead(&self, other_white: u8) -> bool {
-        debug_assert!(other_white == 0 || other_white == 1, "other_white must be 0 or 1");
+        debug_assert!(
+            other_white == 0 || other_white == 1,
+            "other_white must be 0 or 1"
+        );
         (self.marked & (1 << (WHITE0BIT + other_white))) != 0
     }
 
@@ -293,7 +304,7 @@ impl GcHeader {
     }
 
     // ============ Generational GC Age Transitions ============
-    
+
     /// Advance object to OLD0 (marked old by forward barrier)
     #[inline(always)]
     pub fn make_old0(&mut self) {
@@ -331,7 +342,7 @@ impl GcHeader {
     }
 
     // ============ Utility Methods ============
-    
+
     /// Check if object is marked (not white)
     /// Convenience method for readability
     #[inline(always)]
@@ -458,10 +469,10 @@ pub struct GcObject {
 impl GcObject {
     /// Create a new GC object with proper white color and size
     /// Port of lgc.c: luaC_newobj - all new objects MUST be created as current white
-    /// 
+    ///
     /// **CRITICAL**: current_white MUST come from GC.current_white to ensure
     /// objects are marked with the correct color for the current cycle
-    /// 
+    ///
     /// size: The estimated memory size of this object (including heap allocations)
     pub fn with_white(ptr: GcPtrObject, current_white: u8, size: u32) -> Self {
         GcObject {
@@ -600,77 +611,78 @@ impl Upvalue {
     }
 }
 
-/// Simple Vec-based pool for small objects
-/// - Direct O(1) indexing with no chunking overhead
-/// - Free list for slot reuse
-/// - Objects stored inline in Vec
+/// IndexMap-based pool for GC objects
+/// - O(1) lookup by ID using ahash
+/// - O(live_objects) iteration (no empty slots!)
+/// - Free list for ID reuse to prevent unbounded growth
+/// - Much faster than Vec<Option<T>> when sparsely populated
 pub struct GcPool {
-    gc_list: Vec<Option<GcObject>>,
+    gc_map: IndexMap<u32, GcObject, RandomState>,
     free_list: Vec<u32>,
-    count: usize,
+    next_id: u32,
 }
 
 impl GcPool {
     #[inline]
     pub fn new() -> Self {
         Self {
-            gc_list: Vec::new(),
+            gc_map: IndexMap::with_hasher(RandomState::new()),
             free_list: Vec::new(),
-            count: 0,
+            next_id: 0,
         }
     }
 
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            gc_list: Vec::with_capacity(cap),
+            gc_map: IndexMap::with_capacity_and_hasher(cap, RandomState::new()),
             free_list: Vec::with_capacity(cap / 8),
-            count: 0,
+            next_id: 0,
         }
     }
 
     /// Allocate a new object and return its ID
+    /// Uses free_list to recycle IDs and prevent unbounded growth
     #[inline]
     pub fn alloc(&mut self, value: GcObject) -> u32 {
-        self.count += 1;
+        let id = if let Some(free_id) = self.free_list.pop() {
+            // Reuse recycled ID
+            free_id
+        } else {
+            // Allocate new ID
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            debug_assert!(
+                self.next_id != 0,
+                "GcPool exhausted u32 IDs - too many objects allocated"
+            );
+            id
+        };
 
-        if let Some(free_id) = self.free_list.pop() {
-            self.gc_list[free_id as usize] = Some(value);
-            return free_id;
-        }
-
-        let id = self.gc_list.len() as u32;
-        self.gc_list.push(Some(value));
+        self.gc_map.insert(id, value);
         id
     }
 
     /// Get immutable reference by ID
     #[inline(always)]
     pub fn get(&self, id: u32) -> Option<&GcObject> {
-        self.gc_list.get(id as usize).and_then(|opt| opt.as_ref())
+        self.gc_map.get(&id)
     }
 
     /// Get mutable reference by ID
     #[inline(always)]
     pub fn get_mut(&mut self, id: u32) -> Option<&mut GcObject> {
-        self.gc_list
-            .get_mut(id as usize)
-            .and_then(|opt| opt.as_mut())
+        self.gc_map.get_mut(&id)
     }
 
     /// Free a slot (mark for reuse)
     #[inline]
     pub fn free(&mut self, id: u32) -> usize {
-        if let Some(slot) = self.gc_list.get_mut(id as usize) {
-            if slot.is_some() {
-                let size = slot.as_ref().unwrap().size();
-                *slot = None;
-                self.free_list.push(id);
-                self.count -= 1;
-                return size;
-            }
+        if let Some(obj) = self.gc_map.swap_remove(&id) {
+            let size = obj.size();
+            self.free_list.push(id);
+            return size;
         }
-
         0
     }
 
@@ -680,67 +692,59 @@ impl GcPool {
         self.free_list.len()
     }
 
-    /// Trim trailing None values from the pool to reduce iteration overhead
-    /// This removes None values from the end of the data vec
-    pub fn trim_tail(&mut self) {
-        // Remove trailing None values
-        while self.gc_list.last().map_or(false, |v| v.is_none()) {
-            self.gc_list.pop();
-        }
-        // Remove free list entries that are now out of bounds
-        let max_valid = self.gc_list.len() as u32;
-        self.free_list.retain(|&id| id < max_valid);
-    }
-
     /// Check if a slot is occupied
     #[inline(always)]
     pub fn is_valid(&self, id: u32) -> bool {
-        self.gc_list
-            .get(id as usize)
-            .map(|opt| opt.is_some())
-            .unwrap_or(false)
+        self.gc_map.contains_key(&id)
     }
 
     /// Current number of live objects
     #[inline]
     pub fn len(&self) -> usize {
-        self.count
+        self.gc_map.len()
     }
 
-    /// Total capacity of the gc_list Vec (including empty slots)
-    /// Used by sweep_step to iterate through all slots
+    /// Length of free_list (recycled IDs)
+    #[inline]
+    pub fn free_list_len(&self) -> usize {
+        self.free_list.len()
+    }
+
+    /// Total capacity of the gc_map (no longer sparse!)
+    /// With IndexMap, this equals the number of live objects
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.gc_list.len()
+        self.gc_map.len() // IndexMap has no empty slots!
     }
 
     /// Iterate over all live objects
-    pub fn iter(&self) -> impl Iterator<Item = (GcId, &GcObject)> {
-        self.gc_list
+    /// CRITICAL PERFORMANCE FIX: With IndexMap, this only iterates actual objects!
+    /// Before: O(vec.capacity) - could be millions with mostly None
+    /// After: O(live_objects) - only hundreds
+    pub fn iter(&self) -> impl Iterator<Item = (GcId, &GcObject)> + '_ {
+        self.gc_map
             .iter()
-            .enumerate()
-            .filter_map(|(id, opt)| opt.as_ref().map(|v| (v.trans_to_gcid(id as u32), v)))
+            .map(|(&id, obj)| (obj.trans_to_gcid(id), obj))
     }
 
     /// Iterate over all live objects mutably
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (GcId, &mut GcObject)> {
-        self.gc_list
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (GcId, &mut GcObject)> + '_ {
+        self.gc_map
             .iter_mut()
-            .enumerate()
-            .filter_map(|(id, opt)| opt.as_mut().map(|v| (v.trans_to_gcid(id as u32), v)))
+            .map(|(&id, obj)| (obj.trans_to_gcid(id), obj))
     }
 
     /// Shrink internal storage
     pub fn shrink_to_fit(&mut self) {
-        self.gc_list.shrink_to_fit();
+        self.gc_map.shrink_to_fit();
         self.free_list.shrink_to_fit();
     }
 
     /// Clear all objects
     pub fn clear(&mut self) {
-        self.gc_list.clear();
+        self.gc_map.clear();
         self.free_list.clear();
-        self.count = 0;
+        self.next_id = 0;
     }
 }
 
