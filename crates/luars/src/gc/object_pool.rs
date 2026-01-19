@@ -13,7 +13,8 @@ use crate::gc::string_interner::StringInterner;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption, TmKind};
 use crate::{
-    Gc, GcBinary, GcFunction, GcId, GcObject, GcObjectKind, GcPool, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable, LuaValue, Upvalue, UpvaluePtr
+    GcBinary, GcFunction, GcId, GcObject, GcObjectKind, GcPool, GcTable, GcThread, GcUpvalue,
+    GcUserdata, LuaTable, LuaValue, Upvalue, UpvaluePtr,
 };
 use std::rc::Rc;
 
@@ -426,7 +427,7 @@ impl ObjectPool {
             current_white,
             size,
         )));
-        let ptr: *const Gc<FunctionBody> = gc_func.as_function_ptr().unwrap();
+        let ptr = gc_func.as_function_ptr().unwrap();
         self.gc_pool.alloc(gc_func);
         LuaValue::function(ptr)
     }
@@ -469,7 +470,7 @@ impl ObjectPool {
         let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
         let ptr = gc_uv.as_upvalue_ptr().unwrap();
         self.gc_pool.alloc(gc_uv);
-        UpvaluePtr::new(ptr)
+        ptr
     }
 
     /// Create a closed upvalue with a value
@@ -481,7 +482,7 @@ impl ObjectPool {
         let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
         let ptr = gc_uv.as_upvalue_ptr().unwrap();
         self.gc_pool.alloc(gc_uv);
-        UpvaluePtr::new(ptr)
+        ptr
     }
 
     /// Create upvalue from LuaUpvalue
@@ -515,8 +516,7 @@ impl ObjectPool {
     #[inline]
     pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> LuaValue {
         let size = 4096; // Fixed size for thread (including stack)
-        let gc_thread =
-            GcObject::Thread(Box::new(GcThread::new(thread, current_white, size)));
+        let gc_thread = GcObject::Thread(Box::new(GcThread::new(thread, current_white, size)));
         let ptr = gc_thread.as_thread_ptr().unwrap();
         self.gc_pool.alloc(gc_thread);
 
@@ -544,8 +544,9 @@ impl ObjectPool {
                 if let Some(s_object) = self.gc_pool.get(id.index())
                     && let GcObject::String(s) = &s_object
                 {
+                    let ptr = s_object.as_str_ptr().unwrap();
                     // Remove from string interner first
-                    self.strings.remove_dead_intern(id.index(), &s.data);
+                    self.strings.remove_dead_intern(ptr, &s.data);
                     return self.gc_pool.free(id.index());
                 }
 

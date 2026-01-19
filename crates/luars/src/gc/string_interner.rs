@@ -2,7 +2,7 @@ use ahash::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-use crate::{GcObject, GcPool, LuaValue, StringPtr};
+use crate::{GcObject, GcPool, GcString, LuaValue, StringPtr};
 
 /// Complete string interner - ALL strings are interned for maximum performance
 /// - Same content always returns same StringId
@@ -54,24 +54,20 @@ impl StringInterner {
             // (marked White and waiting for Sweep). If we return it now, the Sweeper will free it later,
             // leaving us with a dangling reference.
             // Marking it Black ensures it survives the current/pending sweep.
-            ptr.as_ref().header.make_black();
-            let ptr = gs.ptr.as_str_ptr().unwrap();
-            return (LuaValue::string(id, ptr), false);
+            ptr.as_mut_ref().header.make_black();
+            return (LuaValue::string(ptr), false);
         }
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
         let size = (64 + s.len()) as u32;
-        let gc_string = GcObject::with_white(
-            GcObject::String(Box::new(s.to_string())),
-            current_white,
-            size,
+        let gc_string = GcObject::String(
+            Box::new(GcString::new(s.to_string(), current_white, size)),
         );
-        let ptr = gc_string.ptr.as_str_ptr().unwrap();
-        let id = gc_pool.alloc(gc_string);
-        let str_id = StringId(id);
-        self.map.entry(hash).or_insert_with(Vec::new).push(str_id);
+        let ptr = gc_string.as_str_ptr().unwrap();
+        gc_pool.alloc(gc_string);
+        self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
 
-        (LuaValue::string(str_id, ptr), true)
+        (LuaValue::string(ptr), true)
     }
 
     /// Fast hash function - uses ahash for speed
@@ -83,11 +79,11 @@ impl StringInterner {
     }
 
     /// Remove dead strings (called by GC)
-    pub fn remove_dead_intern(&mut self, id: StringId, s: &str) {
+    pub fn remove_dead_intern(&mut self, ptr: StringPtr, s: &str) {
         let hash = self.hash_string(s);
         // Remove from map
         if let Some(ids) = self.map.get_mut(&hash) {
-            ids.retain(|&i| i != id);
+            ids.retain(|&i| i != ptr);
             if ids.is_empty() {
                 self.map.remove(&hash);
             }

@@ -2,7 +2,9 @@
 use std::rc::Rc;
 
 use crate::{
-    lua_value::LuaUserdata, lua_vm::{CFunction, LuaState}, Chunk, GcId, LuaTable, LuaValue
+    Chunk, GcId, LuaTable, LuaValue,
+    lua_value::LuaUserdata,
+    lua_vm::{CFunction, LuaState},
 };
 
 /// Cached upvalue - stores both ID and direct pointer for fast access
@@ -95,8 +97,8 @@ pub const MASKGCBITS: u8 = MASKCOLORS | AGEBITS;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
-    pub marked: u8, // Color and age bits combined
-    pub size: u32,  // Size of the object in bytes (for memory tracking)
+    pub marked: u8,     // Color and age bits combined
+    pub size: u32,      // Size of the object in bytes (for memory tracking)
 }
 
 impl Default for GcHeader {
@@ -350,7 +352,7 @@ pub struct Gc<T> {
     pub data: T,
 }
 
-impl <T> Gc<T> {
+impl<T> Gc<T> {
     pub fn new(data: T, current_white: u8, size: u32) -> Self {
         Gc {
             header: GcHeader::with_white(current_white, size),
@@ -367,10 +369,28 @@ pub type GcThread = Gc<LuaState>;
 pub type GcUserdata = Gc<LuaUserdata>;
 pub type GcBinary = Gc<Vec<u8>>;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct GcPtr<T>{
+#[derive(Debug)]
+pub struct GcPtr<T> {
     ptr: u64,
     _marker: std::marker::PhantomData<*const T>,
+}
+
+// Manual implementation of Clone and Copy to avoid trait bound requirements on T
+// GcPtr is always Copy regardless of T, since it only stores a u64 pointer
+impl<T> Clone for GcPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for GcPtr<T> {}
+
+impl<T> Eq for GcPtr<T> {}
+
+impl<T> PartialEq for GcPtr<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
 }
 
 impl<T> GcPtr<T> {
@@ -444,7 +464,7 @@ impl GcObject {
             GcObject::Binary(b) => &b.header,
         }
     }
-    
+
     pub fn header_mut(&mut self) -> &mut GcHeader {
         match self {
             GcObject::String(s) => &mut s.header,
@@ -657,15 +677,14 @@ impl Upvalue {
     }
 }
 
-/// Vec-based pool with free list for GC objects
-/// - O(1) allocation and lookup (direct indexing)
-/// - O(vec.len()) iteration (includes None slots, but fast for allocation-heavy workloads)
-/// - Free list for ID reuse
-/// - Optimized for fast allocation at the cost of slower iteration when sparse
+/// High-performance Vec-based pool for GC objects
+/// - O(1) allocation: direct push to Vec, returns GcPtr
+/// - O(1) deallocation: swap_remove using tracked pool_index  
+/// - O(live_objects) iteration: always compact, no holes!
+/// - No free_list needed: objects are truly removed via swap_remove
+/// - GcPtr-based: external references use pointers, not indices
 pub struct GcPool {
-    gc_list: Vec<Option<GcObject>>,
-    free_list: Vec<u32>,
-    count: usize,
+    gc_list: Vec<GcObject>,
 }
 
 impl GcPool {
@@ -673,8 +692,6 @@ impl GcPool {
     pub fn new() -> Self {
         Self {
             gc_list: Vec::new(),
-            free_list: Vec::new(),
-            count: 0,
         }
     }
 
@@ -682,117 +699,62 @@ impl GcPool {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             gc_list: Vec::with_capacity(cap),
-            free_list: Vec::with_capacity(cap / 8),
-            count: 0,
         }
     }
 
-    /// Allocate a new object and return its ID
-    /// Super-fast O(1) allocation via Vec indexing
+    /// Allocate a new object and return a GcPtr to it
+    /// O(1) allocation: push to Vec, track index in header, return pointer to Box contents
     #[inline]
     pub fn alloc(&mut self, value: GcObject) {
-        self.count += 1;
-        self.gc_list.push(Some(value));
+        self.gc_list.push(value);
     }
 
-    /// Get immutable reference by ID
-    #[inline(always)]
-    pub fn get(&self, id: u32) -> Option<&GcObject> {
-        self.gc_list.get(id as usize).and_then(|opt| opt.as_ref())
-    }
-
-    /// Get mutable reference by ID
-    #[inline(always)]
-    pub fn get_mut(&mut self, id: u32) -> Option<&mut GcObject> {
-        self.gc_list
-            .get_mut(id as usize)
-            .and_then(|opt| opt.as_mut())
-    }
-
-    /// Free a slot (mark for reuse)
+    /// Free an object using its pointer
+    /// O(1) via swap_remove: moves last object to removed position, updates its index
     #[inline]
-    pub fn free(&mut self, id: u32) -> usize {
-        if let Some(slot) = self.gc_list.get_mut(id as usize) {
-            if slot.is_some() {
-                let size = slot.as_ref().unwrap().size();
-                *slot = None;
-                self.free_list.push(id);
-                self.count -= 1;
-                return size;
-            }
-        }
-        0
+    pub fn free(&mut self, gc_id: GcId) {
+        let index = gc_id.index() as usize;
+        
+        // swap_remove: O(1) removal by moving last element to this position
+        self.gc_list.swap_remove(index);
     }
 
-    /// Get number of free slots in the free list
-    #[inline]
-    pub fn free_slots_count(&self) -> usize {
-        self.free_list.len()
-    }
-
-    /// Trim trailing None values from the pool to reduce iteration overhead
-    pub fn trim_tail(&mut self) {
-        while self.gc_list.last().map_or(false, |v| v.is_none()) {
-            self.gc_list.pop();
-        }
-        let max_valid = self.gc_list.len() as u32;
-        self.free_list.retain(|&id| id < max_valid);
-    }
-
-    /// Check if a slot is occupied
-    #[inline(always)]
-    pub fn is_valid(&self, id: u32) -> bool {
-        self.gc_list
-            .get(id as usize)
-            .map(|opt| opt.is_some())
-            .unwrap_or(false)
-    }
-
-    /// Current number of live objects
+    /// Current number of live objects (always equals Vec length, no holes!)
     #[inline]
     pub fn len(&self) -> usize {
-        self.count
-    }
-
-    /// Length of free_list (recycled IDs)
-    #[inline]
-    pub fn free_list_len(&self) -> usize {
-        self.free_list.len()
-    }
-
-    /// Total capacity of the gc_list Vec (including empty slots)
-    #[inline]
-    pub fn capacity(&self) -> usize {
         self.gc_list.len()
     }
 
-    /// Iterate over all live objects
-    pub fn iter(&self) -> impl Iterator<Item = (GcId, &GcObject)> + '_ {
-        self.gc_list
-            .iter()
-            .enumerate()
-            .filter_map(|(id, opt)| opt.as_ref().map(|v| (v.trans_to_gcid(id as u32), v)))
+    /// Check if pool is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.gc_list.is_empty()
+    }
+
+    /// Iterate over all live objects (always compact, O(live_objects))
+    pub fn iter(&self) -> impl Iterator<Item = &GcObject> + '_ {
+        self.gc_list.iter()
     }
 
     /// Iterate over all live objects mutably
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (GcId, &mut GcObject)> + '_ {
-        self.gc_list
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(id, opt)| opt.as_mut().map(|v| (v.trans_to_gcid(id as u32), v)))
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut GcObject> + '_ {
+        self.gc_list.iter_mut()
     }
 
-    /// Shrink internal storage
+    /// Shrink internal storage to fit current objects
     pub fn shrink_to_fit(&mut self) {
         self.gc_list.shrink_to_fit();
-        self.free_list.shrink_to_fit();
     }
 
     /// Clear all objects
     pub fn clear(&mut self) {
         self.gc_list.clear();
-        self.free_list.clear();
-        self.count = 0;
+    }
+
+    /// Get Vec capacity (for diagnostics)
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.gc_list.capacity()
     }
 }
 
