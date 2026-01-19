@@ -131,15 +131,6 @@ pub fn handle_mmbin(
     // Store result
     lua_state.stack_set(current_base + result_reg, result)?;
 
-    // CRITICAL: Update frame.top to protect the result register
-    // This prevents subsequent operations from overwriting this result
-    let result_pos = current_base + result_reg;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if result_pos + 1 > call_info.top {
-        call_info.top = result_pos + 1;
-        lua_state.set_top(result_pos + 1);
-    }
-
     Ok(())
 }
 
@@ -208,14 +199,6 @@ pub fn handle_mmbini(
 
     // Store result
     lua_state.stack_set(current_base + result_reg, result)?;
-
-    // CRITICAL: Update frame.top to protect the result register
-    let result_pos = current_base + result_reg;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if result_pos + 1 > call_info.top {
-        call_info.top = result_pos + 1;
-        lua_state.set_top(result_pos + 1);
-    }
 
     Ok(())
 }
@@ -290,14 +273,6 @@ pub fn handle_mmbink(
     // Store result
     lua_state.stack_set(current_base + result_reg, result)?;
 
-    // CRITICAL: Update frame.top to protect the result register
-    let result_pos = current_base + result_reg;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if result_pos + 1 > call_info.top {
-        call_info.top = result_pos + 1;
-        lua_state.set_top(result_pos + 1);
-    }
-
     Ok(())
 }
 
@@ -330,7 +305,7 @@ fn try_bin_tm(
     tm: TmKind,
 ) -> LuaResult<LuaValue> {
     let tm_name = tm.name();
-    
+
     // Try to get metamethod from p1, then p2
     let metamethod = get_binop_metamethod(lua_state, &p1, tm_name)
         .or_else(|| get_binop_metamethod(lua_state, &p2, tm_name));
@@ -338,7 +313,7 @@ fn try_bin_tm(
     if let Some(mm) = metamethod {
         // Call metamethod with (p1, p2) as arguments
         call_tm_res(lua_state, mm, p1, p2)
-    } else{
+    } else {
         // No metamethod found, return error
         let msg = match tm {
             TmKind::Band
@@ -424,15 +399,20 @@ pub fn call_tm_res(
     arg1: LuaValue,
     arg2: LuaValue,
 ) -> LuaResult<LuaValue> {
-    // Use current stack top - caller should have set up protection
+    // CRITICAL: Port of Lua 5.5's Protect macro's savestate(L,ci)
+    // Before pushing arguments, set L->top.p = ci->top.p
+    // This ensures func_pos starts at the correct position
+    if let Some(frame) = lua_state.current_frame() {
+        lua_state.set_top(frame.top);
+    }
+    
     let func_pos = lua_state.get_top();
-
     // Push function and arguments
     lua_state.push_value(metamethod)?;
     lua_state.push_value(arg1)?;
     lua_state.push_value(arg2)?;
 
-    // Call the metamethod
+    // Call the metamethod with nresults=1
     if metamethod.is_cfunction() {
         call::call_c_function(lua_state, func_pos, 2, 1)?;
     } else if let Some(func_body) = metamethod.as_lua_function() {
@@ -451,11 +431,23 @@ pub fn call_tm_res(
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
 
-    // Get result from func_pos (where return handler placed it)
-    let result = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
-
-    // Clean up stack - result is already copied
-    lua_state.set_top(func_pos);
+    // CRITICAL: Lua 5.5's behavior after luaD_call with nresults=1:
+    // - Return value is at position 'func' (replaces the function)
+    // - L->top.p = func + 1 (points after the return value)
+    // - setobjs2s(L, res, --L->top.p) does:
+    //   1. Decrement L->top.p to 'func'
+    //   2. Copy value from 'func' to 'res'
+    // After this, L->top.p = func (back to where it was before push)
+    let top = lua_state.get_top();
+    let result = if top > func_pos {
+        // Get return value (should be at func_pos after call returns)
+        let result_val = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
+        // Reset top to func_pos (matching Lua 5.5's --L->top.p behavior)
+        lua_state.set_top(func_pos);
+        result_val
+    } else {
+        LuaValue::nil()
+    };
 
     Ok(result)
 }
@@ -485,6 +477,13 @@ pub fn call_tm(
     arg2: LuaValue,
     arg3: LuaValue,
 ) -> LuaResult<()> {
+    // CRITICAL: Port of Lua 5.5's Protect macro's savestate(L,ci)
+    // Before pushing arguments, set L->top.p = ci->top.p
+    // This ensures func_pos starts at the correct position
+    if let Some(frame) = lua_state.current_frame() {
+        lua_state.set_top(frame.top);
+    }
+    
     let func_pos = lua_state.get_top();
 
     // Push function and 3 arguments
@@ -512,9 +511,10 @@ pub fn call_tm(
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
 
-    // No return value to retrieve
-    // Clean up stack
-    lua_state.set_top(func_pos);
+    // No return value expected (nresults=0)
+    // Unlike call_tm_res, we don't need to get any result
+    // The call itself has adjusted top appropriately
+    // Don't reset top to func_pos as that would destroy the stack!
 
     lua_state.check_gc()?;
     Ok(())

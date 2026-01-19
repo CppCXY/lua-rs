@@ -91,14 +91,10 @@ pub fn handle_return(
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Update logical stack top and caller frame's top
-    // This is CRITICAL: both must be updated for correct stack management
+    // Update logical stack top (L->top.p)
+    // Do NOT modify caller frame's top limit (ci->top), only L->top.p
     let new_top = func_pos + nres;
     lua_state.set_top(new_top);
-
-    if let Some(caller_frame) = lua_state.current_frame_mut() {
-        caller_frame.top = new_top;
-    }
 
     // Check if this was the top-level frame
     if lua_state.call_depth() == 0 {
@@ -135,12 +131,6 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<F
 
     // Pop current call frame
     lua_state.pop_call_frame();
-
-    // Update caller frame's top to match logical stack top
-    let current_top = lua_state.get_top();
-    if let Some(caller_frame) = lua_state.current_frame_mut() {
-        caller_frame.top = current_top;
-    }
 
     // Check if this was the top-level frame
     if lua_state.call_depth() == 0 {
@@ -203,12 +193,6 @@ pub fn handle_return1(
 
     // Pop current call frame
     lua_state.pop_call_frame();
-
-    // Update caller frame's top to match logical stack top
-    let current_top = lua_state.get_top();
-    if let Some(caller_frame) = lua_state.current_frame_mut() {
-        caller_frame.top = current_top;
-    }
 
     // Check if this was the top-level frame
     if lua_state.call_depth() == 0 {

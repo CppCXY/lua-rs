@@ -35,13 +35,10 @@ pub fn exec_gettable(
     let b = instr.get_b() as usize;
     let c = instr.get_c() as usize;
 
-    // CRITICAL: Update frame.top before potential metamethod call
+    // Update L->top.p before potential metamethod call
+    // Do NOT modify frame.top (ci->top) - it's immutable
     let write_pos = base + a;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if write_pos + 1 > call_info.top {
-        call_info.top = write_pos + 1;
-        lua_state.set_top(write_pos + 1);
-    }
+    lua_state.set_top(write_pos + 1);
 
     let rb = lua_state.stack_mut()[base + b];
     let rc = lua_state.stack_mut()[base + c];

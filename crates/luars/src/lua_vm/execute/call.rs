@@ -113,11 +113,9 @@ pub fn handle_call(
             // Set metamethod as the function to call
             lua_state.stack_set(func_idx, mm)?;
 
-            // Update frame top to include the shifted argument
+            // Update L->top.p to include the shifted argument
+            // Do NOT modify frame.top (ci->top) - it's immutable stack limit
             let new_top = first_arg + nargs + 1;
-            if let Some(frame) = lua_state.current_frame_mut() {
-                frame.top = new_top;
-            }
             lua_state.set_top(new_top);
 
             // Now call the metamethod with nargs+1 (including original func)
@@ -216,10 +214,8 @@ pub fn call_c_function(
     // This preserves caller's local variables which live below this top
     lua_state.set_top(new_top);
 
-    // Update current frame's top limit
-    if let Some(frame) = lua_state.current_frame_mut() {
-        frame.top = new_top;
-    }
+    // Do NOT modify frame.top (ci->top) - it's the stack limit (base + maxstacksize)
+    // and should not change during execution
 
     Ok(())
 }
