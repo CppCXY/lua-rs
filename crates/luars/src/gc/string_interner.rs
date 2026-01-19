@@ -34,7 +34,7 @@ impl StringInterner {
     /// 所有字符串都会被 intern，保证相同内容只存储一份
     ///
     /// **CRITICAL**: current_white MUST be passed from GC.current_white for correct marking
-    pub fn intern(&mut self, s: &str, gc_pool: &mut GcPool, current_white: u8) -> (LuaValue, bool) {
+    pub fn intern(&mut self, s: &str, gc_pool: &mut GcPool, current_white: u8) -> (LuaValue, bool, usize) {
         let hash = self.hash_string(s);
 
         // Check if already interned
@@ -55,7 +55,7 @@ impl StringInterner {
             // leaving us with a dangling reference.
             // Marking it Black ensures it survives the current/pending sweep.
             ptr.as_mut_ref().header.make_black();
-            return (LuaValue::string(ptr), false);
+            return (LuaValue::string(ptr), false, 0);
         }
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
@@ -67,7 +67,7 @@ impl StringInterner {
         gc_pool.alloc(gc_string);
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
 
-        (LuaValue::string(ptr), true)
+        (LuaValue::string(ptr), true, size as usize)
     }
 
     /// Fast hash function - uses ahash for speed

@@ -2,9 +2,7 @@
 use std::rc::Rc;
 
 use crate::{
-    Chunk, GcId, LuaTable, LuaValue,
-    lua_value::LuaUserdata,
-    lua_vm::{CFunction, LuaState},
+    Chunk, GcId, GcObjectKind, LuaTable, LuaValue, lua_value::{LuaUserdata, LuaValueKind}, lua_vm::{CFunction, LuaState}
 };
 
 /// Cached upvalue - stores both ID and direct pointer for fast access
@@ -436,6 +434,55 @@ pub type FunctionPtr = GcPtr<GcFunction>;
 pub type BinaryPtr = GcPtr<GcBinary>;
 pub type UserdataPtr = GcPtr<GcUserdata>;
 pub type ThreadPtr = GcPtr<GcThread>;
+
+#[derive(Clone, Copy)]
+pub enum GcObjectPtr {
+    String(StringPtr),
+    Table(TablePtr),
+    Function(FunctionPtr),
+    Upvalue(UpvaluePtr),
+    Thread(ThreadPtr),
+    Userdata(UserdataPtr),
+    Binary(BinaryPtr),
+}
+
+impl GcObjectPtr {
+    pub fn header(&self) -> Option<&GcHeader> {
+        match self {
+            GcObjectPtr::String(p) => Some(&p.as_ref().header),
+            GcObjectPtr::Table(p) => Some(&p.as_ref().header),
+            GcObjectPtr::Function(p) => Some(&p.as_ref().header),
+            GcObjectPtr::Upvalue(p) => Some(&p.as_ref().header),
+            GcObjectPtr::Thread(p) => Some(&p.as_ref().header),
+            GcObjectPtr::Userdata(p) => Some(&p.as_ref().header),
+            GcObjectPtr::Binary(p) => Some(&p.as_ref().header),
+        }
+    }
+
+    pub fn header_mut(&self) -> Option<&mut GcHeader> {
+        match self {
+            GcObjectPtr::String(p) => Some(&mut p.as_mut_ref().header),
+            GcObjectPtr::Table(p) => Some(&mut p.as_mut_ref().header),
+            GcObjectPtr::Function(p) => Some(&mut p.as_mut_ref().header),
+            GcObjectPtr::Upvalue(p) => Some(&mut p.as_mut_ref().header),
+            GcObjectPtr::Thread(p) => Some(&mut p.as_mut_ref().header),
+            GcObjectPtr::Userdata(p) => Some(&mut p.as_mut_ref().header),
+            GcObjectPtr::Binary(p) => Some(&mut p.as_mut_ref().header),
+        }
+    }
+
+    pub fn kind(&self) -> GcObjectKind {
+        match self {
+            GcObjectPtr::String(_) => GcObjectKind::String,
+            GcObjectPtr::Table(_) => GcObjectKind::Table,
+            GcObjectPtr::Function(_) => GcObjectKind::Function,
+            GcObjectPtr::Upvalue(_) => GcObjectKind::Upvalue,
+            GcObjectPtr::Thread(_) => GcObjectKind::Thread,
+            GcObjectPtr::Userdata(_) => GcObjectKind::Userdata,
+            GcObjectPtr::Binary(_) => GcObjectKind::Binary,
+        }
+    }
+}
 
 // ============ GC-managed Objects ============
 pub enum GcObject {

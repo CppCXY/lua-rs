@@ -278,27 +278,27 @@ impl ObjectPool {
     /// Create string (COMPLETE INTERNING - all strings)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     ///
-    pub fn create_string(&mut self, s: &str, current_white: u8) -> (LuaValue, bool) {
+    pub fn create_string(&mut self, s: &str, current_white: u8) -> (LuaValue, bool, usize) {
         self.strings.intern(s, &mut self.gc_pool, current_white)
     }
 
     /// Create string from owned String (avoids clone if already interned)
     /// Returns (StringId, is_new) where is_new indicates if a new string was created
     ///
-    pub fn create_string_owned(&mut self, s: String, current_white: u8) -> (LuaValue, bool) {
+    pub fn create_string_owned(&mut self, s: String, current_white: u8) -> (LuaValue, bool, usize) {
         self.strings.intern(&s, &mut self.gc_pool, current_white)
     }
 
     /// Create a binary value from Vec<u8>
     ///
     #[inline]
-    pub fn create_binary(&mut self, data: Vec<u8>, current_white: u8) -> LuaValue {
+    pub fn create_binary(&mut self, data: Vec<u8>, current_white: u8) -> (LuaValue, usize) {
         let size = (64 + data.len()) as u32;
         let gc_ptr = Box::new(GcBinary::new(data, current_white, size));
         let gc_binary = GcObject::Binary(gc_ptr);
         let ptr = gc_binary.as_binary_ptr().unwrap();
         self.gc_pool.alloc(gc_binary);
-        LuaValue::binary(ptr)
+        (LuaValue::binary(ptr), size as usize)
     }
 
     /// Create a substring from an existing string (optimized for string.sub)
@@ -312,7 +312,7 @@ impl ObjectPool {
         start: usize,
         end: usize,
         current_white: u8,
-    ) -> (LuaValue, bool) {
+    ) -> (LuaValue, bool, usize) {
         let string = match s_value.as_str() {
             Some(s) => s,
             None => return self.create_string("", current_white),
@@ -329,7 +329,7 @@ impl ObjectPool {
 
             // Fast path: return original if full range
             if start == 0 && end == string.len() {
-                return (s_value, false);
+                return (s_value, false, 0);
             }
 
             // Copy substring to avoid borrowing issue
@@ -358,7 +358,7 @@ impl ObjectPool {
         array_size: usize,
         hash_size: usize,
         current_white: u8,
-    ) -> LuaValue {
+    ) -> (LuaValue, usize) {
         // Lua 5.5 ltable.c luaH_size:
         //   lu_mem sz = sizeof(Table) + concretesize(t->asize);
         //   if (!isdummy(t)) sz += sizehash(t);
@@ -391,7 +391,7 @@ impl ObjectPool {
         let gc_table = GcObject::Table(ptr);
         let ptr = gc_table.as_table_ptr().unwrap();
         self.gc_pool.alloc(gc_table);
-        LuaValue::table(ptr)
+        (LuaValue::table(ptr), size as usize)
     }
 
     // ==================== Function Operations ====================
@@ -405,7 +405,7 @@ impl ObjectPool {
         chunk: Rc<Chunk>,
         upvalue_ptrs: Vec<UpvaluePtr>,
         current_white: u8,
-    ) -> LuaValue {
+    ) -> (LuaValue, usize) {
         // Calculate size: base + upvalues + chunk data
         let upvalue_count = upvalue_ptrs.len();
         let instr_size = chunk.code.len() * 8;
@@ -429,7 +429,7 @@ impl ObjectPool {
         )));
         let ptr = gc_func.as_function_ptr().unwrap();
         self.gc_pool.alloc(gc_func);
-        LuaValue::function(ptr)
+        (LuaValue::function(ptr), size as usize)
     }
 
     /// Create a C closure (native function with upvalues)
@@ -441,7 +441,7 @@ impl ObjectPool {
         func: CFunction,
         upvalue_ptrs: Vec<UpvaluePtr>,
         current_white: u8,
-    ) -> LuaValue {
+    ) -> (LuaValue, usize) {
         // Build cached upvalues with direct pointers
         let mut upvalues: Vec<CachedUpvalue> = vec![];
         for ptr in upvalue_ptrs {
@@ -456,7 +456,7 @@ impl ObjectPool {
         )));
         let ptr = gc_func.as_function_ptr().unwrap();
         self.gc_pool.alloc(gc_func);
-        LuaValue::function(ptr)
+        (LuaValue::function(ptr), size as usize)
     }
 
     // ==================== Upvalue Operations ====================
@@ -464,30 +464,30 @@ impl ObjectPool {
     /// Create an open upvalue pointing to a stack location
     ///
     #[inline]
-    pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> UpvaluePtr {
+    pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> (UpvaluePtr, usize) {
         let upvalue = Upvalue::Open(stack_index);
         let size = 64;
         let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
         let ptr = gc_uv.as_upvalue_ptr().unwrap();
         self.gc_pool.alloc(gc_uv);
-        ptr
+        (ptr, size as usize)
     }
 
     /// Create a closed upvalue with a value
     ///
     #[inline]
-    pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> UpvaluePtr {
+    pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> (UpvaluePtr, usize) {
         let upvalue = Upvalue::Closed(value);
         let size = 64;
         let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
         let ptr = gc_uv.as_upvalue_ptr().unwrap();
         self.gc_pool.alloc(gc_uv);
-        ptr
+        (ptr, size as usize)
     }
 
     /// Create upvalue from LuaUpvalue
     ///
-    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>, current_white: u8) -> UpvaluePtr {
+    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>, current_white: u8) -> (UpvaluePtr, usize) {
         // Check if open and get stack index
         if upvalue.is_open() {
             self.create_upvalue_open(upvalue.get_stack_index().unwrap_or(0), current_white)
@@ -502,25 +502,25 @@ impl ObjectPool {
     // ==================== Userdata Operations ====================
 
     #[inline]
-    pub fn create_userdata(&mut self, userdata: LuaUserdata, current_white: u8) -> LuaValue {
+    pub fn create_userdata(&mut self, userdata: LuaUserdata, current_white: u8) -> (LuaValue, usize) {
         let size = 512;
         let gc_userdata =
             GcObject::Userdata(Box::new(GcUserdata::new(userdata, current_white, size)));
         let ptr = gc_userdata.as_userdata_ptr().unwrap();
         self.gc_pool.alloc(gc_userdata);
-        LuaValue::userdata(ptr)
+        (LuaValue::userdata(ptr), size as usize)
     }
 
     // ==================== Thread Operations ====================
 
     #[inline]
-    pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> LuaValue {
+    pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> (LuaValue, usize) {
         let size = 4096; // Fixed size for thread (including stack)
         let gc_thread = GcObject::Thread(Box::new(GcThread::new(thread, current_white, size)));
         let ptr = gc_thread.as_thread_ptr().unwrap();
         self.gc_pool.alloc(gc_thread);
 
-        LuaValue::thread(ptr)
+        (LuaValue::thread(ptr), size as usize)
     }
 
     // ==================== GC Support ====================

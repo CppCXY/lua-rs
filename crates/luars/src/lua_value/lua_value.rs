@@ -721,6 +721,38 @@ impl LuaValue {
         }
     }
 
+    pub fn as_binary_ptr(&self) -> Option<BinaryPtr> {
+        if self.ttisbinary() {
+            Some(BinaryPtr::new(unsafe { self.value.ptr as *mut GcBinary }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
+        if self.ttisfunction() {
+            Some(FunctionPtr::new(unsafe { self.value.ptr as *mut GcFunction }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
+        if self.ttisfulluserdata() {
+            Some(UserdataPtr::new(unsafe { self.value.ptr as *mut GcUserdata }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_thread_ptr(&self) -> Option<ThreadPtr> {
+        if self.ttisthread() {
+            Some(ThreadPtr::new(unsafe { self.value.ptr as *mut GcThread }))
+        } else {
+            None
+        }
+    }
+
     // ============ Truthiness (Lua semantics) ============
 
     /// l_isfalse - Lua truthiness: only nil and false are falsy

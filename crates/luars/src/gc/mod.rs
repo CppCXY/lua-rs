@@ -47,10 +47,10 @@ pub use object_pool::*;
 /// Actions that GC needs VM to perform after a GC step
 /// This allows GC to mark objects for finalization
 /// Weak tables are now cleaned directly during GC atomic phase
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct GcActions {
     /// Objects that need their __gc finalizer called
-    pub to_finalize: Vec<GcId>,
+    pub to_finalize: Vec<GcObjectPtr>,
 }
 
 // GC Parameters (from lua.h)
@@ -277,20 +277,20 @@ pub struct GC {
 
     // === Gray lists (for marking) ===
     /// Regular gray objects waiting to be visited
-    pub gray: Vec<GcId>,
+    pub gray: Vec<GcObjectPtr>,
 
     /// Objects to be revisited at atomic phase
-    pub grayagain: Vec<GcId>,
+    pub grayagain: Vec<GcObjectPtr>,
 
     // === Weak table lists (Port of Lua 5.5) ===
     /// Weak value tables (only values are weak)
-    pub weak: Vec<TableId>,
+    pub weak: Vec<TablePtr>,
 
     /// Ephemeron tables (keys are weak, but key存活则value存活)
-    pub ephemeron: Vec<TableId>,
+    pub ephemeron: Vec<TablePtr>,
 
     /// Fully weak tables (both keys and values are weak)
-    pub allweak: Vec<TableId>,
+    pub allweak: Vec<TablePtr>,
 
     // === Sweep state ===
     /// Current position in sweep (like Lua 5.5's sweepgc pointer)
@@ -301,7 +301,7 @@ pub struct GC {
     sweep_target: usize,
     /// List of object IDs to sweep (collected at start of sweep phase)
     /// This avoids iterating through sparse Vec slots
-    sweep_ids: Vec<GcId>,
+    sweep_ids: Vec<GcObjectPtr>,
 
     // === Generational collector pointers ===
     /// Points to first survival object in allgc list
@@ -2167,20 +2167,19 @@ impl GC {
     /// Forward barrier (luaC_barrier_)
     /// Called when a black object 'o' is modified to point to white object 'v'
     /// This maintains the invariant: black objects cannot point to white objects
-    pub fn barrier(&mut self, o_id: GcId, v_id: GcId, pool: &mut ObjectPool) {
+    pub fn barrier(&mut self, o_ptr: GcObjectPtr, v_ptr: GcObjectPtr) {
         // Check if 'o' is black and 'v' is white
-        let (o_black, o_old) = if let Some(o) = pool.get(o_id) {
-            (o.header.is_black(), o.header.is_old())
+        let (o_black, o_old) = if let Some(o) = o_ptr.header() {
+            (o.is_black(), o.is_old())
         } else {
             return;
         };
-
         if !o_black {
             return;
         }
 
-        let v_white = if let Some(v) = pool.get(v_id) {
-            v.header.is_white()
+        let v_white = if let Some(v) = v_ptr.header() {
+            v.is_white()
         } else {
             return;
         };
@@ -2192,18 +2191,18 @@ impl GC {
         // Must keep invariant during mark phase
         if self.gc_state.keep_invariant() {
             // Mark 'v' immediately to restore invariant
-            self.mark_object(v_id, pool);
+            self.mark_object(v_ptr, pool);
 
             // Generational invariant: if 'o' is old, make 'v' OLD0
             if o_old {
-                if let Some(v) = pool.get_mut(v_id) {
+                if let Some(v) = pool.get_mut(v_ptr) {
                     v.header.make_old0();
                 }
             }
         } else if self.gc_state.is_sweep_phase() {
             // In incremental sweep: make 'o' white to avoid repeated barriers
             if self.gc_kind != GcKind::GenMinor {
-                if let Some(o) = pool.get_mut(o_id) {
+                if let Some(o) = pool.get_mut(o_ptr) {
                     o.header.make_white(self.current_white);
                 }
             }
@@ -2267,17 +2266,17 @@ impl GC {
     }
 
     /// Mark an object (helper for barrier)
-    fn mark_object(&mut self, gc_id: GcId, pool: &mut ObjectPool) {
-        if let Some(obj) = pool.get_mut(gc_id) {
+    fn mark_object(&mut self, gc_ptr: GcObjectPtr) {
+        if let Some(header) = gc_ptr.header_mut() {
             // Only need to mark if it is white
-            if obj.header.is_white() {
-                match obj.ptr {
-                    GcObject::String(_) | GcObject::Binary(_) => {
-                        obj.header.make_black(); // Leaves become black immediately
+            if header.is_white() {
+                match gc_ptr.kind() {
+                    GcObjectKind::String | GcObjectKind::Binary => {
+                        header.make_black(); // Leaves become black immediately
                     }
                     _ => {
-                        obj.header.make_gray(); // Others become gray
-                        self.gray.push(gc_id);
+                        header.make_gray(); // Others become gray
+                        self.gray.push(gc_ptr);
                     }
                 }
             }

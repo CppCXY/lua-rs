@@ -11,7 +11,7 @@ use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, GcActions, GcId, LuaTable, LuaVM, UpvaluePtr};
+use crate::{Chunk, GcActions, GcObjectPtr, GcId, LuaTable, LuaVM, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -144,7 +144,7 @@ impl LuaState {
         // nextraargs = number of arguments passed beyond the function's fixed parameters
         let mut nextraargs = 0;
         let mut maxstacksize = nparams; // Default for C functions
-        
+
         if let Some(func) = func.as_lua_function() {
             if let Some(chunk) = func.chunk() {
                 // For Lua functions with prototypes
@@ -154,7 +154,7 @@ impl LuaState {
                 } else {
                     0
                 };
-                
+
                 // CRITICAL: frame_top should be base + maxstacksize (not base + nparams)
                 // This is the maximum stack size that the function may use
                 // See luaD_precall in ldo.c:731: fsize = p->maxstacksize
@@ -438,8 +438,6 @@ impl LuaState {
     /// Close upvalues from a given stack index upwards
     /// This is called when exiting a function or block scope
     pub fn close_upvalues(&mut self, level: usize) {
-        let object_pool = unsafe { &mut (*self.vm).object_pool };
-
         // Optimization: The list is sorted by stack index descending (higher indices first).
         // Upvalues to close (index >= level) are at the beginning of the list.
         // We scan to find the cutoff point.
@@ -447,15 +445,11 @@ impl LuaState {
         let len = self.open_upvalues_list.len();
 
         while count < len {
-            let upval_id = self.open_upvalues_list[count];
+            let upval_ptr = self.open_upvalues_list[count];
             // Check if this upvalue points to a stack index >= level
-            let should_close = if let Some(upval) = object_pool.get_upvalue(upval_id) {
-                match upval.get_stack_index() {
-                    Some(stack_idx) => stack_idx >= level,
-                    None => true, // Already closed (stale state), remove it
-                }
-            } else {
-                true // Invalid ID, remove it
+            let should_close = match upval_ptr.as_ref().data.get_stack_index() {
+                Some(stack_idx) => stack_idx >= level,
+                None => true, // Already closed (stale state), remove it
             };
 
             if !should_close {
@@ -495,33 +489,28 @@ impl LuaState {
     /// Find or create an open upvalue for the given stack index
     /// Uses HashMap for O(1) lookup instead of O(n) linear search
     /// This is a major optimization over the naive linked list approach
-    pub fn find_or_create_upvalue(&mut self, stack_index: usize) -> LuaResult<UpvalueId> {
+    pub fn find_or_create_upvalue(&mut self, stack_index: usize) -> LuaResult<UpvaluePtr> {
         // O(1) lookup in HashMap
-        if let Some(&upval_id) = self.open_upvalues_map.get(&stack_index) {
-            return Ok(upval_id);
+        if let Some(&upval_ptr) = self.open_upvalues_map.get(&stack_index) {
+            return Ok(upval_ptr);
         }
 
         // Not found, create a new one
-        let upval_id = {
+        let upval_ptr = {
             let vm = self.vm_mut();
             vm.create_upvalue_open(stack_index)
         };
 
         // Add to HashMap for O(1) future lookups
-        self.open_upvalues_map.insert(stack_index, upval_id);
+        self.open_upvalues_map.insert(stack_index, upval_ptr);
 
         // Also add to sorted list for traversal (insert in sorted position, higher indices first)
         // Collect existing upvalue IDs and their stack indices
-        let upval_ids: Vec<_> = self.open_upvalues_list.iter().copied().collect();
+        let upval_ptrs: Vec<_> = self.open_upvalues_list.iter().copied().collect();
         let stack_indices: Vec<usize> = {
-            let vm = self.vm_mut();
-            upval_ids
+            upval_ptrs
                 .iter()
-                .filter_map(|&id| {
-                    vm.object_pool
-                        .get_upvalue(id)
-                        .and_then(|upval| upval.get_stack_index())
-                })
+                .filter_map(|&ptr| ptr.as_ref().data.get_stack_index())
                 .collect()
         };
 
@@ -530,9 +519,9 @@ impl LuaState {
             .position(|&idx| idx < stack_index)
             .unwrap_or(stack_indices.len());
 
-        self.open_upvalues_list.insert(insert_pos, upval_id);
+        self.open_upvalues_list.insert(insert_pos, upval_ptr);
 
-        Ok(upval_id)
+        Ok(upval_ptr)
     }
 
     /// Get stack reference (for GC tracing)
@@ -608,7 +597,7 @@ impl LuaState {
 
     /// Get all open upvalues (for GC root collection)
     #[inline(always)]
-    pub fn get_open_upvalues(&self) -> &[UpvalueId] {
+    pub fn get_open_upvalues(&self) -> &[UpvaluePtr] {
         &self.open_upvalues_list
     }
 
@@ -795,7 +784,7 @@ impl LuaState {
     }
 
     /// Create function closure
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvalueId>) -> LuaValue {
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> LuaValue {
         self.vm_mut().create_function(chunk, upvalues)
     }
 
@@ -849,12 +838,6 @@ impl LuaState {
         value: LuaValue,
     ) -> LuaResult<()> {
         self.vm_mut().table_set_with_meta(table, key, value)
-    }
-
-    /// Get string from value
-    pub fn get_string(&self, value: &LuaValue) -> Option<&str> {
-        let vm = unsafe { &*self.vm };
-        vm.get_string(value)
     }
 
     // ===== Protected Call (pcall/xpcall) =====
@@ -1248,18 +1231,22 @@ impl LuaState {
             // For now, we close them to avoid cross-thread stack access issues
             // TODO: Proper solution is to store ThreadId in Upvalue::Open
             if let Some(func_body) = func.as_lua_function() {
-                let upvalue_ids: Vec<UpvalueId> = func_body.cached_upvalues().iter().map(|u| u.id).collect();
+                let upvalue_ptrs: Vec<UpvaluePtr> =
+                    func_body.cached_upvalues().iter().map(|u| u.ptr).collect();
+                // TODO: check the correct implement
                 unsafe {
                     let vm = &mut *self.vm;
-                    for upval_id in upvalue_ids {
-                        if let Some(upval) = vm.object_pool.get_upvalue(upval_id) {
-                            if let Some(stack_idx) = upval.get_stack_index() {
-                                // Get value from main thread's stack
-                                let value = vm.main_state.stack.get(stack_idx).copied().unwrap_or(LuaValue::nil());
-                                if let Some(upval_mut) = vm.object_pool.get_upvalue_mut(upval_id) {
-                                    upval_mut.close(value);
-                                }
-                            }
+                    for upval_ptr in upvalue_ptrs {
+                        if let Some(stack_idx) = upval_ptr.as_ref().data.get_stack_index() {
+                            // Get value from main thread's stack
+                            let value = vm
+                                .main_state
+                                .stack
+                                .get(stack_idx)
+                                .copied()
+                                .unwrap_or(LuaValue::nil());
+
+                            upval_ptr.as_mut_ref().data.close(value);
                         }
                     }
                 }
@@ -1364,10 +1351,10 @@ impl LuaState {
 
     /// Forward GC barrier (luaC_barrier in Lua 5.5)
     /// Called when modifying an object to point to another object
-    pub fn gc_barrier(&mut self, owner_id: UpvalueId, value_gc_id: GcId) {
+    pub fn gc_barrier(&mut self, upvalue_ptr: UpvaluePtr, value_gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
-        let owner_gc_id = GcId::UpvalueId(owner_id);
-        vm.gc.barrier(owner_gc_id, value_gc_id, &mut vm.object_pool);
+        let owner_ptr = GcObjectPtr::Upvalue(upvalue_ptr);
+        vm.gc.barrier(owner_ptr, value_gc_ptr);
     }
 
     /// Backward GC barrier (luaC_barrierback in Lua 5.5)
@@ -1379,15 +1366,15 @@ impl LuaState {
     }
 
     /// Convert LuaValue to GcId (if it's a GC-managed object)
-    pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<GcId> {
+    pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<GcObjectPtr> {
         use crate::lua_value::LuaValueKind;
         match value.kind() {
-            LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
-            LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
-            LuaValueKind::String => value.as_string_id().map(GcId::StringId),
-            LuaValueKind::Binary => value.as_binary_id().map(GcId::BinaryId),
-            LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
-            LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
+            LuaValueKind::Table => value.as_table_ptr().map(GcObjectPtr::Table),
+            LuaValueKind::Function => value.as_function_ptr().map(GcObjectPtr::Function),
+            LuaValueKind::String => value.as_string_ptr().map(GcObjectPtr::String),
+            LuaValueKind::Binary => value.as_binary_ptr().map(GcObjectPtr::Binary),
+            LuaValueKind::Thread => value.as_thread_ptr().map(GcObjectPtr::Thread),
+            LuaValueKind::Userdata => value.as_userdata_ptr().map(GcObjectPtr::Userdata),
             _ => None,
         }
     }
@@ -1446,49 +1433,21 @@ impl LuaState {
     }
 
     /// Call __gc metamethods for objects pending finalization
-    fn call_finalizers(&mut self, to_finalize: Vec<GcId>) -> LuaResult<()> {
-        use crate::gc::GcObject;
+    fn call_finalizers(&mut self, to_finalize: Vec<GcObjectPtr>) -> LuaResult<()> {
         use crate::lua_vm::get_metamethod_event;
 
-        for gc_id in to_finalize {
+        for gc_ptr in to_finalize {
             // Convert GcId to LuaValue
-            let obj_value = match gc_id {
-                GcId::TableId(id) => {
-                    if let Some(val) = self.vm_mut().object_pool.get_table_value(id) {
-                        val
-                    } else {
-                        continue;
-                    }
+            let obj_value = match gc_ptr {
+                GcObjectPtr::Table(ptr) => {
+                    LuaValue::table(ptr)
                 }
-                GcId::UserdataId(id) => {
+                GcObjectPtr::Userdata(ptr) => {
                     // Get userdata pointer
-                    let vm = self.vm_mut();
-                    if let Some(ud) = vm.object_pool.gc_pool.get(id.0) {
-                        match &ud.ptr {
-                            GcObject::Userdata(ud_box) => {
-                                let ptr = ud_box.as_ref() as *const LuaUserdata;
-                                LuaValue::userdata(id, ptr)
-                            }
-                            _ => continue,
-                        }
-                    } else {
-                        continue;
-                    }
+                   LuaValue::userdata(ptr)
                 }
-                GcId::ThreadId(id) => {
-                    // Get thread pointer
-                    let vm = self.vm_mut();
-                    if let Some(thread) = vm.object_pool.gc_pool.get(id.0) {
-                        match &thread.ptr {
-                            GcObject::Thread(thread_box) => {
-                                let ptr = thread_box.as_ref() as *const LuaState;
-                                LuaValue::thread(id, ptr)
-                            }
-                            _ => continue,
-                        }
-                    } else {
-                        continue;
-                    }
+                GcObjectPtr::Thread(ptr) => {
+                    LuaValue::thread(ptr)
                 }
                 // Other types don't support __gc
                 _ => continue,

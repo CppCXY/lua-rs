@@ -264,11 +264,10 @@ impl LuaVM {
 
         // Create thread in ObjectPool and return LuaValue
         let current_white = self.gc.current_white;
-        let value = self.object_pool.create_thread(thread, current_white);
-        let id = value.as_thread_id().unwrap();
+        let (value, size) = self.object_pool.create_thread(thread, current_white);
+
         // Track thread for GC (IMPORTANT: threads are large objects!)
-        self.gc
-            .track_size(GcId::ThreadId(id), &mut self.object_pool);
+        self.gc.track_size(size);
         value
     }
 
@@ -280,21 +279,12 @@ impl LuaVM {
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Get ThreadId from LuaValue
-        let Some(thread_id) = thread_val.as_thread_id() else {
+        let Some(l) = thread_val.as_thread_mut() else {
             return Err(self.error("invalid thread".to_string()));
         };
 
-        if thread_id.is_main() {
-            return Err(self.error("cannot resume main thread".to_string()));
-        }
-
-        // Get thread's Rc<RefCell<LuaState>>
-        let Some(thread) = self.object_pool.get_thread_mut(thread_id) else {
-            return Err(self.error("thread not found".to_string()));
-        };
-        //
         // Borrow mutably and delegate to LuaState::resume
-        thread.resume(args)
+        l.resume(args)
     }
 
     /// Fast table get - NO metatable support!
@@ -303,17 +293,13 @@ impl LuaVM {
     /// Only use table_get_with_meta when you explicitly need __index metamethod
     #[inline(always)]
     pub fn table_get(&self, table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        let table_id = table_value.as_table_id()?;
-        let table = self.object_pool.get_table(table_id)?;
+        let table = table_value.as_table()?;
         table.raw_get(key)
     }
 
     #[inline(always)]
     pub fn table_set(&mut self, lua_table_val: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
-        let Some(table_id) = lua_table_val.as_table_id() else {
-            return false;
-        };
-        let Some(table) = self.object_pool.get_table_mut(table_id) else {
+        let Some(table) = lua_table_val.as_table_mut() else {
             return false;
         };
         table.raw_set(&key, value.clone());
@@ -321,7 +307,7 @@ impl LuaVM {
         // GC backward barrier (luaC_barrierback)
         // Tables use backward barrier since they may be modified many times
         if value.is_collectable() {
-            self.gc_barrier_back(table_id);
+            self.gc_barrier_back(lua_table_val.as_table_ptr());
         }
         true
     }
@@ -443,21 +429,17 @@ impl LuaVM {
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, is_new) = self.object_pool.create_string(s, current_white);
+        let (value, is_new, size) = self.object_pool.create_string(s, current_white);
         if is_new {
-            let s_id = value.as_string_id().unwrap();
-            self.gc
-                .track_size(GcId::StringId(s_id), &mut self.object_pool);
+            self.gc.track_size(size);
         }
         value
     }
 
     pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
         let current_white = self.gc.current_white;
-        let value = self.object_pool.create_binary(data, current_white);
-        let id = value.as_binary_id().unwrap();
-        self.gc
-            .track_size(GcId::BinaryId(id), &mut self.object_pool);
+        let (value, size) = self.object_pool.create_binary(data, current_white);
+        self.gc.track_size(size);
         value
     }
 
@@ -465,11 +447,9 @@ impl LuaVM {
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, is_new) = self.object_pool.create_string_owned(s, current_white);
+        let (value, is_new, size) = self.object_pool.create_string_owned(s, current_white);
         if is_new {
-            let s_id = value.as_string_id().unwrap();
-            self.gc
-                .track_size(GcId::StringId(s_id), &mut self.object_pool);
+            self.gc.track_size(size);
         }
         value
     }
@@ -478,27 +458,17 @@ impl LuaVM {
     #[inline]
     pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, is_new) = self
-            .object_pool
-            .create_substring(s_value, start, end, current_white);
+        let (value, is_new, size) =
+            self.object_pool
+                .create_substring(s_value, start, end, current_white);
 
         if is_new {
-            let s_id = value.as_string_id().unwrap();
-            self.gc
-                .track_size(GcId::StringId(s_id), &mut self.object_pool);
+            self.gc.track_size(size);
         }
 
         value
     }
 
-    /// Get string by LuaValue (resolves ID from object pool)
-    pub fn get_string(&self, value: &LuaValue) -> Option<&str> {
-        if let Some(id) = value.as_string_id() {
-            self.object_pool.get_string(id)
-        } else {
-            None
-        }
-    }
 
     // ============ GC Write Barriers ============
 
@@ -543,8 +513,7 @@ impl LuaVM {
             .create_table(array_size, hash_size, current_white);
         let id = value.as_table_id().unwrap();
         // Track object for GC - calculates precise size and updates gc_debt
-        self.gc
-            .track_size(GcId::TableId(id), &mut self.object_pool);
+        self.gc.track_size(GcId::TableId(id), &mut self.object_pool);
         value
     }
 
@@ -739,23 +708,23 @@ impl LuaVM {
         //
         // CRITICAL: Only call GC step ONCE, not in a loop!
         // luaC_step itself (via incstep) contains the logic to do enough work
-        
+
         if self.gc.gc_debt <= 0 {
             // Skip if GC is stopped by user
             if self.gc.gc_stopped {
                 return false;
             }
-            
+
             // OPTIMIZATION: Only collect roots when needed!
             // Lua 5.5 only accesses roots in specific states:
             // - Pause: restartcollection() marks roots
             // - EnterAtomic: atomic() marks roots again
             // Other states (Propagate, Sweep, etc.) don't need roots!
             let need_roots = matches!(
-                self.gc.gc_state, 
+                self.gc.gc_state,
                 crate::GcState::Pause | crate::GcState::EnterAtomic
             );
-            
+
             if need_roots {
                 let roots = self.collect_roots();
                 self.gc.step(&roots, &mut self.object_pool);
@@ -764,7 +733,7 @@ impl LuaVM {
                 // This avoids expensive stack traversal on every GC step!
                 self.gc.step(&[], &mut self.object_pool);
             }
-            
+
             return true;
         }
 
