@@ -2,7 +2,7 @@ use ahash::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-use crate::{GcObject, GcPool, GcPtrObject, LuaValue, StringId};
+use crate::{GcObject, GcPool, LuaValue, StringPtr};
 
 /// Complete string interner - ALL strings are interned for maximum performance
 /// - Same content always returns same StringId
@@ -17,7 +17,7 @@ use crate::{GcObject, GcPool, GcPtrObject, LuaValue, StringId};
 pub struct StringInterner {
     // Content hash -> StringIds mapping for deduplication
     // 使用 ahash 作为哈希算法以提升性能
-    map: HashMap<u64, Vec<StringId>, RandomState>,
+    map: HashMap<u64, Vec<StringPtr>, RandomState>,
 
     hashbuilder: RandomState,
 }
@@ -32,42 +32,40 @@ impl StringInterner {
 
     /// Intern a string - returns existing StringId if already interned, creates new otherwise
     /// 所有字符串都会被 intern，保证相同内容只存储一份
-    /// 
+    ///
     /// **CRITICAL**: current_white MUST be passed from GC.current_white for correct marking
     pub fn intern(&mut self, s: &str, gc_pool: &mut GcPool, current_white: u8) -> (LuaValue, bool) {
         let hash = self.hash_string(s);
 
         // Check if already interned
-        let mut found_id = None;
-        if let Some(ids) = self.map.get(&hash) {
-            for &id in ids {
-                if let Some(gs) = gc_pool.get(id.0)
-                    && let GcPtrObject::String(boxed_str) = &gs.ptr
-                {
-                    if boxed_str.as_str() == s {
-                        found_id = Some(id);
-                        break;
-                    }
+        let mut found_ptr = None;
+        if let Some(ptrs) = self.map.get(&hash) {
+            for &ptr in ptrs {
+                if ptr.as_ref().data.as_str() == s {
+                    found_ptr = Some(ptr);
+                    break;
                 }
             }
         }
 
-        if let Some(id) = found_id {
+        if let Some(ptr) = found_ptr {
             // Found! Ensure the string is resurrected if it was condemned (White).
             // Even if create() doesn't trigger GC, the string might be "Dead" from a previous GC cycle
             // (marked White and waiting for Sweep). If we return it now, the Sweeper will free it later,
             // leaving us with a dangling reference.
             // Marking it Black ensures it survives the current/pending sweep.
-            if let Some(gs) = gc_pool.get_mut(id.0) {
-                gs.header.make_black();
-                let ptr = gs.ptr.as_str_ptr().unwrap();
-                return (LuaValue::string(id, ptr), false);
-            }
+            ptr.as_ref().header.make_black();
+            let ptr = gs.ptr.as_str_ptr().unwrap();
+            return (LuaValue::string(id, ptr), false);
         }
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
         let size = (64 + s.len()) as u32;
-        let gc_string = GcObject::with_white(GcPtrObject::String(Box::new(s.to_string())), current_white, size);
+        let gc_string = GcObject::with_white(
+            GcObject::String(Box::new(s.to_string())),
+            current_white,
+            size,
+        );
         let ptr = gc_string.ptr.as_str_ptr().unwrap();
         let id = gc_pool.alloc(gc_string);
         let str_id = StringId(id);

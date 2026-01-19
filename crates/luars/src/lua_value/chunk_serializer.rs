@@ -128,7 +128,7 @@ fn write_chunk(
     // Write constants
     write_u32(buf, chunk.constants.len() as u32);
     for constant in &chunk.constants {
-        write_constant_with_pool(buf, constant, pool)?;
+        write_constant_with_pool(buf, constant)?;
     }
 
     // Write metadata
@@ -316,7 +316,6 @@ const TAG_STRING: u8 = 5;
 fn write_constant_with_pool(
     buf: &mut Vec<u8>,
     value: &LuaValue,
-    pool: &ObjectPool,
 ) -> Result<(), String> {
     if value.is_nil() {
         buf.push(TAG_NIL);
@@ -328,13 +327,9 @@ fn write_constant_with_pool(
     } else if let Some(f) = value.as_float() {
         buf.push(TAG_FLOAT);
         write_f64(buf, f);
-    } else if let Some(string_id) = value.as_string_id() {
-        if let Some(lua_string) = pool.get_string(string_id) {
-            buf.push(TAG_STRING);
-            write_string(buf, lua_string);
-        } else {
-            buf.push(TAG_NIL);
-        }
+    } else if let Some(lua_string) = value.as_str() {
+        buf.push(TAG_STRING);
+        write_string(buf, lua_string);
     } else {
         buf.push(TAG_NIL);
     }

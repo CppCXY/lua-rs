@@ -5,14 +5,13 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::gc::UpvalueId;
 use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, GcActions, GcId, LuaTable, LuaVM, ThreadId};
+use crate::{Chunk, GcActions, GcId, LuaTable, LuaVM, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -42,16 +41,14 @@ pub struct LuaState {
     /// Open upvalues - upvalues pointing to stack locations
     /// Uses HashMap for O(1) lookup by stack index (unlike Lua's sorted linked list)
     /// Also maintains a sorted Vec for efficient traversal during close operations
-    open_upvalues_map: HashMap<usize, UpvalueId>,
-    open_upvalues_list: Vec<UpvalueId>,
+    open_upvalues_map: HashMap<usize, UpvaluePtr>,
+    open_upvalues_list: Vec<UpvaluePtr>,
 
     /// Error message storage (lightweight error handling)
     error_msg: String,
 
     /// Yield values storage (for coroutine yield)
     yield_values: Vec<LuaValue>,
-
-    thread_id: ThreadId,
 
     /// Hook mask and count (for debug hooks)
     _hook_mask: u8,
@@ -77,7 +74,6 @@ impl LuaState {
             open_upvalues_list: Vec::new(),
             error_msg: String::new(),
             yield_values: Vec::new(),
-            thread_id: ThreadId::main_id(),
             _hook_mask: 0,
             _hook_count: 0,
             safe_option,
@@ -86,14 +82,6 @@ impl LuaState {
 
     pub(crate) fn set_vm(&mut self, vm: *mut LuaVM) {
         self.vm = vm;
-    }
-
-    pub(crate) fn set_thread_id(&mut self, id: ThreadId) {
-        self.thread_id = id;
-    }
-
-    pub fn get_thread_id(&self) -> ThreadId {
-        self.thread_id
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)
@@ -321,13 +309,13 @@ impl LuaState {
 
     /// Get open upvalues list
     #[inline(always)]
-    pub fn open_upvalues(&self) -> &[UpvalueId] {
+    pub fn open_upvalues(&self) -> &[UpvaluePtr] {
         &self.open_upvalues_list
     }
 
     /// Get mutable open upvalues list
     #[inline(always)]
-    pub fn open_upvalues_mut(&mut self) -> &mut Vec<UpvalueId> {
+    pub fn open_upvalues_mut(&mut self) -> &mut Vec<UpvaluePtr> {
         &mut self.open_upvalues_list
     }
 
@@ -479,14 +467,12 @@ impl LuaState {
 
         if count > 0 {
             // Batch remove all closed upvalues from the list (efficient O(M) shift via drain)
-            let to_close: Vec<UpvalueId> = self.open_upvalues_list.drain(0..count).collect();
+            let to_close: Vec<UpvaluePtr> = self.open_upvalues_list.drain(0..count).collect();
 
             // Perform the close operation for each
-            for upval_id in to_close {
+            for upval_ptr in to_close {
                 // 1. Identify stack index (must check before closing as closing removes it)
-                let stack_idx_opt = object_pool
-                    .get_upvalue(upval_id)
-                    .and_then(|u| u.get_stack_index());
+                let stack_idx_opt = upval_ptr.as_ref().data.get_stack_index();
 
                 if let Some(stack_idx) = stack_idx_opt {
                     // 2. Remove from map (maintain consistency)
@@ -500,9 +486,7 @@ impl LuaState {
                         .unwrap_or(LuaValue::nil());
 
                     // 4. Close the upvalue (move value to heap)
-                    if let Some(upval) = object_pool.get_upvalue_mut(upval_id) {
-                        upval.close(value);
-                    }
+                    upval_ptr.as_mut_ref().data.close(value);
                 }
             }
         }
@@ -1463,7 +1447,7 @@ impl LuaState {
 
     /// Call __gc metamethods for objects pending finalization
     fn call_finalizers(&mut self, to_finalize: Vec<GcId>) -> LuaResult<()> {
-        use crate::gc::GcPtrObject;
+        use crate::gc::GcObject;
         use crate::lua_vm::get_metamethod_event;
 
         for gc_id in to_finalize {
@@ -1481,7 +1465,7 @@ impl LuaState {
                     let vm = self.vm_mut();
                     if let Some(ud) = vm.object_pool.gc_pool.get(id.0) {
                         match &ud.ptr {
-                            GcPtrObject::Userdata(ud_box) => {
+                            GcObject::Userdata(ud_box) => {
                                 let ptr = ud_box.as_ref() as *const LuaUserdata;
                                 LuaValue::userdata(id, ptr)
                             }
@@ -1496,7 +1480,7 @@ impl LuaState {
                     let vm = self.vm_mut();
                     if let Some(thread) = vm.object_pool.gc_pool.get(id.0) {
                         match &thread.ptr {
-                            GcPtrObject::Thread(thread_box) => {
+                            GcObject::Thread(thread_box) => {
                                 let ptr = thread_box.as_ref() as *const LuaState;
                                 LuaValue::thread(id, ptr)
                             }

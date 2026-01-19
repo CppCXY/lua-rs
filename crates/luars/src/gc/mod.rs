@@ -629,7 +629,7 @@ impl GC {
             GcId::UserdataId(id) => {
                 // Check if userdata has __gc metamethod
                 if let Some(gc_obj) = pool.gc_pool.get(id.0) {
-                    if let GcPtrObject::Userdata(ud) = &gc_obj.ptr {
+                    if let GcObject::Userdata(ud) = &gc_obj.ptr {
                         let metatable = ud.get_metatable();
                         if let Some(mt_table) = metatable.as_table() {
                             let gc_key = pool.tm_gc.clone();
@@ -643,7 +643,7 @@ impl GC {
             GcId::ThreadId(id) => {
                 // Threads don't typically have __gc in standard Lua, but check anyway
                 if let Some(gc_obj) = pool.gc_pool.get(id.0) {
-                    if let GcPtrObject::Thread(_) = &gc_obj.ptr {
+                    if let GcObject::Thread(_) = &gc_obj.ptr {
                         // TODO: Check if thread has __gc if you support it
                         return false;
                     }
@@ -2299,7 +2299,7 @@ impl GC {
             // Only need to mark if it is white
             if obj.header.is_white() {
                 match obj.ptr {
-                    GcPtrObject::String(_) | GcPtrObject::Binary(_) => {
+                    GcObject::String(_) | GcObject::Binary(_) => {
                         obj.header.make_black(); // Leaves become black immediately
                     }
                     _ => {

@@ -13,8 +13,7 @@ use crate::gc::string_interner::StringInterner;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption, TmKind};
 use crate::{
-    BinaryId, FunctionId, GcId, GcObject, GcObjectType, GcPool, GcPtrObject, LuaTable, LuaValue,
-    StringId, TableId, ThreadId, Upvalue, UpvalueId, UserdataId,
+    Gc, GcBinary, GcFunction, GcId, GcObject, GcObjectKind, GcPool, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable, LuaValue, Upvalue, UpvaluePtr
 };
 use std::rc::Rc;
 
@@ -154,40 +153,40 @@ impl ObjectPool {
 
         // Fix all metamethod name strings - they should never be collected
         // (like Lua's luaC_fix in luaT_init)
-        pool.fix_gc_object(pool.tm_index.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_newindex.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_call.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_tostring.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_len.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_pairs.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_ipairs.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_gc.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_close.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_mode.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_name.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_eq.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_lt.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_le.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_add.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_sub.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_mul.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_div.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_mod.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_pow.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_unm.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_idiv.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_band.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_bor.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_bxor.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_bnot.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_shl.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_shr.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_concat.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.tm_metatable.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.str_suspended.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.str_running.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.str_normal.as_string_id().unwrap().into());
-        pool.fix_gc_object(pool.str_dead.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_index.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_newindex.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_call.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_tostring.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_len.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_pairs.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_ipairs.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_gc.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_close.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_mode.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_name.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_eq.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_lt.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_le.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_add.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_sub.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_mul.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_div.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_mod.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_pow.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_unm.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_idiv.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_band.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_bor.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_bxor.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_bnot.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_shl.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_shr.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_concat.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.tm_metatable.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.str_suspended.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.str_running.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.str_normal.as_string_id().unwrap().into());
+        // pool.fix_gc_object(pool.str_dead.as_string_id().unwrap().into());
 
         pool
     }
@@ -289,58 +288,16 @@ impl ObjectPool {
         self.strings.intern(&s, &mut self.gc_pool, current_white)
     }
 
-    pub fn get_string_value(&self, id: StringId) -> Option<LuaValue> {
-        let gc_obj = self.gc_pool.get(id.0)?;
-        let ptr = match &gc_obj.ptr {
-            GcPtrObject::String(s) => s.as_ref() as *const String,
-            _ => return None,
-        };
-        Some(LuaValue::string(id, ptr))
-    }
-
     /// Create a binary value from Vec<u8>
     ///
     #[inline]
     pub fn create_binary(&mut self, data: Vec<u8>, current_white: u8) -> LuaValue {
         let size = (64 + data.len()) as u32;
-        let gc_binary =
-            GcObject::with_white(GcPtrObject::Binary(Box::new(data)), current_white, size);
-        let ptr = gc_binary.ptr.as_binary_ptr().unwrap();
-        let id = self.gc_pool.alloc(gc_binary);
-        let binary_id = BinaryId(id);
-
-        LuaValue::binary(binary_id, ptr)
-    }
-
-    #[inline(always)]
-    pub fn get_binary(&self, id: BinaryId) -> Option<&[u8]> {
-        self.gc_pool.get(id.0).and_then(|go| match &go.ptr {
-            GcPtrObject::Binary(b) => Some(b.as_ref().as_slice()),
-            _ => None,
-        })
-    }
-
-    #[inline(always)]
-    pub fn get_binary_value(&self, id: BinaryId) -> Option<LuaValue> {
-        let gc_obj = self.gc_pool.get(id.0)?;
-        let ptr = match &gc_obj.ptr {
-            GcPtrObject::Binary(b) => b.as_ref() as *const Vec<u8>,
-            _ => return None,
-        };
-        Some(LuaValue::binary(id, ptr))
-    }
-
-    #[inline(always)]
-    pub fn get_string(&self, id: StringId) -> Option<&str> {
-        self.gc_pool.get(id.0).and_then(|go| match &go.ptr {
-            GcPtrObject::String(s) => Some(s.as_ref().as_str()),
-            _ => None,
-        })
-    }
-
-    #[inline(always)]
-    pub fn contains_string(&self, id: StringId) -> bool {
-        self.gc_pool.get(id.0).is_some()
+        let gc_ptr = Box::new(GcBinary::new(data, current_white, size));
+        let gc_binary = GcObject::Binary(gc_ptr);
+        let ptr = gc_binary.as_binary_ptr().unwrap();
+        self.gc_pool.alloc(gc_binary);
+        LuaValue::binary(ptr)
     }
 
     /// Create a substring from an existing string (optimized for string.sub)
@@ -387,9 +344,9 @@ impl ObjectPool {
     /// In Lua 5.5: "set2gray(o); /* they will be gray forever */"
     #[inline]
     pub fn fix_gc_object(&mut self, id: GcId) {
-        if let Some(go) = self.gc_pool.get_mut(id.index()) {
-            go.header.set_fixed();
-            go.header.make_gray(); // Gray forever, like Lua 5.5
+        if let Some(gc) = self.gc_pool.get_mut(id.index()) {
+            gc.header_mut().set_fixed();
+            gc.header_mut().make_gray(); // Gray forever, like Lua 5.5
         }
     }
     // ==================== Table Operations ====================
@@ -404,14 +361,14 @@ impl ObjectPool {
         // Lua 5.5 ltable.c luaH_size:
         //   lu_mem sz = sizeof(Table) + concretesize(t->asize);
         //   if (!isdummy(t)) sz += sizehash(t);
-        // 
+        //
         // concretesize(size) = size * (sizeof(Value) + 1) + sizeof(unsigned)
         //   = size * (16 + 1) + 4 = size * 17 + 4
-        // 
+        //
         // sizehash(t) = sizenode(t) * sizeof(Node) + extraLastfree(t)
         //   ≈ (1 << lsizenode) * 24 + (has_lastfree ? 8 : 0)
         //   For simplicity, use hash_size * 24
-        // 
+        //
         // sizeof(Table) ≈ 80 bytes (base struct)
         let base_size = 80;
         let array_bytes = if array_size > 0 {
@@ -420,49 +377,20 @@ impl ObjectPool {
             0
         };
         let hash_bytes = if hash_size > 0 {
-            hash_size * 24 + 8  // Node size + lastfree overhead
+            hash_size * 24 + 8 // Node size + lastfree overhead
         } else {
             0
         };
         let size = (base_size + array_bytes + hash_bytes) as u32;
-
-        let gc_table = GcObject::with_white(
-            GcPtrObject::Table(Box::new(LuaTable::new(array_size as u32, hash_size as u32))),
+        let ptr = Box::new(GcTable::new(
+            LuaTable::new(array_size as u32, hash_size as u32),
             current_white,
             size,
-        );
-        let ptr = gc_table.ptr.as_table_ptr().unwrap();
-        let id = self.gc_pool.alloc(gc_table);
-        let table_id = TableId(id);
-        LuaValue::table(table_id, ptr)
-    }
-
-    #[inline(always)]
-    pub fn get_table(&self, id: TableId) -> Option<&LuaTable> {
-        let table = self.gc_pool.get(id.0)?;
-        match &table.ptr {
-            GcPtrObject::Table(t) => Some(t.as_ref()),
-            _ => None,
-        }
-    }
-
-    #[inline(always)]
-    pub fn get_table_value(&self, id: TableId) -> Option<LuaValue> {
-        let table = self.gc_pool.get(id.0)?;
-        let ptr = match &table.ptr {
-            GcPtrObject::Table(t) => t.as_ref() as *const LuaTable,
-            _ => return None,
-        };
-        Some(LuaValue::table(id, ptr))
-    }
-
-    #[inline(always)]
-    pub fn get_table_mut(&mut self, id: TableId) -> Option<&mut LuaTable> {
-        let table = self.gc_pool.get_mut(id.0)?;
-        match &mut table.ptr {
-            GcPtrObject::Table(t) => Some(t.as_mut()),
-            _ => None,
-        }
+        ));
+        let gc_table = GcObject::Table(ptr);
+        let ptr = gc_table.as_table_ptr().unwrap();
+        self.gc_pool.alloc(gc_table);
+        LuaValue::table(ptr)
     }
 
     // ==================== Function Operations ====================
@@ -474,11 +402,11 @@ impl ObjectPool {
     pub fn create_function(
         &mut self,
         chunk: Rc<Chunk>,
-        upvalue_ids: Vec<UpvalueId>,
+        upvalue_ptrs: Vec<UpvaluePtr>,
         current_white: u8,
     ) -> LuaValue {
         // Calculate size: base + upvalues + chunk data
-        let upvalue_count = upvalue_ids.len();
+        let upvalue_count = upvalue_ptrs.len();
         let instr_size = chunk.code.len() * 8;
         let const_size = chunk.constants.len() * 32;
         let child_size = chunk.child_protos.len() * 512;
@@ -489,22 +417,18 @@ impl ObjectPool {
 
         // Build cached upvalues with direct pointers
         let mut upvalues: Vec<CachedUpvalue> = vec![];
-        for id in upvalue_ids {
-            if let Some(uv) = self.gc_pool.get(id.0) {
-                let ptr = uv.ptr.as_upvalue_ptr().unwrap();
-                upvalues.push(CachedUpvalue::new(id, ptr));
-            }
+        for ptr in upvalue_ptrs {
+            upvalues.push(CachedUpvalue::new(ptr));
         }
 
-        let gc_func = GcObject::with_white(
-            GcPtrObject::Function(Box::new(FunctionBody::Lua(chunk, upvalues))),
+        let gc_func = GcObject::Function(Box::new(GcFunction::new(
+            FunctionBody::Lua(chunk, upvalues),
             current_white,
             size,
-        );
-        let ptr = gc_func.ptr.as_function_ptr().unwrap();
-        let id = self.gc_pool.alloc(gc_func);
-        let func_id = FunctionId(id);
-        LuaValue::function(func_id, ptr)
+        )));
+        let ptr: *const Gc<FunctionBody> = gc_func.as_function_ptr().unwrap();
+        self.gc_pool.alloc(gc_func);
+        LuaValue::function(ptr)
     }
 
     /// Create a C closure (native function with upvalues)
@@ -514,28 +438,24 @@ impl ObjectPool {
     pub fn create_c_closure(
         &mut self,
         func: CFunction,
-        upvalue_ids: Vec<UpvalueId>,
+        upvalue_ptrs: Vec<UpvaluePtr>,
         current_white: u8,
     ) -> LuaValue {
         // Build cached upvalues with direct pointers
         let mut upvalues: Vec<CachedUpvalue> = vec![];
-        for id in upvalue_ids {
-            if let Some(uv) = self.gc_pool.get(id.0) {
-                let ptr = uv.ptr.as_upvalue_ptr().unwrap();
-                upvalues.push(CachedUpvalue::new(id, ptr));
-            }
+        for ptr in upvalue_ptrs {
+            upvalues.push(CachedUpvalue::new(ptr));
         }
 
         let size = (256 + upvalues.len() * 64) as u32;
-        let gc_func = GcObject::with_white(
-            GcPtrObject::Function(Box::new(FunctionBody::CClosure(func, upvalues))),
+        let gc_func = GcObject::Function(Box::new(GcFunction::new(
+            FunctionBody::CClosure(func, upvalues),
             current_white,
             size,
-        );
-        let ptr = gc_func.ptr.as_function_ptr().unwrap();
-        let id = self.gc_pool.alloc(gc_func);
-        let func_id = FunctionId(id);
-        LuaValue::function(func_id, ptr)
+        )));
+        let ptr = gc_func.as_function_ptr().unwrap();
+        self.gc_pool.alloc(gc_func);
+        LuaValue::function(ptr)
     }
 
     // ==================== Upvalue Operations ====================
@@ -543,46 +463,30 @@ impl ObjectPool {
     /// Create an open upvalue pointing to a stack location
     ///
     #[inline]
-    pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> UpvalueId {
+    pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> UpvaluePtr {
         let upvalue = Upvalue::Open(stack_index);
         let size = 64;
-        let gc_uv =
-            GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white, size);
-        UpvalueId(self.gc_pool.alloc(gc_uv))
+        let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
+        let ptr = gc_uv.as_upvalue_ptr().unwrap();
+        self.gc_pool.alloc(gc_uv);
+        UpvaluePtr::new(ptr)
     }
 
     /// Create a closed upvalue with a value
     ///
     #[inline]
-    pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> UpvalueId {
+    pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> UpvaluePtr {
         let upvalue = Upvalue::Closed(value);
         let size = 64;
-        let gc_uv =
-            GcObject::with_white(GcPtrObject::Upvalue(Box::new(upvalue)), current_white, size);
-        UpvalueId(self.gc_pool.alloc(gc_uv))
-    }
-
-    #[inline(always)]
-    pub(crate) fn get_upvalue(&self, id: UpvalueId) -> Option<&Upvalue> {
-        let gc_obj = self.gc_pool.get(id.0)?;
-        match &gc_obj.ptr {
-            GcPtrObject::Upvalue(upvalue) => Some(upvalue.as_ref()),
-            _ => None,
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn get_upvalue_mut(&mut self, id: UpvalueId) -> Option<&mut Upvalue> {
-        let gc_obj = self.gc_pool.get_mut(id.0)?;
-        match &mut gc_obj.ptr {
-            GcPtrObject::Upvalue(upvalue) => Some(upvalue.as_mut()),
-            _ => None,
-        }
+        let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
+        let ptr = gc_uv.as_upvalue_ptr().unwrap();
+        self.gc_pool.alloc(gc_uv);
+        UpvaluePtr::new(ptr)
     }
 
     /// Create upvalue from LuaUpvalue
     ///
-    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>, current_white: u8) -> UpvalueId {
+    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>, current_white: u8) -> UpvaluePtr {
         // Check if open and get stack index
         if upvalue.is_open() {
             self.create_upvalue_open(upvalue.get_stack_index().unwrap_or(0), current_white)
@@ -599,24 +503,11 @@ impl ObjectPool {
     #[inline]
     pub fn create_userdata(&mut self, userdata: LuaUserdata, current_white: u8) -> LuaValue {
         let size = 512;
-        let gc_userdata = GcObject::with_white(
-            GcPtrObject::Userdata(Box::new(userdata)),
-            current_white,
-            size,
-        );
-        let ptr = gc_userdata.ptr.as_userdata_ptr().unwrap();
-        let id = UserdataId(self.gc_pool.alloc(gc_userdata));
-        LuaValue::userdata(id, ptr)
-    }
-
-    #[inline(always)]
-    pub fn get_userdata_mut(&mut self, id: UserdataId) -> Option<&mut LuaUserdata> {
-        self.gc_pool
-            .get_mut(id.0)
-            .and_then(|gc_obj| match &mut gc_obj.ptr {
-                GcPtrObject::Userdata(userdata) => Some(userdata.as_mut()),
-                _ => None,
-            })
+        let gc_userdata =
+            GcObject::Userdata(Box::new(GcUserdata::new(userdata, current_white, size)));
+        let ptr = gc_userdata.as_userdata_ptr().unwrap();
+        self.gc_pool.alloc(gc_userdata);
+        LuaValue::userdata(ptr)
     }
 
     // ==================== Thread Operations ====================
@@ -625,34 +516,13 @@ impl ObjectPool {
     pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> LuaValue {
         let size = 4096; // Fixed size for thread (including stack)
         let gc_thread =
-            GcObject::with_white(GcPtrObject::Thread(Box::new(thread)), current_white, size);
-        let ptr = gc_thread.ptr.as_thread_ptr().unwrap();
-        let id = ThreadId(self.gc_pool.alloc(gc_thread));
-        let l = self.get_thread_mut(id).unwrap();
-        l.set_thread_id(id);
+            GcObject::Thread(Box::new(GcThread::new(thread, current_white, size)));
+        let ptr = gc_thread.as_thread_ptr().unwrap();
+        self.gc_pool.alloc(gc_thread);
 
-        LuaValue::thread(id, ptr)
+        LuaValue::thread(ptr)
     }
 
-    #[inline(always)]
-    pub fn get_thread_value(&self, id: ThreadId) -> Option<LuaValue> {
-        let gc = self.gc_pool.get(id.0)?;
-        let ptr = match &gc.ptr {
-            GcPtrObject::Thread(t) => t.as_ref() as *const LuaState,
-            _ => return None,
-        };
-        Some(LuaValue::thread(id, ptr))
-    }
-
-    #[inline(always)]
-    pub fn get_thread_mut(&mut self, id: ThreadId) -> Option<&mut LuaState> {
-        self.gc_pool
-            .get_mut(id.0)
-            .and_then(|gc_obj| match &mut gc_obj.ptr {
-                GcPtrObject::Thread(t) => Some(t.as_mut()),
-                _ => None,
-            })
-    }
     // ==================== GC Support ====================
     pub fn shrink_to_fit(&mut self) {
         // StringInterner manages its own internal structures
@@ -670,12 +540,12 @@ impl ObjectPool {
     #[inline]
     pub fn remove(&mut self, id: GcId) -> usize {
         match id.gc_type() {
-            GcObjectType::String => {
+            GcObjectKind::String => {
                 if let Some(s_object) = self.gc_pool.get(id.index())
-                    && let GcPtrObject::String(s) = &s_object.ptr
+                    && let GcObject::String(s) = &s_object
                 {
                     // Remove from string interner first
-                    self.strings.remove_dead_intern(StringId(id.index()), &s);
+                    self.strings.remove_dead_intern(id.index(), &s.data);
                     return self.gc_pool.free(id.index());
                 }
 
