@@ -64,6 +64,14 @@ impl LuaTable {
         }
     }
 
+    pub fn is_array(&self) -> bool {
+        match &self.impl_table {
+            // LuaTableDetail::TypedArray(_) => true,
+            LuaTableDetail::ValueArray(_) => true,
+            LuaTableDetail::HashTable(_) => false,
+        }
+    }
+
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
         match &self.impl_table {
             // LuaTableDetail::TypedArray(arr) => arr.get_int(key),

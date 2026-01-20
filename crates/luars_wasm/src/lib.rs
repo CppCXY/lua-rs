@@ -1,5 +1,8 @@
-use luars::{lua_vm::SafeOption, stdlib, LuaVM, LuaValue};
+use luars::{lua_vm::SafeOption, stdlib, LuaVM};
 use wasm_bindgen::prelude::*;
+
+mod conversion;
+use conversion::{js_value_to_lua, lua_value_to_js, lua_value_to_json_string};
 
 // Set panic hook for better error messages in WASM
 #[wasm_bindgen(start)]
@@ -7,6 +10,7 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
+/// simple impl, need more work
 /// Lua VM wrapper for WASM
 #[wasm_bindgen]
 pub struct LuaWasm {
@@ -30,7 +34,7 @@ impl LuaWasm {
         match self.vm.execute_string(code) {
             Ok(results) => {
                 let result = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
-                Ok(self.vm.value_to_string_raw(&result))
+                Ok(format!("{}", result))
             }
             Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
         }
@@ -49,7 +53,7 @@ impl LuaWasm {
     #[wasm_bindgen(js_name = getGlobal)]
     pub fn get_global(&mut self, name: &str) -> Result<JsValue, JsValue> {
         if let Some(lua_value) = self.vm.get_global(name) {
-            lua_value_to_js(&self.vm, &lua_value)
+            lua_value_to_js(&*self.vm, &lua_value)
         } else {
             Ok(JsValue::NULL)
         }
@@ -64,7 +68,25 @@ impl LuaWasm {
             Ok(chunk) => match self.vm.execute(std::rc::Rc::new(chunk)) {
                 Ok(results) => {
                     let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
-                    lua_value_to_js(&self.vm, &value)
+                    lua_value_to_js(&*self.vm, &value)
+                }
+                Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
+            },
+            Err(e) => Err(JsValue::from_str(&format!("Compilation error: {:?}", e))),
+        }
+    }
+
+    /// Evaluate Lua code and return the result as JSON string
+    /// Useful for getting structured data from Lua tables
+    #[wasm_bindgen(js_name = evalJson)]
+    pub fn eval_json(&mut self, expr: &str) -> Result<String, JsValue> {
+        let code = format!("return {}", expr);
+
+        match self.vm.compile(&code) {
+            Ok(chunk) => match self.vm.execute(std::rc::Rc::new(chunk)) {
+                Ok(results) => {
+                    let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
+                    Ok(lua_value_to_json_string(&*self.vm, &value))
                 }
                 Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
             },
@@ -104,52 +126,9 @@ impl LuaWasm {
     }
 }
 
-/// Convert Lua value to JavaScript value
-fn lua_value_to_js(vm: &LuaVM, value: &LuaValue) -> Result<JsValue, JsValue> {
-    if value.is_nil() {
-        Ok(JsValue::NULL)
-    } else if let Some(b) = value.as_bool() {
-        Ok(JsValue::from_bool(b))
-    } else if let Some(i) = value.as_integer() {
-        Ok(JsValue::from_f64(i as f64))
-    } else if let Some(n) = value.as_number() {
-        Ok(JsValue::from_f64(n))
-    } else if value.is_string() {
-        // Use VM's value_as_string to properly resolve the string
-        if let Some(s) = value.as_str() {
-            Ok(JsValue::from_str(&s))
-        } else {
-            Ok(JsValue::from_str("[invalid string]"))
-        }
-    } else if value.is_table() {
-        // For tables, we'll convert to a simple object representation
-        Ok(JsValue::from_str(&(value)))
-    } else if value.is_function() || value.is_cfunction() {
-        Ok(JsValue::from_str("[Lua Function]"))
-    } else if value.is_thread() {
-        Ok(JsValue::from_str("[Lua Thread]"))
-    } else {
-        Ok(JsValue::from_str(&format!("{:?}", value)))
-    }
-}
-
-/// Convert JavaScript value to Lua value
-fn js_value_to_lua(vm: &mut LuaVM, value: &JsValue) -> Result<LuaValue, luars::lua_vm::LuaError> {
-    if value.is_null() || value.is_undefined() {
-        Ok(LuaValue::nil())
-    } else if let Some(b) = value.as_bool() {
-        Ok(LuaValue::boolean(b))
-    } else if let Some(n) = value.as_f64() {
-        if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-            Ok(LuaValue::integer(n as i64))
-        } else {
-            Ok(LuaValue::number(n))
-        }
-    } else if let Some(s) = value.as_string() {
-        // Use VM's create_string to properly create a string in the object pool
-        Ok(vm.create_string(&s))
-    } else {
-        // For complex objects, return nil
-        Ok(LuaValue::nil())
-    }
-}
+// Note: Conversion functions moved to conversion.rs module
+// The module provides enhanced conversion with:
+// - Table to Object/Array conversion
+// - Nested structure support
+// - Cycle detection
+// - Recursion depth limits

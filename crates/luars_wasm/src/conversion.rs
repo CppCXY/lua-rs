@@ -4,8 +4,7 @@
 /// - Tables to JS Objects/Arrays
 /// - Nested structures with cycle detection
 /// - JS callbacks to Lua functions
-
-use luars::{LuaValue, LuaVM};
+use luars::{LuaVM, LuaValue};
 use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
 
@@ -85,14 +84,19 @@ fn lua_value_to_js_impl(
         return table_to_js(vm, value, ctx);
     }
 
-    // Handle functions
+    // Handle functions - create a JS object with metadata
     if value.is_function() || value.is_cfunction() {
-        return Ok(JsValue::from_str("[Lua Function]"));
+        return function_to_js(value);
     }
 
     // Handle threads
     if value.is_thread() {
         return Ok(JsValue::from_str("[Lua Thread]"));
+    }
+
+    // Handle userdata - create a JS object with metadata
+    if value.is_userdata() {
+        return userdata_to_js(value);
     }
 
     // Default: convert to string representation
@@ -106,7 +110,8 @@ fn table_to_js(
     ctx: &mut ConversionContext,
 ) -> Result<JsValue, JsValue> {
     // Get raw pointer for cycle detection
-    let ptr = table_value.as_table_ptr()
+    let ptr = table_value
+        .as_table_ptr()
         .ok_or_else(|| JsValue::from_str("Invalid table"))?
         .as_ptr() as usize;
 
@@ -132,22 +137,7 @@ fn is_array_like(table_value: &LuaValue) -> bool {
         return false;
     };
 
-    let len = table.len();
-    
-    // Empty tables are considered objects
-    if len == 0 {
-        return false;
-    }
-
-    // Check if all keys from 1 to len exist and are consecutive
-    for i in 1..=len {
-        if table.get_int(i as i64).is_none() || 
-           table.get_int(i as i64).unwrap().is_nil() {
-            return false;
-        }
-    }
-
-    true
+    table.is_array()
 }
 
 /// Convert Lua table to JavaScript Array
@@ -188,20 +178,35 @@ fn table_to_js_object(
     };
 
     let obj = js_sys::Object::new();
+    let all_pairs = table.iter_all();
 
     // Iterate over all key-value pairs
-    // Note: This is a simplified version - a full implementation would need
-    // to iterate through both array and hash parts of the table
-    
-    // For now, convert to a simple string representation
-    // Full implementation would require table iteration API from LuaTable
-    let display = format!("{}", table_value);
-    js_sys::Reflect::set(
-        &obj,
-        &JsValue::from_str("__luaTable"),
-        &JsValue::from_str(&display),
-    )
-    .map_err(|_| JsValue::from_str("Failed to set property"))?;
+    for (key, value) in all_pairs {
+        // Convert key to string for JS object property
+        let key_str = if let Some(s) = key.as_str() {
+            s.to_string()
+        } else if let Some(i) = key.as_integer() {
+            i.to_string()
+        } else if let Some(n) = key.as_number() {
+            n.to_string()
+        } else if key.is_boolean() {
+            if key.as_bool().unwrap() {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        } else {
+            // For complex keys (tables, functions), use a placeholder
+            format!("[{}]", key.type_name())
+        };
+
+        // Convert value recursively
+        let js_value = lua_value_to_js_impl(vm, &value, ctx)?;
+
+        // Set property on object
+        js_sys::Reflect::set(&obj, &JsValue::from_str(&key_str), &js_value)
+            .map_err(|_| JsValue::from_str("Failed to set object property"))?;
+    }
 
     Ok(obj.into())
 }
@@ -224,9 +229,7 @@ fn js_value_to_lua_impl(
 ) -> Result<LuaValue, luars::lua_vm::LuaError> {
     // Check recursion depth
     if !ctx.can_recurse() {
-        return Err(luars::lua_vm::LuaError::RuntimeError(
-            "Maximum recursion depth exceeded".to_string(),
-        ));
+        return Ok(LuaValue::nil());
     }
 
     // Handle null/undefined
@@ -285,7 +288,7 @@ fn js_array_to_lua(
     for i in 0..len {
         let js_elem = array.get(i as u32);
         let lua_elem = js_value_to_lua_impl(vm, &js_elem, ctx)?;
-        
+
         // Lua arrays are 1-indexed
         if let Some(t) = table.as_table_mut() {
             t.set_int((i + 1) as i64, lua_elem);
@@ -332,6 +335,69 @@ fn js_object_to_lua(
     Ok(table)
 }
 
+// ============ Advanced Type Conversions ============
+
+/// Convert Lua function to JavaScript representation
+/// Returns an object with metadata about the function
+fn function_to_js(value: &LuaValue) -> Result<JsValue, JsValue> {
+    let obj = js_sys::Object::new();
+
+    // Set type identifier
+    js_sys::Reflect::set(&obj, &"__type".into(), &"LuaFunction".into())
+        .map_err(|_| JsValue::from_str("Failed to set property"))?;
+
+    // Distinguish between Lua function and C function
+    let func_type = if value.is_cfunction() {
+        "cfunction"
+    } else {
+        "function"
+    };
+    js_sys::Reflect::set(&obj, &"functionType".into(), &func_type.into())
+        .map_err(|_| JsValue::from_str("Failed to set property"))?;
+
+    // Add pointer address as identifier (useful for equality checks)
+    let ptr_addr = format!("{:p}", value as *const LuaValue);
+    js_sys::Reflect::set(&obj, &"__ptr".into(), &ptr_addr.into())
+        .map_err(|_| JsValue::from_str("Failed to set property"))?;
+
+    // Make it display nicely with toString
+    let to_string_func = js_sys::Function::new_no_args(&format!("return '[Lua {}]'", func_type));
+    js_sys::Reflect::set(&obj, &"toString".into(), &to_string_func)
+        .map_err(|_| JsValue::from_str("Failed to set property"))?;
+
+    Ok(obj.into())
+}
+
+/// Convert Lua userdata to JavaScript representation
+/// Returns an object with metadata about the userdata
+fn userdata_to_js(value: &LuaValue) -> Result<JsValue, JsValue> {
+    let obj = js_sys::Object::new();
+
+    // Set type identifier
+    js_sys::Reflect::set(&obj, &"__type".into(), &"LuaUserdata".into())
+        .map_err(|_| JsValue::from_str("Failed to set property"))?;
+
+    // Add pointer address as identifier
+    let ptr_addr = format!("{:p}", value as *const LuaValue);
+    js_sys::Reflect::set(&obj, &"__ptr".into(), &ptr_addr.into())
+        .map_err(|_| JsValue::from_str("Failed to set property"))?;
+
+    // Try to get metatable information if available
+    if let Some(userdata) = value.as_userdata_mut() {
+        if let Some(_mt) = &userdata.get_metatable() {
+            js_sys::Reflect::set(&obj, &"hasMetatable".into(), &true.into())
+                .map_err(|_| JsValue::from_str("Failed to set property"))?;
+        }
+    }
+
+    // Make it display nicely with toString
+    let to_string_func = js_sys::Function::new_no_args("return '[Lua Userdata]'");
+    js_sys::Reflect::set(&obj, &"toString".into(), &to_string_func)
+        .map_err(|_| JsValue::from_str("Failed to set property"))?;
+
+    Ok(obj.into())
+}
+
 // ============ Utility Functions ============
 
 /// Convert Lua value to a human-readable JSON-like string
@@ -341,19 +407,13 @@ pub fn lua_value_to_json_string(vm: &LuaVM, value: &LuaValue) -> String {
         Ok(js_val) => {
             // Try to convert to JSON string
             if let Ok(json_str) = js_sys::JSON::stringify(&js_val) {
-                json_str.as_string().unwrap_or_else(|| "[Invalid JSON]".to_string())
+                json_str
+                    .as_string()
+                    .unwrap_or_else(|| "[Invalid JSON]".to_string())
             } else {
                 format!("{:?}", value)
             }
         }
         Err(_) => format!("{:?}", value),
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Note: These tests require WASM testing infrastructure
-    // They serve as documentation of expected behavior
 }
