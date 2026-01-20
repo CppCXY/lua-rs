@@ -297,12 +297,6 @@ pub struct GC {
     /// Current position in sweep (like Lua 5.5's sweepgc pointer)
     /// This ensures we don't re-scan the same objects
     sweep_index: usize,
-    /// Target position for sweep completion (set at start of sweep phase)
-    /// This prevents chasing a growing capacity() during sweep
-    sweep_target: usize,
-    /// List of object IDs to sweep (collected at start of sweep phase)
-    /// This avoids iterating through sparse Vec slots
-    sweep_ids: Vec<GcObjectPtr>,
 
     // === Generational collector pointers ===
     /// Points to first survival object in allgc list
@@ -363,8 +357,6 @@ impl GC {
             ephemeron: Vec::new(),
             allweak: Vec::new(),
             sweep_index: 0,
-            sweep_target: 0,
-            sweep_ids: Vec::new(),
             survival: None,
             old1: None,
             reallyold: None,
@@ -1642,15 +1634,12 @@ impl GC {
     }
 
     /// Enter sweep phase (like entersweep in Lua 5.5)
-    pub fn enter_sweep(&mut self, pool: &mut ObjectPool) {
+    pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
-
-        // Collect all live object IDs at the start of sweep phase
-        // With IndexMap, iter() only visits actual objects (no None holes!)
-        // New objects created during sweep will have current_white, so won't be collected
-        self.sweep_ids = pool.gc_pool.iter().map(|owner| owner.as_gc_ptr()).collect();
-        self.sweep_target = self.sweep_ids.len();
+        
+        // No longer need to cache object IDs - we'll iterate through pool directly
+        // This avoids the dangling pointer problem with swap_remove
     }
 
     /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
@@ -1663,19 +1652,27 @@ impl GC {
         let mut count = 0;
         let other_white = 1 - self.current_white;
 
-        // Use sweep_ids collected at start of sweep phase
-        // This avoids iterating through sparse Vec slots
-        let sweep_end = self.sweep_target;
-
+        // CRITICAL FIX: Instead of using cached GcPtr (which becomes dangling after swap_remove),
+        // we iterate through the actual pool and track which objects we've processed.
+        // This avoids the use-after-free caused by stale pointers after swap_remove.
+        
         let mut dead_ptrs = Vec::new();
         let mut to_finalize = Vec::new();
 
-        // Continue from where we left off in sweep_ids
-        while self.sweep_index < sweep_end && count < max_sweep {
-            let gc_ptr = self.sweep_ids[self.sweep_index];
-
-            // Check if this object still exists (it might have been collected already)
-            if let Some(header) = gc_ptr.header_mut() {
+        // Sweep from the current pool state, not from cached pointers
+        let current_len = pool.gc_pool.len();
+        
+        // Process objects in reverse order to handle swap_remove correctly
+        // When we remove object at index i, the last object moves to i,
+        // so we'll naturally process it in the next iteration backwards
+        while self.sweep_index < current_len && count < max_sweep {
+            // Access object by its current index in the pool
+            let current_idx = current_len - 1 - self.sweep_index;
+            
+            if let Some(owner) = pool.gc_pool.get(current_idx) {
+                let gc_ptr = owner.as_gc_ptr();
+                let header = owner.header();
+                
                 // Check if object is dead (other white and not fixed)
                 if !header.is_fixed() && header.is_dead(other_white) {
                     // Dead object - mark for removal or finalization
@@ -1687,8 +1684,9 @@ impl GC {
                     if needs_fin {
                         // Mark object as pending finalization (FINALIZED flag)
                         // This prevents __gc from being called twice
-
-                        header.set_finalized();
+                        if let Some(header_mut) = gc_ptr.header_mut() {
+                            header_mut.set_finalized();
+                        }
 
                         to_finalize.push(gc_ptr);
 
@@ -1708,8 +1706,10 @@ impl GC {
                     // ```
                     // This is CRITICAL: Without this, BLACK objects stay BLACK across cycles
                     // and won't be remarked in the next cycle!
-                    header.make_white(self.current_white);
-                    header.set_age(G_NEW);
+                    if let Some(header_mut) = gc_ptr.header_mut() {
+                        header_mut.make_white(self.current_white);
+                        header_mut.set_age(G_NEW);
+                    }
                 }
             }
 
@@ -1752,8 +1752,8 @@ impl GC {
 
         let _ = (dead_count, freed_bytes); // suppress unused warnings
 
-        // Return true if we've reached the sweep target (set at start of sweep phase)
-        self.sweep_index >= sweep_end
+        // Return true if we've swept through the entire pool
+        self.sweep_index >= current_len
     }
 
     pub fn set_pause(&mut self, pool: &mut ObjectPool) {
