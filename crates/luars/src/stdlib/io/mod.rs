@@ -103,7 +103,7 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
             None => break,
         };
 
-        if let Some(s) = l.get_string(&arg) {
+        if let Some(s) = arg.as_str() {
             print!("{}", s);
         } else if let Some(n) = arg.as_number() {
             print!("{}", n);
@@ -125,7 +125,7 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
 
     // Default to "*l" (read line)
     let format_str = format
-        .and_then(|v| l.get_string(&v).map(|s| s.to_string()))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "*l".to_string());
 
     let result = match format_str.as_str() {
@@ -209,14 +209,14 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
     let filename_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'io.open' (string expected)".to_string()))?;
-    let filename_str = match l.get_string(&filename_val) {
+    let filename_str = match filename_val.as_str() {
         Some(s) => s.to_string(),
         None => return Err(l.error("bad argument #1 to 'io.open' (string expected)".to_string())),
     };
 
     let mode_str = l
         .get_arg(2)
-        .and_then(|v| l.get_string(&v).map(|s| s.to_string()))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "r".to_string());
     let mode = mode_str.as_str();
 
@@ -260,7 +260,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
 
     if let Some(filename_val) = filename {
         // io.lines(filename) - open file and return iterator
-        let filename_str = match l.get_string(&filename_val) {
+        let filename_str = match filename_val.as_str() {
             Some(s) => s.to_string(),
             None => return Err(l.error("bad argument #1 to 'lines' (string expected)".to_string())),
         };

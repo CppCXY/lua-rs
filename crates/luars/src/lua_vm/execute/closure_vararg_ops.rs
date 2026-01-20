@@ -11,8 +11,7 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
-    UpvalueId,
-    gc::CachedUpvalue,
+    UpvaluePtr,
     lua_value::{Chunk, LuaValue},
     lua_vm::{Instruction, LuaResult, LuaState, OpCode},
 };
@@ -30,16 +29,13 @@ pub fn exec_closure(
     instr: Instruction,
     base: usize,
     chunk: &Rc<Chunk>,
-    upvalue_ptrs: &[CachedUpvalue],
+    upvalue_ptrs: &[UpvaluePtr],
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
     let bx = instr.get_bx() as usize;
 
-    // Extract upvalue IDs from cached upvalues for closure creation
-    let parent_upvalue_ids: Vec<UpvalueId> = upvalue_ptrs.iter().map(|cu| cu.id).collect();
-
     // Create closure from child prototype
-    closure_handler::handle_closure(lua_state, base, a, bx, chunk, &parent_upvalue_ids)?;
+    closure_handler::handle_closure(lua_state, base, a, bx, chunk, &upvalue_ptrs)?;
 
     Ok(())
 }

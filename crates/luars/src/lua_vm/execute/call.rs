@@ -8,7 +8,7 @@
 /// - TAILCALL: replace current frame, return FrameAction::TailCall (main loop loads new chunk)
 use crate::{
     LuaValue,
-    lua_vm::{CFunction, LuaError, LuaResult, LuaState, execute::helper::get_call_metamethod},
+    lua_vm::{CFunction, LuaError, LuaResult, LuaState, TmKind, get_metamethod_event},
 };
 
 pub enum FrameAction {
@@ -30,7 +30,7 @@ pub fn handle_call(
 ) -> LuaResult<FrameAction> {
     // Get function position
     let func_idx = base + a;
-    
+
     // Calculate nargs and set stack_top
     // Port of Lua 5.5's OP_CALL: if (b != 0) L->top.p = ra + b;
     let nargs = if b == 0 {
@@ -92,7 +92,7 @@ pub fn handle_call(
     } else {
         // Not a function - check for __call metamethod
         // Port of Lua 5.5's handling in ldo.c:tryfuncTM
-        if let Some(mm) = get_call_metamethod(lua_state, &func) {
+        if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
             // We have __call metamethod
             // Need to shift arguments and insert function as first arg
             // Stack layout before: [func, arg1, arg2, ...]
@@ -331,7 +331,6 @@ pub fn handle_tailcall(
 
     // Check if it's a function
     if let Some(new_func) = func.as_lua_function() {
-
         if new_func.is_lua_function() {
             // Move arguments to current frame base
             let mut dist = 0;

@@ -7,53 +7,33 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'require' (string expected)".to_string()))?;
 
-    let Some(modname_id) = modname_val.as_string_id() else {
+    let Some(modname_str) = modname_val.as_str() else {
         return Err(l.error("bad argument #1 to 'require' (string expected)".to_string()));
     };
 
-    let modname_str = {
-        let vm = l.vm_mut();
-        let Some(s) = vm.object_pool.get_string(modname_id) else {
-            return Err(l.error("bad argument #1 to 'require' (string expected)".to_string()));
-        };
-        s.to_string()
-    };
-
     // Get package table
-    let package_table = l
+    let package_table_value = l
         .get_global("package")
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
-    let Some(package_id) = package_table.as_table_id() else {
+    let Some(package_table) = package_table_value.as_table_mut() else {
         return Err(l.error("package must be a table".to_string()));
     };
 
     // Get package.loaded
     let loaded_key = l.create_string("loaded");
-    let loaded_val = {
-        let vm = l.vm_mut();
-        let Some(pkg_table) = vm.object_pool.get_table(package_id) else {
-            return Err(l.error("package must be a table".to_string()));
-        };
-        pkg_table
-            .raw_get(&loaded_key)
-            .ok_or_else(|| l.error("package.loaded not found".to_string()))?
-    };
+    let loaded_val = package_table
+        .raw_get(&loaded_key)
+        .ok_or_else(|| l.error("package.loaded not found".to_string()))?;
 
-    let Some(loaded_id) = loaded_val.as_table_id() else {
+    let Some(loaded_table) = loaded_val.as_table_mut() else {
         return Err(l.error("package.loaded must be a table".to_string()));
     };
 
     // Check if module is already loaded
-    let already_loaded = {
-        let vm = l.vm_mut();
-        let Some(loaded_table) = vm.object_pool.get_table(loaded_id) else {
-            return Err(l.error("package.loaded must be a table".to_string()));
-        };
-        loaded_table
-            .raw_get(&modname_val)
-            .unwrap_or(LuaValue::nil())
-    };
+    let already_loaded = loaded_table
+        .raw_get(&modname_val)
+        .unwrap_or(LuaValue::nil());
 
     // If module is already loaded and not nil/false, return it
     if !already_loaded.is_nil() {
@@ -73,24 +53,16 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Mark module as being loaded to prevent recursion
-    {
-        let vm = l.vm_mut();
-        if let Some(loaded_table) = vm.object_pool.get_table_mut(loaded_id) {
-            loaded_table.raw_set(&modname_val, LuaValue::boolean(false));
-        }
-    }
+    loaded_table.raw_set(&modname_val, LuaValue::boolean(false));
 
     // Get package.searchers
     let searchers_key = l.create_string("searchers");
-    let searchers_val = {
-        let vm = l.vm_mut();
-        let Some(pkg_table) = vm.object_pool.get_table(package_id) else {
-            return Err(l.error("package must be a table".to_string()));
-        };
-        pkg_table.raw_get(&searchers_key)
+    let searchers_val = match package_table.raw_get(&searchers_key) {
+        Some(v) => v,
+        None => return Err(l.error("package.searchers not found".to_string())),
     };
 
-    let Some(searchers_id) = searchers_val.and_then(|v| v.as_table_id()) else {
+    let Some(searchers_table) = searchers_val.as_table() else {
         return Err(l.error("package.searchers must be a table".to_string()));
     };
 
@@ -100,13 +72,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     // Try each searcher (iterate until we hit nil)
     let mut i = 1;
     loop {
-        let searcher = {
-            let vm = l.vm_mut();
-            let Some(searchers_table) = vm.object_pool.get_table(searchers_id) else {
-                return Err(l.error("package.searchers must be a table".to_string()));
-            };
-            searchers_table.get_int(i as i64).unwrap_or(LuaValue::nil())
-        };
+        let searcher = searchers_table.get_int(i as i64).unwrap_or(LuaValue::nil());
 
         if searcher.is_nil() {
             break;
@@ -132,11 +98,8 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         if !success {
             // Searcher threw an error
             let error_msg = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
-            if let Some(err_id) = error_msg.as_string_id() {
-                let vm = l.vm_mut();
-                if let Some(err_str) = vm.object_pool.get_string(err_id) {
-                    error_messages.push(err_str.to_string());
-                }
+            if let Some(err) = error_msg.as_str() {
+                error_messages.push(err.to_string());
             }
             l.set_top(func_idx);
             i += 1;
@@ -164,12 +127,10 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
         // If result is not a function, it must be a string error message
         if !is_function {
-            if let Some(msg_id) = first_result.as_string_id() {
-                let vm = l.vm_mut();
-                if let Some(msg_str) = vm.object_pool.get_string(msg_id) {
-                    error_messages.push(msg_str.to_string());
-                }
+            if let Some(msg) = first_result.as_str() {
+                error_messages.push(msg.to_string());
             }
+
             l.set_top(func_idx);
             i += 1;
             continue;
@@ -201,13 +162,8 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         if !loader_success {
             // Loader failed
             let error_val = l.stack_get(loader_func_idx).unwrap_or(LuaValue::nil());
-            let error_msg = if let Some(err_id) = error_val.as_string_id() {
-                let vm = l.vm_mut();
-                if let Some(err_str) = vm.object_pool.get_string(err_id) {
-                    err_str.to_string()
-                } else {
-                    "error loading module".to_string()
-                }
+            let error_msg = if let Some(err) = error_val.as_str() {
+                err.to_string()
             } else {
                 "error loading module".to_string()
             };
@@ -232,12 +188,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         };
 
         // Store in package.loaded
-        {
-            let vm = l.vm_mut();
-            if let Some(loaded_table) = vm.object_pool.get_table_mut(loaded_id) {
-                loaded_table.raw_set(&modname_val, final_result);
-            }
-        }
+        loaded_table.raw_set(&modname_val, final_result);
 
         // Clean up stack and return result
         l.set_top(loader_func_idx);
@@ -247,12 +198,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
     // No searcher found the module
     // Clean up the false marker from package.loaded
-    {
-        let vm = l.vm_mut();
-        if let Some(loaded_table) = vm.object_pool.get_table_mut(loaded_id) {
-            loaded_table.raw_set(&modname_val, LuaValue::nil());
-        }
-    }
+    loaded_table.raw_set(&modname_val, LuaValue::nil());
 
     let error_msg = if error_messages.is_empty() {
         format!("module '{}' not found", modname_str)

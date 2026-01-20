@@ -6,7 +6,7 @@ use crate::compiler::parser::BinaryOperator;
 use crate::compiler::{ExpUnion, IndVars};
 use crate::lua_value::LuaValueKind;
 use crate::lua_vm::{Instruction, OpCode, TmKind};
-use crate::{LuaValue, StringId};
+use crate::{LuaValue, StringPtr};
 
 // Port of int2sC from lcode.c (macro)
 // Convert integer to sC format (with OFFSET_sC = 128)
@@ -75,7 +75,7 @@ pub fn const_to_exp(value: LuaValue, e: &mut ExpDesc) {
         }
         LuaValueKind::String => {
             e.kind = ExpKind::VKSTR;
-            e.u = ExpUnion::Str(value.as_string_id().unwrap_or(StringId(0)));
+            e.u = ExpUnion::Str(value.as_string_ptr().unwrap_or(StringPtr::null()));
         }
         _ => {
             // Other types shouldn't appear as compile-time constants
@@ -1017,8 +1017,8 @@ pub fn string_k(fs: &mut FuncState, s: String) -> usize {
 fn str2k(fs: &mut FuncState, e: &mut ExpDesc) -> usize {
     debug_assert!(e.kind == ExpKind::VKSTR);
     e.kind = ExpKind::VK;
-    let str_id = e.u.str();
-    let value = fs.vm.object_pool.get_string_value(str_id).unwrap();
+    let string_ptr = e.u.str();
+    let value = LuaValue::string(string_ptr);
     let k = add_constant(fs, value);
     e.u = ExpUnion::Info(k as i32);
     k
@@ -2390,12 +2390,9 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
     // Check if key is a VKSTR (method name string)
     let can_use_self = if key.kind == ExpKind::VKSTR {
         // Check if it's a short string
-        let str_id = key.u.str();
-        if let Some(lua_str) = fs.vm.object_pool.get_string(str_id) {
-            lua_str.len() <= fs.short_string_limit
-        } else {
-            false
-        }
+        let string_ptr = key.u.str();
+
+        string_ptr.as_ref().data.len() <= fs.short_string_limit
     } else {
         false // Not VKSTR
     };
@@ -2461,8 +2458,8 @@ pub fn exp2const(fs: &FuncState, e: &ExpDesc) -> Option<LuaValue> {
         ExpKind::VNIL => Some(LuaValue::nil()),
         ExpKind::VKSTR => {
             // String constant - already in constants
-            let id = e.u.str();
-            let str_value = fs.vm.object_pool.get_string_value(id)?;
+            let string_ptr = e.u.str();
+            let str_value = LuaValue::string(string_ptr);
             Some(str_value)
         }
         ExpKind::VK => {

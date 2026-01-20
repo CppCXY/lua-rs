@@ -16,7 +16,7 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
-    Chunk, gc,
+    Chunk, UpvaluePtr,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
 use std::rc::Rc;
@@ -31,7 +31,7 @@ pub fn handle_closure(
     a: usize,
     bx: usize,
     current_chunk: &Rc<Chunk>,
-    parent_upvalues: &[gc::UpvalueId],
+    parent_upvalues: &[UpvaluePtr],
 ) -> LuaResult<()> {
     // Get child prototype
     if bx >= current_chunk.child_protos.len() {
@@ -48,13 +48,13 @@ pub fn handle_closure(
 
     // Fill in upvalues according to descriptors
     for desc in upvalue_descs {
-        let upval_id = if desc.is_local {
+        let upval_ptr = if desc.is_local {
             // Capture local variable from current stack frame
             // desc.index is relative to base
             let stack_index = base + desc.index as usize;
 
             // Find or create open upvalue for this stack position
-            find_or_create_upvalue(lua_state, stack_index)?
+            lua_state.find_or_create_upvalue(stack_index)?
         } else {
             // Inherit upvalue from parent closure
             let parent_idx = desc.index as usize;
@@ -64,28 +64,14 @@ pub fn handle_closure(
             parent_upvalues[parent_idx]
         };
 
-        new_upvalues.push(upval_id);
+        new_upvalues.push(upval_ptr);
     }
 
     // Create the function with the proto and upvalues
-    let closure_value = lua_state
-        .vm_mut()
-        .create_function(proto, new_upvalues);
+    let closure_value = lua_state.vm_mut().create_function(proto, new_upvalues);
 
     // Store in R[A]
     lua_state.stack_mut()[base + a] = closure_value;
 
     Ok(())
-}
-
-/// Find an existing open upvalue for stack_index, or create a new one
-/// Based on Lua's luaF_findupval (lfunc.c)
-fn find_or_create_upvalue(
-    lua_state: &mut LuaState,
-    stack_index: usize,
-) -> LuaResult<crate::gc::UpvalueId> {
-    // Use LuaState's find_or_create_upvalue which uses the open_upvalues list
-    // This is O(n) where n is the number of open upvalues for THIS thread,
-    // not all upvalues in the system
-    lua_state.find_or_create_upvalue(stack_index)
 }

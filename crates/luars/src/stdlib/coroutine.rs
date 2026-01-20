@@ -1,7 +1,6 @@
 // Coroutine library - Full implementation
 // Implements: create, resume, yield, status, running, wrap, isyieldable
 
-use crate::ThreadId;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
@@ -119,8 +118,8 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("coroutine.status requires a thread argument".to_string()));
     }
 
-    if let Some(thread_id) = thread_val.as_thread_id() {
-        if thread_id.is_main() {
+    if let Some(thread_ptr) = thread_val.as_thread_ptr() {
+        if thread_ptr.is_main() {
             // Main thread is always running
             let status_val = l.create_string("running");
             l.push_value(status_val)?;
@@ -151,15 +150,14 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 /// coroutine.running() - Get currently running coroutine
 fn coroutine_running(l: &mut LuaState) -> LuaResult<usize> {
     // In the main thread, return nil and true
-    let thread_id = l.get_thread_id();
-    if thread_id.is_main() {
-        let main_ptr = l as *mut LuaState;
-        l.push_value(LuaValue::thread(ThreadId::main_id(), main_ptr))?;
+    let thread_ptr = unsafe { l.thread_ptr() };
+    if thread_ptr.is_main() {
+        l.push_value(LuaValue::thread(thread_ptr))?;
         l.push_value(LuaValue::boolean(true))?;
         return Ok(2);
     }
 
-    let thread_value = l.vm_mut().object_pool.get_thread_value(thread_id).unwrap();
+    let thread_value = LuaValue::thread(thread_ptr);
     l.push_value(thread_value)?;
     l.push_value(LuaValue::boolean(false))?;
     Ok(2)
@@ -195,9 +193,9 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
     let mut thread_val = LuaValue::nil();
     if let Some(frame) = l.current_frame() {
         if let Some(func) = frame.func.as_lua_function() {
-            if let Some(upval) = func.cached_upvalues().get(0) {
+            if let Some(upval_ptr) = func.upvalues().get(0) {
                 // Upvalue should be closed with the thread value
-                thread_val = upval.get_value(l);
+                thread_val = upval_ptr.as_ref().data.get_value(l);
             }
         }
     };
@@ -229,8 +227,8 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
 
 /// coroutine.isyieldable() - Check if current position can yield
 fn coroutine_isyieldable(l: &mut LuaState) -> LuaResult<usize> {
-    let id = l.get_thread_id();
-    l.push_value(LuaValue::boolean(!id.is_main()))?;
+    let thread_ptr = unsafe { l.thread_ptr() };
+    l.push_value(LuaValue::boolean(!thread_ptr.is_main()))?;
     Ok(1)
 }
 
@@ -247,11 +245,11 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("coroutine.close requires a thread argument".to_string()));
     }
 
-    let Some(thread_id) = thread_val.as_thread_id() else {
+    let Some(thread_ptr) = thread_val.as_thread_ptr() else {
         return Err(l.error("invalid thread".to_string()));
     };
 
-    if thread_id.is_main() {
+    if thread_ptr.is_main() {
         return Err(l.error("cannot close the main thread".to_string()));
     }
 

@@ -13,7 +13,6 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
-    GcId,
     lua_value::LuaValue,
     lua_vm::{Instruction, LuaResult, LuaState},
 };
@@ -117,11 +116,10 @@ pub fn exec_settable(
             // Fast path: no metatable, directly set
             table.raw_set(&rb, val);
 
-            // CRITICAL: GC write barrier
             // When modifying a BLACK table, we must call barrier_back to re-gray it
             // This ensures weak tables are re-traversed in subsequent GC cycles
-            let table_gc_id = GcId::TableId(ra.hvalue());
-            lua_state.gc_barrier_back(table_gc_id);
+            let table_ptr = ra.as_table_ptr().unwrap();
+            lua_state.gc_barrier_back(table_ptr.into());
 
             lua_state.check_gc()?;
             return Ok(());
@@ -381,8 +379,8 @@ pub fn exec_setfield(
             table.raw_set(&key, value);
 
             // CRITICAL: GC write barrier
-            let table_gc_id = GcId::TableId(ra.hvalue());
-            lua_state.gc_barrier_back(table_gc_id);
+            let table_ptr = ra.as_table_ptr().unwrap();
+            lua_state.gc_barrier_back(table_ptr.into());
 
             lua_state.check_gc()?;
             return Ok(());

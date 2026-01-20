@@ -5,17 +5,13 @@ mod value_array;
 
 use super::lua_value::LuaValue;
 use crate::{
-    LuaResult, TableId,
+    LuaResult, TablePtr,
     lua_value::lua_table::{hash_table::LuaHashTable, value_array::LuaValueArray},
     lua_vm::LuaError,
 };
 
 pub struct LuaTable {
-    /// 压缩的元数据字段
-    /// Layout: flags(8) | lsizenode(8) | metatable_id(48)
-    /// metatable_id为0表示没有metatable
-    /// metatable_id为n+1表示TableId(n) (1-based以避免0冲突)
-    meta: u64,
+    meta: TablePtr,
 
     pub(crate) impl_table: LuaTableDetail,
 }
@@ -30,57 +26,34 @@ impl LuaTable {
         };
 
         Self {
-            meta: Self::pack_meta(0, 0, None),
+            meta: TablePtr::null(),
             impl_table,
         }
     }
 
-    // ============ Meta字段的压缩/解压 ============
-
-    /// 打包meta字段: flags(8) | lsizenode(8) | metatable_id(48)
-    #[inline(always)]
-    fn pack_meta(flags: u8, lsizenode: u8, metatable: Option<TableId>) -> u64 {
-        let metatable_bits = match metatable {
-            None => 0u64,
-            Some(TableId(id)) => (id as u64) + 1, // 1-based以避免0
-        };
-        (flags as u64) | ((lsizenode as u64) << 8) | (metatable_bits << 16)
-    }
-
     #[inline(always)]
     pub fn has_metatable(&self) -> bool {
-        self.meta >> 16 != 0
+        !self.meta.is_null()
     }
 
-    /// 获取metatable
-    #[inline(always)]
-    fn metatable(&self) -> Option<crate::TableId> {
-        let bits = self.meta >> 16;
-        if bits == 0 {
+    pub fn get_metatable(&self) -> Option<LuaValue> {
+        if self.meta.is_null() {
             None
         } else {
-            Some(TableId((bits - 1) as u32))
+            Some(LuaValue::table(self.meta))
         }
     }
 
-    /// 设置metatable
-    #[inline(always)]
-    fn set_metatable_internal(&mut self, metatable: Option<TableId>) {
-        let metatable_bits = match metatable {
-            None => 0u64,
-            Some(TableId(id)) => (id as u64) + 1,
-        };
-        self.meta = (self.meta & 0xFFFF) | (metatable_bits << 16);
-    }
-
-    pub fn get_metatable(&self) -> Option<TableId> {
-        let id = self.metatable()?;
-        Some(id)
-    }
-
     pub fn set_metatable(&mut self, metatable: Option<LuaValue>) {
-        let metatable_id = metatable.and_then(|v| v.as_table_id());
-        self.set_metatable_internal(metatable_id);
+        if let Some(meta) = metatable {
+            if let Some(table_ptr) = meta.as_table_ptr() {
+                self.meta = table_ptr;
+            } else {
+                self.meta = TablePtr::null();
+            }
+        } else {
+            self.meta = TablePtr::null();
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -88,6 +61,14 @@ impl LuaTable {
             // LuaTableDetail::TypedArray(arr) => arr.len(),
             LuaTableDetail::ValueArray(arr) => arr.len(),
             LuaTableDetail::HashTable(map) => map.len(),
+        }
+    }
+
+    pub fn is_array(&self) -> bool {
+        match &self.impl_table {
+            // LuaTableDetail::TypedArray(_) => true,
+            LuaTableDetail::ValueArray(_) => true,
+            LuaTableDetail::HashTable(_) => false,
         }
     }
 
@@ -293,6 +274,34 @@ impl LuaTable {
 
         result
     }
+
+    pub fn iter_keys(&self) -> Vec<LuaValue> {
+        let mut result = Vec::new();
+        match &self.impl_table {
+            // LuaTableDetail::TypedArray(ar) => {
+            //     for i in 0..ar.array.len() {
+            //         let key = LuaValue::integer((i + 1) as i64);
+            //         result.push(key);
+            //     }
+            // }
+            LuaTableDetail::ValueArray(ar) => {
+                for i in 0..ar.array.len() {
+                    let key = LuaValue::integer((i + 1) as i64);
+                    result.push(key);
+                }
+            }
+            LuaTableDetail::HashTable(t) => {
+                // 使用 next 方法遵循接口遍历
+                let mut key = LuaValue::nil();
+                while let Some((k, _v)) = t.next(&key) {
+                    result.push(k.clone());
+                    key = k;
+                }
+            }
+        }
+
+        result
+    }
 }
 
 pub trait LuaTableImpl {
@@ -311,69 +320,6 @@ pub trait LuaTableImpl {
     fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)>;
 
     fn len(&self) -> usize;
-}
-
-impl LuaTable {
-    /// Remove entries with dead (collectible) keys or values
-    /// Used by weak table cleanup during GC
-    /// - weak_keys: if true, remove entries whose keys are dead GC objects
-    /// - weak_values: if true, remove entries whose values are dead GC objects
-    /// - is_dead: closure to check if a GcId is dead
-    pub fn remove_weak_entries_with_checker<F>(&mut self, weak_keys: bool, weak_values: bool, mut is_dead: F)
-    where
-        F: FnMut(crate::gc::GcId) -> bool,
-    {
-        // Collect all keys to remove
-        let mut keys_to_remove = Vec::new();
-
-        // Iterate over all entries
-        let entries = self.iter_all();
-        for (key, value) in entries {
-            let mut should_remove = false;
-
-            // Check if key should cause removal (for weak keys)
-            if weak_keys {
-                if let Some(gc_id) = Self::value_to_gc_id(&key) {
-                    if is_dead(gc_id) {
-                        should_remove = true;
-                    }
-                }
-            }
-
-            // Check if value should cause removal (for weak values)
-            if !should_remove && weak_values {
-                if let Some(gc_id) = Self::value_to_gc_id(&value) {
-                    if is_dead(gc_id) {
-                        should_remove = true;
-                    }
-                }
-            }
-
-            if should_remove {
-                keys_to_remove.push(key);
-            }
-        }
-
-        // Remove marked keys
-        for key in keys_to_remove {
-            self.raw_set(&key, LuaValue::nil());
-        }
-    }
-
-    /// Convert LuaValue to GcId for dead object checking
-    fn value_to_gc_id(value: &LuaValue) -> Option<crate::gc::GcId> {
-        use crate::lua_value::LuaValueKind;
-        use crate::gc::GcId;
-
-        match value.kind() {
-            LuaValueKind::String => value.as_string_id().map(GcId::StringId),
-            LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
-            LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
-            LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
-            LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
-            _ => None,
-        }
-    }
 }
 
 pub enum LuaTableDetail {

@@ -1,4 +1,4 @@
-use crate::StringId;
+use crate::StringPtr;
 
 // Port of expdesc from lcode.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,7 @@ pub enum ExpUnion {
     // for generic use
     Info(i32),
     // for VKSTR
-    Str(StringId),
+    Str(StringPtr),
     // for VKINT
     IVal(i64),
     // for VKFLT
@@ -60,7 +60,7 @@ impl ExpUnion {
         }
     }
 
-    pub fn str(&self) -> StringId {
+    pub fn str(&self) -> StringPtr {
         match self {
             ExpUnion::Str(sid) => *sid,
             _ => panic!("ExpUnion does not contain str"),
@@ -184,10 +184,10 @@ impl ExpDesc {
         }
     }
 
-    pub fn new_vkstr(string_id: StringId) -> Self {
+    pub fn new_vkstr(string_ptr: StringPtr) -> Self {
         ExpDesc {
             kind: ExpKind::VKSTR,
-            u: ExpUnion::Str(string_id),
+            u: ExpUnion::Str(string_ptr),
             t: -1,
             f: -1,
         }

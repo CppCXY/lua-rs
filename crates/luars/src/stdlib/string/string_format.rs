@@ -238,7 +238,7 @@ fn format_string(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
     } else if let Some(n) = arg.as_number() {
         write!(buf, "{}", n).unwrap();
     } else {
-        let s = l.vm_mut().value_to_string_raw(arg);
+        let s = l.to_string(arg)?;
         buf.push_str(&s);
     }
     Ok(())

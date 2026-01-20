@@ -19,7 +19,7 @@ pub use lua_value::{
     LUA_VNUMINT, LUA_VTRUE,
 };
 
-use crate::Instruction;
+use crate::{Instruction, TablePtr};
 
 /// Lua function
 /// Runtime upvalue - can be open (pointing to stack) or closed (owns value)
@@ -160,18 +160,18 @@ impl fmt::Debug for LuaUpvalue {
 /// Userdata - arbitrary Rust data with optional metatable
 pub struct LuaUserdata {
     data: Box<dyn Any>,
-    metatable: LuaValue,
+    metatable: TablePtr,
 }
 
 impl LuaUserdata {
     pub fn new<T: Any>(data: T) -> Self {
         LuaUserdata {
             data: Box::new(data),
-            metatable: LuaValue::nil(),
+            metatable: TablePtr::null(),
         }
     }
 
-    pub fn with_metatable<T: Any>(data: T, metatable: LuaValue) -> Self {
+    pub fn with_metatable<T: Any>(data: T, metatable: TablePtr) -> Self {
         LuaUserdata {
             data: Box::new(data),
             metatable,
@@ -186,12 +186,25 @@ impl LuaUserdata {
         &mut self.data
     }
 
-    pub fn get_metatable(&self) -> LuaValue {
-        self.metatable
+    pub fn get_metatable(&self) -> Option<LuaValue> {
+        if self.metatable.is_null() {
+            None
+        } else {
+            Some(LuaValue::table(self.metatable))
+        }
     }
 
     pub fn set_metatable(&mut self, metatable: LuaValue) {
-        self.metatable = metatable;
+        if let Some(table_ptr) = metatable.as_table_ptr() {
+            self.metatable = table_ptr;
+        } else if metatable.is_nil() {
+            self.metatable = TablePtr::null();
+        } else {
+            debug_assert!(
+                false,
+                "Attempted to set userdata metatable to non-table, non-nil value"
+            );
+        }
     }
 }
 

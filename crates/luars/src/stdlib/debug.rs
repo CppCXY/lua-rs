@@ -17,12 +17,13 @@ pub fn create_debug_lib() -> LibraryModule {
 /// debug.traceback([message [, level]]) - Get stack traceback
 fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
     // Get message argument (can be nil)
-    let message = l.get_arg(1).unwrap_or(LuaValue::nil());
-    let message_str = if message.is_nil() {
+    let message_val = l.get_arg(1).unwrap_or(LuaValue::nil());
+    let message_str = if message_val.is_nil() {
         None
+    } else if let Some(s) = message_val.as_str() {
+        Some(s.to_string())
     } else {
-        let vm = l.vm_mut();
-        Some(vm.value_to_string_raw(&message))
+        return Err(l.error("bad argument #1 to 'traceback' (string or nil expected)".to_string()));
     };
 
     // Get level argument (default is 1)
@@ -99,11 +100,11 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
     // Set some basic fields
     let source_key = vm.create_string("source");
     let source_val = vm.create_string("=[C]");
-    vm.table_set_with_meta(info_table, source_key, source_val)?;
+    vm.table_set(&info_table, source_key, source_val);
 
     let what_key = vm.create_string("what");
     let what_val = vm.create_string("C");
-    vm.table_set_with_meta(info_table, what_key, what_val)?;
+    vm.table_set(&info_table, what_key, what_val);
 
     l.push_value(info_table)?;
     Ok(1)

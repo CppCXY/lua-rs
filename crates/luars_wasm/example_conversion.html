@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lua WASM - 类型转换示例</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        .section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .code-block {
+            background: #f4f4f4;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 10px 0;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            overflow-x: auto;
+        }
+        .result {
+            background: #e8f5e9;
+            border-left: 4px solid #4caf50;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        .error {
+            background: #ffebee;
+            border-left: 4px solid #f44336;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        button {
+            background: #2196f3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover {
+            background: #1976d2;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .test-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .test-case {
+            background: #fafafa;
+            padding: 15px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+        }
+        .test-case h4 {
+            margin-top: 0;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 Lua WASM 类型转换示例</h1>
+
+    <div class="section">
+        <h2>📖 说明</h2>
+        <p>这个示例展示了 Lua 和 JavaScript 之间的类型转换功能:</p>
+        <ul>
+            <li><strong>基本类型</strong>: nil, boolean, number, string</li>
+            <li><strong>复杂类型</strong>: table (数组/对象), 嵌套结构</li>
+            <li><strong>特殊处理</strong>: 循环引用检测, 递归深度限制</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>🔄 Lua → JavaScript 转换</h2>
+        
+        <div class="test-grid">
+            <div class="test-case">
+                <h4>基本类型</h4>
+                <button onclick="testBasicTypes()">运行测试</button>
+                <div id="basic-result"></div>
+            </div>
+
+            <div class="test-case">
+                <h4>数组</h4>
+                <button onclick="testArrays()">运行测试</button>
+                <div id="array-result"></div>
+            </div>
+
+            <div class="test-case">
+                <h4>对象</h4>
+                <button onclick="testObjects()">运行测试</button>
+                <div id="object-result"></div>
+            </div>
+
+            <div class="test-case">
+                <h4>嵌套结构</h4>
+                <button onclick="testNested()">运行测试</button>
+                <div id="nested-result"></div>
+            </div>
+
+            <div class="test-case">
+                <h4>混合类型</h4>
+                <button onclick="testMixed()">运行测试</button>
+                <div id="mixed-result"></div>
+            </div>
+
+            <div class="test-case">
+                <h4>JSON 导出</h4>
+                <button onclick="testJsonExport()">运行测试</button>
+                <div id="json-result"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>🔄 JavaScript → Lua 转换</h2>
+        
+        <div class="test-grid">
+            <div class="test-case">
+                <h4>设置基本值</h4>
+                <button onclick="testSetBasic()">运行测试</button>
+                <div id="set-basic-result"></div>
+            </div>
+
+            <div class="test-case">
+                <h4>设置数组</h4>
+                <button onclick="testSetArray()">运行测试</button>
+                <div id="set-array-result"></div>
+            </div>
+
+            <div class="test-case">
+                <h4>设置对象</h4>
+                <button onclick="testSetObject()">运行测试</button>
+                <div id="set-object-result"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>🎮 交互式测试</h2>
+        <textarea id="lua-code" rows="8" style="width: 100%; font-family: monospace; padding: 10px;">
+-- 输入 Lua 代码
+return {
+    name = "测试",
+    data = {1, 2, 3, 4, 5},
+    nested = {
+        a = true,
+        b = false,
+        c = nil
+    }
+}
+        </textarea>
+        <br>
+        <button onclick="runCustomCode()">执行代码</button>
+        <button onclick="clearResult()">清除结果</button>
+        <div id="custom-result"></div>
+    </div>
+
+    <script type="module">
+        let lua;
+        let isLoaded = false;
+
+        // 初始化 WASM 模块
+        async function init() {
+            try {
+                // 注意: 需要先编译 WASM 模块
+                // wasm-pack build --target web
+                const { default: init, LuaWasm } = await import('./pkg/luars_wasm.js');
+                await init();
+                lua = new LuaWasm();
+                isLoaded = true;
+                showStatus('✅ Lua WASM 已加载', 'success');
+            } catch (e) {
+                showStatus('❌ 加载失败: ' + e.message, 'error');
+                console.error(e);
+            }
+        }
+
+        function showStatus(message, type) {
+            const div = document.createElement('div');
+            div.className = type === 'error' ? 'error' : 'result';
+            div.textContent = message;
+            document.body.insertBefore(div, document.body.firstChild);
+            setTimeout(() => div.remove(), 3000);
+        }
+
+        function showResult(elementId, content) {
+            const el = document.getElementById(elementId);
+            if (!el) return;
+            el.innerHTML = content;
+        }
+
+        // 测试函数
+        window.testBasicTypes = async function() {
+            if (!isLoaded) return showStatus('请先加载 WASM 模块', 'error');
+            
+            try {
+                const tests = [
+                    { code: 'return nil', desc: 'nil → null' },
+                    { code: 'return true', desc: 'true → true' },
+                    { code: 'return 42', desc: '42 → 42' },
+                    { code: 'return 3.14', desc: '3.14 → 3.14' },
+                    { code: 'return "hello"', desc: '"hello" → "hello"' }
+                ];
+
+                let result = '<div class="code-block">';
+                for (const test of tests) {
+                    const value = lua.eval(test.code.replace('return ', ''));
+                    result += `${test.desc}: ${JSON.stringify(value)}<br>`;
+                }
+                result += '</div>';
+                showResult('basic-result', result);
+            } catch (e) {
+                showResult('basic-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testArrays = function() {
+            if (!isLoaded) return;
+            
+            try {
+                const arr = lua.eval('{1, 2, 3, 4, 5}');
+                showResult('array-result', 
+                    `<div class="code-block">Lua: {1, 2, 3, 4, 5}<br>JS: ${JSON.stringify(arr)}</div>`);
+            } catch (e) {
+                showResult('array-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testObjects = function() {
+            if (!isLoaded) return;
+            
+            try {
+                const obj = lua.eval('{name = "John", age = 30}');
+                showResult('object-result', 
+                    `<div class="code-block">Lua: {name = "John", age = 30}<br>JS: ${JSON.stringify(obj)}</div>`);
+            } catch (e) {
+                showResult('object-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testNested = function() {
+            if (!isLoaded) return;
+            
+            try {
+                const nested = lua.eval('{a = {b = {c = 123}}}');
+                showResult('nested-result', 
+                    `<div class="code-block">嵌套对象:<br>${JSON.stringify(nested, null, 2)}</div>`);
+            } catch (e) {
+                showResult('nested-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testMixed = function() {
+            if (!isLoaded) return;
+            
+            try {
+                const mixed = lua.eval('{1, 2, x = "hello", y = true}');
+                showResult('mixed-result', 
+                    `<div class="code-block">混合表:<br>${JSON.stringify(mixed, null, 2)}</div>`);
+            } catch (e) {
+                showResult('mixed-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testJsonExport = function() {
+            if (!isLoaded) return;
+            
+            try {
+                const json = lua.evalJson('{data = {1, 2, 3}, meta = {version = 1}}');
+                showResult('json-result', 
+                    `<div class="code-block">JSON 字符串:<br><pre>${json}</pre></div>`);
+            } catch (e) {
+                showResult('json-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testSetBasic = function() {
+            if (!isLoaded) return;
+            
+            try {
+                lua.setGlobal('myNumber', 123);
+                lua.setGlobal('myString', 'test');
+                const num = lua.getGlobal('myNumber');
+                const str = lua.getGlobal('myString');
+                showResult('set-basic-result', 
+                    `<div class="code-block">设置: myNumber=123, myString="test"<br>读取: ${num}, "${str}"</div>`);
+            } catch (e) {
+                showResult('set-basic-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testSetArray = function() {
+            if (!isLoaded) return;
+            
+            try {
+                lua.setGlobal('myArray', [1, 2, 3, 4, 5]);
+                const result = lua.execute('return #myArray');
+                showResult('set-array-result', 
+                    `<div class="code-block">设置数组 [1,2,3,4,5]<br>Lua 中长度: ${result}</div>`);
+            } catch (e) {
+                showResult('set-array-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.testSetObject = function() {
+            if (!isLoaded) return;
+            
+            try {
+                lua.setGlobal('myObj', {name: 'Alice', age: 25});
+                const name = lua.execute('return myObj.name');
+                showResult('set-object-result', 
+                    `<div class="code-block">设置对象 {name: 'Alice', age: 25}<br>读取 name: "${name}"</div>`);
+            } catch (e) {
+                showResult('set-object-result', `<div class="error">${e}</div>`);
+            }
+        };
+
+        window.runCustomCode = function() {
+            if (!isLoaded) return;
+            
+            const code = document.getElementById('lua-code').value;
+            try {
+                const result = lua.execute(code);
+                showResult('custom-result', 
+                    `<div class="result"><strong>执行成功</strong><br><pre>${JSON.stringify(result, null, 2)}</pre></div>`);
+            } catch (e) {
+                showResult('custom-result', 
+                    `<div class="error"><strong>执行错误</strong><br>${e}</div>`);
+            }
+        };
+
+        window.clearResult = function() {
+            showResult('custom-result', '');
+        };
+
+        // 页面加载时初始化
+        init();
+    </script>
+
+    <div class="section">
+        <h2>📝 注意事项</h2>
+        <ul>
+            <li>需要先使用 <code>wasm-pack build --target web</code> 编译 WASM 模块</li>
+            <li>Lua 数组索引从 1 开始,转换为 JS 数组时会自动调整</li>
+            <li>循环引用会被检测并显示为 <code>"[Circular Reference]"</code></li>
+            <li>最大递归深度为 100 层</li>
+            <li>JS 的 <code>undefined</code> 和 <code>null</code> 都转换为 Lua 的 <code>nil</code></li>
+            <li>当前版本暂不支持 JS 函数到 Lua 函数的转换</li>
+        </ul>
+    </div>
+</body>
+</html>

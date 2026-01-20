@@ -6,10 +6,10 @@ mod require;
 
 use std::rc::Rc;
 
+use crate::gc::{code_param, decode_param};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event, get_metatable};
-use crate::gc::{code_param, decode_param};
+use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 use crate::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use require::lua_require;
 
@@ -46,16 +46,14 @@ pub fn create_basic_lib() -> LibraryModule {
 /// print(...) - Print values to stdout
 fn lua_print(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
-    let vm = l.vm_mut();
-
-    let output: Vec<String> = args.iter().map(|v| vm.value_to_string_raw(v)).collect();
-
-    if !output.is_empty() {
-        println!("{}", output.join("\t"));
-    } else {
-        println!();
+    for (index, arg) in args.iter().enumerate() {
+        let s = l.to_string(arg)?;
+        print!("{}", s);
+        if index < args.len() - 1 {
+            print!("\t");
+        }
     }
-
+    println!();
     Ok(0)
 }
 
@@ -107,11 +105,13 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
 
 /// error(message) - Raise an error
 fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
-    let arg = l.get_arg(1);
-    let vm = l.vm_mut();
-    let message = arg
-        .map(|v| vm.value_to_string_raw(&v))
-        .unwrap_or_else(|| "error".to_string());
+    let arg = match l.get_arg(1) {
+        Some(v) => v,
+        None => {
+            return Err(l.error("bad argument #1 to 'error' (value expected)".to_string()));
+        }
+    };
+    let message = l.to_string(&arg)?;
 
     Err(l.error(message))
 }
@@ -223,50 +223,10 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    // Fast path: simple types without metamethods
-    if value.is_nil() || value.as_bool().is_some() || value.is_integer() || value.is_number() {
-        let vm = l.vm_mut();
-        let s = if value.is_nil() {
-            vm.create_string("nil")
-        } else if let Some(b) = value.as_bool() {
-            vm.create_string(if b { "true" } else { "false" })
-        } else if let Some(i) = value.as_integer() {
-            vm.create_string(&i.to_string())
-        } else if let Some(f) = value.as_number() {
-            vm.create_string(&f.to_string())
-        } else {
-            unreachable!()
-        };
-        l.push_value(s)?;
-        return Ok(1);
-    }
-
-    // Check for __tostring metamethod
-    if let Some(mm) = get_tostring_metamethod(l, &value) {
-        // Call __tostring metamethod
-        let (succ, results) = l.pcall(mm, vec![value])?;
-        if !succ {
-            return Err(l.error("error in __tostring metamethod".to_string()));
-        }
-        if let Some(result) = results.get(0) {
-            l.push_value(result.clone())?;
-            return Ok(1);
-        } else {
-            return Err(l.error("error in __tostring metamethod: no result".to_string()));
-        }
-    }
-
-    // No metamethod: use default representation
-    let vm = l.vm_mut();
-    let value_str = vm.value_to_string_raw(&value);
-    let result = vm.create_string(&value_str);
-    l.push_value(result)?;
+    let result = l.to_string(&value)?;
+    let result_value = l.create_string_owned(result);
+    l.push_value(result_value)?;
     Ok(1)
-}
-
-/// Get __tostring metamethod for a value
-fn get_tostring_metamethod(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
-    get_metamethod_event(lua_state, value, "__tostring")
 }
 
 /// select(index, ...) - Return subset of arguments
@@ -391,7 +351,7 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'pairs' (value expected)".to_string()))?;
 
     // Validate that it's a table
-    if table_val.as_table_id().is_none() {
+    if !table_val.is_table() {
         return Err(l.error("bad argument #1 to 'pairs' (table expected)".to_string()));
     }
 
@@ -418,15 +378,6 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     let table = table_val
         .as_table()
         .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
-
-    // First, if index is not nil, verify it exists in the table
-    // This distinguishes "key not found" from "no more keys"
-    if !index_val.is_nil() {
-        let key_exists = table.raw_get(&index_val).is_some();
-        if !key_exists {
-            return Err(l.error("invalid key to 'next'".to_string()));
-        }
-    }
 
     let result = table.next(&index_val);
 
@@ -668,13 +619,13 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // LUA_GCCOUNT: returns memory in use in Kbytes
             // Lua 5.5 lapi.c line 1222: res = gettotalbytes(g);
             // gettotalbytes(g) = (g)->GCtotalbytes - (g)->GCdebt (lstate.h line 435)
-            
+
             // CRITICAL: Check GC before returning count
             // In Lua 5.5, luaC_checkGC is called on every API entry
             l.check_gc()?;
-            
+
             let gc = &l.vm_mut().gc;
-            let real_bytes = gc.total_bytes - gc.gc_debt;  // gettotalbytes
+            let real_bytes = gc.total_bytes - gc.gc_debt; // gettotalbytes
             let kb = real_bytes.max(0) as f64 / 1024.0;
             l.push_value(LuaValue::number(kb))?;
             Ok(1)
@@ -696,7 +647,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         }
         "step" => {
             // LUA_GCSTEP: Single step with optional size argument (in bytes)
-            // 
+            //
             // From lapi.c (Lua 5.5): lines 1202-1214
             // ```c
             // case LUA_GCSTEP: {
@@ -726,11 +677,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // 否则如果debt是负数，debt - debt = 0不会触发GC
             let gc = &l.vm_mut().gc;
             let stepsize = gc.apply_param(STEPSIZE, 100);
-            let n = if n_arg <= 0 {
-                stepsize
-            } else {
-                n_arg as isize
-            };
+            let n = if n_arg <= 0 { stepsize } else { n_arg as isize };
 
             // int work = 0;
             let mut work = false;
@@ -1061,13 +1008,15 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
 /// warn(msg1, ...) - Emit a warning
 fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
-    let vm = l.vm_mut();
 
-    let messages: Vec<String> = args.iter().map(|v| vm.value_to_string_raw(v)).collect();
-    let message = messages.join("");
-
-    // Emit warning to stderr
-    eprintln!("Lua warning: {}", message);
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            // Separator
+            eprint!("\t");
+        }
+        let s = l.to_string(arg)?;
+        eprint!("{}", s);
+    }
 
     Ok(0)
 }

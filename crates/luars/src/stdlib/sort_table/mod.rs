@@ -7,7 +7,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'sort' (table expected)".to_string()))?;
     let comp = l.get_arg(2);
 
-    let Some(table_ref) = l.get_table_mut(&table_val) else {
+    let Some(table_ref) = table_val.as_table_mut() else {
         return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
     };
 
@@ -94,7 +94,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Write back sorted array
-    let Some(table_ref) = l.get_table_mut(&table_val) else {
+    let Some(table_ref) = table_val.as_table_mut() else {
         return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
     };
 
@@ -129,10 +129,6 @@ fn lua_compare_values(a: &LuaValue, b: &LuaValue) -> std::cmp::Ordering {
     if a.is_string() && b.is_string() {
         if let (Some(str1), Some(str2)) = (a.as_str(), b.as_str()) {
             return str1.cmp(str2);
-        }
-        // Fallback: compare string IDs (maintains stability)
-        if let (Some(id1), Some(id2)) = (a.as_string_id(), b.as_string_id()) {
-            return id1.0.cmp(&id2.0);
         }
     }
 

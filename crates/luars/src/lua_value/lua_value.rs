@@ -28,10 +28,12 @@
 // - Bits 0-3: 基础类型 (LUA_TNIL, LUA_TBOOLEAN, LUA_TNUMBER, etc.)
 // - Bits 4-5: variant bits (区分子类型,如integer/float, short/long string)
 // - Bit 6: BIT_ISCOLLECTABLE (标记是否是GC对象)
-use crate::gc::{FunctionId, StringId, TableId, ThreadId, UserdataId};
 use crate::lua_value::LuaUserdata;
 use crate::lua_vm::{CFunction, LuaState};
-use crate::{BinaryId, FunctionBody, LuaTable};
+use crate::{
+    BinaryPtr, FunctionBody, FunctionPtr, GcBinary, GcFunction, GcObjectPtr, GcString, GcTable,
+    GcThread, GcUserdata, LuaTable, StringPtr, TablePtr, ThreadPtr, UserdataPtr,
+};
 
 // ============ Basic type tags (bits 0-3) ============
 // From lua.h
@@ -44,16 +46,6 @@ pub const LUA_TTABLE: u8 = 5;
 pub const LUA_TFUNCTION: u8 = 6;
 pub const LUA_TUSERDATA: u8 = 7;
 pub const LUA_TTHREAD: u8 = 8;
-
-// Extra types for non-values
-#[allow(unused)]
-pub const LUA_NUMTYPES: u8 = 9;
-#[allow(unused)]
-pub const LUA_TUPVAL: u8 = LUA_NUMTYPES; // upvalues
-#[allow(unused)]
-pub const LUA_TPROTO: u8 = LUA_NUMTYPES + 1; // function prototypes  
-#[allow(unused)]
-pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2; // removed keys in table
 
 // ============ Variant tags (with bits 4-5) ============
 macro_rules! makevariant {
@@ -143,46 +135,14 @@ impl Value {
     }
 }
 
-// ============ Value Metadata ============
-/// Combines type tag and GC ID into 8 bytes
-/// Layout: [tt: u8, _padding: [u8; 3], gcid: u32]
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub struct ValueMeta {
-    tt: u8,    // Type tag (same as Lua 5.5)
-    gcid: u32, // GC object ID (only valid for collectable types)
-}
-
-impl ValueMeta {
-    #[inline(always)]
-    pub const fn new(tt: u8) -> Self {
-        Self { tt, gcid: 0 }
-    }
-
-    #[inline(always)]
-    pub const fn with_gcid(tt: u8, gcid: u32) -> Self {
-        Self { tt, gcid }
-    }
-
-    #[inline(always)]
-    pub fn tt(&self) -> u8 {
-        self.tt
-    }
-
-    #[inline(always)]
-    pub fn gcid(&self) -> u32 {
-        self.gcid
-    }
-}
-
 // ============ TValue ============
 /// Lua 5.5 TValue structure (16 bytes)
 /// Now with embedded GC ID for direct pointer access
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct LuaValue {
-    pub(crate) value: Value,    // 8 bytes: value or pointer
-    pub(crate) meta: ValueMeta, // 8 bytes: type tag + GC ID
+    pub(crate) value: Value, // 8 bytes: value or pointer
+    pub(crate) tt: u8,       // 1 byte: type tag
 }
 
 impl LuaValue {
@@ -191,13 +151,7 @@ impl LuaValue {
     /// Get type tag (for compatibility)
     #[inline(always)]
     pub fn tt(&self) -> u8 {
-        self.meta.tt()
-    }
-
-    /// Get GC ID if this is a collectable type
-    #[inline(always)]
-    pub fn gcid(&self) -> u32 {
-        self.meta.gcid()
+        self.tt
     }
 
     // ============ Constructors ============
@@ -206,7 +160,7 @@ impl LuaValue {
     pub const fn nil() -> Self {
         Self {
             value: Value::nil(),
-            meta: ValueMeta::new(LUA_VNIL),
+            tt: LUA_VNIL,
         }
     }
 
@@ -214,7 +168,7 @@ impl LuaValue {
     pub const fn empty() -> Self {
         Self {
             value: Value::nil(),
-            meta: ValueMeta::new(LUA_VEMPTY),
+            tt: LUA_VEMPTY,
         }
     }
 
@@ -222,7 +176,7 @@ impl LuaValue {
     pub const fn abstkey() -> Self {
         Self {
             value: Value::nil(),
-            meta: ValueMeta::new(LUA_VABSTKEY),
+            tt: LUA_VABSTKEY,
         }
     }
 
@@ -230,7 +184,7 @@ impl LuaValue {
     pub const fn boolean(b: bool) -> Self {
         Self {
             value: Value::nil(),
-            meta: ValueMeta::new(if b { LUA_VTRUE } else { LUA_VFALSE }),
+            tt: if b { LUA_VTRUE } else { LUA_VFALSE },
         }
     }
 
@@ -238,7 +192,7 @@ impl LuaValue {
     pub const fn integer(i: i64) -> Self {
         Self {
             value: Value::integer(i),
-            meta: ValueMeta::new(LUA_VNUMINT),
+            tt: LUA_VNUMINT,
         }
     }
 
@@ -246,7 +200,7 @@ impl LuaValue {
     pub fn float(n: f64) -> Self {
         Self {
             value: Value::float(n),
-            meta: ValueMeta::new(LUA_VNUMFLT),
+            tt: LUA_VNUMFLT,
         }
     }
 
@@ -259,42 +213,42 @@ impl LuaValue {
 
     /// Create a string value from StringId
     #[inline(always)]
-    pub fn string(id: StringId, ptr: *const String) -> Self {
+    pub fn string(ptr: StringPtr) -> Self {
         Self {
             value: Value {
-                ptr: ptr as *const u8,
+                ptr: ptr.as_ptr() as *const u8,
             }, // Pointer set later
-            meta: ValueMeta::with_gcid(LUA_VSTR, id.0),
+            tt: LUA_VSTR,
         }
     }
 
     #[inline(always)]
-    pub fn binary(id: BinaryId, ptr: *const Vec<u8>) -> Self {
+    pub fn binary(ptr: BinaryPtr) -> Self {
         Self {
             value: Value {
-                ptr: ptr as *const u8,
+                ptr: ptr.as_ptr() as *const u8,
             },
-            meta: ValueMeta::with_gcid(LUA_VBINARY, id.0),
+            tt: LUA_VBINARY,
         }
     }
 
     #[inline(always)]
-    pub fn table(id: TableId, ptr: *const LuaTable) -> Self {
+    pub fn table(ptr: TablePtr) -> Self {
         Self {
             value: Value {
-                ptr: ptr as *const u8,
+                ptr: ptr.as_ptr() as *const u8,
             },
-            meta: ValueMeta::with_gcid(LUA_VTABLE, id.0),
+            tt: LUA_VTABLE,
         }
     }
 
     #[inline(always)]
-    pub fn function(id: FunctionId, ptr: *const FunctionBody) -> Self {
+    pub fn function(ptr: FunctionPtr) -> Self {
         Self {
             value: Value {
-                ptr: ptr as *const u8,
+                ptr: ptr.as_ptr() as *const u8,
             },
-            meta: ValueMeta::with_gcid(LUA_VFUNCTION, id.0),
+            tt: LUA_VFUNCTION,
         }
     }
 
@@ -303,7 +257,7 @@ impl LuaValue {
     pub fn cfunction(f: CFunction) -> Self {
         Self {
             value: Value::cfunction(f),
-            meta: ValueMeta::new(LUA_VLCF),
+            tt: LUA_VLCF,
         }
     }
 
@@ -311,27 +265,27 @@ impl LuaValue {
     pub fn lightuserdata(p: *mut std::ffi::c_void) -> Self {
         Self {
             value: Value::lightuserdata(p),
-            meta: ValueMeta::new(LUA_VLIGHTUSERDATA),
+            tt: LUA_VLIGHTUSERDATA,
         }
     }
 
     #[inline(always)]
-    pub fn userdata(id: UserdataId, ptr: *const LuaUserdata) -> Self {
+    pub fn userdata(ptr: UserdataPtr) -> Self {
         Self {
             value: Value {
-                ptr: ptr as *const u8,
+                ptr: ptr.as_ptr() as *const u8,
             },
-            meta: ValueMeta::with_gcid(LUA_VUSERDATA, id.0),
+            tt: LUA_VUSERDATA,
         }
     }
 
     #[inline(always)]
-    pub fn thread(id: ThreadId, ptr: *const LuaState) -> Self {
+    pub fn thread(ptr: ThreadPtr) -> Self {
         Self {
             value: Value {
-                ptr: ptr as *const u8,
+                ptr: ptr.as_ptr() as *const u8,
             },
-            meta: ValueMeta::with_gcid(LUA_VTHREAD, id.0),
+            tt: LUA_VTHREAD,
         }
     }
 
@@ -513,46 +467,9 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn gcvalue(&self) -> u32 {
-        debug_assert!(self.iscollectable());
-        self.gcid()
-    }
-
-    // Specific GC type extraction
-    #[inline(always)]
-    pub fn tsvalue(&self) -> StringId {
-        debug_assert!(self.ttisstring());
-        StringId(self.gcid())
-    }
-
-    #[inline(always)]
-    pub fn hvalue(&self) -> TableId {
-        debug_assert!(self.ttistable());
-        TableId(self.gcid())
-    }
-
-    #[inline(always)]
-    pub fn clvalue(&self) -> FunctionId {
-        debug_assert!(self.ttisluafunction());
-        FunctionId(self.gcid())
-    }
-
-    #[inline(always)]
     pub fn fvalue(&self) -> CFunction {
         debug_assert!(self.ttiscfunction());
         unsafe { std::mem::transmute(self.value.f) }
-    }
-
-    #[inline(always)]
-    pub fn uvalue(&self) -> UserdataId {
-        debug_assert!(self.ttisfulluserdata());
-        UserdataId(self.gcid())
-    }
-
-    #[inline(always)]
-    pub fn thvalue(&self) -> ThreadId {
-        debug_assert!(self.ttisthread());
-        ThreadId(self.gcid())
     }
 
     // ============ Compatibility layer with old API ============
@@ -694,31 +611,13 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_string_id(&self) -> Option<StringId> {
-        if self.ttisstring() {
-            Some(self.tsvalue())
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
     pub fn as_str(&self) -> Option<&str> {
         if self.ttisstring() {
             Some(unsafe {
                 let ptr = self.value.ptr;
-                let s: &String = &*(ptr as *const String);
-                s.as_str()
+                let s: &GcString = &*(ptr as *const GcString);
+                &s.data.as_str()
             })
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_binary_id(&self) -> Option<BinaryId> {
-        if self.ttisbinary() {
-            Some(BinaryId(self.gcid()))
         } else {
             None
         }
@@ -729,18 +628,9 @@ impl LuaValue {
         if self.ttisbinary() {
             Some(unsafe {
                 let ptr = self.value.ptr;
-                let v: &Vec<u8> = &*(ptr as *const Vec<u8>);
-                v.as_slice()
+                let v: &GcBinary = &*(ptr as *const GcBinary);
+                &v.data.as_slice()
             })
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_table_id(&self) -> Option<TableId> {
-        if self.ttistable() {
-            Some(self.hvalue())
         } else {
             None
         }
@@ -749,7 +639,8 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_table(&self) -> Option<&LuaTable> {
         if self.ttistable() {
-            Some(unsafe { &*(self.value.ptr as *const LuaTable) })
+            let v = unsafe { &*(self.value.ptr as *const GcTable) };
+            Some(&v.data)
         } else {
             None
         }
@@ -758,16 +649,8 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_table_mut(&self) -> Option<&mut LuaTable> {
         if self.ttistable() {
-            Some(unsafe { &mut *(self.value.ptr as *mut LuaTable) })
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_function_id(&self) -> Option<FunctionId> {
-        if self.ttisluafunction() {
-            Some(self.clvalue())
+            let v = unsafe { &mut *(self.value.ptr as *mut GcTable) };
+            Some(&mut v.data)
         } else {
             None
         }
@@ -776,7 +659,8 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_lua_function(&self) -> Option<&FunctionBody> {
         if self.ttisluafunction() {
-            Some(unsafe { &*(self.value.ptr as *const FunctionBody) })
+            let func = unsafe { &*(self.value.ptr as *const GcFunction) };
+            Some(&func.data)
         } else {
             None
         }
@@ -792,27 +676,10 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_userdata_id(&self) -> Option<UserdataId> {
-        if self.ttisfulluserdata() {
-            Some(self.uvalue())
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
     pub fn as_userdata_mut(&self) -> Option<&mut LuaUserdata> {
         if self.ttisfulluserdata() {
-            Some(unsafe { &mut *(self.value.ptr as *mut LuaUserdata) })
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub fn as_thread_id(&self) -> Option<ThreadId> {
-        if self.ttisthread() {
-            Some(self.thvalue())
+            let gc = unsafe { &mut *(self.value.ptr as *mut GcUserdata) };
+            Some(&mut gc.data)
         } else {
             None
         }
@@ -821,9 +688,74 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_thread_mut(&self) -> Option<&mut LuaState> {
         if self.ttisthread() {
-            Some(unsafe { &mut *(self.value.ptr as *mut LuaState) })
+            let v = unsafe { &mut *(self.value.ptr as *mut GcThread) };
+            Some(&mut v.data)
         } else {
             None
+        }
+    }
+
+    pub fn as_table_ptr(&self) -> Option<TablePtr> {
+        if self.ttistable() {
+            Some(TablePtr::new(unsafe { self.value.ptr as *mut GcTable }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_string_ptr(&self) -> Option<StringPtr> {
+        if self.ttisstring() {
+            Some(StringPtr::new(unsafe { self.value.ptr as *mut GcString }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_binary_ptr(&self) -> Option<BinaryPtr> {
+        if self.ttisbinary() {
+            Some(BinaryPtr::new(unsafe { self.value.ptr as *mut GcBinary }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
+        if self.ttisfunction() {
+            Some(FunctionPtr::new(unsafe {
+                self.value.ptr as *mut GcFunction
+            }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
+        if self.ttisfulluserdata() {
+            Some(UserdataPtr::new(unsafe {
+                self.value.ptr as *mut GcUserdata
+            }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_thread_ptr(&self) -> Option<ThreadPtr> {
+        if self.ttisthread() {
+            Some(ThreadPtr::new(unsafe { self.value.ptr as *mut GcThread }))
+        } else {
+            None
+        }
+    }
+
+    pub fn as_gc_ptr(&self) -> Option<GcObjectPtr> {
+        match self.kind() {
+            LuaValueKind::Table => self.as_table_ptr().map(GcObjectPtr::Table),
+            LuaValueKind::Function => self.as_function_ptr().map(GcObjectPtr::Function),
+            LuaValueKind::String => self.as_string_ptr().map(GcObjectPtr::String),
+            LuaValueKind::Binary => self.as_binary_ptr().map(GcObjectPtr::Binary),
+            LuaValueKind::Thread => self.as_thread_ptr().map(GcObjectPtr::Thread),
+            LuaValueKind::Userdata => self.as_userdata_ptr().map(GcObjectPtr::Userdata),
+            _ => None,
         }
     }
 
@@ -891,14 +823,8 @@ impl LuaValue {
         }
     }
 
-    /// GC object ID for GC traversal
-    #[inline(always)]
-    pub fn gc_object_id(&self) -> Option<(u8, u32)> {
-        if self.iscollectable() {
-            Some((self.ttype(), self.meta.gcid()))
-        } else {
-            None
-        }
+    fn raw_ptr_repr(&self) -> *const u8 {
+        unsafe { self.value.ptr }
     }
 }
 
@@ -962,18 +888,15 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Boolean => write!(f, "{}", self.bvalue()),
             LuaValueKind::Integer => write!(f, "{}", self.ivalue()),
             LuaValueKind::Float => write!(f, "{}", self.fltvalue()),
-            LuaValueKind::String => write!(
-                f,
-                "string({}) \"{}\"",
-                self.tsvalue().0,
-                self.as_str().unwrap_or("<invalid string>")
-            ),
-            LuaValueKind::Binary => write!(f, "binary({})", self.gcid()),
-            LuaValueKind::Table => write!(f, "table({})", self.hvalue().0),
-            LuaValueKind::Function => write!(f, "function({})", self.clvalue().0),
-            LuaValueKind::CFunction => write!(f, "cfunction({:#x})", unsafe { self.value.f }),
-            LuaValueKind::Userdata => write!(f, "userdata({})", self.uvalue().0),
-            LuaValueKind::Thread => write!(f, "thread({})", self.thvalue().0),
+            LuaValueKind::String => {
+                write!(f, "\"{}\"", self.as_str().unwrap_or("<invalid string>"))
+            }
+            LuaValueKind::Binary => write!(f, "binary({:#x})", self.raw_ptr_repr() as usize),
+            LuaValueKind::Table => write!(f, "table({:#x})", self.raw_ptr_repr() as usize),
+            LuaValueKind::Function => write!(f, "function({:#x})", self.raw_ptr_repr() as usize),
+            LuaValueKind::CFunction => write!(f, "cfunction({:#x})", self.raw_ptr_repr() as usize),
+            LuaValueKind::Userdata => write!(f, "userdata({:#x})", self.raw_ptr_repr() as usize),
+            LuaValueKind::Thread => write!(f, "thread({:#x})", self.raw_ptr_repr() as usize),
         }
     }
 }
@@ -1013,7 +936,7 @@ impl std::hash::Hash for LuaValue {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         let tt = self.tt();
-        
+
         // Special handling for numbers to maintain equality invariant
         // (integer 1 == float 1.0, so they must hash the same)
         if tt == LUA_VNUMINT || tt == LUA_VNUMFLT {
@@ -1035,7 +958,7 @@ impl std::hash::Hash for LuaValue {
         } else {
             // GC types: hash type tag + gc_id
             tt.hash(state);
-            self.meta.gcid().hash(state);
+            self.raw_ptr_repr().hash(state);
         }
     }
 }

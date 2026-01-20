@@ -339,8 +339,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Use optimized create_substring
-    let result_value = vm
-        .create_substring(s_value, start_byte, end_byte);
+    let result_value = vm.create_substring(s_value, start_byte, end_byte);
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -446,27 +445,16 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'match' (string expected)".to_string()))?;
-    let string_id = s_value
-        .as_string_id()
-        .ok_or_else(|| l.error("bad argument #1 to 'match' (string expected)".to_string()))?;
+    let Some(s_str) = s_value.as_str() else {
+        return Err(l.error("bad argument #1 to 'match' (string expected)".to_string()));
+    };
 
     let pattern_value = l
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'match' (string expected)".to_string()))?;
-    let pattern_id = pattern_value
-        .as_string_id()
-        .ok_or_else(|| l.error("bad argument #2 to 'match' (string expected)".to_string()))?;
-
-    let (s_str, pattern_str) = {
-        let vm = l.vm_mut();
-        let s = vm.object_pool.get_string(string_id);
-        let p = vm.object_pool.get_string(pattern_id);
-        match (s, p) {
-            (Some(s_obj), Some(p_obj)) => Ok((s_obj.to_string(), p_obj.to_string())),
-            _ => Err("invalid string".to_string()),
-        }
-    }
-    .map_err(|e| l.error(e))?;
+    let Some(pattern_str) = pattern_value.as_str() else {
+        return Err(l.error("bad argument #2 to 'match' (string expected)".to_string()));
+    };
 
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
     let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
