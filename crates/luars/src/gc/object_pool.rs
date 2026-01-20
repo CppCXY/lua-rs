@@ -233,6 +233,7 @@ impl ObjectPool {
             TmKind::Concat => self.tm_concat,
             TmKind::Call => self.tm_call,
             TmKind::Close => self.tm_close,
+            TmKind::ToString => self.tm_tostring,
             _ => self.tm_index, // Fallback to __index
         }
     }
@@ -487,8 +488,11 @@ impl ObjectPool {
     #[inline]
     pub fn create_thread(&mut self, thread: LuaState, current_white: u8) -> (LuaValue, usize) {
         let size = 4096; // Fixed size for thread (including stack)
-        let gc_thread = GcObject::Thread(Box::new(GcThread::new(thread, current_white, size)));
+        let mut gc_thread = GcObject::Thread(Box::new(GcThread::new(thread, current_white, size)));
         let ptr = gc_thread.as_thread_ptr().unwrap();
+        unsafe {
+            gc_thread.as_thread_mut().unwrap().set_thread_ptr(ptr);
+        }
         self.gc_pool.alloc(gc_thread);
 
         (LuaValue::thread(ptr), size as usize)

@@ -47,16 +47,6 @@ pub const LUA_TFUNCTION: u8 = 6;
 pub const LUA_TUSERDATA: u8 = 7;
 pub const LUA_TTHREAD: u8 = 8;
 
-// Extra types for non-values
-#[allow(unused)]
-pub const LUA_NUMTYPES: u8 = 9;
-#[allow(unused)]
-pub const LUA_TUPVAL: u8 = LUA_NUMTYPES; // upvalues
-#[allow(unused)]
-pub const LUA_TPROTO: u8 = LUA_NUMTYPES + 1; // function prototypes  
-#[allow(unused)]
-pub const LUA_TDEADKEY: u8 = LUA_NUMTYPES + 2; // removed keys in table
-
 // ============ Variant tags (with bits 4-5) ============
 macro_rules! makevariant {
     ($base:expr, $variant:expr) => {

@@ -275,6 +275,13 @@ impl LuaVM {
         thread_val: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        // must check
+        if let Some(thread_ptr) = thread_val.as_thread_ptr() {
+            if thread_ptr.is_main() {
+                return Err(self.error("cannot resume main thread".to_string()));
+            }
+        }
+
         // Get ThreadId from LuaValue
         let Some(l) = thread_val.as_thread_mut() else {
             return Err(self.error("invalid thread".to_string()));

@@ -327,7 +327,7 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
 
             // Otherwise treat as format string
             let format_str = format_arg
-                .and_then(|v| l.get_string(&v).map(|s| s.to_string()))
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "*l".to_string());
             let format = format_str.as_str();
 
@@ -413,24 +413,30 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
                     None => break,
                 };
 
-                let text = match val.kind() {
+                match val.kind() {
                     LuaValueKind::String => {
-                        if let Some(s) = l.get_string(&val) {
-                            s.to_string()
+                        if let Some(s) = val.as_str() {
+                            if let Err(e) = lua_file.write(&s) {
+                                return Err(l.error(format!("write error: {}", e)));
+                            }
                         } else {
                             return Err(l.error("write expects strings or numbers".to_string()));
                         }
                     }
                     LuaValueKind::Integer => {
                         if let Some(n) = val.as_integer() {
-                            n.to_string()
+                            if let Err(e) = lua_file.write(&n.to_string()) {
+                                return Err(l.error(format!("write error: {}", e)));
+                            }
                         } else {
                             return Err(l.error("write expects strings or numbers".to_string()));
                         }
                     }
                     LuaValueKind::Float => {
                         if let Some(n) = val.as_float() {
-                            n.to_string()
+                            if let Err(e) = lua_file.write(&n.to_string()) {
+                                return Err(l.error(format!("write error: {}", e)));
+                            }
                         } else {
                             return Err(l.error("write expects strings or numbers".to_string()));
                         }
@@ -440,9 +446,6 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
                     }
                 };
 
-                if let Err(e) = lua_file.write(&text) {
-                    return Err(l.error(format!("write error: {}", e)));
-                }
                 i += 1;
             }
 
@@ -558,7 +561,7 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
 
     let whence = l
         .get_arg(2)
-        .and_then(|v| l.get_string(&v).map(|s| s.to_string()))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "cur".to_string());
 
     let offset = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(0);
@@ -610,7 +613,7 @@ fn file_setvbuf(l: &mut LuaState) -> LuaResult<usize> {
 
     let _mode = l
         .get_arg(2)
-        .and_then(|v| l.get_string(&v).map(|s| s.to_string()))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "full".to_string());
 
     let _size = l.get_arg(3).and_then(|v| v.as_integer());

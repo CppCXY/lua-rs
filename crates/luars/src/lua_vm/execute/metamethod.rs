@@ -9,37 +9,6 @@ use crate::lua_vm::opcode::Instruction;
 /// Based on Lua 5.5 ltm.c
 use crate::lua_vm::{LuaResult, LuaState, get_metamethod_event};
 
-/// Tag Method types (TMS from ltm.h)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TmKind {
-    Index = 0,
-    NewIndex = 1,
-    Gc = 2,
-    Mode = 3,
-    Len = 4,
-    Eq = 5,
-    Add = 6,
-    Sub = 7,
-    Mul = 8,
-    Mod = 9,
-    Pow = 10,
-    Div = 11,
-    IDiv = 12,
-    Band = 13,
-    Bor = 14,
-    Bxor = 15,
-    Shl = 16,
-    Shr = 17,
-    Unm = 18,
-    Bnot = 19,
-    Lt = 20,
-    Le = 21,
-    Concat = 22,
-    Call = 23,
-    Close = 24,
-    N = 25, // number of tag methods
-}
 
 /// Try unary metamethod (for __unm, __bnot)
 /// Port of luaT_trybinTM for unary operations
@@ -552,6 +521,39 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
     Ok(false)
 }
 
+/// Tag Method types (TMS from ltm.h)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TmKind {
+    Index = 0,
+    NewIndex = 1,
+    Gc = 2,
+    Mode = 3,
+    Len = 4,
+    Eq = 5,
+    Add = 6,
+    Sub = 7,
+    Mul = 8,
+    Mod = 9,
+    Pow = 10,
+    Div = 11,
+    IDiv = 12,
+    Band = 13,
+    Bor = 14,
+    Bxor = 15,
+    Shl = 16,
+    Shr = 17,
+    Unm = 18,
+    Bnot = 19,
+    Lt = 20,
+    Le = 21,
+    Concat = 22,
+    Call = 23,
+    Close = 24,
+    ToString = 25,
+    N = 26, // number of tag methods
+}
+
 impl TmKind {
     /// Convert u8 to TmKind
     pub fn from_u8(value: u8) -> Option<Self> {
@@ -581,6 +583,7 @@ impl TmKind {
             22 => Some(TmKind::Concat),
             23 => Some(TmKind::Call),
             24 => Some(TmKind::Close),
+            25 => Some(TmKind::ToString),
             _ => None,
         }
     }
@@ -613,6 +616,7 @@ impl TmKind {
             TmKind::Concat => "__concat",
             TmKind::Call => "__call",
             TmKind::Close => "__close",
+            TmKind::ToString => "__tostring",
             TmKind::N => "__n", // Not a real metamethod
         }
     }

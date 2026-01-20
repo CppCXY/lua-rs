@@ -5,18 +5,20 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::lua_value::{LuaUserdata, LuaValue};
+use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
-use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind};
-use crate::{Chunk, GcActions, GcObjectPtr, LuaVM, UpvaluePtr};
+use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
+use crate::{Chunk, GcActions, GcObjectPtr, LuaVM, ThreadPtr, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
 pub struct LuaState {
     vm: *mut LuaVM,
+
+    thread: ThreadPtr,
     /// Data stack - stores all values (registers, temporaries, function arguments)
     /// Layout: [frame0_values...][frame1_values...][frame2_values...]
     /// Similar to Lua's TValue stack[] in lua_State
@@ -67,6 +69,7 @@ impl LuaState {
         Self {
             vm,
             stack: Vec::with_capacity(Self::BASIC_STACK_SIZE),
+            thread: ThreadPtr::null(),
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
             call_depth: 0, // Start with no calls
@@ -82,6 +85,15 @@ impl LuaState {
 
     pub(crate) fn set_vm(&mut self, vm: *mut LuaVM) {
         self.vm = vm;
+    }
+
+    // please donot use this function directly unless you are very sure of what you are doing
+    pub(crate) unsafe fn thread_ptr(&self) -> ThreadPtr {
+        self.thread
+    }
+
+    pub(crate) unsafe fn set_thread_ptr(&mut self, thread: ThreadPtr) {
+        self.thread = thread;
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)
@@ -1431,6 +1443,65 @@ impl LuaState {
         }
 
         Ok(())
+    }
+
+    pub fn to_string(&mut self, value: &LuaValue) -> LuaResult<String> {
+        // Fast path: simple types without metamethods
+        match value.kind() {
+            LuaValueKind::Binary => {
+                if let Some(s) = value.as_binary() {
+                    return Ok(format!("<binary: {} bytes>", s.len()));
+                }
+            }
+            LuaValueKind::Nil => return Ok("nil".to_string()),
+            LuaValueKind::Boolean => {
+                if let Some(b) = value.as_boolean() {
+                    return Ok(if b {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    });
+                }
+            }
+            LuaValueKind::Integer => {
+                if let Some(n) = value.as_integer() {
+                    return Ok(n.to_string());
+                }
+            }
+            LuaValueKind::Float => {
+                if let Some(n) = value.as_number() {
+                    return Ok(n.to_string());
+                }
+            }
+            LuaValueKind::String => {
+                if let Some(s) = value.as_str() {
+                    return Ok(s.to_string());
+                }
+            }
+            _ => {
+                // Check for __tostring metamethod
+                if let Some(mm) = get_metamethod_event(self, value, TmKind::ToString) {
+                    // Call __tostring metamethod
+                    let (succ, results) = self.pcall(mm, vec![value.clone()])?;
+                    if !succ {
+                        return Err(self.error("error in __tostring metamethod".to_string()));
+                    }
+                    if let Some(result) = results.get(0) {
+                        if let Some(s) = result.as_str() {
+                            return Ok(s.to_string());
+                        }
+                        return Ok(format!("{}", result));
+                    } else {
+                        return Err(
+                            self.error("error in __tostring metamethod: no result".to_string())
+                        );
+                    }
+                }
+            }
+        }
+
+        // Fallback: generic representation
+        Ok(format!("{}", value))
     }
 }
 
