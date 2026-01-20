@@ -84,14 +84,15 @@ const MAX_LMEM: isize = isize::MAX;
 /// Port of luaO_ceillog2 from Lua 5.5 lobject.c
 fn ceil_log2(x: u32) -> u8 {
     static LOG_2: [u8; 256] = [
-        0,1,2,2,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
-        6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,
-        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
-        7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
-        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
-        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
-        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
-        8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+        0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+        5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+        6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
     ];
     let mut x = x.saturating_sub(1);
     let mut l: u32 = 0;
@@ -104,7 +105,7 @@ fn ceil_log2(x: u32) -> u8 {
 
 /// Encode a percentage value 'p' as a floating-point byte (eeeexxxx).
 /// Port of luaO_codeparam from Lua 5.5 lobject.c
-/// 
+///
 /// The exponent is represented using excess-7. Mimicking IEEE 754, the
 /// representation normalizes the number when possible, assuming an extra
 /// 1 before the mantissa (xxxx) and adding one to the exponent (eeee)
@@ -117,10 +118,10 @@ pub fn code_param(p: u32) -> u8 {
     if p >= ((0x1Fu64) << (0xF - 7 - 1)) as u32 * 100 {
         return 0xFF; // Return maximum value on overflow
     }
-    
+
     // p' = (p * 128 + 99) / 100 (round up the division)
     let p_scaled = ((p as u64) * 128 + 99) / 100;
-    
+
     if p_scaled < 0x10 {
         // Subnormal number: exponent bits are already zero
         p_scaled as u8
@@ -137,24 +138,24 @@ pub fn code_param(p: u32) -> u8 {
 /// Decode a floating-point byte back to approximate percentage
 /// Used for returning parameter values to Lua
 /// This is the inverse of code_param: given the encoded byte, return approximate percentage
-/// 
+///
 /// The key insight is: apply_param(p, 100) ≈ original_percentage
 /// Because apply_param computes: x * percentage / 100
 /// So apply_param(p, 100) = 100 * percentage / 100 = percentage
 pub fn decode_param(p: u8) -> i32 {
     let m = (p & 0xF) as isize;
     let e = (p >> 4) as i32;
-    
+
     // Compute what apply_param(p, 100) would return
     // This gives us the original percentage value
     let x: isize = 100;
-    
+
     let (m_full, e_adj) = if e > 0 {
         (m + 0x10, e - 1 - 7)
     } else {
         (m, -7)
     };
-    
+
     if e_adj >= 0 {
         let e_adj = e_adj as u32;
         ((x * m_full) << e_adj) as i32
@@ -412,9 +413,9 @@ impl GC {
     #[inline]
     pub fn track_size(&mut self, size: usize) {
         let size_signed = size as isize;
-        
+
         // Lua 5.5 lmem.c luaM_malloc_:
-        self.gc_debt -= size_signed;  // 分配减少debt
+        self.gc_debt -= size_signed; // 分配减少debt
         self.stats.bytes_allocated += size;
     }
 
@@ -442,13 +443,12 @@ impl GC {
         // Port of Lua 5.5's luaE_setdebt from lstate.c
         // Keep the real allocated bytes (total_bytes - gc_debt) invariant
         let real_bytes = self.total_bytes - self.gc_debt;
-        
-        
+
         // Avoid overflow in total_bytes
         if debt > MAX_LMEM - real_bytes {
             debt = MAX_LMEM - real_bytes;
         }
-        
+
         // Maintain invariant: total_bytes = real_bytes + debt
         self.total_bytes = real_bytes + debt;
         self.gc_debt = debt;
@@ -456,17 +456,17 @@ impl GC {
 
     /// Apply GC parameter (like luaO_applyparam in Lua 5.5)
     /// Parameters are stored as compressed floating-point bytes (eeeexxxx)
-    /// 
+    ///
     /// Port of luaO_applyparam from lobject.c:
     /// Computes 'p' times 'x', where 'p' is a floating-point byte.
     /// Returns MAX_LMEM on overflow to prevent extreme debt values.
     pub(crate) fn apply_param(&self, param_idx: usize, value: isize) -> isize {
         let p = self.gc_params[param_idx];
         let x = value;
-        
-        let m = (p & 0xF) as isize;  // mantissa
-        let e = (p >> 4) as i32;     // exponent
-        
+
+        let m = (p & 0xF) as isize; // mantissa
+        let e = (p >> 4) as i32; // exponent
+
         let (m_full, e_adj) = if e > 0 {
             // Normalized number: add implicit 1 to mantissa
             (m + 0x10, e - 1 - 7)
@@ -474,7 +474,7 @@ impl GC {
             // Subnormal number
             (m, -7)
         };
-        
+
         if e_adj >= 0 {
             let e_adj = e_adj as u32;
             // Check for overflow before computing
@@ -658,7 +658,7 @@ impl GC {
     /// Port of Lua 5.5's convergeephemerons
     /// Iterate ephemeron tables until convergence
     /// Port of Lua 5.5's convergeephemerons
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// /*
@@ -713,17 +713,22 @@ impl GC {
                     changed = true;
                 }
             }
-            
+
             dir = !dir;
         }
-        
+
         if iteration >= MAX_ITERATIONS {
             eprintln!("WARNING: converge_ephemerons exceeded max iterations");
         }
     }
 
     /// Traverse ephemeron in atomic phase - returns true if any value was marked
-    fn traverse_ephemeron_atomic(&mut self, table_id: TableId, pool: &mut ObjectPool, inv: bool) -> bool {
+    fn traverse_ephemeron_atomic(
+        &mut self,
+        table_id: TableId,
+        pool: &mut ObjectPool,
+        inv: bool,
+    ) -> bool {
         let entries = if let Some(table) = pool.get_table_mut(table_id) {
             table.iter_all()
         } else {
@@ -733,7 +738,7 @@ impl GC {
         let mut marked_any = false;
         let mut has_white_keys = false;
         let mut has_white_white = false;
-        
+
         let mut entry_list: Vec<_> = entries.into_iter().collect();
         if inv {
             entry_list.reverse();
@@ -805,7 +810,7 @@ impl GC {
         };
 
         let mut keys_to_remove = Vec::new();
-        
+
         for (key, _value) in entries {
             if let Some(key_id) = Self::value_to_gc_id_static(&key) {
                 if self.is_cleared(key_id, pool) {
@@ -813,7 +818,7 @@ impl GC {
                 }
             }
         }
-        
+
         // Remove entries with dead keys
         if let Some(table) = pool.get_table_mut(table_id) {
             for key in keys_to_remove {
@@ -835,10 +840,15 @@ impl GC {
             self.clear_table_by_values(table_id, pool);
         }
     }
-    
+
     /// Second pass of clear_by_values for resurrected objects
     /// Only process tables NOT in original lists (Lua 5.5: clearbyvalues(g, g->weak, origweak))
-    fn clear_by_values_range(&mut self, pool: &mut ObjectPool, origweak: &[TableId], origall: &[TableId]) {
+    fn clear_by_values_range(
+        &mut self,
+        pool: &mut ObjectPool,
+        origweak: &[TableId],
+        origall: &[TableId],
+    ) {
         // Process weak tables added after finalization
         let weak_list = self.weak.clone();
         for table_id in weak_list {
@@ -847,7 +857,7 @@ impl GC {
             }
         }
 
-        // Process allweak tables added after finalization  
+        // Process allweak tables added after finalization
         let allweak_list = self.allweak.clone();
         for table_id in allweak_list {
             if !origall.contains(&table_id) {
@@ -872,8 +882,10 @@ impl GC {
             // - Only tables, functions, threads, userdata are GC objects
             // So we SKIP strings here
             match value.kind() {
-                LuaValueKind::Table | LuaValueKind::Function | 
-                LuaValueKind::Thread | LuaValueKind::Userdata => {
+                LuaValueKind::Table
+                | LuaValueKind::Function
+                | LuaValueKind::Thread
+                | LuaValueKind::Userdata => {
                     if let Some(val_id) = Self::value_to_gc_id_static(&value) {
                         if self.is_cleared(val_id, pool) {
                             keys_to_remove.push(key);
@@ -909,14 +921,14 @@ impl GC {
         // if (!gcrunning(g)) {
         //   if (g->gcstp & GCSTPUSR) luaE_setdebt(g, 20000);
         // } else { ... }
-        
+
         // Check if GC is stopped by user (unless forced)
         if !force && self.gc_stopped {
             // Lua 5.5: set reasonable debt to avoid being called at every check
             self.set_debt(20000);
             return;
         }
-        
+
         // If not forced, check debt
         // Lua 5.5: luaC_condGC only runs step when GCdebt <= 0
         if !force && self.gc_debt > 0 {
@@ -934,7 +946,7 @@ impl GC {
     }
 
     /// Incremental GC step (like incstep in Lua 5.5)
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// static void incstep (lua_State *L, global_State *g) {
@@ -960,7 +972,7 @@ impl GC {
     fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         // l_mem stepsize = applygcparam(g, STEPSIZE, 100);
         let stepsize = self.apply_param(STEPSIZE, 100);
-        
+
         // l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
         let ptr_size = std::mem::size_of::<*const ()>() as isize;
         let mut work2do = self.apply_param(STEPMUL, stepsize / ptr_size);
@@ -1008,7 +1020,6 @@ impl GC {
             // Set positive debt = buffer before next GC
             self.set_debt(stepsize);
         }
-
     }
 
     /// Single GC step (like singlestep in Lua 5.5)
@@ -1081,7 +1092,7 @@ impl GC {
     }
 
     /// Restart collection (like restartcollection in Lua 5.5)
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// /*
@@ -1098,20 +1109,20 @@ impl GC {
     ///   markbeingfnz(g);  /* mark any finalizing object left from previous cycle */
     /// }
     /// ```
-    /// 
+    ///
     /// CRITICAL: Lua 5.5 calls cleargraylists which clears ALL gray lists including weak table lists.
     /// This is safe because restartcollection is only called from GCSpause state,
     /// meaning the previous cycle has completely finished (atomic phase cleared weak tables).
     fn restart_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
         self.stats.collection_count += 1;
-        
+
         // CRITICAL: Reset sweep_index when starting a new cycle
         // This ensures the next sweep will scan all objects from the beginning
         self.sweep_index = 0;
-        
+
         // NOTE: Do NOT set gc_state here! It should be set by the caller
         // Lua 5.5's restartcollection does not set gcstate
-        
+
         // Clear all gray lists (like Lua 5.5's cleargraylists)
         self.gray.clear();
         self.grayagain.clear();
@@ -1133,12 +1144,12 @@ impl GC {
     }
 
     /// Mark a value (add to gray list if collectable)
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// #define markvalue(g,o) { checkliveness(mainthread(g),o); \
     ///   if (valiswhite(o)) reallymarkobject(g,gcvalue(o)); }
-    /// 
+    ///
     /// static void reallymarkobject (global_State *g, GCObject *o) {
     ///   g->GCmarked += objsize(o);
     ///   switch (o->tt) {
@@ -1160,7 +1171,7 @@ impl GC {
     ///   }
     /// }
     /// ```
-    /// 
+    ///
     /// CRITICAL: Only mark WHITE objects. Black objects from previous cycle became
     /// "other white" after color flip, so they WILL be marked again.
     /// Fixed objects (metamethod names) are kept GRAY forever, so they're naturally skipped.
@@ -1283,7 +1294,7 @@ impl GC {
     }
 
     /// Port of Lua 5.5's traverseweakvalue
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// /*
@@ -1340,7 +1351,7 @@ impl GC {
         // else if (hasclears)
         //     linkgclist(h, g->weak);  /* has to be cleared later */
         // ```
-        // 
+        //
         // CRITICAL: ONLY in Propagate state should we add to grayagain!
         // In Pause/Atomic/other states, we directly mark and add to weak list.
         if self.gc_state == GcState::Propagate {
@@ -1375,7 +1386,7 @@ impl GC {
     }
 
     /// Port of Lua 5.5's traverseephemeron
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// /*
@@ -1448,7 +1459,7 @@ impl GC {
         //     ...
         // }
         // ```
-        // 
+        //
         // CRITICAL: ONLY in Propagate state should we return "propagate again"!
         // In Propagate state, we add to grayagain and return.
         // In other states (Pause/Atomic), we proceed to classify entries.
@@ -1500,7 +1511,7 @@ impl GC {
     }
 
     /// Port of Lua 5.5's traversetable (case 3: weak keys and values)
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// case 3:  /* all weak; nothing to traverse */
@@ -1538,7 +1549,7 @@ impl GC {
         // else
         //     linkgclist(h, g->allweak);
         // ```
-        // 
+        //
         // CRITICAL: ONLY in Propagate state should we add to grayagain!
         // In other states, directly add to allweak list.
         if self.gc_state == GcState::Propagate {
@@ -1585,7 +1596,7 @@ impl GC {
             GcId::TableId(id) => {
                 // Port of Lua 5.5's traversetable with weak table handling
                 // Check weak mode first to decide how to traverse
-                
+
                 let weak_mode = self.get_weak_mode(id, pool);
 
                 match weak_mode {
@@ -1750,7 +1761,7 @@ impl GC {
         // 11. clearbykeys(ephemeron & allweak) - clear dead keys
         // 12. clearbyvalues(weak & allweak, origweak & origall) - clear resurrected
         // 13. g->currentwhite = otherwhite(g) - FLIP WHITE COLOR
-        
+
         self.gc_state = GcState::Atomic;
 
         // Mark roots again (they may have changed)
@@ -1785,7 +1796,7 @@ impl GC {
 
         // Clear weak values (first pass)
         self.clear_by_values(pool);
-        
+
         // Save original lists before finalization (Lua 5.5: origweak = g->weak; origall = g->allweak;)
         let origweak = self.weak.clone();
         let origall = self.allweak.clone();
@@ -1814,7 +1825,7 @@ impl GC {
     pub fn enter_sweep(&mut self, pool: &mut ObjectPool) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
-        
+
         // Collect all live object IDs at the start of sweep phase
         // With IndexMap, iter() only visits actual objects (no None holes!)
         // New objects created during sweep will have current_white, so won't be collected
@@ -1848,7 +1859,7 @@ impl GC {
                 // Check if object is dead (other white and not fixed)
                 if !obj.header.is_fixed() && obj.header.is_dead(other_white) {
                     // Dead object - mark for removal or finalization
-                    
+
                     // Check if object needs finalization (__gc metamethod)
                     // Also check if it's already been finalized (FINALIZED flag)
                     let already_finalized = obj.header.to_finalize();
@@ -1859,7 +1870,7 @@ impl GC {
                         if let Some(obj) = pool.get_mut(gc_id) {
                             obj.header.set_finalized();
                         }
-                        
+
                         to_finalize.push(gc_id);
 
                         // Resurrect object: mark it and all its references (including metatable)
@@ -1907,18 +1918,18 @@ impl GC {
             } else {
                 false // Already removed somehow
             };
-            
+
             if still_dead {
                 let size = pool.remove(*gc_id);
                 if size > 0 {
-                    self.gc_debt += size as isize;  // 释放增加debt
+                    self.gc_debt += size as isize; // 释放增加debt
                     self.stats.bytes_freed += size;
                     self.stats.objects_collected += 1;
                     freed_bytes += size;
                 }
             }
         }
-        
+
         let _ = (dead_count, freed_bytes); // suppress unused warnings
 
         // Return true if we've reached the sweep target (set at start of sweep phase)
@@ -1934,12 +1945,12 @@ impl GC {
         let threshold = self.apply_param(PAUSE, self.gc_marked);
         let real_bytes = self.total_bytes - self.gc_debt;
         let mut debt = threshold - real_bytes;
-        
+
         if debt < 0 {
             debt = 0;
         }
         self.set_debt(debt);
-        
+
         // With IndexMap, no need to compact - it has no empty slots!
         // shrink_to_fit() only reduces memory overhead, doesn't affect iteration
         pool.gc_pool.shrink_to_fit();
@@ -2005,7 +2016,7 @@ impl GC {
 
     /// Full generation collection (like fullgen in Lua 5.5)
     /// Port of Lua 5.5's fullgen (partial - we use youngcollection for GenMinor)
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// /*
@@ -2030,9 +2041,9 @@ impl GC {
     ///   ...
     /// }
     /// ```
-    /// 
+    ///
     /// Port of Lua 5.5's fullgen / youngcollection
-    /// 
+    ///
     /// From lgc.c (Lua 5.5):
     /// ```c
     /// /*
@@ -2057,7 +2068,7 @@ impl GC {
     ///   ...
     /// }
     /// ```
-    /// 
+    ///
     /// NOTE: In generational mode, full collection does:
     /// 1. restart_collection (marks roots, weak tables go to grayagain)
     /// 2. propagate gray list
@@ -2072,16 +2083,16 @@ impl GC {
             // Lua 5.5's singlestep calls restartcollection() while gcstate==GCSpause,
             // THEN sets gcstate=GCSpropagate.
             self.restart_collection(roots, pool);
-            
+
             // NOW transition to Propagate state (like Lua 5.5's singlestep)
             self.gc_state = GcState::Propagate;
         }
-        
+
         // Step 2: Propagate gray list (weak tables will be added to grayagain)
         while !self.gray.is_empty() {
             self.propagate_mark(pool);
         }
-        
+
         // Step 3: Call atomic phase (like youngcollection does)
         // atomic() will process grayagain, converge ephemerons, and clear weak tables
         self.atomic(roots, pool);
@@ -2152,7 +2163,7 @@ impl GC {
 
         // Enter sweep phase
         self.enter_sweep(pool);
-        
+
         // Complete sweep (fast mode = sweep everything)
         while !self.sweep_step(pool, true) {
             // Continue sweeping until complete

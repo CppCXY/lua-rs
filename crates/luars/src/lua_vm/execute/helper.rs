@@ -1,5 +1,7 @@
 use crate::{
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT}, lua_vm::{execute, LuaState, TmKind}, Chunk, LuaResult, LuaValue
+    Chunk, LuaResult, LuaValue,
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
+    lua_vm::{LuaState, TmKind, execute},
 };
 
 /// Build hidden arguments for vararg functions
@@ -408,7 +410,7 @@ pub fn finishset(
         if let Some(table) = t.as_table() {
             // Get metatable
             let metatable = table.get_metatable();
-            
+
             // Try to get __newindex metamethod
             let tm_val = if let Some(metatable) = metatable {
                 get_metamethod_from_metatable(lua_state, metatable, TmKind::NewIndex)
@@ -420,15 +422,15 @@ pub fn finishset(
                 // No metamethod - set directly
                 if let Some(table_ref) = t.as_table_mut() {
                     table_ref.raw_set(key, value);
-                    
+
                     // CRITICAL: GC write barrier
                     let table_ptr = t.as_table_ptr().unwrap();
                     lua_state.gc_barrier_back(table_ptr.into());
-                    
+
                     return Ok(true);
                 }
             }
-            
+
             // Found metamethod - check if it's a function
             if let Some(tm) = tm_val {
                 if tm.is_function() {
@@ -440,7 +442,7 @@ pub fn finishset(
 
                     return Ok(true);
                 }
-                
+
                 // Metamethod is a table - repeat assignment over 'tm'
                 // t = tm; then try luaV_fastset again
                 t = tm;
@@ -458,12 +460,12 @@ pub fn finishset(
 
                     return Ok(true);
                 }
-                
+
                 // Metamethod is a table
                 t = tm;
                 continue;
             }
-            
+
             // No metamethod found for non-table
             return Err(lua_state.error(format!("attempt to index a {} value", t.type_name())));
         }

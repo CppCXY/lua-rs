@@ -755,7 +755,7 @@ impl LuaValue {
             LuaValueKind::Binary => self.as_binary_ptr().map(GcObjectPtr::Binary),
             LuaValueKind::Thread => self.as_thread_ptr().map(GcObjectPtr::Thread),
             LuaValueKind::Userdata => self.as_userdata_ptr().map(GcObjectPtr::Userdata),
-            _ => None
+            _ => None,
         }
     }
 

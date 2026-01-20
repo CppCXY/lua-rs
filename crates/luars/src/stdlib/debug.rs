@@ -105,7 +105,7 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
     let what_key = vm.create_string("what");
     let what_val = vm.create_string("C");
     vm.table_set(&info_table, what_key, what_val);
-    
+
     l.push_value(info_table)?;
     Ok(1)
 }

@@ -313,10 +313,7 @@ const TAG_INTEGER: u8 = 3;
 const TAG_FLOAT: u8 = 4;
 const TAG_STRING: u8 = 5;
 
-fn write_constant_with_pool(
-    buf: &mut Vec<u8>,
-    value: &LuaValue,
-) -> Result<(), String> {
+fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), String> {
     if value.is_nil() {
         buf.push(TAG_NIL);
     } else if let Some(b) = value.as_boolean() {

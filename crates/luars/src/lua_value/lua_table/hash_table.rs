@@ -51,7 +51,7 @@ impl LuaTableImpl for LuaHashTable {
     #[inline(always)]
     fn set_int(&mut self, key: i64, value: LuaValue) -> LuaInsertResult {
         let key_value = LuaValue::integer(key);
-        
+
         if value.is_nil() {
             self.map.shift_remove(&key_value);
             self.update_array_len_remove(key);
@@ -59,7 +59,7 @@ impl LuaTableImpl for LuaHashTable {
             self.map.insert(key_value, value);
             self.update_array_len_insert(key);
         }
-        
+
         LuaInsertResult::Success
     }
 
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn test_next() {
         let mut table = LuaHashTable::new(0);
-        
+
         table.set_int(1, LuaValue::integer(10));
         table.set_int(2, LuaValue::integer(20));
         table.set_int(3, LuaValue::integer(30));

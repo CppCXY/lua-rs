@@ -1,4 +1,3 @@
-
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GcObjectKind {
@@ -22,12 +21,8 @@ pub struct GcId {
 
 impl GcId {
     pub fn new(kind: GcObjectKind, index: u32) -> Self {
-        Self {
-            kind,
-            index,
-        }
+        Self { kind, index }
     }
-
 
     #[inline(always)]
     pub fn gc_type(self) -> GcObjectKind {

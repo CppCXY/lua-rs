@@ -254,7 +254,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
 
     // Optional sep and rep arguments
     let sep_val = l.get_arg(3);
-    
+
     let sep = if let Some(sep_val) = &sep_val {
         sep_val.as_str().unwrap_or(".")
     } else {

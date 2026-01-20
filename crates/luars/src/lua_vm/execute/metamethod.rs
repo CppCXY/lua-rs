@@ -9,7 +9,6 @@ use crate::lua_vm::opcode::Instruction;
 /// Based on Lua 5.5 ltm.c
 use crate::lua_vm::{LuaResult, LuaState, get_metamethod_event};
 
-
 /// Try unary metamethod (for __unm, __bnot)
 /// Port of luaT_trybinTM for unary operations
 pub fn try_unary_tm(

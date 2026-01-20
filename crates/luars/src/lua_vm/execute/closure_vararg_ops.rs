@@ -11,8 +11,9 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
+    UpvaluePtr,
     lua_value::{Chunk, LuaValue},
-    lua_vm::{Instruction, LuaResult, LuaState, OpCode}, UpvaluePtr,
+    lua_vm::{Instruction, LuaResult, LuaState, OpCode},
 };
 use std::rc::Rc;
 

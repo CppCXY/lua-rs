@@ -34,7 +34,12 @@ impl StringInterner {
     /// 所有字符串都会被 intern，保证相同内容只存储一份
     ///
     /// **CRITICAL**: current_white MUST be passed from GC.current_white for correct marking
-    pub fn intern(&mut self, s: &str, gc_pool: &mut GcPool, current_white: u8) -> (LuaValue, bool, usize) {
+    pub fn intern(
+        &mut self,
+        s: &str,
+        gc_pool: &mut GcPool,
+        current_white: u8,
+    ) -> (LuaValue, bool, usize) {
         let hash = self.hash_string(s);
 
         // Check if already interned
@@ -60,9 +65,8 @@ impl StringInterner {
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
         let size = (64 + s.len()) as u32;
-        let gc_string = GcObject::String(
-            Box::new(GcString::new(s.to_string(), current_white, size)),
-        );
+        let gc_string =
+            GcObject::String(Box::new(GcString::new(s.to_string(), current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
         gc_pool.alloc(gc_string);
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
