@@ -478,6 +478,10 @@ impl LuaVM {
 
             if need_roots {
                 let roots = self.collect_roots();
+                // CRITICAL: Mark open upvalues separately
+                // They need to be marked as roots but can't be in LuaValue form
+                let open_upvals = self.main_state.get_open_upvalues();
+                self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
                 self.gc.step(&roots, &mut self.object_allocator);
             } else {
                 // Pass empty roots for states that don't need them
@@ -495,6 +499,9 @@ impl LuaVM {
     pub fn check_gc_step(&mut self) {
         // Always collect roots for explicit GC step calls
         let roots = self.collect_roots();
+        // Mark open upvalues
+        let open_upvals = self.main_state.get_open_upvalues();
+        self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
         self.gc.step(&roots, &mut self.object_allocator);
     }
 
@@ -610,12 +617,9 @@ impl LuaVM {
             }
         }
 
-        // 6. Open upvalues
-        for upval_ptr in self.main_state.get_open_upvalues() {
-            if let Some(val) = upval_ptr.as_ref().data.get_closed_value() {
-                roots.push(val);
-            }
-        }
+        // 6. Open upvalues - handled separately in GC by mark_open_upvalues
+        // Open upvalue objects themselves are marked directly by GC
+        // Their values (stack slots) are already marked above in step 4
 
         roots
     }
