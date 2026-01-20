@@ -1,6 +1,7 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
 mod call_info;
+mod const_string;
 mod execute;
 mod lua_error;
 mod lua_state;
@@ -11,12 +12,13 @@ use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::GC;
 use crate::lua_value::{Chunk, LuaUserdata, LuaValue};
 pub use crate::lua_vm::call_info::CallInfo;
+use crate::lua_vm::const_string::ConstString;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{GcKind, ObjectPool, UpvaluePtr, lib_registry};
+use crate::{GcKind, ObjectAllocator, UpvaluePtr, lib_registry};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -38,7 +40,7 @@ pub struct LuaVM {
     pub(crate) registry: LuaValue,
 
     /// Object pool for unified object management
-    pub(crate) object_pool: ObjectPool,
+    pub(crate) object_allocator: ObjectAllocator,
 
     /// Garbage collector state
     pub(crate) gc: GC,
@@ -51,18 +53,24 @@ pub struct LuaVM {
     pub(crate) string_mt: Option<LuaValue>,
 
     pub(crate) safe_option: SafeOption,
+
+    pub const_strings: ConstString,
 }
 
 impl LuaVM {
     pub fn new(option: SafeOption) -> Box<Self> {
+        let mut gc = GC::new();
+        let mut object_allocator = ObjectAllocator::new(option.clone());
+        let cs = ConstString::new(&mut object_allocator, &mut gc);
         let mut vm = Box::new(LuaVM {
             global: LuaValue::nil(),
             registry: LuaValue::nil(),
-            object_pool: ObjectPool::new(option.clone()),
-            gc: GC::new(),
+            object_allocator,
+            gc,
             main_state: LuaState::new(6, null_mut(), option.clone()),
             string_mt: None,
             safe_option: option,
+            const_strings: cs,
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;
@@ -265,10 +273,9 @@ impl LuaVM {
 
         // Create thread in ObjectPool and return LuaValue
         let current_white = self.gc.current_white;
-        let (value, size) = self.object_pool.create_thread(thread, current_white);
-
-        // Track thread for GC (IMPORTANT: threads are large objects!)
-        self.gc.track_size(size);
+        let value = self
+            .object_allocator
+            .create_thread(&mut self.gc, thread, current_white);
         value
     }
 
@@ -332,17 +339,17 @@ impl LuaVM {
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, is_new, size) = self.object_pool.create_string(s, current_white);
-        if is_new {
-            self.gc.track_size(size);
-        }
+        let value = self
+            .object_allocator
+            .create_string(&mut self.gc, s, current_white);
         value
     }
 
     pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, size) = self.object_pool.create_binary(data, current_white);
-        self.gc.track_size(size);
+        let value = self
+            .object_allocator
+            .create_binary(&mut self.gc, data, current_white);
         value
     }
 
@@ -350,10 +357,9 @@ impl LuaVM {
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, is_new, size) = self.object_pool.create_string_owned(s, current_white);
-        if is_new {
-            self.gc.track_size(size);
-        }
+        let value = self
+            .object_allocator
+            .create_string_owned(&mut self.gc, s, current_white);
         value
     }
 
@@ -361,14 +367,13 @@ impl LuaVM {
     #[inline]
     pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, is_new, size) =
-            self.object_pool
-                .create_substring(s_value, start, end, current_white);
-
-        if is_new {
-            self.gc.track_size(size);
-        }
-
+        let value = self.object_allocator.create_substring(
+            &mut self.gc,
+            s_value,
+            start,
+            end,
+            current_white,
+        );
         value
     }
 
@@ -378,19 +383,18 @@ impl LuaVM {
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, size) = self
-            .object_pool
-            .create_table(array_size, hash_size, current_white);
-        // Track object for GC - calculates precise size and updates gc_debt
-        self.gc.track_size(size);
+        let value =
+            self.object_allocator
+                .create_table(&mut self.gc, array_size, hash_size, current_white);
         value
     }
 
     /// Create new userdata in object pool
     pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, size) = self.object_pool.create_userdata(data, current_white);
-        self.gc.track_size(size);
+        let value = self
+            .object_allocator
+            .create_userdata(&mut self.gc, data, current_white);
         value
     }
 
@@ -399,10 +403,9 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvaluePtr>) -> LuaValue {
         let current_white = self.gc.current_white;
-        let (value, size) = self
-            .object_pool
-            .create_function(chunk, upvalue_ids, current_white);
-        self.gc.track_size(size);
+        let value =
+            self.object_allocator
+                .create_function(&mut self.gc, chunk, upvalue_ids, current_white);
         value
     }
 
@@ -417,10 +420,9 @@ impl LuaVM {
             .collect();
 
         let current_white = self.gc.current_white;
-        let (value, size) = self
-            .object_pool
-            .create_c_closure(func, upvalue_ids, current_white);
-        self.gc.track_size(size);
+        let value =
+            self.object_allocator
+                .create_c_closure(&mut self.gc, func, upvalue_ids, current_white);
         value
     }
 
@@ -428,10 +430,9 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvaluePtr {
         let current_white = self.gc.current_white;
-        let (ptr, size) = self
-            .object_pool
-            .create_upvalue_open(stack_index, current_white);
-        self.gc.track_size(size);
+        let ptr =
+            self.object_allocator
+                .create_upvalue_open(&mut self.gc, stack_index, current_white);
         ptr
     }
 
@@ -439,8 +440,9 @@ impl LuaVM {
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvaluePtr {
         let current_white = self.gc.current_white;
-        let (ptr, size) = self.object_pool.create_upvalue_closed(value, current_white);
-        self.gc.track_size(size);
+        let ptr = self
+            .object_allocator
+            .create_upvalue_closed(&mut self.gc, value, current_white);
         ptr
     }
 
@@ -476,11 +478,11 @@ impl LuaVM {
 
             if need_roots {
                 let roots = self.collect_roots();
-                self.gc.step(&roots, &mut self.object_pool);
+                self.gc.step(&roots, &mut self.object_allocator);
             } else {
                 // Pass empty roots for states that don't need them
                 // This avoids expensive stack traversal on every GC step!
-                self.gc.step(&[], &mut self.object_pool);
+                self.gc.step(&[], &mut self.object_allocator);
             }
 
             return true;
@@ -493,7 +495,7 @@ impl LuaVM {
     pub fn check_gc_step(&mut self) {
         // Always collect roots for explicit GC step calls
         let roots = self.collect_roots();
-        self.gc.step(&roots, &mut self.object_pool);
+        self.gc.step(&roots, &mut self.object_allocator);
     }
 
     // ============ GC Management ============
@@ -529,27 +531,36 @@ impl LuaVM {
 
         // If we're keeping invariant (in marking phase), sweep first
         if self.gc.keep_invariant() {
-            self.gc.enter_sweep(&mut self.object_pool);
+            self.gc.enter_sweep(&mut self.object_allocator);
         }
 
         // Run until pause state
-        self.gc
-            .run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
+        self.gc.run_until_state(
+            crate::gc::GcState::Pause,
+            &roots,
+            &mut self.object_allocator,
+        );
         // Run finalizers
-        self.gc
-            .run_until_state(crate::gc::GcState::CallFin, &roots, &mut self.object_pool);
+        self.gc.run_until_state(
+            crate::gc::GcState::CallFin,
+            &roots,
+            &mut self.object_allocator,
+        );
         // Complete the cycle
-        self.gc
-            .run_until_state(crate::gc::GcState::Pause, &roots, &mut self.object_pool);
+        self.gc.run_until_state(
+            crate::gc::GcState::Pause,
+            &roots,
+            &mut self.object_allocator,
+        );
 
         // Set pause for next cycle
-        self.gc.set_pause(&mut self.object_pool);
+        self.gc.set_pause();
     }
 
     /// Full GC cycle for generational mode (like fullgen in Lua 5.5)
     fn full_gen(&mut self) {
         let roots = self.collect_roots();
-        self.gc.full_generation(&roots, &mut self.object_pool);
+        self.gc.full_generation(&roots, &mut self.object_allocator);
     }
 
     /// Collect all GC roots (objects that must not be collected)

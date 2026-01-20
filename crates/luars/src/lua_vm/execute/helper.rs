@@ -345,7 +345,7 @@ fn get_metamethod_from_metatable(
     // NEW Optimization: Use direct pointer access if possible
     if let Some(mt) = metatable.as_table() {
         let vm = lua_state.vm_mut();
-        let event_key = vm.object_pool.get_tm_value(tm_kind);
+        let event_key = vm.const_strings.get_tm_value(tm_kind);
 
         return mt.raw_get(&event_key);
     }

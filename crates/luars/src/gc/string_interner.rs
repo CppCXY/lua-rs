@@ -2,7 +2,7 @@ use ahash::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-use crate::{GcObjectOwner, GcPool, GcString, LuaValue, StringPtr};
+use crate::{GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
 /// Complete string interner - ALL strings are interned for maximum performance
 /// - Same content always returns same StringId
@@ -34,12 +34,7 @@ impl StringInterner {
     /// 所有字符串都会被 intern，保证相同内容只存储一份
     ///
     /// **CRITICAL**: current_white MUST be passed from GC.current_white for correct marking
-    pub fn intern(
-        &mut self,
-        s: &str,
-        gc_pool: &mut GcPool,
-        current_white: u8,
-    ) -> (LuaValue, bool, usize) {
+    pub fn intern(&mut self, s: &str, gc: &mut GC, current_white: u8) -> LuaValue {
         let hash = self.hash_string(s);
 
         // Check if already interned
@@ -60,7 +55,7 @@ impl StringInterner {
             // leaving us with a dangling reference.
             // Marking it Black ensures it survives the current/pending sweep.
             ptr.as_mut_ref().header.make_black();
-            return (LuaValue::string(ptr), false, 0);
+            return LuaValue::string(ptr);
         }
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
@@ -68,10 +63,11 @@ impl StringInterner {
         let gc_string =
             GcObjectOwner::String(Box::new(GcString::new(s.to_string(), current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
-        gc_pool.alloc(gc_string);
+        gc.gc_pool.alloc(gc_string);
+        gc.track_size(size as usize);
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
 
-        (LuaValue::string(ptr), true, size as usize)
+        LuaValue::string(ptr)
     }
 
     /// Fast hash function - uses ahash for speed

@@ -454,6 +454,13 @@ impl GcObjectPtr {
             GcObjectPtr::Binary(p) => p.as_ref().header.index,
         }
     }
+
+    pub fn fix_gc_object(&mut self) {
+        if let Some(header) = self.header_mut() {
+            header.set_fixed();
+            header.make_gray(); // Gray forever, like Lua 5.5
+        }
+    }
 }
 
 impl From<StringPtr> for GcObjectPtr {

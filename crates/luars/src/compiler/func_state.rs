@@ -181,7 +181,7 @@ impl<'a> FuncState<'a> {
     ) -> Self {
         // Create kcache table for constant deduplication (like Lua 5.5's open_func)
         let kcache = vm.create_table(0, 0);
-        let short_string_limit = vm.object_pool.get_short_string_limit();
+        let short_string_limit = vm.object_allocator.get_short_string_limit();
         FuncState {
             chunk: Chunk::new(),
             prev: None,
@@ -245,7 +245,7 @@ impl<'a> FuncState<'a> {
     pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
         // Create new kcache table for child function
         let kcache = parent.vm.create_table(0, 0);
-        let short_string_limit = parent.vm.object_pool.get_short_string_limit();
+        let short_string_limit = parent.vm.object_allocator.get_short_string_limit();
         FuncState {
             chunk: Chunk::new(),
             prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),

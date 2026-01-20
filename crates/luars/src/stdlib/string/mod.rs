@@ -144,7 +144,7 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Serialize the chunk with pool access for string constants
-    match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_pool) {
+    match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_allocator) {
         Ok(bytes) => {
             // Create binary value directly - no encoding needed
             let result = vm.create_binary(bytes);

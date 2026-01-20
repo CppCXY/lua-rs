@@ -3,7 +3,7 @@
 
 use super::{Chunk, LuaValue, UpvalueDesc};
 use crate::Instruction;
-use crate::gc::ObjectPool;
+use crate::gc::ObjectAllocator;
 use std::io::{Cursor, Read};
 use std::rc::Rc;
 
@@ -15,7 +15,7 @@ const LUARS_VERSION: u8 = 1;
 pub fn serialize_chunk_with_pool(
     chunk: &Chunk,
     strip: bool,
-    pool: &ObjectPool,
+    pool: &ObjectAllocator,
 ) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
 
@@ -117,7 +117,7 @@ fn write_chunk(
     buf: &mut Vec<u8>,
     chunk: &Chunk,
     strip: bool,
-    pool: &ObjectPool,
+    pool: &ObjectAllocator,
 ) -> Result<(), String> {
     // Write code
     write_u32(buf, chunk.code.len() as u32);

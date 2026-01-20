@@ -36,13 +36,13 @@
 
 mod gc_kind;
 mod gc_object;
-mod object_pool;
+mod object_allocator;
 mod string_interner;
 
 use crate::lua_value::{Chunk, LuaValue};
 pub use gc_kind::*;
 pub use gc_object::*;
-pub use object_pool::*;
+pub use object_allocator::*;
 
 /// Actions that GC needs VM to perform after a GC step
 /// This allows GC to mark objects for finalization
@@ -235,6 +235,8 @@ impl GcState {
 
 /// Garbage Collector
 pub struct GC {
+    // General GC pool for all objects
+    pub(crate) gc_pool: GcPool,
     // === Debt and memory tracking ===
     /// GCdebt from Lua: bytes allocated but not yet "paid for"
     /// GC debt (like Lua 5.5 GCdebt)
@@ -313,6 +315,10 @@ pub struct GC {
 
     // === Statistics ===
     pub stats: GcStats,
+
+    pub tm_gc: LuaValue,
+
+    pub tm_mode: LuaValue,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -332,6 +338,7 @@ pub struct GcStats {
 impl GC {
     pub fn new() -> Self {
         GC {
+            gc_pool: GcPool::new(),
             gc_debt: 0, // Start with 0 debt, will be set after first allocation
             total_bytes: 0,
             gc_marked: 0,
@@ -362,11 +369,13 @@ impl GC {
             reallyold: None,
             firstold1: None,
             stats: GcStats::default(),
+            tm_gc: LuaValue::nil(),
+            tm_mode: LuaValue::nil(),
         }
     }
 
     /// Change to incremental mode (like minor2inc in Lua 5.5)
-    pub fn change_to_incremental_mode(&mut self, pool: &mut ObjectPool) {
+    pub fn change_to_incremental_mode(&mut self, pool: &mut ObjectAllocator) {
         if self.gc_kind == GcKind::Inc {
             return; // Already in incremental mode
         }
@@ -573,7 +582,7 @@ impl GC {
 
     /// Check if an object needs finalization (__gc metamethod)
     /// Only tables, userdata, and threads can have __gc
-    fn needs_finalization(&self, gc_ptr: GcObjectPtr, pool: &ObjectPool) -> bool {
+    fn needs_finalization(&self, gc_ptr: GcObjectPtr) -> bool {
         let metatable = match gc_ptr {
             GcObjectPtr::Table(table_ptr) => table_ptr.as_ref().data.get_metatable(),
             GcObjectPtr::Userdata(ud_ptr) => ud_ptr.as_ref().data.get_metatable(),
@@ -581,7 +590,7 @@ impl GC {
         };
 
         if let Some(metatable) = metatable {
-            let gc_key = pool.tm_gc;
+            let gc_key = self.tm_gc;
             if let Some(mt_table) = metatable.as_table() {
                 if let Some(gc_field) = mt_table.raw_get(&gc_key) {
                     return !gc_field.is_nil();
@@ -593,11 +602,11 @@ impl GC {
     }
 
     /// Get weak mode for a table (returns None if not weak, or Some((weak_keys, weak_values)))
-    fn get_weak_mode(&self, table_ptr: TablePtr, pool: &ObjectPool) -> Option<(bool, bool)> {
+    fn get_weak_mode(&self, table_ptr: TablePtr) -> Option<(bool, bool)> {
         let table = &table_ptr.as_ref().data;
         let metatable_val = table.get_metatable()?;
         let metatable = metatable_val.as_table()?;
-        let mode_key = pool.tm_mode;
+        let mode_key = self.tm_mode;
         let weak = metatable.raw_get(&mode_key)?;
         let weak_str = weak.as_str()?;
         let weak_keys = weak_str.contains('k');
@@ -640,7 +649,7 @@ impl GC {
     ///   } while (changed);
     /// }
     /// ```
-    fn converge_ephemerons(&mut self, pool: &mut ObjectPool) {
+    fn converge_ephemerons(&mut self) {
         let mut changed = true;
         let mut dir = false;
         let mut iteration = 0;
@@ -658,7 +667,7 @@ impl GC {
                 let marked = self.traverse_ephemeron_atomic(table_ptr, dir);
                 if marked {
                     while !self.gray.is_empty() {
-                        self.propagate_mark(pool);
+                        self.propagate_mark();
                     }
                     changed = true;
                 }
@@ -822,13 +831,13 @@ impl GC {
 
     /// Main GC step function (like luaC_step in Lua 5.5)
     /// Actions are accumulated in pending_actions, retrieve with take_pending_actions()
-    pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+    pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
         self.step_internal(roots, pool, false)
     }
 
     /// Internal step function with force parameter
     /// If force=true, ignore gc_stopped flag (used by collectgarbage("step"))
-    pub fn step_internal(&mut self, roots: &[LuaValue], pool: &mut ObjectPool, force: bool) {
+    pub fn step_internal(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator, force: bool) {
         // Lua 5.5 luaC_step:
         // if (!gcrunning(g)) {
         //   if (g->gcstp & GCSTPUSR) luaE_setdebt(g, 20000);
@@ -881,7 +890,7 @@ impl GC {
     ///     luaE_setdebt(g, stepsize);
     /// }
     /// ```
-    fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+    fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
         // l_mem stepsize = applygcparam(g, STEPSIZE, 100);
         let stepsize = self.apply_param(STEPSIZE, 100);
 
@@ -926,7 +935,7 @@ impl GC {
         // Set debt for next step (like Lua 5.5 incstep)
 
         if self.gc_state == GcState::Pause {
-            self.set_pause(pool);
+            self.set_pause();
         } else {
             // Lua 5.5: luaE_setdebt(g, stepsize);
             // Set positive debt = buffer before next GC
@@ -935,7 +944,12 @@ impl GC {
     }
 
     /// Single GC step (like singlestep in Lua 5.5)
-    fn single_step(&mut self, roots: &[LuaValue], pool: &mut ObjectPool, fast: bool) -> StepResult {
+    fn single_step(
+        &mut self,
+        roots: &[LuaValue],
+        pool: &mut ObjectAllocator,
+        fast: bool,
+    ) -> StepResult {
         if self.gc_stopem {
             return StepResult::Work(0);
         }
@@ -955,12 +969,12 @@ impl GC {
                     self.gc_state = GcState::EnterAtomic;
                     StepResult::Work(1)
                 } else {
-                    let work = self.propagate_mark(pool);
+                    let work = self.propagate_mark();
                     StepResult::Work(work)
                 }
             }
             GcState::EnterAtomic => {
-                self.atomic(roots, pool);
+                self.atomic(roots);
                 self.enter_sweep(pool);
                 StepResult::Atomic
             }
@@ -1430,9 +1444,9 @@ impl GC {
     }
 
     /// Propagate mark for one gray object (like propagatemark in Lua 5.5)
-    fn propagate_mark(&mut self, pool: &ObjectPool) -> isize {
+    fn propagate_mark(&mut self) -> isize {
         if let Some(gc_ptr) = self.gray.pop() {
-            self.mark_one(gc_ptr, pool);
+            self.mark_one(gc_ptr);
             // Use the size stored in GcObject (same as track_object and sweep)
             // This ensures consistency across all GC operations
             let size = gc_ptr.header().map(|it| it.size as isize).unwrap_or(0);
@@ -1446,13 +1460,13 @@ impl GC {
     /// Mark one object and traverse its references
     /// Like Lua 5.5's propagatemark: "nw2black(o);" then traverse
     /// Sets object to BLACK before traversing children
-    fn mark_one(&mut self, gc_ptr: GcObjectPtr, pool: &ObjectPool) -> isize {
+    fn mark_one(&mut self, gc_ptr: GcObjectPtr) -> isize {
         match gc_ptr {
             GcObjectPtr::Table(table_ptr) => {
                 // Port of Lua 5.5's traversetable with weak table handling
                 // Check weak mode first to decide how to traverse
 
-                let weak_mode = self.get_weak_mode(table_ptr, pool);
+                let weak_mode = self.get_weak_mode(table_ptr);
 
                 match weak_mode {
                     None | Some((false, false)) => {
@@ -1558,7 +1572,7 @@ impl GC {
     }
 
     /// Atomic phase (like atomic in Lua 5.5)
-    fn atomic(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+    fn atomic(&mut self, roots: &[LuaValue]) {
         // Lua 5.5's atomic phase does:
         // 1. Set gcstate = GCSatomic
         // 2. Mark running thread, registry, global metatables
@@ -1583,28 +1597,28 @@ impl GC {
 
         // Propagate all marks (empty the gray list)
         while !self.gray.is_empty() {
-            self.propagate_mark(pool);
+            self.propagate_mark();
         }
 
         // Process grayagain list (objects that were blackened but then mutated)
         // Moving them to gray list effectively
         let grayagain = std::mem::take(&mut self.grayagain);
         for gc_id in grayagain {
-            let size = self.mark_one(gc_id, pool);
+            let size = self.mark_one(gc_id);
             // Update gc_marked for objects processed from grayagain
             self.gc_marked += size;
         }
 
         // Propagate again to handle anything pushed by grayagain processing
         while !self.gray.is_empty() {
-            self.propagate_mark(pool);
+            self.propagate_mark();
         }
 
         // Port of Lua 5.5's atomic() phase for weak tables
         // At this point, all strongly accessible objects are marked.
 
         // First convergence of ephemeron tables
-        self.converge_ephemerons(pool);
+        self.converge_ephemerons();
 
         // Clear weak values (first pass)
         self.clear_by_values();
@@ -1617,7 +1631,7 @@ impl GC {
         // For now we skip finalization
 
         // Second convergence after potential resurrection
-        self.converge_ephemerons(pool);
+        self.converge_ephemerons();
 
         // Clear weak keys from ephemeron and allweak tables
         self.clear_by_keys();
@@ -1634,10 +1648,10 @@ impl GC {
     }
 
     /// Enter sweep phase (like entersweep in Lua 5.5)
-    pub fn enter_sweep(&mut self, _pool: &mut ObjectPool) {
+    pub fn enter_sweep(&mut self, _pool: &mut ObjectAllocator) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
-        
+
         // No longer need to cache object IDs - we'll iterate through pool directly
         // This avoids the dangling pointer problem with swap_remove
     }
@@ -1647,7 +1661,7 @@ impl GC {
     ///
     /// Port of Lua 5.5's sweepstep: maintains sweep position (sweepgc pointer)
     /// to avoid re-scanning already-swept objects
-    fn sweep_step(&mut self, pool: &mut ObjectPool, fast: bool) -> bool {
+    fn sweep_step(&mut self, pool: &mut ObjectAllocator, fast: bool) -> bool {
         let max_sweep = if fast { usize::MAX } else { 100 };
         let mut count = 0;
         let other_white = 1 - self.current_white;
@@ -1655,33 +1669,33 @@ impl GC {
         // CRITICAL FIX: Instead of using cached GcPtr (which becomes dangling after swap_remove),
         // we iterate through the actual pool and track which objects we've processed.
         // This avoids the use-after-free caused by stale pointers after swap_remove.
-        
+
         let mut to_finalize = Vec::new();
 
         // **CRITICAL FIX**: Proper sweep with swap_remove handling
         // Key insight: When we remove object at index i with swap_remove:
-        //   - Object at last_index moves to index i  
+        //   - Object at last_index moves to index i
         //   - Pool length decreases by 1
         //   - We MUST re-check index i (don't increment) to examine the moved object
         //
         // This ensures NO object is skipped during sweep
-        
-        while self.sweep_index < pool.gc_pool.len() && count < max_sweep {
+
+        while self.sweep_index < self.gc_pool.len() && count < max_sweep {
             let current_idx = self.sweep_index;
-            
-            let owner = &pool.gc_pool.get(current_idx).unwrap();
+
+            let owner = &self.gc_pool.get(current_idx).unwrap();
             let gc_ptr = owner.as_gc_ptr();
             let header = owner.header();
-            
+
             let mut should_remove = false;
             let mut needs_resurrection = false;
-            
+
             // Check if object is dead (other white and not fixed)
             if !header.is_fixed() && header.is_dead(other_white) {
                 // Dead object - check for finalization needs
                 let already_finalized = header.to_finalize();
-                let needs_fin = !already_finalized && self.needs_finalization(gc_ptr, pool);
-                
+                let needs_fin = !already_finalized && self.needs_finalization(gc_ptr);
+
                 if needs_fin {
                     // Mark for finalization and resurrection
                     if let Some(header_mut) = gc_ptr.header_mut() {
@@ -1701,23 +1715,27 @@ impl GC {
                     header_mut.set_age(G_NEW);
                 }
             }
-            
+
             // Handle actions outside of borrow scope
             if needs_resurrection {
                 // Resurrect: mark object and all references
-                self.mark_one(gc_ptr, pool);
+                self.mark_one(gc_ptr);
                 self.sweep_index += 1; // Move to next
             } else if should_remove {
                 // Remove dead object
                 let size = gc_ptr.header().map(|h| h.size).unwrap_or(0) as usize;
-                pool.remove(gc_ptr);
-                
+                if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                    pool.remove_str(str_ptr);
+                }
+
+                self.gc_pool.free(gc_ptr);
+
                 if size > 0 {
                     self.gc_debt += size as isize;
                     self.stats.bytes_freed += size;
                     self.stats.objects_collected += 1;
                 }
-                
+
                 // **KEY**: Don't increment sweep_index!
                 // The object from last_index moved to current_idx,
                 // we must check it in next iteration
@@ -1725,7 +1743,7 @@ impl GC {
                 // Object survives, move to next
                 self.sweep_index += 1;
             }
-            
+
             count += 1;
         }
 
@@ -1733,10 +1751,10 @@ impl GC {
         self.pending_actions.to_finalize.extend(to_finalize);
 
         // Return true if we've swept through the entire pool
-        self.sweep_index >= pool.gc_pool.len()
+        self.sweep_index >= self.gc_pool.len()
     }
 
-    pub fn set_pause(&mut self, pool: &mut ObjectPool) {
+    pub fn set_pause(&mut self) {
         // Lua 5.5 lgc.c setpause:
         // l_mem threshold = applygcparam(g, PAUSE, g->GCmarked);
         // l_mem debt = threshold - gettotalbytes(g);
@@ -1753,7 +1771,7 @@ impl GC {
 
         // With IndexMap, no need to compact - it has no empty slots!
         // shrink_to_fit() only reduces memory overhead, doesn't affect iteration
-        pool.gc_pool.shrink_to_fit();
+        self.gc_pool.shrink_to_fit();
     }
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
     /// During marking phase, the invariant must be kept
@@ -1769,7 +1787,7 @@ impl GC {
         &mut self,
         target_state: GcState,
         roots: &[LuaValue],
-        pool: &mut ObjectPool,
+        pool: &mut ObjectAllocator,
     ) {
         // Increase MAX_ITERATIONS to handle large object pools
         // With 100 objects per sweep step, we need more iterations for large heaps
@@ -1876,7 +1894,7 @@ impl GC {
     /// 4. propagate again
     /// 5. converge ephemerons
     /// 6. clear weak tables
-    pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+    pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
         // If we're in Pause state, we need to do the state transition ourselves
         if self.gc_state == GcState::Pause {
             // CRITICAL: Call restart_collection WHILE STILL IN PAUSE STATE!
@@ -1890,12 +1908,12 @@ impl GC {
 
         // Step 2: Propagate gray list (weak tables will be added to grayagain)
         while !self.gray.is_empty() {
-            self.propagate_mark(pool);
+            self.propagate_mark();
         }
 
         // Step 3: Call atomic phase (like youngcollection does)
         // atomic() will process grayagain, converge ephemerons, and clear weak tables
-        self.atomic(roots, pool);
+        self.atomic(roots);
 
         // Step 4: Sweep
         self.enter_sweep(pool);
@@ -1903,7 +1921,7 @@ impl GC {
         self.run_until_state(GcState::Pause, roots, pool);
 
         // set_pause uses total_bytes (actual memory after sweep) as base
-        self.set_pause(pool);
+        self.set_pause();
     }
 
     /// Set minor debt for generational mode
@@ -1945,7 +1963,7 @@ impl GC {
     ///   finishgencycle(L, g);
     /// }
     /// ```
-    fn young_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectPool) {
+    fn young_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
         self.stats.minor_collections += 1;
 
         // Start collection: mark roots
@@ -1954,12 +1972,12 @@ impl GC {
 
         // Propagate all marks
         while !self.gray.is_empty() {
-            self.propagate_mark(pool);
+            self.propagate_mark();
         }
 
         // CRITICAL: Call atomic phase!
         // This flips current_white so sweep can identify dead objects
-        self.atomic(roots, pool);
+        self.atomic(roots);
 
         // Enter sweep phase
         self.enter_sweep(pool);

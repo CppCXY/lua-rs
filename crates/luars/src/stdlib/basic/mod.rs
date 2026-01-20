@@ -739,7 +739,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             };
 
             // Switch to incremental mode (like luaC_changemode in Lua 5.5)
-            vm.gc.change_to_incremental_mode(&mut vm.object_pool);
+            vm.gc.change_to_incremental_mode(&mut vm.object_allocator);
 
             let mode_value = vm.create_string(old_mode);
             l.push_value(mode_value)?;
