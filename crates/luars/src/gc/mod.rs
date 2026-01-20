@@ -1656,104 +1656,84 @@ impl GC {
         // we iterate through the actual pool and track which objects we've processed.
         // This avoids the use-after-free caused by stale pointers after swap_remove.
         
-        let mut dead_ptrs = Vec::new();
         let mut to_finalize = Vec::new();
 
-        // Sweep from the current pool state, not from cached pointers
-        let current_len = pool.gc_pool.len();
+        // **CRITICAL FIX**: Proper sweep with swap_remove handling
+        // Key insight: When we remove object at index i with swap_remove:
+        //   - Object at last_index moves to index i  
+        //   - Pool length decreases by 1
+        //   - We MUST re-check index i (don't increment) to examine the moved object
+        //
+        // This ensures NO object is skipped during sweep
         
-        // Process objects in reverse order to handle swap_remove correctly
-        // When we remove object at index i, the last object moves to i,
-        // so we'll naturally process it in the next iteration backwards
-        while self.sweep_index < current_len && count < max_sweep {
-            // Access object by its current index in the pool
-            let current_idx = current_len - 1 - self.sweep_index;
+        while self.sweep_index < pool.gc_pool.len() && count < max_sweep {
+            let current_idx = self.sweep_index;
             
-            if let Some(owner) = pool.gc_pool.get(current_idx) {
-                let gc_ptr = owner.as_gc_ptr();
-                let header = owner.header();
+            let owner = &pool.gc_pool.get(current_idx).unwrap();
+            let gc_ptr = owner.as_gc_ptr();
+            let header = owner.header();
+            
+            let mut should_remove = false;
+            let mut needs_resurrection = false;
+            
+            // Check if object is dead (other white and not fixed)
+            if !header.is_fixed() && header.is_dead(other_white) {
+                // Dead object - check for finalization needs
+                let already_finalized = header.to_finalize();
+                let needs_fin = !already_finalized && self.needs_finalization(gc_ptr, pool);
                 
-                // Check if object is dead (other white and not fixed)
-                if !header.is_fixed() && header.is_dead(other_white) {
-                    // Dead object - mark for removal or finalization
-
-                    // Check if object needs finalization (__gc metamethod)
-                    // Also check if it's already been finalized (FINALIZED flag)
-                    let already_finalized = header.to_finalize();
-                    let needs_fin = !already_finalized && self.needs_finalization(gc_ptr, pool);
-                    if needs_fin {
-                        // Mark object as pending finalization (FINALIZED flag)
-                        // This prevents __gc from being called twice
-                        if let Some(header_mut) = gc_ptr.header_mut() {
-                            header_mut.set_finalized();
-                        }
-
-                        to_finalize.push(gc_ptr);
-
-                        // Resurrect object: mark it and all its references (including metatable)
-                        // This ensures the object and everything it references survives this GC cycle
-                        // so the finalizer can access them safely
-                        self.mark_one(gc_ptr, pool);
-                    } else {
-                        dead_ptrs.push(gc_ptr);
-                    }
-                } else if !header.is_fixed() {
-                    // Lua 5.5 sweeplist logic: Surviving objects are reset to current white!
-                    // ```c
-                    // else {  /* change mark to 'white' and age to 'new' */
-                    //     curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
-                    // }
-                    // ```
-                    // This is CRITICAL: Without this, BLACK objects stay BLACK across cycles
-                    // and won't be remarked in the next cycle!
+                if needs_fin {
+                    // Mark for finalization and resurrection
                     if let Some(header_mut) = gc_ptr.header_mut() {
-                        header_mut.make_white(self.current_white);
-                        header_mut.set_age(G_NEW);
+                        header_mut.set_finalized();
                     }
+                    to_finalize.push(gc_ptr);
+                    needs_resurrection = true;
+                } else {
+                    // Really dead - can be removed
+                    should_remove = true;
+                }
+            } else if !header.is_fixed() {
+                // Lua 5.5 sweeplist: Surviving objects reset to current white!
+                // This is CRITICAL for next cycle's marking
+                if let Some(header_mut) = gc_ptr.header_mut() {
+                    header_mut.make_white(self.current_white);
+                    header_mut.set_age(G_NEW);
                 }
             }
-
-            self.sweep_index += 1;
+            
+            // Handle actions outside of borrow scope
+            if needs_resurrection {
+                // Resurrect: mark object and all references
+                self.mark_one(gc_ptr, pool);
+                self.sweep_index += 1; // Move to next
+            } else if should_remove {
+                // Remove dead object
+                let size = gc_ptr.header().map(|h| h.size).unwrap_or(0) as usize;
+                pool.remove(gc_ptr);
+                
+                if size > 0 {
+                    self.gc_debt += size as isize;
+                    self.stats.bytes_freed += size;
+                    self.stats.objects_collected += 1;
+                }
+                
+                // **KEY**: Don't increment sweep_index!
+                // The object from last_index moved to current_idx,
+                // we must check it in next iteration
+            } else {
+                // Object survives, move to next
+                self.sweep_index += 1;
+            }
+            
             count += 1;
         }
 
         // Add to pending actions
         self.pending_actions.to_finalize.extend(to_finalize);
 
-        // Actually remove dead objects (those without finalizers)
-        // BUT: filter out any objects that were resurrected by mark_one during finalization setup
-        // This can happen when a dead object's metatable was collected before the object with __gc
-        // Lua 5.5 lmem.c luaM_free_:
-        //   g->GCdebt += cast(l_mem, osize);
-        // 释放时增加GCdebt，不修改GCtotalbytes！
-        // 不变量：真实内存 = GCtotalbytes - GCdebt
-        // 释放时：debt增加size，totalbytes不变，所以真实内存减少size
-        let dead_count = dead_ptrs.len();
-        let mut freed_bytes = 0usize;
-        for gc_ptr in &dead_ptrs {
-            // Check if the object was resurrected (no longer dead)
-            let still_dead = if let Some(header) = gc_ptr.header() {
-                header.is_dead(other_white)
-            } else {
-                false // Already removed somehow
-            };
-
-            if still_dead {
-                let size = gc_ptr.header().map(|it| it.size).unwrap_or(0) as usize;
-                pool.remove(*gc_ptr);
-                if size > 0 {
-                    self.gc_debt += size as isize; // 释放增加debt
-                    self.stats.bytes_freed += size;
-                    self.stats.objects_collected += 1;
-                    freed_bytes += size;
-                }
-            }
-        }
-
-        let _ = (dead_count, freed_bytes); // suppress unused warnings
-
         // Return true if we've swept through the entire pool
-        self.sweep_index >= current_len
+        self.sweep_index >= pool.gc_pool.len()
     }
 
     pub fn set_pause(&mut self, pool: &mut ObjectPool) {
