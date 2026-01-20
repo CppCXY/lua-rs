@@ -2,7 +2,7 @@ use ahash::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-use crate::{GcObject, GcPool, GcString, LuaValue, StringPtr};
+use crate::{GcObjectOwner, GcPool, GcString, LuaValue, StringPtr};
 
 /// Complete string interner - ALL strings are interned for maximum performance
 /// - Same content always returns same StringId
@@ -66,7 +66,7 @@ impl StringInterner {
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
         let size = (64 + s.len()) as u32;
         let gc_string =
-            GcObject::String(Box::new(GcString::new(s.to_string(), current_white, size)));
+            GcObjectOwner::String(Box::new(GcString::new(s.to_string(), current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
         gc_pool.alloc(gc_string);
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
@@ -83,7 +83,9 @@ impl StringInterner {
     }
 
     /// Remove dead strings (called by GC)
-    pub fn remove_dead_intern(&mut self, ptr: StringPtr, s: &str) {
+    pub fn remove_dead_intern(&mut self, ptr: StringPtr) {
+        let s = &ptr.as_ref().data;
+
         let hash = self.hash_string(s);
         // Remove from map
         if let Some(ids) = self.map.get_mut(&hash) {

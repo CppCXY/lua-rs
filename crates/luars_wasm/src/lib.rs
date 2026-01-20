@@ -116,14 +116,14 @@ fn lua_value_to_js(vm: &LuaVM, value: &LuaValue) -> Result<JsValue, JsValue> {
         Ok(JsValue::from_f64(n))
     } else if value.is_string() {
         // Use VM's value_as_string to properly resolve the string
-        if let Some(s) = vm.value_as_string(value) {
+        if let Some(s) = value.as_str() {
             Ok(JsValue::from_str(&s))
         } else {
             Ok(JsValue::from_str("[invalid string]"))
         }
     } else if value.is_table() {
         // For tables, we'll convert to a simple object representation
-        Ok(JsValue::from_str(&vm.value_to_string_raw(value)))
+        Ok(JsValue::from_str(&(value)))
     } else if value.is_function() || value.is_cfunction() {
         Ok(JsValue::from_str("[Lua Function]"))
     } else if value.is_thread() {

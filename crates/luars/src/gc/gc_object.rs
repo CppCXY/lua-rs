@@ -2,7 +2,7 @@
 use std::rc::Rc;
 
 use crate::{
-    Chunk, GcId, GcObjectKind, LuaTable, LuaValue,
+    Chunk, GcObjectKind, LuaTable, LuaValue,
     lua_value::LuaUserdata,
     lua_vm::{CFunction, LuaState},
 };
@@ -46,8 +46,9 @@ pub const MASKGCBITS: u8 = MASKCOLORS | AGEBITS;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
-    pub marked: u8, // Color and age bits combined
-    pub size: u32,  // Size of the object in bytes (for memory tracking)
+    pub marked: u8,   // Color and age bits combined
+    pub size: u32,    // Size of the object in bytes (for memory tracking)
+    pub index: usize, // Index in the GC pool
 }
 
 impl Default for GcHeader {
@@ -59,6 +60,7 @@ impl Default for GcHeader {
         GcHeader {
             marked: G_NEW, // Age 0, no color bits set (gray state - WRONG for new objects!)
             size: 0,
+            index: 0,
         }
     }
 }
@@ -79,6 +81,7 @@ impl GcHeader {
         GcHeader {
             marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
             size,
+            index: 0,
         }
     }
 
@@ -439,6 +442,18 @@ impl GcObjectPtr {
             GcObjectPtr::Binary(_) => GcObjectKind::Binary,
         }
     }
+
+    pub(crate) fn index(&self) -> usize {
+        match self {
+            GcObjectPtr::String(p) => p.as_ref().header.index,
+            GcObjectPtr::Table(p) => p.as_ref().header.index,
+            GcObjectPtr::Function(p) => p.as_ref().header.index,
+            GcObjectPtr::Upvalue(p) => p.as_ref().header.index,
+            GcObjectPtr::Thread(p) => p.as_ref().header.index,
+            GcObjectPtr::Userdata(p) => p.as_ref().header.index,
+            GcObjectPtr::Binary(p) => p.as_ref().header.index,
+        }
+    }
 }
 
 impl From<StringPtr> for GcObjectPtr {
@@ -484,7 +499,7 @@ impl From<UserdataPtr> for GcObjectPtr {
 }
 
 // ============ GC-managed Objects ============
-pub enum GcObject {
+pub enum GcObjectOwner {
     String(Box<GcString>),
     Table(Box<GcTable>),
     Function(Box<GcFunction>),
@@ -494,32 +509,32 @@ pub enum GcObject {
     Binary(Box<GcBinary>),
 }
 
-impl GcObject {
+impl GcObjectOwner {
     pub fn size(&self) -> usize {
         self.header().size as usize
     }
 
     pub fn header(&self) -> &GcHeader {
         match self {
-            GcObject::String(s) => &s.header,
-            GcObject::Table(t) => &t.header,
-            GcObject::Function(f) => &f.header,
-            GcObject::Upvalue(u) => &u.header,
-            GcObject::Thread(t) => &t.header,
-            GcObject::Userdata(u) => &u.header,
-            GcObject::Binary(b) => &b.header,
+            GcObjectOwner::String(s) => &s.header,
+            GcObjectOwner::Table(t) => &t.header,
+            GcObjectOwner::Function(f) => &f.header,
+            GcObjectOwner::Upvalue(u) => &u.header,
+            GcObjectOwner::Thread(t) => &t.header,
+            GcObjectOwner::Userdata(u) => &u.header,
+            GcObjectOwner::Binary(b) => &b.header,
         }
     }
 
     pub fn header_mut(&mut self) -> &mut GcHeader {
         match self {
-            GcObject::String(s) => &mut s.header,
-            GcObject::Table(t) => &mut t.header,
-            GcObject::Function(f) => &mut f.header,
-            GcObject::Upvalue(u) => &mut u.header,
-            GcObject::Thread(t) => &mut t.header,
-            GcObject::Userdata(u) => &mut u.header,
-            GcObject::Binary(b) => &mut b.header,
+            GcObjectOwner::String(s) => &mut s.header,
+            GcObjectOwner::Table(t) => &mut t.header,
+            GcObjectOwner::Function(f) => &mut f.header,
+            GcObjectOwner::Upvalue(u) => &mut u.header,
+            GcObjectOwner::Thread(t) => &mut t.header,
+            GcObjectOwner::Userdata(u) => &mut u.header,
+            GcObjectOwner::Binary(b) => &mut b.header,
         }
     }
 
@@ -527,84 +542,110 @@ impl GcObject {
     #[inline(always)]
     pub fn as_str_ptr(&self) -> Option<StringPtr> {
         match self {
-            GcObject::String(s) => Some(StringPtr::new(s.as_ref() as *const GcString)),
+            GcObjectOwner::String(s) => Some(StringPtr::new(s.as_ref() as *const GcString)),
             _ => None,
         }
     }
 
     pub fn as_table_ptr(&self) -> Option<TablePtr> {
         match self {
-            GcObject::Table(t) => Some(TablePtr::new(t.as_ref() as *const GcTable)),
+            GcObjectOwner::Table(t) => Some(TablePtr::new(t.as_ref() as *const GcTable)),
             _ => None,
         }
     }
 
     pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
         match self {
-            GcObject::Function(f) => Some(FunctionPtr::new(f.as_ref() as *const GcFunction)),
+            GcObjectOwner::Function(f) => Some(FunctionPtr::new(f.as_ref() as *const GcFunction)),
             _ => None,
         }
     }
 
     pub fn as_upvalue_ptr(&self) -> Option<UpvaluePtr> {
         match self {
-            GcObject::Upvalue(u) => Some(UpvaluePtr::new(u.as_ref() as *const GcUpvalue)),
+            GcObjectOwner::Upvalue(u) => Some(UpvaluePtr::new(u.as_ref() as *const GcUpvalue)),
             _ => None,
         }
     }
 
     pub fn as_thread_ptr(&self) -> Option<ThreadPtr> {
         match self {
-            GcObject::Thread(t) => Some(ThreadPtr::new(t.as_ref() as *const GcThread)),
+            GcObjectOwner::Thread(t) => Some(ThreadPtr::new(t.as_ref() as *const GcThread)),
             _ => None,
         }
     }
 
     pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
         match self {
-            GcObject::Userdata(u) => Some(UserdataPtr::new(u.as_ref() as *const GcUserdata)),
+            GcObjectOwner::Userdata(u) => Some(UserdataPtr::new(u.as_ref() as *const GcUserdata)),
             _ => None,
         }
     }
 
     pub fn as_binary_ptr(&self) -> Option<BinaryPtr> {
         match self {
-            GcObject::Binary(b) => Some(BinaryPtr::new(b.as_ref() as *const GcBinary)),
+            GcObjectOwner::Binary(b) => Some(BinaryPtr::new(b.as_ref() as *const GcBinary)),
             _ => None,
+        }
+    }
+
+    pub fn as_gc_ptr(&self) -> GcObjectPtr {
+        match self {
+            GcObjectOwner::String(s) => {
+                GcObjectPtr::String(StringPtr::new(s.as_ref() as *const GcString))
+            }
+            GcObjectOwner::Table(t) => {
+                GcObjectPtr::Table(TablePtr::new(t.as_ref() as *const GcTable))
+            }
+            GcObjectOwner::Function(f) => {
+                GcObjectPtr::Function(FunctionPtr::new(f.as_ref() as *const GcFunction))
+            }
+            GcObjectOwner::Upvalue(u) => {
+                GcObjectPtr::Upvalue(UpvaluePtr::new(u.as_ref() as *const GcUpvalue))
+            }
+            GcObjectOwner::Thread(t) => {
+                GcObjectPtr::Thread(ThreadPtr::new(t.as_ref() as *const GcThread))
+            }
+            GcObjectOwner::Userdata(u) => {
+                GcObjectPtr::Userdata(UserdataPtr::new(u.as_ref() as *const GcUserdata))
+            }
+            GcObjectOwner::Binary(b) => {
+                GcObjectPtr::Binary(BinaryPtr::new(b.as_ref() as *const GcBinary))
+            }
         }
     }
 
     pub fn as_table_mut(&mut self) -> Option<&mut LuaTable> {
         match self {
-            GcObject::Table(t) => Some(&mut t.data),
+            GcObjectOwner::Table(t) => Some(&mut t.data),
             _ => None,
         }
     }
 
     pub fn as_function_mut(&mut self) -> Option<&mut FunctionBody> {
         match self {
-            GcObject::Function(f) => Some(&mut f.data),
+            GcObjectOwner::Function(f) => Some(&mut f.data),
             _ => None,
         }
     }
 
     pub fn as_upvalue_mut(&mut self) -> Option<&mut Upvalue> {
         match self {
-            GcObject::Upvalue(u) => Some(&mut u.data),
+            GcObjectOwner::Upvalue(u) => Some(&mut u.data),
             _ => None,
         }
     }
 
     pub fn as_thread_mut(&mut self) -> Option<&mut LuaState> {
         match self {
-            GcObject::Thread(t) => Some(&mut t.data),
+            GcObjectOwner::Thread(t) => Some(&mut t.data),
             _ => None,
         }
     }
 
     pub fn as_userdata_mut(&mut self) -> Option<&mut LuaUserdata> {
         match self {
-            GcObject::Userdata(u) => Some(&mut u.data),
+            GcObjectOwner::Userdata(u) => Some(&mut u.data),
             _ => None,
         }
     }
@@ -758,7 +799,7 @@ impl Upvalue {
 /// - No free_list needed: objects are truly removed via swap_remove
 /// - GcPtr-based: external references use pointers, not indices
 pub struct GcPool {
-    gc_list: Vec<GcObject>,
+    gc_list: Vec<GcObjectOwner>,
 }
 
 impl GcPool {
@@ -779,15 +820,23 @@ impl GcPool {
     /// Allocate a new object and return a GcPtr to it
     /// O(1) allocation: push to Vec, track index in header, return pointer to Box contents
     #[inline]
-    pub fn alloc(&mut self, value: GcObject) {
+    pub fn alloc(&mut self, mut value: GcObjectOwner) {
+        let index = self.gc_list.len();
+        value.header_mut().index = index;
         self.gc_list.push(value);
     }
 
     /// Free an object using its pointer
     /// O(1) via swap_remove: moves last object to removed position, updates its index
     #[inline]
-    pub fn free(&mut self, gc_id: GcId) {
-        let index = gc_id.index() as usize;
+    pub fn free(&mut self, gc_ptr: GcObjectPtr) {
+        let index = gc_ptr.index();
+        let last_index = self.gc_list.len() - 1;
+        if index != last_index {
+            // Update moved object's index
+            let moved_obj = &mut self.gc_list[last_index];
+            moved_obj.header_mut().index = index;
+        }
 
         // swap_remove: O(1) removal by moving last element to this position
         self.gc_list.swap_remove(index);
@@ -806,12 +855,12 @@ impl GcPool {
     }
 
     /// Iterate over all live objects (always compact, O(live_objects))
-    pub fn iter(&self) -> impl Iterator<Item = &GcObject> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = &GcObjectOwner> + '_ {
         self.gc_list.iter()
     }
 
     /// Iterate over all live objects mutably
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut GcObject> + '_ {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut GcObjectOwner> + '_ {
         self.gc_list.iter_mut()
     }
 
@@ -831,11 +880,11 @@ impl GcPool {
         self.gc_list.capacity()
     }
 
-    pub fn get(&self, index: usize) -> Option<&GcObject> {
+    pub fn get(&self, index: usize) -> Option<&GcObjectOwner> {
         self.gc_list.get(index)
     }
 
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut GcObject> {
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut GcObjectOwner> {
         self.gc_list.get_mut(index)
     }
 }

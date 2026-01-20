@@ -266,6 +266,34 @@ impl LuaTable {
 
         result
     }
+
+    pub fn iter_keys(&self) -> Vec<LuaValue> {
+        let mut result = Vec::new();
+        match &self.impl_table {
+            // LuaTableDetail::TypedArray(ar) => {
+            //     for i in 0..ar.array.len() {
+            //         let key = LuaValue::integer((i + 1) as i64);
+            //         result.push(key);
+            //     }
+            // }
+            LuaTableDetail::ValueArray(ar) => {
+                for i in 0..ar.array.len() {
+                    let key = LuaValue::integer((i + 1) as i64);
+                    result.push(key);
+                }
+            }
+            LuaTableDetail::HashTable(t) => {
+                // 使用 next 方法遵循接口遍历
+                let mut key = LuaValue::nil();
+                while let Some((k, _v)) = t.next(&key) {
+                    result.push(k.clone());
+                    key = k;
+                }
+            }
+        }
+
+        result
+    }
 }
 
 pub trait LuaTableImpl {
@@ -284,59 +312,6 @@ pub trait LuaTableImpl {
     fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)>;
 
     fn len(&self) -> usize;
-}
-
-impl LuaTable {
-    /// Remove entries with dead (collectible) keys or values
-    /// Used by weak table cleanup during GC
-    /// - weak_keys: if true, remove entries whose keys are dead GC objects
-    /// - weak_values: if true, remove entries whose values are dead GC objects
-    /// - is_dead: closure to check if a GcId is dead
-    pub fn remove_weak_entries_with_checker<F>(
-        &mut self,
-        _weak_keys: bool,
-        _weak_values: bool,
-        mut _is_dead: F,
-    ) where
-        F: FnMut(crate::gc::GcId) -> bool,
-    {
-        // // Collect all keys to remove
-        // let mut keys_to_remove = Vec::new();
-
-        // // Iterate over all entries
-        // let entries = self.iter_all();
-        // for (key, value) in entries {
-        //     let mut should_remove = false;
-
-        //     // Check if key should cause removal (for weak keys)
-        //     if weak_keys {
-        //         if let Some(gc_id) = Self::value_to_gc_id(&key) {
-        //             if is_dead(gc_id) {
-        //                 should_remove = true;
-        //             }
-        //         }
-        //     }
-
-        //     // Check if value should cause removal (for weak values)
-        //     if !should_remove && weak_values {
-        //         if let Some(gc_id) = Self::value_to_gc_id(&value) {
-        //             if is_dead(gc_id) {
-        //                 should_remove = true;
-        //             }
-        //         }
-        //     }
-
-        //     if should_remove {
-        //         keys_to_remove.push(key);
-        //     }
-        // }
-
-        // // Remove marked keys
-        // for key in keys_to_remove {
-        //     self.raw_set(&key, LuaValue::nil());
-        // }
-        todo!()
-    }
 }
 
 pub enum LuaTableDetail {

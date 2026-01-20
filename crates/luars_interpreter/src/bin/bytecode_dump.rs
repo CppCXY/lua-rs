@@ -49,7 +49,7 @@ fn main() {
 }
 
 /// 格式化常量值为luac格式的字符串（对齐luac的PrintConstant）
-fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
+fn format_constant(chunk: &Chunk, idx: u32, _vm: &LuaVM) -> String {
     if let Some(val) = chunk.constants.get(idx as usize) {
         // 根据值类型格式化
         if val.is_nil() {
@@ -74,34 +74,31 @@ fn format_constant(chunk: &Chunk, idx: u32, vm: &LuaVM) -> String {
             }
         } else if val.is_string() {
             // 获取实际字符串内容（对齐luac）
-            if let Some(content) = vm.get_string(val) {
-                // Escape special characters like official luac (including all control characters)
-                let mut escaped = String::new();
-                for ch in content.chars() {
-                    match ch {
-                        '\\' => escaped.push_str("\\\\"),
-                        '\n' => escaped.push_str("\\n"),
-                        '\r' => escaped.push_str("\\r"),
-                        '\t' => escaped.push_str("\\t"),
-                        '"' => escaped.push_str("\\\""),
-                        '\0' => escaped.push_str("\\000"),
-                        // Escape other control characters as \ddd
-                        c if c.is_control() => {
-                            escaped.push_str(&format!("\\{:03}", c as u8));
-                        }
-                        c => escaped.push(c),
+            let content = val.as_str().unwrap_or("");
+            // Escape special characters like official luac (including all control characters)
+            let mut escaped = String::new();
+            for ch in content.chars() {
+                match ch {
+                    '\\' => escaped.push_str("\\\\"),
+                    '\n' => escaped.push_str("\\n"),
+                    '\r' => escaped.push_str("\\r"),
+                    '\t' => escaped.push_str("\\t"),
+                    '"' => escaped.push_str("\\\""),
+                    '\0' => escaped.push_str("\\000"),
+                    // Escape other control characters as \ddd
+                    c if c.is_control() => {
+                        escaped.push_str(&format!("\\{:03}", c as u8));
                     }
+                    c => escaped.push(c),
                 }
-                let char_count = escaped.chars().count();
-                // 如果字符串超过64个字符，截断并添加 ...
-                if char_count > 64 {
-                    let truncated: String = escaped.chars().take(64).collect();
-                    format!("\"{} ...\"", truncated)
-                } else {
-                    format!("\"{}\"", escaped)
-                }
+            }
+            let char_count = escaped.chars().count();
+            // 如果字符串超过64个字符，截断并添加 ...
+            if char_count > 64 {
+                let truncated: String = escaped.chars().take(64).collect();
+                format!("\"{} ...\"", truncated)
             } else {
-                format!("string({})", idx)
+                format!("\"{}\"", escaped)
             }
         } else {
             format!("{:?}", val)

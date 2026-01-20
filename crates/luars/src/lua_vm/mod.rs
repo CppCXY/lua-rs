@@ -86,6 +86,10 @@ impl LuaVM {
         vm
     }
 
+    pub fn main_state(&mut self) -> &mut LuaState {
+        &mut self.main_state
+    }
+
     /// Set a value in the registry by integer key
     pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
         if let Some(reg_table) = self.registry.as_table_mut() {
