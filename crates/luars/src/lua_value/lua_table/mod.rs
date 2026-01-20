@@ -35,11 +35,12 @@ impl LuaTable {
     pub fn has_metatable(&self) -> bool {
         !self.meta.is_null()
     }
-    pub fn get_metatable(&self) -> Option<TablePtr> {
+
+    pub fn get_metatable(&self) -> Option<LuaValue> {
         if self.meta.is_null() {
             None
         } else {
-            Some(self.meta)
+            Some(LuaValue::table(self.meta))
         }
     }
 
@@ -293,9 +294,9 @@ impl LuaTable {
     /// - is_dead: closure to check if a GcId is dead
     pub fn remove_weak_entries_with_checker<F>(
         &mut self,
-        weak_keys: bool,
-        weak_values: bool,
-        mut is_dead: F,
+        _weak_keys: bool,
+        _weak_values: bool,
+        mut _is_dead: F,
     ) where
         F: FnMut(crate::gc::GcId) -> bool,
     {

@@ -10,8 +10,8 @@ use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
-use crate::lua_vm::{CallInfo, LuaError, LuaResult};
-use crate::{Chunk, GcActions, GcObjectPtr, GcId, LuaTable, LuaVM, UpvaluePtr};
+use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind};
+use crate::{Chunk, GcActions, GcObjectPtr, LuaVM, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -826,20 +826,6 @@ impl LuaState {
         self.vm_mut().table_set(table, key, value)
     }
 
-    pub fn get_table_mut(&mut self, table: &LuaValue) -> Option<&mut LuaTable> {
-        self.vm_mut().get_table_mut(table)
-    }
-
-    /// Set value in table with metatable support
-    pub fn table_set_with_meta(
-        &mut self,
-        table: LuaValue,
-        key: LuaValue,
-        value: LuaValue,
-    ) -> LuaResult<()> {
-        self.vm_mut().table_set_with_meta(table, key, value)
-    }
-
     // ===== Protected Call (pcall/xpcall) =====
 
     /// Protected call - execute function with error handling (pcall semantics)
@@ -1231,8 +1217,7 @@ impl LuaState {
             // For now, we close them to avoid cross-thread stack access issues
             // TODO: Proper solution is to store ThreadId in Upvalue::Open
             if let Some(func_body) = func.as_lua_function() {
-                let upvalue_ptrs: Vec<UpvaluePtr> =
-                    func_body.cached_upvalues().iter().map(|u| u.ptr).collect();
+                let upvalue_ptrs = func_body.upvalues();
                 // TODO: check the correct implement
                 unsafe {
                     let vm = &mut *self.vm;
@@ -1360,23 +1345,9 @@ impl LuaState {
     /// Backward GC barrier (luaC_barrierback in Lua 5.5)
     /// Called when modifying a BLACK object (typically table) with new values
     /// Instead of marking the value, re-gray the object for re-traversal
-    pub fn gc_barrier_back(&mut self, owner_gc_id: GcId) {
+    pub fn gc_barrier_back(&mut self, gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
-        vm.gc.barrier_back(owner_gc_id, &mut vm.object_pool);
-    }
-
-    /// Convert LuaValue to GcId (if it's a GC-managed object)
-    pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<GcObjectPtr> {
-        use crate::lua_value::LuaValueKind;
-        match value.kind() {
-            LuaValueKind::Table => value.as_table_ptr().map(GcObjectPtr::Table),
-            LuaValueKind::Function => value.as_function_ptr().map(GcObjectPtr::Function),
-            LuaValueKind::String => value.as_string_ptr().map(GcObjectPtr::String),
-            LuaValueKind::Binary => value.as_binary_ptr().map(GcObjectPtr::Binary),
-            LuaValueKind::Thread => value.as_thread_ptr().map(GcObjectPtr::Thread),
-            LuaValueKind::Userdata => value.as_userdata_ptr().map(GcObjectPtr::Userdata),
-            _ => None,
-        }
+        vm.gc.barrier_back(gc_ptr);
     }
 
     pub fn check_gc(&mut self) -> LuaResult<bool> {
@@ -1439,22 +1410,18 @@ impl LuaState {
         for gc_ptr in to_finalize {
             // Convert GcId to LuaValue
             let obj_value = match gc_ptr {
-                GcObjectPtr::Table(ptr) => {
-                    LuaValue::table(ptr)
-                }
+                GcObjectPtr::Table(ptr) => LuaValue::table(ptr),
                 GcObjectPtr::Userdata(ptr) => {
                     // Get userdata pointer
-                   LuaValue::userdata(ptr)
+                    LuaValue::userdata(ptr)
                 }
-                GcObjectPtr::Thread(ptr) => {
-                    LuaValue::thread(ptr)
-                }
+                GcObjectPtr::Thread(ptr) => LuaValue::thread(ptr),
                 // Other types don't support __gc
                 _ => continue,
             };
 
             // Get __gc metamethod
-            if let Some(gc_method) = get_metamethod_event(self, &obj_value, "__gc") {
+            if let Some(gc_method) = get_metamethod_event(self, &obj_value, TmKind::Gc) {
                 // Call __gc(obj) using pcall to handle errors safely
                 // In Lua 5.x, errors in finalizers are silently ignored
                 // (the error message is discarded to prevent cascade failures)

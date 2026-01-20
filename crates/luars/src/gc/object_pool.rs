@@ -8,7 +8,7 @@
 // 5. Free list for slot reuse
 // 6. GC headers embedded in objects for mark-sweep
 
-use crate::gc::gc_object::{CachedUpvalue, FunctionBody};
+use crate::gc::gc_object::FunctionBody;
 use crate::gc::string_interner::StringInterner;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption, TmKind};
@@ -237,39 +237,6 @@ impl ObjectPool {
         }
     }
 
-    #[inline]
-    pub fn get_tm_value_by_str(&self, tm_str: &str) -> LuaValue {
-        match tm_str {
-            "__index" => self.tm_index,
-            "__newindex" => self.tm_newindex,
-            "__gc" => self.tm_gc,
-            "__mode" => self.tm_mode,
-            "__len" => self.tm_len,
-            "__eq" => self.tm_eq,
-            "__add" => self.tm_add,
-            "__sub" => self.tm_sub,
-            "__mul" => self.tm_mul,
-            "__mod" => self.tm_mod,
-            "__pow" => self.tm_pow,
-            "__div" => self.tm_div,
-            "__idiv" => self.tm_idiv,
-            "__band" => self.tm_band,
-            "__bor" => self.tm_bor,
-            "__bxor" => self.tm_bxor,
-            "__shl" => self.tm_shl,
-            "__shr" => self.tm_shr,
-            "__unm" => self.tm_unm,
-            "__bnot" => self.tm_bnot,
-            "__lt" => self.tm_lt,
-            "__le" => self.tm_le,
-            "__concat" => self.tm_concat,
-            "__call" => self.tm_call,
-            "__close" => self.tm_close,
-            "__tostring" => self.tm_tostring,
-            _ => self.tm_index, // Fallback to __index
-        }
-    }
-
     // ==================== String Operations ====================
 
     /// Create or intern a string (Lua-style with proper hash collision handling)
@@ -416,14 +383,8 @@ impl ObjectPool {
             (256 + upvalue_count * 64 + instr_size + const_size + child_size + line_size + 512)
                 as u32;
 
-        // Build cached upvalues with direct pointers
-        let mut upvalues: Vec<CachedUpvalue> = vec![];
-        for ptr in upvalue_ptrs {
-            upvalues.push(CachedUpvalue::new(ptr));
-        }
-
         let gc_func = GcObject::Function(Box::new(GcFunction::new(
-            FunctionBody::Lua(chunk, upvalues),
+            FunctionBody::Lua(chunk, upvalue_ptrs),
             current_white,
             size,
         )));
@@ -442,15 +403,9 @@ impl ObjectPool {
         upvalue_ptrs: Vec<UpvaluePtr>,
         current_white: u8,
     ) -> (LuaValue, usize) {
-        // Build cached upvalues with direct pointers
-        let mut upvalues: Vec<CachedUpvalue> = vec![];
-        for ptr in upvalue_ptrs {
-            upvalues.push(CachedUpvalue::new(ptr));
-        }
-
-        let size = (256 + upvalues.len() * 64) as u32;
+        let size = (256 + upvalue_ptrs.len() * 64) as u32;
         let gc_func = GcObject::Function(Box::new(GcFunction::new(
-            FunctionBody::CClosure(func, upvalues),
+            FunctionBody::CClosure(func, upvalue_ptrs),
             current_white,
             size,
         )));
@@ -464,7 +419,11 @@ impl ObjectPool {
     /// Create an open upvalue pointing to a stack location
     ///
     #[inline]
-    pub fn create_upvalue_open(&mut self, stack_index: usize, current_white: u8) -> (UpvaluePtr, usize) {
+    pub fn create_upvalue_open(
+        &mut self,
+        stack_index: usize,
+        current_white: u8,
+    ) -> (UpvaluePtr, usize) {
         let upvalue = Upvalue::Open(stack_index);
         let size = 64;
         let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
@@ -476,7 +435,11 @@ impl ObjectPool {
     /// Create a closed upvalue with a value
     ///
     #[inline]
-    pub fn create_upvalue_closed(&mut self, value: LuaValue, current_white: u8) -> (UpvaluePtr, usize) {
+    pub fn create_upvalue_closed(
+        &mut self,
+        value: LuaValue,
+        current_white: u8,
+    ) -> (UpvaluePtr, usize) {
         let upvalue = Upvalue::Closed(value);
         let size = 64;
         let gc_uv = GcObject::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
@@ -487,7 +450,11 @@ impl ObjectPool {
 
     /// Create upvalue from LuaUpvalue
     ///
-    pub fn create_upvalue(&mut self, upvalue: Rc<LuaUpvalue>, current_white: u8) -> (UpvaluePtr, usize) {
+    pub fn create_upvalue(
+        &mut self,
+        upvalue: Rc<LuaUpvalue>,
+        current_white: u8,
+    ) -> (UpvaluePtr, usize) {
         // Check if open and get stack index
         if upvalue.is_open() {
             self.create_upvalue_open(upvalue.get_stack_index().unwrap_or(0), current_white)
@@ -502,7 +469,11 @@ impl ObjectPool {
     // ==================== Userdata Operations ====================
 
     #[inline]
-    pub fn create_userdata(&mut self, userdata: LuaUserdata, current_white: u8) -> (LuaValue, usize) {
+    pub fn create_userdata(
+        &mut self,
+        userdata: LuaUserdata,
+        current_white: u8,
+    ) -> (LuaValue, usize) {
         let size = 512;
         let gc_userdata =
             GcObject::Userdata(Box::new(GcUserdata::new(userdata, current_white, size)));

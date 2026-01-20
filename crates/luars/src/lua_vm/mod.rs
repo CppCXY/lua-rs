@@ -8,15 +8,15 @@ pub mod opcode;
 mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
-use crate::gc::{GC, GcId, TableId, UpvalueId};
-use crate::lua_value::{Chunk, LuaTable, LuaUserdata, LuaValue, LuaValueKind};
+use crate::gc::GC;
+use crate::lua_value::{Chunk, LuaUserdata, LuaValue};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{GcKind, ObjectPool, lib_registry};
+use crate::{GcKind, ObjectPool, UpvaluePtr, lib_registry};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
@@ -27,9 +27,6 @@ pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
 /// Now takes LuaContext instead of LuaVM for better ergonomics
 pub type CFunction = fn(&mut LuaState) -> LuaResult<usize>;
-
-/// Maximum call stack depth (similar to LUAI_MAXCCALLS in Lua)
-pub const MAX_CALL_DEPTH: usize = 200;
 
 /// Global VM state (equivalent to global_State in Lua C API)
 /// Manages global resources shared by all execution threads/coroutines
@@ -298,8 +295,8 @@ impl LuaVM {
     }
 
     #[inline(always)]
-    pub fn table_set(&mut self, lua_table_val: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
-        let Some(table) = lua_table_val.as_table_mut() else {
+    pub fn table_set(&mut self, table_value: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
+        let Some(table) = table_value.as_table_mut() else {
             return false;
         };
         table.raw_set(&key, value.clone());
@@ -307,114 +304,9 @@ impl LuaVM {
         // GC backward barrier (luaC_barrierback)
         // Tables use backward barrier since they may be modified many times
         if value.is_collectable() {
-            self.gc_barrier_back(lua_table_val.as_table_ptr());
+            self.gc.barrier_back(table_value.as_gc_ptr().unwrap());
         }
         true
-    }
-
-    /// Get value from table with metatable support (__index metamethod)
-    /// Use this for GETTABLE, GETFIELD, GETI instructions
-    /// For raw access without metamethods, use table_get_raw() instead
-    pub fn table_get_with_meta(
-        &mut self,
-        table_value: &LuaValue,
-        key: &LuaValue,
-    ) -> Option<LuaValue> {
-        if let Some(table) = table_value.as_table_mut() {
-            if let Some(val) = table.raw_get(key) {
-                return Some(val);
-            }
-
-            if let Some(meta_id) = table.get_metatable() {
-                if let Some(meta_table) = self.object_pool.get_table(meta_id) {
-                    // Try to get __index metamethod
-                    let index_key = self.object_pool.tm_index;
-                    if let Some(index_mm) = meta_table.raw_get(&index_key) {
-                        if index_mm.is_table() {
-                            // __index is a table, do lookup in it
-                            return self.table_get_with_meta(&index_mm, key);
-                        } else if index_mm.is_function() || index_mm.is_cfunction() {
-                            // __index is a function, call it
-                            // For now, we'll skip function call to avoid complexity
-                            // TODO: Implement function call for __index
-                            return None;
-                        }
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Set value in table with metatable support (__newindex metamethod)
-    /// Use this for SETTABLE, SETFIELD, SETI instructions
-    /// For raw set without metamethods, use table_set_raw() instead
-    pub fn table_set_with_meta(
-        &mut self,
-        lua_table_val: LuaValue,
-        key: LuaValue,
-        value: LuaValue,
-    ) -> LuaResult<()> {
-        let mut meta_id = None;
-        if let Some(table) = lua_table_val.as_table_mut() {
-            if let Some(r) = table.raw_get(&key) {
-                if !r.is_nil() {
-                    // Key exists, just set it directly
-                    table.raw_set(&key, value);
-                    return Ok(());
-                }
-            }
-
-            if let Some(id) = table.get_metatable() {
-                meta_id = Some(id);
-            }
-        }
-
-        // Key doesn't exist, check for __newindex metamethod
-        if let Some(mt) = meta_id {
-            let newindex_key = self.object_pool.tm_newindex;
-            if let Some(table) = self.object_pool.get_table(mt) {
-                if let Some(newindex_mm) = table.raw_get(&newindex_key) {
-                    if newindex_mm.is_table() {
-                        // __newindex is a table, set in that table
-                        return self.table_set_with_meta(newindex_mm, key, value);
-                    } else if newindex_mm.is_function() || newindex_mm.is_cfunction() {
-                        // __newindex is a function, call it
-                        // For now, we'll skip function call to avoid complexity
-                        // TODO: Implement function call for __newindex
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        // No metamethod or metamethod didn't handle it, do raw set
-        self.table_set_raw(&lua_table_val, key, value);
-        Ok(())
-    }
-
-    /// Get value from userdata with metatable support
-    /// Handles __index metamethod
-    pub fn userdata_get(&mut self, userdata_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        if let Some(userdata) = userdata_value.as_userdata_mut() {
-            let metatable = userdata.get_metatable();
-            if let Some(table) = metatable.as_table_mut() {
-                // Try to get __index metamethod
-                let index_key = self.object_pool.tm_index;
-                if let Some(index_mm) = table.raw_get(&index_key) {
-                    if index_mm.is_table() {
-                        // __index is a table, do lookup in it
-                        return self.table_get_with_meta(&index_mm, key);
-                    } else if index_mm.is_function() || index_mm.is_cfunction() {
-                        // __index is a function, call it
-                        // For now, we'll skip function call to avoid complexity
-                    }
-                }
-            }
-        }
-
-        None
     }
 
     /// Create a new table and register it with GC
@@ -469,113 +361,37 @@ impl LuaVM {
         value
     }
 
-
-    // ============ GC Write Barriers ============
-
-    /// Forward GC barrier (luaC_barrier in Lua 5.5)
-    /// Called when modifying an object to point to another object
-    /// If owner is black and value is white, restore invariant
-    pub fn gc_barrier(&mut self, owner_id: UpvalueId, value_gc_id: GcId) {
-        let owner_gc_id = GcId::UpvalueId(owner_id);
-        self.gc
-            .barrier(owner_gc_id, value_gc_id, &mut self.object_pool);
-    }
-
-    /// Backward GC barrier (luaC_barrierback in Lua 5.5)  
-    /// Called when modifying a table - marks table as gray again
-    /// More efficient than forward barrier for objects with many modifications
-    pub fn gc_barrier_back(&mut self, table_id: TableId) {
-        let table_gc_id = GcId::TableId(table_id);
-        self.gc.barrier_back(table_gc_id, &mut self.object_pool);
-    }
-
-    /// Convert LuaValue to GcId (if it's a GC-managed object)
-    pub fn value_to_gc_id(&self, value: &LuaValue) -> Option<GcId> {
-        match value.kind() {
-            LuaValueKind::Table => value.as_table_id().map(GcId::TableId),
-            LuaValueKind::Function => value.as_function_id().map(GcId::FunctionId),
-            LuaValueKind::String => value.as_string_id().map(GcId::StringId),
-            LuaValueKind::Binary => value.as_binary_id().map(GcId::BinaryId),
-            LuaValueKind::Thread => value.as_thread_id().map(GcId::ThreadId),
-            LuaValueKind::Userdata => value.as_userdata_id().map(GcId::UserdataId),
-            _ => None,
-        }
-    }
-
     // ============ Legacy GC Barrier Methods (deprecated) ============
 
     /// Create a new table in object pool
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
         let current_white = self.gc.current_white;
-        let value = self
+        let (value, size) = self
             .object_pool
             .create_table(array_size, hash_size, current_white);
-        let id = value.as_table_id().unwrap();
         // Track object for GC - calculates precise size and updates gc_debt
-        self.gc.track_size(GcId::TableId(id), &mut self.object_pool);
+        self.gc.track_size(size);
         value
-    }
-
-    /// Get table by LuaValue (resolves ID from object pool)
-    pub fn get_table(&self, value: &LuaValue) -> Option<&LuaTable> {
-        if let Some(id) = value.as_table_id() {
-            self.object_pool.get_table(id)
-        } else {
-            None
-        }
-    }
-
-    /// Get mutable table by LuaValue
-    pub fn get_table_mut(&mut self, value: &LuaValue) -> Option<&mut LuaTable> {
-        if let Some(id) = value.as_table_id() {
-            self.object_pool.get_table_mut(id)
-        } else {
-            None
-        }
-    }
-
-    pub fn table_set_raw(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) {
-        if let Some(table_ref) = self.get_table_mut(table) {
-            table_ref.raw_set(&key, value);
-        }
-    }
-
-    pub fn table_get_raw(&self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        if let Some(table_ref) = self.get_table(table) {
-            table_ref.raw_get(key)
-        } else {
-            None
-        }
-    }
-
-    pub fn table_set_metatable(&mut self, table: &LuaValue, metatable: Option<LuaValue>) {
-        if let Some(table_ref) = self.get_table_mut(table) {
-            table_ref.set_metatable(metatable);
-        }
     }
 
     /// Create new userdata in object pool
     pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
         let current_white = self.gc.current_white;
-        let value = self.object_pool.create_userdata(data, current_white);
-        let id = value.as_userdata_id().unwrap();
-        self.gc
-            .track_size(GcId::UserdataId(id), &mut self.object_pool);
+        let (value, size) = self.object_pool.create_userdata(data, current_white);
+        self.gc.track_size(size);
         value
     }
 
     /// Create a function in object pool
     /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvalueId>) -> LuaValue {
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvaluePtr>) -> LuaValue {
         let current_white = self.gc.current_white;
-        let value = self
+        let (value, size) = self
             .object_pool
             .create_function(chunk, upvalue_ids, current_white);
-        let id = value.as_function_id().unwrap();
-        self.gc
-            .track_size(GcId::FunctionId(id), &mut self.object_pool);
+        self.gc.track_size(size);
         value
     }
 
@@ -584,115 +400,37 @@ impl LuaVM {
     #[inline]
     pub fn create_c_closure(&mut self, func: CFunction, upvalues: Vec<LuaValue>) -> LuaValue {
         // Create closed upvalues for each value
-        let upvalue_ids: Vec<UpvalueId> = upvalues
+        let upvalue_ids: Vec<UpvaluePtr> = upvalues
             .into_iter()
             .map(|v| self.create_upvalue_closed(v))
             .collect();
 
         let current_white = self.gc.current_white;
-        let value = self
+        let (value, size) = self
             .object_pool
             .create_c_closure(func, upvalue_ids, current_white);
-        let id = value.as_function_id().unwrap();
-        self.gc
-            .track_size(GcId::FunctionId(id), &mut self.object_pool);
+        self.gc.track_size(size);
         value
     }
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
-    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvalueId {
+    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvaluePtr {
         let current_white = self.gc.current_white;
-        let id = self
+        let (ptr, size) = self
             .object_pool
             .create_upvalue_open(stack_index, current_white);
-        self.gc
-            .track_size(GcId::UpvalueId(id), &mut self.object_pool);
-        id
+        self.gc.track_size(size);
+        ptr
     }
 
     /// Create a closed upvalue with a value
     #[inline(always)]
-    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvalueId {
+    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvaluePtr {
         let current_white = self.gc.current_white;
-        let id = self.object_pool.create_upvalue_closed(value, current_white);
-        self.gc
-            .track_size(GcId::UpvalueId(id), &mut self.object_pool);
-        id
-    }
-
-    //==========================================================================
-    // Value conversion helpers (for WASM and external APIs)
-    //==========================================================================
-
-    /// Convert a LuaValue to its string representation (without metamethods)
-    /// This properly resolves GC objects through the object pool
-    pub fn value_to_string_raw(&self, value: &LuaValue) -> String {
-        if value.is_nil() {
-            "nil".to_string()
-        } else if let Some(b) = value.as_bool() {
-            b.to_string()
-        } else if let Some(i) = value.as_integer() {
-            i.to_string()
-        } else if let Some(n) = value.as_number() {
-            // Format float to match Lua output
-            if n.fract() == 0.0 && n.abs() < 1e15 {
-                format!("{:.1}", n)
-            } else {
-                n.to_string()
-            }
-        } else if let Some(lua_str) = self.get_string(value) {
-            lua_str.to_string()
-        } else if value.is_table() {
-            if let Some(id) = value.as_table_id() {
-                format!("table: 0x{:x}", id.0)
-            } else {
-                "table".to_string()
-            }
-        } else if value.is_function() {
-            if let Some(id) = value.as_function_id() {
-                format!("function: 0x{:x}", id.0)
-            } else {
-                "function".to_string()
-            }
-        } else if value.is_cfunction() {
-            "function".to_string()
-        } else if value.is_thread() {
-            if let Some(id) = value.as_thread_id() {
-                format!("thread: 0x{:x}", id.0)
-            } else {
-                "thread".to_string()
-            }
-        } else if value.is_userdata() {
-            if let Some(id) = value.as_userdata_id() {
-                format!("userdata: 0x{:x}", id.0)
-            } else {
-                "userdata".to_string()
-            }
-        } else {
-            format!("{:?}", value)
-        }
-    }
-
-    /// Get the string content of a LuaValue if it is a string
-    /// Returns None if the value is not a string
-    pub fn value_as_string(&self, value: &LuaValue) -> Option<String> {
-        self.get_string(value).map(|s| s.to_string())
-    }
-
-    /// Get the type name of a LuaValue
-    pub fn value_type_name(&self, value: &LuaValue) -> &'static str {
-        match value.kind() {
-            LuaValueKind::Nil => "nil",
-            LuaValueKind::Boolean => "boolean",
-            LuaValueKind::Integer | LuaValueKind::Float => "number",
-            LuaValueKind::String => "string",
-            LuaValueKind::Binary => "string", // Binary is also a string type in Lua
-            LuaValueKind::Table => "table",
-            LuaValueKind::Function | LuaValueKind::CFunction => "function",
-            LuaValueKind::Thread => "thread",
-            LuaValueKind::Userdata => "userdata",
-        }
+        let (ptr, size) = self.object_pool.create_upvalue_closed(value, current_white);
+        self.gc.track_size(size);
+        ptr
     }
 
     /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
@@ -851,11 +589,9 @@ impl LuaVM {
         }
 
         // 6. Open upvalues
-        for upval_id in self.main_state.get_open_upvalues() {
-            if let Some(uv) = self.object_pool.get_upvalue(*upval_id) {
-                if let Some(val) = uv.get_closed_value() {
-                    roots.push(val);
-                }
+        for upval_ptr in self.main_state.get_open_upvalues() {
+            if let Some(val) = upval_ptr.as_ref().data.get_closed_value() {
+                roots.push(val);
             }
         }
 

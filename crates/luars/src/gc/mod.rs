@@ -2213,9 +2213,9 @@ impl GC {
     /// Called when a black object 'o' is modified to point to white object
     /// Instead of marking the white object, we mark 'o' as gray again
     /// Used for tables and other objects that may have many modifications
-    pub fn barrier_back(&mut self, o_id: GcId, pool: &mut ObjectPool) {
-        let (is_black, age) = if let Some(o) = pool.get(o_id) {
-            (o.header.is_black(), o.header.age())
+    pub fn barrier_back(&mut self, o_ptr: GcObjectPtr) {
+        let (is_black, age) = if let Some(o) = o_ptr.header() {
+            (o.is_black(), o.age())
         } else {
             return;
         };
@@ -2236,8 +2236,8 @@ impl GC {
 
         // If TOUCHED2: just make gray (will become TOUCHED1 at end of cycle)
         if age == G_TOUCHED2 {
-            if let Some(o) = pool.get_mut(o_id) {
-                o.header.make_gray();
+            if let Some(header) = o_ptr.header_mut() {
+                header.make_gray();
             }
         } else {
             // In propagate/atomic phase: link into grayagain for re-traversal in current cycle
@@ -2248,19 +2248,19 @@ impl GC {
                 &mut self.grayagain
             };
 
-            if !target_list.contains(&o_id) {
-                target_list.push(o_id);
+            if !target_list.contains(&o_ptr) {
+                target_list.push(o_ptr);
             }
 
-            if let Some(o) = pool.get_mut(o_id) {
-                o.header.make_gray();
+            if let Some(header) = o_ptr.header_mut() {
+                header.make_gray();
             }
         }
 
         // If old in generational mode: mark as TOUCHED1
         if age >= G_OLD0 {
-            if let Some(o) = pool.get_mut(o_id) {
-                o.header.make_touched1();
+            if let Some(header) = o_ptr.header_mut() {
+                header.make_touched1();
             }
         }
     }

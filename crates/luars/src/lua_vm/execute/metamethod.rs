@@ -1,12 +1,13 @@
-use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::lua_value::LuaValue;
 use crate::lua_vm::execute::call::{self, call_c_function};
+use crate::lua_vm::execute::helper::get_binop_metamethod;
 use crate::lua_vm::execute::lua_execute_until;
 use crate::lua_vm::opcode::Instruction;
 /// Metamethod operations
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
-use crate::lua_vm::{LuaResult, LuaState};
+use crate::lua_vm::{LuaResult, LuaState, get_metamethod_event};
 
 /// Tag Method types (TMS from ltm.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,14 +47,10 @@ pub fn try_unary_tm(
     lua_state: &mut LuaState,
     operand: LuaValue,
     result_pos: usize,
-    tm: TmKind,
+    tm_kind: TmKind,
 ) -> LuaResult<()> {
-    // For unary operations, Lua passes the same operand twice
-    let tm_name = tm.name();
-
     // Try to get metamethod from operand
-    let metamethod = get_binop_metamethod(lua_state, &operand, tm_name);
-
+    let metamethod = get_metamethod_event(lua_state, &operand, tm_kind);
     if let Some(mm) = metamethod {
         // Call metamethod: mm(operand, operand) -> result
         let result = call_tm_res(lua_state, mm, operand, operand)?;
@@ -66,7 +63,7 @@ pub fn try_unary_tm(
         // No metamethod found
         Err(lua_state.error(format!(
             "attempt to perform '{}' on a {} value",
-            tm_name,
+            tm_kind.name(),
             operand.type_name()
         )))
     }
@@ -302,20 +299,16 @@ fn try_bin_tm(
     lua_state: &mut LuaState,
     p1: LuaValue,
     p2: LuaValue,
-    tm: TmKind,
+    tm_kind: TmKind,
 ) -> LuaResult<LuaValue> {
-    let tm_name = tm.name();
-
     // Try to get metamethod from p1, then p2
-    let metamethod = get_binop_metamethod(lua_state, &p1, tm_name)
-        .or_else(|| get_binop_metamethod(lua_state, &p2, tm_name));
-
+    let metamethod = get_binop_metamethod(lua_state, &p1, &p2, tm_kind);
     if let Some(mm) = metamethod {
         // Call metamethod with (p1, p2) as arguments
         call_tm_res(lua_state, mm, p1, p2)
     } else {
         // No metamethod found, return error
-        let msg = match tm {
+        let msg = match tm_kind {
             TmKind::Band
             | TmKind::Bor
             | TmKind::Bxor
@@ -325,49 +318,6 @@ fn try_bin_tm(
             _ => "attempt to perform arithmetic on non-number values",
         };
         Err(lua_state.error(msg.to_string()))
-    }
-}
-
-/// Get binary operation metamethod from a value
-fn get_binop_metamethod(
-    lua_state: &mut LuaState,
-    value: &LuaValue,
-    tm_name: &str,
-) -> Option<LuaValue> {
-    // Get metatable based on value type
-    let metatable = get_metatable(lua_state, value)?;
-
-    // Look up the metamethod in the metatable
-    // CRITICAL: Use raw access to avoid triggering __index metamethod
-    // This matches Lua 5.5's luaH_Hgetshortstr which is a raw access
-    if let Some(table) = metatable.as_table_mut() {
-        let vm = lua_state.vm_mut();
-        let key = vm.object_pool.get_tm_value_by_str(tm_name);
-        table.raw_get(&key)
-    } else {
-        None
-    }
-}
-
-/// Get metatable for a value
-fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
-    let vm = lua_state.vm_mut();
-
-    match value.kind() {
-        LuaValueKind::Table => {
-            let meta = value.as_table_mut()?.get_metatable();
-            if let Some(mt_id) = meta {
-                vm.object_pool.get_table_value(mt_id)
-            } else {
-                None
-            }
-        }
-        LuaValueKind::Userdata => Some(value.as_userdata_mut()?.get_metatable()),
-        LuaValueKind::String => {
-            // Strings share a global metatable
-            vm.string_mt
-        }
-        _ => None,
     }
 }
 
@@ -405,7 +355,7 @@ pub fn call_tm_res(
     if let Some(frame) = lua_state.current_frame() {
         lua_state.set_top(frame.top);
     }
-    
+
     let func_pos = lua_state.get_top();
     // Push function and arguments
     lua_state.push_value(metamethod)?;
@@ -483,7 +433,7 @@ pub fn call_tm(
     if let Some(frame) = lua_state.current_frame() {
         lua_state.set_top(frame.top);
     }
-    
+
     let func_pos = lua_state.get_top();
 
     // Push function and 3 arguments
@@ -526,13 +476,10 @@ pub fn try_comp_tm(
     lua_state: &mut LuaState,
     p1: LuaValue,
     p2: LuaValue,
-    tm: TmKind,
+    tm_kind: TmKind,
 ) -> LuaResult<Option<bool>> {
-    let tm_name = tm.name();
-
     // Try to get metamethod from p1, then p2
-    let metamethod = get_binop_metamethod(lua_state, &p1, tm_name)
-        .or_else(|| get_binop_metamethod(lua_state, &p2, tm_name));
+    let metamethod = get_binop_metamethod(lua_state, &p1, &p2, tm_kind);
 
     if let Some(mm) = metamethod {
         // Call metamethod and convert result to boolean
@@ -559,18 +506,13 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
 
     if t1.ttisfulluserdata() {
         // Userdata: first check identity
-        if let (Some(id1), Some(id2)) = (t1.as_userdata_id(), t2.as_userdata_id()) {
-            if id1 == id2 {
+        if let (Some(u_ptr1), Some(u_ptr2)) = (t1.as_userdata_ptr(), t2.as_userdata_ptr()) {
+            if u_ptr1 == u_ptr2 {
                 return Ok(true);
             }
         }
         // Different userdata - try __eq metamethod
-        let tm1 = get_metatable(lua_state, &t1)
-            .and_then(|_mt| get_binop_metamethod(lua_state, &t1, "__eq"));
-        let tm = tm1.or_else(|| {
-            get_metatable(lua_state, &t2)
-                .and_then(|_mt| get_binop_metamethod(lua_state, &t2, "__eq"))
-        });
+        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
 
         if let Some(metamethod) = tm {
             let result = call_tm_res(lua_state, metamethod, t1, t2)?;
@@ -582,19 +524,13 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
 
     if t1.ttistable() {
         // Tables: first check identity
-        if let (Some(id1), Some(id2)) = (t1.as_table_id(), t2.as_table_id()) {
-            if id1 == id2 {
+        if let (Some(t_ptr1), Some(t_ptr2)) = (t1.as_table_ptr(), t2.as_table_ptr()) {
+            if t_ptr1 == t_ptr2 {
                 return Ok(true);
             }
         }
         // Different tables - try __eq metamethod
-        let tm1 = get_metatable(lua_state, &t1)
-            .and_then(|_mt| get_binop_metamethod(lua_state, &t1, "__eq"));
-        let tm = tm1.or_else(|| {
-            get_metatable(lua_state, &t2)
-                .and_then(|_mt| get_binop_metamethod(lua_state, &t2, "__eq"))
-        });
-
+        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
         if let Some(metamethod) = tm {
             let result = call_tm_res(lua_state, metamethod, t1, t2)?;
             return Ok(!result.is_falsy());
@@ -609,8 +545,8 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
     }
 
     // Lua functions, threads, etc.: compare GC pointers
-    if let (Some(id1), Some(id2)) = (t1.as_function_id(), t2.as_function_id()) {
-        return Ok(id1 == id2);
+    if let (Some(f_ptr1), Some(f_ptr2)) = (t1.as_function_ptr(), t2.as_function_ptr()) {
+        return Ok(f_ptr1 == f_ptr2);
     }
 
     Ok(false)

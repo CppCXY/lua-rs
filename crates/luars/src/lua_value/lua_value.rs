@@ -31,8 +31,8 @@
 use crate::lua_value::LuaUserdata;
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    BinaryPtr, FunctionBody, FunctionPtr, GcBinary, GcFunction, GcString, GcTable, GcThread,
-    GcUserdata, LuaTable, StringPtr, TablePtr, ThreadPtr, UserdataPtr,
+    BinaryPtr, FunctionBody, FunctionPtr, GcBinary, GcFunction, GcObjectPtr, GcString, GcTable,
+    GcThread, GcUserdata, LuaTable, StringPtr, TablePtr, ThreadPtr, UserdataPtr,
 };
 
 // ============ Basic type tags (bits 0-3) ============
@@ -731,7 +731,9 @@ impl LuaValue {
 
     pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
         if self.ttisfunction() {
-            Some(FunctionPtr::new(unsafe { self.value.ptr as *mut GcFunction }))
+            Some(FunctionPtr::new(unsafe {
+                self.value.ptr as *mut GcFunction
+            }))
         } else {
             None
         }
@@ -739,7 +741,9 @@ impl LuaValue {
 
     pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
         if self.ttisfulluserdata() {
-            Some(UserdataPtr::new(unsafe { self.value.ptr as *mut GcUserdata }))
+            Some(UserdataPtr::new(unsafe {
+                self.value.ptr as *mut GcUserdata
+            }))
         } else {
             None
         }
@@ -750,6 +754,18 @@ impl LuaValue {
             Some(ThreadPtr::new(unsafe { self.value.ptr as *mut GcThread }))
         } else {
             None
+        }
+    }
+
+    pub fn as_gc_ptr(&self) -> Option<GcObjectPtr> {
+        match self.kind() {
+            LuaValueKind::Table => self.as_table_ptr().map(GcObjectPtr::Table),
+            LuaValueKind::Function => self.as_function_ptr().map(GcObjectPtr::Function),
+            LuaValueKind::String => self.as_string_ptr().map(GcObjectPtr::String),
+            LuaValueKind::Binary => self.as_binary_ptr().map(GcObjectPtr::Binary),
+            LuaValueKind::Thread => self.as_thread_ptr().map(GcObjectPtr::Thread),
+            LuaValueKind::Userdata => self.as_userdata_ptr().map(GcObjectPtr::Userdata),
+            _ => None
         }
     }
 

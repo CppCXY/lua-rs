@@ -195,7 +195,7 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
     let mut thread_val = LuaValue::nil();
     if let Some(frame) = l.current_frame() {
         if let Some(func) = frame.func.as_lua_function() {
-            if let Some(upval) = func.cached_upvalues().get(0) {
+            if let Some(upval) = func.upvalues().get(0) {
                 // Upvalue should be closed with the thread value
                 thread_val = upval.get_value(l);
             }

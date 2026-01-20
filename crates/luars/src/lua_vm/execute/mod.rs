@@ -31,7 +31,6 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
-    GcId,
     lua_value::{LUA_VFALSE, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
@@ -90,7 +89,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
             return Err(lua_state.error("Lua function has no chunk".to_string()));
         };
 
-        let upvalue_ptrs = func_body.cached_upvalues();
+        let upvalue_ptrs = func_body.upvalues();
 
         // Load frame state
         let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
@@ -913,7 +912,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
 
                     // ULTRA-OPTIMIZED: Direct double-pointer dereference
                     // Matches Lua C: setobj2s(L, ra, cl->upvals[b]->v.p)
-                    let value = upvalue_ptrs[b].get_value(lua_state);
+                    let value = upvalue_ptrs[b].as_ref().data.get_value(lua_state);
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
@@ -939,14 +938,17 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // Set value in upvalue (OPTIMIZED: Uses direct pointer)
                     // ULTRA-OPTIMIZED: Direct double-pointer write
                     // Matches Lua C: setobj(L, uv->v.p, s2v(ra))
-                    upvalue_ptrs[b].set_value(lua_state, value);
+                    upvalue_ptrs[b]
+                        .as_mut_ref()
+                        .data
+                        .set_value(lua_state, value);
 
                     // GC barrier: luaC_barrier(L, uv, s2v(ra))
                     // If upvalue is black and value is white collectable, restore invariant
                     if value.is_collectable() {
-                        let upvalue_id = upvalue_ptrs[b].id;
-                        if let Some(v_gc_id) = lua_state.value_to_gc_id(&value) {
-                            lua_state.gc_barrier(upvalue_id, v_gc_id);
+                        let upvalue_ptr = upvalue_ptrs[b];
+                        if let Some(gc_ptr) = value.as_gc_ptr() {
+                            lua_state.gc_barrier(upvalue_ptr, gc_ptr);
                         }
                     }
                 }
@@ -1012,7 +1014,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
-                    
+
                     // CRITICAL: Ensure stack_top includes the register we just wrote to
                     // stack_top points to "next available position", so valid range is [0, stack_top)
                     // If we write to stack[base+a], stack_top must be AT LEAST base+a+1
@@ -1021,7 +1023,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     if lua_state.get_top() < new_top {
                         lua_state.set_top(new_top);
                     }
-                    
+
                     // GC check after table creation (like Lua 5.5 OP_NEWTABLE)
                     lua_state.check_gc()?;
                 }
@@ -1452,7 +1454,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("GETTABUP: invalid upvalue index {}", b))
                         );
                     }
-                    let table_value = upvalue_ptrs[b].get_value(lua_state);
+                    let table_value = upvalue_ptrs[b].as_ref().data.get_value(lua_state);
 
                     // Get key from constants (K[C])
                     if c >= constants.len() {
@@ -1506,7 +1508,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("SETTABUP: invalid upvalue index {}", a))
                         );
                     }
-                    let table_value = upvalue_ptrs[a].get_value(lua_state);
+                    let table_value = upvalue_ptrs[a].as_ref().data.get_value(lua_state);
 
                     // Get key from constants (K[B])
                     if b >= constants.len() {
@@ -1533,12 +1535,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
                     if let Some(table) = table_value.as_table_mut() {
                         table.raw_set(&key, value);
-                        
+
                         // CRITICAL: GC write barrier
-                        let table_gc_id = GcId::TableId(table_value.hvalue());
-                        lua_state.gc_barrier_back(table_gc_id);
-                    } else {
-                        // TODO: trigger metamethod for non-table
+                        let table_ptr = table_value.as_table_ptr().unwrap();
+                        lua_state.gc_barrier_back(table_ptr.into());
                     }
                 }
 
@@ -1564,7 +1564,9 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
 
                         if has_metatable {
                             // Try __len metamethod
-                            if let Some(mm) = helper::get_len_metamethod(lua_state, &rb) {
+                            if let Some(mm) =
+                                helper::get_metamethod_event(lua_state, &rb, TmKind::Len)
+                            {
                                 // Call metamethod with Protect pattern
                                 save_pc!();
                                 let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
@@ -1582,7 +1584,8 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         }
                     } else {
                         // Other types: try __len metamethod
-                        if let Some(mm) = helper::get_len_metamethod(lua_state, &rb) {
+                        if let Some(mm) = helper::get_metamethod_event(lua_state, &rb, TmKind::Len)
+                        {
                             save_pc!();
                             let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
                             restore_state!();
@@ -1620,12 +1623,14 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                                 };
 
                                 // Try to get __concat metamethod
-                                if let Some(mm) =
-                                    helper::get_binop_metamethod(lua_state, &v1, &v2, "__concat")
-                                {
+                                if let Some(mm) = helper::get_binop_metamethod(
+                                    lua_state,
+                                    &v1,
+                                    &v2,
+                                    TmKind::Concat,
+                                ) {
                                     save_pc!();
-                                    let result =
-                                        metamethod::call_tm_res(lua_state, mm, v1, v2)?;
+                                    let result = metamethod::call_tm_res(lua_state, mm, v1, v2)?;
                                     restore_state!();
 
                                     // Store result back and reduce count
@@ -1657,7 +1662,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             }
                         }
                     }
-                    
+
                     // GC check after concatenation (like Lua 5.5 OP_CONCAT)
                     lua_state.check_gc()?;
                 }

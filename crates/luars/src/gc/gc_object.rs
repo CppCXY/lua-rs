@@ -2,59 +2,10 @@
 use std::rc::Rc;
 
 use crate::{
-    Chunk, GcId, GcObjectKind, LuaTable, LuaValue, lua_value::{LuaUserdata, LuaValueKind}, lua_vm::{CFunction, LuaState}
+    Chunk, GcId, GcObjectKind, LuaTable, LuaValue,
+    lua_value::LuaUserdata,
+    lua_vm::{CFunction, LuaState},
 };
-
-/// Cached upvalue - stores both ID and direct pointer for fast access
-/// Mimics Lua C's cl->upvals[i] which is a direct pointer to UpValue
-#[derive(Clone, Copy)]
-pub struct CachedUpvalue {
-    /// Direct pointer to the Upvalue object for fast access
-    /// SAFETY: This pointer is valid as long as the Upvalue exists in ObjectPool
-    /// The Upvalue is kept alive by the GC as long as this function exists
-    pub ptr: UpvaluePtr,
-}
-
-impl CachedUpvalue {
-    #[inline(always)]
-    pub fn new(ptr: UpvaluePtr) -> Self {
-        Self { ptr }
-    }
-
-    /// Get the upvalue value directly through the cached pointer
-    /// SAFETY: Caller must ensure the pointer is still valid
-    /// current_thread: The thread attempting to read the upvalue (used for stack access optimization)
-    #[inline(always)]
-    pub fn get_value(&self, l: &LuaState) -> LuaValue {
-        unsafe {
-            let upval = &*self.ptr.as_ptr();
-            match upval.data {
-                Upvalue::Open(stack_index) => {
-                    // Directly access the stack value
-                    l.stack()[stack_index].clone()
-                }
-                Upvalue::Closed(val) => val.clone(),
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub fn set_value(&self, l: &mut LuaState, value: LuaValue) {
-        unsafe {
-            let upval = &mut *self.ptr.as_mut_ptr();
-            match &mut upval.data {
-                Upvalue::Open(stack_index) => {
-                    // Set value directly on the stack
-                    l.stack_mut()[*stack_index] = value;
-                }
-                Upvalue::Closed(val) => {
-                    // Update closed value
-                    *val = value;
-                }
-            }
-        }
-    }
-}
 
 // ============ GC Constants (from Lua 5.5 lgc.h) ============
 // Object ages for generational GC
@@ -95,8 +46,8 @@ pub const MASKGCBITS: u8 = MASKCOLORS | AGEBITS;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
-    pub marked: u8,     // Color and age bits combined
-    pub size: u32,      // Size of the object in bytes (for memory tracking)
+    pub marked: u8, // Color and age bits combined
+    pub size: u32,  // Size of the object in bytes (for memory tracking)
 }
 
 impl Default for GcHeader {
@@ -435,7 +386,7 @@ pub type BinaryPtr = GcPtr<GcBinary>;
 pub type UserdataPtr = GcPtr<GcUserdata>;
 pub type ThreadPtr = GcPtr<GcThread>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GcObjectPtr {
     String(StringPtr),
     Table(TablePtr),
@@ -481,6 +432,48 @@ impl GcObjectPtr {
             GcObjectPtr::Userdata(_) => GcObjectKind::Userdata,
             GcObjectPtr::Binary(_) => GcObjectKind::Binary,
         }
+    }
+}
+
+impl From<StringPtr> for GcObjectPtr {
+    fn from(ptr: StringPtr) -> Self {
+        GcObjectPtr::String(ptr)
+    }
+}
+
+impl From<BinaryPtr> for GcObjectPtr {
+    fn from(ptr: BinaryPtr) -> Self {
+        GcObjectPtr::Binary(ptr)
+    }
+}
+
+impl From<TablePtr> for GcObjectPtr {
+    fn from(ptr: TablePtr) -> Self {
+        GcObjectPtr::Table(ptr)
+    }
+}
+
+impl From<FunctionPtr> for GcObjectPtr {
+    fn from(ptr: FunctionPtr) -> Self {
+        GcObjectPtr::Function(ptr)
+    }
+}
+
+impl From<UpvaluePtr> for GcObjectPtr {
+    fn from(ptr: UpvaluePtr) -> Self {
+        GcObjectPtr::Upvalue(ptr)
+    }
+}
+
+impl From<ThreadPtr> for GcObjectPtr {
+    fn from(ptr: ThreadPtr) -> Self {
+        GcObjectPtr::Thread(ptr)
+    }
+}
+
+impl From<UserdataPtr> for GcObjectPtr {
+    fn from(ptr: UserdataPtr) -> Self {
+        GcObjectPtr::Userdata(ptr)
     }
 }
 
@@ -615,9 +608,9 @@ impl GcObject {
 pub enum FunctionBody {
     /// Lua function with bytecode chunk
     /// Now includes cached upvalue pointers for direct access (zero-overhead like Lua C)
-    Lua(Rc<Chunk>, Vec<CachedUpvalue>),
+    Lua(Rc<Chunk>, Vec<UpvaluePtr>),
     /// C function (native Rust function) with cached upvalues
-    CClosure(CFunction, Vec<CachedUpvalue>),
+    CClosure(CFunction, Vec<UpvaluePtr>),
 }
 
 impl FunctionBody {
@@ -653,7 +646,7 @@ impl FunctionBody {
 
     /// Get cached upvalues (direct pointers for fast access)
     #[inline(always)]
-    pub fn cached_upvalues(&self) -> &Vec<CachedUpvalue> {
+    pub fn upvalues(&self) -> &Vec<UpvaluePtr> {
         match &self {
             FunctionBody::CClosure(_, uv) => uv,
             FunctionBody::Lua(_, uv) => uv,
@@ -662,7 +655,7 @@ impl FunctionBody {
 
     /// Get mutable access to cached upvalues for updating pointers
     #[inline(always)]
-    pub fn cached_upvalues_mut(&mut self) -> &mut Vec<CachedUpvalue> {
+    pub fn upvalues_mut(&mut self) -> &mut Vec<UpvaluePtr> {
         match self {
             FunctionBody::CClosure(_, uv) => uv,
             FunctionBody::Lua(_, uv) => uv,
@@ -722,6 +715,34 @@ impl Upvalue {
             Upvalue::Closed(_) => None,
         }
     }
+
+    /// Get the upvalue value directly through the cached pointer
+    /// SAFETY: Caller must ensure the pointer is still valid
+    /// current_thread: The thread attempting to read the upvalue (used for stack access optimization)
+    #[inline(always)]
+    pub fn get_value(&self, l: &LuaState) -> LuaValue {
+        match self {
+            Upvalue::Open(stack_index) => {
+                // Directly access the stack value
+                l.stack()[*stack_index].clone()
+            }
+            Upvalue::Closed(val) => val.clone(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn set_value(&mut self, l: &mut LuaState, value: LuaValue) {
+        match self {
+            Upvalue::Open(stack_index) => {
+                // Set value directly on the stack
+                l.stack_mut()[*stack_index] = value;
+            }
+            Upvalue::Closed(val) => {
+                // Update closed value
+                *val = value;
+            }
+        }
+    }
 }
 
 /// High-performance Vec-based pool for GC objects
@@ -761,7 +782,7 @@ impl GcPool {
     #[inline]
     pub fn free(&mut self, gc_id: GcId) {
         let index = gc_id.index() as usize;
-        
+
         // swap_remove: O(1) removal by moving last element to this position
         self.gc_list.swap_remove(index);
     }
