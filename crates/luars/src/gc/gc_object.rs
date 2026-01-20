@@ -154,23 +154,9 @@ impl GcHeader {
         self.marked &= !(1 << FINALIZEDBIT);
     }
 
-    /// Check if object is fixed (never collected)
-    /// In Lua 5.5, fixed objects also use FINALIZEDBIT (bit 6) but never sweep them
-    /// Port of lgc.h: isold(x) but for permanent objects
-    #[inline(always)]
+    // deprecated method, we need new refactor
     pub fn is_fixed(&self) -> bool {
-        // In Lua 5.5, fixed strings and permanent objects have special age G_OLD
-        // and are never collected. We can use same bit as finalized since
-        // fixed objects won't be finalized.
-        self.age() == G_OLD && self.to_finalize()
-    }
-
-    /// Mark object as fixed (never collected)
-    /// Port of lgc.h: luaC_fix()
-    #[inline(always)]
-    pub fn set_fixed(&mut self) {
-        self.set_age(G_OLD);
-        self.set_finalized();
+        self.to_finalize()
     }
 
     // ============ Color Transitions ============
@@ -457,7 +443,7 @@ impl GcObjectPtr {
 
     pub fn fix_gc_object(&mut self) {
         if let Some(header) = self.header_mut() {
-            header.set_fixed();
+            header.set_age(G_OLD);
             header.make_gray(); // Gray forever, like Lua 5.5
         }
     }
@@ -807,6 +793,7 @@ impl Upvalue {
 /// - GcPtr-based: external references use pointers, not indices
 pub struct GcPool {
     gc_list: Vec<GcObjectOwner>,
+    fixed_list: Vec<GcObjectOwner>,
 }
 
 impl GcPool {
@@ -814,6 +801,7 @@ impl GcPool {
     pub fn new() -> Self {
         Self {
             gc_list: Vec::new(),
+            fixed_list: Vec::new(),
         }
     }
 
@@ -821,6 +809,7 @@ impl GcPool {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             gc_list: Vec::with_capacity(cap),
+            fixed_list: Vec::new(),
         }
     }
 
@@ -836,7 +825,7 @@ impl GcPool {
     /// Free an object using its pointer
     /// O(1) via swap_remove: moves last object to removed position, updates its index
     #[inline]
-    pub fn free(&mut self, gc_ptr: GcObjectPtr) {
+    pub fn free(&mut self, gc_ptr: GcObjectPtr) -> GcObjectOwner {
         let index = gc_ptr.index();
         let last_index = self.gc_list.len() - 1;
         if index != last_index {
@@ -846,7 +835,7 @@ impl GcPool {
         }
 
         // swap_remove: O(1) removal by moving last element to this position
-        self.gc_list.swap_remove(index);
+        self.gc_list.swap_remove(index)
     }
 
     /// Current number of live objects (always equals Vec length, no holes!)
@@ -893,6 +882,16 @@ impl GcPool {
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut GcObjectOwner> {
         self.gc_list.get_mut(index)
+    }
+
+    pub fn fixed(&mut self, gc_ptr: GcObjectPtr) {
+        if let Some(header) = gc_ptr.header_mut() {
+            header.set_age(G_OLD);
+            header.make_gray(); // Gray forever, like Lua 5.5
+        }
+
+        let gc_owner = self.free(gc_ptr);
+        self.fixed_list.push(gc_owner);
     }
 }
 

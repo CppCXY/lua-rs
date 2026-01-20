@@ -536,9 +536,9 @@ impl GC {
     pub fn is_object_dead(&self, gc_ptr: GcObjectPtr) -> bool {
         if let Some(header) = gc_ptr.header() {
             // Fixed objects are never dead
-            if header.is_fixed() {
-                return false;
-            }
+            // if header.is_fixed() {
+            //     return false;
+            // }
             // Calculate other_white (the white that will be collected)
             let other_white = GcHeader::otherwhite(self.current_white);
             // Object is dead if it's marked with other_white
@@ -1074,7 +1074,7 @@ impl GC {
 
     /// Mark open upvalues from a thread (like Lua 5.5's remarkupvals)
     /// Open upvalues must be kept gray because their values can change
-    /// 
+    ///
     /// Port of Lua 5.5's remarkupvals:
     /// ```c
     /// for (uv = thread->openupval; uv != NULL; uv = uv->u.open.next) {
@@ -1087,13 +1087,13 @@ impl GC {
         for upval_ptr in upvalues {
             let gc_upval = upval_ptr.as_mut_ref();
             let header = &mut gc_upval.header;
-            
+
             if header.is_white() {
                 // Lua 5.5: open upvalues are kept gray, not black
                 header.make_gray();
                 self.gray.push(upval_ptr.clone().into());
             }
-            
+
             // CRITICAL: Mark the value that the open upvalue points to
             // This is the Lua 5.5 remarkupvals behavior
             if let Some(stack_index) = gc_upval.data.get_stack_index() {
@@ -1562,9 +1562,8 @@ impl GC {
                 // else
                 //   set2black(uv);  /* closed upvalues are visited here */
                 // markvalue(g, uv->v.p);  /* mark its content */
-                
                 let gc_upval = upval_ptr.as_mut_ref();
-                
+
                 if gc_upval.data.is_open() {
                     // Open upvalue: keep gray (value on stack may change)
                     gc_upval.header.make_gray();
@@ -1580,7 +1579,7 @@ impl GC {
                         self.mark_value(&val);
                     }
                 }
-                
+
                 return 1;
             }
             GcObjectPtr::String(string_ptr) => {
@@ -1724,7 +1723,7 @@ impl GC {
     ///
     /// Port of Lua 5.5's sweepstep: maintains sweep position (sweepgc pointer)
     /// to avoid re-scanning already-swept objects
-    /// 
+    ///
     /// CRITICAL: Lua 5.5's sweeplist does NOT handle finalization!
     /// Objects with finalizers are in a separate 'finobj' list and handled by separatetobefnz.
     /// Here we should ONLY:
@@ -1738,44 +1737,32 @@ impl GC {
         // Sweep forward through pool, handling swap_remove correctly
         while self.sweep_index < self.gc_pool.len() && count < max_sweep {
             let current_idx = self.sweep_index;
-            
+
             // Get object info
             let owner = &self.gc_pool.get(current_idx).unwrap();
             let gc_ptr = owner.as_gc_ptr();
             let header = owner.header();
-            
-            if cfg!(debug_assertions) && false {  // 设为true启用调试
-                eprintln!("[SWEEP] idx={} kind={:?} dead={} fixed={}", 
-                    current_idx, 
-                    gc_ptr.kind(),
-                    header.is_dead(other_white),
-                    header.is_fixed());
-            }
 
             // Check if object is dead (not fixed and wrong white)
             if !header.is_fixed() && header.is_dead(other_white) {
                 // Dead object - remove it
                 // Save size BEFORE removing (after free, header is invalid!)
                 let size = header.size as usize;
-                
-                if cfg!(debug_assertions) && false {
-                    eprintln!("[SWEEP] Removing dead object at idx={} size={}", current_idx, size);
-                }
-                
+
                 // For strings, remove from interner first
                 if let GcObjectPtr::String(str_ptr) = gc_ptr {
                     pool.remove_str(str_ptr);
                 }
-                
+
                 // Free the object (swap_remove: moves last to current_idx)
                 self.gc_pool.free(gc_ptr);
-                
+
                 if size > 0 {
                     self.gc_debt += size as isize;
                     self.stats.bytes_freed += size;
                     self.stats.objects_collected += 1;
                 }
-                
+
                 // DON'T increment sweep_index - the object from end was moved here
                 // Next iteration will check that moved object
             } else if !header.is_fixed() {
@@ -1785,12 +1772,12 @@ impl GC {
                     header_mut.make_white(self.current_white);
                     header_mut.set_age(G_NEW);
                 }
-                self.sweep_index += 1;  // Move to next
+                self.sweep_index += 1; // Move to next
             } else {
                 // Fixed object, skip
                 self.sweep_index += 1;
             }
-            
+
             count += 1;
         }
 
