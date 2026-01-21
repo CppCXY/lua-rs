@@ -830,24 +830,33 @@ impl LuaValue {
 
 impl PartialEq for LuaValue {
     fn eq(&self, other: &Self) -> bool {
-        if self.tt() == other.tt() {
-            if unsafe { self.value.i == other.value.i } {
-                return true;
-            } else if self.ttisstring() {
-                // Compare string contents
-                let s1 = unsafe { &*(self.value.ptr as *const String) };
-                let s2 = unsafe { &*(other.value.ptr as *const String) };
-                return s1 == s2;
+        match (self.kind(), other.kind()) {
+            (LuaValueKind::Nil, LuaValueKind::Nil) => true,
+            (LuaValueKind::Boolean, LuaValueKind::Boolean) => self.bvalue() == other.bvalue(),
+
+            // Numbers: keep Lua semantics (integer 1 == float 1.0)
+            (LuaValueKind::Integer, LuaValueKind::Integer) => self.ivalue() == other.ivalue(),
+            (LuaValueKind::Float, LuaValueKind::Float) => self.fltvalue() == other.fltvalue(),
+            (LuaValueKind::Integer, LuaValueKind::Float) => self.ivalue() as f64 == other.fltvalue(),
+            (LuaValueKind::Float, LuaValueKind::Integer) => self.fltvalue() == other.ivalue() as f64,
+
+            // Strings/binaries must compare by content (NOT by pointer)
+            (LuaValueKind::String, LuaValueKind::String) => self.as_str() == other.as_str(),
+            (LuaValueKind::Binary, LuaValueKind::Binary) => self.as_binary() == other.as_binary(),
+
+            // GC objects: compare identity
+            (LuaValueKind::Table, LuaValueKind::Table)
+            | (LuaValueKind::Function, LuaValueKind::Function)
+            | (LuaValueKind::Userdata, LuaValueKind::Userdata)
+            | (LuaValueKind::Thread, LuaValueKind::Thread) => self.raw_ptr_repr() == other.raw_ptr_repr(),
+
+            // CFunction: compare function pointer
+            (LuaValueKind::CFunction, LuaValueKind::CFunction) => {
+                std::ptr::fn_addr_eq(self.fvalue(), other.fvalue())
             }
 
-            return false;
-        } else if self.ttisinteger() && other.ttisfloat() {
-            return self.ivalue() as f64 == other.fltvalue();
-        } else if self.ttisfloat() && other.ttisinteger() {
-            return self.fltvalue() == other.ivalue() as f64;
+            _ => false,
         }
-
-        false
     }
 }
 
@@ -935,30 +944,45 @@ impl std::fmt::Display for LuaValue {
 impl std::hash::Hash for LuaValue {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let tt = self.tt();
-
-        // Special handling for numbers to maintain equality invariant
-        // (integer 1 == float 1.0, so they must hash the same)
-        if tt == LUA_VNUMINT || tt == LUA_VNUMFLT {
-            // Always hash numbers as floats to maintain hash consistency
-            // when integer equals float
-            unsafe {
-                let n = if tt == LUA_VNUMINT {
-                    self.value.i as f64
-                } else {
-                    self.value.n
-                };
-                // Use a stable representation for hashing
+        match self.kind() {
+            LuaValueKind::Nil | LuaValueKind::Boolean => {
+                // Tag already encodes nil/false/true variants
+                self.tt().hash(state);
+            }
+            LuaValueKind::Integer | LuaValueKind::Float => {
+                // Keep invariant: integer 1 == float 1.0 => same hash
+                let n = self.as_float().unwrap_or(0.0);
                 LUA_TNUMBER.hash(state);
                 n.to_bits().hash(state);
             }
-        } else if tt <= LUA_VFALSE {
-            // nil or boolean - hash type tag only
-            tt.hash(state);
-        } else {
-            // GC types: hash type tag + gc_id
-            tt.hash(state);
-            self.raw_ptr_repr().hash(state);
+            LuaValueKind::String => {
+                LUA_TSTRING.hash(state);
+                if let Some(s) = self.as_str() {
+                    s.hash(state);
+                } else {
+                    // Fallback: should not happen
+                    self.raw_ptr_repr().hash(state);
+                }
+            }
+            LuaValueKind::Binary => {
+                LUA_TSTRING.hash(state);
+                // Distinguish binary from regular strings under the same LUA_TSTRING tag
+                0xB1_u8.hash(state);
+                if let Some(b) = self.as_binary() {
+                    b.hash(state);
+                } else {
+                    self.raw_ptr_repr().hash(state);
+                }
+            }
+            LuaValueKind::CFunction => {
+                LUA_TFUNCTION.hash(state);
+                (self.fvalue() as usize).hash(state);
+            }
+            // GC objects: hash by identity
+            _ => {
+                self.tt().hash(state);
+                self.raw_ptr_repr().hash(state);
+            }
         }
     }
 }

@@ -546,8 +546,10 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(3)
         .ok_or_else(|| l.error("bad argument #3 to 'rawset' (value expected)".to_string()))?;
 
-    if let Some(table_ref) = table.as_table_mut() {
-        table_ref.raw_set(&key, value);
+    if table.is_table() {
+        // CRITICAL: rawset must still run the GC write barrier.
+        // Using VM's table_set keeps semantics (no metamethods) while preserving tri-color.
+        l.table_set(&table, key, value);
         l.push_value(table)?;
         return Ok(1);
     }

@@ -19,6 +19,11 @@ pub struct StringInterner {
     // 使用 ahash 作为哈希算法以提升性能
     map: HashMap<u64, Vec<StringPtr>, RandomState>,
 
+    // Reverse index to remove strings without dereferencing them during sweep.
+    // This is important because sweeping code is precisely where dangling pointers
+    // might surface if there is any GC invariant violation elsewhere.
+    rev: HashMap<StringPtr, u64, RandomState>,
+
     hashbuilder: RandomState,
 }
 
@@ -26,6 +31,7 @@ impl StringInterner {
     pub fn new() -> Self {
         Self {
             map: HashMap::with_capacity_and_hasher(256, RandomState::new()),
+            rev: HashMap::with_capacity_and_hasher(256, RandomState::new()),
             hashbuilder: RandomState::new(),
         }
     }
@@ -66,6 +72,7 @@ impl StringInterner {
         gc.gc_pool.alloc(gc_string);
         gc.track_size(size as usize);
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
+        self.rev.insert(ptr, hash);
 
         LuaValue::string(ptr)
     }
@@ -80,9 +87,19 @@ impl StringInterner {
 
     /// Remove dead strings (called by GC)
     pub fn remove_dead_intern(&mut self, ptr: StringPtr) {
-        let s = &ptr.as_ref().data;
-
-        let hash = self.hash_string(s);
+        // Do NOT dereference `ptr` here.
+        // If there is any GC/root/barrier bug elsewhere, `ptr` can already be dangling
+        // by the time we reach sweeping, and dereferencing would immediately panic
+        // under Rust's UB checks.
+        let Some(hash) = self.rev.remove(&ptr) else {
+            // Fallback: best-effort removal by scanning buckets.
+            // This avoids dereferencing `ptr` at the cost of O(n) work.
+            for ids in self.map.values_mut() {
+                ids.retain(|&i| i != ptr);
+            }
+            self.map.retain(|_, ids| !ids.is_empty());
+            return;
+        };
         // Remove from map
         if let Some(ids) = self.map.get_mut(&hash) {
             ids.retain(|&i| i != ptr);

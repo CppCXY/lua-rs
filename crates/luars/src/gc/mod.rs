@@ -1743,6 +1743,12 @@ impl GC {
             let gc_ptr = owner.as_gc_ptr();
             let header = owner.header();
 
+            debug_assert_eq!(
+                header.index,
+                current_idx,
+                "GcHeader.index mismatch during sweep (pool corrupted?)"
+            );
+
             // Check if object is dead (not fixed and wrong white)
             if !header.is_fixed() && header.is_dead(other_white) {
                 // Dead object - remove it

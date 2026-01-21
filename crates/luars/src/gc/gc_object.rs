@@ -313,6 +313,12 @@ pub struct GcPtr<T> {
     _marker: std::marker::PhantomData<*const T>,
 }
 
+impl<T> std::hash::Hash for GcPtr<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
+    }
+}
+
 // Manual implementation of Clone and Copy to avoid trait bound requirements on T
 // GcPtr is always Copy regardless of T, since it only stores a u64 pointer
 impl<T> Clone for GcPtr<T> {

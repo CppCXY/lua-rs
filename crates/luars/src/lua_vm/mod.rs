@@ -101,7 +101,14 @@ impl LuaVM {
     /// Set a value in the registry by integer key
     pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
         if let Some(reg_table) = self.registry.as_table_mut() {
-            reg_table.set_int(key, value);
+            reg_table.set_int(key, value.clone());
+
+            // CRITICAL: GC write barrier
+            // Registry is a long-lived root table; it can be BLACK during incremental marking.
+            // Any insertion of a collectable value must preserve the tri-color invariant.
+            if value.is_collectable() {
+                self.gc.barrier_back(self.registry.as_gc_ptr().unwrap());
+            }
         }
     }
 
@@ -118,9 +125,9 @@ impl LuaVM {
     pub fn registry_set(&mut self, key: &str, value: LuaValue) {
         let key_value = self.create_string(key);
 
-        if let Some(reg_table) = self.registry.as_table_mut() {
-            reg_table.raw_set(&key_value, value);
-        }
+        // Use VM table_set so we always run the GC barrier
+        let registry = self.registry;
+        let _ = self.table_set(&registry, key_value, value);
     }
 
     /// Get a value from the registry by string key
@@ -236,9 +243,9 @@ impl LuaVM {
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
         let key = self.create_string(name);
 
-        if let Some(global) = self.global.as_table_mut() {
-            global.raw_set(&key, value);
-        }
+        // Use VM table_set so we always run the GC barrier
+        let global = self.global;
+        let _ = self.table_set(&global, key, value);
     }
 
     /// Set the metatable for all strings
@@ -249,9 +256,7 @@ impl LuaVM {
 
         // Set __index to point to the string library
         let index_key = self.create_string("__index");
-        if let Some(mt) = mt_value.as_table_mut() {
-            mt.raw_set(&index_key, string_lib_table);
-        }
+        let _ = self.table_set(&mt_value, index_key, string_lib_table);
 
         // Store in the VM
         self.string_mt = Some(mt_value);
@@ -536,6 +541,12 @@ impl LuaVM {
         // Collect roots
         let roots = self.collect_roots();
 
+        // CRITICAL: Mark open upvalues before entering atomic phase.
+        // In Lua, remarkupvals happens during atomic; we keep the same requirement
+        // by letting the VM push open upvalues into the GC marking frontier.
+        let open_upvals = self.main_state.get_open_upvalues();
+        self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
+
         // If we're keeping invariant (in marking phase), sweep first
         if self.gc.keep_invariant() {
             self.gc.enter_sweep(&mut self.object_allocator);
@@ -567,6 +578,10 @@ impl LuaVM {
     /// Full GC cycle for generational mode (like fullgen in Lua 5.5)
     fn full_gen(&mut self) {
         let roots = self.collect_roots();
+
+        // Same as incremental: ensure open upvalues are marked as part of the root set.
+        let open_upvals = self.main_state.get_open_upvalues();
+        self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
         self.gc.full_generation(&roots, &mut self.object_allocator);
     }
 
@@ -585,24 +600,12 @@ impl LuaVM {
             roots.push(*mt);
         }
 
-        // 4. All values in the logical stack
-        // CRITICAL FIX: Use MAX(stack_top, all ci->top) to ensure we collect ALL active values
-        // During bytecode execution, temporary values may be created in registers beyond current stack_top
-        // but within ci->top range. These MUST be collected as roots!
-        //
-        // Example: `a = {}` compiles to:
-        //   NEWTABLE R[x]        -- creates table at R[x], extends stack_top to include R[x]
-        //   SETTABUP _ENV "a" R[x]  -- but before this, other ops may shrink stack_top!
-        //
-        // Lua 5.5 marks all slots from 0 to ci->top during GC root collection
-        let mut max_top = self.main_state.get_top();
-        for i in 0..self.main_state.call_depth() {
-            if let Some(frame) = self.main_state.get_frame(i) {
-                max_top = max_top.max(frame.top);
-            }
-        }
-
-        for i in 0..max_top {
+        // 4. All values in the logical stack (0..stack_top)
+        // Lua semantics: only slots below L->top are live. Slots above may contain
+        // stale temporaries and MUST NOT be treated as roots, otherwise weak-table
+        // tests will keep dead objects alive.
+        let top = self.main_state.get_top();
+        for i in 0..top {
             if let Some(value) = self.main_state.stack_get(i) {
                 if !value.is_nil() {
                     roots.push(value);
