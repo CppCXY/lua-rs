@@ -30,7 +30,7 @@ pub struct ObjectAllocator {
 impl ObjectAllocator {
     pub fn new(option: SafeOption) -> Self {
         let pool = Self {
-            strings: StringInterner::new(),
+            strings: StringInterner::new(option.short_string_limit),
             short_string_limit: option.short_string_limit,
         };
 
@@ -65,7 +65,7 @@ impl ObjectAllocator {
     ///
     #[inline]
     pub fn create_binary(&mut self, gc: &mut GC, data: Vec<u8>, current_white: u8) -> LuaValue {
-        let size = (64 + data.len()) as u32;
+        let size = (std::mem::size_of::<GcBinary>() + data.len()) as u32;
         let gc_ptr = Box::new(GcBinary::new(data, current_white, size));
         let gc_binary = GcObjectOwner::Binary(gc_ptr);
         let ptr = gc_binary.as_binary_ptr().unwrap();
@@ -174,10 +174,11 @@ impl ObjectAllocator {
         current_white: u8,
     ) -> LuaValue {
         // Calculate size: base + upvalues + chunk data
+        // TODO: refine size calculation
         let upvalue_count = upvalue_ptrs.len();
         let instr_size = chunk.code.len() * 8;
         let const_size = chunk.constants.len() * 32;
-        let child_size = chunk.child_protos.len() * 512;
+        let child_size = chunk.child_protos.len() * std::mem::size_of::<Chunk>();
         let line_size = chunk.line_info.len() * 4;
         let size =
             (256 + upvalue_count * 64 + instr_size + const_size + child_size + line_size + 512)
@@ -205,7 +206,7 @@ impl ObjectAllocator {
         upvalue_ptrs: Vec<UpvaluePtr>,
         current_white: u8,
     ) -> LuaValue {
-        let size = (256 + upvalue_ptrs.len() * 64) as u32;
+        let size = std::mem::size_of::<CFunction>() as u32 + (upvalue_ptrs.len() as u32 * 64);
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
             FunctionBody::CClosure(func, upvalue_ptrs),
             current_white,
@@ -284,9 +285,9 @@ impl ObjectAllocator {
         userdata: LuaUserdata,
         current_white: u8,
     ) -> LuaValue {
-        let size = 128;
+        let size = std::mem::size_of::<LuaUserdata>();
         let gc_userdata =
-            GcObjectOwner::Userdata(Box::new(GcUserdata::new(userdata, current_white, size)));
+            GcObjectOwner::Userdata(Box::new(GcUserdata::new(userdata, current_white, size as u32)));
         let ptr = gc_userdata.as_userdata_ptr().unwrap();
         gc.gc_pool.alloc(gc_userdata);
         gc.track_size(size as usize);
@@ -297,9 +298,9 @@ impl ObjectAllocator {
 
     #[inline]
     pub fn create_thread(&mut self, gc: &mut GC, thread: LuaState, current_white: u8) -> LuaValue {
-        let size = 4096; // Fixed size for thread (including stack)
+        let size = std::mem::size_of::<LuaState>();
         let mut gc_thread =
-            GcObjectOwner::Thread(Box::new(GcThread::new(thread, current_white, size)));
+            GcObjectOwner::Thread(Box::new(GcThread::new(thread, current_white, size as u32)));
         let ptr = gc_thread.as_thread_ptr().unwrap();
         unsafe {
             gc_thread.as_thread_mut().unwrap().set_thread_ptr(ptr);

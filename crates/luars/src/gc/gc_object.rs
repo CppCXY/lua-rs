@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::{
     Chunk, GcObjectKind, LuaTable, LuaValue,
-    lua_value::LuaUserdata,
+    lua_value::{LuaString, LuaUserdata},
     lua_vm::{CFunction, LuaState},
 };
 
@@ -283,7 +283,7 @@ impl<T> Gc<T> {
     }
 }
 
-pub type GcString = Gc<String>;
+pub type GcString = Gc<LuaString>;
 pub type GcTable = Gc<LuaTable>;
 pub type GcFunction = Gc<FunctionBody>;
 pub type GcUpvalue = Gc<Upvalue>;

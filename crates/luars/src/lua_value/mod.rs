@@ -268,6 +268,30 @@ impl Chunk {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LuaString {
+    pub str: String,
+    pub hash: u64,
+}
+
+impl LuaString {
+    pub fn new(s: String, hash: u64) -> Self {
+        Self { str: s, hash }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.str
+    }
+}
+
+impl Eq for LuaString {}
+
+impl PartialEq for LuaString {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.str == other.str
+    }
+}
+
 #[cfg(test)]
 mod value_tests {
     use super::*;

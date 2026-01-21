@@ -2,6 +2,7 @@ use ahash::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 
+use crate::lua_value::LuaString;
 use crate::{GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
 /// Complete string interner - ALL strings are interned for maximum performance
@@ -19,14 +20,17 @@ pub struct StringInterner {
     // might surface if there is any GC invariant violation elsewhere.
     rev: HashMap<StringPtr, u64, RandomState>,
 
+    short_string_limit: usize,
+
     hashbuilder: RandomState,
 }
 
 impl StringInterner {
-    pub fn new() -> Self {
+    pub fn new(short_string_limit: usize) -> Self {
         Self {
             map: HashMap::with_capacity_and_hasher(256, RandomState::new()),
             rev: HashMap::with_capacity_and_hasher(256, RandomState::new()),
+            short_string_limit,
             hashbuilder: RandomState::new(),
         }
     }
@@ -34,7 +38,17 @@ impl StringInterner {
     /// Intern a string - returns existing StringId if already interned, creates new otherwise
     pub fn intern(&mut self, s: &str, gc: &mut GC, current_white: u8) -> LuaValue {
         let hash = self.hash_string(s);
-        // TODO: support long strings and short strings differently
+        if s.len() > self.short_string_limit {
+            // Long strings are not interned
+            let size = (64 + s.len()) as u32;
+            let lua_string = LuaString::new(s.to_string(), hash);
+            let gc_string =
+                GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
+            let ptr = gc_string.as_str_ptr().unwrap();
+            gc.gc_pool.alloc(gc_string);
+            gc.track_size(size as usize);
+            return LuaValue::string(ptr);
+        }
 
         // Check if already interned
         let mut found_ptr = None;
@@ -59,8 +73,9 @@ impl StringInterner {
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
         let size = (64 + s.len()) as u32;
+        let lua_string = LuaString::new(s.to_string(), hash);
         let gc_string =
-            GcObjectOwner::String(Box::new(GcString::new(s.to_string(), current_white, size)));
+            GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
         gc.gc_pool.alloc(gc_string);
         gc.track_size(size as usize);

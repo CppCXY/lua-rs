@@ -2391,7 +2391,7 @@ pub fn self_op(fs: &mut FuncState, e: &mut ExpDesc, key: &mut ExpDesc) {
         // Check if it's a short string
         let string_ptr = key.u.str();
 
-        string_ptr.as_ref().data.len() <= fs.short_string_limit
+        string_ptr.as_ref().data.as_str().len() <= fs.short_string_limit
     } else {
         false // Not VKSTR
     };
