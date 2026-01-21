@@ -6,14 +6,9 @@ use crate::{GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
 /// Complete string interner - ALL strings are interned for maximum performance
 /// - Same content always returns same StringId
-/// - StringId equality = content equality (no string comparison needed)
 /// - O(1) hash lookup for new strings (using ahash for speed)
 /// - GC can collect unused strings via mark-sweep
 ///
-/// 所有字符串（包括长字符串）都被 intern，确保：
-/// 1. 相同内容的字符串只存储一份
-/// 2. 字符串比较只需比较 StringId（O(1)）
-/// 3. Table key 查找更快
 pub struct StringInterner {
     // Content hash -> StringIds mapping for deduplication
     // 使用 ahash 作为哈希算法以提升性能
@@ -37,11 +32,9 @@ impl StringInterner {
     }
 
     /// Intern a string - returns existing StringId if already interned, creates new otherwise
-    /// 所有字符串都会被 intern，保证相同内容只存储一份
-    ///
-    /// **CRITICAL**: current_white MUST be passed from GC.current_white for correct marking
     pub fn intern(&mut self, s: &str, gc: &mut GC, current_white: u8) -> LuaValue {
         let hash = self.hash_string(s);
+        // TODO: support long strings and short strings differently
 
         // Check if already interned
         let mut found_ptr = None;

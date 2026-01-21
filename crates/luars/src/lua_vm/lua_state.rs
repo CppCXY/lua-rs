@@ -240,18 +240,9 @@ impl LuaState {
     /// Old values remain in stack array but are considered "garbage"
     #[inline(always)]
     pub fn set_top(&mut self, new_top: usize) {
-        let old_top = self.stack_top;
         // Ensure physical stack is large enough
         if new_top > self.stack.len() {
             self.stack.resize(new_top, LuaValue::nil());
-        } else if new_top > old_top {
-            // IMPORTANT: When growing the logical top within existing capacity,
-            // clear newly-exposed slots to avoid resurrecting stale values.
-            // Lua keeps inactive stack slots as nil, so raising top does not
-            // accidentally create extra GC roots.
-            for slot in &mut self.stack[old_top..new_top] {
-                *slot = LuaValue::nil();
-            }
         }
         self.stack_top = new_top;
     }
