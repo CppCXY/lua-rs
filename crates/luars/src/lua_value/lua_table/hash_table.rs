@@ -82,7 +82,7 @@ impl LuaTableImpl for LuaHashTable {
                 self.update_array_len_insert(k);
             }
         }
-        
+
         result
     }
 

@@ -1059,7 +1059,6 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
-
                     // Save PC before call
                     save_pc!();
 
@@ -1454,6 +1453,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("GETTABUP: invalid upvalue index {}", b))
                         );
                     }
+
                     let table_value = upvalue_ptrs[b].as_ref().data.get_value(lua_state);
 
                     // Get key from constants (K[C])

@@ -549,11 +549,10 @@ impl LuaVM {
         // Collect roots
         let roots = self.collect_roots();
 
-        // CRITICAL: Mark open upvalues before entering atomic phase.
-        // In Lua, remarkupvals happens during atomic; we keep the same requirement
-        // by letting the VM push open upvalues into the GC marking frontier.
-        let open_upvals = self.main_state.get_open_upvalues();
-        self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
+        // NOTE: mark_open_upvalues should NOT be called here!
+        // In Lua 5.5, remarkupvals is called DURING the atomic phase,
+        // after restart_collection. Calling it here would add objects
+        // to the gray list, which then gets cleared by restart_collection.
 
         // If we're keeping invariant (in marking phase), sweep first
         if self.gc.keep_invariant() {
@@ -587,9 +586,8 @@ impl LuaVM {
     fn full_gen(&mut self) {
         let roots = self.collect_roots();
 
-        // Same as incremental: ensure open upvalues are marked as part of the root set.
-        let open_upvals = self.main_state.get_open_upvalues();
-        self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
+        // NOTE: mark_open_upvalues should NOT be called here!
+        // In Lua 5.5, remarkupvals is called DURING the atomic phase.
         self.gc.full_generation(&roots, &mut self.object_allocator);
     }
 

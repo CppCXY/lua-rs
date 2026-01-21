@@ -72,7 +72,9 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     // Try each searcher (iterate until we hit nil)
     let mut i = 1;
     loop {
-        let searcher = searchers_table.raw_geti(i as i64).unwrap_or(LuaValue::nil());
+        let searcher = searchers_table
+            .raw_geti(i as i64)
+            .unwrap_or(LuaValue::nil());
 
         if searcher.is_nil() {
             break;

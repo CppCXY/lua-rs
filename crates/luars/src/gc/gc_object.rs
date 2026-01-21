@@ -267,7 +267,6 @@ impl GcHeader {
     pub fn is_marked(&self) -> bool {
         !self.is_white()
     }
-
 }
 
 pub struct Gc<T> {

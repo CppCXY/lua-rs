@@ -1040,7 +1040,9 @@ impl GC {
                 // Lua 5.5: GCScallfin calls pending finalizers from 'tobefnz'.
                 // We delegate the actual calls to the VM via pending_actions.
                 if !self.tobefnz.is_empty() {
-                    self.pending_actions.to_finalize.extend(self.tobefnz.drain(..));
+                    self.pending_actions
+                        .to_finalize
+                        .extend(self.tobefnz.drain(..));
                 }
                 self.gc_state = GcState::Pause;
                 StepResult::Pause
@@ -1187,6 +1189,52 @@ impl GC {
     /// CRITICAL: Only mark WHITE objects. Black objects from previous cycle became
     /// "other white" after color flip, so they WILL be marked again.
     /// Fixed objects (metamethod names) are kept GRAY forever, so they're naturally skipped.
+
+    /// Mark OLD1 objects for young collection (port of Lua 5.5's markold).
+    /// In generational mode, OLD1 objects are those that just became old in the
+    /// previous cycle. They need to be traversed because they might reference
+    /// young objects that need to be marked.
+    ///
+    /// Port of Lua 5.5 lgc.c:
+    /// ```c
+    /// static void markold (global_State *g, GCObject *from, GCObject *to) {
+    ///   GCObject *p;
+    ///   for (p = from; p != to; p = p->next) {
+    ///     if (getage(p) == G_OLD1) {
+    ///       lua_assert(!iswhite(p));
+    ///       setage(p, G_OLD);  /* now they are old */
+    ///       if (isblack(p))
+    ///         reallymarkobject(g, p);
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    fn mark_old1(&mut self) {
+        // Iterate through all objects in gc_pool
+        // Find OLD1 objects and re-mark them if they're black
+        for i in 0..self.gc_pool.len() {
+            if let Some(owner) = self.gc_pool.get(i) {
+                let gc_ptr = owner.as_gc_ptr();
+                if let Some(header) = gc_ptr.header_mut() {
+                    if header.age() == G_OLD1 {
+                        // Assert: OLD1 objects should NOT be white
+                        debug_assert!(!header.is_white(), "OLD1 object should not be white");
+
+                        // Advance age to G_OLD
+                        header.set_age(G_OLD);
+
+                        // If it's black, re-mark it (add to gray list for traversal)
+                        if header.is_black() {
+                            // Make it gray and add to gray list
+                            header.make_gray();
+                            self.gray.push(gc_ptr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn mark_value(&mut self, value: &LuaValue) {
         let Some(gc_ptr) = value.as_gc_ptr() else {
             return;
@@ -1821,9 +1869,15 @@ impl GC {
         let max_sweep = if fast { usize::MAX } else { 100 };
         let mut count = 0;
         let other_white = 1 - self.current_white;
+        let mut total_iterations = 0usize;
 
         // Sweep forward through pool, handling swap_remove correctly
         while self.sweep_index < self.gc_pool.len() && count < max_sweep {
+            total_iterations += 1;
+            if total_iterations > 10000 {
+                break;
+            }
+
             let current_idx = self.sweep_index;
 
             // Get object info
@@ -1832,8 +1886,7 @@ impl GC {
             let header = owner.header();
 
             debug_assert_eq!(
-                header.index,
-                current_idx,
+                header.index, current_idx,
                 "GcHeader.index mismatch during sweep (pool corrupted?)"
             );
 
@@ -1860,10 +1913,37 @@ impl GC {
                 // DON'T increment sweep_index - the object from end was moved here
                 // Next iteration will check that moved object
             } else {
-                // Lua 5.5 sweeplist: surviving objects reset to current white
+                // Surviving object - handle differently based on GC mode
                 if let Some(header_mut) = gc_ptr.header_mut() {
-                    header_mut.make_white(self.current_white);
-                    header_mut.set_age(G_NEW);
+                    if self.gc_kind == GcKind::Inc || self.gc_kind == GcKind::GenMajor {
+                        // INCREMENTAL MODE: Lua 5.5's sweeplist
+                        // All surviving objects go back to white + G_NEW
+                        // Port of: curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
+                        header_mut.make_white(self.current_white);
+                        header_mut.set_age(G_NEW);
+                    } else {
+                        // GENERATIONAL MODE (GenMinor): Lua 5.5's sweepgen
+                        // Only G_NEW objects go back to white; older objects keep their color
+                        let age = header_mut.age();
+                        if age == G_NEW {
+                            // New objects go back to white and become G_SURVIVAL
+                            header_mut.make_white(self.current_white);
+                            header_mut.set_age(G_SURVIVAL);
+                        } else {
+                            // Older objects keep their color and advance age
+                            // Port of Lua 5.5's nextage table
+                            let next_age = match age {
+                                G_SURVIVAL => G_OLD1,
+                                G_OLD0 => G_OLD1,
+                                G_OLD1 => G_OLD,
+                                G_OLD => G_OLD,           // already old
+                                G_TOUCHED1 => G_TOUCHED1, // keep same
+                                G_TOUCHED2 => G_TOUCHED2, // keep same
+                                _ => G_OLD,
+                            };
+                            header_mut.set_age(next_age);
+                        }
+                    }
                 }
                 self.sweep_index += 1; // Move to next
             }
@@ -2090,6 +2170,12 @@ impl GC {
         // Start collection: mark roots
         self.restart_collection(roots);
         self.gc_state = GcState::Propagate;
+
+        // CRITICAL: Mark OLD1 objects before propagation!
+        // In generational mode, OLD1 objects are black from the previous cycle.
+        // They must be re-traversed so their referenced young objects get marked.
+        // Port of Lua 5.5's markold call in youngcollection.
+        self.mark_old1();
 
         // Propagate all marks
         while !self.gray.is_empty() {

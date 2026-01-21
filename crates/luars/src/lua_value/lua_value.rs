@@ -955,8 +955,19 @@ impl std::hash::Hash for LuaValue {
         } else if tt <= LUA_VFALSE {
             // nil or boolean - hash type tag only
             tt.hash(state);
+        } else if self.ttisstring() {
+            // CRITICAL: Strings must hash by CONTENT, not pointer!
+            // This maintains the Hash/Eq invariant: if a == b then hash(a) == hash(b)
+            // PartialEq compares string contents, so Hash must also use contents
+            tt.hash(state);
+            if let Some(s) = self.as_str() {
+                s.hash(state);
+            } else {
+                // Fallback: use pointer if we can't get the string content
+                self.raw_ptr_repr().hash(state);
+            }
         } else {
-            // GC types: hash type tag + gc_id
+            // Other GC types: hash type tag + pointer (they use identity for equality)
             tt.hash(state);
             self.raw_ptr_repr().hash(state);
         }
