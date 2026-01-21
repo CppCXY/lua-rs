@@ -257,34 +257,34 @@ pub fn create_file_metatable(l: &mut LuaState) -> LuaResult<LuaValue> {
 
     // file:read([format])
     let read_key = l.create_string("read");
-    l.table_set(&index_table, read_key, LuaValue::cfunction(file_read));
+    l.raw_set(&index_table, read_key, LuaValue::cfunction(file_read));
 
     // file:write(...)
     let write_key = l.create_string("write");
-    l.table_set(&index_table, write_key, LuaValue::cfunction(file_write));
+    l.raw_set(&index_table, write_key, LuaValue::cfunction(file_write));
 
     // file:flush()
     let flush_key = l.create_string("flush");
-    l.table_set(&index_table, flush_key, LuaValue::cfunction(file_flush));
+    l.raw_set(&index_table, flush_key, LuaValue::cfunction(file_flush));
 
     // file:close()
     let close_key = l.create_string("close");
-    l.table_set(&index_table, close_key, LuaValue::cfunction(file_close));
+    l.raw_set(&index_table, close_key, LuaValue::cfunction(file_close));
 
     // file:lines([formats])
     let lines_key = l.create_string("lines");
-    l.table_set(&index_table, lines_key, LuaValue::cfunction(file_lines));
+    l.raw_set(&index_table, lines_key, LuaValue::cfunction(file_lines));
 
     // file:seek([whence [, offset]])
     let seek_key = l.create_string("seek");
-    l.table_set(&index_table, seek_key, LuaValue::cfunction(file_seek));
+    l.raw_set(&index_table, seek_key, LuaValue::cfunction(file_seek));
 
     // file:setvbuf(mode [, size])
     let setvbuf_key = l.create_string("setvbuf");
-    l.table_set(&index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf));
+    l.raw_set(&index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf));
 
     let index_key = l.create_string("__index");
-    l.table_set(&mt, index_key, index_table);
+    l.raw_set(&mt, index_key, index_table);
 
     Ok(mt)
 }
@@ -512,7 +512,7 @@ fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
     // Create state table with file handle
     let state_table = l.create_table(0, 1);
     let file_key = l.create_string("file");
-    l.table_set(&state_table, file_key, file_val);
+    l.raw_set(&state_table, file_key, file_val);
 
     l.push_value(LuaValue::cfunction(file_lines_iterator))?;
     l.push_value(state_table)?;
@@ -527,7 +527,7 @@ fn file_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("iterator requires state".to_string()))?;
     let file_key = l.create_string("file");
     let file_val = l
-        .table_get(&state_val, &file_key)
+        .raw_get(&state_val, &file_key)
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
 
     // Read next line

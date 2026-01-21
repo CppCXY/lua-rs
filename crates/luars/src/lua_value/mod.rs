@@ -194,7 +194,7 @@ impl LuaUserdata {
         }
     }
 
-    pub fn set_metatable(&mut self, metatable: LuaValue) {
+    pub(crate) fn set_metatable(&mut self, metatable: LuaValue) {
         if let Some(table_ptr) = metatable.as_table_ptr() {
             self.metatable = table_ptr;
         } else if metatable.is_nil() {

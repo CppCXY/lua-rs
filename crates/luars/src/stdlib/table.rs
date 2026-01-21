@@ -83,7 +83,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
 
     let mut parts = Vec::new();
     for idx in i..=j {
-        if let Some(value) = table.get_int(idx) {
+        if let Some(value) = table.raw_geti(idx) {
             if let Some(s) = value.as_str() {
                 parts.push(s.to_string());
             } else {
@@ -122,7 +122,14 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         };
         // Append at position len + 1 (1-based indexing)
         match table_ref.insert_array_at(len as i64 + 1, value) {
-            Ok(_) => {}
+            Ok(new_key) => {
+                if new_key {
+                    // New key inserted - run GC barrier
+                    if value.is_collectable() {
+                        l.vm_mut().gc.barrier_back(table_val.as_gc_ptr().unwrap());
+                    }
+                }
+            }
             Err(e) => {
                 return Err(l.error(format!("error inserting into table: {}", e)));
             }
@@ -146,7 +153,14 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
         };
         match table_ref.insert_array_at(pos, value) {
-            Ok(_) => {}
+            Ok(new_key) => {
+                if new_key {
+                    // New key inserted - run GC barrier
+                    if value.is_collectable() {
+                        l.vm_mut().gc.barrier_back(table_val.as_gc_ptr().unwrap());
+                    }
+                }
+            }
             Err(e) => {
                 return Err(l.error(format!("error inserting into table: {}", e)));
             }
@@ -233,7 +247,7 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
 
     let mut values = Vec::new();
     for i in f..=e {
-        let val = src_ref.get_int(i).unwrap_or(LuaValue::nil());
+        let val = src_ref.raw_geti(i).unwrap_or(LuaValue::nil());
         values.push(val);
     }
 
@@ -241,7 +255,7 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #5 to 'move' (table expected)".to_string()));
     };
     for (offset, val) in values.into_iter().enumerate() {
-        dst_ref.set_int(t + offset as i64, val);
+        dst_ref.raw_seti(t + offset as i64, val);
     }
 
     l.push_value(dst_value)?;
@@ -255,15 +269,15 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
 
     // Set 'n' field
     let n_key = l.create_string("n");
-    let Some(table_ref) = table.as_table_mut() else {
+    if !table.is_table() {
         return Err(l.error("failed to create table".to_string()));
     };
 
     for (i, arg) in args.iter().enumerate() {
-        table_ref.set_int(i as i64 + 1, arg.clone());
+        l.raw_seti(&table, i as i64 + 1, arg.clone());
     }
 
-    table_ref.raw_set(&n_key, LuaValue::integer(args.len() as i64));
+    l.raw_set(&table, n_key, LuaValue::integer(args.len() as i64));
     l.push_value(table)?;
     Ok(1)
 }
@@ -295,7 +309,7 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     // Collect all values
     let mut values = Vec::new();
     for idx in i..=j {
-        values.push(table_ref.get_int(idx).unwrap_or(LuaValue::nil()));
+        values.push(table_ref.raw_geti(idx).unwrap_or(LuaValue::nil()));
     }
 
     // Push values after vm borrow ends

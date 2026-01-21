@@ -1533,12 +1533,8 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
 
                     // Set table[key] = value
                     // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
-                    if let Some(table) = table_value.as_table_mut() {
-                        table.raw_set(&key, value);
-
-                        // CRITICAL: GC write barrier
-                        let table_ptr = table_value.as_table_ptr().unwrap();
-                        lua_state.gc_barrier_back(table_ptr.into());
+                    if table_value.is_table() {
+                        lua_state.raw_set(&table_value, key, value);
                     }
                 }
 

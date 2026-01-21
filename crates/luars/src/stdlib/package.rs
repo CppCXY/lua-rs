@@ -22,7 +22,7 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
         .get_global("package")
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
-    let Some(package) = package_table.as_table_mut() else {
+    if !package_table.is_table() {
         return Err(l.error("package must be a table".to_string()));
     };
 
@@ -53,16 +53,16 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     let searchers_table = searchers_table_value.as_table_mut().unwrap();
 
     // Fill searchers array
-    searchers_table.set_int(1, LuaValue::cfunction(searcher_preload));
-    searchers_table.set_int(2, LuaValue::cfunction(searcher_lua));
+    searchers_table.raw_seti(1, LuaValue::cfunction(searcher_preload));
+    searchers_table.raw_seti(2, LuaValue::cfunction(searcher_lua));
 
     // Set all fields in package table
-    package.raw_set(&loaded_key, loaded_table);
-    package.raw_set(&preload_key, preload_table);
-    package.raw_set(&path_key, path_value);
-    package.raw_set(&cpath_key, cpath_value);
-    package.raw_set(&config_key, config_value);
-    package.raw_set(&searchers_key, searchers_table_value);
+    l.raw_set(&package_table, loaded_key, loaded_table);
+    l.raw_set(&package_table, preload_key, preload_table);
+    l.raw_set(&package_table, path_key, path_value);
+    l.raw_set(&package_table, cpath_key, cpath_value);
+    l.raw_set(&package_table, config_key, config_value);
+    l.raw_set(&package_table, searchers_key, searchers_table_value);
 
     Ok(())
 }

@@ -606,7 +606,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
                 l.create_string(&m.captures[0])
             };
 
-            let result_val = l.table_get(&repl_value, &key).unwrap_or(LuaValue::nil());
+            let result_val = l.raw_get(&repl_value, &key).unwrap_or(LuaValue::nil());
 
             let replacement = if result_val.is_nil() {
                 // nil means no replacement, use original match
@@ -654,9 +654,9 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
     let state_table = l.create_table(3, 0);
 
     if let Some(state_ref) = state_table.as_table_mut() {
-        state_ref.set_int(1, s_value);
-        state_ref.set_int(2, pattern_value);
-        state_ref.set_int(3, LuaValue::integer(0)); // position
+        state_ref.raw_seti(1, s_value);
+        state_ref.raw_seti(2, pattern_value);
+        state_ref.raw_seti(3, LuaValue::integer(0)); // position
     }
 
     // Return: iterator function, state table, nil (initial control variable)
@@ -680,21 +680,21 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Extract string, pattern, and position from state
-    let Some(s_val) = state_ref.get_int(1) else {
+    let Some(s_val) = state_ref.raw_geti(1) else {
         return Err(l.error("gmatch iterator: string not found in state".to_string()));
     };
     let Some(s_str) = s_val.as_str() else {
         return Err(l.error("gmatch iterator: string invalid".to_string()));
     };
 
-    let Some(pattern_val) = state_ref.get_int(2) else {
+    let Some(pattern_val) = state_ref.raw_geti(2) else {
         return Err(l.error("gmatch iterator: pattern not found in state".to_string()));
     };
     let Some(pattern_str) = pattern_val.as_str() else {
         return Err(l.error("gmatch iterator: pattern invalid".to_string()));
     };
 
-    let position_value = state_ref.get_int(3).unwrap_or(LuaValue::integer(0));
+    let position_value = state_ref.raw_geti(3).unwrap_or(LuaValue::integer(0));
     let position = position_value.as_integer().unwrap_or(0) as usize;
 
     // Parse pattern
@@ -708,7 +708,7 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
         // Update position for next iteration
         let next_pos = if end > start { end } else { end + 1 };
         if let Some(state_ref) = state_table_value.as_table_mut() {
-            state_ref.set_int(3, LuaValue::integer(next_pos as i64));
+            state_ref.raw_seti(3, LuaValue::integer(next_pos as i64));
         }
 
         // Return captures if any, otherwise return the matched string

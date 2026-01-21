@@ -240,9 +240,18 @@ impl LuaState {
     /// Old values remain in stack array but are considered "garbage"
     #[inline(always)]
     pub fn set_top(&mut self, new_top: usize) {
+        let old_top = self.stack_top;
         // Ensure physical stack is large enough
         if new_top > self.stack.len() {
             self.stack.resize(new_top, LuaValue::nil());
+        } else if new_top > old_top {
+            // IMPORTANT: When growing the logical top within existing capacity,
+            // clear newly-exposed slots to avoid resurrecting stale values.
+            // Lua keeps inactive stack slots as nil, so raising top does not
+            // accidentally create extra GC roots.
+            for slot in &mut self.stack[old_top..new_top] {
+                *slot = LuaValue::nil();
+            }
         }
         self.stack_top = new_top;
     }
@@ -268,16 +277,6 @@ impl LuaState {
         }
         self.stack[index] = value;
         Ok(())
-    }
-
-    /// DEPRECATED: Use set_top() instead
-    /// Old version that truncates stack - this is WRONG in Lua's model!
-    /// Kept for backward compatibility but should not be used
-    #[deprecated(note = "Use set_top() instead - this truncates stack incorrectly")]
-    #[inline(always)]
-    pub fn set_stack_top(&mut self, new_top: usize) {
-        // Just delegate to set_top which does the right thing
-        self.set_top(new_top);
     }
 
     /// Insert a value at a specific stack position, shifting everything after it
@@ -829,13 +828,21 @@ impl LuaState {
     // ===== Table Operations =====
 
     /// Get value from table
-    pub fn table_get(&mut self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        self.vm_mut().table_get(table, key)
+    pub fn raw_get(&mut self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        self.vm_mut().raw_get(table, key)
     }
 
     /// Set value in table
-    pub fn table_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
-        self.vm_mut().table_set(table, key, value)
+    pub fn raw_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
+        self.vm_mut().raw_set(table, key, value)
+    }
+
+    pub fn raw_geti(&mut self, table: &LuaValue, index: i64) -> Option<LuaValue> {
+        self.vm_mut().raw_geti(table, index)
+    }
+
+    pub fn raw_seti(&mut self, table: &LuaValue, index: i64, value: LuaValue) -> bool {
+        self.vm_mut().raw_seti(table, index, value)
     }
 
     // ===== Protected Call (pcall/xpcall) =====
@@ -1420,6 +1427,13 @@ impl LuaState {
         use crate::lua_vm::get_metamethod_event;
 
         for gc_ptr in to_finalize {
+            // Lua 5.5: udata2finalize() resets FINALIZEDBIT before calling __gc.
+            // This ensures resurrected objects are not finalized again unless
+            // they are explicitly re-registered.
+            if let Some(header) = gc_ptr.header_mut() {
+                header.clear_finalized();
+            }
+
             // Convert GcId to LuaValue
             let obj_value = match gc_ptr {
                 GcObjectPtr::Table(ptr) => LuaValue::table(ptr),

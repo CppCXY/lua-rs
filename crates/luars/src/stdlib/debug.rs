@@ -100,11 +100,11 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
     // Set some basic fields
     let source_key = vm.create_string("source");
     let source_val = vm.create_string("=[C]");
-    vm.table_set(&info_table, source_key, source_val);
+    vm.raw_set(&info_table, source_key, source_val);
 
     let what_key = vm.create_string("what");
     let what_val = vm.create_string("C");
-    vm.table_set(&info_table, what_key, what_val);
+    vm.raw_set(&info_table, what_key, what_val);
 
     l.push_value(info_table)?;
     Ok(1)
@@ -145,6 +145,9 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
             table.set_metatable(None);
         }
     }
+
+    // Register for finalization if __gc is present
+    l.vm_mut().gc.check_finalizer(&value);
 
     l.push_value(value)?;
     Ok(1)

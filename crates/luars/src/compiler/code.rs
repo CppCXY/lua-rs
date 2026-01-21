@@ -1068,9 +1068,8 @@ fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> 
     fs.chunk.constants.push(value.clone());
 
     // Store key->index mapping in kcache table (lcode.c:575-576)
-    if let Some(kcache_table) = fs.kcache.as_table_mut() {
-        kcache_table.raw_set(&key, LuaValue::integer(idx as i64));
-    }
+    fs.vm
+        .raw_set(&fs.kcache, key, LuaValue::integer(idx as i64));
 
     idx
 }

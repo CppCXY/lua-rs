@@ -44,7 +44,7 @@ impl LuaTable {
         }
     }
 
-    pub fn set_metatable(&mut self, metatable: Option<LuaValue>) {
+    pub(crate) fn set_metatable(&mut self, metatable: Option<LuaValue>) {
         if let Some(meta) = metatable {
             if let Some(table_ptr) = meta.as_table_ptr() {
                 self.meta = table_ptr;
@@ -72,7 +72,7 @@ impl LuaTable {
         }
     }
 
-    pub fn get_int(&self, key: i64) -> Option<LuaValue> {
+    pub fn raw_geti(&self, key: i64) -> Option<LuaValue> {
         match &self.impl_table {
             // LuaTableDetail::TypedArray(arr) => arr.get_int(key),
             LuaTableDetail::ValueArray(arr) => arr.get_int(key),
@@ -141,7 +141,7 @@ impl LuaTable {
         }
     }
 
-    pub fn set_int(&mut self, key: i64, value: LuaValue) {
+    pub(crate) fn raw_seti(&mut self, key: i64, value: LuaValue) {
         let r = match &mut self.impl_table {
             // LuaTableDetail::TypedArray(arr) => arr.set_int(key, value),
             LuaTableDetail::ValueArray(arr) => arr.set_int(key, value),
@@ -149,7 +149,9 @@ impl LuaTable {
         };
 
         match r {
-            LuaInsertResult::Success | LuaInsertResult::Failure => {}
+            LuaInsertResult::Update
+            | LuaInsertResult::NewKeyInserted
+            | LuaInsertResult::Failure => {}
             LuaInsertResult::NeedConvertToValueArray => {
                 self.migrate_to_value_array();
                 if let LuaTableDetail::ValueArray(arr) = &mut self.impl_table {
@@ -173,7 +175,8 @@ impl LuaTable {
         }
     }
 
-    pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) {
+    /// return true if new key inserted, false if updated existing key
+    pub(crate) fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
         let r = match &mut self.impl_table {
             // LuaTableDetail::TypedArray(arr) => arr.raw_set(key, value),
             LuaTableDetail::ValueArray(arr) => arr.raw_set(key, value),
@@ -181,18 +184,23 @@ impl LuaTable {
         };
 
         match r {
-            LuaInsertResult::Success | LuaInsertResult::Failure => {}
+            LuaInsertResult::Update | LuaInsertResult::Failure => false,
+            LuaInsertResult::NewKeyInserted => true,
             LuaInsertResult::NeedConvertToValueArray => {
                 self.migrate_to_value_array();
                 if let LuaTableDetail::ValueArray(arr) = &mut self.impl_table {
                     arr.raw_set(key, value);
                 }
+
+                true
             }
             LuaInsertResult::NeedConvertToHashTable => {
                 self.migrate_to_hash_table();
                 if let LuaTableDetail::HashTable(map) = &mut self.impl_table {
                     map.raw_set(key, value);
                 }
+
+                true
             }
         }
     }
@@ -205,7 +213,9 @@ impl LuaTable {
         }
     }
 
-    pub fn insert_array_at(&mut self, i: i64, value: LuaValue) -> LuaResult<()> {
+    /// Insert value at array index i (1-based)
+    /// return true if new key inserted, false if updated existing key
+    pub(crate) fn insert_array_at(&mut self, i: i64, value: LuaValue) -> LuaResult<bool> {
         let index = (i - 1) as usize;
         let r = match &mut self.impl_table {
             // LuaTableDetail::TypedArray(arr) => arr.insert_at(index, value),
@@ -214,7 +224,8 @@ impl LuaTable {
         };
 
         match r {
-            LuaInsertResult::Success => {}
+            LuaInsertResult::Update => return Ok(false),
+            LuaInsertResult::NewKeyInserted => {}
             LuaInsertResult::Failure => return Err(LuaError::IndexOutOfBounds),
             LuaInsertResult::NeedConvertToValueArray => {
                 self.migrate_to_value_array();
@@ -229,7 +240,8 @@ impl LuaTable {
                 }
             }
         }
-        Ok(())
+
+        Ok(true)
     }
 
     pub fn remove_array_at(&mut self, i: i64) -> LuaResult<LuaValue> {
@@ -329,7 +341,8 @@ pub enum LuaTableDetail {
 }
 
 pub enum LuaInsertResult {
-    Success,
+    Update,
+    NewKeyInserted,
     NeedConvertToValueArray,
     NeedConvertToHashTable,
     Failure,

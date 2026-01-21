@@ -53,7 +53,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Mark module as being loaded to prevent recursion
-    loaded_table.raw_set(&modname_val, LuaValue::boolean(false));
+    l.raw_set(&loaded_val, modname_val, LuaValue::boolean(false));
 
     // Get package.searchers
     let searchers_key = l.create_string("searchers");
@@ -72,7 +72,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     // Try each searcher (iterate until we hit nil)
     let mut i = 1;
     loop {
-        let searcher = searchers_table.get_int(i as i64).unwrap_or(LuaValue::nil());
+        let searcher = searchers_table.raw_geti(i as i64).unwrap_or(LuaValue::nil());
 
         if searcher.is_nil() {
             break;
@@ -188,7 +188,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         };
 
         // Store in package.loaded
-        loaded_table.raw_set(&modname_val, final_result);
+        l.raw_set(&loaded_val, modname_val, final_result);
 
         // Clean up stack and return result
         l.set_top(loader_func_idx);
@@ -199,6 +199,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     // No searcher found the module
     // Clean up the false marker from package.loaded
     loaded_table.raw_set(&modname_val, LuaValue::nil());
+    // donot need trace gc
 
     let error_msg = if error_messages.is_empty() {
         format!("module '{}' not found", modname_str)

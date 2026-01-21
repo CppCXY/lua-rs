@@ -47,7 +47,7 @@ pub fn exec_gettable(
         let direct_result = unsafe {
             if pttisinteger(&rc as *const LuaValue) {
                 let key = pivalue(&rc as *const LuaValue);
-                table.get_int(key)
+                table.raw_geti(key)
             } else {
                 table.raw_get(&rc)
             }
@@ -111,16 +111,10 @@ pub fn exec_settable(
     };
 
     // OPTIMIZED: Fast path - check if we can avoid metamethod call
-    if let Some(table) = ra.as_table_mut() {
+    if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
             // Fast path: no metatable, directly set
-            table.raw_set(&rb, val);
-
-            // When modifying a BLACK table, we must call barrier_back to re-gray it
-            // This ensures weak tables are re-traversed in subsequent GC cycles
-            let table_ptr = ra.as_table_ptr().unwrap();
-            lua_state.gc_barrier_back(table_ptr.into());
-
+            lua_state.raw_set(&ra, rb, val);
             lua_state.check_gc()?;
             return Ok(());
         }
@@ -169,7 +163,7 @@ pub fn exec_geti(
 
     let result = if let Some(table) = rb.as_table_mut() {
         // Fast path: try direct table access - OPTIMIZED: Direct pointer
-        let direct_result = table.get_int(c as i64);
+        let direct_result = table.raw_geti(c as i64);
 
         if direct_result.is_some() {
             direct_result
@@ -248,7 +242,7 @@ pub fn exec_seti(
     if let Some(table) = ra.as_table_mut() {
         if !table.has_metatable() {
             // Fast path: no __newindex, directly set
-            table.set_int(b as i64, value);
+            table.raw_seti(b as i64, value);
             lua_state.check_gc()?;
         } else {
             // Slow path: has __newindex metamethod
@@ -373,15 +367,10 @@ pub fn exec_setfield(
     };
 
     // OPTIMIZED: Fast path - check if we can avoid metamethod call
-    if let Some(table) = ra.as_table_mut() {
+    if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
             // Fast path: no __newindex metamethod, directly set
-            table.raw_set(&key, value);
-
-            // CRITICAL: GC write barrier
-            let table_ptr = ra.as_table_ptr().unwrap();
-            lua_state.gc_barrier_back(table_ptr.into());
-
+            lua_state.raw_set(&ra, key, value);
             lua_state.check_gc()?;
             return Ok(());
         }

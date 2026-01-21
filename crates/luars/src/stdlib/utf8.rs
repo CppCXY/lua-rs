@@ -164,7 +164,7 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("utf8.codes iterator: invalid state".to_string()));
     };
 
-    let Some(s_val) = table.get_int(string_key) else {
+    let Some(s_val) = table.raw_geti(string_key) else {
         return Err(l.error("utf8.codes iterator: string not found".to_string()));
     };
 
@@ -173,7 +173,7 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let pos = table
-        .get_int(position_key)
+        .raw_geti(position_key)
         .and_then(|v| v.as_integer())
         .unwrap_or(0) as usize;
 
@@ -190,12 +190,11 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
         let code_point = ch as u32;
 
         // Update position in the state table
-        if let Some(table) = t_value.as_table_mut() {
-            table.raw_set(
-                &LuaValue::integer(position_key),
-                LuaValue::integer((pos + char_len) as i64),
-            );
-        }
+        l.raw_seti(
+            &t_value,
+            position_key,
+            LuaValue::integer((pos + char_len) as i64),
+        );
 
         l.push_value(LuaValue::integer((pos + 1) as i64))?; // 1-based position
         l.push_value(LuaValue::integer(code_point as i64))?;

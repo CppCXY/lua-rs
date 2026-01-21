@@ -89,7 +89,7 @@ impl LuaVM {
         vm.set_global("_ENV", globals_value);
 
         // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
-        vm.registry_set_integer(1, globals_value);
+        vm.registry_seti(1, globals_value);
 
         vm
     }
@@ -99,26 +99,13 @@ impl LuaVM {
     }
 
     /// Set a value in the registry by integer key
-    pub fn registry_set_integer(&mut self, key: i64, value: LuaValue) {
-        if let Some(reg_table) = self.registry.as_table_mut() {
-            reg_table.set_int(key, value.clone());
-
-            // CRITICAL: GC write barrier
-            // Registry is a long-lived root table; it can be BLACK during incremental marking.
-            // Any insertion of a collectable value must preserve the tri-color invariant.
-            if value.is_collectable() {
-                self.gc.barrier_back(self.registry.as_gc_ptr().unwrap());
-            }
-        }
+    pub fn registry_seti(&mut self, key: i64, value: LuaValue) {
+        self.raw_seti(&self.registry.clone(), key, value);
     }
 
     /// Get a value from the registry by integer key
-    pub fn registry_get_integer(&self, key: i64) -> Option<LuaValue> {
-        if let Some(reg_table) = self.registry.as_table_mut() {
-            return reg_table.get_int(key);
-        }
-
-        None
+    pub fn registry_geti(&self, key: i64) -> Option<LuaValue> {
+        self.raw_geti(&self.registry, key)
     }
 
     /// Set a value in the registry by string key
@@ -127,17 +114,13 @@ impl LuaVM {
 
         // Use VM table_set so we always run the GC barrier
         let registry = self.registry;
-        let _ = self.table_set(&registry, key_value, value);
+        self.raw_set(&registry, key_value, value);
     }
 
     /// Get a value from the registry by string key
     pub fn registry_get(&mut self, key: &str) -> Option<LuaValue> {
         let key = self.create_string(key);
-        if let Some(reg_table) = self.registry.as_table_mut() {
-            return reg_table.raw_get(&key);
-        }
-
-        None
+        self.raw_get(&self.registry, &key)
     }
 
     pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
@@ -245,7 +228,7 @@ impl LuaVM {
 
         // Use VM table_set so we always run the GC barrier
         let global = self.global;
-        let _ = self.table_set(&global, key, value);
+        self.raw_set(&global, key, value);
     }
 
     /// Set the metatable for all strings
@@ -255,8 +238,8 @@ impl LuaVM {
         let mt_value = self.create_table(0, 1);
 
         // Set __index to point to the string library
-        let index_key = self.create_string("__index");
-        let _ = self.table_set(&mt_value, index_key, string_lib_table);
+        let index_key = self.const_strings.tm_index;
+        self.raw_set(&mt_value, index_key, string_lib_table);
 
         // Store in the VM
         self.string_mt = Some(mt_value);
@@ -312,17 +295,46 @@ impl LuaVM {
     /// This is the correct behavior for Lua bytecode instructions
     /// Only use table_get_with_meta when you explicitly need __index metamethod
     #[inline(always)]
-    pub fn table_get(&self, table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+    pub fn raw_get(&self, table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
         let table = table_value.as_table()?;
         table.raw_get(key)
     }
 
-    #[inline(always)]
-    pub fn table_set(&mut self, table_value: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
+    #[inline]
+    pub fn raw_set(&mut self, table_value: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
         let Some(table) = table_value.as_table_mut() else {
             return false;
         };
-        table.raw_set(&key, value.clone());
+        let new_key = table.raw_set(&key, value);
+        let mut need_barrier = false;
+        if new_key && key.is_collectable() {
+            // New key inserted - run GC barrier
+            need_barrier = true;
+        }
+
+        if value.is_collectable() {
+            need_barrier = true;
+        }
+
+        // GC backward barrier (luaC_barrierback)
+        // Tables use backward barrier since they may be modified many times
+        if need_barrier {
+            self.gc.barrier_back(table_value.as_gc_ptr().unwrap());
+        }
+        true
+    }
+
+    #[inline(always)]
+    pub fn raw_geti(&self, table_value: &LuaValue, key: i64) -> Option<LuaValue> {
+        let table = table_value.as_table()?;
+        table.raw_geti(key)
+    }
+
+    pub fn raw_seti(&mut self, table_value: &LuaValue, key: i64, value: LuaValue) -> bool {
+        let Some(table) = table_value.as_table_mut() else {
+            return false;
+        };
+        table.raw_seti(key, value.clone());
 
         // GC backward barrier (luaC_barrierback)
         // Tables use backward barrier since they may be modified many times

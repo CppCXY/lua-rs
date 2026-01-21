@@ -273,6 +273,13 @@ pub struct GC {
     /// This is filled during GC steps and retrieved by VM later
     pending_actions: GcActions,
 
+    /// Objects pending __gc finalization (Lua 5.5: g->tobefnz)
+    ///
+    /// We keep a Vec instead of a linked list; objects stay in the main pool.
+    /// Items are moved into VM actions only in CallFin state (after sweep),
+    /// matching Lua 5.5 timing.
+    tobefnz: Vec<GcObjectPtr>,
+
     // === GC parameters (from gcparams[LUA_GCPN]) ===
     // Stored as compressed floating-point bytes (like Lua 5.5)
     // Use code_param() to encode, apply_param() to apply
@@ -350,6 +357,7 @@ impl GC {
             gc_stopem: false,
             gc_stopped: false,
             pending_actions: GcActions::default(),
+            tobefnz: Vec::new(),
             gc_params: [
                 code_param(DEFAULT_PAUSE as u32),      // PAUSE = 0
                 code_param(DEFAULT_STEPMUL as u32),    // STEPMUL = 1
@@ -599,6 +607,34 @@ impl GC {
         }
 
         false
+    }
+
+    /// Register an object as finalizable if its metatable has a non-nil __gc.
+    ///
+    /// This mirrors Lua 5.5's luaC_checkfinalizer: objects are put into the
+    /// 'finobj' list when __gc is set. We model this by setting FINALIZEDBIT
+    /// and later, during atomic, moving unreachable ones into `tobefnz`.
+    pub fn check_finalizer(&mut self, value: &LuaValue) {
+        let Some(gc_ptr) = value.as_gc_ptr() else {
+            return;
+        };
+
+        match gc_ptr {
+            GcObjectPtr::Table(_) | GcObjectPtr::Userdata(_) | GcObjectPtr::Thread(_) => {}
+            _ => return,
+        }
+
+        let Some(header) = gc_ptr.header_mut() else {
+            return;
+        };
+
+        if header.to_finalize() {
+            return;
+        }
+
+        if self.needs_finalization(gc_ptr) {
+            header.set_finalized();
+        }
     }
 
     /// Get weak mode for a table (returns None if not weak, or Some((weak_keys, weak_values)))
@@ -1001,9 +1037,11 @@ impl GC {
                 StepResult::Work(100)
             }
             GcState::CallFin => {
-                // In Lua 5.5, this would call finalizers if tobefnz is not empty
-                // For now, we immediately transition to Pause
-                // The actual finalization happens via pending_actions processed by the VM
+                // Lua 5.5: GCScallfin calls pending finalizers from 'tobefnz'.
+                // We delegate the actual calls to the VM via pending_actions.
+                if !self.tobefnz.is_empty() {
+                    self.pending_actions.to_finalize.extend(self.tobefnz.drain(..));
+                }
                 self.gc_state = GcState::Pause;
                 StepResult::Pause
             }
@@ -1066,6 +1104,19 @@ impl GC {
         // Mark roots
         for value in roots.iter() {
             self.mark_value(value);
+        }
+
+        // markbeingfnz(g): mark any object pending finalization from previous cycle
+        if !self.tobefnz.is_empty() {
+            let to_mark = self.tobefnz.clone();
+            for gc_ptr in to_mark {
+                match gc_ptr {
+                    GcObjectPtr::Table(p) => self.mark_value(&LuaValue::table(p)),
+                    GcObjectPtr::Userdata(p) => self.mark_value(&LuaValue::userdata(p)),
+                    GcObjectPtr::Thread(p) => self.mark_value(&LuaValue::thread(p)),
+                    _ => {}
+                }
+            }
         }
 
         // NOTE: Open upvalues are marked separately by VM calling mark_open_upvalues
@@ -1689,8 +1740,45 @@ impl GC {
         let origweak = self.weak.clone();
         let origall = self.allweak.clone();
 
-        // TODO: Handle finalizers (separatetobefnz, markbeingfnz)
-        // For now we skip finalization
+        // 9. separatetobefnz + markbeingfnz + propagateall
+        // Objects are registered as finalizable (in Lua: moved to 'finobj') when
+        // their metatable gets a non-nil __gc. We model this with FINALIZEDBIT.
+        // Here we move unreachable ones (still WHITE) into `tobefnz` and mark them.
+        let pool_len = self.gc_pool.len();
+        for idx in 0..pool_len {
+            let Some(owner) = self.gc_pool.get(idx) else {
+                continue;
+            };
+            let gc_ptr = owner.as_gc_ptr();
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
+
+            // Candidate: unreachable + registered as finalizable (FINALIZEDBIT set)
+            if header.is_white() && header.to_finalize() {
+                if !self.tobefnz.contains(&gc_ptr) {
+                    self.tobefnz.push(gc_ptr);
+                }
+            }
+        }
+
+        if !self.tobefnz.is_empty() {
+            // markbeingfnz: mark any object pending finalization so it (and anything
+            // reachable from it) survives this cycle.
+            let to_mark = self.tobefnz.clone();
+            for gc_ptr in to_mark {
+                match gc_ptr {
+                    GcObjectPtr::Table(p) => self.mark_value(&LuaValue::table(p)),
+                    GcObjectPtr::Userdata(p) => self.mark_value(&LuaValue::userdata(p)),
+                    GcObjectPtr::Thread(p) => self.mark_value(&LuaValue::thread(p)),
+                    _ => {}
+                }
+            }
+
+            while !self.gray.is_empty() {
+                self.propagate_mark();
+            }
+        }
 
         // Second convergence after potential resurrection
         self.converge_ephemerons();
@@ -1749,8 +1837,8 @@ impl GC {
                 "GcHeader.index mismatch during sweep (pool corrupted?)"
             );
 
-            // Check if object is dead (not fixed and wrong white)
-            if !header.is_fixed() && header.is_dead(other_white) {
+            // Check if object is dead (wrong white)
+            if header.is_dead(other_white) {
                 // Dead object - remove it
                 // Save size BEFORE removing (after free, header is invalid!)
                 let size = header.size as usize;
@@ -1771,17 +1859,13 @@ impl GC {
 
                 // DON'T increment sweep_index - the object from end was moved here
                 // Next iteration will check that moved object
-            } else if !header.is_fixed() {
-                // Lua 5.5 sweeplist: Surviving objects reset to current white!
-                // curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
+            } else {
+                // Lua 5.5 sweeplist: surviving objects reset to current white
                 if let Some(header_mut) = gc_ptr.header_mut() {
                     header_mut.make_white(self.current_white);
                     header_mut.set_age(G_NEW);
                 }
                 self.sweep_index += 1; // Move to next
-            } else {
-                // Fixed object, skip
-                self.sweep_index += 1;
             }
 
             count += 1;

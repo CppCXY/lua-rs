@@ -154,7 +154,7 @@ fn table_to_js_array(
     let len = table.len();
 
     for i in 1..=len {
-        if let Some(value) = table.get_int(i as i64) {
+        if let Some(value) = table.raw_geti(i as i64) {
             if !value.is_nil() {
                 let js_value = lua_value_to_js_impl(vm, &value, ctx)?;
                 array.push(&js_value);
@@ -290,9 +290,7 @@ fn js_array_to_lua(
         let lua_elem = js_value_to_lua_impl(vm, &js_elem, ctx)?;
 
         // Lua arrays are 1-indexed
-        if let Some(t) = table.as_table_mut() {
-            t.set_int((i + 1) as i64, lua_elem);
-        }
+        vm.raw_set(&table, LuaValue::integer((i + 1) as i64), lua_elem);
     }
 
     ctx.depth -= 1;
@@ -322,10 +320,7 @@ fn js_object_to_lua(
             if let Ok(val_js) = js_sys::Reflect::get(&obj, &key_js) {
                 let lua_key = vm.create_string(&key_str);
                 let lua_value = js_value_to_lua_impl(vm, &val_js, ctx)?;
-
-                if let Some(t) = table.as_table_mut() {
-                    t.raw_set(&lua_key, lua_value);
-                }
+                vm.raw_set(&table, lua_key, lua_value);
             }
         }
     }

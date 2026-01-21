@@ -154,11 +154,6 @@ impl GcHeader {
         self.marked &= !(1 << FINALIZEDBIT);
     }
 
-    // deprecated method, we need new refactor
-    pub fn is_fixed(&self) -> bool {
-        self.to_finalize()
-    }
-
     // ============ Color Transitions ============
 
     /// Make object white with given current_white (0 or 1)
@@ -273,16 +268,6 @@ impl GcHeader {
         !self.is_white()
     }
 
-    /// Legacy method for backward compatibility
-    #[deprecated(note = "Use make_black/make_white directly for clarity")]
-    #[inline(always)]
-    pub fn set_marked(&mut self, marked: bool) {
-        if marked {
-            self.make_black();
-        } else {
-            self.make_white(0);
-        }
-    }
 }
 
 pub struct Gc<T> {

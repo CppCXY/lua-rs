@@ -420,13 +420,8 @@ pub fn finishset(
 
             if tm_val.is_none() {
                 // No metamethod - set directly
-                if let Some(table_ref) = t.as_table_mut() {
-                    table_ref.raw_set(key, value);
-
-                    // CRITICAL: GC write barrier
-                    let table_ptr = t.as_table_ptr().unwrap();
-                    lua_state.gc_barrier_back(table_ptr.into());
-
+                if t.is_table() {
+                    lua_state.raw_set(&t, *key, value);
                     return Ok(true);
                 }
             }

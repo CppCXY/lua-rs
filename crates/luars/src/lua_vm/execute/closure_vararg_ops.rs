@@ -116,7 +116,7 @@ pub fn exec_vararg(
             // Direct pointer access
             let mut values = Vec::with_capacity(touse);
             for i in 0..touse {
-                let val = table.get_int((i + 1) as i64).unwrap_or(LuaValue::nil());
+                let val = table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil());
                 values.push(val);
             }
             // Now write to stack
@@ -204,7 +204,7 @@ pub fn exec_varargprep(
             if let Some(table_ref) = table_val.as_table_mut() {
                 // Populate array first (ValueArray will push)
                 for (i, val) in args.into_iter().enumerate() {
-                    table_ref.set_int((i + 1) as i64, val);
+                    table_ref.raw_seti((i + 1) as i64, val);
                 }
                 // Set "n" last (ValueArray will confirm matching length or resize)
                 table_ref.raw_set(&n_str, n_val);
@@ -295,7 +295,7 @@ pub fn exec_setlist(
             for i in 1..=vb {
                 let val = stack_ptr.add(base + a + i);
                 let index = (vc + i) as i64;
-                table.set_int(index, *val);
+                table.raw_seti(index, *val);
             }
         }
     }

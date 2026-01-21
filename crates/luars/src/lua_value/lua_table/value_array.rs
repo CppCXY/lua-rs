@@ -27,11 +27,12 @@ impl LuaTableImpl for LuaValueArray {
             self.array[index] = value;
         } else if index == self.array.len() {
             self.array.push(value);
+            return LuaInsertResult::NewKeyInserted;
         } else {
             return LuaInsertResult::NeedConvertToHashTable;
         }
 
-        LuaInsertResult::Success
+        LuaInsertResult::Update
     }
 
     fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
@@ -60,7 +61,7 @@ impl LuaTableImpl for LuaValueArray {
                     } else {
                         self.array.truncate(new_len);
                     }
-                    LuaInsertResult::Success
+                    LuaInsertResult::Update
                 } else {
                     // Setting n to non-integer?
                     LuaInsertResult::NeedConvertToHashTable
@@ -103,7 +104,7 @@ impl LuaTableImpl for LuaValueArray {
             return LuaInsertResult::NeedConvertToHashTable;
         }
 
-        LuaInsertResult::Success
+        LuaInsertResult::Update
     }
 
     fn remove_at(&mut self, index: usize) -> LuaResult<LuaValue> {

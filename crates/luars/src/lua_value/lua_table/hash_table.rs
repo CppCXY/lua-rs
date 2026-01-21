@@ -54,13 +54,13 @@ impl LuaTableImpl for LuaHashTable {
 
         if value.is_nil() {
             self.map.shift_remove(&key_value);
-            self.update_array_len_remove(key);
+            self.update_array_len_remove(key)
         } else {
             self.map.insert(key_value, value);
-            self.update_array_len_insert(key);
+            self.update_array_len_insert(key)
         }
 
-        LuaInsertResult::Success
+        LuaInsertResult::Update
     }
 
     fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
@@ -68,18 +68,22 @@ impl LuaTableImpl for LuaHashTable {
     }
 
     fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> LuaInsertResult {
+        let mut result = LuaInsertResult::Update;
         if value.is_nil() {
             self.map.shift_remove(key);
             if let Some(k) = key.as_integer() {
                 self.update_array_len_remove(k);
             }
         } else {
-            self.map.insert(*key, value);
+            if self.map.insert(*key, value).is_none() {
+                result = LuaInsertResult::NewKeyInserted;
+            }
             if let Some(k) = key.as_integer() {
                 self.update_array_len_insert(k);
             }
         }
-        LuaInsertResult::Success
+        
+        result
     }
 
     fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
@@ -101,7 +105,7 @@ impl LuaTableImpl for LuaHashTable {
     }
 
     fn insert_at(&mut self, _index: usize, _value: LuaValue) -> LuaInsertResult {
-        LuaInsertResult::Success
+        LuaInsertResult::Update
     }
 
     fn remove_at(&mut self, _index: usize) -> LuaResult<LuaValue> {

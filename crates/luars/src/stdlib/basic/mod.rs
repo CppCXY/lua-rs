@@ -328,7 +328,7 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(index) = index_val.as_integer() {
             let next_index = index + 1;
 
-            if let Some(value) = table.get_int(next_index) {
+            if let Some(value) = table.raw_geti(next_index) {
                 // Return (next_index, value)
                 l.push_value(LuaValue::integer(next_index))?;
                 l.push_value(value)?;
@@ -512,6 +512,9 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
             }
         }
     }
+
+    // Lua 5.5: luaC_checkfinalizer - register object if __gc is present
+    l.vm_mut().gc.check_finalizer(&table);
     // Return the original table
     l.push_value(table)?;
     Ok(1)
@@ -549,7 +552,7 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
     if table.is_table() {
         // CRITICAL: rawset must still run the GC write barrier.
         // Using VM's table_set keeps semantics (no metamethods) while preserving tri-color.
-        l.table_set(&table, key, value);
+        l.raw_set(&table, key, value);
         l.push_value(table)?;
         return Ok(1);
     }

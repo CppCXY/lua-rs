@@ -33,24 +33,24 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
         .get_global("io")
         .ok_or_else(|| l.error("io table not found".to_string()))?;
 
-    let Some(io_tbl) = io_table.as_table_mut() else {
+    if !io_table.is_table() {
         return Err(l.error("io must be a table".to_string()));
     };
 
     // Create stdin
     let stdin_val = create_stdin(l)?;
     let stdin_key = l.create_string("stdin");
-    io_tbl.raw_set(&stdin_key, stdin_val);
+    l.raw_set(&io_table, stdin_key, stdin_val);
 
     // Create stdout
     let stdout_val = create_stdout(l)?;
     let stdout_key = l.create_string("stdout");
-    io_tbl.raw_set(&stdout_key, stdout_val);
+    l.raw_set(&io_table, stdout_key, stdout_val);
 
     // Create stderr
     let stderr_val = create_stderr(l)?;
     let stderr_key = l.create_string("stderr");
-    io_tbl.raw_set(&stderr_key, stderr_val);
+    l.raw_set(&io_table, stderr_key, stderr_val);
 
     Ok(())
 }
@@ -65,6 +65,9 @@ fn create_stdin(l: &mut LuaState) -> LuaResult<LuaValue> {
         ud.set_metatable(file_mt);
     }
 
+    // Register userdata for __gc finalization if present
+    l.vm_mut().gc.check_finalizer(&userdata);
+
     Ok(userdata)
 }
 
@@ -78,6 +81,9 @@ fn create_stdout(l: &mut LuaState) -> LuaResult<LuaValue> {
         ud.set_metatable(file_mt);
     }
 
+    // Register userdata for __gc finalization if present
+    l.vm_mut().gc.check_finalizer(&userdata);
+
     Ok(userdata)
 }
 
@@ -90,6 +96,9 @@ fn create_stderr(l: &mut LuaState) -> LuaResult<LuaValue> {
     if let Some(ud) = userdata.as_userdata_mut() {
         ud.set_metatable(file_mt);
     }
+
+    // Register userdata for __gc finalization if present
+    l.vm_mut().gc.check_finalizer(&userdata);
 
     Ok(userdata)
 }
@@ -241,6 +250,12 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
                 ud.set_metatable(file_mt);
             }
 
+            // Register userdata for __gc finalization if present
+            l.vm_mut().gc.check_finalizer(&userdata);
+
+            // Register userdata for __gc finalization if present
+            l.vm_mut().gc.check_finalizer(&userdata);
+
             l.push_value(userdata)?;
             Ok(1)
         }
@@ -279,10 +294,13 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                     ud.set_metatable(file_mt);
                 }
 
+                // Register userdata for __gc finalization if present
+                l.vm_mut().gc.check_finalizer(&userdata);
+
                 // Create state table with file handle
                 let state_table = l.create_table(0, 1);
                 let file_key = l.create_string("file");
-                l.table_set(&state_table, file_key, userdata);
+                l.raw_set(&state_table, file_key, userdata);
 
                 l.push_value(LuaValue::cfunction(io_lines_iterator))?;
                 l.push_value(state_table)?;
@@ -304,7 +322,7 @@ fn io_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("iterator requires state".to_string()))?;
     let file_key = l.create_string("file");
     let file_val = l
-        .table_get(&state_val, &file_key)
+        .raw_get(&state_val, &file_key)
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
 
     // Read next line
