@@ -239,10 +239,10 @@ pub fn exec_seti(
     };
 
     // OPTIMIZED: Fast path - check if we need metamethod call
-    if let Some(table) = ra.as_table_mut() {
+    if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
             // Fast path: no __newindex, directly set
-            table.raw_seti(b as i64, value);
+            lua_state.raw_seti(&ra, b as i64, value);
             lua_state.check_gc()?;
         } else {
             // Slow path: has __newindex metamethod

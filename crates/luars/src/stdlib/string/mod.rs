@@ -707,9 +707,7 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
     if let Some((start, end, captures)) = pattern::find(&s_str, &pattern, position) {
         // Update position for next iteration
         let next_pos = if end > start { end } else { end + 1 };
-        if let Some(state_ref) = state_table_value.as_table_mut() {
-            state_ref.raw_seti(3, LuaValue::integer(next_pos as i64));
-        }
+        l.raw_seti(&state_table_value, 3, LuaValue::integer(next_pos as i64));
 
         // Return captures if any, otherwise return the matched string
         if captures.is_empty() {

@@ -251,11 +251,8 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
         values.push(val);
     }
 
-    let Some(dst_ref) = dst_value.as_table_mut() else {
-        return Err(l.error("bad argument #5 to 'move' (table expected)".to_string()));
-    };
     for (offset, val) in values.into_iter().enumerate() {
-        dst_ref.raw_seti(t + offset as i64, val);
+        l.raw_seti(&dst_value, t + offset as i64, val);
     }
 
     l.push_value(dst_value)?;
