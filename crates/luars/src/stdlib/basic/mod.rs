@@ -736,15 +736,16 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         }
         "incremental" => {
             // LUA_GCINC: Switch to incremental mode
-            let vm = l.vm_mut();
-            let old_mode = match vm.gc.gc_kind {
+            let old_mode = match l.vm_mut().gc.gc_kind {
                 GcKind::Inc => "incremental",
                 GcKind::GenMinor => "generational",
                 GcKind::GenMajor => "generational",
             };
 
+            let vm_ptr = l.vm_ptr();
+            let vm = unsafe { &mut *vm_ptr };
             // Switch to incremental mode (like luaC_changemode in Lua 5.5)
-            vm.gc.change_to_incremental_mode(&mut vm.object_allocator);
+            vm.gc.change_to_incremental_mode(l);
 
             let mode_value = vm.create_string(old_mode);
             l.push_value(mode_value)?;

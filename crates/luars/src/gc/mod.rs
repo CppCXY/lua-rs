@@ -386,7 +386,7 @@ impl GC {
     }
 
     /// Change to incremental mode (like minor2inc in Lua 5.5)
-    pub fn change_to_incremental_mode(&mut self, pool: &mut ObjectAllocator) {
+    pub fn change_to_incremental_mode(&mut self, l: &mut LuaState) {
         if self.gc_kind == GcKind::Inc {
             return; // Already in incremental mode
         }
@@ -403,7 +403,7 @@ impl GC {
         self.survival = None;
 
         // Enter sweep phase (like Lua 5.5's entersweep)
-        self.enter_sweep(pool);
+        self.enter_sweep(l);
 
         // Set debt for next step
         let stepsize = self.apply_param(STEPSIZE, 100);
@@ -971,11 +971,7 @@ impl GC {
     }
 
     /// Single GC step (like singlestep in Lua 5.5)
-    fn single_step(
-        &mut self,
-        l: &mut LuaState,
-        fast: bool,
-    ) -> StepResult {
+    fn single_step(&mut self, l: &mut LuaState, fast: bool) -> StepResult {
         self.gc_stopem = true;
 
         let result = match self.gc_state {
@@ -1089,25 +1085,27 @@ impl GC {
         // Objects from last cycle are now "other white" and will be collected if not marked.
         // NO need to flip again or make_all_white - objects are already the right color!
 
-        // Mark roots
+        // Mark objects
         let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
-        self.mark_object(main_thread_ptr.into());
+        self.mark_object(l, main_thread_ptr.into());
 
-        // markbeingfnz(g): mark any object pending finalization from previous cycle
-        if !self.tobefnz.is_empty() {
-            let to_mark = self.tobefnz.clone();
-            for gc_ptr in to_mark {
-                match gc_ptr {
-                    GcObjectPtr::Table(p) => self.mark_value(&LuaValue::table(p)),
-                    GcObjectPtr::Userdata(p) => self.mark_value(&LuaValue::userdata(p)),
-                    GcObjectPtr::Thread(p) => self.mark_value(&LuaValue::thread(p)),
-                    _ => {}
-                }
+        let registry = l.vm_mut().registry;
+        // markvalue(g, &g->l_registry);
+        self.mark_value(&registry);
+
+        // markmt(g);  /* mark global metatables */
+        for mt in l.vm_mut().get_basic_metatables() {
+            if let Some(mt_ptr) = mt.as_gc_ptr() {
+                self.mark_object(l, mt_ptr.into());
             }
         }
 
-        // NOTE: Open upvalues are marked separately by VM calling mark_open_upvalues
-        // This is because we need thread access to get open_upvalues list
+        // markbeingfnz(g): mark any object pending finalization from previous cycle
+        if !self.tobefnz.is_empty() {
+            for obj_ptr in self.tobefnz.clone() {
+                self.mark_object(l, obj_ptr.into());
+            }
+        }
     }
 
     /// Mark open upvalues from a thread (like Lua 5.5's remarkupvals)
@@ -1569,6 +1567,24 @@ impl GC {
     }
 
     /// Propagate mark for one gray object (like propagatemark in Lua 5.5)
+    /// /*
+    // ** traverse one gray object, turning it to black. Return an estimate
+    // ** of the number of slots traversed.
+    // */
+    // static l_mem propagatemark (global_State *g) {
+    //   GCObject *o = g->gray;
+    //   nw2black(o);
+    //   g->gray = *getgclist(o);  /* remove from 'gray' list */
+    //   switch (o->tt) {
+    //     case LUA_VTABLE: return traversetable(g, gco2t(o));
+    //     case LUA_VUSERDATA: return traverseudata(g, gco2u(o));
+    //     case LUA_VLCL: return traverseLclosure(g, gco2lcl(o));
+    //     case LUA_VCCL: return traverseCclosure(g, gco2ccl(o));
+    //     case LUA_VPROTO: return traverseproto(g, gco2p(o));
+    //     case LUA_VTHREAD: return traversethread(g, gco2th(o));
+    //     default: lua_assert(0); return 0;
+    //   }
+    // }
     fn propagate_mark(&mut self) -> isize {
         if let Some(gc_ptr) = self.gray.pop() {
             self.mark_one(gc_ptr);
@@ -1713,7 +1729,7 @@ impl GC {
     }
 
     /// Atomic phase (like atomic in Lua 5.5)
-    fn atomic(&mut self, roots: &[LuaValue]) {
+    fn atomic(&mut self, l: &mut LuaState) {
         // Lua 5.5's atomic phase does:
         // 1. Set gcstate = GCSatomic
         // 2. Mark running thread, registry, global metatables
@@ -1732,9 +1748,9 @@ impl GC {
         self.gc_state = GcState::Atomic;
 
         // Mark roots again (they may have changed)
-        for value in roots {
-            self.mark_value(value);
-        }
+        // for value in roots {
+        //     self.mark_value(value);
+        // }
 
         // Propagate all marks (empty the gray list)
         while !self.gray.is_empty() {
@@ -1847,7 +1863,7 @@ impl GC {
     /// Here we should ONLY:
     /// 1. Free dead objects (isdeadm check)
     /// 2. Reset surviving objects to current white
-    fn sweep_step(&mut self, pool: &mut ObjectAllocator, fast: bool) -> bool {
+    fn sweep_step(&mut self, l: &mut LuaState, fast: bool) -> bool {
         let max_sweep = if fast { usize::MAX } else { 100 };
         let mut count = 0;
         let other_white = 1 - self.current_white;
@@ -1880,7 +1896,7 @@ impl GC {
 
                 // For strings, remove from interner first
                 if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    pool.remove_str(str_ptr);
+                    l.vm_mut().object_allocator.remove_str(str_ptr);
                 }
 
                 // Free the object (swap_remove: moves last to current_idx)
@@ -1962,11 +1978,7 @@ impl GC {
     }
 
     /// Run GC until reaching a specific state (like luaC_runtilstate in Lua 5.5)
-    pub fn run_until_state(
-        &mut self,
-        l: &mut LuaState,
-        target_state: GcState,
-    ) {
+    pub fn run_until_state(&mut self, l: &mut LuaState, target_state: GcState) {
         // Increase MAX_ITERATIONS to handle large object pools
         // With 100 objects per sweep step, we need more iterations for large heaps
         const MAX_ITERATIONS: usize = 100000;
@@ -1984,7 +1996,7 @@ impl GC {
 
         loop {
             let prev_state = self.gc_state;
-            self.single_step(roots, pool, true);
+            self.single_step(l, true);
             let new_state = self.gc_state;
             iterations += 1;
 
@@ -2078,7 +2090,7 @@ impl GC {
             // CRITICAL: Call restart_collection WHILE STILL IN PAUSE STATE!
             // Lua 5.5's singlestep calls restartcollection() while gcstate==GCSpause,
             // THEN sets gcstate=GCSpropagate.
-            self.restart_collection(roots);
+            self.restart_collection(l);
 
             // NOW transition to Propagate state (like Lua 5.5's singlestep)
             self.gc_state = GcState::Propagate;
@@ -2091,12 +2103,12 @@ impl GC {
 
         // Step 3: Call atomic phase (like youngcollection does)
         // atomic() will process grayagain, converge ephemerons, and clear weak tables
-        self.atomic(roots);
+        self.atomic(l);
 
         // Step 4: Sweep
-        self.enter_sweep(pool);
-        self.run_until_state(GcState::CallFin, roots, pool);
-        self.run_until_state(GcState::Pause, roots, pool);
+        self.enter_sweep(l);
+        self.run_until_state(l, GcState::CallFin);
+        self.run_until_state(l, GcState::Pause);
 
         // set_pause uses total_bytes (actual memory after sweep) as base
         self.set_pause();
@@ -2141,11 +2153,11 @@ impl GC {
     ///   finishgencycle(L, g);
     /// }
     /// ```
-    fn young_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
+    fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
         // Start collection: mark roots
-        self.restart_collection(roots);
+        self.restart_collection(l);
         self.gc_state = GcState::Propagate;
 
         // CRITICAL: Mark OLD1 objects before propagation!
@@ -2161,13 +2173,13 @@ impl GC {
 
         // CRITICAL: Call atomic phase!
         // This flips current_white so sweep can identify dead objects
-        self.atomic(roots);
+        self.atomic(l);
 
         // Enter sweep phase
-        self.enter_sweep(pool);
+        self.enter_sweep(l);
 
         // Complete sweep (fast mode = sweep everything)
-        while !self.sweep_step(pool, true) {
+        while !self.sweep_step(l, true) {
             // Continue sweeping until complete
         }
 
@@ -2180,7 +2192,7 @@ impl GC {
     /// Forward barrier (luaC_barrier_)
     /// Called when a black object 'o' is modified to point to white object 'v'
     /// This maintains the invariant: black objects cannot point to white objects
-    pub fn barrier(&mut self, o_ptr: GcObjectPtr, v_ptr: GcObjectPtr) {
+    pub fn barrier(&mut self, l: &mut LuaState, o_ptr: GcObjectPtr, v_ptr: GcObjectPtr) {
         // Check if 'o' is black and 'v' is white
         let (o_black, o_old) = if let Some(o) = o_ptr.header() {
             (o.is_black(), o.is_old())
@@ -2204,7 +2216,7 @@ impl GC {
         // Must keep invariant during mark phase
         if self.gc_state.keep_invariant() {
             // Mark 'v' immediately to restore invariant
-            self.mark_object(v_ptr);
+            self.mark_object(l, v_ptr);
 
             // Generational invariant: if 'o' is old, make 'v' OLD0
             if o_old {
@@ -2279,13 +2291,31 @@ impl GC {
     }
 
     /// Mark an object (helper for barrier)
-    fn mark_object(&mut self, gc_ptr: GcObjectPtr) {
+    fn mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
         if let Some(header) = gc_ptr.header_mut() {
             // Only need to mark if it is white
             if header.is_white() {
-                match gc_ptr.kind() {
-                    GcObjectKind::String | GcObjectKind::Binary => {
+                match gc_ptr {
+                    GcObjectPtr::String(_) | GcObjectPtr::Binary(_) => {
                         header.make_black(); // Leaves become black immediately
+                    }
+                    GcObjectPtr::Upvalue(upval_ptr) => {
+                        let uv = upval_ptr.as_mut_ref();
+                        if uv.data.is_open() {
+                            uv.header.make_gray();
+                        } else {
+                            uv.header.make_black();
+                        }
+
+                        let value = &uv.data.get_value(l);
+                        self.mark_value(value);
+                    }
+                    GcObjectPtr::Userdata(u_ptr) => {
+                        let ud = u_ptr.as_mut_ref();
+                        ud.header.make_black();
+                        if let Some(metatable) = ud.data.get_metatable() {
+                            self.mark_object(l, metatable.as_gc_ptr().unwrap());
+                        }
                     }
                     _ => {
                         header.make_gray(); // Others become gray
@@ -2301,8 +2331,8 @@ impl GC {
 #[derive(Debug)]
 enum StepResult {
     Work(isize), // Amount of work done
-    Step2Pause,       // Reached pause state
-    AtomicStep,      // Completed atomic phase
+    Step2Pause,  // Reached pause state
+    AtomicStep,  // Completed atomic phase
     #[allow(unused)]
     Step2Minor, // Returned to minor mode
 }

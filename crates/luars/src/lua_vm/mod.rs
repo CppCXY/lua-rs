@@ -10,7 +10,7 @@ mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::GC;
-use crate::lua_value::{Chunk, LuaUserdata, LuaValue};
+use crate::lua_value::{Chunk, LuaUserdata, LuaValue, LuaValueKind};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 use crate::lua_vm::execute::lua_execute;
@@ -676,5 +676,21 @@ impl LuaVM {
 
     pub fn get_main_thread_ptr(&self) -> ThreadPtr {
         self.main_state
+    }
+
+    pub fn get_basic_metatable(&self, kind: LuaValueKind) -> Option<LuaValue> {
+        // support other metatables later
+        match kind {
+            LuaValueKind::String => self.string_mt,
+            _ => None,
+        }
+    }
+
+    pub fn get_basic_metatables(&self) -> Vec<LuaValue> {
+        let mut mts = Vec::new();
+        if let Some(mt) = &self.string_mt {
+            mts.push(mt.clone());
+        }
+        mts
     }
 }

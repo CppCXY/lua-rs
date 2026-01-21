@@ -630,6 +630,10 @@ impl LuaState {
         unsafe { &mut *self.vm }
     }
 
+    pub(crate) fn vm_ptr(&self) -> *mut LuaVM {
+        self.vm
+    }
+
     // ===== Call Frame Management =====
 
     /// Get current CallInfo by index
@@ -1356,7 +1360,7 @@ impl LuaState {
     pub fn gc_barrier(&mut self, upvalue_ptr: UpvaluePtr, value_gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
         let owner_ptr = GcObjectPtr::Upvalue(upvalue_ptr);
-        vm.gc.barrier(owner_ptr, value_gc_ptr);
+        vm.gc.barrier(self, owner_ptr, value_gc_ptr);
     }
 
     /// Backward GC barrier (luaC_barrierback in Lua 5.5)
