@@ -835,9 +835,9 @@ impl PartialEq for LuaValue {
                 return true;
             } else if self.ttisstring() {
                 // Compare string contents
-                let s1 = unsafe { &*(self.value.ptr as *const String) };
-                let s2 = unsafe { &*(other.value.ptr as *const String) };
-                return s1 == s2;
+                let s1 = unsafe { &*(self.value.ptr as *const GcString) };
+                let s2 = unsafe { &*(other.value.ptr as *const GcString) };
+                return &s1.data == &s2.data;
             }
 
             return false;

@@ -216,11 +216,7 @@ impl LuaVM {
 
     pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
         let key = self.create_string(name);
-
-        if let Some(global) = self.global.as_table_mut() {
-            return global.raw_get(&key);
-        }
-        None
+        self.raw_get(&self.global, &key)
     }
 
     pub fn set_global(&mut self, name: &str, value: LuaValue) {
