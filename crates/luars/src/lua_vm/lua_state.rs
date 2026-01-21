@@ -57,6 +57,8 @@ pub struct LuaState {
     _hook_count: i32,
 
     safe_option: SafeOption,
+
+    is_main: bool,
 }
 
 impl LuaState {
@@ -64,8 +66,12 @@ impl LuaState {
     const BASIC_STACK_SIZE: usize = 40;
 
     /// Create a new execution state
-    /// 按需分配，而不是预分配 200 个 CallInfo（像 Lua 5.4）
-    pub fn new(call_stack_size: usize, vm: *mut LuaVM, safe_option: SafeOption) -> Self {
+    pub fn new(
+        call_stack_size: usize,
+        vm: *mut LuaVM,
+        is_main: bool,
+        safe_option: SafeOption,
+    ) -> Self {
         Self {
             vm,
             stack: Vec::with_capacity(Self::BASIC_STACK_SIZE),
@@ -80,6 +86,7 @@ impl LuaState {
             _hook_mask: 0,
             _hook_count: 0,
             safe_option,
+            is_main,
         }
     }
 
@@ -1235,7 +1242,7 @@ impl LuaState {
                         if let Some(stack_idx) = upval_ptr.as_ref().data.get_stack_index() {
                             // Get value from main thread's stack
                             let value = vm
-                                .main_state
+                                .main_state_ref()
                                 .stack
                                 .get(stack_idx)
                                 .copied()
@@ -1362,7 +1369,7 @@ impl LuaState {
 
     pub fn check_gc(&mut self) -> LuaResult<bool> {
         let vm = unsafe { &mut *self.vm };
-        let do_step = vm.check_gc();
+        let do_step = vm.check_gc(self);
 
         // Process any accumulated GC actions (finalizers, weak tables, etc.)
         if vm.gc.has_pending_actions() {
@@ -1375,7 +1382,7 @@ impl LuaState {
 
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
         let vm = unsafe { &mut *self.vm };
-        vm.full_gc(false);
+        vm.full_gc(self, false);
 
         // Process any accumulated GC actions (finalizers, weak tables, etc.)
         if vm.gc.has_pending_actions() {
@@ -1508,10 +1515,14 @@ impl LuaState {
         // Fallback: generic representation
         Ok(format!("{}", value))
     }
+
+    pub fn is_main_thread(&self) -> bool {
+        self.is_main
+    }
 }
 
 impl Default for LuaState {
     fn default() -> Self {
-        Self::new(1, std::ptr::null_mut(), SafeOption::default())
+        Self::new(1, std::ptr::null_mut(), false, SafeOption::default())
     }
 }

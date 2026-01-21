@@ -39,7 +39,10 @@ mod gc_object;
 mod object_allocator;
 mod string_interner;
 
-use crate::lua_value::{Chunk, LuaValue};
+use crate::{
+    lua_value::{Chunk, LuaValue},
+    lua_vm::LuaState,
+};
 pub use gc_kind::*;
 pub use gc_object::*;
 pub use object_allocator::*;
@@ -867,36 +870,24 @@ impl GC {
 
     /// Main GC step function (like luaC_step in Lua 5.5)
     /// Actions are accumulated in pending_actions, retrieve with take_pending_actions()
-    pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
-        self.step_internal(roots, pool, false)
-    }
-
-    /// Internal step function with force parameter
-    /// If force=true, ignore gc_stopped flag (used by collectgarbage("step"))
-    pub fn step_internal(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator, force: bool) {
+    pub fn step(&mut self, l: &mut LuaState) {
         // Lua 5.5 luaC_step:
         // if (!gcrunning(g)) {
         //   if (g->gcstp & GCSTPUSR) luaE_setdebt(g, 20000);
         // } else { ... }
 
         // Check if GC is stopped by user (unless forced)
-        if !force && self.gc_stopped {
+        if self.gc_stopped {
             // Lua 5.5: set reasonable debt to avoid being called at every check
             self.set_debt(20000);
             return;
         }
 
-        // If not forced, check debt
-        // Lua 5.5: luaC_condGC only runs step when GCdebt <= 0
-        if !force && self.gc_debt > 0 {
-            return; // Still have budget, no need to collect
-        }
-
         // Dispatch based on GC mode (like Lua 5.5 luaC_step)
         match self.gc_kind {
-            GcKind::Inc | GcKind::GenMajor => self.inc_step(roots, pool),
+            GcKind::Inc | GcKind::GenMajor => self.inc_step(l),
             GcKind::GenMinor => {
-                self.young_collection(roots, pool);
+                self.young_collection(l);
                 self.set_minor_debt();
             }
         }
@@ -926,7 +917,7 @@ impl GC {
     ///     luaE_setdebt(g, stepsize);
     /// }
     /// ```
-    fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
+    fn inc_step(&mut self, l: &mut LuaState) {
         // l_mem stepsize = applygcparam(g, STEPSIZE, 100);
         let stepsize = self.apply_param(STEPSIZE, 100);
 
@@ -938,18 +929,18 @@ impl GC {
 
         // Repeat until enough work is done (like Lua 5.5's do-while loop)
         loop {
-            let stres = self.single_step(roots, pool, fast);
+            let stres = self.single_step(l, fast);
 
             match stres {
-                StepResult::MinorMode => {
+                StepResult::Step2Minor => {
                     // Returned to minor collections
                     return;
                 }
-                StepResult::Pause => {
+                StepResult::Step2Pause => {
                     // End of cycle (step2pause in Lua)
                     break;
                 }
-                StepResult::Atomic => {
+                StepResult::AtomicStep => {
                     // Atomic step completed (atomicstep in Lua)
                     if !fast {
                         break;
@@ -982,19 +973,14 @@ impl GC {
     /// Single GC step (like singlestep in Lua 5.5)
     fn single_step(
         &mut self,
-        roots: &[LuaValue],
-        pool: &mut ObjectAllocator,
+        l: &mut LuaState,
         fast: bool,
     ) -> StepResult {
-        if self.gc_stopem {
-            return StepResult::Work(0);
-        }
-
         self.gc_stopem = true;
 
         let result = match self.gc_state {
             GcState::Pause => {
-                self.restart_collection(roots);
+                self.restart_collection(l);
                 // Set gc_state to Propagate AFTER restart_collection
                 // This matches Lua 5.5's logic in singlestep case GCSpause
                 self.gc_state = GcState::Propagate;
@@ -1010,12 +996,12 @@ impl GC {
                 }
             }
             GcState::EnterAtomic => {
-                self.atomic(roots);
-                self.enter_sweep(pool);
-                StepResult::Atomic
+                self.atomic(l);
+                self.enter_sweep(l);
+                StepResult::AtomicStep
             }
             GcState::SwpAllGc => {
-                let complete = self.sweep_step(pool, fast);
+                let complete = self.sweep_step(l, fast);
                 if complete {
                     // Only one gc_pool, skip finobj and tobefnz phases
                     self.gc_state = GcState::SwpEnd;
@@ -1045,7 +1031,7 @@ impl GC {
                         .extend(self.tobefnz.drain(..));
                 }
                 self.gc_state = GcState::Pause;
-                StepResult::Pause
+                StepResult::Step2Pause
             }
             GcState::Atomic => {
                 // Should not reach here directly
@@ -1079,7 +1065,7 @@ impl GC {
     /// CRITICAL: Lua 5.5 calls cleargraylists which clears ALL gray lists including weak table lists.
     /// This is safe because restartcollection is only called from GCSpause state,
     /// meaning the previous cycle has completely finished (atomic phase cleared weak tables).
-    fn restart_collection(&mut self, roots: &[LuaValue]) {
+    fn restart_collection(&mut self, l: &mut LuaState) {
         self.stats.collection_count += 1;
 
         // CRITICAL: Reset sweep_index when starting a new cycle
@@ -1104,9 +1090,8 @@ impl GC {
         // NO need to flip again or make_all_white - objects are already the right color!
 
         // Mark roots
-        for value in roots.iter() {
-            self.mark_value(value);
-        }
+        let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
+        self.mark_object(main_thread_ptr.into());
 
         // markbeingfnz(g): mark any object pending finalization from previous cycle
         if !self.tobefnz.is_empty() {
@@ -1846,12 +1831,9 @@ impl GC {
     }
 
     /// Enter sweep phase (like entersweep in Lua 5.5)
-    pub fn enter_sweep(&mut self, _pool: &mut ObjectAllocator) {
+    pub fn enter_sweep(&mut self, _l: &mut LuaState) {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_index = 0; // Reset sweep position
-
-        // No longer need to cache object IDs - we'll iterate through pool directly
-        // This avoids the dangling pointer problem with swap_remove
     }
 
     /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
@@ -1969,10 +1951,6 @@ impl GC {
             debt = 0;
         }
         self.set_debt(debt);
-
-        // With IndexMap, no need to compact - it has no empty slots!
-        // shrink_to_fit() only reduces memory overhead, doesn't affect iteration
-        self.gc_pool.shrink_to_fit();
     }
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
     /// During marking phase, the invariant must be kept
@@ -1986,9 +1964,8 @@ impl GC {
     /// Run GC until reaching a specific state (like luaC_runtilstate in Lua 5.5)
     pub fn run_until_state(
         &mut self,
+        l: &mut LuaState,
         target_state: GcState,
-        roots: &[LuaValue],
-        pool: &mut ObjectAllocator,
     ) {
         // Increase MAX_ITERATIONS to handle large object pools
         // With 100 objects per sweep step, we need more iterations for large heaps
@@ -2095,7 +2072,7 @@ impl GC {
     /// 4. propagate again
     /// 5. converge ephemerons
     /// 6. clear weak tables
-    pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
+    pub fn full_generation(&mut self, l: &mut LuaState) {
         // If we're in Pause state, we need to do the state transition ourselves
         if self.gc_state == GcState::Pause {
             // CRITICAL: Call restart_collection WHILE STILL IN PAUSE STATE!
@@ -2324,10 +2301,10 @@ impl GC {
 #[derive(Debug)]
 enum StepResult {
     Work(isize), // Amount of work done
-    Pause,       // Reached pause state
-    Atomic,      // Completed atomic phase
+    Step2Pause,       // Reached pause state
+    AtomicStep,      // Completed atomic phase
     #[allow(unused)]
-    MinorMode, // Returned to minor mode
+    Step2Minor, // Returned to minor mode
 }
 
 impl Default for GC {

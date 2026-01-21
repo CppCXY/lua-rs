@@ -118,17 +118,15 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("coroutine.status requires a thread argument".to_string()));
     }
 
-    if let Some(thread_ptr) = thread_val.as_thread_ptr() {
-        if thread_ptr.is_main() {
+    // Check if thread exists and get status
+    let status_str = if let Some(thread) = thread_val.as_thread_mut() {
+        if thread.is_main_thread() {
             // Main thread is always running
             let status_val = l.create_string("running");
             l.push_value(status_val)?;
             return Ok(1);
         }
-    }
 
-    // Check if thread exists and get status
-    let status_str = if let Some(thread) = thread_val.as_thread_mut() {
         // Thread is suspended if it has frames or stack content
         if thread.call_depth() > 0 {
             "suspended"
@@ -151,7 +149,7 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 fn coroutine_running(l: &mut LuaState) -> LuaResult<usize> {
     // In the main thread, return nil and true
     let thread_ptr = unsafe { l.thread_ptr() };
-    if thread_ptr.is_main() {
+    if l.is_main_thread() {
         l.push_value(LuaValue::thread(thread_ptr))?;
         l.push_value(LuaValue::boolean(true))?;
         return Ok(2);
@@ -227,8 +225,7 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
 
 /// coroutine.isyieldable() - Check if current position can yield
 fn coroutine_isyieldable(l: &mut LuaState) -> LuaResult<usize> {
-    let thread_ptr = unsafe { l.thread_ptr() };
-    l.push_value(LuaValue::boolean(!thread_ptr.is_main()))?;
+    l.push_value(LuaValue::boolean(!l.is_main_thread()))?;
     Ok(1)
 }
 
@@ -245,16 +242,12 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("coroutine.close requires a thread argument".to_string()));
     }
 
-    let Some(thread_ptr) = thread_val.as_thread_ptr() else {
-        return Err(l.error("invalid thread".to_string()));
-    };
-
-    if thread_ptr.is_main() {
-        return Err(l.error("cannot close the main thread".to_string()));
-    }
-
     // Clear the thread's stack and frames to mark it as closed
     if let Some(thread) = thread_val.as_thread_mut() {
+        if thread.is_main_thread() {
+            return Err(l.error("cannot close the main thread".to_string()));
+        }
+
         thread.stack_truncate(0);
         while thread.call_depth() > 0 {
             thread.pop_frame();

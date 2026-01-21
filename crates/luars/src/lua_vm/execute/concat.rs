@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_concat_empty() {
         let mut vm = LuaVM::new(SafeOption::default());
-        let state = &mut vm.main_state;
+        let state = vm.main_state();
         // Empty concat should return empty string
         let result = concat_strings(state, 0, 0, 0);
         assert!(result.is_ok());

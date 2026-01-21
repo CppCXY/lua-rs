@@ -365,12 +365,6 @@ pub type BinaryPtr = GcPtr<GcBinary>;
 pub type UserdataPtr = GcPtr<GcUserdata>;
 pub type ThreadPtr = GcPtr<GcThread>;
 
-impl ThreadPtr {
-    pub fn is_main(&self) -> bool {
-        self.is_null()
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GcObjectPtr {
     String(StringPtr),

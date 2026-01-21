@@ -151,7 +151,7 @@ impl LibraryRegistry {
 
         // Call the module initializer if it exists
         if let Some(init_fn) = module.initializer {
-            init_fn(&mut vm.main_state)?;
+            init_fn(vm.main_state())?;
         }
 
         Ok(())
