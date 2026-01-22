@@ -626,6 +626,10 @@ impl GcObjectOwner {
             _ => None,
         }
     }
+
+    pub fn size_of_data(&self) -> usize {
+        self.header().size as usize
+    }
 }
 
 /// Function body - either Lua bytecode or C function

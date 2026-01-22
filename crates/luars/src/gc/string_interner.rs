@@ -36,7 +36,8 @@ impl StringInterner {
     }
 
     /// Intern a string - returns existing StringId if already interned, creates new otherwise
-    pub fn intern(&mut self, s: &str, gc: &mut GC, current_white: u8) -> LuaValue {
+    pub fn intern(&mut self, s: &str, gc: &mut GC) -> LuaValue {
+        let current_white = gc.current_white;
         let hash = self.hash_string(s);
         if s.len() > self.short_string_limit {
             // Long strings are not interned
@@ -45,8 +46,7 @@ impl StringInterner {
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
-            gc.gc_pool.alloc(gc_string);
-            gc.track_size(size as usize);
+            gc.trace_object(gc_string);
             return LuaValue::string(ptr);
         }
 
@@ -77,8 +77,7 @@ impl StringInterner {
         let gc_string =
             GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
-        gc.gc_pool.alloc(gc_string);
-        gc.track_size(size as usize);
+        gc.trace_object(gc_string);
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
         self.rev.insert(ptr, hash);
 

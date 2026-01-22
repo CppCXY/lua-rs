@@ -73,13 +73,10 @@ impl LuaVM {
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;
-        let current_white = vm.gc.current_white;
         // Set LuaVM pointer in main_state
-        let thread_value = vm.object_allocator.create_thread(
-            &mut vm.gc,
-            LuaState::new(6, ptr_vm, true, option.clone()),
-            current_white,
-        );
+        let thread_value = vm
+            .object_allocator
+            .create_thread(&mut vm.gc, LuaState::new(6, ptr_vm, true, option.clone()));
 
         vm.main_state = thread_value.as_thread_ptr().unwrap();
 
@@ -268,10 +265,8 @@ impl LuaVM {
             .expect("Failed to push function onto coroutine stack");
 
         // Create thread in ObjectPool and return LuaValue
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_thread(&mut self.gc, thread, current_white);
+
+        let value = self.object_allocator.create_thread(&mut self.gc, thread);
         value
     }
 
@@ -360,42 +355,28 @@ impl LuaVM {
     /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
     /// - Long string: 1 Box allocation, GC registration, no pooling
     pub fn create_string(&mut self, s: &str) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_string(&mut self.gc, s, current_white);
+        let value = self.object_allocator.create_string(&mut self.gc, s);
         value
     }
 
     pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_binary(&mut self.gc, data, current_white);
+        let value = self.object_allocator.create_binary(&mut self.gc, data);
         value
     }
 
     /// Create string from owned String (avoids clone for non-interned strings)
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_string_owned(&mut self.gc, s, current_white);
+        let value = self.object_allocator.create_string_owned(&mut self.gc, s);
         value
     }
 
     /// Create substring (optimized for string.sub)
     #[inline]
     pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self.object_allocator.create_substring(
-            &mut self.gc,
-            s_value,
-            start,
-            end,
-            current_white,
-        );
+        let value = self
+            .object_allocator
+            .create_substring(&mut self.gc, s_value, start, end);
         value
     }
 
@@ -404,19 +385,15 @@ impl LuaVM {
     /// Create a new table in object pool
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value =
-            self.object_allocator
-                .create_table(&mut self.gc, array_size, hash_size, current_white);
+        let value = self
+            .object_allocator
+            .create_table(&mut self.gc, array_size, hash_size);
         value
     }
 
     /// Create new userdata in object pool
     pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_userdata(&mut self.gc, data, current_white);
+        let value = self.object_allocator.create_userdata(&mut self.gc, data);
         value
     }
 
@@ -424,10 +401,9 @@ impl LuaVM {
     /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvaluePtr>) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value =
-            self.object_allocator
-                .create_function(&mut self.gc, chunk, upvalue_ids, current_white);
+        let value = self
+            .object_allocator
+            .create_function(&mut self.gc, chunk, upvalue_ids);
         value
     }
 
@@ -441,30 +417,27 @@ impl LuaVM {
             .map(|v| self.create_upvalue_closed(v))
             .collect();
 
-        let current_white = self.gc.current_white;
         let value =
             self.object_allocator
-                .create_c_closure(&mut self.gc, func, upvalue_ids, current_white);
+                .create_c_closure(&mut self.gc, func, upvalue_ids);
         value
     }
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
     pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvaluePtr {
-        let current_white = self.gc.current_white;
         let ptr =
             self.object_allocator
-                .create_upvalue_open(&mut self.gc, stack_index, current_white);
+                .create_upvalue_open(&mut self.gc, stack_index);
         ptr
     }
 
     /// Create a closed upvalue with a value
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvaluePtr {
-        let current_white = self.gc.current_white;
         let ptr = self
             .object_allocator
-            .create_upvalue_closed(&mut self.gc, value, current_white);
+            .create_upvalue_closed(&mut self.gc, value);
         ptr
     }
 

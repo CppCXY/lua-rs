@@ -239,7 +239,7 @@ impl GcState {
 /// Garbage Collector
 pub struct GC {
     // General GC pool for all objects
-    pub(crate) gc_pool: GcPool,
+    gc_pool: GcPool,
     // === Debt and memory tracking ===
     /// GCdebt from Lua: bytes allocated but not yet "paid for"
     /// GC debt (like Lua 5.5 GCdebt)
@@ -410,25 +410,26 @@ impl GC {
         self.set_debt(stepsize);
     }
 
+    pub fn trace_object(&mut self, gc_object_owner: GcObjectOwner) {
+        let size = gc_object_owner.size_of_data();
+        self.gc_pool.alloc(gc_object_owner);
+        self.track_size(size);
+    }
+
     /// Track a new object allocation (like luaC_newobj in Lua)
     /// This increments debt - when debt becomes positive, GC should run
     ///
-    /// **CRITICAL**: Objects are created WHITE by ObjectPool.create_*() with current_white.
-    /// This function ONLY tracks memory accounting - it does NOT modify object colors.
-    /// The tri-color invariant is maintained by write barriers, not by track_object.
-    ///
-    /// Port of lgc.c: luaC_newobj creates objects as WHITE, then links to allgc list.
-    /// Barriers will mark them BLACK/GRAY if needed when stored into reachable objects.
-    ///
-    /// Lua 5.5内存分配：lmem.c中 g->GCdebt -= size (分配减少debt)
-    /// 维护不变量：GCtotalbytes = 实际分配字节 + GCdebt
     #[inline]
-    pub fn track_size(&mut self, size: usize) {
+    fn track_size(&mut self, size: usize) {
         let size_signed = size as isize;
 
         // Lua 5.5 lmem.c luaM_malloc_:
         self.gc_debt -= size_signed; // 分配减少debt
         self.stats.bytes_allocated += size;
+    }
+
+    pub fn fixed(&mut self, gc_ptr: GcObjectPtr) {
+        self.gc_pool.fixed(gc_ptr);
     }
 
     /// Check if GC should run (debt > 0)

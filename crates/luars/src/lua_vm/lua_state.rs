@@ -90,10 +90,6 @@ impl LuaState {
         }
     }
 
-    pub(crate) fn set_vm(&mut self, vm: *mut LuaVM) {
-        self.vm = vm;
-    }
-
     // please donot use this function directly unless you are very sure of what you are doing
     pub(crate) unsafe fn thread_ptr(&self) -> ThreadPtr {
         self.thread
