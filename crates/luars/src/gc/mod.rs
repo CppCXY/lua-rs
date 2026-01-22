@@ -312,20 +312,6 @@ pub struct GC {
     /// This ensures we don't re-scan the same objects
     sweep_index: usize,
 
-    // === Generational collector pointers ===
-    /// todo remove these and iterate over gc_list instead
-    /// Points to first survival object in allgc list
-    pub survival: Option<GcObjectPtr>,
-
-    /// Points to first old1 object
-    pub old1: Option<GcObjectPtr>,
-
-    /// Points to first really old object
-    pub reallyold: Option<GcObjectPtr>,
-
-    /// Points to first OLD1 object (optimization for markold)
-    pub firstold1: Option<GcObjectPtr>,
-
     // === Statistics ===
     pub stats: GcStats,
 
@@ -373,10 +359,6 @@ impl GC {
             twups: Vec::new(),
             finobj: Vec::new(),
             sweep_index: 0,
-            survival: None,
-            old1: None,
-            reallyold: None,
-            firstold1: None,
             stats: GcStats::default(),
             tm_gc: LuaValue::nil(),
             tm_mode: LuaValue::nil(),
@@ -403,11 +385,6 @@ impl GC {
 
         // Switch mode
         self.gc_kind = GcKind::Inc;
-
-        // Clear generational lists
-        self.reallyold = None;
-        self.old1 = None;
-        self.survival = None;
 
         // Enter sweep phase (like Lua 5.5's entersweep)
         self.enter_sweep(l);
@@ -1168,18 +1145,77 @@ impl GC {
         self.finish_gen_cycle(l);
     }
 
-    // /*
-    // ** Finish a young-generation collection.
-    // */
-    // static void finishgencycle (lua_State *L, global_State *g) {
-    // correctgraylists(g);
-    // checkSizes(L, g);
-    // g->gcstate = GCSpropagate;  /* skip restart */
-    // if (!g->gcemergency && luaD_checkminstack(L))
-    //     callallpendingfinalizers(L);
-    // }
+    /// Finish a young-generation collection.
+    /// Port of Lua 5.5's finishgencycle:
+    /// ```c
+    /// static void finishgencycle (lua_State *L, global_State *g) {
+    ///   correctgraylists(g);
+    ///   checkSizes(L, g);
+    ///   g->gcstate = GCSpropagate;  /* skip restart */
+    ///   if (!g->gcemergency && luaD_checkminstack(L))
+    ///     callallpendingfinalizers(L);
+    /// }
+    /// ```
     fn finish_gen_cycle(&mut self, l: &mut LuaState) {
-
+        // 1. Correct gray lists (handle TOUCHED objects)
+        self.correct_gray_lists();
+        
+        // 2. checkSizes - optional optimization to shrink tables
+        // Skip for now, not critical for correctness
+        
+        // 3. Set state to Propagate (skip restart in next cycle)
+        self.gc_state = GcState::Propagate;
+        
+        // 4. Call pending finalizers if not in emergency mode
+        if !self.gc_emergency && !self.tobefnz.is_empty() {
+            self.pending_actions.to_finalize.extend(self.tobefnz.drain(..));
+        }
+    }
+    
+    /// Port of Lua 5.5's correctgraylists
+    /// Process TOUCHED objects and advance their ages
+    /// 
+    /// From lgc.c:
+    /// ```c
+    /// static void correctgraylists (global_State *g) {
+    ///   GCObject **p;
+    ///   p = correctgraylist(&g->grayagain);
+    ///   *p = g->weak; g->weak = NULL;
+    ///   p = correctgraylist(p);
+    ///   *p = g->allweak; g->allweak = NULL;
+    ///   correctgraylist(p);
+    /// }
+    /// ```
+    fn correct_gray_lists(&mut self) {
+        // Process grayagain list: handle TOUCHED objects
+        let grayagain = std::mem::take(&mut self.grayagain);
+        
+        for gc_ptr in grayagain {
+            if let Some(header) = gc_ptr.header_mut() {
+                let age = header.age();
+                
+                match age {
+                    G_TOUCHED1 => {
+                        // TOUCHED1 -> TOUCHED2 (will become G_OLD next cycle)
+                        header.set_age(G_TOUCHED2);
+                        // Keep in grayagain for next cycle
+                        self.grayagain.push(gc_ptr);
+                    }
+                    G_TOUCHED2 => {
+                        // TOUCHED2 -> G_OLD (fully aged)
+                        header.set_age(G_OLD);
+                        // Remove from grayagain
+                    }
+                    _ => {
+                        // Other ages: keep in grayagain unchanged
+                        self.grayagain.push(gc_ptr);
+                    }
+                }
+            }
+        }
+        
+        // In Lua 5.5, weak tables are also moved through correctgraylist
+        // But our weak table handling is done in atomic phase, so we skip that here
     }
 
     /// Mark OLD1 objects for young collection (port of Lua 5.5's markold).
@@ -1201,8 +1237,12 @@ impl GC {
     ///   }
     /// }
     /// ```
-    fn mark_old1(&mut self) {
-        // Iterate through all objects in gc_pool
+    /// 
+    /// NOTE: Lua 5.5 uses linked lists (allgc, finobj, tobefnz) and passes
+    /// (from, to) pointers to mark a range. We use a unified Vec pool,
+    /// so we iterate all objects and check their age.
+    fn mark_old1(&mut self, l: &mut LuaState) {
+        // Iterate through all objects in gc_list
         // Find OLD1 objects and re-mark them if they're black
         for i in 0..self.gc_list.len() {
             if let Some(owner) = self.gc_list.get(i) {
@@ -1211,10 +1251,10 @@ impl GC {
                     if header.age() == G_OLD1 {
                         // Assert: OLD1 objects should NOT be white
                         debug_assert!(!header.is_white(), "OLD1 object should not be white");
-
+                        
                         // Advance age to G_OLD
                         header.set_age(G_OLD);
-
+                        
                         // If it's black, re-mark it (add to gray list for traversal)
                         if header.is_black() {
                             // Make it gray and add to gray list
@@ -2089,7 +2129,7 @@ impl GC {
         // In generational mode, OLD1 objects are black from the previous cycle.
         // They must be re-traversed so their referenced young objects get marked.
         // Port of Lua 5.5's markold call in youngcollection.
-        self.mark_old1();
+        self.mark_old1(l);
 
         // Propagate all marks
         while !self.gray.is_empty() {
@@ -2108,8 +2148,8 @@ impl GC {
             // Continue sweeping until complete
         }
 
-        // Return to pause state, ready for next cycle
-        self.gc_state = GcState::Pause;
+        // Finish the generation cycle
+        self.finish_gen_cycle(l);
     }
 
     // ============ GC Write Barriers (from lgc.c) ============
