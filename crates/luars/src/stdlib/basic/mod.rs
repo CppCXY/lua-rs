@@ -771,12 +771,12 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             // Map parameter name to index
             let param_idx = match param_name.as_str() {
-                "minormul" => Some(MINORMUL),     // 3: LUA_GCPMINORMUL
-                "majorminor" => Some(MAJORMINOR), // 5: LUA_GCPMAJORMINOR
-                "minormajor" => Some(MINORMAJOR), // 4: LUA_GCPMINORMAJOR
-                "pause" => Some(PAUSE),           // 0: LUA_GCPPAUSE
-                "stepmul" => Some(STEPMUL),       // 1: LUA_GCPSTEPMUL
-                "stepsize" => Some(STEPSIZE),     // 2: LUA_GCPSTEPSIZE
+                "minormul" => Some(MINORMUL),     // 0: LUA_GCPMINORMUL
+                "majorminor" => Some(MAJORMINOR), // 1: LUA_GCPMAJORMINOR
+                "minormajor" => Some(MINORMAJOR), // 2: LUA_GCPMINORMAJOR
+                "pause" => Some(PAUSE),           // 3: LUA_GCPPAUSE
+                "stepmul" => Some(STEPMUL),       // 4: LUA_GCPSTEPMUL
+                "stepsize" => Some(STEPSIZE),     // 5: LUA_GCPSTEPSIZE
                 _ => None,
             };
 

@@ -64,6 +64,14 @@ impl LuaTable {
         }
     }
 
+    pub fn hash_size(&self) -> usize {
+        match &self.impl_table {
+            // LuaTableDetail::TypedArray(_) => 0,
+            LuaTableDetail::ValueArray(_) => 0,
+            LuaTableDetail::HashTable(map) => map.hash_size(),
+        }
+    }
+
     pub fn is_array(&self) -> bool {
         match &self.impl_table {
             // LuaTableDetail::TypedArray(_) => true,

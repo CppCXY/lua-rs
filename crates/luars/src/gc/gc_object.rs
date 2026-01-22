@@ -799,6 +799,10 @@ impl GcList {
         let gc_owner = self.free(gc_ptr);
         self.fixed_list.push(gc_owner);
     }
+
+    pub fn iter_ptrs(&self) -> impl Iterator<Item = GcObjectPtr> + '_ {
+        self.gc_list.iter().map(|obj| obj.as_gc_ptr())
+    }
 }
 
 impl Default for GcList {

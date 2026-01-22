@@ -39,6 +39,10 @@ impl LuaHashTable {
             self.array_len -= 1;
         }
     }
+
+    pub fn hash_size(&self) -> usize {
+        self.map.len()
+    }
 }
 
 impl LuaTableImpl for LuaHashTable {
