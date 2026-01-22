@@ -77,7 +77,7 @@ pub fn exec_vararg(
 
     // Always update stack_top and frame.top to accommodate the results
     let new_top = base + a + touse;
-    lua_state.set_top(new_top);
+    lua_state.set_top(new_top)?;
     let call_info = lua_state.get_call_info_mut(frame_idx);
     call_info.top = new_top;
 

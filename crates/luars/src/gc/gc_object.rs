@@ -2,8 +2,8 @@
 use std::rc::Rc;
 
 use crate::{
-    Chunk, GcObjectKind, LuaTable, LuaValue,
-    lua_value::{LuaString, LuaUserdata},
+    Chunk, GcObjectKind, LuaTable,
+    lua_value::{LuaString, LuaUpvalue, LuaUserdata},
     lua_vm::{CFunction, LuaState},
 };
 
@@ -286,7 +286,7 @@ impl<T> Gc<T> {
 pub type GcString = Gc<LuaString>;
 pub type GcTable = Gc<LuaTable>;
 pub type GcFunction = Gc<FunctionBody>;
-pub type GcUpvalue = Gc<Upvalue>;
+pub type GcUpvalue = Gc<LuaUpvalue>;
 pub type GcThread = Gc<LuaState>;
 pub type GcUserdata = Gc<LuaUserdata>;
 pub type GcBinary = Gc<Vec<u8>>;
@@ -606,7 +606,7 @@ impl GcObjectOwner {
         }
     }
 
-    pub fn as_upvalue_mut(&mut self) -> Option<&mut Upvalue> {
+    pub fn as_upvalue_mut(&mut self) -> Option<&mut LuaUpvalue> {
         match self {
             GcObjectOwner::Upvalue(u) => Some(&mut u.data),
             _ => None,
@@ -691,100 +691,18 @@ impl FunctionBody {
     }
 }
 
-/// Upvalue with embedded GC header
-///
-/// Mimics Lua 5.5's UpVal structure with v.p pointer optimization:
-/// - v.p always points to the actual value location (stack or u.value)
-/// - When open: v.p points to stack[stack_index]
-/// - When closed: v.p points to closed_value
-///
-/// This eliminates the branch in get/set operations, matching Lua C performance
-pub enum Upvalue {
-    Open(usize),
-    Closed(LuaValue),
-}
-
-impl Upvalue {
-    /// Check if this upvalue points to the given absolute stack index
-    #[inline]
-    pub fn points_to_index(&self, index: usize) -> bool {
-        match self {
-            Upvalue::Open(i) => *i == index,
-            Upvalue::Closed(_) => false,
-        }
-    }
-
-    /// Check if this upvalue is open (still points to stack)
-    #[inline]
-    pub fn is_open(&self) -> bool {
-        matches!(self, Upvalue::Open(_))
-    }
-
-    /// Close this upvalue with the given value
-    #[inline]
-    pub fn close(&mut self, value: LuaValue) {
-        *self = Upvalue::Closed(value);
-    }
-
-    /// Get the value of a closed upvalue (returns None if still open)
-    #[inline]
-    pub fn get_closed_value(&self) -> Option<LuaValue> {
-        match self {
-            Upvalue::Closed(val) => Some(val.clone()),
-            Upvalue::Open(_) => None,
-        }
-    }
-
-    /// Get the absolute stack index if this upvalue is open
-    #[inline]
-    pub fn get_stack_index(&self) -> Option<usize> {
-        match self {
-            Upvalue::Open(i) => Some(*i),
-            Upvalue::Closed(_) => None,
-        }
-    }
-
-    /// Get the upvalue value directly through the cached pointer
-    /// SAFETY: Caller must ensure the pointer is still valid
-    /// current_thread: The thread attempting to read the upvalue (used for stack access optimization)
-    #[inline(always)]
-    pub fn get_value(&self, l: &LuaState) -> LuaValue {
-        match self {
-            Upvalue::Open(stack_index) => {
-                // Directly access the stack value
-                l.stack()[*stack_index].clone()
-            }
-            Upvalue::Closed(val) => val.clone(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn set_value(&mut self, l: &mut LuaState, value: LuaValue) {
-        match self {
-            Upvalue::Open(stack_index) => {
-                // Set value directly on the stack
-                l.stack_mut()[*stack_index] = value;
-            }
-            Upvalue::Closed(val) => {
-                // Update closed value
-                *val = value;
-            }
-        }
-    }
-}
-
 /// High-performance Vec-based pool for GC objects
 /// - O(1) allocation: direct push to Vec, returns GcPtr
 /// - O(1) deallocation: swap_remove using tracked pool_index  
 /// - O(live_objects) iteration: always compact, no holes!
 /// - No free_list needed: objects are truly removed via swap_remove
 /// - GcPtr-based: external references use pointers, not indices
-pub struct GcPool {
+pub struct GcList {
     gc_list: Vec<GcObjectOwner>,
     fixed_list: Vec<GcObjectOwner>,
 }
 
-impl GcPool {
+impl GcList {
     #[inline]
     pub fn new() -> Self {
         Self {
@@ -883,7 +801,7 @@ impl GcPool {
     }
 }
 
-impl Default for GcPool {
+impl Default for GcList {
     fn default() -> Self {
         Self::new()
     }

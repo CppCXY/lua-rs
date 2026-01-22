@@ -321,7 +321,7 @@ pub fn call_tm_res(
     // Before pushing arguments, set L->top.p = ci->top.p
     // This ensures func_pos starts at the correct position
     if let Some(frame) = lua_state.current_frame() {
-        lua_state.set_top(frame.top);
+        lua_state.set_top(frame.top)?;
     }
 
     let func_pos = lua_state.get_top();
@@ -361,7 +361,7 @@ pub fn call_tm_res(
         // Get return value (should be at func_pos after call returns)
         let result_val = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
         // Reset top to func_pos (matching Lua 5.5's --L->top.p behavior)
-        lua_state.set_top(func_pos);
+        lua_state.set_top(func_pos)?;
         result_val
     } else {
         LuaValue::nil()
@@ -399,7 +399,7 @@ pub fn call_tm(
     // Before pushing arguments, set L->top.p = ci->top.p
     // This ensures func_pos starts at the correct position
     if let Some(frame) = lua_state.current_frame() {
-        lua_state.set_top(frame.top);
+        lua_state.set_top(frame.top)?;
     }
 
     let func_pos = lua_state.get_top();

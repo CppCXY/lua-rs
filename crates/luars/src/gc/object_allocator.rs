@@ -14,7 +14,7 @@ use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption};
 use crate::{
     GC, GcBinary, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable,
-    LuaValue, StringPtr, Upvalue, UpvaluePtr,
+    LuaValue, StringPtr, UpvaluePtr,
 };
 use std::rc::Rc;
 
@@ -208,48 +208,15 @@ impl ObjectAllocator {
 
     // ==================== Upvalue Operations ====================
 
-    /// Create an open upvalue pointing to a stack location
-    ///
-    #[inline]
-    pub fn create_upvalue_open(&mut self, gc: &mut GC, stack_index: usize) -> UpvaluePtr {
-        let current_white = gc.current_white;
-        let upvalue = Upvalue::Open(stack_index);
-        let size = 64;
-        let gc_uv = GcObjectOwner::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
-        let ptr = gc_uv.as_upvalue_ptr().unwrap();
-        gc.trace_object(gc_uv);
-        ptr
-    }
-
-    /// Create a closed upvalue with a value
-    ///
-    #[inline]
-    pub fn create_upvalue_closed(&mut self, gc: &mut GC, value: LuaValue) -> UpvaluePtr {
-        let current_white = gc.current_white;
-        let upvalue = Upvalue::Closed(value);
-        let size = 64;
-        let gc_uv = GcObjectOwner::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
-        let ptr = gc_uv.as_upvalue_ptr().unwrap();
-        gc.trace_object(gc_uv);
-        ptr
-    }
-
     /// Create upvalue from LuaUpvalue
     ///
-    pub fn create_upvalue(
-        &mut self,
-        gc: &mut GC,
-        upvalue: Rc<LuaUpvalue>,
-    ) -> UpvaluePtr {
-        // Check if open and get stack index
-        if upvalue.is_open() {
-            self.create_upvalue_open(gc, upvalue.get_stack_index().unwrap_or(0))
-        } else {
-            self.create_upvalue_closed(
-                gc,
-                upvalue.get_closed_value().unwrap_or(LuaValue::nil()),
-            )
-        }
+    pub fn create_upvalue(&mut self, gc: &mut GC, upvalue: LuaUpvalue) -> UpvaluePtr {
+        let current_white = gc.current_white;
+        let size = 64;
+        let gc_uv = GcObjectOwner::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
+        let ptr = gc_uv.as_upvalue_ptr().unwrap();
+        gc.trace_object(gc_uv);
+        ptr
     }
 
     // ==================== Userdata Operations ====================

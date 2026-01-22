@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind};
+use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
@@ -42,7 +42,7 @@ pub struct LuaState {
 
     /// Open upvalues - upvalues pointing to stack locations
     /// Uses HashMap for O(1) lookup by stack index (unlike Lua's sorted linked list)
-    /// Also maintains a sorted Vec for efficient traversal during close operations
+    /// Also maintains a sorted Vec(higher indices first) for efficient traversal during close operations
     open_upvalues_map: HashMap<usize, UpvaluePtr>,
     open_upvalues_list: Vec<UpvaluePtr>,
 
@@ -242,12 +242,14 @@ impl LuaState {
     /// This only updates the logical pointer, does NOT truncate the physical stack
     /// Old values remain in stack array but are considered "garbage"
     #[inline(always)]
-    pub fn set_top(&mut self, new_top: usize) {
+    pub fn set_top(&mut self, new_top: usize) -> LuaResult<()> {
         // Ensure physical stack is large enough
         if new_top > self.stack.len() {
-            self.stack.resize(new_top, LuaValue::nil());
+            self.resize(new_top)?;
         }
         self.stack_top = new_top;
+
+        Ok(())
     }
 
     /// Get stack value at absolute index
@@ -267,27 +269,34 @@ impl LuaState {
             return Err(LuaError::StackOverflow);
         }
         if index >= self.stack.len() {
-            self.stack.resize(index + 1, LuaValue::nil());
+            self.resize(index + 1)?;
         }
         self.stack[index] = value;
         Ok(())
     }
 
-    /// Insert a value at a specific stack position, shifting everything after it
-    pub fn stack_insert(&mut self, index: usize, value: LuaValue) -> LuaResult<()> {
-        if self.stack.len() + 1 >= self.safe_option.max_stack_size {
+    fn resize(&mut self, new_size: usize) -> LuaResult<()> {
+        if new_size > self.safe_option.max_stack_size {
             self.error(format!(
-                "stack overflow: attempted to insert at index {} exceeding maximum {}",
-                index, self.safe_option.max_stack_size
+                "stack overflow: attempted to resize to {} exceeding maximum {}",
+                new_size, self.safe_option.max_stack_size
             ));
             return Err(LuaError::StackOverflow);
         }
-        if index >= self.stack.len() {
-            self.stack.resize(index, LuaValue::nil());
-            self.stack.push(value);
-        } else {
-            self.stack.insert(index, value);
+        self.stack.resize(new_size, LuaValue::nil());
+        for upval_ptr in &self.open_upvalues_list {
+            if let LuaUpvalue::Open {
+                stack_index,
+                stack_ptr,
+            } = &mut upval_ptr.as_mut_ref().data
+            {
+                // Update cached pointer to new stack location
+                if *stack_index < self.stack.len() {
+                    stack_ptr.ptr = (&self.stack[*stack_index]) as *const LuaValue as *mut LuaValue;
+                }
+            }
         }
+
         Ok(())
     }
 
@@ -486,6 +495,18 @@ impl LuaState {
 
                     // 4. Close the upvalue (move value to heap)
                     upval_ptr.as_mut_ref().data.close(value);
+                    let gc_ptr = GcObjectPtr::Upvalue(upval_ptr);
+
+                    if let Some(header) = gc_ptr.header_mut() {
+                        if !header.is_white() {
+                            // nw2black(uv);  /* closed upvalues cannot be gray */
+                            // luaC_barrier(L, uv, slot);
+                            header.make_black();
+                            if let Some(value_gc_ptr) = value.as_gc_ptr() {
+                                self.gc_barrier(upval_ptr, value_gc_ptr);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -502,8 +523,11 @@ impl LuaState {
 
         // Not found, create a new one
         let upval_ptr = {
+            let ptr = LuaValuePtr {
+                ptr: (&self.stack[stack_index]) as *const LuaValue as *mut LuaValue,
+            };
             let vm = self.vm_mut();
-            vm.create_upvalue_open(stack_index)
+            vm.create_upvalue_open(stack_index, ptr)
         };
 
         // Add to HashMap for O(1) future lookups
@@ -511,18 +535,13 @@ impl LuaState {
 
         // Also add to sorted list for traversal (insert in sorted position, higher indices first)
         // Collect existing upvalue IDs and their stack indices
-        let upval_ptrs: Vec<_> = self.open_upvalues_list.iter().copied().collect();
-        let stack_indices: Vec<usize> = {
-            upval_ptrs
+        let insert_pos = {
+            self.open_upvalues_list
                 .iter()
                 .filter_map(|&ptr| ptr.as_ref().data.get_stack_index())
-                .collect()
+                .position(|idx| idx < stack_index)
+                .unwrap_or(self.open_upvalues_list.len())
         };
-
-        let insert_pos = stack_indices
-            .iter()
-            .position(|&idx| idx < stack_index)
-            .unwrap_or(stack_indices.len());
 
         self.open_upvalues_list.insert(insert_pos, upval_ptr);
 
@@ -551,8 +570,21 @@ impl LuaState {
 
     /// Truncate stack to specified length
     /// Used after function calls to remove temporary values
-    pub fn stack_truncate(&mut self, new_len: usize) {
+    pub fn stack_truncate(&mut self) {
+        let new_len = 0;
         if new_len < self.stack.len() {
+            for upval_ptr in &self.open_upvalues_list {
+                let upval = &mut upval_ptr.as_mut_ref().data;
+                if upval.is_open() {
+                    if let Some(stack_idx) = upval.get_stack_index() {
+                        if stack_idx >= new_len {
+                            // Invalidate upvalue pointing to truncated stack
+                            upval.close(self.stack[stack_idx]);
+                        }
+                    }
+                }
+            }
+
             self.stack.truncate(new_len);
         }
     }
@@ -570,7 +602,7 @@ impl LuaState {
             return Err(LuaError::StackOverflow);
         }
         if self.stack.len() < needed {
-            self.stack.resize(needed, LuaValue::nil());
+            self.resize(needed)?;
         }
 
         Ok(())
@@ -767,7 +799,7 @@ impl LuaState {
             if new_size > self.safe_option.max_stack_size {
                 new_size = self.safe_option.max_stack_size;
             }
-            self.stack.resize(new_size, LuaValue::nil());
+            self.resize(new_size)?;
         }
 
         // Write at logical top position (L->top.p->value = value)
@@ -1018,7 +1050,7 @@ impl LuaState {
                 self.error("pcall: invalid function index".to_string());
                 let err_str = self.create_string("pcall: invalid function index");
                 self.stack_set(func_idx, err_str)?;
-                self.set_top(func_idx + 1);
+                self.set_top(func_idx + 1)?;
                 return Ok((false, 1));
             }
         };
@@ -1076,7 +1108,7 @@ impl LuaState {
 
                 // Set error at func_idx and update stack top
                 self.stack_set(func_idx, err_str)?;
-                self.set_top(func_idx + 1);
+                self.set_top(func_idx + 1)?;
 
                 Ok((false, 1))
             }
@@ -1110,7 +1142,7 @@ impl LuaState {
         let base = func_idx + 1;
         if let Err(_) = self.push_frame(func, base, nargs, -1) {
             // Error during setup
-            self.set_top(handler_idx);
+            self.set_top(handler_idx)?;
             let error_msg = std::mem::take(&mut self.error_msg);
             let err_str = self.create_string(&error_msg);
             return Ok((false, vec![err_str]));
@@ -1135,7 +1167,7 @@ impl LuaState {
                     }
                 }
 
-                self.set_top(handler_idx);
+                self.set_top(handler_idx)?;
                 Ok((true, results))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
@@ -1156,7 +1188,7 @@ impl LuaState {
 
                 // Set up error handler call
                 // Reset stack to [handler]
-                self.set_top(handler_idx + 1);
+                self.set_top(handler_idx + 1)?;
 
                 // Push error message as argument
                 let err_value = self.create_string(&error_msg);
@@ -1168,7 +1200,7 @@ impl LuaState {
 
                 if let Err(_) = self.push_frame(handler, handler_base, 1, -1) {
                     // Error handler setup failed
-                    self.set_top(handler_idx);
+                    self.set_top(handler_idx)?;
                     let final_err =
                         self.create_string(&format!("error in error handling: {}", error_msg));
                     return Ok((false, vec![final_err]));
@@ -1197,12 +1229,12 @@ impl LuaState {
                             results.push(self.create_string(&error_msg));
                         }
 
-                        self.set_top(handler_idx);
+                        self.set_top(handler_idx)?;
                         Ok((false, results))
                     }
                     Err(_) => {
                         // Error handler failed
-                        self.set_top(handler_idx);
+                        self.set_top(handler_idx)?;
                         let final_err =
                             self.create_string(&format!("error in error handling: {}", error_msg));
                         Ok((false, vec![final_err]))
@@ -1316,7 +1348,7 @@ impl LuaState {
 
             // Update stack top and current frame's top
             let new_top = func_idx + actual_nresults;
-            self.set_top(new_top);
+            self.set_top(new_top)?;
 
             if let Some(frame) = self.current_frame_mut() {
                 frame.top = new_top;

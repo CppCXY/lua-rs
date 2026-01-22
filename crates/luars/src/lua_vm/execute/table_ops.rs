@@ -37,7 +37,7 @@ pub fn exec_gettable(
     // Update L->top.p before potential metamethod call
     // Do NOT modify frame.top (ci->top) - it's immutable
     let write_pos = base + a;
-    lua_state.set_top(write_pos + 1);
+    lua_state.set_top(write_pos + 1)?;
 
     let rb = lua_state.stack_mut()[base + b];
     let rc = lua_state.stack_mut()[base + c];
@@ -125,7 +125,7 @@ pub fn exec_settable(
     // See Lua 5.5's savestate macro: L->top.p = ci->top.p
     let call_info_top = lua_state.get_call_info(frame_idx).top;
     if lua_state.get_top() < call_info_top {
-        lua_state.set_top(call_info_top);
+        lua_state.set_top(call_info_top)?;
     }
 
     // Slow path: has __newindex or not a table
@@ -134,7 +134,7 @@ pub fn exec_settable(
 
     // CRITICAL: Restore top after metamethod call
     // The metamethod may have changed stack_top, so we need to reset it
-    lua_state.set_top(call_info_top);
+    lua_state.set_top(call_info_top)?;
 
     // Verify base hasn't changed
     let new_base = lua_state.get_frame_base(frame_idx);
@@ -195,7 +195,7 @@ pub fn exec_geti(
     let call_info = lua_state.get_call_info_mut(frame_idx);
     if write_pos >= call_info.top {
         call_info.top = write_pos + 1;
-        lua_state.set_top(write_pos + 1);
+        lua_state.set_top(write_pos + 1)?;
     }
 
     let stack = lua_state.stack_mut();
@@ -221,7 +221,7 @@ pub fn exec_seti(
     // CRITICAL: Ensure stack_top protects call_info.top
     let call_info_top = lua_state.get_call_info(frame_idx).top;
     if lua_state.get_top() < call_info_top {
-        lua_state.set_top(call_info_top);
+        lua_state.set_top(call_info_top)?;
     }
 
     let stack = lua_state.stack();
@@ -287,7 +287,7 @@ pub fn exec_getfield(
     let call_info = lua_state.get_call_info_mut(frame_idx);
     if write_pos + 1 > call_info.top {
         call_info.top = write_pos + 1;
-        lua_state.set_top(write_pos + 1);
+        lua_state.set_top(write_pos + 1)?;
     }
 
     if c >= constants.len() {
@@ -413,7 +413,7 @@ pub fn exec_self(
     let call_info = lua_state.get_call_info_mut(frame_idx);
     if write_top > call_info.top {
         call_info.top = write_top;
-        lua_state.set_top(write_top);
+        lua_state.set_top(write_top)?;
     }
 
     let stack = lua_state.stack_mut();

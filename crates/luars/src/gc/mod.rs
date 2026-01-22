@@ -239,7 +239,7 @@ impl GcState {
 /// Garbage Collector
 pub struct GC {
     // General GC pool for all objects
-    gc_pool: GcPool,
+    gc_pool: GcList,
     // === Debt and memory tracking ===
     /// GCdebt from Lua: bytes allocated but not yet "paid for"
     /// GC debt (like Lua 5.5 GCdebt)
@@ -348,7 +348,7 @@ pub struct GcStats {
 impl GC {
     pub fn new() -> Self {
         GC {
-            gc_pool: GcPool::new(),
+            gc_pool: GcList::new(),
             gc_debt: 0, // Start with 0 debt, will be set after first allocation
             total_bytes: 0,
             gc_marked: 0,
@@ -1676,9 +1676,8 @@ impl GC {
                 } else {
                     // Closed upvalue: mark black and mark its value
                     gc_upval.header.make_black();
-                    if let Some(val) = gc_upval.data.get_closed_value() {
-                        self.mark_value(&val);
-                    }
+
+                    self.mark_value(&gc_upval.data.get_value());
                 }
 
                 return 1;
@@ -2308,7 +2307,7 @@ impl GC {
                             uv.header.make_black();
                         }
 
-                        let value = &uv.data.get_value(l);
+                        let value = &uv.data.get_value();
                         self.mark_value(value);
                     }
                     GcObjectPtr::Userdata(u_ptr) => {

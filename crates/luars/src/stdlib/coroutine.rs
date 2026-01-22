@@ -193,7 +193,7 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(func) = frame.func.as_lua_function() {
             if let Some(upval_ptr) = func.upvalues().get(0) {
                 // Upvalue should be closed with the thread value
-                thread_val = upval_ptr.as_ref().data.get_value(l);
+                thread_val = upval_ptr.as_ref().data.get_value();
             }
         }
     };
@@ -248,7 +248,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error("cannot close the main thread".to_string()));
         }
 
-        thread.stack_truncate(0);
+        thread.stack_truncate();
         while thread.call_depth() > 0 {
             thread.pop_frame();
         }

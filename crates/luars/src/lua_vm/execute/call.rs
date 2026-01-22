@@ -45,7 +45,7 @@ pub fn handle_call(
     } else {
         // Fixed args: set stack_top to func_idx + b
         // b includes the function itself, so args = b - 1
-        lua_state.set_top(func_idx + b);
+        lua_state.set_top(func_idx + b)?;
         b - 1
     };
 
@@ -116,7 +116,7 @@ pub fn handle_call(
             // Update L->top.p to include the shifted argument
             // Do NOT modify frame.top (ci->top) - it's immutable stack limit
             let new_top = first_arg + nargs + 1;
-            lua_state.set_top(new_top);
+            lua_state.set_top(new_top)?;
 
             // Now call the metamethod with nargs+1 (including original func)
             // We need to adjust b: if b was 0 (varargs), keep it 0
@@ -212,7 +212,7 @@ pub fn call_c_function(
     // Set logical stack top (L->top.p) - does NOT truncate physical stack
     // This is critical: old values remain in stack array but are "hidden"
     // This preserves caller's local variables which live below this top
-    lua_state.set_top(new_top);
+    lua_state.set_top(new_top)?;
 
     // Do NOT modify frame.top (ci->top) - it's the stack limit (base + maxstacksize)
     // and should not change during execution
@@ -300,7 +300,7 @@ pub fn handle_tailcall(
     // Same as handle_call - we need current top to calculate variable args
     if let Some(frame) = lua_state.current_frame() {
         let frame_top = frame.top;
-        lua_state.set_top(frame_top);
+        lua_state.set_top(frame_top)?;
     }
 
     let nargs = if b == 0 {
@@ -376,7 +376,7 @@ pub fn handle_tailcall(
             // CRITICAL: Update frame top after moving results
             // The next RETURN instruction will use frame.top to determine how many values to return
             let new_top = base + nresults;
-            lua_state.set_top(new_top);
+            lua_state.set_top(new_top)?;
             if let Some(frame) = lua_state.current_frame_mut() {
                 frame.top = new_top;
             }
@@ -468,7 +468,7 @@ fn call_c_function_tailcall(
     // CRITICAL FIX: Update frame top so next RETURN instruction knows the correct top
     // After moving results to func_idx, the new top should be func_idx + n
     let new_top = func_idx + n;
-    lua_state.set_top(new_top);
+    lua_state.set_top(new_top)?;
     if let Some(frame) = lua_state.current_frame_mut() {
         frame.top = new_top;
     }

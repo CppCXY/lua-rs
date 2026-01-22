@@ -103,13 +103,13 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             if let Some(err) = error_msg.as_str() {
                 error_messages.push(err.to_string());
             }
-            l.set_top(func_idx);
+            l.set_top(func_idx)?;
             i += 1;
             continue;
         }
 
         if result_count == 0 {
-            l.set_top(func_idx);
+            l.set_top(func_idx)?;
             i += 1;
             continue;
         }
@@ -119,7 +119,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
         // If result is nil or false, searcher didn't find the module
         if first_result.is_nil() || (first_result.as_boolean() == Some(false)) {
-            l.set_top(func_idx);
+            l.set_top(func_idx)?;
             i += 1;
             continue;
         }
@@ -133,7 +133,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
                 error_messages.push(msg.to_string());
             }
 
-            l.set_top(func_idx);
+            l.set_top(func_idx)?;
             i += 1;
             continue;
         }
@@ -148,7 +148,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
         // Call loader(modname, loader_data) to get the module
         // Clean stack and prepare to call loader
-        l.set_top(func_idx);
+        l.set_top(func_idx)?;
 
         l.push_value(loader)?;
         l.push_value(modname_val)?;
@@ -193,7 +193,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         l.raw_set(&loaded_val, modname_val, final_result);
 
         // Clean up stack and return result
-        l.set_top(loader_func_idx);
+        l.set_top(loader_func_idx)?;
         l.push_value(final_result)?;
         return Ok(1);
     }

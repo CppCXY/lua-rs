@@ -10,7 +10,7 @@ mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::GC;
-use crate::lua_value::{Chunk, LuaUserdata, LuaValue, LuaValueKind};
+use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 use crate::lua_vm::execute::lua_execute;
@@ -178,7 +178,7 @@ impl LuaVM {
         let results = self.run()?;
 
         // Reset logical stack top for next execution
-        self.main_state().set_top(0);
+        self.main_state().set_top(0)?;
 
         Ok(results)
     }
@@ -425,19 +425,21 @@ impl LuaVM {
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
-    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvaluePtr {
+    pub fn create_upvalue_open(&mut self, stack_index: usize, ptr: LuaValuePtr) -> UpvaluePtr {
+        let upval = LuaUpvalue::new_open(stack_index, ptr);
         let ptr =
             self.object_allocator
-                .create_upvalue_open(&mut self.gc, stack_index);
+                .create_upvalue(&mut self.gc, upval);
         ptr
     }
 
     /// Create a closed upvalue with a value
     #[inline(always)]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvaluePtr {
+        let upval = LuaUpvalue::new_closed(value);
         let ptr = self
             .object_allocator
-            .create_upvalue_closed(&mut self.gc, value);
+            .create_upvalue(&mut self.gc, upval);
         ptr
     }
 

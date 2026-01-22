@@ -5,7 +5,6 @@ mod lua_table;
 mod lua_value;
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
@@ -21,138 +20,79 @@ pub use lua_value::{
 
 use crate::{Instruction, TablePtr};
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct LuaValuePtr {
+    pub ptr: *mut LuaValue,
+}
+
 /// Lua function
 /// Runtime upvalue - can be open (pointing to stack) or closed (owns value)
 /// This matches Lua's UpVal implementation
-pub struct LuaUpvalue {
-    value: RefCell<UpvalueState>,
-}
-
-#[derive(Debug)]
-enum UpvalueState {
+pub enum LuaUpvalue {
     Open {
-        stack_index: usize, // Absolute index in register_stack
+        stack_index: usize,             // Absolute index in register_stack
+        stack_ptr: LuaValuePtr, // Cached pointer for fast access
     },
     Closed(LuaValue), // Value moved to heap after frame exits
 }
 
 impl LuaUpvalue {
     /// Create an open upvalue pointing to a stack location (absolute index)
-    pub fn new_open(stack_index: usize) -> Rc<Self> {
-        Rc::new(LuaUpvalue {
-            value: RefCell::new(UpvalueState::Open { stack_index }),
-        })
-    }
-
-    /// Create an open upvalue with frame base + register (computes absolute index)
-    pub fn new_open_relative(base_ptr: usize, register: usize) -> Rc<Self> {
-        Rc::new(LuaUpvalue {
-            value: RefCell::new(UpvalueState::Open {
-                stack_index: base_ptr + register,
-            }),
-        })
+    pub fn new_open(stack_index: usize, stack_ptr: LuaValuePtr) -> Self {
+        LuaUpvalue::Open {
+            stack_index,
+            stack_ptr,
+        }
     }
 
     /// Create a closed upvalue with an owned value
-    pub fn new_closed(value: LuaValue) -> Rc<Self> {
-        Rc::new(LuaUpvalue {
-            value: RefCell::new(UpvalueState::Closed(value)),
-        })
+    pub fn new_closed(value: LuaValue) -> Self {
+        LuaUpvalue::Closed(value)
     }
 
     /// Check if this upvalue is open
     pub fn is_open(&self) -> bool {
-        matches!(*self.value.borrow(), UpvalueState::Open { .. })
-    }
-
-    /// Check if this upvalue points to a specific stack location (absolute index)
-    pub fn points_to_index(&self, index: usize) -> bool {
-        match *self.value.borrow() {
-            UpvalueState::Open { stack_index } => stack_index == index,
-            _ => false,
-        }
+        matches!(self, LuaUpvalue::Open { .. })
     }
 
     /// Get the stack index if open (for comparison during close)
     pub fn get_stack_index(&self) -> Option<usize> {
-        match *self.value.borrow() {
-            UpvalueState::Open { stack_index } => Some(stack_index),
+        match self {
+            LuaUpvalue::Open { stack_index, .. } => Some(*stack_index),
             _ => None,
         }
     }
 
     /// Close this upvalue (move value from stack to heap)
-    pub fn close(&self, stack_value: LuaValue) {
-        let mut state = self.value.borrow_mut();
-        if matches!(*state, UpvalueState::Open { .. }) {
-            *state = UpvalueState::Closed(stack_value);
+    pub fn close(&mut self, stack_value: LuaValue) {
+        match self {
+            LuaUpvalue::Open { .. } => {
+                // Replace with closed variant
+                *self = LuaUpvalue::Closed(stack_value);
+            }
+            LuaUpvalue::Closed(_) => {
+                *self = LuaUpvalue::Closed(stack_value);
+            }
         }
     }
 
     /// Get the value (requires register_stack if open)
-    pub fn get_value(&self, register_stack: &[LuaValue]) -> LuaValue {
-        let state = self.value.borrow();
-        match *state {
-            UpvalueState::Open { stack_index } => {
-                if stack_index < register_stack.len() {
-                    register_stack[stack_index]
-                } else {
-                    LuaValue::nil()
-                }
+    pub fn get_value(&self) -> LuaValue {
+        match self {
+            LuaUpvalue::Open {
+                stack_ptr,
+                ..
+            } => {
+                unsafe { *stack_ptr.ptr }
             }
-            UpvalueState::Closed(ref val) => val.clone(),
+            LuaUpvalue::Closed(val) => val.clone(),
         }
     }
 
-    /// Set the value (requires register_stack if open)
-    pub fn set_value(&self, register_stack: &mut [LuaValue], value: LuaValue) {
-        let state = self.value.borrow();
-        match *state {
-            UpvalueState::Open { stack_index } => {
-                drop(state);
-                if stack_index < register_stack.len() {
-                    register_stack[stack_index] = value;
-                }
-            }
-            UpvalueState::Closed(_) => {
-                drop(state);
-                *self.value.borrow_mut() = UpvalueState::Closed(value);
-            }
-        }
-    }
-
-    /// Get the closed value for GC marking (returns None if open)
-    pub fn get_closed_value(&self) -> Option<LuaValue> {
-        match *self.value.borrow() {
-            UpvalueState::Closed(ref val) => Some(val.clone()),
+    pub fn get_closed_value(&self) -> Option<&LuaValue> {
+        match self {
+            LuaUpvalue::Closed(val) => Some(val),
             _ => None,
-        }
-    }
-
-    /// Fast path: Try to get value directly if closed (avoids frame lookup)
-    /// Returns None if the upvalue is open
-    #[inline(always)]
-    pub fn try_get_closed(&self) -> Option<LuaValue> {
-        if let Ok(state) = self.value.try_borrow() {
-            match *state {
-                UpvalueState::Closed(ref val) => Some(*val),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    }
-}
-
-impl fmt::Debug for LuaUpvalue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self.value.borrow() {
-            UpvalueState::Open { stack_index } => {
-                write!(f, "Upvalue::Open(idx={})", stack_index)
-            }
-            UpvalueState::Closed(ref val) => {
-                write!(f, "Upvalue::Closed({:?})", val)
-            }
         }
     }
 }
