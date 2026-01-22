@@ -1130,7 +1130,6 @@ impl GC {
 
         //   g->reallyold = g->old1 = g->survival = g->allgc;
         //  g->firstold1 = NULL;  /* there are no OLD1 objects anywhere */
-
         let finobj_list = self.finobj.clone();
         self.sweep2old(l, &finobj_list);
         // g->finobjrold = g->finobjold1 = g->finobjsur = g->finobj;
@@ -1141,7 +1140,7 @@ impl GC {
         self.gc_kind = GcKind::GenMinor;
         self.gc_majorminor = self.gc_marked;
         self.gc_marked = 0;
-        
+
         self.finish_gen_cycle(l);
     }
 
@@ -1159,63 +1158,103 @@ impl GC {
     fn finish_gen_cycle(&mut self, l: &mut LuaState) {
         // 1. Correct gray lists (handle TOUCHED objects)
         self.correct_gray_lists();
-        
+
         // 2. checkSizes - optional optimization to shrink tables
         // Skip for now, not critical for correctness
-        
+
         // 3. Set state to Propagate (skip restart in next cycle)
         self.gc_state = GcState::Propagate;
-        
+
         // 4. Call pending finalizers if not in emergency mode
         if !self.gc_emergency && !self.tobefnz.is_empty() {
-            self.pending_actions.to_finalize.extend(self.tobefnz.drain(..));
+            self.pending_actions
+                .to_finalize
+                .extend(self.tobefnz.drain(..));
         }
     }
-    
+
     /// Port of Lua 5.5's correctgraylists
     /// Process TOUCHED objects and advance their ages
-    /// 
-    /// From lgc.c:
-    /// ```c
-    /// static void correctgraylists (global_State *g) {
-    ///   GCObject **p;
-    ///   p = correctgraylist(&g->grayagain);
-    ///   *p = g->weak; g->weak = NULL;
-    ///   p = correctgraylist(p);
-    ///   *p = g->allweak; g->allweak = NULL;
-    ///   correctgraylist(p);
-    /// }
-    /// ```
+
+    // static void correctgraylists (global_State *g) {
+    //      GCObject **list = correctgraylist(&g->grayagain);
+    //      *list = g->weak; g->weak = NULL;
+    //      list = correctgraylist(list);
+    //      *list = g->allweak; g->allweak = NULL;
+    //      list = correctgraylist(list);
+    //      *list = g->ephemeron; g->ephemeron = NULL;
+    //      correctgraylist(list);
+    // }
     fn correct_gray_lists(&mut self) {
         // Process grayagain list: handle TOUCHED objects
-        let grayagain = std::mem::take(&mut self.grayagain);
-        
-        for gc_ptr in grayagain {
+        let mut grayagain_list = std::mem::take(&mut self.grayagain);
+        self.correct_gray_list(&mut grayagain_list);
+        self.grayagain = grayagain_list;
+
+        let mut weak_list = std::mem::take(&mut self.weak)
+            .iter()
+            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .collect::<Vec<_>>();
+        self.weak.clear();
+        // Process weak list: handle TOUCHED objects
+        self.correct_gray_list(&mut weak_list);
+
+        let mut allweak_list = std::mem::take(&mut self.allweak)
+            .iter()
+            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .collect::<Vec<_>>();
+        self.allweak.clear();
+
+        // Process allweak list: handle TOUCHED objects
+        self.correct_gray_list(&mut allweak_list);
+
+        let mut ephemeron_list = std::mem::take(&mut self.ephemeron)
+            .iter()
+            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .collect::<Vec<_>>();
+        self.ephemeron.clear();
+
+        // Process ephemeron list: handle TOUCHED objects
+        self.correct_gray_list(&mut ephemeron_list);
+    }
+
+    // ** Correct a list of gray objects. Return a pointer to the last element
+    // ** left on the list, so that we can link another list to the end of
+    // ** this one.
+    // ** Because this correction is done after sweeping, young objects might
+    // ** be turned white and still be in the list. They are only removed.
+    // ** 'TOUCHED1' objects are advanced to 'TOUCHED2' and remain on the list;
+    // ** Non-white threads also remain on the list. 'TOUCHED2' objects and
+    // ** anything else become regular old, are marked black, and are removed
+    // ** from the list.
+    fn correct_gray_list(&mut self, list: &mut Vec<GcObjectPtr>) {
+        let original_list = std::mem::take(list);
+
+        for gc_ptr in original_list {
             if let Some(header) = gc_ptr.header_mut() {
+                if header.is_white() {
+                    // Object turned white during sweep - remove from list
+                    continue;
+                }
+
                 let age = header.age();
-                
-                match age {
-                    G_TOUCHED1 => {
-                        // TOUCHED1 -> TOUCHED2 (will become G_OLD next cycle)
-                        header.set_age(G_TOUCHED2);
-                        // Keep in grayagain for next cycle
-                        self.grayagain.push(gc_ptr);
-                    }
-                    G_TOUCHED2 => {
-                        // TOUCHED2 -> G_OLD (fully aged)
+                if age == G_TOUCHED1 {
+                    header.make_black();
+                    header.set_age(G_TOUCHED2);
+                    // Keep in list for next cycle
+                    list.push(gc_ptr);
+                } else if gc_ptr.kind() == GcObjectKind::Thread {
+                    // Non-white threads remain in list unchanged
+                    list.push(gc_ptr);
+                } else {
+                    if age == G_TOUCHED2 {
+                        // Other ages: become old and black, remove from list
                         header.set_age(G_OLD);
-                        // Remove from grayagain
                     }
-                    _ => {
-                        // Other ages: keep in grayagain unchanged
-                        self.grayagain.push(gc_ptr);
-                    }
+                    header.make_black();
                 }
             }
         }
-        
-        // In Lua 5.5, weak tables are also moved through correctgraylist
-        // But our weak table handling is done in atomic phase, so we skip that here
     }
 
     /// Mark OLD1 objects for young collection (port of Lua 5.5's markold).
@@ -1237,7 +1276,7 @@ impl GC {
     ///   }
     /// }
     /// ```
-    /// 
+    ///
     /// NOTE: Lua 5.5 uses linked lists (allgc, finobj, tobefnz) and passes
     /// (from, to) pointers to mark a range. We use a unified Vec pool,
     /// so we iterate all objects and check their age.
@@ -1251,10 +1290,10 @@ impl GC {
                     if header.age() == G_OLD1 {
                         // Assert: OLD1 objects should NOT be white
                         debug_assert!(!header.is_white(), "OLD1 object should not be white");
-                        
+
                         // Advance age to G_OLD
                         header.set_age(G_OLD);
-                        
+
                         // If it's black, re-mark it (add to gray list for traversal)
                         if header.is_black() {
                             // Make it gray and add to gray list
