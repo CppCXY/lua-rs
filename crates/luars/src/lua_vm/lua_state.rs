@@ -11,7 +11,7 @@ use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
-use crate::{Chunk, GcActions, GcObjectPtr, LuaVM, ThreadPtr, UpvaluePtr};
+use crate::{Chunk, GcObjectPtr, LuaVM, ThreadPtr, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -1399,93 +1399,16 @@ impl LuaState {
         vm.gc.barrier_back(gc_ptr);
     }
 
+    #[inline]
     pub fn check_gc(&mut self) -> LuaResult<bool> {
         let vm = unsafe { &mut *self.vm };
-        let do_step = vm.check_gc(self);
-
-        // Process any accumulated GC actions (finalizers, weak tables, etc.)
-        if vm.gc.has_pending_actions() {
-            let actions = vm.gc.take_pending_actions();
-            self.process_gc_actions(actions)?;
-        }
-
-        Ok(do_step)
+        let work = vm.check_gc(self);
+        Ok(work)
     }
 
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
         let vm = unsafe { &mut *self.vm };
         vm.full_gc(self, false);
-
-        // Process any accumulated GC actions (finalizers, weak tables, etc.)
-        if vm.gc.has_pending_actions() {
-            let actions = vm.gc.take_pending_actions();
-            self.process_gc_actions(actions)?;
-        }
-
-        Ok(())
-    }
-
-    /// Process actions returned by GC (call finalizers, clean weak tables)
-    fn process_gc_actions(&mut self, actions: GcActions) -> LuaResult<()> {
-        if actions.to_finalize.is_empty() {
-            return Ok(());
-        }
-
-        // Enter finalizer mode - stop GC during finalizer execution
-        // This prevents objects from being collected while their finalizers run
-        self.vm_mut().gc.enter_finalizer_mode();
-
-        // Call __gc finalizers
-        if !actions.to_finalize.is_empty() {
-            match self.call_finalizers(actions.to_finalize) {
-                Ok(()) => {}
-                Err(e) => {
-                    // Exit finalizer mode before returning error
-                    self.vm_mut().gc.exit_finalizer_mode();
-                    return Err(e);
-                }
-            };
-        }
-        // Exit finalizer mode - resume normal GC
-        self.vm_mut().gc.exit_finalizer_mode();
-
-        Ok(())
-    }
-
-    /// Call __gc metamethods for objects pending finalization
-    fn call_finalizers(&mut self, to_finalize: Vec<GcObjectPtr>) -> LuaResult<()> {
-        use crate::lua_vm::get_metamethod_event;
-
-        for gc_ptr in to_finalize {
-            // Lua 5.5: udata2finalize() resets FINALIZEDBIT before calling __gc.
-            // This ensures resurrected objects are not finalized again unless
-            // they are explicitly re-registered.
-            if let Some(header) = gc_ptr.header_mut() {
-                header.clear_finalized();
-            }
-
-            // Convert GcId to LuaValue
-            let obj_value = match gc_ptr {
-                GcObjectPtr::Table(ptr) => LuaValue::table(ptr),
-                GcObjectPtr::Userdata(ptr) => {
-                    // Get userdata pointer
-                    LuaValue::userdata(ptr)
-                }
-                GcObjectPtr::Thread(ptr) => LuaValue::thread(ptr),
-                // Other types don't support __gc
-                _ => continue,
-            };
-
-            // Get __gc metamethod
-            if let Some(gc_method) = get_metamethod_event(self, &obj_value, TmKind::Gc) {
-                // Call __gc(obj) using pcall to handle errors safely
-                // In Lua 5.x, errors in finalizers are silently ignored
-                // (the error message is discarded to prevent cascade failures)
-                let _result = self.pcall(gc_method, vec![obj_value]);
-                // Silently ignore any errors
-            }
-        }
-
         Ok(())
     }
 

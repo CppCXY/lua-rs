@@ -7,7 +7,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
 
 const VERSION: &str = "Lua-RS 5.5 (compatible)";
-const COPYRIGHT: &str = "Copyright (C) 2026 lua-rs contributors";
+const COPYRIGHT: &str = "Copyright (C) 2026 lua-rs CppCXY";
 
 fn print_usage() {
     eprintln!("usage: lua [options] [script [args]]");

@@ -452,7 +452,7 @@ impl LuaVM {
     fn check_gc(&mut self, l: &mut LuaState) -> bool {
         if self.gc.gc_debt <= 0 {
             self.gc.step(l);
-            return true;
+            return true
         }
 
         false

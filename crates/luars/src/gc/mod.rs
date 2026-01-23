@@ -40,22 +40,13 @@ mod object_allocator;
 mod string_interner;
 
 use crate::{
-    LuaTable,
+    LuaResult, LuaTable,
     lua_value::{Chunk, LuaValue},
-    lua_vm::LuaState,
+    lua_vm::{LuaState, TmKind},
 };
 pub use gc_kind::*;
 pub use gc_object::*;
 pub use object_allocator::*;
-
-/// Actions that GC needs VM to perform after a GC step
-/// This allows GC to mark objects for finalization
-/// Weak tables are now cleaned directly during GC atomic phase
-#[derive(Default)]
-pub struct GcActions {
-    /// Objects that need their __gc finalizer called
-    pub to_finalize: Vec<GcObjectPtr>,
-}
 
 // GC Parameters (from lua.h)
 pub const MINORMUL: usize = 0; // Minor collection multiplier
@@ -267,11 +258,6 @@ pub struct GC {
     /// GC stopped by user (gcstp in Lua, GCSTPUSR bit)
     pub gc_stopped: bool,
 
-    // === Pending actions (for finalizers and weak tables) ===
-    /// Accumulated actions that need VM to process
-    /// This is filled during GC steps and retrieved by VM later
-    pending_actions: GcActions,
-
     /// Objects pending __gc finalization (Lua 5.5: g->tobefnz)
     ///
     /// We keep a Vec instead of a linked list; objects stay in the main pool.
@@ -348,7 +334,6 @@ impl GC {
             gc_emergency: false,
             gc_stopem: false,
             gc_stopped: false,
-            pending_actions: GcActions::default(),
             tobefnz: Vec::new(),
             gc_params: [0; GCPARAM_COUNT], // Default to 100%
             gray: Vec::with_capacity(128),
@@ -505,19 +490,6 @@ impl GC {
     /// Get current GC statistics
     pub fn stats(&self) -> &GcStats {
         &self.stats
-    }
-
-    // ============ Pending Actions Management ============
-
-    /// Get accumulated GC actions that need VM processing
-    /// This retrieves and clears the pending actions
-    pub fn take_pending_actions(&mut self) -> GcActions {
-        std::mem::take(&mut self.pending_actions)
-    }
-
-    /// Check if there are pending actions waiting for VM
-    pub fn has_pending_actions(&self) -> bool {
-        !self.pending_actions.to_finalize.is_empty()
     }
 
     /// Enter finalizer execution mode - temporarily stop GC to prevent
@@ -1018,14 +990,16 @@ impl GC {
             }
             GcState::CallFin => {
                 // Lua 5.5: GCScallfin calls pending finalizers from 'tobefnz'.
-                // We delegate the actual calls to the VM via pending_actions.
-                if !self.tobefnz.is_empty() {
-                    self.pending_actions
-                        .to_finalize
-                        .extend(self.tobefnz.drain(..));
+                // Each step calls ONE finalizer (GCTM)
+                if !self.tobefnz.is_empty() && !self.gc_emergency {
+                    // Call one finalizer
+                    let _ = self.call_one_finalizer(l);
+                    StepResult::Step2Pause // Return to pause after calling all finalizers
+                } else {
+                    // No more finalizers
+                    self.gc_state = GcState::Pause;
+                    StepResult::Step2Pause
                 }
-                self.gc_state = GcState::Pause;
-                StepResult::Step2Pause
             }
             GcState::Atomic => {
                 // Should not reach here directly
@@ -1167,15 +1141,12 @@ impl GC {
 
         // 4. Call pending finalizers if not in emergency mode
         if !self.gc_emergency && !self.tobefnz.is_empty() {
-            self.pending_actions
-                .to_finalize
-                .extend(self.tobefnz.drain(..));
+            let _ = self.call_all_pending_finalizers(l);
         }
     }
 
     /// Port of Lua 5.5's correctgraylists
     /// Process TOUCHED objects and advance their ages
-
     // static void correctgraylists (global_State *g) {
     //      GCObject **list = correctgraylist(&g->grayagain);
     //      *list = g->weak; g->weak = NULL;
@@ -1198,6 +1169,7 @@ impl GC {
         self.weak.clear();
         // Process weak list: handle TOUCHED objects
         self.correct_gray_list(&mut weak_list);
+        self.grayagain.extend(weak_list);
 
         let mut allweak_list = std::mem::take(&mut self.allweak)
             .iter()
@@ -1207,6 +1179,7 @@ impl GC {
 
         // Process allweak list: handle TOUCHED objects
         self.correct_gray_list(&mut allweak_list);
+        self.grayagain.extend(allweak_list);
 
         let mut ephemeron_list = std::mem::take(&mut self.ephemeron)
             .iter()
@@ -1216,6 +1189,7 @@ impl GC {
 
         // Process ephemeron list: handle TOUCHED objects
         self.correct_gray_list(&mut ephemeron_list);
+        self.grayagain.extend(ephemeron_list);
     }
 
     // ** Correct a list of gray objects. Return a pointer to the last element
@@ -1955,7 +1929,15 @@ impl GC {
         self.sweep_index >= self.gc_list.len()
     }
 
-    fn sweep2old(&mut self, l: &mut LuaState, list: &[GcObjectPtr]) {}
+    
+    // Sweep a list of objects to enter generational mode.  Deletes dead
+    // objects and turns the non dead to old. All non-dead threads---which
+    // are now old---must be in a gray list. Everything else is not in a
+    // gray list. Open upvalues are also kept gray.
+    
+    fn sweep2old(&mut self, l: &mut LuaState, list: &[GcObjectPtr]) {
+        
+    }
 
     pub fn set_pause(&mut self) {
         // Lua 5.5 lgc.c setpause:
@@ -2360,6 +2342,139 @@ impl GC {
             if header.is_white() {
                 self.really_mark_object(l, gc_ptr);
             }
+        }
+    }
+
+    /// Get the next object to be finalized from the 'tobefnz' list.
+    /// Port of Lua 5.5's udata2finalize:
+    /// ```c
+    /// static GCObject *udata2finalize (global_State *g) {
+    ///   GCObject *o = g->tobefnz;  /* get first element */
+    ///   lua_assert(tofinalize(o));
+    ///   g->tobefnz = o->next;  /* remove it from 'tobefnz' list */
+    ///   o->next = g->allgc;  /* return it to 'allgc' list */
+    ///   g->allgc = o;
+    ///   resetbit(o->marked, FINALIZEDBIT);  /* object is "normal" again */
+    ///   if (issweepphase(g))
+    ///     makewhite(g, o);  /* "sweep" object */
+    ///   else if (getage(o) == G_OLD1)
+    ///     g->firstold1 = o;  /* it is the first OLD1 object in the list */
+    ///   return o;
+    /// }
+    /// ```
+    ///
+    /// NOTE: In Rust with Vec pool, we don't physically move objects.
+    /// The object stays in gc_list, we just remove it from tobefnz.
+    fn udata2finalize(&mut self) -> Option<GcObjectPtr> {
+        if self.tobefnz.is_empty() {
+            return None;
+        }
+
+        // Get first element from tobefnz
+        let gc_ptr = self.tobefnz.pop()?;
+
+        // Reset FINALIZEDBIT (object is "normal" again)
+        if let Some(header) = gc_ptr.header_mut() {
+            header.clear_finalized();
+
+            // If in sweep phase, make white
+            if self.gc_state.is_sweep_phase() {
+                header.make_white(self.current_white);
+            }
+            // If age is G_OLD1 in generational mode, note this
+            // (In C, this updates g->firstold1 pointer)
+            // In our Vec pool design, we don't need to track this explicitly
+        }
+
+        Some(gc_ptr)
+    }
+
+    /// Call ONE finalizer (__gc metamethod) for the next object in tobefnz.
+    /// Port of Lua 5.5's GCTM:
+    /// ```c
+    /// static void GCTM (lua_State *L) {
+    ///   global_State *g = G(L);
+    ///   const TValue *tm;
+    ///   TValue v;
+    ///   lua_assert(!g->gcemergency);
+    ///   setgcovalue(L, &v, udata2finalize(g));
+    ///   tm = luaT_gettmbyobj(L, &v, TM_GC);
+    ///   if (!notm(tm)) {  /* is there a finalizer? */
+    ///     TStatus status;
+    ///     lu_byte oldah = L->allowhook;
+    ///     lu_byte oldgcstp  = g->gcstp;
+    ///     g->gcstp |= GCSTPGC;  /* avoid GC steps */
+    ///     L->allowhook = 0;  /* stop debug hooks during GC metamethod */
+    ///     setobj2s(L, L->top.p++, tm);  /* push finalizer... */
+    ///     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
+    ///     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */
+    ///     status = luaD_pcall(L, dothecall, NULL, savestack(L, L->top.p - 2), 0);
+    ///     L->ci->callstatus &= ~CIST_FIN;  /* not running a finalizer anymore */
+    ///     L->allowhook = oldah;  /* restore hooks */
+    ///     g->gcstp = oldgcstp;  /* restore state */
+    ///     if (l_unlikely(status != LUA_OK)) {  /* error while running __gc? */
+    ///       luaE_warnerror(L, "__gc");
+    ///       L->top.p--;  /* pops error object */
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    fn call_one_finalizer(&mut self, l: &mut LuaState) {
+        use crate::lua_vm::get_metamethod_event;
+
+        debug_assert!(!self.gc_emergency, "GCTM called during emergency GC");
+
+        // Get next object to finalize
+        let Some(gc_ptr) = self.udata2finalize() else {
+            return; // No more objects to finalize
+        };
+
+        // Convert GcObjectPtr to LuaValue
+        let obj_value = match gc_ptr {
+            GcObjectPtr::Table(ptr) => LuaValue::table(ptr),
+            GcObjectPtr::Userdata(ptr) => LuaValue::userdata(ptr),
+            GcObjectPtr::Thread(ptr) => LuaValue::thread(ptr),
+            // Other types don't support __gc
+            _ => return,
+        };
+
+        // Get __gc metamethod
+        let Some(gc_method) = get_metamethod_event(l, &obj_value, TmKind::Gc) else {
+            return; // No __gc metamethod
+        };
+
+        // Stop GC during finalization (g->gcstp |= GCSTPGC)
+        let old_stopped = self.gc_stopped;
+        let old_debt = self.gc_debt;
+        self.gc_stopped = true;
+
+        // TODO: Save and restore L->allowhook (requires VM support)
+        // TODO: Set L->ci->callstatus |= CIST_FIN (requires VM support)
+
+        // Call __gc(obj) using pcall to handle errors safely
+        let result = l.pcall(gc_method, vec![obj_value]);
+
+        // TODO: Clear CIST_FIN flag
+        // TODO: Restore allowhook
+
+        // Restore GC state
+        self.gc_stopped = old_stopped;
+        self.gc_debt = old_debt;
+
+        // If error occurred, warn but don't propagate
+        // Lua 5.5: luaE_warnerror(L, "__gc");
+        if result.is_err() {
+            let msg = l.error_msg();
+            eprintln!("Error in __gc metamethod: {}", msg);
+        }
+    }
+
+    /// Call all pending finalizers (used in non-step contexts like finish_gen_cycle).
+    /// This is NOT how Lua 5.5 normally runs finalizers (it uses GCTM one at a time),
+    /// but useful for batch processing when appropriate.
+    fn call_all_pending_finalizers(&mut self, l: &mut LuaState) {
+        while !self.tobefnz.is_empty() && !self.gc_emergency {
+            self.call_one_finalizer(l);
         }
     }
 }
