@@ -1857,29 +1857,125 @@ impl GC {
         }
     }
 
-    // static GCObject **sweeplist (lua_State *L, GCObject **p, l_mem countin) {
-    //     global_State *g = G(L);
-    //     int ow = otherwhite(g);
-    //     int white = luaC_white(g);  /* current white */
-    //     while (*p != NULL && countin-- > 0) {
-    //         GCObject *curr = *p;
-    //         int marked = curr->marked;
-    //         if (isdeadm(ow, marked)) {  /* is 'curr' dead? */
-    //         *p = curr->next;  /* remove 'curr' from list */
-    //         freeobj(L, curr);  /* erase 'curr' */
-    //         }
-    //         else {  /* change mark to 'white' and age to 'new' */
-    //         curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
-    //         p = &curr->next;  /* go to next element */
-    //         }
-    //     }
-    //     return (*p == NULL) ? NULL : p;
-    // }
-    fn sweep_list(&mut self, _l: &mut LuaState, sweep_count: usize) {
+    /// Sweep a list of objects, freeing dead ones and resetting survivors
+    /// Port of Lua 5.5's sweeplist from lgc.c
+    ///
+    /// Lua 5.5 源码：
+    /// ```c
+    /// static GCObject **sweeplist (lua_State *L, GCObject **p, l_mem countin) {
+    ///   global_State *g = G(L);
+    ///   int ow = otherwhite(g);
+    ///   int white = luaC_white(g);  /* current white */
+    ///   while (*p != NULL && countin-- > 0) {
+    ///     GCObject *curr = *p;
+    ///     int marked = curr->marked;
+    ///     if (isdeadm(ow, marked)) {  /* is 'curr' dead? */
+    ///       *p = curr->next;  /* remove 'curr' from list */
+    ///       freeobj(L, curr);  /* erase 'curr' */
+    ///     }
+    ///     else {  /* change mark to 'white' and age to 'new' */
+    ///       curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
+    ///       p = &curr->next;  /* go to next element */
+    ///     }
+    ///   }
+    ///   return (*p == NULL) ? NULL : p;
+    /// }
+    /// ```
+    ///
+    fn sweep_list(&mut self, _l: &mut LuaState, mut sweep_count: usize) {
+        let other_white = 1 - self.current_white;
 
+        // 根据 sweepgc 状态决定操作哪个列表
+        match &mut self.sweepgc {
+            SweepGc::AllGc(index) => {
+                // 扫描主 gc_list
+                while *index < self.gc_list.len() && sweep_count > 0 {
+                    let gc_ptr = self.gc_list.get(*index).unwrap().as_gc_ptr();
+                    
+                    if let Some(header) = gc_ptr.header() {
+                        // 检查是否是死对象（other white）
+                        if header.is_dead(other_white) {
+                            // 死对象：释放
+                            let obj = self.gc_list.free(gc_ptr);
+                            self.total_bytes -= obj.size() as isize;
+                            drop(obj);
+                        } else {
+                            // 存活对象：重置为当前白色 + G_NEW
+                            if let Some(header_mut) = gc_ptr.header_mut() {
+                                header_mut.make_white(self.current_white);
+                                header_mut.set_age(G_NEW);
+                            }
+                            *index += 1;
+                        }
+                    } else {
+                        *index += 1;
+                    }
+                    
+                    sweep_count -= 1;
+                }
 
+                // 如果扫描完成，标记为 Done
+                if *index >= self.gc_list.len() {
+                    self.sweepgc = SweepGc::Done;
+                }
+            }
 
-        // last set self.sweepgc to Done if finished
+            SweepGc::FinObj(index) => {
+                // 扫描 finobj 列表（有终结器的对象）
+                while *index < self.finobj.len() && sweep_count > 0 {
+                    let gc_ptr = self.finobj[*index];
+                    
+                    if let Some(header) = gc_ptr.header() {
+                        if header.is_dead(other_white) {
+                            // 死对象且有终结器：移到 tobefnz
+                            self.tobefnz.push(gc_ptr);
+                            self.finobj.swap_remove(*index);
+                            // 不增加 index（因为 swap_remove）
+                        } else {
+                            // 存活对象：重置为当前白色 + G_NEW
+                            if let Some(header_mut) = gc_ptr.header_mut() {
+                                header_mut.make_white(self.current_white);
+                                header_mut.set_age(G_NEW);
+                            }
+                            *index += 1;
+                        }
+                    } else {
+                        *index += 1;
+                    }
+                    
+                    sweep_count -= 1;
+                }
+
+                if *index >= self.finobj.len() {
+                    self.sweepgc = SweepGc::Done;
+                }
+            }
+
+            SweepGc::ToBeFnz(index) => {
+                // 扫描 tobefnz 列表（等待终结的对象）
+                // 注意：tobefnz 中的对象不应该被清理，它们等待终结器调用
+                while *index < self.tobefnz.len() && sweep_count > 0 {
+                    let gc_ptr = self.tobefnz[*index];
+                    
+                    // tobefnz 中的对象保持原状，只是重置颜色
+                    if let Some(header_mut) = gc_ptr.header_mut() {
+                        header_mut.make_white(self.current_white);
+                        header_mut.set_age(G_NEW);
+                    }
+                    
+                    *index += 1;
+                    sweep_count -= 1;
+                }
+
+                if *index >= self.tobefnz.len() {
+                    self.sweepgc = SweepGc::Done;
+                }
+            }
+
+            SweepGc::Done => {
+                // 已经完成，不做任何事
+            }
+        }
     }
 
     fn sweep2old(&mut self, _l: &mut LuaState, to_clear_list: &mut HashSet<GcObjectPtr>) {
@@ -2100,7 +2196,8 @@ impl GC {
     }
 
     /// Young collection for generational mode
-    /// Port of Lua 5.5's youngcollection:
+    /// Port of Lua 5.5's youngcollection from lgc.c
+    ///
     /// ```c
     /// static void youngcollection (lua_State *L, global_State *g) {
     ///   lua_assert(g->gcstate == GCSpropagate);
@@ -2114,43 +2211,192 @@ impl GC {
     ///   /* sweep nursery and get a pointer to its last live element */
     ///   g->gcstate = GCSswpallgc;
     ///   psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
-    ///   ...
+    ///   /* sweep objects in 'finobj' list */
+    ///   psurvivalf = sweepgen(L, g, &g->finobj, g->finobjsur, NULL, NULL);
+    ///   /* update 'survival' and 'finobjsur' */
+    ///   g->survival = *psurvival;
+    ///   g->finobjsur = *psurvivalf;
     ///   finishgencycle(L, g);
     /// }
     /// ```
+    ///
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
-        // Start collection: mark roots
+        // === 步骤 1: 初始化标记阶段 ===
+        // 标记根对象：主线程、注册表、全局元表
         self.restart_collection(l);
         self.gc_state = GcState::Propagate;
 
-        // CRITICAL: Mark OLD1 objects before propagation!
-        // In generational mode, OLD1 objects are black from the previous cycle.
-        // They must be re-traversed so their referenced young objects get marked.
-        // Port of Lua 5.5's markold call in youngcollection.
+        // === 步骤 2: 标记 OLD1 对象 ===
+        // OLD1 对象是第一轮成为老对象的对象，它们可能引用年轻对象
+        // 必须重新遍历它们，确保被引用的年轻对象被标记
+        // Port of: markold(g, g->firstold1, g->reallyold)
         self.mark_old1();
 
-        // Propagate all marks
+        // === 步骤 3: 标记 finobj 和 tobefnz 中的老对象 ===
+        // 有终结器的对象需要特殊处理
+        // Port of: markold(g, g->finobj, g->finobjrold)
+        self.mark_old_in_list(&self.finobj.clone());
+        
+        // Port of: markold(g, g->tobefnz, NULL)
+        self.mark_old_in_list(&self.tobefnz.clone());
+
+        // === 步骤 4: 传播所有标记 ===
+        // 遍历灰色列表，标记所有可达对象
         while !self.gray.is_empty() {
             self.propagate_mark(l);
         }
 
-        // CRITICAL: Call atomic phase!
-        // This flips current_white so sweep can identify dead objects
+        // === 步骤 5: 执行 atomic 阶段 ===
+        // 处理 upvalues、弱表、终结器等
+        // 翻转白色标记
         self.atomic(l);
 
-        // Enter sweep phase
-        self.enter_sweep(l);
+        // === 步骤 6: 扫描年轻代 ===
+        // Port of: sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1)
+        self.sweep_gen(l);
 
-        // Complete sweep (fast mode = sweep everything)
-        // TODO
-        // while !self.sweep_step(l, true) {
-        //     // Continue sweeping until complete
-        // }
-
-        // Finish the generation cycle
+        // === 步骤 7: 完成分代周期 ===
+        // 调整灰色列表、设置 GC 状态、调用终结器
         self.finish_gen_cycle(l);
+    }
+
+    /// Mark old objects in a list (objects with age >= G_OLD0)
+    /// Port of Lua 5.5's markold function
+    ///
+    /// 原理：
+    /// 在分代 GC 中，老对象可能引用年轻对象。
+    /// 这个函数遍历列表，标记所有老对象（age >= G_OLD0）。
+    /// 老对象本身可能是黑色的，但需要重新遍历以标记它们引用的年轻对象。
+    fn mark_old_in_list(&mut self, list: &[GcObjectPtr]) {
+        for &gc_ptr in list {
+            if let Some(header) = gc_ptr.header() {
+                // 只标记老对象（G_OLD0, G_OLD1, G_OLD, TOUCHED1, TOUCHED2）
+                if header.is_old() {
+                    // 如果对象是黑色的，需要重新变为灰色以便重新遍历
+                    if header.is_black() {
+                        if let Some(header_mut) = gc_ptr.header_mut() {
+                            header_mut.make_gray();
+                        }
+                        // 添加到灰色列表等待遍历
+                        if !self.gray.contains(&gc_ptr) {
+                            self.gray.push(gc_ptr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sweep the young generation, promoting survivors
+    /// Port of Lua 5.5's sweepgen function
+    ///
+    /// 原理：
+    /// sweepgen 只扫描年轻代对象（G_NEW 和 G_SURVIVAL）：
+    /// 1. G_NEW 且白色（未标记）：死对象，回收
+    /// 2. G_NEW 且非白色（已标记）：存活，晋升为 G_SURVIVAL
+    /// 3. G_SURVIVAL 且非白色（已标记）：存活，晋升为 G_OLD0
+    /// 4. 老对象（age >= G_OLD0）：不处理，保持原状
+    fn sweep_gen(&mut self, _l: &mut LuaState) {
+        let other_white = 1 - self.current_white;
+        
+        // 反向遍历（因为可能删除元素）
+        let mut i = self.gc_list.len();
+        while i > 0 {
+            i -= 1;
+            
+            let Some(obj) = self.gc_list.get(i) else {
+                continue;
+            };
+            let gc_ptr = obj.as_gc_ptr();
+            
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
+
+            let age = header.age();
+            
+            // 只处理年轻对象（G_NEW, G_SURVIVAL）
+            if age == G_NEW {
+                // G_NEW 对象
+                if header.is_dead(other_white) {
+                    // 死对象：回收
+                    let obj = self.gc_list.free(gc_ptr);
+                    self.total_bytes -= obj.size() as isize;
+                    drop(obj);
+                } else {
+                    // 存活对象：晋升为 G_SURVIVAL
+                    if let Some(header_mut) = gc_ptr.header_mut() {
+                        header_mut.set_age(G_SURVIVAL);
+                        header_mut.make_white(self.current_white);
+                    }
+                }
+            } else if age == G_SURVIVAL {
+                // G_SURVIVAL 对象
+                if header.is_dead(other_white) {
+                    // 理论上不应该发生（SURVIVAL 应该被标记）
+                    // 但为了安全，仍然回收
+                    let obj = self.gc_list.free(gc_ptr);
+                    self.total_bytes -= obj.size() as isize;
+                    drop(obj);
+                } else {
+                    // 存活对象：晋升为 G_OLD0（通过前向屏障进入老代）
+                    if let Some(header_mut) = gc_ptr.header_mut() {
+                        header_mut.set_age(G_OLD0);
+                        header_mut.make_white(self.current_white);
+                    }
+                }
+            }
+            // 老对象（age >= G_OLD0）：不处理，跳过
+        }
+
+        // 同样处理 finobj 列表
+        self.sweep_gen_finobj();
+    }
+
+    /// Sweep finobj list in generational mode
+    fn sweep_gen_finobj(&mut self) {
+        let other_white = 1 - self.current_white;
+        let mut i = 0;
+        
+        while i < self.finobj.len() {
+            let gc_ptr = self.finobj[i];
+            
+            if let Some(header) = gc_ptr.header() {
+                let age = header.age();
+                
+                if age == G_NEW {
+                    if header.is_dead(other_white) {
+                        // 死对象且有终结器：移到 tobefnz
+                        self.tobefnz.push(gc_ptr);
+                        self.finobj.swap_remove(i);
+                        continue; // 不增加 i
+                    } else {
+                        // 存活：晋升为 G_SURVIVAL
+                        if let Some(header_mut) = gc_ptr.header_mut() {
+                            header_mut.set_age(G_SURVIVAL);
+                            header_mut.make_white(self.current_white);
+                        }
+                    }
+                } else if age == G_SURVIVAL {
+                    if header.is_dead(other_white) {
+                        // 死对象：移到 tobefnz
+                        self.tobefnz.push(gc_ptr);
+                        self.finobj.swap_remove(i);
+                        continue;
+                    } else {
+                        // 存活：晋升为 G_OLD0
+                        if let Some(header_mut) = gc_ptr.header_mut() {
+                            header_mut.set_age(G_OLD0);
+                            header_mut.make_white(self.current_white);
+                        }
+                    }
+                }
+            }
+            
+            i += 1;
+        }
     }
 
     // ============ GC Write Barriers (from lgc.c) ============
