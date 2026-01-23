@@ -365,7 +365,7 @@ pub type BinaryPtr = GcPtr<GcBinary>;
 pub type UserdataPtr = GcPtr<GcUserdata>;
 pub type ThreadPtr = GcPtr<GcThread>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GcObjectPtr {
     String(StringPtr),
     Table(TablePtr),
