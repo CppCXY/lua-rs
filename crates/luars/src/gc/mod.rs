@@ -1936,7 +1936,15 @@ impl GC {
     // gray list. Open upvalues are also kept gray.
     
     fn sweep2old(&mut self, l: &mut LuaState, list: &[GcObjectPtr]) {
-        
+        for gc_ptr in list {
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
+
+            if header.is_white() {
+                
+            }
+        }
     }
 
     pub fn set_pause(&mut self) {
