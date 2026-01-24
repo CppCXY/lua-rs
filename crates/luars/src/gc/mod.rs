@@ -44,7 +44,7 @@ use std::collections::HashSet;
 use crate::{
     LuaTable,
     lua_value::{Chunk, LuaValue},
-    lua_vm::{LuaState, TmKind},
+    lua_vm::{LuaState, TmKind}, stdlib::debug,
 };
 pub use gc_kind::*;
 pub use gc_object::*;
@@ -1251,7 +1251,7 @@ impl GC {
     /// NOTE: Lua 5.5 uses linked lists (allgc, finobj, tobefnz) and passes
     /// (from, to) pointers to mark a range. We use a unified Vec pool,
     /// so we iterate all objects and check their age.
-    fn mark_old1(&mut self) {
+    fn mark_old(&mut self, l: &mut LuaState) {
         // Iterate through all objects in gc_list
         // Find OLD1 objects and re-mark them if they're black
         for i in 0..self.gc_list.len() {
@@ -1267,9 +1267,7 @@ impl GC {
 
                         // If it's black, re-mark it (add to gray list for traversal)
                         if header.is_black() {
-                            // Make it gray and add to gray list
-                            header.make_gray();
-                            self.gray.push(gc_ptr);
+                           self.really_mark_object(l, gc_ptr);
                         }
                     }
                 }
@@ -2195,97 +2193,74 @@ impl GC {
         self.set_debt(debt);
     }
 
-    /// Young collection for generational mode
-    /// Port of Lua 5.5's youngcollection from lgc.c
-    ///
-    /// ```c
-    /// static void youngcollection (lua_State *L, global_State *g) {
-    ///   lua_assert(g->gcstate == GCSpropagate);
-    ///   if (g->firstold1) {
-    ///     markold(g, g->firstold1, g->reallyold);
-    ///     g->firstold1 = NULL;
-    ///   }
-    ///   markold(g, g->finobj, g->finobjrold);
-    ///   markold(g, g->tobefnz, NULL);
-    ///   atomic(L);  /* will lose 'g->marked' */
-    ///   /* sweep nursery and get a pointer to its last live element */
-    ///   g->gcstate = GCSswpallgc;
-    ///   psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
-    ///   /* sweep objects in 'finobj' list */
-    ///   psurvivalf = sweepgen(L, g, &g->finobj, g->finobjsur, NULL, NULL);
-    ///   /* update 'survival' and 'finobjsur' */
-    ///   g->survival = *psurvival;
-    ///   g->finobjsur = *psurvivalf;
-    ///   finishgencycle(L, g);
-    /// }
-    /// ```
-    ///
+    // static void youngcollection (lua_State *L, global_State *g) {
+    //     l_mem addedold1 = 0;
+    //     l_mem marked = g->GCmarked;  /* preserve 'g->GCmarked' */
+    //     GCObject **psurvival;  /* to point to first non-dead survival object */
+    //     GCObject *dummy;  /* dummy out parameter to 'sweepgen' */
+    //     lua_assert(g->gcstate == GCSpropagate);
+    //     if (g->firstold1) {  /* are there regular OLD1 objects? */
+    //         markold(g, g->firstold1, g->reallyold);  /* mark them */
+    //         g->firstold1 = NULL;  /* no more OLD1 objects (for now) */
+    //     }
+    //     markold(g, g->finobj, g->finobjrold);
+    //     markold(g, g->tobefnz, NULL);
+
+    //     atomic(L);  /* will lose 'g->marked' */
+
+    //     /* sweep nursery and get a pointer to its last live element */
+    //     g->gcstate = GCSswpallgc;
+    //     psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
+    //     /* sweep 'survival' */
+    //     sweepgen(L, g, psurvival, g->old1, &g->firstold1, &addedold1);
+    //     g->reallyold = g->old1;
+    //     g->old1 = *psurvival;  /* 'survival' survivals are old now */
+    //     g->survival = g->allgc;  /* all news are survivals */
+
+    //     /* repeat for 'finobj' lists */
+    //     dummy = NULL;  /* no 'firstold1' optimization for 'finobj' lists */
+    //     psurvival = sweepgen(L, g, &g->finobj, g->finobjsur, &dummy, &addedold1);
+    //     /* sweep 'survival' */
+    //     sweepgen(L, g, psurvival, g->finobjold1, &dummy, &addedold1);
+    //     g->finobjrold = g->finobjold1;
+    //     g->finobjold1 = *psurvival;  /* 'survival' survivals are old now */
+    //     g->finobjsur = g->finobj;  /* all news are survivals */
+
+    //     sweepgen(L, g, &g->tobefnz, NULL, &dummy, &addedold1);
+
+    //     /* keep total number of added old1 bytes */
+    //     g->GCmarked = marked + addedold1;
+
+    //     /* decide whether to shift to major mode */
+    //     if (checkminormajor(g)) {
+    //         minor2inc(L, g, KGC_GENMAJOR);  /* go to major mode */
+    //         g->GCmarked = 0;  /* avoid pause in first major cycle (see 'setpause') */
+    //     }
+    //     else
+    //         finishgencycle(L, g);  /* still in minor mode; finish it */
+    //     }
+    // }
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
-        // === 步骤 1: 初始化标记阶段 ===
-        // 标记根对象：主线程、注册表、全局元表
-        self.restart_collection(l);
-        self.gc_state = GcState::Propagate;
+        let added_old1 = 0;
+        let marked = self.gc_marked; // Preserve gc_marked
+        debug_assert!(
+            self.gc_state == GcState::Propagate,
+            "GC state must be Propagate at start of young collection"
+        );
 
-        // === 步骤 2: 标记 OLD1 对象 ===
-        // OLD1 对象是第一轮成为老对象的对象，它们可能引用年轻对象
-        // 必须重新遍历它们，确保被引用的年轻对象被标记
-        // Port of: markold(g, g->firstold1, g->reallyold)
-        self.mark_old1();
-
-        // === 步骤 3: 标记 finobj 和 tobefnz 中的老对象 ===
-        // 有终结器的对象需要特殊处理
-        // Port of: markold(g, g->finobj, g->finobjrold)
-        self.mark_old_in_list(&self.finobj.clone());
-        
-        // Port of: markold(g, g->tobefnz, NULL)
-        self.mark_old_in_list(&self.tobefnz.clone());
-
-        // === 步骤 4: 传播所有标记 ===
-        // 遍历灰色列表，标记所有可达对象
-        while !self.gray.is_empty() {
-            self.propagate_mark(l);
-        }
-
-        // === 步骤 5: 执行 atomic 阶段 ===
-        // 处理 upvalues、弱表、终结器等
-        // 翻转白色标记
+        self.mark_old(l);
         self.atomic(l);
 
-        // === 步骤 6: 扫描年轻代 ===
-        // Port of: sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1)
+        self.gc_state = GcState::SwpAllGc;
         self.sweep_gen(l);
 
-        // === 步骤 7: 完成分代周期 ===
-        // 调整灰色列表、设置 GC 状态、调用终结器
-        self.finish_gen_cycle(l);
-    }
-
-    /// Mark old objects in a list (objects with age >= G_OLD0)
-    /// Port of Lua 5.5's markold function
-    ///
-    /// 原理：
-    /// 在分代 GC 中，老对象可能引用年轻对象。
-    /// 这个函数遍历列表，标记所有老对象（age >= G_OLD0）。
-    /// 老对象本身可能是黑色的，但需要重新遍历以标记它们引用的年轻对象。
-    fn mark_old_in_list(&mut self, list: &[GcObjectPtr]) {
-        for &gc_ptr in list {
-            if let Some(header) = gc_ptr.header() {
-                // 只标记老对象（G_OLD0, G_OLD1, G_OLD, TOUCHED1, TOUCHED2）
-                if header.is_old() {
-                    // 如果对象是黑色的，需要重新变为灰色以便重新遍历
-                    if header.is_black() {
-                        if let Some(header_mut) = gc_ptr.header_mut() {
-                            header_mut.make_gray();
-                        }
-                        // 添加到灰色列表等待遍历
-                        if !self.gray.contains(&gc_ptr) {
-                            self.gray.push(gc_ptr);
-                        }
-                    }
-                }
-            }
+        if self.check_major_minor(l) {
+            // self.minor_to_incremental(l, KGC_GENMAJOR);
+            self.gc_marked = 0; // Avoid pause in first major cycle
+        } else {
+            self.finish_gen_cycle(l); // Still in minor mode; finish it
         }
     }
 
