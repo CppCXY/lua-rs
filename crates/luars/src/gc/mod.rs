@@ -1099,6 +1099,7 @@ impl GC {
             let added_bytes = num_bytes - self.gc_majorminor;
             let limit = self.apply_param(MAJORMINOR, added_bytes);
             let to_be_collected = num_bytes - self.gc_marked;
+            
             if to_be_collected >= limit {
                 // atomic2gen(L, g);  /* return to generational mode */
                 // setminordebt(g);
@@ -1143,18 +1144,10 @@ impl GC {
         self.gc_majorminor = self.gc_marked;
         self.gc_marked = 0;
 
-        // Rebuild young_objects list: collect all young objects (age < G_OLD1)
-        self.young_objects.clear();
-        for i in 0..self.gc_list.len() {
-            if let Some(owner) = self.gc_list.get(i) {
-                let gc_ptr = owner.as_gc_ptr();
-                if let Some(header) = gc_ptr.header() {
-                    if header.age() < G_OLD1 {
-                        self.young_objects.push(gc_ptr);
-                    }
-                }
-            }
-        }
+        // After sweep2old, all objects are G_OLD, so young_objects is already empty
+        // (cleared in sweep2old). No need to rebuild.
+        debug_assert!(self.young_objects.is_empty(), 
+            "young_objects should be empty after sweep2old in atomic2gen");
 
         self.finish_gen_cycle(l);
     }
@@ -2329,6 +2322,11 @@ impl GC {
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
+        // CRITICAL: Set gc_stopem to prevent recursive GC during collection
+        // This matches Lua 5.5's behavior where GC steps check gc_stopem
+        let old_stopem = self.gc_stopem;
+        self.gc_stopem = true;
+
         let marked = self.gc_marked; // Preserve gc_marked
         
         // Ensure we're in the right state for young collection
@@ -2336,6 +2334,19 @@ impl GC {
         if self.gc_state != GcState::Propagate {
             self.restart_collection(l);
             self.gc_state = GcState::Propagate;
+            
+            // CRITICAL: After restart_collection, rebuild young_objects list
+            // The list may contain stale pointers if incremental GC ran before
+            // first young collection. Rebuild by scanning all objects with age < G_OLD1.
+            self.young_objects.clear();
+            for i in 0..self.gc_list.len() {
+                if let Some(obj) = self.gc_list.get(i) {
+                    let age = obj.header().age();
+                    if age < G_OLD1 {
+                        self.young_objects.push(obj.as_gc_ptr());
+                    }
+                }
+            }
         }
 
         // Phase 1: Mark OLD1 objects (including finobj and tobefnz)
@@ -2352,12 +2363,20 @@ impl GC {
         self.gc_marked = marked + added_old1;
 
         // Phase 5: Check if need to switch to major mode
-        if self.check_major_minor(l) {
+        // Skip this check on first generation (gc_majorminor == 0 means first time)
+        let is_first_gen = self.gc_majorminor == 0;
+        if is_first_gen {
+            self.gc_majorminor = self.gc_marked; // Initialize for next cycle
+            self.finish_gen_cycle(l);
+        } else if self.check_major_minor(l) {
             // self.minor_to_incremental(l, KGC_GENMAJOR);
             self.gc_marked = 0; // Avoid pause in first major cycle
         } else {
             self.finish_gen_cycle(l); // Still in minor mode; finish it
         }
+
+        // Restore gc_stopem
+        self.gc_stopem = old_stopem;
     }
 
     /// Sweep the young generation, promoting survivors
@@ -2377,6 +2396,10 @@ impl GC {
         let young_list = std::mem::take(&mut self.young_objects);
         let mut new_young_list = Vec::new();
         
+        let mut dead_count = 0;
+        let mut survived_count = 0;
+        let mut promoted_count = 0;
+        
         for gc_ptr in young_list {
             let Some(header) = gc_ptr.header() else {
                 continue;
@@ -2386,13 +2409,17 @@ impl GC {
             
             // Process young objects (G_NEW, G_SURVIVAL, G_OLD0)
             if age == G_NEW {
-                if header.is_dead(other_white) {
+                let is_dead = header.is_dead(other_white);
+                
+                if is_dead {
                     // Dead: collect
+                    dead_count += 1;
                     let obj = self.gc_list.remove(gc_ptr);
                     self.total_bytes -= obj.size() as isize;
                     drop(obj);
                 } else {
                     // Alive: promote to G_SURVIVAL and make white
+                    survived_count += 1;
                     if let Some(header_mut) = gc_ptr.header_mut() {
                         header_mut.set_age(Self::next_age(age));
                         header_mut.make_white(self.current_white);
@@ -2400,13 +2427,17 @@ impl GC {
                     new_young_list.push(gc_ptr); // Still young
                 }
             } else if age == G_SURVIVAL || age == G_OLD0 {
-                if header.is_dead(other_white) {
+                let is_dead = header.is_dead(other_white);
+                
+                if is_dead {
                     // Dead: collect
+                    dead_count += 1;
                     let obj = self.gc_list.remove(gc_ptr);
                     self.total_bytes -= obj.size() as isize;
                     drop(obj);
                 } else {
                     // Alive: promote to OLD1 and KEEP COLOR (don't make white)
+                    promoted_count += 1;
                     if let Some(header_mut) = gc_ptr.header_mut() {
                         let old_age = header_mut.age();
                         debug_assert!(old_age != G_OLD1, "OLD1 should be advanced in mark_old");
