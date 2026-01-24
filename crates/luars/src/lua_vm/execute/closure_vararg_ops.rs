@@ -285,7 +285,7 @@ pub fn exec_setlist(
 
     // Get table from R[A] - OPTIMIZED: Direct pointer access
     let table_val = lua_state.stack_mut()[base + a];
-
+    let mut is_collectable = false;
     if let Some(table) = table_val.as_table_mut() {
         // Direct pointer access - no object_pool needed
         unsafe {
@@ -293,10 +293,17 @@ pub fn exec_setlist(
 
             // Set elements: table[vc+i] = R[A+i] for i=1..vb
             for i in 1..=vb {
-                let val = stack_ptr.add(base + a + i);
+                let val = *stack_ptr.add(base + a + i);
+                if val.iscollectable() {
+                    is_collectable = true;
+                }
                 let index = (vc + i) as i64;
-                table.raw_seti(index, *val);
+                table.raw_seti(index, val);
             }
+        }
+
+        if is_collectable {
+            lua_state.gc_barrier_back(table_val.as_gc_ptr().unwrap());
         }
     }
 
