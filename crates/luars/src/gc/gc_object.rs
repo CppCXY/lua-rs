@@ -699,7 +699,6 @@ impl FunctionBody {
 /// - GcPtr-based: external references use pointers, not indices
 pub struct GcList {
     gc_list: Vec<GcObjectOwner>,
-    fixed_list: Vec<GcObjectOwner>,
 }
 
 impl GcList {
@@ -707,7 +706,6 @@ impl GcList {
     pub fn new() -> Self {
         Self {
             gc_list: Vec::new(),
-            fixed_list: Vec::new(),
         }
     }
 
@@ -715,14 +713,13 @@ impl GcList {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             gc_list: Vec::with_capacity(cap),
-            fixed_list: Vec::new(),
         }
     }
 
     /// Allocate a new object and return a GcPtr to it
     /// O(1) allocation: push to Vec, track index in header, return pointer to Box contents
     #[inline]
-    pub fn alloc(&mut self, mut value: GcObjectOwner) {
+    pub fn add(&mut self, mut value: GcObjectOwner) {
         let index = self.gc_list.len();
         value.header_mut().index = index;
         self.gc_list.push(value);
@@ -731,7 +728,7 @@ impl GcList {
     /// Free an object using its pointer
     /// O(1) via swap_remove: moves last object to removed position, updates its index
     #[inline]
-    pub fn free(&mut self, gc_ptr: GcObjectPtr) -> GcObjectOwner {
+    pub fn remove(&mut self, gc_ptr: GcObjectPtr) -> GcObjectOwner {
         let index = gc_ptr.index();
         let last_index = self.gc_list.len() - 1;
         if index != last_index {
@@ -788,16 +785,6 @@ impl GcList {
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut GcObjectOwner> {
         self.gc_list.get_mut(index)
-    }
-
-    pub fn fixed(&mut self, gc_ptr: GcObjectPtr) {
-        if let Some(header) = gc_ptr.header_mut() {
-            header.set_age(G_OLD);
-            header.make_gray(); // Gray forever, like Lua 5.5
-        }
-
-        let gc_owner = self.free(gc_ptr);
-        self.fixed_list.push(gc_owner);
     }
 
     pub fn iter_ptrs(&self) -> impl Iterator<Item = GcObjectPtr> + '_ {
