@@ -43,6 +43,19 @@ impl LuaHashTable {
     pub fn hash_size(&self) -> usize {
         self.map.len()
     }
+    
+    /// GC-safe iteration: directly iterate by index without allocation
+    /// This avoids allocating Vec in iter_all() during GC
+    pub fn for_each_entry<F>(&self, mut f: F) 
+    where
+        F: FnMut(LuaValue, LuaValue),
+    {
+        for i in 0..self.map.len() {
+            if let Some((k, v)) = self.map.get_index(i) {
+                f(*k, *v);
+            }
+        }
+    }
 }
 
 impl LuaTableImpl for LuaHashTable {

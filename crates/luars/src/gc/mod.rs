@@ -408,6 +408,7 @@ impl GC {
         // SAFETY CHECK: Prevent out-of-memory by limiting total allocation to MAX_MEMORY_LIMIT
         let total_bytes = self.get_total_bytes();
         if total_bytes + size as isize > MAX_MEMORY_LIMIT {
+            // For simple test, later will return an error instead of panic
             panic!(
                 "Memory limit exceeded: {} bytes allocated, attempting to allocate {} more bytes (limit: {} bytes)",
                 total_bytes,
@@ -718,6 +719,9 @@ impl GC {
         table_ptr: TablePtr,
         inv: bool,
     ) -> bool {
+        // CRITICAL FIX: Collect entries first to avoid borrow issues
+        // Must use iter_all here because we need to reverse for convergence
+        // But this is in atomic phase where GC should not be triggered
         let entries = table_ptr.as_ref().data.iter_all();
 
         let mut marked_any = false;
@@ -850,16 +854,18 @@ impl GC {
 
     /// Clear entries with unmarked values from a single table
     fn clear_table_by_values(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
-        let entries = table_ptr.as_ref().data.iter_all();
-
+        // CRITICAL FIX: Use next() to avoid allocating Vec during sweep phase
         let mut keys_to_remove = Vec::new();
 
-        for (key, value) in entries {
+        let mut key = LuaValue::nil();
+        let table_data = &table_ptr.as_ref().data;
+        while let Some((k, value)) = table_data.next(&key) {
             if let Some(val_ptr) = value.as_gc_ptr() {
                 if self.is_cleared(l, val_ptr) {
-                    keys_to_remove.push(key);
+                    keys_to_remove.push(k);
                 }
             }
+            key = k;
         }
 
         // Remove entries with dead values
@@ -1412,15 +1418,21 @@ impl GC {
         if table.is_array() {
             self.traverse_array(l, table_ptr);
         } else {
-            // Mark all entries
-            for (k, v) in &table.iter_all() {
+            // CRITICAL FIX: Use for_each_entry() to iterate by index directly
+            // This avoids both allocating Vec (iter_all) and repeated lookups (next)
+            // Port of Lua 5.5's direct pointer iteration: `for (n = gnode(h, 0); n < limit; n++)`
+            let entry_count = table.hash_size();
+            if entry_count >= 80 {
+                eprintln!("[GC] traverse_strong_table: table with {} hash entries", entry_count);
+            }
+            table.for_each_entry(|k, v| {
                 if let Some(k_ptr) = k.as_gc_ptr() {
                     self.mark_object(l, k_ptr);
                 }
                 if let Some(v_ptr) = v.as_gc_ptr() {
                     self.mark_object(l, v_ptr);
                 }
-            }
+            });
         }
 
         self.gen_link(table_ptr.into());
@@ -1488,8 +1500,9 @@ impl GC {
 
         let mut has_clears = table.len() > 0;
 
-        let entries = table.iter_all();
-        for (k, v) in &entries {
+        // CRITICAL FIX: Use next() instead of iter_all() to avoid allocation
+        let mut key = LuaValue::nil();
+        while let Some((k, v)) = table.next(&key) {
             // Mark key (strong reference)
             if let Some(key_ptr) = k.as_gc_ptr() {
                 self.mark_object(l, key_ptr);
@@ -1501,6 +1514,7 @@ impl GC {
                     has_clears = true;
                 }
             }
+            key = k;
         }
 
         if self.gc_state == GcState::Propagate {
@@ -1570,8 +1584,9 @@ impl GC {
 
         let mut marked = self.traverse_array(l, table_ptr);
 
-        let entries = table.iter_all();
-        for (k, v) in &entries {
+        // CRITICAL FIX: Use next() instead of iter_all() to avoid allocation
+        let mut key = LuaValue::nil();
+        while let Some((k, v)) = table.next(&key) {
             let key_ptr = k.as_gc_ptr();
             let val_ptr = v.as_gc_ptr();
 
@@ -1588,6 +1603,7 @@ impl GC {
                 // Key is alive, but value is white - mark the value
                 self.really_mark_object(l, val_ptr.unwrap());
             }
+            key = k;
         }
 
         if self.gc_state == GcState::Propagate {
@@ -2352,6 +2368,9 @@ impl GC {
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
+        eprintln!("\n[GC] === young_collection #{} START ==", self.stats.minor_collections);
+        eprintln!("[GC] Total bytes: {}", self.get_total_bytes());
+
         // CRITICAL: Set gc_stopem to prevent recursive GC during collection
         // This matches Lua 5.5's behavior where GC steps check gc_stopem
         let old_stopem = self.gc_stopem;
@@ -2407,6 +2426,9 @@ impl GC {
 
         // Restore gc_stopem
         self.gc_stopem = old_stopem;
+        
+        eprintln!("[GC] === young_collection END ===");
+        eprintln!("[GC] Total bytes after: {}\n", self.get_total_bytes());
     }
 
     /// Sweep the young generation, promoting survivors

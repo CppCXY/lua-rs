@@ -322,6 +322,26 @@ impl LuaTable {
 
         result
     }
+    
+    /// GC-safe iteration: call f for each entry without allocating Vec
+    /// This is used by GC to traverse table entries safely
+    pub(crate) fn for_each_entry<F>(&self, mut f: F)
+    where
+        F: FnMut(LuaValue, LuaValue),
+    {
+        match &self.impl_table {
+            LuaTableDetail::ValueArray(ar) => {
+                for i in 0..ar.array.len() {
+                    let value = ar.array[i];
+                    let key = LuaValue::integer((i + 1) as i64);
+                    f(key, value);
+                }
+            }
+            LuaTableDetail::HashTable(t) => {
+                t.for_each_entry(f);
+            }
+        }
+    }
 }
 
 pub trait LuaTableImpl {
