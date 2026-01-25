@@ -11,7 +11,7 @@ use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
-use crate::{Chunk, GcObjectPtr, LuaVM, ThreadPtr, UpvaluePtr};
+use crate::{Chunk, GcObjectPtr, LuaVM, StringPtr, ThreadPtr, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -97,6 +97,13 @@ impl LuaState {
 
     pub(crate) unsafe fn set_thread_ptr(&mut self, thread: ThreadPtr) {
         self.thread = thread;
+    }
+
+    /// Remove a dead string from the intern map (called by GC during sweep)
+    pub(crate) fn remove_dead_string(&mut self, str_ptr: StringPtr) {
+        unsafe {
+            (*self.vm).object_allocator.remove_str(str_ptr);
+        }
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)

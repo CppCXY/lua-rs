@@ -72,6 +72,9 @@ const DEFAULT_MAJORMINOR: i32 = 50; // 50%
 
 const GCSWEEPMAX: isize = 20; // Max steps per sweep call
 
+/// Maximum memory limit (1GB) to prevent out-of-memory crashes
+const MAX_MEMORY_LIMIT: isize = 1024 * 1024 * 1024; // 1GB
+
 /// Maximum l_mem value (like MAX_LMEM in Lua 5.5)
 const MAX_LMEM: isize = isize::MAX;
 /// Compute ceil(log2(x)) for GC parameter encoding
@@ -373,6 +376,12 @@ impl GC {
         gc
     }
 
+    /// Helper to remove a dead string from the string intern map
+    /// This is needed because object_allocator is in LuaVM, accessed via LuaState
+    fn remove_dead_string_from_intern(l: &mut LuaState, str_ptr: StringPtr) {
+        l.remove_dead_string(str_ptr);
+    }
+
     /// Change to incremental mode (like minor2inc in Lua 5.5)
     pub fn change_to_incremental_mode(&mut self, l: &mut LuaState) {
         if self.gc_kind == GcKind::Inc {
@@ -395,6 +404,18 @@ impl GC {
 
     pub fn trace_object(&mut self, gc_object_owner: GcObjectOwner) {
         let size = gc_object_owner.size_of_data();
+        
+        // SAFETY CHECK: Prevent out-of-memory by limiting total allocation to MAX_MEMORY_LIMIT
+        let total_bytes = self.get_total_bytes();
+        if total_bytes + size as isize > MAX_MEMORY_LIMIT {
+            panic!(
+                "Memory limit exceeded: {} bytes allocated, attempting to allocate {} more bytes (limit: {} bytes)",
+                total_bytes,
+                size,
+                MAX_MEMORY_LIMIT
+            );
+        }
+        
         let gc_ptr = gc_object_owner.as_gc_ptr();
         let age = gc_object_owner.header().age();
         
@@ -606,10 +627,13 @@ impl GC {
 
         if header.to_finalize() {
             return;
-        }
+        };
 
         if self.needs_finalization(gc_ptr) {
             header.set_finalized();
+            // CRITICAL: Add to finobj list so it will be tracked by GC
+            // This is required for generational GC to properly handle finalizers
+            self.finobj.push(gc_ptr);
         }
     }
 
@@ -1939,7 +1963,7 @@ impl GC {
     /// }
     /// ```
     ///
-    fn sweep_list(&mut self, _l: &mut LuaState, mut sweep_count: usize) {
+    fn sweep_list(&mut self, l: &mut LuaState, mut sweep_count: usize) {
         let other_white = 1 - self.current_white;
 
         // 根据 sweepgc 状态决定操作哪个列表
@@ -1953,6 +1977,12 @@ impl GC {
                         // 检查是否是死对象（other white）
                         if header.is_dead(other_white) {
                             // 死对象：释放
+                            
+                            // CRITICAL: Remove dead strings from intern map before dropping
+                            if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                                Self::remove_dead_string_from_intern(l, str_ptr);
+                            }
+                            
                             let obj = self.gc_list.remove(gc_ptr);
                             self.total_bytes -= obj.size() as isize;
                             drop(obj);
@@ -2387,7 +2417,7 @@ impl GC {
     /// We track young objects in a separate Vec for O(young) instead of O(total).
     ///
     /// Returns: bytes promoted to OLD1 generation
-    fn sweep_gen(&mut self, _l: &mut LuaState) -> isize {
+    fn sweep_gen(&mut self, l: &mut LuaState) -> isize {
         let other_white = 1 - self.current_white;
         let mut added_old1: isize = 0;
         
@@ -2414,6 +2444,12 @@ impl GC {
                 if is_dead {
                     // Dead: collect
                     dead_count += 1;
+                    
+                    // CRITICAL: Remove dead strings from intern map before dropping
+                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    }
+                    
                     let obj = self.gc_list.remove(gc_ptr);
                     self.total_bytes -= obj.size() as isize;
                     drop(obj);
@@ -2432,6 +2468,12 @@ impl GC {
                 if is_dead {
                     // Dead: collect
                     dead_count += 1;
+                    
+                    // CRITICAL: Remove dead strings from intern map before dropping
+                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    }
+                    
                     let obj = self.gc_list.remove(gc_ptr);
                     self.total_bytes -= obj.size() as isize;
                     drop(obj);
@@ -2752,10 +2794,13 @@ impl GC {
         if let Some(header) = gc_ptr.header_mut() {
             header.clear_finalized();
 
-            // If in sweep phase, make white
-            if self.gc_state.is_sweep_phase() {
-                header.make_white(self.current_white);
-            }
+            // CRITICAL: Make the object white with current_white color
+            // This ensures that if the object is resurrected (referenced again)
+            // during finalization, it won't be swept in the next GC cycle.
+            // Lua 5.5 does this implicitly by calling resetbits which sets to
+            // currentwhite.
+            header.make_white(self.current_white);
+            
             // If age is G_OLD1 in generational mode, note this
             // (In C, this updates g->firstold1 pointer)
             // In our Vec pool design, we don't need to track this explicitly
