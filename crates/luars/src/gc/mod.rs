@@ -1031,7 +1031,8 @@ impl GC {
                 if !self.tobefnz.is_empty() && !self.gc_emergency {
                     // Call one finalizer
                     self.call_one_finalizer(l);
-                    StepResult::Step2Pause // Return to pause after calling all finalizers
+                    // Stay in CallFin state to process more finalizers
+                    StepResult::Work(GCSWEEPMAX)
                 } else {
                     // No more finalizers
                     self.gc_state = GcState::Pause;
@@ -1158,11 +1159,22 @@ impl GC {
                 }
             }
 
+            // CRITICAL BUG FIX: Don't remove objects from tobefnz even if marked for clearing
+            // Objects in tobefnz need to have their finalizers called. If they're in
+            // to_clear_hash_set (white), we make them old+black to prevent collection.
+            // This fixes the issue where finalizers weren't called in generational GC.
             let tobefnz = std::mem::take(&mut self.tobefnz);
             for obj_ptr in tobefnz {
-                if !to_clear_hash_set.contains(&obj_ptr) {
-                    self.tobefnz.push(obj_ptr);
+                if to_clear_hash_set.contains(&obj_ptr) {
+                    // Object was marked for clearing but needs finalization
+                    // Remove from clear set and make it old+black
+                    to_clear_hash_set.remove(&obj_ptr);
+                    if let Some(header) = obj_ptr.header_mut() {
+                        header.set_age(G_OLD);
+                        header.make_black();
+                    }
                 }
+                self.tobefnz.push(obj_ptr);
             }
 
             for gc_ptr in to_clear_hash_set {
@@ -1421,10 +1433,6 @@ impl GC {
             // CRITICAL FIX: Use for_each_entry() to iterate by index directly
             // This avoids both allocating Vec (iter_all) and repeated lookups (next)
             // Port of Lua 5.5's direct pointer iteration: `for (n = gnode(h, 0); n < limit; n++)`
-            let entry_count = table.hash_size();
-            if entry_count >= 80 {
-                eprintln!("[GC] traverse_strong_table: table with {} hash entries", entry_count);
-            }
             table.for_each_entry(|k, v| {
                 if let Some(k_ptr) = k.as_gc_ptr() {
                     self.mark_object(l, k_ptr);
