@@ -63,7 +63,7 @@ pub const GCPARAM_COUNT: usize = 6;
 
 // Default GC parameters (from Lua 5.5 lgc.h)
 // MUST match Lua 5.5 exactly for debugging consistency
-const DEFAULT_PAUSE: i32 = 250; // 200% (LUAI_GCPAUSE in lgc.h)
+const DEFAULT_PAUSE: i32 = 250; // 250% (LUAI_GCPAUSE in lgc.h)
 const DEFAULT_STEPMUL: i32 = 200; // 200% (LUAI_GCMUL in lgc.h)
 const DEFAULT_STEPSIZE: i32 = 200 * std::mem::size_of::<LuaTable>() as i32; // ~13KB
 const DEFAULT_MINORMUL: i32 = 20; // 20%
@@ -2300,54 +2300,6 @@ impl GC {
         let debt = self.apply_param(MINORMUL, base);
         self.set_debt(debt);
     }
-
-    // static void youngcollection (lua_State *L, global_State *g) {
-    //     l_mem addedold1 = 0;
-    //     l_mem marked = g->GCmarked;  /* preserve 'g->GCmarked' */
-    //     GCObject **psurvival;  /* to point to first non-dead survival object */
-    //     GCObject *dummy;  /* dummy out parameter to 'sweepgen' */
-    //     lua_assert(g->gcstate == GCSpropagate);
-    //     if (g->firstold1) {  /* are there regular OLD1 objects? */
-    //         markold(g, g->firstold1, g->reallyold);  /* mark them */
-    //         g->firstold1 = NULL;  /* no more OLD1 objects (for now) */
-    //     }
-    //     markold(g, g->finobj, g->finobjrold);
-    //     markold(g, g->tobefnz, NULL);
-
-    //     atomic(L);  /* will lose 'g->marked' */
-
-    //     /* sweep nursery and get a pointer to its last live element */
-    //     g->gcstate = GCSswpallgc;
-    //     psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
-    //     /* sweep 'survival' */
-    //     sweepgen(L, g, psurvival, g->old1, &g->firstold1, &addedold1);
-    //     g->reallyold = g->old1;
-    //     g->old1 = *psurvival;  /* 'survival' survivals are old now */
-    //     g->survival = g->allgc;  /* all news are survivals */
-
-    //     /* repeat for 'finobj' lists */
-    //     dummy = NULL;  /* no 'firstold1' optimization for 'finobj' lists */
-    //     psurvival = sweepgen(L, g, &g->finobj, g->finobjsur, &dummy, &addedold1);
-    //     /* sweep 'survival' */
-    //     sweepgen(L, g, psurvival, g->finobjold1, &dummy, &addedold1);
-    //     g->finobjrold = g->finobjold1;
-    //     g->finobjold1 = *psurvival;  /* 'survival' survivals are old now */
-    //     g->finobjsur = g->finobj;  /* all news are survivals */
-
-    //     sweepgen(L, g, &g->tobefnz, NULL, &dummy, &addedold1);
-
-    //     /* keep total number of added old1 bytes */
-    //     g->GCmarked = marked + addedold1;
-
-    //     /* decide whether to shift to major mode */
-    //     if (checkminormajor(g)) {
-    //         minor2inc(L, g, KGC_GENMAJOR);  /* go to major mode */
-    //         g->GCmarked = 0;  /* avoid pause in first major cycle (see 'setpause') */
-    //     }
-    //     else
-    //         finishgencycle(L, g);  /* still in minor mode; finish it */
-    //     }
-    // }
     
     /// Age transition function (replaces Lua 5.5's nextage array)
     /// Inlined for performance - compiler will optimize to jump table or branches
@@ -2367,9 +2319,6 @@ impl GC {
     
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
-
-        eprintln!("\n[GC] === young_collection #{} START ==", self.stats.minor_collections);
-        eprintln!("[GC] Total bytes: {}", self.get_total_bytes());
 
         // CRITICAL: Set gc_stopem to prevent recursive GC during collection
         // This matches Lua 5.5's behavior where GC steps check gc_stopem
@@ -2426,9 +2375,6 @@ impl GC {
 
         // Restore gc_stopem
         self.gc_stopem = old_stopem;
-        
-        eprintln!("[GC] === young_collection END ===");
-        eprintln!("[GC] Total bytes after: {}\n", self.get_total_bytes());
     }
 
     /// Sweep the young generation, promoting survivors
@@ -2448,10 +2394,6 @@ impl GC {
         let young_list = std::mem::take(&mut self.young_objects);
         let mut new_young_list = Vec::new();
         
-        let mut dead_count = 0;
-        let mut survived_count = 0;
-        let mut promoted_count = 0;
-        
         for gc_ptr in young_list {
             let Some(header) = gc_ptr.header() else {
                 continue;
@@ -2464,9 +2406,6 @@ impl GC {
                 let is_dead = header.is_dead(other_white);
                 
                 if is_dead {
-                    // Dead: collect
-                    dead_count += 1;
-                    
                     // CRITICAL: Remove dead strings from intern map before dropping
                     if let GcObjectPtr::String(str_ptr) = gc_ptr {
                         Self::remove_dead_string_from_intern(l, str_ptr);
@@ -2477,7 +2416,6 @@ impl GC {
                     drop(obj);
                 } else {
                     // Alive: promote to G_SURVIVAL and make white
-                    survived_count += 1;
                     if let Some(header_mut) = gc_ptr.header_mut() {
                         header_mut.set_age(Self::next_age(age));
                         header_mut.make_white(self.current_white);
@@ -2488,9 +2426,6 @@ impl GC {
                 let is_dead = header.is_dead(other_white);
                 
                 if is_dead {
-                    // Dead: collect
-                    dead_count += 1;
-                    
                     // CRITICAL: Remove dead strings from intern map before dropping
                     if let GcObjectPtr::String(str_ptr) = gc_ptr {
                         Self::remove_dead_string_from_intern(l, str_ptr);
@@ -2501,7 +2436,6 @@ impl GC {
                     drop(obj);
                 } else {
                     // Alive: promote to OLD1 and KEEP COLOR (don't make white)
-                    promoted_count += 1;
                     if let Some(header_mut) = gc_ptr.header_mut() {
                         let old_age = header_mut.age();
                         debug_assert!(old_age != G_OLD1, "OLD1 should be advanced in mark_old");

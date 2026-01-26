@@ -15,11 +15,6 @@ pub struct StringInterner {
     // 使用 ahash 作为哈希算法以提升性能
     map: HashMap<u64, Vec<StringPtr>, RandomState>,
 
-    // Reverse index to remove strings without dereferencing them during sweep.
-    // This is important because sweeping code is precisely where dangling pointers
-    // might surface if there is any GC invariant violation elsewhere.
-    rev: HashMap<StringPtr, u64, RandomState>,
-
     short_string_limit: usize,
 
     hashbuilder: RandomState,
@@ -29,7 +24,6 @@ impl StringInterner {
     pub fn new(short_string_limit: usize) -> Self {
         Self {
             map: HashMap::with_capacity_and_hasher(256, RandomState::new()),
-            rev: HashMap::with_capacity_and_hasher(256, RandomState::new()),
             short_string_limit,
             hashbuilder: RandomState::new(),
         }
@@ -79,7 +73,6 @@ impl StringInterner {
         let ptr = gc_string.as_str_ptr().unwrap();
         gc.trace_object(gc_string);
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
-        self.rev.insert(ptr, hash);
 
         LuaValue::string(ptr)
     }
@@ -94,19 +87,9 @@ impl StringInterner {
 
     /// Remove dead strings (called by GC)
     pub fn remove_dead_intern(&mut self, ptr: StringPtr) {
-        // Do NOT dereference `ptr` here.
-        // If there is any GC/root/barrier bug elsewhere, `ptr` can already be dangling
-        // by the time we reach sweeping, and dereferencing would immediately panic
-        // under Rust's UB checks.
-        let Some(hash) = self.rev.remove(&ptr) else {
-            // Fallback: best-effort removal by scanning buckets.
-            // This avoids dereferencing `ptr` at the cost of O(n) work.
-            for ids in self.map.values_mut() {
-                ids.retain(|&i| i != ptr);
-            }
-            self.map.retain(|_, ids| !ids.is_empty());
-            return;
-        };
+        let gc_string = ptr.as_ref();
+        let hash = gc_string.data.hash;
+
         // Remove from map
         if let Some(ids) = self.map.get_mut(&hash) {
             ids.retain(|&i| i != ptr);
