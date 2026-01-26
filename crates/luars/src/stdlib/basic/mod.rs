@@ -324,20 +324,31 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("ipairs iterator: missing index".to_string()))?;
 
     // Fast path: both table and index are valid
-    if let Some(table) = table_val.as_table() {
-        if let Some(index) = index_val.as_integer() {
+    // CRITICAL: Get the value FIRST before any push_value operations
+    // to avoid dangling pointer issues when stack is reallocated
+    let next_index_opt = index_val.as_integer();
+    let value_opt = if let Some(table) = table_val.as_table() {
+        if let Some(index) = next_index_opt {
             let next_index = index + 1;
-
-            if let Some(value) = table.raw_geti(next_index) {
-                // Return (next_index, value)
-                l.push_value(LuaValue::integer(next_index))?;
-                l.push_value(value)?;
-                return Ok(2);
-            }
-            // Reached end of array - return nil
-            l.push_value(LuaValue::nil())?;
-            return Ok(1);
+            // Get value and next index before any stack operations
+            table.raw_geti(next_index).map(|v| (next_index, v))
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    // Now safely push values without holding any references
+    if let Some((next_index, value)) = value_opt {
+        // Return (next_index, value)
+        l.push_value(LuaValue::integer(next_index))?;
+        l.push_value(value)?;
+        return Ok(2);
+    } else if next_index_opt.is_some() {
+        // Reached end of array - return nil
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
     }
 
     // Slow path with error
@@ -374,14 +385,16 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
 
     let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
 
-    // Use efficient lua_next implementation - direct table access
-    let table = table_val
-        .as_table()
-        .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
+    // CRITICAL: Get the result FIRST before any push_value operations
+    // to avoid dangling pointer issues when stack is reallocated
+    let result = {
+        let table = table_val
+            .as_table()
+            .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
+        table.next(&index_val)
+    };
 
-    let result = table.next(&index_val);
-
-    // Return next key-value pair, or nil if at end
+    // Now safely push values without holding any table references
     if let Some((k, v)) = result {
         l.push_value(k)?;
         l.push_value(v)?;
@@ -529,9 +542,15 @@ fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'rawget' (value expected)".to_string()))?;
 
-    if let Some(table_ref) = table.as_table() {
-        let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
-        l.push_value(value)?;
+    // CRITICAL: Get the value FIRST before push_value to avoid dangling pointer
+    let value = if let Some(table_ref) = table.as_table() {
+        Some(table_ref.raw_get(&key).unwrap_or(LuaValue::nil()))
+    } else {
+        None
+    };
+
+    if let Some(v) = value {
+        l.push_value(v)?;
         return Ok(1);
     }
     Err(l.error("bad argument #1 to 'rawget' (table expected)".to_string()))
