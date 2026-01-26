@@ -118,6 +118,17 @@ impl GcHeader {
         (self.marked & WHITEBITS) != 0
     }
 
+    /// Check if object is current white (the white color of current GC cycle)
+    /// This is used during marking phase to determine if object needs marking
+    #[inline(always)]
+    pub fn is_current_white(&self, current_white: u8) -> bool {
+        debug_assert!(
+            current_white == 0 || current_white == 1,
+            "current_white must be 0 or 1"
+        );
+        (self.marked & (1 << (WHITE0BIT + current_white))) != 0
+    }
+
     /// Check if object is black
     /// Port of lgc.h: isblack(x) macro
     #[inline(always)]

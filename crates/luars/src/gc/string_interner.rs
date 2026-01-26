@@ -48,6 +48,14 @@ impl StringInterner {
         let mut found_ptr = None;
         if let Some(ptrs) = self.map.get(&hash) {
             for &ptr in ptrs {
+                let header = ptr.as_ref().header;
+                let other_white = 1 - gc.current_white;
+                
+                // Skip dead strings that haven't been removed from map yet
+                if header.is_dead(other_white) {
+                    continue;
+                }
+                
                 if ptr.as_ref().data.as_str() == s {
                     found_ptr = Some(ptr);
                     break;

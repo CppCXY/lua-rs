@@ -1381,14 +1381,7 @@ impl GC {
             return;
         };
 
-        // CRITICAL: Must check if white before marking, just like mark_object
-        // Otherwise we'll add already-marked objects to gray list repeatedly
-        // causing infinite loops in converge_ephemerons
-        if let Some(header) = gc_ptr.header_mut() {
-            if header.is_white() {
-                self.really_mark_object(l, gc_ptr);
-            }
-        }
+        self.really_mark_object(l, gc_ptr);
     }
 
     /// Mark all constants in a chunk and its nested chunks (like Lua 5.5's traverseproto)
@@ -1757,7 +1750,11 @@ impl GC {
     /// Check if an object is white
     fn is_white(&self, gc_ptr: GcObjectPtr) -> bool {
         if let Some(header) = gc_ptr.header() {
-            header.is_white()
+            // CRITICAL: Must check CURRENT white, not any white!
+            // After atomic phase flips current_white, old black objects
+            // are not current white, so they need to be marked again
+            // in next GC cycle. Using is_current_white ensures correct behavior.
+            header.is_current_white(self.current_white)
         } else {
             false
         }
@@ -1866,7 +1863,9 @@ impl GC {
 
         self.clear_by_values_range(l, &origweak, &origall);
 
+        let old_white = self.current_white;
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
+        
         debug_assert!(
             self.gray.is_empty(),
             "Gray list should be empty at end of atomic phase"
@@ -2007,9 +2006,6 @@ impl GC {
                     if let Some(header) = gc_ptr.header() {
                         // 检查是否是死对象（other white）
                         if header.is_dead(other_white) {
-                            // 死对象：释放
-                            
-                            // CRITICAL: Remove dead strings from intern map before dropping
                             if let GcObjectPtr::String(str_ptr) = gc_ptr {
                                 Self::remove_dead_string_from_intern(l, str_ptr);
                             }
@@ -2695,7 +2691,16 @@ impl GC {
     fn really_mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
         self.gc_marked += gc_ptr.header().map(|it| it.size as isize).unwrap_or(0);
         match gc_ptr {
-            GcObjectPtr::String(_) | GcObjectPtr::Binary(_) => {
+            GcObjectPtr::String(str_ptr) => {
+                // Debug: log specific strings
+                // let content = str_ptr.as_ref().data.as_str();
+                // if content.contains("item500") || content.contains("item999") || content.contains("item1000") {
+                //     eprintln!("[GC MARK] String '{}' marked BLACK (state={}, cw={})", 
+                //         content, self.gc_state as u8, self.current_white);
+                // }
+                gc_ptr.header_mut().unwrap().make_black();
+            }
+            GcObjectPtr::Binary(_) => {
                 gc_ptr.header_mut().unwrap().make_black(); // Leaves become black immediately
             }
             GcObjectPtr::Upvalue(upval_ptr) => {
@@ -2717,8 +2722,13 @@ impl GC {
                 }
             }
             _ => {
-                gc_ptr.header_mut().unwrap().make_gray(); // Others become gray
-                self.gray.push(gc_ptr);
+                let header = gc_ptr.header_mut().unwrap();
+                // CRITICAL: Only add to gray list if not already gray
+                // This prevents infinite loops in converge_ephemerons
+                if !header.is_gray() {
+                    header.make_gray(); // Others become gray
+                    self.gray.push(gc_ptr);
+                }
             }
         }
     }
@@ -2930,6 +2940,7 @@ impl Default for GC {
     }
 }
 
+#[derive(Debug)]
 enum SweepGc {
     AllGc(usize),
     FinObj(usize),
