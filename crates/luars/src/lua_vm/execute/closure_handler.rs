@@ -73,5 +73,9 @@ pub fn handle_closure(
     // Store in R[A]
     lua_state.stack_mut()[base + a] = closure_value;
 
+    // CRITICAL: Check GC after creating closure (like Lua 5.5 luaC_checkGC)
+    // Each object allocation should trigger GC check to prevent memory exhaustion
+    lua_state.check_gc()?;
+
     Ok(())
 }
