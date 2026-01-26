@@ -124,6 +124,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                 }
             };
         }
+
         // MAINLOOP: Main instruction dispatch loop
         loop {
             // Fetch instruction and advance PC
@@ -1006,16 +1007,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
 
-                    // CRITICAL: Ensure stack_top includes the register we just wrote to
-                    // stack_top points to "next available position", so valid range is [0, stack_top)
-                    // If we write to stack[base+a], stack_top must be AT LEAST base+a+1
-                    // This ensures the new table is visible to GC root collection
+                    // like checkGC
                     let new_top = base + a + 1;
-                    if lua_state.get_top() < new_top {
-                        lua_state.set_top(new_top)?;
-                    }
-
-                    // GC check after table creation (like Lua 5.5 OP_NEWTABLE)
+                    save_pc!();
+                    lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
                 }
                 OpCode::GetTable => {
@@ -1650,7 +1645,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         }
                     }
 
+                    let new_top = base + a;
                     // GC check after concatenation (like Lua 5.5 OP_CONCAT)
+                    save_pc!();
+                    lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
                 }
 
@@ -1816,6 +1814,12 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         &chunk,
                         &upvalue_ptrs,
                     )?;
+
+                    let a = instr.get_a() as usize;
+                    let new_top = base + a + 1;
+                    save_pc!();
+                    lua_state.set_top(new_top)?;
+                    lua_state.check_gc()?;
                 }
 
                 OpCode::Vararg => {

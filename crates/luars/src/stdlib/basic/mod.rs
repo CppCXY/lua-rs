@@ -640,14 +640,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "count" => {
-            // LUA_GCCOUNT: returns memory in use in Kbytes
-            // Lua 5.5 lapi.c line 1222: res = gettotalbytes(g);
-            // gettotalbytes(g) = (g)->GCtotalbytes - (g)->GCdebt (lstate.h line 435)
-
-            // CRITICAL: Check GC before returning count
-            // In Lua 5.5, luaC_checkGC is called on every API entry
-            l.check_gc()?;
-
             let gc = &l.vm_mut().gc;
             let real_bytes = gc.total_bytes - gc.gc_debt; // gettotalbytes
             let kb = real_bytes.max(0) as f64 / 1024.0;

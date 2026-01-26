@@ -429,12 +429,6 @@ pub fn call_tm(
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
 
-    // No return value expected (nresults=0)
-    // Unlike call_tm_res, we don't need to get any result
-    // The call itself has adjusted top appropriately
-    // Don't reset top to func_pos as that would destroy the stack!
-
-    lua_state.check_gc()?;
     Ok(())
 }
 

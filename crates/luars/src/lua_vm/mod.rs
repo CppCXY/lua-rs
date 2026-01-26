@@ -454,11 +454,6 @@ impl LuaVM {
     /// - gc_stopem: GC is already running (prevents recursive GC during allocation)
     #[inline(always)]
     fn check_gc(&mut self, l: &mut LuaState) -> bool {
-        // Don't run GC if stopped by user or already running
-        if self.gc.gc_stopped || self.gc.gc_stopem {
-            return false;
-        }
-
         if self.gc.gc_debt <= 0 {
             self.gc.step(l);
             return true
