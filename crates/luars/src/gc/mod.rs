@@ -1381,7 +1381,14 @@ impl GC {
             return;
         };
 
-        self.really_mark_object(l, gc_ptr);
+        // CRITICAL: Must check if white before marking, just like mark_object
+        // Otherwise we'll add already-marked objects to gray list repeatedly
+        // causing infinite loops in converge_ephemerons
+        if let Some(header) = gc_ptr.header_mut() {
+            if header.is_white() {
+                self.really_mark_object(l, gc_ptr);
+            }
+        }
     }
 
     /// Mark all constants in a chunk and its nested chunks (like Lua 5.5's traverseproto)
