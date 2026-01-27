@@ -1645,7 +1645,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         }
                     }
 
-                    let new_top = base + a;
+                    let new_top = base + a + 1;
                     // GC check after concatenation (like Lua 5.5 OP_CONCAT)
                     save_pc!();
                     lua_state.set_top(new_top)?;
