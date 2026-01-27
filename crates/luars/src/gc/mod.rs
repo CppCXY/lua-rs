@@ -746,7 +746,7 @@ impl GC {
                     has_white_white = true;
                 }
             } else if val_is_white {
-                self.mark_value(l, &v);
+                self.really_mark_object(l, val_ptr.unwrap());
                 marked_any = true;
             }
         }
@@ -1381,7 +1381,7 @@ impl GC {
             return;
         };
 
-        self.really_mark_object(l, gc_ptr);
+        self.mark_object(l, gc_ptr);
     }
 
     /// Mark all constants in a chunk and its nested chunks (like Lua 5.5's traverseproto)
@@ -1592,7 +1592,6 @@ impl GC {
 
         let mut marked = self.traverse_array(l, table_ptr);
 
-        // CRITICAL FIX: Use next() instead of iter_all() to avoid allocation
         let mut key = LuaValue::nil();
         while let Some((k, v)) = table.next(&key) {
             let key_ptr = k.as_gc_ptr();
@@ -1750,11 +1749,7 @@ impl GC {
     /// Check if an object is white
     fn is_white(&self, gc_ptr: GcObjectPtr) -> bool {
         if let Some(header) = gc_ptr.header() {
-            // CRITICAL: Must check CURRENT white, not any white!
-            // After atomic phase flips current_white, old black objects
-            // are not current white, so they need to be marked again
-            // in next GC cycle. Using is_current_white ensures correct behavior.
-            header.is_current_white(self.current_white)
+            header.is_white()
         } else {
             false
         }
@@ -1863,7 +1858,6 @@ impl GC {
 
         self.clear_by_values_range(l, &origweak, &origall);
 
-        let old_white = self.current_white;
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
         
         debug_assert!(
@@ -2691,16 +2685,7 @@ impl GC {
     fn really_mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
         self.gc_marked += gc_ptr.header().map(|it| it.size as isize).unwrap_or(0);
         match gc_ptr {
-            GcObjectPtr::String(str_ptr) => {
-                // Debug: log specific strings
-                // let content = str_ptr.as_ref().data.as_str();
-                // if content.contains("item500") || content.contains("item999") || content.contains("item1000") {
-                //     eprintln!("[GC MARK] String '{}' marked BLACK (state={}, cw={})", 
-                //         content, self.gc_state as u8, self.current_white);
-                // }
-                gc_ptr.header_mut().unwrap().make_black();
-            }
-            GcObjectPtr::Binary(_) => {
+            GcObjectPtr::String(_) | GcObjectPtr::Binary(_) => {
                 gc_ptr.header_mut().unwrap().make_black(); // Leaves become black immediately
             }
             GcObjectPtr::Upvalue(upval_ptr) => {
