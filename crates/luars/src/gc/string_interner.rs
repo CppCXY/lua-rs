@@ -48,14 +48,6 @@ impl StringInterner {
         let mut found_ptr = None;
         if let Some(ptrs) = self.map.get(&hash) {
             for &ptr in ptrs {
-                let header = ptr.as_ref().header;
-                let other_white = 1 - gc.current_white;
-                
-                // Skip dead strings that haven't been removed from map yet
-                if header.is_dead(other_white) {
-                    continue;
-                }
-                
                 if ptr.as_ref().data.as_str() == s {
                     found_ptr = Some(ptr);
                     break;
@@ -64,17 +56,11 @@ impl StringInterner {
         }
 
         if let Some(ptr) = found_ptr {
-            // Found! Ensure the string is resurrected if it was condemned (White).
-            // Even if create() doesn't trigger GC, the string might be "Dead" from a previous GC cycle
-            // (marked White and waiting for Sweep). If we return it now, the Sweeper will free it later,
-            // leaving us with a dangling reference.
-            // Marking it Black ensures it survives the current/pending sweep.
-            ptr.as_mut_ref().header.make_black();
             return LuaValue::string(ptr);
         }
 
         // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
-        let size = (64 + s.len()) as u32;
+        let size = (std::mem::size_of::<GcString>() + s.len()) as u32;
         let lua_string = LuaString::new(s.to_string(), hash);
         let gc_string =
             GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
