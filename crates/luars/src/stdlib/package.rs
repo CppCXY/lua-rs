@@ -26,30 +26,28 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
         return Err(l.error("package must be a table".to_string()));
     };
 
-    let vm = l.vm_mut();
-
     // Create all keys
-    let loaded_key = vm.create_string("loaded")?;
-    let preload_key = vm.create_string("preload")?;
-    let path_key = vm.create_string("path")?;
-    let cpath_key = vm.create_string("cpath")?;
-    let config_key = vm.create_string("config")?;
-    let searchers_key = vm.create_string("searchers")?;
+    let loaded_key = l.create_string("loaded")?;
+    let preload_key = l.create_string("preload")?;
+    let path_key = l.create_string("path")?;
+    let cpath_key = l.create_string("cpath")?;
+    let config_key = l.create_string("config")?;
+    let searchers_key = l.create_string("searchers")?;
 
     // Create all values
-    let loaded_table = vm.create_table(0, 0)?;
-    let preload_table = vm.create_table(0, 0)?;
-    let path_value = vm.create_string("./?.lua;./?/init.lua")?;
-    let cpath_value = vm.create_string("./?.so;./?.dll;./?.dylib")?;
+    let loaded_table = l.create_table(0, 0)?;
+    let preload_table = l.create_table(0, 0)?;
+    let path_value = l.create_string("./?.lua;./?/init.lua")?;
+    let cpath_value = l.create_string("./?.so;./?.dll;./?.dylib")?;
 
     #[cfg(windows)]
     let config_str = "\\\n;\n?\n!\n-";
     #[cfg(not(windows))]
     let config_str = "/\n;\n?\n!\n-";
-    let config_value = vm.create_string(config_str)?;
+    let config_value = l.create_string(config_str)?;
 
     // Create searchers array
-    let searchers_table_value = vm.create_table(4, 0)?;
+    let searchers_table_value = l.create_table(4, 0)?;
     let searchers_table = searchers_table_value.as_table_mut().unwrap();
 
     // Fill searchers array

@@ -292,7 +292,12 @@ fn main() {
     }
 
     // Create VM
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = LuaVM::new(SafeOption {
+        max_stack_size: 10000000,
+        max_call_depth: 256,
+        short_string_limit: 40,
+        max_memory_limit: 1024 * 1024 * 1024, // 1 GB
+    });
     vm.open_stdlib(stdlib::Stdlib::All).unwrap();
 
     // Setup arg table

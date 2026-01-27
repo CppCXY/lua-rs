@@ -214,6 +214,7 @@ pub fn call_c_function(
     // This preserves caller's local variables which live below this top
     lua_state.set_top(new_top)?;
 
+    lua_state.check_gc()?;
     // Do NOT modify frame.top (ci->top) - it's the stack limit (base + maxstacksize)
     // and should not change during execution
 

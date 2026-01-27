@@ -878,6 +878,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // Handle return
                     return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
 
+                    lua_state.check_gc()?;
                     // Return pops frame, continue to 'startfunc to load caller's context
                     continue 'startfunc;
                 }
@@ -886,6 +887,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     save_pc!();
                     return_handler::handle_return0(lua_state, frame_idx)?;
 
+                    lua_state.check_gc()?;
                     // Return pops frame, continue to 'startfunc
                     continue 'startfunc;
                 }
@@ -895,6 +897,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     save_pc!();
                     return_handler::handle_return1(lua_state, base, frame_idx, a)?;
 
+                    lua_state.check_gc()?;
                     // Return pops frame, continue to 'startfunc
                     continue 'startfunc;
                 }

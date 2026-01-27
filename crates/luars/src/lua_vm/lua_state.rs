@@ -830,6 +830,18 @@ impl LuaState {
         self.vm_mut().create_function(chunk, upvalues)
     }
 
+    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> LuaResult<UpvaluePtr> {
+        self.vm_mut().create_upvalue_closed(value)
+    }
+
+    pub fn create_upvalue_open(
+        &mut self,
+        stack_index: usize,
+        stack_ptr: LuaValuePtr,
+    ) -> LuaResult<UpvaluePtr> {
+        self.vm_mut().create_upvalue_open(stack_index, stack_ptr)
+    }
+
     /// Create/intern string (automatically handles short string interning)
     pub fn create_string(&mut self, s: &str) -> CreateResult {
         self.vm_mut().create_string(s)
@@ -1408,7 +1420,7 @@ impl LuaState {
         vm.gc.barrier_back(gc_ptr);
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn check_gc(&mut self) -> LuaResult<bool> {
         let vm = unsafe { &mut *self.vm };
         let work = vm.check_gc(self);

@@ -369,7 +369,7 @@ impl GC {
             stats: GcStats::default(),
             tm_gc: LuaValue::nil(),
             tm_mode: LuaValue::nil(),
-            max_memory_limit: option.max_stack_size as isize,
+            max_memory_limit: option.max_memory_limit as isize,
             tmp_max_memory_limit: None,
             gc_error_msg: None,
             gc_memory_check: true,
@@ -2126,7 +2126,7 @@ impl GC {
         // - other_white: dead objects from previous cycle
         // Port of Lua 5.5 lgc.c sweep2old: uses isdeadm(ow, marked)
         let other_white = GcHeader::otherwhite(self.current_white);
-        
+
         let mut i = self.gc_list.len();
         while i > 0 {
             i -= 1;
