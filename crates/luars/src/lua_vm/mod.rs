@@ -608,8 +608,8 @@ impl LuaVM {
     }
 
     #[inline]
-    pub fn get_error_message(&self) -> &str {
-        self.main_state_ref().error_msg()
+    pub fn get_error_message(&mut self, e: LuaError) -> String {
+        self.main_state().get_error_msg(e)
     }
 
     /// Generate a stack traceback string

@@ -40,8 +40,8 @@ fn main() {
                 &vm,
             );
         }
-        Err(_) => {
-            let err_msg = vm.get_error_message();
+        Err(e) => {
+            let err_msg = vm.get_error_message(e);
             eprintln!("{}", err_msg);
             std::process::exit(1);
         }

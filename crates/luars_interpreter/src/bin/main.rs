@@ -165,15 +165,15 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
         Ok(chunk) => {
             match vm.execute(Rc::new(chunk)) {
                 Ok(_) => Ok(()),
-                Err(_) => {
+                Err(e) => {
                     // Generate traceback for uncaught runtime errors
-                    let error_msg = vm.get_error_message();
-                    let traceback = vm.generate_traceback(error_msg);
+                    let error_msg = vm.get_error_message(e);
+                    let traceback = vm.generate_traceback(&error_msg);
                     Err(traceback.to_string())
                 }
             }
         }
-        Err(e) => Err(format!("{}: {}: {}", filename, e, vm.get_error_message())),
+        Err(e) => Err(format!("{}: {}: {}", filename, e, vm.get_error_message(e))),
     }
 }
 
@@ -311,9 +311,9 @@ fn main() {
     for code in &opts.execute_strings {
         match vm.compile(code) {
             Ok(chunk) => {
-                if let Err(_) = vm.execute(Rc::new(chunk)) {
-                    let error_msg = vm.get_error_message();
-                    let traceback = vm.generate_traceback(error_msg);
+                if let Err(e) = vm.execute(Rc::new(chunk)) {
+                    let error_msg = vm.get_error_message(e);
+                    let traceback = vm.generate_traceback(&error_msg);
                     eprintln!("lua: Runtime Error: {}", traceback);
                     std::process::exit(1);
                 }

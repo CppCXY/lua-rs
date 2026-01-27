@@ -2893,7 +2893,7 @@ impl GC {
         // If error occurred, warn but don't propagate
         // Lua 5.5: luaE_warnerror(L, "__gc");
         if result.is_err() {
-            let msg = l.error_msg();
+            let msg = l.get_error_msg(LuaError::RuntimeError);
             eprintln!("Error in __gc metamethod: {}", msg);
         }
     }

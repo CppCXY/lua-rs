@@ -371,12 +371,6 @@ impl LuaState {
         LuaError::RuntimeError
     }
 
-    /// Get error message
-    #[inline(always)]
-    pub fn error_msg(&self) -> &str {
-        &self.error_msg
-    }
-
     /// Clear error state
     #[inline(always)]
     pub fn clear_error(&mut self) {
@@ -887,7 +881,7 @@ impl LuaState {
             LuaError::OutOfMemory => {
                 format!("out of memory: {}", self.vm_mut().gc.get_error_message())
             }
-            _ => std::mem::take(&mut self.error_msg),
+            _ => format!("{}: {}", e, std::mem::take(&mut self.error_msg)),
         }
     }
 

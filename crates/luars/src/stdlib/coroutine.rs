@@ -77,7 +77,7 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
             // Error occurred during resume - get detailed error message
             let error_msg = {
                 if let Some(thread) = thread_val.as_thread_mut() {
-                    thread.error_msg().to_string()
+                    thread.get_error_msg(e)
                 } else {
                     String::new()
                 }
