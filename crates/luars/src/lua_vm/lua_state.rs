@@ -11,7 +11,7 @@ use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
-use crate::{Chunk, GcObjectPtr, LuaVM, StringPtr, ThreadPtr, UpvaluePtr};
+use crate::{Chunk, CreateResult, GcObjectPtr, LuaVM, StringPtr, ThreadPtr, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -534,7 +534,7 @@ impl LuaState {
                 ptr: (&self.stack[stack_index]) as *const LuaValue as *mut LuaValue,
             };
             let vm = self.vm_mut();
-            vm.create_upvalue_open(stack_index, ptr)
+            vm.create_upvalue_open(stack_index, ptr)?
         };
 
         // Add to HashMap for O(1) future lookups
@@ -827,39 +827,39 @@ impl LuaState {
     // ===== Object Creation =====
 
     /// Create table
-    pub fn create_table(&mut self, narr: usize, nrec: usize) -> LuaValue {
+    pub fn create_table(&mut self, narr: usize, nrec: usize) -> CreateResult {
         self.vm_mut().create_table(narr, nrec)
     }
 
     /// Create function closure
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> LuaValue {
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> CreateResult {
         self.vm_mut().create_function(chunk, upvalues)
     }
 
     /// Create/intern string (automatically handles short string interning)
-    pub fn create_string(&mut self, s: &str) -> LuaValue {
+    pub fn create_string(&mut self, s: &str) -> CreateResult {
         self.vm_mut().create_string(s)
     }
 
-    pub fn create_string_owned(&mut self, s: String) -> LuaValue {
+    pub fn create_string_owned(&mut self, s: String) -> CreateResult {
         self.vm_mut().create_string_owned(s)
     }
 
     /// Create userdata
-    pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
+    pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.vm_mut().create_userdata(data)
     }
 
     // ===== Global Access =====
 
     /// Get global variable
-    pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
+    pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
         self.vm_mut().get_global(name)
     }
 
     /// Set global variable
-    pub fn set_global(&mut self, name: &str, value: LuaValue) {
-        self.vm_mut().set_global(name, value);
+    pub fn set_global(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
+        self.vm_mut().set_global(name, value)
     }
 
     // ===== Table Operations =====
@@ -880,6 +880,15 @@ impl LuaState {
 
     pub fn raw_seti(&mut self, table: &LuaValue, index: i64, value: LuaValue) -> bool {
         self.vm_mut().raw_seti(table, index, value)
+    }
+
+    pub fn get_error_msg(&mut self, e: LuaError) -> String {
+        match e {
+            LuaError::OutOfMemory => {
+                format!("out of memory: {}", self.vm_mut().gc.get_error_message())
+            }
+            _ => std::mem::take(&mut self.error_msg),
+        }
     }
 
     // ===== Protected Call (pcall/xpcall) =====
@@ -927,10 +936,10 @@ impl LuaState {
             if let Some(cfunc) = cfunc {
                 // Create frame for C function
                 let base = func_idx + 1;
-                if let Err(_) = self.push_frame(func, base, nargs, -1) {
+                if let Err(e) = self.push_frame(func, base, nargs, -1) {
                     self.stack.truncate(func_idx);
-                    let error_msg = std::mem::take(&mut self.error_msg);
-                    let err_str = self.create_string(&error_msg);
+                    let error_msg = self.get_error_msg(e);
+                    let err_str = self.create_string(&error_msg)?;
                     return Ok((false, vec![err_str]));
                 }
 
@@ -962,15 +971,15 @@ impl LuaState {
                         Ok((true, results))
                     }
                     Err(LuaError::Yield) => Err(LuaError::Yield),
-                    Err(_) => {
-                        let error_msg = std::mem::take(&mut self.error_msg);
-                        let err_str = self.create_string(&error_msg);
+                    Err(e) => {
+                        let error_msg = self.get_error_msg(e);
+                        let err_str = self.create_string(&error_msg)?;
                         self.stack.truncate(func_idx);
                         Ok((false, vec![err_str]))
                     }
                 }
             } else {
-                let err_str = self.create_string("not a function");
+                let err_str = self.create_string("not a function")?;
                 Ok((false, vec![err_str]))
             }
         } else {
@@ -984,10 +993,10 @@ impl LuaState {
             // Create call frame
             let base = func_idx + 1;
             // pcall expects all return values
-            if let Err(_) = self.push_frame(func, base, nargs, -1) {
+            if let Err(e) = self.push_frame(func, base, nargs, -1) {
                 self.stack.truncate(func_idx);
-                let error_msg = std::mem::take(&mut self.error_msg);
-                let err_str = self.create_string(&error_msg);
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
 
@@ -1010,7 +1019,7 @@ impl LuaState {
                     Ok((true, results))
                 }
                 Err(LuaError::Yield) => Err(LuaError::Yield),
-                Err(_) => {
+                Err(e) => {
                     // Error occurred - clean up
 
                     // Close upvalues
@@ -1027,8 +1036,8 @@ impl LuaState {
                     }
 
                     // Get error message
-                    let error_msg = std::mem::take(&mut self.error_msg);
-                    let err_str = self.create_string(&error_msg);
+                    let error_msg = self.get_error_msg(e);
+                    let err_str = self.create_string(&error_msg)?;
 
                     // Clean up stack
                     self.stack.truncate(func_idx);
@@ -1054,8 +1063,7 @@ impl LuaState {
         let func = match self.stack_get(func_idx) {
             Some(f) => f,
             None => {
-                self.error("pcall: invalid function index".to_string());
-                let err_str = self.create_string("pcall: invalid function index");
+                let err_str = self.create_string("pcall: invalid function index")?;
                 self.stack_set(func_idx, err_str)?;
                 self.set_top(func_idx + 1)?;
                 return Ok((false, 1));
@@ -1094,7 +1102,7 @@ impl LuaState {
                 Ok((true, result_count))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
-            Err(_) => {
+            Err(e) => {
                 // Error - clean up and return error message
 
                 // Close upvalues
@@ -1110,8 +1118,8 @@ impl LuaState {
                 }
 
                 // Get error and push to stack
-                let error_msg = std::mem::take(&mut self.error_msg);
-                let err_str = self.create_string(&error_msg);
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
 
                 // Set error at func_idx and update stack top
                 self.stack_set(func_idx, err_str)?;
@@ -1147,16 +1155,16 @@ impl LuaState {
 
         // Create call frame, expecting all return values
         let base = func_idx + 1;
-        if let Err(_) = self.push_frame(func, base, nargs, -1) {
+        if let Err(e) = self.push_frame(func, base, nargs, -1) {
             // Error during setup
             self.set_top(handler_idx)?;
-            let error_msg = std::mem::take(&mut self.error_msg);
-            let err_str = self.create_string(&error_msg);
+            let error_msg = self.get_error_msg(e);
+            let err_str = self.create_string(&error_msg)?;
             return Ok((false, vec![err_str]));
         }
 
         // Execute
-        let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
+        let result = execute::lua_execute_until(self, initial_depth);
 
         match result {
             Ok(()) => {
@@ -1178,9 +1186,9 @@ impl LuaState {
                 Ok((true, results))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
-            Err(_) => {
+            Err(e) => {
                 // Error occurred - call error handler
-                let error_msg = self.error_msg.clone();
+                let error_msg = self.get_error_msg(e);
 
                 // Clean up failed frames
                 if self.call_depth() > initial_depth {
@@ -1198,7 +1206,7 @@ impl LuaState {
                 self.set_top(handler_idx + 1)?;
 
                 // Push error message as argument
-                let err_value = self.create_string(&error_msg);
+                let err_value = self.create_string(&error_msg)?;
                 self.push_value(err_value)?;
 
                 // Get handler and create frame
@@ -1209,12 +1217,12 @@ impl LuaState {
                     // Error handler setup failed
                     self.set_top(handler_idx)?;
                     let final_err =
-                        self.create_string(&format!("error in error handling: {}", error_msg));
+                        self.create_string(&format!("error in error handling: {}", error_msg))?;
                     return Ok((false, vec![final_err]));
                 }
 
                 // Execute error handler
-                let handler_result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
+                let handler_result = execute::lua_execute_until(self, initial_depth);
 
                 match handler_result {
                     Ok(()) => {
@@ -1233,7 +1241,7 @@ impl LuaState {
                         }
 
                         if results.is_empty() {
-                            results.push(self.create_string(&error_msg));
+                            results.push(self.create_string(&error_msg)?);
                         }
 
                         self.set_top(handler_idx)?;
@@ -1243,7 +1251,7 @@ impl LuaState {
                         // Error handler failed
                         self.set_top(handler_idx)?;
                         let final_err =
-                            self.create_string(&format!("error in error handling: {}", error_msg));
+                            self.create_string(&format!("error in error handling: {}", error_msg))?;
                         Ok((false, vec![final_err]))
                     }
                 }

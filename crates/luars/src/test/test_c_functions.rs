@@ -14,7 +14,7 @@ fn test_call_c_function_basic() {
 
     // Register a simple C function
     let c_func = LuaValue::cfunction(test_no_return);
-    vm.set_global("test_func", c_func);
+    vm.set_global("test_func", c_func).unwrap();
 
     // Call it from Lua
     let result = vm.execute_string(
@@ -35,7 +35,7 @@ fn test_call_c_function_in_expression() {
 
     // Register C function
     let c_func = LuaValue::cfunction(test_no_return);
-    vm.set_global("cfunc", c_func);
+    vm.set_global("cfunc", c_func).unwrap();
 
     // Use in expression
     let result = vm.execute_string(
@@ -59,7 +59,7 @@ fn test_call_c_function_multiple_times() {
 
     // Register C function
     let c_func = LuaValue::cfunction(test_no_return);
-    vm.set_global("cfunc", c_func);
+    vm.set_global("cfunc", c_func).unwrap();
 
     // Call multiple times
     let result = vm.execute_string(
@@ -84,7 +84,7 @@ fn test_c_function_in_tail_call() {
 
     // Register C function
     let c_func = LuaValue::cfunction(test_no_return);
-    vm.set_global("cfunc", c_func);
+    vm.set_global("cfunc", c_func).unwrap();
 
     // Use in tail call position
     let result = vm.execute_string(

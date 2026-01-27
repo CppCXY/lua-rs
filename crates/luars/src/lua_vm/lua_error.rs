@@ -11,6 +11,9 @@ pub enum LuaError {
     /// Stack overflow
     StackOverflow,
 
+    /// Out of memory
+    OutOfMemory,
+
     IndexOutOfBounds,
     /// VM exit (internal use) - returned when top-level frame returns
     Exit,
@@ -24,6 +27,7 @@ impl std::fmt::Display for LuaError {
             LuaError::Yield => write!(f, "Coroutine Yield"),
             LuaError::StackOverflow => write!(f, "Stack Overflow"),
             LuaError::IndexOutOfBounds => write!(f, "Index Out Of Bounds"),
+            LuaError::OutOfMemory => write!(f, "Out Of Memory"),
             LuaError::Exit => write!(f, "VM Exit"),
         }
     }

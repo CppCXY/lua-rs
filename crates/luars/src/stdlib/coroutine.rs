@@ -33,7 +33,7 @@ fn coroutine_create(l: &mut LuaState) -> LuaResult<usize> {
 
     // Use VM's create_thread which properly sets up the thread with the function
     let vm = l.vm_mut();
-    let thread_val = vm.create_thread(func);
+    let thread_val = vm.create_thread(func)?;
 
     l.push_value(thread_val)?;
     Ok(1)
@@ -83,9 +83,9 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
                 }
             };
             let error_str = if error_msg.is_empty() {
-                l.create_string(&format!("{:?}", e))
+                l.create_string(&format!("{:?}", e))?
             } else {
-                l.create_string(&error_msg)
+                l.create_string(&error_msg)?
             };
             l.push_value(LuaValue::boolean(false))?; // success=false
             l.push_value(error_str)?;
@@ -122,7 +122,7 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
     let status_str = if let Some(thread) = thread_val.as_thread_mut() {
         if thread.is_main_thread() {
             // Main thread is always running
-            let status_val = l.create_string("running");
+            let status_val = l.create_string("running")?;
             l.push_value(status_val)?;
             return Ok(1);
         }
@@ -140,7 +140,7 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
         "dead"
     };
 
-    let status_val = l.create_string(status_str);
+    let status_val = l.create_string(status_str)?;
     l.push_value(status_val)?;
     Ok(1)
 }
@@ -176,10 +176,10 @@ fn coroutine_wrap(l: &mut LuaState) -> LuaResult<usize> {
 
     // Create the coroutine
     let vm = l.vm_mut();
-    let thread_val = vm.create_thread(func);
+    let thread_val = vm.create_thread(func)?;
 
     // Create a C closure with the thread as upvalue
-    let wrapper_func = vm.create_c_closure(coroutine_wrap_call, vec![thread_val]);
+    let wrapper_func = vm.create_c_closure(coroutine_wrap_call, vec![thread_val])?;
 
     l.push_value(wrapper_func)?;
     Ok(1)

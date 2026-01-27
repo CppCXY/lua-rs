@@ -30,7 +30,7 @@ pub struct LuaValuePtr {
 /// This matches Lua's UpVal implementation
 pub enum LuaUpvalue {
     Open {
-        stack_index: usize,             // Absolute index in register_stack
+        stack_index: usize,     // Absolute index in register_stack
         stack_ptr: LuaValuePtr, // Cached pointer for fast access
     },
     Closed(LuaValue), // Value moved to heap after frame exits
@@ -79,12 +79,7 @@ impl LuaUpvalue {
     /// Get the value (requires register_stack if open)
     pub fn get_value(&self) -> LuaValue {
         match self {
-            LuaUpvalue::Open {
-                stack_ptr,
-                ..
-            } => {
-                unsafe { *stack_ptr.ptr }
-            }
+            LuaUpvalue::Open { stack_ptr, .. } => unsafe { *stack_ptr.ptr },
             LuaUpvalue::Closed(val) => val.clone(),
         }
     }

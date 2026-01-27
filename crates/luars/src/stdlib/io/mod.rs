@@ -30,7 +30,7 @@ pub fn create_io_lib() -> LibraryModule {
 /// Initialize io standard streams (called after library registration)
 pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
     let io_table = l
-        .get_global("io")
+        .get_global("io")?
         .ok_or_else(|| l.error("io table not found".to_string()))?;
 
     if !io_table.is_table() {
@@ -39,17 +39,17 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
 
     // Create stdin
     let stdin_val = create_stdin(l)?;
-    let stdin_key = l.create_string("stdin");
+    let stdin_key = l.create_string("stdin")?;
     l.raw_set(&io_table, stdin_key, stdin_val);
 
     // Create stdout
     let stdout_val = create_stdout(l)?;
-    let stdout_key = l.create_string("stdout");
+    let stdout_key = l.create_string("stdout")?;
     l.raw_set(&io_table, stdout_key, stdout_val);
 
     // Create stderr
     let stderr_val = create_stderr(l)?;
-    let stderr_key = l.create_string("stderr");
+    let stderr_key = l.create_string("stderr")?;
     l.raw_set(&io_table, stderr_key, stderr_val);
 
     Ok(())
@@ -59,7 +59,7 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
 fn create_stdin(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file = LuaFile::stdin();
     let file_mt = create_file_metatable(l)?;
-    let userdata = l.create_userdata(LuaUserdata::new(file));
+    let userdata = l.create_userdata(LuaUserdata::new(file))?;
 
     if let Some(ud) = userdata.as_userdata_mut() {
         ud.set_metatable(file_mt);
@@ -75,7 +75,7 @@ fn create_stdin(l: &mut LuaState) -> LuaResult<LuaValue> {
 fn create_stdout(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file = LuaFile::stdout();
     let file_mt = create_file_metatable(l)?;
-    let userdata = l.create_userdata(LuaUserdata::new(file));
+    let userdata = l.create_userdata(LuaUserdata::new(file))?;
 
     if let Some(ud) = userdata.as_userdata_mut() {
         ud.set_metatable(file_mt);
@@ -91,7 +91,7 @@ fn create_stdout(l: &mut LuaState) -> LuaResult<LuaValue> {
 fn create_stderr(l: &mut LuaState) -> LuaResult<LuaValue> {
     let file = LuaFile::stderr();
     let file_mt = create_file_metatable(l)?;
-    let userdata = l.create_userdata(LuaUserdata::new(file));
+    let userdata = l.create_userdata(LuaUserdata::new(file))?;
 
     if let Some(ud) = userdata.as_userdata_mut() {
         ud.set_metatable(file_mt);
@@ -151,7 +151,7 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
                             line.pop();
                         }
                     }
-                    l.create_string(&line)
+                    l.create_string(&line)?
                 }
                 Err(e) => return Err(l.error(format!("read error: {}", e))),
             }
@@ -160,7 +160,7 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
             // Read all
             let mut content = String::new();
             match io::Read::read_to_string(&mut handle, &mut content) {
-                Ok(_) => l.create_string(&content),
+                Ok(_) => l.create_string(&content)?,
                 Err(e) => return Err(l.error(format!("read error: {}", e))),
             }
         }
@@ -190,7 +190,7 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
                     Ok(0) => LuaValue::nil(), // EOF
                     Ok(bytes_read) => {
                         buffer.truncate(bytes_read);
-                        l.create_string(&String::from_utf8_lossy(&buffer))
+                        l.create_string(&String::from_utf8_lossy(&buffer))?
                     }
                     Err(e) => return Err(l.error(format!("read error: {}", e))),
                 }
@@ -243,7 +243,7 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
             let file_mt = create_file_metatable(l)?;
 
             // Create userdata
-            let userdata = l.create_userdata(LuaUserdata::new(file));
+            let userdata = l.create_userdata(LuaUserdata::new(file))?;
 
             // Set metatable
             if let Some(ud) = userdata.as_userdata_mut() {
@@ -262,7 +262,7 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
         Err(e) => {
             // Return nil and error message
             l.push_value(LuaValue::nil())?;
-            let err_str = l.create_string(&e.to_string());
+            let err_str = l.create_string(&e.to_string())?;
             l.push_value(err_str)?;
             Ok(2)
         }
@@ -287,7 +287,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                 let file_mt = create_file_metatable(l)?;
 
                 // Create userdata
-                let userdata = l.create_userdata(LuaUserdata::new(file));
+                let userdata = l.create_userdata(LuaUserdata::new(file))?;
 
                 // Set metatable
                 if let Some(ud) = userdata.as_userdata_mut() {
@@ -298,8 +298,8 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                 l.vm_mut().gc.check_finalizer(&userdata);
 
                 // Create state table with file handle
-                let state_table = l.create_table(0, 1);
-                let file_key = l.create_string("file");
+                let state_table = l.create_table(0, 1)?;
+                let file_key = l.create_string("file")?;
                 l.raw_set(&state_table, file_key, userdata);
 
                 l.push_value(LuaValue::cfunction(io_lines_iterator))?;
@@ -320,7 +320,7 @@ fn io_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
     let state_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("iterator requires state".to_string()))?;
-    let file_key = l.create_string("file");
+    let file_key = l.create_string("file")?;
     let file_val = l
         .raw_get(&state_val, &file_key)
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
@@ -332,7 +332,7 @@ fn io_lines_iterator(l: &mut LuaState) -> LuaResult<usize> {
             let res = lua_file.read_line();
             match res {
                 Ok(Some(line)) => {
-                    let line_str: LuaValue = l.create_string(&line);
+                    let line_str: LuaValue = l.create_string(&line)?;
                     l.push_value(line_str)?;
                     return Ok(1);
                 }
@@ -369,11 +369,11 @@ fn io_type(l: &mut LuaState) -> LuaResult<usize> {
             let data = ud.get_data_mut();
             if let Some(lua_file) = data.downcast_ref::<LuaFile>() {
                 if lua_file.is_closed() {
-                    let result = l.create_string("closed file");
+                    let result = l.create_string("closed file")?;
                     l.push_value(result)?;
                     return Ok(1);
                 } else {
-                    let result = l.create_string("file");
+                    let result = l.create_string("file")?;
                     l.push_value(result)?;
                     return Ok(1);
                 }
@@ -422,7 +422,7 @@ fn io_tmpfile(l: &mut LuaState) -> LuaResult<usize> {
             let file_mt = create_file_metatable(l)?;
 
             // Create userdata
-            let userdata = l.create_userdata(LuaUserdata::new(lua_file));
+            let userdata = l.create_userdata(LuaUserdata::new(lua_file))?;
 
             // Set metatable
             if let Some(ud) = userdata.as_userdata_mut() {
@@ -434,7 +434,7 @@ fn io_tmpfile(l: &mut LuaState) -> LuaResult<usize> {
         }
         Err(e) => {
             l.push_value(LuaValue::nil())?;
-            let err_str = l.create_string(&e.to_string());
+            let err_str = l.create_string(&e.to_string())?;
             l.push_value(err_str)?;
             Ok(2)
         }

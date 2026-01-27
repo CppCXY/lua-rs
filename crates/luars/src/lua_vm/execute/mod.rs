@@ -1002,7 +1002,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     pc += 1;
 
                     // Create table with pre-allocated sizes
-                    let value = lua_state.create_table(vc, hash_size);
+                    let value = lua_state.create_table(vc, hash_size)?;
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;

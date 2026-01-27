@@ -45,14 +45,14 @@ impl LuaWasm {
     pub fn set_global(&mut self, name: &str, value: JsValue) -> Result<(), JsValue> {
         let lua_value = js_value_to_lua(&mut *self.vm, &value)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-        self.vm.set_global(name, lua_value);
+        self.vm.set_global(name, lua_value).unwrap();
         Ok(())
     }
 
     /// Get a global variable from Lua
     #[wasm_bindgen(js_name = getGlobal)]
     pub fn get_global(&mut self, name: &str) -> Result<JsValue, JsValue> {
-        if let Some(lua_value) = self.vm.get_global(name) {
+        if let Some(lua_value) = self.vm.get_global(name).unwrap() {
             lua_value_to_js(&*self.vm, &lua_value)
         } else {
             Ok(JsValue::NULL)

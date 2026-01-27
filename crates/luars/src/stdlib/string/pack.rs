@@ -225,7 +225,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
     // Create a string from bytes - Lua strings can contain arbitrary binary data
     // We need to create the string without UTF-8 validation
     let packed_str = unsafe { String::from_utf8_unchecked(result) };
-    let packed_val = l.create_string(&packed_str);
+    let packed_val = l.create_string(&packed_str)?;
     l.push_value(packed_val)?;
     Ok(1)
 }
@@ -428,7 +428,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("unfinished string in data".to_string()));
                 }
                 let s = String::from_utf8_lossy(&bytes[start..idx]).to_string();
-                results.push(l.create_string(&s));
+                results.push(l.create_string(&s)?);
                 idx += 1; // Skip null terminator
             }
 
@@ -450,7 +450,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("data string too short".to_string()));
                 }
                 let s = unsafe { String::from_utf8_unchecked(bytes[idx..idx + size].to_vec()) };
-                results.push(l.create_string(&s));
+                results.push(l.create_string(&s)?);
                 idx += size;
             }
 

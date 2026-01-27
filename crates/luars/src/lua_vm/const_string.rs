@@ -85,41 +85,41 @@ impl ConstString {
         // Pre-create all metamethod name strings (like Lua's luaT_init)
         // These strings are interned and will never be collected
         // Use current_white = 0 for bootstrap (these will be fixed immediately after)
-        cs.tm_index = allocator.create_string(gc, "__index");
-        cs.tm_newindex = allocator.create_string(gc, "__newindex");
-        cs.tm_call = allocator.create_string(gc, "__call");
-        cs.tm_tostring = allocator.create_string(gc, "__tostring");
-        cs.tm_len = allocator.create_string(gc, "__len");
-        cs.tm_pairs = allocator.create_string(gc, "__pairs");
-        cs.tm_ipairs = allocator.create_string(gc, "__ipairs");
-        cs.tm_gc = allocator.create_string(gc, "__gc");
-        cs.tm_close = allocator.create_string(gc, "__close");
-        cs.tm_mode = allocator.create_string(gc, "__mode");
-        cs.tm_name = allocator.create_string(gc, "__name");
-        cs.tm_eq = allocator.create_string(gc, "__eq");
-        cs.tm_lt = allocator.create_string(gc, "__lt");
-        cs.tm_le = allocator.create_string(gc, "__le");
-        cs.tm_add = allocator.create_string(gc, "__add");
-        cs.tm_sub = allocator.create_string(gc, "__sub");
-        cs.tm_mul = allocator.create_string(gc, "__mul");
-        cs.tm_div = allocator.create_string(gc, "__div");
-        cs.tm_mod = allocator.create_string(gc, "__mod");
-        cs.tm_pow = allocator.create_string(gc, "__pow");
-        cs.tm_unm = allocator.create_string(gc, "__unm");
-        cs.tm_idiv = allocator.create_string(gc, "__idiv");
-        cs.tm_band = allocator.create_string(gc, "__band");
-        cs.tm_bor = allocator.create_string(gc, "__bor");
-        cs.tm_bxor = allocator.create_string(gc, "__bxor");
-        cs.tm_bnot = allocator.create_string(gc, "__bnot");
-        cs.tm_shl = allocator.create_string(gc, "__shl");
-        cs.tm_shr = allocator.create_string(gc, "__shr");
-        cs.tm_concat = allocator.create_string(gc, "__concat");
-        cs.tm_metatable = allocator.create_string(gc, "__metatable");
+        cs.tm_index = allocator.create_string(gc, "__index").unwrap();
+        cs.tm_newindex = allocator.create_string(gc, "__newindex").unwrap();
+        cs.tm_call = allocator.create_string(gc, "__call").unwrap();
+        cs.tm_tostring = allocator.create_string(gc, "__tostring").unwrap();
+        cs.tm_len = allocator.create_string(gc, "__len").unwrap();
+        cs.tm_pairs = allocator.create_string(gc, "__pairs").unwrap();
+        cs.tm_ipairs = allocator.create_string(gc, "__ipairs").unwrap();
+        cs.tm_gc = allocator.create_string(gc, "__gc").unwrap();
+        cs.tm_close = allocator.create_string(gc, "__close").unwrap();
+        cs.tm_mode = allocator.create_string(gc, "__mode").unwrap();
+        cs.tm_name = allocator.create_string(gc, "__name").unwrap();
+        cs.tm_eq = allocator.create_string(gc, "__eq").unwrap();
+        cs.tm_lt = allocator.create_string(gc, "__lt").unwrap();
+        cs.tm_le = allocator.create_string(gc, "__le").unwrap();
+        cs.tm_add = allocator.create_string(gc, "__add").unwrap();
+        cs.tm_sub = allocator.create_string(gc, "__sub").unwrap();
+        cs.tm_mul = allocator.create_string(gc, "__mul").unwrap();
+        cs.tm_div = allocator.create_string(gc, "__div").unwrap();
+        cs.tm_mod = allocator.create_string(gc, "__mod").unwrap();
+        cs.tm_pow = allocator.create_string(gc, "__pow").unwrap();
+        cs.tm_unm = allocator.create_string(gc, "__unm").unwrap();
+        cs.tm_idiv = allocator.create_string(gc, "__idiv").unwrap();
+        cs.tm_band = allocator.create_string(gc, "__band").unwrap();
+        cs.tm_bor = allocator.create_string(gc, "__bor").unwrap();
+        cs.tm_bxor = allocator.create_string(gc, "__bxor").unwrap();
+        cs.tm_bnot = allocator.create_string(gc, "__bnot").unwrap();
+        cs.tm_shl = allocator.create_string(gc, "__shl").unwrap();
+        cs.tm_shr = allocator.create_string(gc, "__shr").unwrap();
+        cs.tm_concat = allocator.create_string(gc, "__concat").unwrap();
+        cs.tm_metatable = allocator.create_string(gc, "__metatable").unwrap();
         // Pre-create coroutine status strings
-        cs.str_suspended = allocator.create_string(gc, "suspended");
-        cs.str_running = allocator.create_string(gc, "running");
-        cs.str_normal = allocator.create_string(gc, "normal");
-        cs.str_dead = allocator.create_string(gc, "dead");
+        cs.str_suspended = allocator.create_string(gc, "suspended").unwrap();
+        cs.str_running = allocator.create_string(gc, "running").unwrap();
+        cs.str_normal = allocator.create_string(gc, "normal").unwrap();
+        cs.str_dead = allocator.create_string(gc, "dead").unwrap();
 
         // Fix all metamethod name strings - they should never be collected
         // (like Lua's luaC_fix in luaT_init)

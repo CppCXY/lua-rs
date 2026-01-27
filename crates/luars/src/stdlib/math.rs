@@ -36,10 +36,10 @@ pub fn create_math_lib() -> LibraryModule {
     });
 
     // Add constants using with_value
-    module = module.with_value("pi", |_vm| LuaValue::float(std::f64::consts::PI));
-    module = module.with_value("huge", |_vm| LuaValue::float(f64::INFINITY));
-    module = module.with_value("maxinteger", |_vm| LuaValue::integer(i64::MAX));
-    module = module.with_value("mininteger", |_vm| LuaValue::integer(i64::MIN));
+    module = module.with_value("pi", |_vm| Ok(LuaValue::float(std::f64::consts::PI)));
+    module = module.with_value("huge", |_vm| Ok(LuaValue::float(f64::INFINITY)));
+    module = module.with_value("maxinteger", |_vm| Ok(LuaValue::integer(i64::MAX)));
+    module = module.with_value("mininteger", |_vm| Ok(LuaValue::integer(i64::MIN)));
 
     module
 }
@@ -511,7 +511,7 @@ fn math_type(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    let result = l.create_string(type_str);
+    let result = l.create_string(type_str)?;
     l.push_value(result)?;
     Ok(1)
 }

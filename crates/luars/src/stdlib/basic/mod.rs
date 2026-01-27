@@ -78,7 +78,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
         LuaValueKind::Thread => "thread",
     };
 
-    let result = l.vm_mut().create_string(type_name);
+    let result = l.vm_mut().create_string(type_name)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -224,7 +224,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     let result = l.to_string(&value)?;
-    let result_value = l.create_string_owned(result);
+    let result_value = l.create_string_owned(result)?;
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -741,7 +741,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             vm.gc.gc_kind = GcKind::GenMinor;
 
             // Push previous mode name (must track if new)
-            let mode_value = vm.create_string(old_mode);
+            let mode_value = vm.create_string(old_mode)?;
             l.push_value(mode_value)?;
             Ok(1)
         }
@@ -758,7 +758,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // Switch to incremental mode (like luaC_changemode in Lua 5.5)
             vm.gc.change_to_incremental_mode(l);
 
-            let mode_value = vm.create_string(old_mode);
+            let mode_value = vm.create_string(old_mode)?;
             l.push_value(mode_value)?;
             Ok(1)
         }
@@ -867,9 +867,9 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             Ok((mut chunk, string_constants)) => {
                 // Register string constants in the object pool and update constants
                 for (const_idx, string_val) in string_constants {
-                    let string_id = vm.create_string_owned(string_val);
+                    let string_val = vm.create_string_owned(string_val)?;
                     if const_idx < chunk.constants.len() {
-                        chunk.constants[const_idx] = string_id;
+                        chunk.constants[const_idx] = string_val;
                     }
                 }
                 Ok(chunk)
@@ -892,20 +892,20 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             let vm = l.vm_mut();
             // Create upvalue for _ENV (global table)
             let env_upvalue_id = if let Some(env) = env {
-                vm.create_upvalue_closed(env)
+                vm.create_upvalue_closed(env)?
             } else {
-                vm.create_upvalue_closed(vm.global)
+                vm.create_upvalue_closed(vm.global)?
             };
             let upvalues = vec![env_upvalue_id];
 
-            let func = vm.create_function(Rc::new(chunk), upvalues);
+            let func = vm.create_function(Rc::new(chunk), upvalues)?;
             l.push_value(func)?;
             Ok(1)
         }
         Err(e) => {
             // Return nil and error message
             let vm = l.vm_mut();
-            let err_msg = vm.create_string(&format!("load error: {}", e));
+            let err_msg = vm.create_string(&format!("load error: {}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -931,7 +931,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
     let code = match std::fs::read_to_string(&filename_str) {
         Ok(c) => c,
         Err(e) => {
-            let err_msg = vm.create_string(&format!("cannot open {}: {}", filename_str, e));
+            let err_msg = vm.create_string(&format!("cannot open {}: {}", filename_str, e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             return Ok(2);
@@ -943,14 +943,14 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
     match vm.compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.create_upvalue_closed(vm.global);
-            let upvalues = vec![env_upvalue_id];
-            let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
+            let env_upvalue = vm.create_upvalue_closed(vm.global)?;
+            let upvalues = vec![env_upvalue];
+            let func = vm.create_function(std::rc::Rc::new(chunk), upvalues)?;
             l.push_value(func)?;
             Ok(1)
         }
         Err(e) => {
-            let err_msg = vm.create_string(&format!("load error: {}", e));
+            let err_msg = vm.create_string(&format!("load error: {}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -998,9 +998,9 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Create function with _ENV upvalue (global table)
-    let env_upvalue_id = vm.create_upvalue_closed(vm.global);
-    let upvalues = vec![env_upvalue_id];
-    let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
+    let env_upvalue = vm.create_upvalue_closed(vm.global)?;
+    let upvalues = vec![env_upvalue];
+    let func = vm.create_function(std::rc::Rc::new(chunk), upvalues)?;
 
     // Call the function with 0 arguments
     let (success, results) = l.pcall(func, vec![])?;

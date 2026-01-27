@@ -46,8 +46,7 @@ fn table_create(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Create table with pre-allocated sizes
-    let table = l.create_table(narray as usize, nhash as usize);
-
+    let table = l.create_table(narray as usize, nhash as usize)?;
     l.push_value(table)?;
     Ok(1)
 }
@@ -94,7 +93,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Concat the parts with separator
-    let result = l.create_string(&parts.join(&sep));
+    let result = l.create_string(&parts.join(&sep))?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -262,10 +261,10 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
 /// table.pack(...) - Pack values into table
 fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
-    let table = l.create_table(args.len(), 1);
+    let table = l.create_table(args.len(), 1)?;
 
     // Set 'n' field
-    let n_key = l.create_string("n");
+    let n_key = l.create_string("n")?;
     if !table.is_table() {
         return Err(l.error("failed to create table".to_string()));
     };

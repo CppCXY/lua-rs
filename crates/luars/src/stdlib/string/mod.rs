@@ -115,8 +115,8 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
 
     // Try to create a valid UTF-8 string first, otherwise return binary
     let result = match String::from_utf8(bytes.clone()) {
-        Ok(s) => l.vm_mut().create_string(&s),
-        Err(_) => l.vm_mut().create_binary(bytes),
+        Ok(s) => l.vm_mut().create_string(&s)?,
+        Err(_) => l.vm_mut().create_binary(bytes)?,
     };
     l.push_value(result)?;
     Ok(1)
@@ -147,7 +147,7 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_allocator) {
         Ok(bytes) => {
             // Create binary value directly - no encoding needed
-            let result = vm.create_binary(bytes);
+            let result = vm.create_binary(bytes)?;
             l.push_value(result)?;
             Ok(1)
         }
@@ -193,7 +193,7 @@ fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
             s.to_lowercase()
         }
     };
-    let result = vm.create_string_owned(result);
+    let result = vm.create_string_owned(result)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -217,7 +217,7 @@ fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
             s.to_uppercase()
         }
     };
-    let result = vm.create_string_owned(result);
+    let result = vm.create_string_owned(result)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -246,7 +246,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     if n <= 0 {
-        let empty = vm.create_string("");
+        let empty = vm.create_string("")?;
         l.push_value(empty)?;
         return Ok(1);
     }
@@ -275,7 +275,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    let result = vm.create_string_owned(result);
+    let result = vm.create_string_owned(result)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -291,7 +291,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
 
     let vm = l.vm_mut();
     let reversed = s.chars().rev().collect::<String>();
-    let result = vm.create_string_owned(reversed);
+    let result = vm.create_string_owned(reversed)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -339,7 +339,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Use optimized create_substring
-    let result_value = vm.create_substring(s_value, start_byte, end_byte);
+    let result_value = vm.create_substring(s_value, start_byte, end_byte)?;
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -423,7 +423,7 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
 
                         // Add captures
                         for cap in captures {
-                            let cap_str = l.create_string(&cap);
+                            let cap_str = l.create_string(&cap)?;
                             l.push_value(cap_str)?;
                         }
                         Ok(2 + pattern::find(&s_str, &parsed_pattern, start_pos)
@@ -466,13 +466,13 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
                 if captures.is_empty() {
                     // No captures, return the matched portion
                     let matched = text[start..end].to_string();
-                    let matched_str = l.create_string(&matched);
+                    let matched_str = l.create_string(&matched)?;
                     l.push_value(matched_str)?;
                     Ok(1)
                 } else {
                     // Return captures
                     for cap in captures {
-                        let cap_str = l.create_string(&cap);
+                        let cap_str = l.create_string(&cap)?;
                         l.push_value(cap_str)?;
                     }
                     Ok(pattern::find(&text, &pattern, 0)
@@ -527,7 +527,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         let repl_str = repl_str.to_string();
         match pattern::gsub(&s_str, &pattern, &repl_str, max) {
             Ok((result_str, count)) => {
-                let result = l.create_string(&result_str);
+                let result = l.create_string(&result_str)?;
                 l.push_value(result)?;
                 l.push_value(LuaValue::integer(count as i64))?;
                 Ok(2)
@@ -544,9 +544,13 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             result.push_str(&s_str[last_end..m.start]);
 
             let args = if m.captures.is_empty() {
-                vec![l.create_string(&s_str[m.start..m.end])]
+                vec![l.create_string(&s_str[m.start..m.end])?]
             } else {
-                m.captures.iter().map(|cap| l.create_string(cap)).collect()
+                let mut captures = vec![];
+                for cap in &m.captures {
+                    captures.push(l.create_string(cap)?);
+                }
+                captures
             };
 
             match l.pcall(repl_value.clone(), args) {
@@ -582,7 +586,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
 
         result.push_str(&s_str[last_end..]);
 
-        let result_val = l.create_string(&result);
+        let result_val = l.create_string(&result)?;
         l.push_value(result_val)?;
         l.push_value(LuaValue::integer(count as i64))?;
         Ok(2)
@@ -600,10 +604,10 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             // Table lookup
             let key = if m.captures.is_empty() {
                 // No captures, use whole match as key
-                l.create_string(&s_str[m.start..m.end])
+                l.create_string(&s_str[m.start..m.end])?
             } else {
                 // Use first capture as key
-                l.create_string(&m.captures[0])
+                l.create_string(&m.captures[0])?
             };
 
             let result_val = l.raw_get(&repl_value, &key).unwrap_or(LuaValue::nil());
@@ -630,7 +634,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         // Copy remaining text
         result.push_str(&s_str[last_end..]);
 
-        let result_val = l.create_string(&result);
+        let result_val = l.create_string(&result)?;
         l.push_value(result_val)?;
         l.push_value(LuaValue::integer(count as i64))?;
         Ok(2)
@@ -651,7 +655,7 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
 
     // Create state table: {string, pattern, position}
-    let state_table = l.create_table(3, 0);
+    let state_table = l.create_table(3, 0)?;
 
     if let Some(state_ref) = state_table.as_table_mut() {
         state_ref.raw_seti(1, s_value);
@@ -712,12 +716,12 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
         // Return captures if any, otherwise return the matched string
         if captures.is_empty() {
             let matched = &s_str[start..end];
-            let result = l.create_string(matched);
+            let result = l.create_string(matched)?;
             l.push_value(result)?;
             Ok(1)
         } else {
             for cap in &captures {
-                let result = l.create_string(cap);
+                let result = l.create_string(cap)?;
                 l.push_value(result)?;
             }
             Ok(captures.len())

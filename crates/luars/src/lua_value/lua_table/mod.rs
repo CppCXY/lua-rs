@@ -322,7 +322,7 @@ impl LuaTable {
 
         result
     }
-    
+
     /// GC-safe iteration: call f for each entry without allocating Vec
     /// This is used by GC to traverse table entries safely
     pub(crate) fn for_each_entry<F>(&self, mut f: F)

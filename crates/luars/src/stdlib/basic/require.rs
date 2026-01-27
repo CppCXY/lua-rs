@@ -13,7 +13,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
     // Get package table
     let package_table_value = l
-        .get_global("package")
+        .get_global("package")?
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_table) = package_table_value.as_table_mut() else {
@@ -21,7 +21,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Get package.loaded
-    let loaded_key = l.create_string("loaded");
+    let loaded_key = l.create_string("loaded")?;
     let loaded_val = package_table
         .raw_get(&loaded_key)
         .ok_or_else(|| l.error("package.loaded not found".to_string()))?;
@@ -56,7 +56,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     l.raw_set(&loaded_val, modname_val, LuaValue::boolean(false));
 
     // Get package.searchers
-    let searchers_key = l.create_string("searchers");
+    let searchers_key = l.create_string("searchers")?;
     let searchers_val = match package_table.raw_get(&searchers_key) {
         Some(v) => v,
         None => return Err(l.error("package.searchers not found".to_string())),

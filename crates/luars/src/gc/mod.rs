@@ -42,9 +42,9 @@ mod string_interner;
 use std::collections::HashSet;
 
 use crate::{
-    LuaTable,
+    LuaResult, LuaTable,
     lua_value::{Chunk, LuaValue},
-    lua_vm::{LuaState, TmKind},
+    lua_vm::{LuaError, LuaState, SafeOption, TmKind},
 };
 pub use gc_kind::*;
 pub use gc_object::*;
@@ -71,9 +71,6 @@ const DEFAULT_MINORMAJOR: i32 = 70; // 70%
 const DEFAULT_MAJORMINOR: i32 = 50; // 50%
 
 const GCSWEEPMAX: isize = 20; // Max steps per sweep call
-
-/// Maximum memory limit (1GB) to prevent out-of-memory crashes
-const MAX_MEMORY_LIMIT: isize = 1024 * 1024 * 1024; // 1GB
 
 /// Maximum l_mem value (like MAX_LMEM in Lua 5.5)
 const MAX_LMEM: isize = isize::MAX;
@@ -319,6 +316,14 @@ pub struct GC {
     pub tm_gc: LuaValue,
 
     pub tm_mode: LuaValue,
+
+    max_memory_limit: isize,
+
+    tmp_max_memory_limit: Option<isize>,
+
+    gc_error_msg: Option<String>,
+
+    gc_memory_check: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -336,7 +341,7 @@ pub struct GcStats {
 }
 
 impl GC {
-    pub fn new() -> Self {
+    pub fn new(option: SafeOption) -> Self {
         let mut gc = GC {
             gc_list: GcList::new(),
             fixed_list: GcList::new(),
@@ -364,6 +369,10 @@ impl GC {
             stats: GcStats::default(),
             tm_gc: LuaValue::nil(),
             tm_mode: LuaValue::nil(),
+            max_memory_limit: option.max_stack_size as isize,
+            tmp_max_memory_limit: None,
+            gc_error_msg: None,
+            gc_memory_check: true,
         };
 
         gc.gc_params[PAUSE] = code_param(DEFAULT_PAUSE as u32);
@@ -402,32 +411,34 @@ impl GC {
         self.set_debt(stepsize);
     }
 
-    pub fn trace_object(&mut self, gc_object_owner: GcObjectOwner) {
+    pub fn trace_object(&mut self, gc_object_owner: GcObjectOwner) -> LuaResult<()> {
         let size = gc_object_owner.size_of_data();
-        
+
         // SAFETY CHECK: Prevent out-of-memory by limiting total allocation to MAX_MEMORY_LIMIT
         let total_bytes = self.get_total_bytes();
-        if total_bytes + size as isize > MAX_MEMORY_LIMIT {
+        let limit_bytes = self.get_limit_bytes();
+        if self.gc_memory_check && (total_bytes + size as isize > limit_bytes) {
             // For simple test, later will return an error instead of panic
-            panic!(
+            self.gc_error_msg = Some(format!(
                 "Memory limit exceeded: {} bytes allocated, attempting to allocate {} more bytes (limit: {} bytes)",
-                total_bytes,
-                size,
-                MAX_MEMORY_LIMIT
-            );
+                total_bytes, size, limit_bytes,
+            ));
+            return Err(LuaError::OutOfMemory);
         }
-        
+
         let gc_ptr = gc_object_owner.as_gc_ptr();
         let age = gc_object_owner.header().age();
-        
+
         self.gc_list.add(gc_object_owner);
         self.track_size(size);
-        
+
         // Add young objects to tracking list for generational GC optimization
         // Only track if in generational mode and object is young
         if self.gc_kind == GcKind::GenMinor && age < G_OLD1 {
             self.young_objects.push(gc_ptr);
         }
+
+        Ok(())
     }
 
     /// Track a new object allocation (like luaC_newobj in Lua)
@@ -489,6 +500,24 @@ impl GC {
 
     fn get_total_bytes(&self) -> isize {
         self.total_bytes - self.gc_debt
+    }
+
+    fn get_limit_bytes(&self) -> isize {
+        if let Some(tmp_limit) = self.tmp_max_memory_limit {
+            tmp_limit
+        } else {
+            self.max_memory_limit
+        }
+    }
+
+    /// set new additional temporary memory limit
+    pub fn set_temporary_memory_limit(&mut self, limit: isize) {
+        let current_total_bytes = self.get_total_bytes();
+        self.tmp_max_memory_limit = Some(current_total_bytes.saturating_add(limit));
+    }
+
+    pub fn clear_temporary_memory_limit(&mut self) {
+        self.tmp_max_memory_limit = None;
     }
 
     /// Apply GC parameter (like luaO_applyparam in Lua 5.5)
@@ -1090,7 +1119,7 @@ impl GC {
         self.clear_gray_lists();
 
         self.gc_marked = 0;
-        
+
         // For full/incremental GC, young_objects is not used
         // Clear it to avoid stale pointers after mode switch
         if self.gc_kind != GcKind::GenMinor {
@@ -1130,7 +1159,7 @@ impl GC {
             let added_bytes = num_bytes - self.gc_majorminor;
             let limit = self.apply_param(MAJORMINOR, added_bytes);
             let to_be_collected = num_bytes - self.gc_marked;
-            
+
             if to_be_collected >= limit {
                 // atomic2gen(L, g);  /* return to generational mode */
                 // setminordebt(g);
@@ -1188,8 +1217,10 @@ impl GC {
 
         // After sweep2old, all objects are G_OLD, so young_objects is already empty
         // (cleared in sweep2old). No need to rebuild.
-        debug_assert!(self.young_objects.is_empty(), 
-            "young_objects should be empty after sweep2old in atomic2gen");
+        debug_assert!(
+            self.young_objects.is_empty(),
+            "young_objects should be empty after sweep2old in atomic2gen"
+        );
 
         self.finish_gen_cycle(l);
     }
@@ -1340,13 +1371,13 @@ impl GC {
                         debug_assert!(!header.is_white(), "OLD1 object should not be white");
                         header.set_age(G_OLD);
                         if header.is_black() {
-                           self.really_mark_object(l, gc_ptr);
+                            self.really_mark_object(l, gc_ptr);
                         }
                     }
                 }
             }
         }
-        
+
         // Mark OLD1 objects in finobj list
         let finobj_list = self.finobj.clone();
         for gc_ptr in finobj_list {
@@ -1360,7 +1391,7 @@ impl GC {
                 }
             }
         }
-        
+
         // Mark OLD1 objects in tobefnz list
         let tobefnz_list = self.tobefnz.clone();
         for gc_ptr in tobefnz_list {
@@ -1859,7 +1890,7 @@ impl GC {
         self.clear_by_values_range(l, &origweak, &origall);
 
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
-        
+
         debug_assert!(
             self.gray.is_empty(),
             "Gray list should be empty at end of atomic phase"
@@ -1996,14 +2027,14 @@ impl GC {
                 // 扫描主 gc_list
                 while *index < self.gc_list.len() && sweep_count > 0 {
                     let gc_ptr = self.gc_list.get(*index).unwrap().as_gc_ptr();
-                    
+
                     if let Some(header) = gc_ptr.header() {
                         // 检查是否是死对象（other white）
                         if header.is_dead(other_white) {
                             if let GcObjectPtr::String(str_ptr) = gc_ptr {
                                 Self::remove_dead_string_from_intern(l, str_ptr);
                             }
-                            
+
                             let obj = self.gc_list.remove(gc_ptr);
                             self.total_bytes -= obj.size() as isize;
                             drop(obj);
@@ -2018,7 +2049,7 @@ impl GC {
                     } else {
                         *index += 1;
                     }
-                    
+
                     sweep_count -= 1;
                 }
 
@@ -2032,7 +2063,7 @@ impl GC {
                 // 扫描 finobj 列表（有终结器的对象）
                 while *index < self.finobj.len() && sweep_count > 0 {
                     let gc_ptr = self.finobj[*index];
-                    
+
                     if let Some(header) = gc_ptr.header() {
                         if header.is_dead(other_white) {
                             // 死对象且有终结器：移到 tobefnz
@@ -2050,7 +2081,7 @@ impl GC {
                     } else {
                         *index += 1;
                     }
-                    
+
                     sweep_count -= 1;
                 }
 
@@ -2064,13 +2095,13 @@ impl GC {
                 // 注意：tobefnz 中的对象不应该被清理，它们等待终结器调用
                 while *index < self.tobefnz.len() && sweep_count > 0 {
                     let gc_ptr = self.tobefnz[*index];
-                    
+
                     // tobefnz 中的对象保持原状，只是重置颜色
                     if let Some(header_mut) = gc_ptr.header_mut() {
                         header_mut.make_white(self.current_white);
                         header_mut.set_age(G_NEW);
                     }
-                    
+
                     *index += 1;
                     sweep_count -= 1;
                 }
@@ -2120,7 +2151,7 @@ impl GC {
                 }
             }
         }
-        
+
         // All objects are now OLD, clear young_objects list
         self.young_objects.clear();
     }
@@ -2305,7 +2336,7 @@ impl GC {
         let debt = self.apply_param(MINORMUL, base);
         self.set_debt(debt);
     }
-    
+
     /// Age transition function (replaces Lua 5.5's nextage array)
     /// Inlined for performance - compiler will optimize to jump table or branches
     #[inline]
@@ -2321,7 +2352,7 @@ impl GC {
             _ => age,
         }
     }
-    
+
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
@@ -2331,13 +2362,13 @@ impl GC {
         self.gc_stopem = true;
 
         let marked = self.gc_marked; // Preserve gc_marked
-        
+
         // Ensure we're in the right state for young collection
         // If not in Propagate, start from restart
         if self.gc_state != GcState::Propagate {
             self.restart_collection(l);
             self.gc_state = GcState::Propagate;
-            
+
             // CRITICAL: After restart_collection, rebuild young_objects list
             // The list may contain stale pointers if incremental GC ran before
             // first young collection. Rebuild by scanning all objects with age < G_OLD1.
@@ -2354,7 +2385,7 @@ impl GC {
 
         // Phase 1: Mark OLD1 objects (including finobj and tobefnz)
         self.mark_old(l);
-        
+
         // Phase 2: Atomic phase
         self.atomic(l);
 
@@ -2393,29 +2424,29 @@ impl GC {
     fn sweep_gen(&mut self, l: &mut LuaState) -> isize {
         let other_white = 1 - self.current_white;
         let mut added_old1: isize = 0;
-        
+
         // Process young objects list (optimization: only young objects, not entire heap)
         // Take ownership to avoid borrow conflicts
         let young_list = std::mem::take(&mut self.young_objects);
         let mut new_young_list = Vec::new();
-        
+
         for gc_ptr in young_list {
             let Some(header) = gc_ptr.header() else {
                 continue;
             };
 
             let age = header.age();
-            
+
             // Process young objects (G_NEW, G_SURVIVAL, G_OLD0)
             if age == G_NEW {
                 let is_dead = header.is_dead(other_white);
-                
+
                 if is_dead {
                     // CRITICAL: Remove dead strings from intern map before dropping
                     if let GcObjectPtr::String(str_ptr) = gc_ptr {
                         Self::remove_dead_string_from_intern(l, str_ptr);
                     }
-                    
+
                     let obj = self.gc_list.remove(gc_ptr);
                     self.total_bytes -= obj.size() as isize;
                     drop(obj);
@@ -2429,13 +2460,13 @@ impl GC {
                 }
             } else if age == G_SURVIVAL || age == G_OLD0 {
                 let is_dead = header.is_dead(other_white);
-                
+
                 if is_dead {
                     // CRITICAL: Remove dead strings from intern map before dropping
                     if let GcObjectPtr::String(str_ptr) = gc_ptr {
                         Self::remove_dead_string_from_intern(l, str_ptr);
                     }
-                    
+
                     let obj = self.gc_list.remove(gc_ptr);
                     self.total_bytes -= obj.size() as isize;
                     drop(obj);
@@ -2446,7 +2477,7 @@ impl GC {
                         debug_assert!(old_age != G_OLD1, "OLD1 should be advanced in mark_old");
                         let new_age = Self::next_age(old_age);
                         header_mut.set_age(new_age);
-                        
+
                         // Track bytes becoming OLD1
                         if new_age == G_OLD1 {
                             if let Some(h) = gc_ptr.header() {
@@ -2462,13 +2493,13 @@ impl GC {
                 // Don't add back to new_young_list
             }
         }
-        
+
         // Restore young_objects list with survivors
         self.young_objects = new_young_list;
 
         // Process finobj and tobefnz lists
         added_old1 += self.sweep_gen_finobj();
-        
+
         added_old1
     }
 
@@ -2478,13 +2509,13 @@ impl GC {
         let other_white = 1 - self.current_white;
         let mut added_old1: isize = 0;
         let mut i = 0;
-        
+
         while i < self.finobj.len() {
             let gc_ptr = self.finobj[i];
-            
+
             if let Some(header) = gc_ptr.header() {
                 let age = header.age();
-                
+
                 if age == G_NEW {
                     if header.is_dead(other_white) {
                         // Dead with finalizer: move to tobefnz
@@ -2510,7 +2541,7 @@ impl GC {
                             let old_age = header_mut.age();
                             let new_age = Self::next_age(old_age);
                             header_mut.set_age(new_age);
-                            
+
                             // Track bytes becoming OLD1
                             if new_age == G_OLD1 {
                                 if let Some(h) = gc_ptr.header() {
@@ -2521,22 +2552,22 @@ impl GC {
                     }
                 }
             }
-            
+
             i += 1;
         }
-        
+
         // Also sweep tobefnz list
         let mut j = 0;
         while j < self.tobefnz.len() {
             let gc_ptr = self.tobefnz[j];
-            
+
             if let Some(header) = gc_ptr.header_mut() {
                 let age = header.age();
                 if age < G_OLD && !header.is_dead(other_white) {
                     // Resurrected or still alive: advance age
                     let new_age = Self::next_age(age);
                     header.set_age(new_age);
-                    
+
                     if new_age == G_OLD1 {
                         if let Some(h) = gc_ptr.header() {
                             added_old1 += h.size as isize;
@@ -2544,10 +2575,10 @@ impl GC {
                     }
                 }
             }
-            
+
             j += 1;
         }
-        
+
         added_old1
     }
 
@@ -2766,7 +2797,7 @@ impl GC {
             // Lua 5.5 does this implicitly by calling resetbits which sets to
             // currentwhite.
             header.make_white(self.current_white);
-            
+
             // If age is G_OLD1 in generational mode, note this
             // (In C, this updates g->firstold1 pointer)
             // In our Vec pool design, we don't need to track this explicitly
@@ -2908,6 +2939,37 @@ impl GC {
             self.mark_object(l, gc_ptr);
         }
     }
+
+    pub fn get_error_message(&mut self) -> String {
+        if let Some(msg) = std::mem::take(&mut self.gc_error_msg) {
+            msg
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn disable_memory_check(&mut self) {
+        self.gc_memory_check = false;
+    }
+
+    pub fn enable_memory_check(&mut self) {
+        self.gc_memory_check = true;
+    }
+
+    pub fn check_memory(&mut self) -> LuaResult<()> {
+        let total_bytes = self.get_total_bytes();
+        let limit_bytes = self.get_limit_bytes();
+        if total_bytes > limit_bytes {
+            // For simple test, later will return an error instead of panic
+            self.gc_error_msg = Some(format!(
+                "Memory limit exceeded: {} bytes allocated (limit: {} bytes)",
+                total_bytes, limit_bytes,
+            ));
+            return Err(LuaError::OutOfMemory);
+        }
+
+        Ok(())
+    }
 }
 
 /// Result of a GC step
@@ -2921,7 +2983,7 @@ enum StepResult {
 
 impl Default for GC {
     fn default() -> Self {
-        Self::new()
+        Self::new(SafeOption::default())
     }
 }
 

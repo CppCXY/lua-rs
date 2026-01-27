@@ -19,7 +19,7 @@ pub fn create_package_lib() -> LibraryModule {
 pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     // Get package table (should already exist from module creation)
     let package_table = l
-        .get_global("package")
+        .get_global("package")?
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     if !package_table.is_table() {
@@ -29,27 +29,27 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     let vm = l.vm_mut();
 
     // Create all keys
-    let loaded_key = vm.create_string("loaded");
-    let preload_key = vm.create_string("preload");
-    let path_key = vm.create_string("path");
-    let cpath_key = vm.create_string("cpath");
-    let config_key = vm.create_string("config");
-    let searchers_key = vm.create_string("searchers");
+    let loaded_key = vm.create_string("loaded")?;
+    let preload_key = vm.create_string("preload")?;
+    let path_key = vm.create_string("path")?;
+    let cpath_key = vm.create_string("cpath")?;
+    let config_key = vm.create_string("config")?;
+    let searchers_key = vm.create_string("searchers")?;
 
     // Create all values
-    let loaded_table = vm.create_table(0, 0);
-    let preload_table = vm.create_table(0, 0);
-    let path_value = vm.create_string("./?.lua;./?/init.lua");
-    let cpath_value = vm.create_string("./?.so;./?.dll;./?.dylib");
+    let loaded_table = vm.create_table(0, 0)?;
+    let preload_table = vm.create_table(0, 0)?;
+    let path_value = vm.create_string("./?.lua;./?/init.lua")?;
+    let cpath_value = vm.create_string("./?.so;./?.dll;./?.dylib")?;
 
     #[cfg(windows)]
     let config_str = "\\\n;\n?\n!\n-";
     #[cfg(not(windows))]
     let config_str = "/\n;\n?\n!\n-";
-    let config_value = vm.create_string(config_str);
+    let config_value = vm.create_string(config_str)?;
 
     // Create searchers array
-    let searchers_table_value = vm.create_table(4, 0);
+    let searchers_table_value = vm.create_table(4, 0)?;
     let searchers_table = searchers_table_value.as_table_mut().unwrap();
 
     // Fill searchers array
@@ -86,14 +86,14 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
     // };
 
     let package_table = l
-        .get_global("package")
+        .get_global("package")?
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_table) = package_table.as_table() else {
         return Err(l.error("Invalid package table".to_string()));
     };
 
-    let preload_key = l.create_string("preload");
+    let preload_key = l.create_string("preload")?;
     let preload_val = package_table
         .raw_get(&preload_key)
         .unwrap_or(LuaValue::nil());
@@ -111,7 +111,7 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
         Ok(1)
     } else {
         l.push_value(loader)?;
-        let preload_str = l.create_string(":preload:");
+        let preload_str = l.create_string(":preload:")?;
         l.push_value(preload_str)?;
         Ok(2)
     }
@@ -128,14 +128,14 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let package_val = l
-        .get_global("package")
+        .get_global("package")?
         .ok_or_else(|| l.error("package table not found".to_string()))?;
 
     let Some(package_table) = package_val.as_table() else {
         return Err(l.error("Invalid package table".to_string()));
     };
 
-    let path_key = l.create_string("path");
+    let path_key = l.create_string("path")?;
 
     let Some(path_value) = package_table.raw_get(&path_key) else {
         return Err(LuaError::RuntimeError);
@@ -150,7 +150,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
     match result {
         Some(filepath) => {
             l.push_value(LuaValue::cfunction(lua_file_loader))?;
-            let filepath_str = l.create_string(&filepath);
+            let filepath_str = l.create_string(&filepath)?;
             l.push_value(filepath_str)?;
             Ok(2)
         }
@@ -163,7 +163,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
                     .collect::<Vec<_>>()
                     .join("'\n\tno file '")
             );
-            let err_str = l.create_string(&err);
+            let err_str = l.create_string(&err)?;
             l.push_value(err_str)?;
             Ok(1)
         }
@@ -204,8 +204,8 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     let chunk = vm.compile_with_name(&source, &chunkname)?;
 
     // Create a function from the chunk with _ENV upvalue
-    let env_upvalue_id = vm.create_upvalue_closed(vm.global);
-    let func = vm.create_function(Rc::new(chunk), vec![env_upvalue_id]);
+    let env_upvalue = vm.create_upvalue_closed(vm.global)?;
+    let func = vm.create_function(Rc::new(chunk), vec![env_upvalue])?;
 
     // Push the function to be called by require
     l.push_value(func)?;
@@ -230,7 +230,7 @@ fn search_path(name: &str, path: &str, sep: &str, rep: &str) -> LuaResult<Option
 }
 
 fn package_loadlib(l: &mut LuaState) -> LuaResult<usize> {
-    let err = l.create_string("loadlib not implemented");
+    let err = l.create_string("loadlib not implemented")?;
     l.push_value(LuaValue::nil())?;
     l.push_value(err)?;
     Ok(2)
@@ -270,7 +270,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
 
     match search_path(&name_str, &path_str, &sep, &rep)? {
         Some(filepath) => {
-            let filepath_str = l.create_string(&filepath);
+            let filepath_str = l.create_string(&filepath)?;
             l.push_value(filepath_str)?;
             Ok(1)
         }
@@ -285,7 +285,7 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
                     .join("'\n\tno file '")
             );
             l.push_value(LuaValue::nil())?;
-            let err_str = l.create_string(&err);
+            let err_str = l.create_string(&err)?;
             l.push_value(err_str)?;
             Ok(2)
         }
