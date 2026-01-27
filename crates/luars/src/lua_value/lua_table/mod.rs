@@ -64,6 +64,14 @@ impl LuaTable {
         }
     }
 
+    pub fn hash_size(&self) -> usize {
+        match &self.impl_table {
+            // LuaTableDetail::TypedArray(_) => 0,
+            LuaTableDetail::ValueArray(_) => 0,
+            LuaTableDetail::HashTable(map) => map.hash_size(),
+        }
+    }
+
     pub fn is_array(&self) -> bool {
         match &self.impl_table {
             // LuaTableDetail::TypedArray(_) => true,
@@ -313,6 +321,26 @@ impl LuaTable {
         }
 
         result
+    }
+
+    /// GC-safe iteration: call f for each entry without allocating Vec
+    /// This is used by GC to traverse table entries safely
+    pub(crate) fn for_each_entry<F>(&self, mut f: F)
+    where
+        F: FnMut(LuaValue, LuaValue),
+    {
+        match &self.impl_table {
+            LuaTableDetail::ValueArray(ar) => {
+                for i in 0..ar.array.len() {
+                    let value = ar.array[i];
+                    let key = LuaValue::integer((i + 1) as i64);
+                    f(key, value);
+                }
+            }
+            LuaTableDetail::HashTable(t) => {
+                t.for_each_entry(f);
+            }
+        }
     }
 }
 

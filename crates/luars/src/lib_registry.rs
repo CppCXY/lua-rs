@@ -8,7 +8,7 @@ use crate::stdlib::{self, Stdlib};
 // use crate::stdlib;
 
 /// Type for value initializers - functions that create values when the module loads
-pub type ValueInitializer = fn(&mut LuaVM) -> LuaValue;
+pub type ValueInitializer = fn(&mut LuaVM) -> LuaResult<LuaValue>;
 
 /// Type for module initializers - functions that set up additional module fields
 pub type ModuleInitializer = fn(&mut LuaState) -> LuaResult<()>;
@@ -98,15 +98,15 @@ impl LibraryRegistry {
     /// Load a specific module into the VM
     pub fn load_module(&self, vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> {
         // Create a table for the library
-        let lib_table = vm.create_table(0, 0);
+        let lib_table = vm.create_table(0, 0)?;
 
         // Register all entries in the table
         for (name, entry) in &module.entries {
             let value = match entry {
                 LibraryEntry::Function(func) => LuaValue::cfunction(*func),
-                LibraryEntry::Value(value_init) => value_init(vm),
+                LibraryEntry::Value(value_init) => value_init(vm)?,
             };
-            let name_key = vm.create_string(name);
+            let name_key = vm.create_string(name)?;
             vm.raw_set(&lib_table, name_key, value);
         }
 
@@ -116,19 +116,19 @@ impl LibraryRegistry {
             for (name, entry) in &module.entries {
                 let value = match entry {
                     LibraryEntry::Function(func) => LuaValue::cfunction(*func),
-                    LibraryEntry::Value(value_init) => value_init(vm),
+                    LibraryEntry::Value(value_init) => value_init(vm)?,
                 };
-                vm.set_global(name, value);
+                vm.set_global(name, value)?;
             }
         } else {
             // For module libraries, set the table as global
-            vm.set_global(module.name, lib_table);
+            vm.set_global(module.name, lib_table)?;
 
             // Special handling for string library: set string metatable
             if module.name == "string" {
                 // In Lua, all strings share a metatable where __index points to the string library
                 // This allows using string methods with : syntax (e.g., str:upper())
-                vm.set_string_metatable(lib_table.clone());
+                vm.set_string_metatable(lib_table.clone())?;
             }
 
             // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)
@@ -136,13 +136,13 @@ impl LibraryRegistry {
 
             // Also register in package.loaded and package.preload (if package exists)
             // This allows require() to find standard libraries
-            if let Some(package_table) = vm.get_global("package") {
+            if let Some(package_table) = vm.get_global("package")? {
                 if package_table.is_table() {
-                    let loaded_key = vm.create_string("loaded");
+                    let loaded_key = vm.create_string("loaded")?;
                     if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
                         && loaded_table.is_table()
                     {
-                        let mod_key = vm.create_string(module.name);
+                        let mod_key = vm.create_string(module.name)?;
                         vm.raw_set(&loaded_table, mod_key, lib_table.clone());
                     }
                 }
@@ -151,7 +151,7 @@ impl LibraryRegistry {
 
         // Call the module initializer if it exists
         if let Some(init_fn) = module.initializer {
-            init_fn(&mut vm.main_state)?;
+            init_fn(vm.main_state())?;
         }
 
         Ok(())

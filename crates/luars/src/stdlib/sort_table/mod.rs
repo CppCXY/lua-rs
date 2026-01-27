@@ -64,7 +64,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
                     };
 
                     // Clean up stack
-                    l.set_top(func_idx);
+                    let _ = l.set_top(func_idx);
 
                     // Convert to bool: nil and false are false, everything else is true
                     let is_less = if cmp_result.is_nil() {
@@ -83,7 +83,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
                 }
                 _ => {
                     // Error or false - treat as not less than
-                    l.set_top(func_idx);
+                    let _ = l.set_top(func_idx);
                     std::cmp::Ordering::Equal
                 }
             }

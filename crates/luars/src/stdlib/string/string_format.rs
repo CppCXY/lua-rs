@@ -82,7 +82,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    let result_str = l.create_string_owned(result);
+    let result_str = l.create_string_owned(result)?;
     l.push_value(result_str)?;
     Ok(1)
 }

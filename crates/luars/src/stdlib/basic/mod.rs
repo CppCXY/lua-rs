@@ -78,7 +78,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
         LuaValueKind::Thread => "thread",
     };
 
-    let result = l.vm_mut().create_string(type_name);
+    let result = l.create_string(type_name)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -224,7 +224,7 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     let result = l.to_string(&value)?;
-    let result_value = l.create_string_owned(result);
+    let result_value = l.create_string_owned(result)?;
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -324,20 +324,31 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("ipairs iterator: missing index".to_string()))?;
 
     // Fast path: both table and index are valid
-    if let Some(table) = table_val.as_table() {
-        if let Some(index) = index_val.as_integer() {
+    // CRITICAL: Get the value FIRST before any push_value operations
+    // to avoid dangling pointer issues when stack is reallocated
+    let next_index_opt = index_val.as_integer();
+    let value_opt = if let Some(table) = table_val.as_table() {
+        if let Some(index) = next_index_opt {
             let next_index = index + 1;
-
-            if let Some(value) = table.raw_geti(next_index) {
-                // Return (next_index, value)
-                l.push_value(LuaValue::integer(next_index))?;
-                l.push_value(value)?;
-                return Ok(2);
-            }
-            // Reached end of array - return nil
-            l.push_value(LuaValue::nil())?;
-            return Ok(1);
+            // Get value and next index before any stack operations
+            table.raw_geti(next_index).map(|v| (next_index, v))
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    // Now safely push values without holding any references
+    if let Some((next_index, value)) = value_opt {
+        // Return (next_index, value)
+        l.push_value(LuaValue::integer(next_index))?;
+        l.push_value(value)?;
+        return Ok(2);
+    } else if next_index_opt.is_some() {
+        // Reached end of array - return nil
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
     }
 
     // Slow path with error
@@ -374,14 +385,16 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
 
     let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
 
-    // Use efficient lua_next implementation - direct table access
-    let table = table_val
-        .as_table()
-        .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
+    // CRITICAL: Get the result FIRST before any push_value operations
+    // to avoid dangling pointer issues when stack is reallocated
+    let result = {
+        let table = table_val
+            .as_table()
+            .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
+        table.next(&index_val)
+    };
 
-    let result = table.next(&index_val);
-
-    // Return next key-value pair, or nil if at end
+    // Now safely push values without holding any table references
     if let Some((k, v)) = result {
         l.push_value(k)?;
         l.push_value(v)?;
@@ -529,9 +542,15 @@ fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'rawget' (value expected)".to_string()))?;
 
-    if let Some(table_ref) = table.as_table() {
-        let value = table_ref.raw_get(&key).unwrap_or(LuaValue::nil());
-        l.push_value(value)?;
+    // CRITICAL: Get the value FIRST before push_value to avoid dangling pointer
+    let value = if let Some(table_ref) = table.as_table() {
+        Some(table_ref.raw_get(&key).unwrap_or(LuaValue::nil()))
+    } else {
+        None
+    };
+
+    if let Some(v) = value {
+        l.push_value(v)?;
         return Ok(1);
     }
     Err(l.error("bad argument #1 to 'rawget' (table expected)".to_string()))
@@ -621,14 +640,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "count" => {
-            // LUA_GCCOUNT: returns memory in use in Kbytes
-            // Lua 5.5 lapi.c line 1222: res = gettotalbytes(g);
-            // gettotalbytes(g) = (g)->GCtotalbytes - (g)->GCdebt (lstate.h line 435)
-
-            // CRITICAL: Check GC before returning count
-            // In Lua 5.5, luaC_checkGC is called on every API entry
-            l.check_gc()?;
-
             let gc = &l.vm_mut().gc;
             let real_bytes = gc.total_bytes - gc.gc_debt; // gettotalbytes
             let kb = real_bytes.max(0) as f64 / 1024.0;
@@ -730,23 +741,24 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             vm.gc.gc_kind = GcKind::GenMinor;
 
             // Push previous mode name (must track if new)
-            let mode_value = vm.create_string(old_mode);
+            let mode_value = l.create_string(old_mode)?;
             l.push_value(mode_value)?;
             Ok(1)
         }
         "incremental" => {
             // LUA_GCINC: Switch to incremental mode
-            let vm = l.vm_mut();
-            let old_mode = match vm.gc.gc_kind {
+            let old_mode = match l.vm_mut().gc.gc_kind {
                 GcKind::Inc => "incremental",
                 GcKind::GenMinor => "generational",
                 GcKind::GenMajor => "generational",
             };
 
+            let vm_ptr = l.vm_ptr();
+            let vm = unsafe { &mut *vm_ptr };
             // Switch to incremental mode (like luaC_changemode in Lua 5.5)
-            vm.gc.change_to_incremental_mode(&mut vm.object_allocator);
+            vm.gc.change_to_incremental_mode(l);
 
-            let mode_value = vm.create_string(old_mode);
+            let mode_value = l.create_string(old_mode)?;
             l.push_value(mode_value)?;
             Ok(1)
         }
@@ -770,12 +782,12 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             // Map parameter name to index
             let param_idx = match param_name.as_str() {
-                "minormul" => Some(MINORMUL),     // 3: LUA_GCPMINORMUL
-                "majorminor" => Some(MAJORMINOR), // 5: LUA_GCPMAJORMINOR
-                "minormajor" => Some(MINORMAJOR), // 4: LUA_GCPMINORMAJOR
-                "pause" => Some(PAUSE),           // 0: LUA_GCPPAUSE
-                "stepmul" => Some(STEPMUL),       // 1: LUA_GCPSTEPMUL
-                "stepsize" => Some(STEPSIZE),     // 2: LUA_GCPSTEPSIZE
+                "minormul" => Some(MINORMUL),     // 0: LUA_GCPMINORMUL
+                "majorminor" => Some(MAJORMINOR), // 1: LUA_GCPMAJORMINOR
+                "minormajor" => Some(MINORMAJOR), // 2: LUA_GCPMINORMAJOR
+                "pause" => Some(PAUSE),           // 3: LUA_GCPPAUSE
+                "stepmul" => Some(STEPMUL),       // 4: LUA_GCPSTEPMUL
+                "stepsize" => Some(STEPSIZE),     // 5: LUA_GCPSTEPSIZE
                 _ => None,
             };
 
@@ -855,9 +867,9 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             Ok((mut chunk, string_constants)) => {
                 // Register string constants in the object pool and update constants
                 for (const_idx, string_val) in string_constants {
-                    let string_id = vm.create_string_owned(string_val);
+                    let string_val = vm.create_string_owned(string_val)?;
                     if const_idx < chunk.constants.len() {
-                        chunk.constants[const_idx] = string_id;
+                        chunk.constants[const_idx] = string_val;
                     }
                 }
                 Ok(chunk)
@@ -877,23 +889,22 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
     match chunk_result {
         Ok(chunk) => {
-            let vm = l.vm_mut();
             // Create upvalue for _ENV (global table)
             let env_upvalue_id = if let Some(env) = env {
-                vm.create_upvalue_closed(env)
+                l.create_upvalue_closed(env)?
             } else {
-                vm.create_upvalue_closed(vm.global)
+                let global = l.vm_mut().global.clone();
+                l.create_upvalue_closed(global)?
             };
             let upvalues = vec![env_upvalue_id];
 
-            let func = vm.create_function(Rc::new(chunk), upvalues);
+            let func = l.create_function(Rc::new(chunk), upvalues)?;
             l.push_value(func)?;
             Ok(1)
         }
         Err(e) => {
             // Return nil and error message
-            let vm = l.vm_mut();
-            let err_msg = vm.create_string(&format!("load error: {}", e));
+            let err_msg = l.create_string(&format!("load error: {}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -913,13 +924,11 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'loadfile' (string expected)".to_string()));
     };
 
-    let vm = l.vm_mut();
-
     // Load from specified file
     let code = match std::fs::read_to_string(&filename_str) {
         Ok(c) => c,
         Err(e) => {
-            let err_msg = vm.create_string(&format!("cannot open {}: {}", filename_str, e));
+            let err_msg = l.create_string(&format!("cannot open {}: {}", filename_str, e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             return Ok(2);
@@ -928,17 +937,18 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
 
     // Compile the code using VM's string pool with chunk name
     let chunkname = format!("@{}", filename_str);
-    match vm.compile_with_name(&code, &chunkname) {
+    match l.vm_mut().compile_with_name(&code, &chunkname) {
         Ok(chunk) => {
             // Create upvalue for _ENV (global table)
-            let env_upvalue_id = vm.create_upvalue_closed(vm.global);
-            let upvalues = vec![env_upvalue_id];
-            let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
+            let global = l.vm_mut().global.clone();
+            let env_upvalue = l.create_upvalue_closed(global)?;
+            let upvalues = vec![env_upvalue];
+            let func = l.create_function(std::rc::Rc::new(chunk), upvalues)?;
             l.push_value(func)?;
             Ok(1)
         }
         Err(e) => {
-            let err_msg = vm.create_string(&format!("load error: {}", e));
+            let err_msg = l.create_string(&format!("load error: {}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -968,7 +978,6 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Load from file
-    let vm = l.vm_mut();
     let code = match std::fs::read_to_string(&filename_str) {
         Ok(c) => c,
         Err(e) => {
@@ -978,17 +987,18 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
 
     // Compile the code
     let chunkname = format!("@{}", filename_str);
-    let chunk = match vm.compile_with_name(&code, &chunkname) {
+    let chunk = match l.vm_mut().compile_with_name(&code, &chunkname) {
         Ok(chunk) => chunk,
         Err(e) => {
             return Err(l.error(format!("error loading {}: {}", filename_str, e)));
         }
     };
 
+    let global = l.vm_mut().global.clone();
     // Create function with _ENV upvalue (global table)
-    let env_upvalue_id = vm.create_upvalue_closed(vm.global);
-    let upvalues = vec![env_upvalue_id];
-    let func = vm.create_function(std::rc::Rc::new(chunk), upvalues);
+    let env_upvalue = l.create_upvalue_closed(global)?;
+    let upvalues = vec![env_upvalue];
+    let func = l.create_function(std::rc::Rc::new(chunk), upvalues)?;
 
     // Call the function with 0 arguments
     let (success, results) = l.pcall(func, vec![])?;

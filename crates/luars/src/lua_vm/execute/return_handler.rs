@@ -77,14 +77,14 @@ pub fn handle_return(
     }
 
     // Adjust top to point after the last result
-    lua_state.set_top(func_pos + nres);
+    lua_state.set_top(func_pos + nres)?;
 
     // Fill with nil if caller wants more results than we have
     if wanted_results > nres {
         for i in nres..wanted_results {
             lua_state.stack_set(func_pos + i, LuaValue::nil())?;
         }
-        lua_state.set_top(func_pos + wanted_results);
+        lua_state.set_top(func_pos + wanted_results)?;
         nres = wanted_results;
     }
 
@@ -94,7 +94,7 @@ pub fn handle_return(
     // Update logical stack top (L->top.p)
     // Do NOT modify caller frame's top limit (ci->top), only L->top.p
     let new_top = func_pos + nres;
-    lua_state.set_top(new_top);
+    lua_state.set_top(new_top)?;
 
     // Check if this was the top-level frame
     if lua_state.call_depth() == 0 {
@@ -124,9 +124,9 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<F
         for i in 0..wanted_results {
             lua_state.stack_set(func_pos + i, LuaValue::nil())?;
         }
-        lua_state.set_top(func_pos + wanted_results);
+        lua_state.set_top(func_pos + wanted_results)?;
     } else {
-        lua_state.set_top(func_pos);
+        lua_state.set_top(func_pos)?;
     }
 
     // Pop current call frame
@@ -179,7 +179,7 @@ pub fn handle_return1(
 
     if wanted_results == 0 {
         // Caller doesn't want any results
-        lua_state.set_top(func_pos);
+        lua_state.set_top(func_pos)?;
     } else {
         // Set the first result
         lua_state.stack_set(func_pos, return_val)?;
@@ -188,7 +188,7 @@ pub fn handle_return1(
         for i in 1..wanted_results {
             lua_state.stack_set(func_pos + i, LuaValue::nil())?;
         }
-        lua_state.set_top(func_pos + wanted_results);
+        lua_state.set_top(func_pos + wanted_results)?;
     }
 
     // Pop current call frame

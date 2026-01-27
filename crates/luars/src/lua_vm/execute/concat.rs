@@ -56,8 +56,7 @@ pub fn concat_strings(
 ) -> LuaResult<LuaValue> {
     if n == 0 {
         // Empty concat - return empty string
-        let v = lua_state.create_string("");
-        return Ok(v);
+        return lua_state.create_string("");
     }
 
     if n == 1 {
@@ -68,8 +67,7 @@ pub fn concat_strings(
             return Ok(val); // Already a string
         }
         if let Some((s, _)) = value_to_string_content(&val) {
-            let v = lua_state.create_string(&s);
-            return Ok(v);
+            return lua_state.create_string(&s);
         } else {
             // Cannot convert - need metamethod
             return Err(lua_state.error(format!(
@@ -104,8 +102,7 @@ pub fn concat_strings(
             result.push_str(s);
         }
 
-        let v = lua_state.create_string(&result);
-        return Ok(v);
+        return lua_state.create_string(&result);
     }
     // Collect values first - try to convert each to string
     for i in 0..n {
@@ -121,8 +118,7 @@ pub fn concat_strings(
         }
     }
 
-    let s = lua_state.create_string_owned(result);
-    Ok(s)
+    lua_state.create_string_owned(result)
 }
 
 #[cfg(test)]
@@ -136,7 +132,7 @@ mod tests {
     #[test]
     fn test_concat_empty() {
         let mut vm = LuaVM::new(SafeOption::default());
-        let state = &mut vm.main_state;
+        let state = vm.main_state();
         // Empty concat should return empty string
         let result = concat_strings(state, 0, 0, 0);
         assert!(result.is_ok());

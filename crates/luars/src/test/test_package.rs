@@ -37,7 +37,7 @@ fn test_package_preload() {
     );
 
     if let Err(e) = &result {
-        let error_msg = vm.get_error_message();
+        let error_msg = vm.get_error_message(*e);
         eprintln!("Error: {:?}, Message: {}", e, error_msg);
     }
     assert!(result.is_ok());
@@ -150,7 +150,7 @@ fn test_require_preload() {
     );
 
     if let Err(e) = &result {
-        let error_msg = vm.get_error_message();
+        let error_msg = vm.get_error_message(*e);
         panic!("Error: {:?}, Message: {}", e, error_msg);
     }
     assert!(result.is_ok());

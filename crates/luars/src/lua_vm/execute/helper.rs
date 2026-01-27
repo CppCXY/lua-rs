@@ -67,7 +67,7 @@ pub fn buildhiddenargs(
 
     // Update lua_state.top to match call_info.top
     // This ensures that subsequent set_top calls preserve our data
-    lua_state.set_top(new_call_info_top);
+    lua_state.set_top(new_call_info_top)?;
 
     Ok(new_base)
 }

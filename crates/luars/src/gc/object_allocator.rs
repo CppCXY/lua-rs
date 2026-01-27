@@ -13,10 +13,12 @@ use crate::gc::string_interner::StringInterner;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState, SafeOption};
 use crate::{
-    GC, GcBinary, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata, LuaTable,
-    LuaValue, StringPtr, Upvalue, UpvaluePtr,
+    GC, GcBinary, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata, Instruction,
+    LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
 };
 use std::rc::Rc;
+
+pub type CreateResult = LuaResult<LuaValue>;
 
 /// High-performance object pool for the Lua VM
 /// - Small objects (String, Function, Upvalue) use Pool<T> with direct Vec storage
@@ -45,33 +47,30 @@ impl ObjectAllocator {
     // ==================== String Operations ====================
 
     /// Create or intern a string (Lua-style with proper hash collision handling)
-    /// Returns (StringId, is_new) where is_new indicates if a new string was created
-    #[inline]
-    /// Create string (COMPLETE INTERNING - all strings)
-    /// Returns (StringId, is_new) where is_new indicates if a new string was created
     ///
-    pub fn create_string(&mut self, gc: &mut GC, s: &str, current_white: u8) -> LuaValue {
-        self.strings.intern(s, gc, current_white)
+    #[inline]
+    pub fn create_string(&mut self, gc: &mut GC, s: &str) -> CreateResult {
+        self.strings.intern(s, gc)
     }
 
     /// Create string from owned String (avoids clone if already interned)
-    /// Returns (StringId, is_new) where is_new indicates if a new string was created
     ///
-    pub fn create_string_owned(&mut self, gc: &mut GC, s: String, current_white: u8) -> LuaValue {
-        self.strings.intern(&s, gc, current_white)
+    #[inline]
+    pub fn create_string_owned(&mut self, gc: &mut GC, s: String) -> CreateResult {
+        self.strings.intern(&s, gc)
     }
 
     /// Create a binary value from Vec<u8>
     ///
     #[inline]
-    pub fn create_binary(&mut self, gc: &mut GC, data: Vec<u8>, current_white: u8) -> LuaValue {
+    pub fn create_binary(&mut self, gc: &mut GC, data: Vec<u8>) -> CreateResult {
+        let current_white = gc.current_white;
         let size = (std::mem::size_of::<GcBinary>() + data.len()) as u32;
         let gc_ptr = Box::new(GcBinary::new(data, current_white, size));
         let gc_binary = GcObjectOwner::Binary(gc_ptr);
         let ptr = gc_binary.as_binary_ptr().unwrap();
-        gc.gc_pool.alloc(gc_binary);
-        gc.track_size(size as usize);
-        LuaValue::binary(ptr)
+        gc.trace_object(gc_binary)?;
+        Ok(LuaValue::binary(ptr))
     }
 
     /// Create a substring from an existing string (optimized for string.sub)
@@ -85,11 +84,10 @@ impl ObjectAllocator {
         s_value: LuaValue,
         start: usize,
         end: usize,
-        current_white: u8,
-    ) -> LuaValue {
+    ) -> CreateResult {
         let string = match s_value.as_str() {
             Some(s) => s,
-            None => return self.create_string(gc, "", current_white),
+            None => return self.create_string(gc, ""),
         };
         // Extract substring info first
         let substring = {
@@ -98,12 +96,12 @@ impl ObjectAllocator {
             let end = end.min(string.len());
 
             if start >= end {
-                return self.create_string(gc, "", current_white);
+                return self.create_string(gc, "");
             }
 
             // Fast path: return original if full range
             if start == 0 && end == string.len() {
-                return s_value;
+                return Ok(s_value);
             }
 
             // Copy substring to avoid borrowing issue
@@ -111,7 +109,7 @@ impl ObjectAllocator {
         };
 
         // Intern the substring - will be deduplicated if it already exists
-        self.create_string(gc, substring, current_white)
+        self.create_string(gc, substring)
     }
 
     // ==================== Table Operations ====================
@@ -122,8 +120,7 @@ impl ObjectAllocator {
         gc: &mut GC,
         array_size: usize,
         hash_size: usize,
-        current_white: u8,
-    ) -> LuaValue {
+    ) -> CreateResult {
         // Lua 5.5 ltable.c luaH_size:
         //   lu_mem sz = sizeof(Table) + concretesize(t->asize);
         //   if (!isdummy(t)) sz += sizehash(t);
@@ -136,7 +133,8 @@ impl ObjectAllocator {
         //   For simplicity, use hash_size * 24
         //
         // sizeof(Table) ≈ 80 bytes (base struct)
-        let base_size = 80;
+        let current_white = gc.current_white;
+        let base_size = std::mem::size_of::<GcTable>();
         let array_bytes = if array_size > 0 {
             array_size * 17 + 4
         } else {
@@ -155,9 +153,8 @@ impl ObjectAllocator {
         ));
         let gc_table = GcObjectOwner::Table(ptr);
         let ptr = gc_table.as_table_ptr().unwrap();
-        gc.gc_pool.alloc(gc_table);
-        gc.track_size(size as usize);
-        LuaValue::table(ptr)
+        gc.trace_object(gc_table)?;
+        Ok(LuaValue::table(ptr))
     }
 
     // ==================== Function Operations ====================
@@ -171,18 +168,16 @@ impl ObjectAllocator {
         gc: &mut GC,
         chunk: Rc<Chunk>,
         upvalue_ptrs: Vec<UpvaluePtr>,
-        current_white: u8,
-    ) -> LuaValue {
+    ) -> CreateResult {
+        let current_white = gc.current_white;
         // Calculate size: base + upvalues + chunk data
         // TODO: refine size calculation
-        let upvalue_count = upvalue_ptrs.len();
-        let instr_size = chunk.code.len() * 8;
-        let const_size = chunk.constants.len() * 32;
+        let upval_size = upvalue_ptrs.len() * std::mem::size_of::<UpvaluePtr>();
+        let instr_size = chunk.code.len() * std::mem::size_of::<Instruction>();
+        let const_size = chunk.constants.len() * std::mem::size_of::<LuaValue>();
         let child_size = chunk.child_protos.len() * std::mem::size_of::<Chunk>();
-        let line_size = chunk.line_info.len() * 4;
-        let size =
-            (256 + upvalue_count * 64 + instr_size + const_size + child_size + line_size + 512)
-                as u32;
+        let line_size = chunk.line_info.len() * std::mem::size_of::<u32>();
+        let size = (upval_size + instr_size + const_size + child_size + line_size) as u32;
 
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
             FunctionBody::Lua(chunk, upvalue_ptrs),
@@ -190,9 +185,8 @@ impl ObjectAllocator {
             size,
         )));
         let ptr = gc_func.as_function_ptr().unwrap();
-        gc.gc_pool.alloc(gc_func);
-        gc.track_size(size as usize);
-        LuaValue::function(ptr)
+        gc.trace_object(gc_func)?;
+        Ok(LuaValue::function(ptr))
     }
 
     /// Create a C closure (native function with upvalues)
@@ -204,100 +198,54 @@ impl ObjectAllocator {
         gc: &mut GC,
         func: CFunction,
         upvalue_ptrs: Vec<UpvaluePtr>,
-        current_white: u8,
-    ) -> LuaValue {
-        let size = std::mem::size_of::<CFunction>() as u32 + (upvalue_ptrs.len() as u32 * 64);
+    ) -> CreateResult {
+        let current_white = gc.current_white;
+        let size = std::mem::size_of::<CFunction>() as u32
+            + (upvalue_ptrs.len() as u32 * std::mem::size_of::<UpvaluePtr>() as u32);
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
             FunctionBody::CClosure(func, upvalue_ptrs),
             current_white,
             size,
         )));
         let ptr = gc_func.as_function_ptr().unwrap();
-        gc.gc_pool.alloc(gc_func);
-        gc.track_size(size as usize);
-        LuaValue::function(ptr)
+        gc.trace_object(gc_func)?;
+        Ok(LuaValue::function(ptr))
     }
 
     // ==================== Upvalue Operations ====================
 
-    /// Create an open upvalue pointing to a stack location
-    ///
-    #[inline]
-    pub fn create_upvalue_open(
-        &mut self,
-        gc: &mut GC,
-        stack_index: usize,
-        current_white: u8,
-    ) -> UpvaluePtr {
-        let upvalue = Upvalue::Open(stack_index);
-        let size = 64;
-        let gc_uv = GcObjectOwner::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
-        let ptr = gc_uv.as_upvalue_ptr().unwrap();
-        gc.gc_pool.alloc(gc_uv);
-        gc.track_size(size as usize);
-        ptr
-    }
-
-    /// Create a closed upvalue with a value
-    ///
-    #[inline]
-    pub fn create_upvalue_closed(
-        &mut self,
-        gc: &mut GC,
-        value: LuaValue,
-        current_white: u8,
-    ) -> UpvaluePtr {
-        let upvalue = Upvalue::Closed(value);
-        let size = 64;
-        let gc_uv = GcObjectOwner::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
-        let ptr = gc_uv.as_upvalue_ptr().unwrap();
-        gc.gc_pool.alloc(gc_uv);
-        gc.track_size(size as usize);
-        ptr
-    }
-
     /// Create upvalue from LuaUpvalue
     ///
-    pub fn create_upvalue(
-        &mut self,
-        gc: &mut GC,
-        upvalue: Rc<LuaUpvalue>,
-        current_white: u8,
-    ) -> UpvaluePtr {
-        // Check if open and get stack index
-        if upvalue.is_open() {
-            self.create_upvalue_open(gc, upvalue.get_stack_index().unwrap_or(0), current_white)
-        } else {
-            self.create_upvalue_closed(
-                gc,
-                upvalue.get_closed_value().unwrap_or(LuaValue::nil()),
-                current_white,
-            )
-        }
+    pub fn create_upvalue(&mut self, gc: &mut GC, upvalue: LuaUpvalue) -> LuaResult<UpvaluePtr> {
+        let current_white = gc.current_white;
+        let size = 64;
+        let gc_uv = GcObjectOwner::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
+        let ptr = gc_uv.as_upvalue_ptr().unwrap();
+        gc.trace_object(gc_uv)?;
+        Ok(ptr)
     }
 
     // ==================== Userdata Operations ====================
 
     #[inline]
-    pub fn create_userdata(
-        &mut self,
-        gc: &mut GC,
-        userdata: LuaUserdata,
-        current_white: u8,
-    ) -> LuaValue {
+    pub fn create_userdata(&mut self, gc: &mut GC, userdata: LuaUserdata) -> CreateResult {
+        let current_white = gc.current_white;
         let size = std::mem::size_of::<LuaUserdata>();
-        let gc_userdata =
-            GcObjectOwner::Userdata(Box::new(GcUserdata::new(userdata, current_white, size as u32)));
+        let gc_userdata = GcObjectOwner::Userdata(Box::new(GcUserdata::new(
+            userdata,
+            current_white,
+            size as u32,
+        )));
         let ptr = gc_userdata.as_userdata_ptr().unwrap();
-        gc.gc_pool.alloc(gc_userdata);
-        gc.track_size(size as usize);
-        LuaValue::userdata(ptr)
+        gc.trace_object(gc_userdata)?;
+        Ok(LuaValue::userdata(ptr))
     }
 
     // ==================== Thread Operations ====================
 
     #[inline]
-    pub fn create_thread(&mut self, gc: &mut GC, thread: LuaState, current_white: u8) -> LuaValue {
+    pub fn create_thread(&mut self, gc: &mut GC, thread: LuaState) -> CreateResult {
+        let current_white = gc.current_white;
         let size = std::mem::size_of::<LuaState>();
         let mut gc_thread =
             GcObjectOwner::Thread(Box::new(GcThread::new(thread, current_white, size as u32)));
@@ -306,9 +254,8 @@ impl ObjectAllocator {
             gc_thread.as_thread_mut().unwrap().set_thread_ptr(ptr);
         }
 
-        gc.gc_pool.alloc(gc_thread);
-        gc.track_size(size as usize);
-        LuaValue::thread(ptr)
+        gc.trace_object(gc_thread)?;
+        Ok(LuaValue::thread(ptr))
     }
 
     #[inline]

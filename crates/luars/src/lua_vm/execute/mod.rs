@@ -124,6 +124,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                 }
             };
         }
+
         // MAINLOOP: Main instruction dispatch loop
         loop {
             // Fetch instruction and advance PC
@@ -877,6 +878,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // Handle return
                     return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
 
+                    lua_state.check_gc()?;
                     // Return pops frame, continue to 'startfunc to load caller's context
                     continue 'startfunc;
                 }
@@ -885,6 +887,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     save_pc!();
                     return_handler::handle_return0(lua_state, frame_idx)?;
 
+                    lua_state.check_gc()?;
                     // Return pops frame, continue to 'startfunc
                     continue 'startfunc;
                 }
@@ -894,6 +897,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     save_pc!();
                     return_handler::handle_return1(lua_state, base, frame_idx, a)?;
 
+                    lua_state.check_gc()?;
                     // Return pops frame, continue to 'startfunc
                     continue 'startfunc;
                 }
@@ -912,7 +916,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
 
                     // ULTRA-OPTIMIZED: Direct double-pointer dereference
                     // Matches Lua C: setobj2s(L, ra, cl->upvals[b]->v.p)
-                    let value = upvalue_ptrs[b].as_ref().data.get_value(lua_state);
+                    let value = upvalue_ptrs[b].as_ref().data.get_value();
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
@@ -922,33 +926,24 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
 
+                    let value = lua_state.stack()[base + a];
                     // Get value to set
-                    let value = {
-                        let stack = lua_state.stack_mut();
-                        stack[base + a]
-                    };
-
-                    if b >= upvalue_ptrs.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("SETUPVAL: invalid upvalue index {}", b))
-                        );
-                    }
-
                     // Set value in upvalue (OPTIMIZED: Uses direct pointer)
                     // ULTRA-OPTIMIZED: Direct double-pointer write
                     // Matches Lua C: setobj(L, uv->v.p, s2v(ra))
-                    upvalue_ptrs[b]
-                        .as_mut_ref()
-                        .data
-                        .set_value(lua_state, value);
+                    let upval_ptr = upvalue_ptrs[b];
+                    if let Some(stack_index) = upval_ptr.as_mut_ref().data.get_stack_index() {
+                        lua_state.stack_mut()[stack_index] = value;
+                    } else {
+                        // Closed upvalue: points to own storage
+                        upval_ptr.as_mut_ref().data.close(value);
+                    }
 
                     // GC barrier: luaC_barrier(L, uv, s2v(ra))
                     // If upvalue is black and value is white collectable, restore invariant
                     if value.is_collectable() {
-                        let upvalue_ptr = upvalue_ptrs[b];
                         if let Some(gc_ptr) = value.as_gc_ptr() {
-                            lua_state.gc_barrier(upvalue_ptr, gc_ptr);
+                            lua_state.gc_barrier(upval_ptr, gc_ptr);
                         }
                     }
                 }
@@ -1010,21 +1005,15 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     pc += 1;
 
                     // Create table with pre-allocated sizes
-                    let value = lua_state.create_table(vc, hash_size);
+                    let value = lua_state.create_table(vc, hash_size)?;
 
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
 
-                    // CRITICAL: Ensure stack_top includes the register we just wrote to
-                    // stack_top points to "next available position", so valid range is [0, stack_top)
-                    // If we write to stack[base+a], stack_top must be AT LEAST base+a+1
-                    // This ensures the new table is visible to GC root collection
+                    // like checkGC
                     let new_top = base + a + 1;
-                    if lua_state.get_top() < new_top {
-                        lua_state.set_top(new_top);
-                    }
-
-                    // GC check after table creation (like Lua 5.5 OP_NEWTABLE)
+                    save_pc!();
+                    lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
                 }
                 OpCode::GetTable => {
@@ -1443,7 +1432,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let call_info = lua_state.get_call_info_mut(frame_idx);
                     if write_pos + 1 > call_info.top {
                         call_info.top = write_pos + 1;
-                        lua_state.set_top(write_pos + 1);
+                        lua_state.set_top(write_pos + 1)?;
                     }
 
                     // PERFORMANCE: Use cached upvalue pointer for direct access
@@ -1454,7 +1443,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         );
                     }
 
-                    let table_value = upvalue_ptrs[b].as_ref().data.get_value(lua_state);
+                    let table_value = upvalue_ptrs[b].as_ref().data.get_value();
 
                     // Get key from constants (K[C])
                     if c >= constants.len() {
@@ -1508,7 +1497,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             lua_state.error(format!("SETTABUP: invalid upvalue index {}", a))
                         );
                     }
-                    let table_value = upvalue_ptrs[a].as_ref().data.get_value(lua_state);
+                    let table_value = upvalue_ptrs[a].as_ref().data.get_value();
 
                     // Get key from constants (K[B])
                     if b >= constants.len() {
@@ -1659,7 +1648,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         }
                     }
 
+                    let new_top = base + a + 1;
                     // GC check after concatenation (like Lua 5.5 OP_CONCAT)
+                    save_pc!();
+                    lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
                 }
 
@@ -1825,6 +1817,12 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         &chunk,
                         &upvalue_ptrs,
                     )?;
+
+                    let a = instr.get_a() as usize;
+                    let new_top = base + a + 1;
+                    save_pc!();
+                    lua_state.set_top(new_top)?;
+                    lua_state.check_gc()?;
                 }
 
                 OpCode::Vararg => {

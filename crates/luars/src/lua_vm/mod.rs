@@ -10,7 +10,7 @@ mod safe_option;
 
 use crate::compiler::{compile_code, compile_code_with_name};
 use crate::gc::GC;
-use crate::lua_value::{Chunk, LuaUserdata, LuaValue};
+use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 use crate::lua_vm::execute::lua_execute;
@@ -18,11 +18,10 @@ pub use crate::lua_vm::lua_error::LuaError;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{GcKind, ObjectAllocator, UpvaluePtr, lib_registry};
+use crate::{CreateResult, GcKind, ObjectAllocator, ThreadPtr, UpvaluePtr, lib_registry};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
-use std::ptr::null_mut;
 use std::rc::Rc;
 
 pub type LuaResult<T> = Result<T, LuaError>;
@@ -46,7 +45,7 @@ pub struct LuaVM {
     pub(crate) gc: GC,
 
     /// Main thread execution state (embedded)
-    pub(crate) main_state: LuaState,
+    pub(crate) main_state: ThreadPtr,
 
     #[allow(unused)]
     /// String metatable (shared by all strings)
@@ -59,7 +58,8 @@ pub struct LuaVM {
 
 impl LuaVM {
     pub fn new(option: SafeOption) -> Box<Self> {
-        let mut gc = GC::new();
+        let mut gc = GC::new(option.clone());
+        gc.set_temporary_memory_limit(isize::MAX / 2);
         let mut object_allocator = ObjectAllocator::new(option.clone());
         let cs = ConstString::new(&mut object_allocator, &mut gc);
         let mut vm = Box::new(LuaVM {
@@ -67,35 +67,44 @@ impl LuaVM {
             registry: LuaValue::nil(),
             object_allocator,
             gc,
-            main_state: LuaState::new(6, null_mut(), option.clone()),
+            main_state: ThreadPtr::null(), //,
             string_mt: None,
-            safe_option: option,
+            safe_option: option.clone(),
             const_strings: cs,
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;
         // Set LuaVM pointer in main_state
-        vm.main_state.set_vm(ptr_vm);
+        let thread_value = vm
+            .object_allocator
+            .create_thread(&mut vm.gc, LuaState::new(6, ptr_vm, true, option.clone()))
+            .unwrap();
+
+        vm.main_state = thread_value.as_thread_ptr().unwrap();
 
         // Initialize registry (like Lua's init_registry)
         // Registry is a GC root and protects all values stored in it
-        let registry = vm.create_table(2, 8);
+        let registry = vm.create_table(2, 8).unwrap();
         vm.registry = registry;
 
         // Set _G to point to the global table itself
-        let globals_value = vm.create_table(0, 20);
+        let globals_value = vm.create_table(0, 20).unwrap();
         vm.global = globals_value;
-        vm.set_global("_G", globals_value);
-        vm.set_global("_ENV", globals_value);
+        vm.set_global("_G", globals_value).unwrap();
+        vm.set_global("_ENV", globals_value).unwrap();
 
         // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
         vm.registry_seti(1, globals_value);
-
+        vm.gc.clear_temporary_memory_limit();
         vm
     }
 
     pub fn main_state(&mut self) -> &mut LuaState {
-        &mut self.main_state
+        &mut self.main_state.as_mut_ref().data
+    }
+
+    pub fn main_state_ref(&self) -> &LuaState {
+        &self.main_state.as_ref().data
     }
 
     /// Set a value in the registry by integer key
@@ -109,18 +118,19 @@ impl LuaVM {
     }
 
     /// Set a value in the registry by string key
-    pub fn registry_set(&mut self, key: &str, value: LuaValue) {
-        let key_value = self.create_string(key);
+    pub fn registry_set(&mut self, key: &str, value: LuaValue) -> LuaResult<()> {
+        let key_value = self.create_string(key)?;
 
         // Use VM table_set so we always run the GC barrier
         let registry = self.registry;
         self.raw_set(&registry, key_value, value);
+        Ok(())
     }
 
     /// Get a value from the registry by string key
-    pub fn registry_get(&mut self, key: &str) -> Option<LuaValue> {
-        let key = self.create_string(key);
-        self.raw_get(&self.registry, &key)
+    pub fn registry_get(&mut self, key: &str) -> LuaResult<Option<LuaValue>> {
+        let key = self.create_string(key)?;
+        Ok(self.raw_get(&self.registry, &key))
     }
 
     pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
@@ -132,8 +142,8 @@ impl LuaVM {
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
         // Main chunk needs _ENV upvalue pointing to global table
         // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
-        let env_upvalue_id = self.create_upvalue_closed(self.global);
-        let func = self.create_function(chunk, vec![env_upvalue_id]);
+        let env_upval = self.create_upvalue_closed(self.global)?;
+        let func = self.create_function(chunk, vec![env_upval])?;
         self.execute_function(func, vec![])
     }
 
@@ -149,89 +159,105 @@ impl LuaVM {
         args: Vec<LuaValue>,
     ) -> LuaResult<Vec<LuaValue>> {
         // Save function index - will be at current logical top
-        let func_idx = self.main_state.get_top();
+        let main_state = self.main_state();
+        let func_idx = main_state.get_top();
         let nargs = args.len();
 
         // Push function onto stack (updates stack_top)
-        self.main_state.push_value(func.clone())?;
+        main_state.push_value(func.clone())?;
 
         // Push arguments (each updates stack_top)
         for arg in args {
-            self.main_state.push_value(arg)?;
+            main_state.push_value(arg)?;
         }
 
         // Create initial call frame
         // base points to first argument (func_idx + 1), following Lua convention
         let base = func_idx + 1;
         // Top-level call expects multiple return values
-        self.main_state.push_frame(func, base, nargs, -1)?;
+        main_state.push_frame(func, base, nargs, -1)?;
 
         // Run the VM execution loop
         let results = self.run()?;
 
         // Reset logical stack top for next execution
-        self.main_state.set_top(0);
+        self.main_state().set_top(0)?;
 
         Ok(results)
     }
 
     /// Main VM execution loop (equivalent to luaV_execute)
     fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
-        lua_execute(&mut self.main_state)?;
+        lua_execute(self.main_state())?;
 
+        let main_state = self.main_state();
         // Collect all values from logical stack (0 to stack_top) as return values
         let mut results = Vec::new();
-        let top = self.main_state.get_top();
+        let top = main_state.get_top();
         for i in 0..top {
-            if let Some(val) = self.main_state.stack_get(i) {
+            if let Some(val) = main_state.stack_get(i) {
                 results.push(val);
             }
         }
 
         // Check GC after VM execution completes (like Lua's luaC_checkGC after returning to caller)
         // At this point, all return values are collected and safe from collection
-        self.main_state.check_gc()?;
+        main_state.check_gc()?;
 
         Ok(results)
     }
 
     /// Compile source code using VM's string pool
     pub fn compile(&mut self, source: &str) -> LuaResult<Chunk> {
+        self.gc.disable_memory_check();
         let chunk = match compile_code(source, self) {
             Ok(c) => c,
-            Err(e) => return Err(self.compile_error(e)),
+            Err(e) => {
+                self.gc.enable_memory_check();
+                return Err(self.compile_error(e));
+            }
         };
 
+        self.gc.enable_memory_check();
+        self.gc.check_memory()?;
         Ok(chunk)
     }
 
     pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<Chunk> {
+        self.gc.disable_memory_check();
         let chunk = match compile_code_with_name(source, self, chunk_name) {
             Ok(c) => c,
-            Err(e) => return Err(self.compile_error(e)),
+            Err(e) => {
+                self.gc.enable_memory_check();
+                return Err(self.compile_error(e));
+            }
         };
 
+        self.gc.enable_memory_check();
+        self.gc.check_memory()?;
         Ok(chunk)
     }
 
-    pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
-        let key = self.create_string(name);
-        self.raw_get(&self.global, &key)
+    pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
+        let key = self.create_string(name)?;
+        Ok(self.raw_get(&self.global, &key))
     }
 
-    pub fn set_global(&mut self, name: &str, value: LuaValue) {
-        let key = self.create_string(name);
+    pub fn set_global(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
+        let key = self.create_string(name)?;
 
         // Use VM table_set so we always run the GC barrier
         let global = self.global;
         self.raw_set(&global, key, value);
+
+        Ok(())
     }
 
     /// Set the metatable for all strings
     /// This allows string methods to be called with : syntax (e.g., str:upper())
-    pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) {
+    pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) -> LuaResult<()> {
         // Create a metatable with __index pointing to the string library
-        let mt_value = self.create_table(0, 1);
+        let mt_value = self.create_table(0, 1)?;
 
         // Set __index to point to the string library
         let index_key = self.const_strings.tm_index;
@@ -239,15 +265,17 @@ impl LuaVM {
 
         // Store in the VM
         self.string_mt = Some(mt_value);
+
+        Ok(())
     }
 
     // ============ Coroutine Support ============
 
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
     /// OPTIMIZED: Minimal initial allocations - grows on demand
-    pub fn create_thread(&mut self, func: LuaValue) -> LuaValue {
+    pub fn create_thread(&mut self, func: LuaValue) -> CreateResult {
         // Create a new LuaState for the coroutine
-        let mut thread = LuaState::new(1, self as *mut LuaVM, self.safe_option.clone());
+        let mut thread = LuaState::new(1, self as *mut LuaVM, false, self.safe_option.clone());
 
         // Push the function onto the thread's stack (updates stack_top)
         // It will be used when resume() is first called
@@ -256,11 +284,7 @@ impl LuaVM {
             .expect("Failed to push function onto coroutine stack");
 
         // Create thread in ObjectPool and return LuaValue
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_thread(&mut self.gc, thread, current_white);
-        value
+        self.object_allocator.create_thread(&mut self.gc, thread)
     }
 
     /// Resume a coroutine - DEPRECATED: Use thread_state.resume() instead
@@ -270,17 +294,14 @@ impl LuaVM {
         thread_val: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // must check
-        if let Some(thread_ptr) = thread_val.as_thread_ptr() {
-            if thread_ptr.is_main() {
-                return Err(self.error("cannot resume main thread".to_string()));
-            }
-        }
-
         // Get ThreadId from LuaValue
         let Some(l) = thread_val.as_thread_mut() else {
             return Err(self.error("invalid thread".to_string()));
         };
+
+        if l.is_main_thread() {
+            return Err(self.error("cannot resume main thread".to_string()));
+        }
 
         // Borrow mutably and delegate to LuaState::resume
         l.resume(args)
@@ -350,205 +371,133 @@ impl LuaVM {
     /// - Cache hit (interned): O(1) hash lookup, 0 allocations, 0 atomic ops
     /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
     /// - Long string: 1 Box allocation, GC registration, no pooling
-    pub fn create_string(&mut self, s: &str) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_string(&mut self.gc, s, current_white);
-        value
+    pub fn create_string(&mut self, s: &str) -> CreateResult {
+        self.object_allocator.create_string(&mut self.gc, s)
     }
 
-    pub fn create_binary(&mut self, data: Vec<u8>) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_binary(&mut self.gc, data, current_white);
-        value
+    pub fn create_binary(&mut self, data: Vec<u8>) -> CreateResult {
+        self.object_allocator.create_binary(&mut self.gc, data)
     }
 
     /// Create string from owned String (avoids clone for non-interned strings)
     #[inline]
-    pub fn create_string_owned(&mut self, s: String) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_string_owned(&mut self.gc, s, current_white);
-        value
+    pub fn create_string_owned(&mut self, s: String) -> CreateResult {
+        self.object_allocator.create_string_owned(&mut self.gc, s)
     }
 
     /// Create substring (optimized for string.sub)
     #[inline]
-    pub fn create_substring(&mut self, s_value: LuaValue, start: usize, end: usize) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self.object_allocator.create_substring(
-            &mut self.gc,
-            s_value,
-            start,
-            end,
-            current_white,
-        );
-        value
+    pub fn create_substring(
+        &mut self,
+        s_value: LuaValue,
+        start: usize,
+        end: usize,
+    ) -> CreateResult {
+        self.object_allocator
+            .create_substring(&mut self.gc, s_value, start, end)
     }
 
     // ============ Legacy GC Barrier Methods (deprecated) ============
 
     /// Create a new table in object pool
     /// GC tracks objects via ObjectPool iteration, no allgc list needed
-    pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value =
-            self.object_allocator
-                .create_table(&mut self.gc, array_size, hash_size, current_white);
-        value
+    pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> CreateResult {
+        self.object_allocator
+            .create_table(&mut self.gc, array_size, hash_size)
     }
 
     /// Create new userdata in object pool
-    pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value = self
-            .object_allocator
-            .create_userdata(&mut self.gc, data, current_white);
-        value
+    pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
+        self.object_allocator.create_userdata(&mut self.gc, data)
     }
 
     /// Create a function in object pool
     /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalue_ids: Vec<UpvaluePtr>) -> LuaValue {
-        let current_white = self.gc.current_white;
-        let value =
-            self.object_allocator
-                .create_function(&mut self.gc, chunk, upvalue_ids, current_white);
-        value
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> CreateResult {
+        self.object_allocator
+            .create_function(&mut self.gc, chunk, upvalues)
     }
 
     /// Create a C closure (native function with upvalues stored as closed upvalues)
     /// The upvalues are automatically created as closed upvalues with the given values
     #[inline]
-    pub fn create_c_closure(&mut self, func: CFunction, upvalues: Vec<LuaValue>) -> LuaValue {
+    pub fn create_c_closure(&mut self, func: CFunction, upvalues: Vec<LuaValue>) -> CreateResult {
         // Create closed upvalues for each value
-        let upvalue_ids: Vec<UpvaluePtr> = upvalues
-            .into_iter()
-            .map(|v| self.create_upvalue_closed(v))
-            .collect();
+        let mut upvalue_ids: Vec<UpvaluePtr> = vec![];
+        for val in upvalues {
+            let upval_ptr = self.create_upvalue_closed(val)?;
+            upvalue_ids.push(upval_ptr);
+        }
 
-        let current_white = self.gc.current_white;
-        let value =
-            self.object_allocator
-                .create_c_closure(&mut self.gc, func, upvalue_ids, current_white);
-        value
+        self.object_allocator
+            .create_c_closure(&mut self.gc, func, upvalue_ids)
     }
 
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
-    pub fn create_upvalue_open(&mut self, stack_index: usize) -> UpvaluePtr {
-        let current_white = self.gc.current_white;
-        let ptr =
-            self.object_allocator
-                .create_upvalue_open(&mut self.gc, stack_index, current_white);
-        ptr
+    pub fn create_upvalue_open(
+        &mut self,
+        stack_index: usize,
+        ptr: LuaValuePtr,
+    ) -> LuaResult<UpvaluePtr> {
+        let upval = LuaUpvalue::new_open(stack_index, ptr);
+        self.object_allocator.create_upvalue(&mut self.gc, upval)
     }
 
     /// Create a closed upvalue with a value
     #[inline(always)]
-    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> UpvaluePtr {
-        let current_white = self.gc.current_white;
-        let ptr = self
-            .object_allocator
-            .create_upvalue_closed(&mut self.gc, value, current_white);
-        ptr
+    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> LuaResult<UpvaluePtr> {
+        let upval = LuaUpvalue::new_closed(value);
+        self.object_allocator.create_upvalue(&mut self.gc, upval)
     }
 
-    /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.4)
-    /// This is called after allocating new objects (strings, tables, functions)
-    /// Uses GC debt mechanism like Lua: runs when debt > threshold
+    // Port of Lua 5.5's luaC_condGC macro:
+    // #define luaC_condGC(L,pre,pos) \
+    //   { if (G(L)->GCdebt <= 0) { pre; luaC_step(L); pos;}; }
+    //
+    /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.5)
     ///
-    /// OPTIMIZATION: Fast path is inlined, slow path is separate function
+    /// CRITICAL: Must check gc_stopped and gc_stopem before running GC!
+    /// - gc_stopped: User explicitly stopped GC (collectgarbage("stop"))
+    /// - gc_stopem: GC is already running (prevents recursive GC during allocation)
     #[inline(always)]
-    fn check_gc(&mut self) -> bool {
-        // Port of Lua 5.5's luaC_condGC macro:
-        // #define luaC_condGC(L,pre,pos) \
-        //   { if (G(L)->GCdebt <= 0) { pre; luaC_step(L); pos;}; }
-        //
-        // CRITICAL: Only call GC step ONCE, not in a loop!
-        // luaC_step itself (via incstep) contains the logic to do enough work
-
+    fn check_gc(&mut self, l: &mut LuaState) -> bool {
         if self.gc.gc_debt <= 0 {
-            // Skip if GC is stopped by user
-            if self.gc.gc_stopped {
-                return false;
-            }
-
-            // OPTIMIZATION: Only collect roots when needed!
-            // Lua 5.5 only accesses roots in specific states:
-            // - Pause: restartcollection() marks roots
-            // - EnterAtomic: atomic() marks roots again
-            // Other states (Propagate, Sweep, etc.) don't need roots!
-            let need_roots = matches!(
-                self.gc.gc_state,
-                crate::GcState::Pause | crate::GcState::EnterAtomic
-            );
-
-            if need_roots {
-                let roots = self.collect_roots();
-                // CRITICAL: Mark open upvalues separately
-                // They need to be marked as roots but can't be in LuaValue form
-                let open_upvals = self.main_state.get_open_upvalues();
-                self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
-                self.gc.step(&roots, &mut self.object_allocator);
-            } else {
-                // Pass empty roots for states that don't need them
-                // This avoids expensive stack traversal on every GC step!
-                self.gc.step(&[], &mut self.object_allocator);
-            }
-
+            self.gc.step(l);
             return true;
         }
 
         false
     }
 
-    /// Public method to force a GC step (for collectgarbage "step")
-    pub fn check_gc_step(&mut self) {
-        // Always collect roots for explicit GC step calls
-        let roots = self.collect_roots();
-        // Mark open upvalues
-        let open_upvals = self.main_state.get_open_upvalues();
-        self.gc.mark_open_upvalues(&open_upvals, &self.main_state);
-        self.gc.step(&roots, &mut self.object_allocator);
-    }
-
     // ============ GC Management ============
     /// Perform a full GC cycle (like luaC_fullgc in Lua 5.5)
     /// This is the internal version that can be called in emergency situations
-    fn full_gc(&mut self, is_emergency: bool) {
-        let old_emergency = self.gc.gc_emergency;
+    fn full_gc(&mut self, l: &mut LuaState, is_emergency: bool) {
         self.gc.gc_emergency = is_emergency;
 
         // Dispatch based on GC mode (from luaC_fullgc)
         match self.gc.gc_kind {
             GcKind::GenMinor => {
-                self.full_gen();
+                self.full_gen(l);
             }
             GcKind::Inc => {
-                self.full_inc();
+                self.full_inc(l);
             }
             GcKind::GenMajor => {
                 // Temporarily switch to incremental mode
                 self.gc.gc_kind = GcKind::Inc;
-                self.full_inc();
+                self.full_inc(l);
                 self.gc.gc_kind = GcKind::GenMajor;
             }
         }
 
-        self.gc.gc_emergency = old_emergency;
+        self.gc.gc_emergency = false;
     }
 
     /// Full GC cycle for incremental mode (like fullinc in Lua 5.5)
-    fn full_inc(&mut self) {
-        // Collect roots
-        let roots = self.collect_roots();
-
+    fn full_inc(&mut self, l: &mut LuaState) {
         // NOTE: mark_open_upvalues should NOT be called here!
         // In Lua 5.5, remarkupvals is called DURING the atomic phase,
         // after restart_collection. Calling it here would add objects
@@ -556,82 +505,68 @@ impl LuaVM {
 
         // If we're keeping invariant (in marking phase), sweep first
         if self.gc.keep_invariant() {
-            self.gc.enter_sweep(&mut self.object_allocator);
+            self.gc.enter_sweep(l);
         }
 
         // Run until pause state
-        self.gc.run_until_state(
-            crate::gc::GcState::Pause,
-            &roots,
-            &mut self.object_allocator,
-        );
+        self.gc.run_until_state(l, crate::gc::GcState::Pause);
         // Run finalizers
-        self.gc.run_until_state(
-            crate::gc::GcState::CallFin,
-            &roots,
-            &mut self.object_allocator,
-        );
+        self.gc.run_until_state(l, crate::gc::GcState::CallFin);
         // Complete the cycle
-        self.gc.run_until_state(
-            crate::gc::GcState::Pause,
-            &roots,
-            &mut self.object_allocator,
-        );
+        self.gc.run_until_state(l, crate::gc::GcState::Pause);
 
         // Set pause for next cycle
         self.gc.set_pause();
     }
 
     /// Full GC cycle for generational mode (like fullgen in Lua 5.5)
-    fn full_gen(&mut self) {
-        let roots = self.collect_roots();
-
+    fn full_gen(&mut self, l: &mut LuaState) {
         // NOTE: mark_open_upvalues should NOT be called here!
         // In Lua 5.5, remarkupvals is called DURING the atomic phase.
-        self.gc.full_generation(&roots, &mut self.object_allocator);
+        self.gc.full_generation(l);
     }
 
-    /// Collect all GC roots (objects that must not be collected)
-    pub fn collect_roots(&self) -> Vec<LuaValue> {
-        let mut roots = Vec::with_capacity(128);
+    // /// Collect all GC roots (objects that must not be collected)
+    // pub fn collect_roots(&self) -> Vec<LuaValue> {
+    //     let mut roots = Vec::with_capacity(128);
 
-        // 1. Global table
-        roots.push(self.global);
+    //     // 1. Global table
+    //     roots.push(self.global);
 
-        // 2. Registry table (persistent objects storage)
-        roots.push(self.registry);
+    //     // 2. Registry table (persistent objects storage)
+    //     roots.push(self.registry);
 
-        // 3. String metatable
-        if let Some(mt) = &self.string_mt {
-            roots.push(*mt);
-        }
+    //     // 3. String metatable
+    //     if let Some(mt) = &self.string_mt {
+    //         roots.push(*mt);
+    //     }
 
-        // 4. All values in the logical stack (0..stack_top)
-        // Lua semantics: only slots below L->top are live. Slots above may contain
-        // stale temporaries and MUST NOT be treated as roots, otherwise weak-table
-        // tests will keep dead objects alive.
-        let top = self.main_state.get_top();
-        for i in 0..top {
-            if let Some(value) = self.main_state.stack_get(i) {
-                if !value.is_nil() {
-                    roots.push(value);
-                }
-            }
-        }
+    //     // 4. All values in the logical stack (0..stack_top)
+    //     // Lua semantics: only slots below L->top are live. Slots above may contain
+    //     // stale temporaries and MUST NOT be treated as roots, otherwise weak-table
+    //     // tests will keep dead objects alive.
+    //     let top = self.main_state.get_top();
+    //     for i in 0..top {
+    //         if let Some(value) = self.main_state.stack_get(i) {
+    //             if !value.is_nil() {
+    //                 roots.push(value);
+    //             }
+    //         }
+    //     }
 
-        // 5. All call frames (functions being executed)
-        for i in 0..self.main_state.call_depth() {
-            if let Some(frame) = self.main_state.get_frame(i) {
-                roots.push(frame.func.clone());
-            }
-        }
+    //     // 5. All call frames (functions being executed)
+    //     for i in 0..self.main_state.call_depth() {
+    //         if let Some(frame) = self.main_state.get_frame(i) {
+    //             roots.push(frame.func.clone());
+    //         }
+    //     }
 
-        // 6. Open upvalues - handled separately in GC by mark_open_upvalues
-        // Open upvalue objects themselves are marked directly by GC
-        // Their values (stack slots) are already marked above in step 4
+    //     // 6. Open upvalues - handled separately in GC by mark_open_upvalues
+    //     // Open upvalue objects themselves are marked directly by GC
+    //     // Their values (stack slots) are already marked above in step 4
 
-        roots
-    }
+    //     roots
+    // }
 
     /// Get GC statistics
     pub fn gc_stats(&self) -> String {
@@ -662,25 +597,25 @@ impl LuaVM {
     // ===== Error Handling =====
 
     pub fn error(&mut self, message: impl Into<String>) -> LuaError {
-        self.main_state.error(message.into());
+        self.main_state().error(message.into());
         LuaError::RuntimeError
     }
 
     #[inline]
     pub fn compile_error(&mut self, message: impl Into<String>) -> LuaError {
-        self.main_state.error(message.into());
+        self.main_state().error(message.into());
         LuaError::CompileError
     }
 
     #[inline]
-    pub fn get_error_message(&self) -> &str {
-        self.main_state.error_msg()
+    pub fn get_error_message(&mut self, e: LuaError) -> String {
+        self.main_state().get_error_msg(e)
     }
 
     /// Generate a stack traceback string
     pub fn generate_traceback(&self, error_msg: &str) -> String {
         // Delegate to LuaState's generate_traceback
-        let traceback = self.main_state.generate_traceback();
+        let traceback = self.main_state_ref().generate_traceback();
         if !traceback.is_empty() {
             format!("{}\nstack traceback:\n{}", error_msg, traceback)
         } else {
@@ -698,7 +633,7 @@ impl LuaVM {
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Delegate to main_state
-        self.main_state.pcall(func, args)
+        self.main_state().pcall(func, args)
     }
 
     /// ULTRA-OPTIMIZED pcall for CFunction calls
@@ -711,7 +646,7 @@ impl LuaVM {
         arg_count: usize,
     ) -> LuaResult<(bool, usize)> {
         // Delegate to main_state
-        self.main_state.pcall_stack_based(func_idx, arg_count)
+        self.main_state().pcall_stack_based(func_idx, arg_count)
     }
 
     /// Protected call with error handler (xpcall semantics)
@@ -724,6 +659,26 @@ impl LuaVM {
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Delegate to main_state
-        self.main_state.xpcall(func, args, err_handler)
+        self.main_state().xpcall(func, args, err_handler)
+    }
+
+    pub fn get_main_thread_ptr(&self) -> ThreadPtr {
+        self.main_state
+    }
+
+    pub fn get_basic_metatable(&self, kind: LuaValueKind) -> Option<LuaValue> {
+        // support other metatables later
+        match kind {
+            LuaValueKind::String => self.string_mt,
+            _ => None,
+        }
+    }
+
+    pub fn get_basic_metatables(&self) -> Vec<LuaValue> {
+        let mut mts = Vec::new();
+        if let Some(mt) = &self.string_mt {
+            mts.push(mt.clone());
+        }
+        mts
     }
 }

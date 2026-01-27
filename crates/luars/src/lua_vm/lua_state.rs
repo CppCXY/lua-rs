@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind};
+use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::call_c_function;
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
-use crate::{Chunk, GcActions, GcObjectPtr, LuaVM, ThreadPtr, UpvaluePtr};
+use crate::{Chunk, CreateResult, GcObjectPtr, LuaVM, StringPtr, ThreadPtr, UpvaluePtr};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -42,7 +42,7 @@ pub struct LuaState {
 
     /// Open upvalues - upvalues pointing to stack locations
     /// Uses HashMap for O(1) lookup by stack index (unlike Lua's sorted linked list)
-    /// Also maintains a sorted Vec for efficient traversal during close operations
+    /// Also maintains a sorted Vec(higher indices first) for efficient traversal during close operations
     open_upvalues_map: HashMap<usize, UpvaluePtr>,
     open_upvalues_list: Vec<UpvaluePtr>,
 
@@ -57,6 +57,8 @@ pub struct LuaState {
     _hook_count: i32,
 
     safe_option: SafeOption,
+
+    is_main: bool,
 }
 
 impl LuaState {
@@ -64,8 +66,12 @@ impl LuaState {
     const BASIC_STACK_SIZE: usize = 40;
 
     /// Create a new execution state
-    /// 按需分配，而不是预分配 200 个 CallInfo（像 Lua 5.4）
-    pub fn new(call_stack_size: usize, vm: *mut LuaVM, safe_option: SafeOption) -> Self {
+    pub fn new(
+        call_stack_size: usize,
+        vm: *mut LuaVM,
+        is_main: bool,
+        safe_option: SafeOption,
+    ) -> Self {
         Self {
             vm,
             stack: Vec::with_capacity(Self::BASIC_STACK_SIZE),
@@ -80,11 +86,8 @@ impl LuaState {
             _hook_mask: 0,
             _hook_count: 0,
             safe_option,
+            is_main,
         }
-    }
-
-    pub(crate) fn set_vm(&mut self, vm: *mut LuaVM) {
-        self.vm = vm;
     }
 
     // please donot use this function directly unless you are very sure of what you are doing
@@ -94,6 +97,13 @@ impl LuaState {
 
     pub(crate) unsafe fn set_thread_ptr(&mut self, thread: ThreadPtr) {
         self.thread = thread;
+    }
+
+    /// Remove a dead string from the intern map (called by GC during sweep)
+    pub(crate) fn remove_dead_string(&mut self, str_ptr: StringPtr) {
+        unsafe {
+            (*self.vm).object_allocator.remove_str(str_ptr);
+        }
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)
@@ -239,12 +249,14 @@ impl LuaState {
     /// This only updates the logical pointer, does NOT truncate the physical stack
     /// Old values remain in stack array but are considered "garbage"
     #[inline(always)]
-    pub fn set_top(&mut self, new_top: usize) {
+    pub fn set_top(&mut self, new_top: usize) -> LuaResult<()> {
         // Ensure physical stack is large enough
         if new_top > self.stack.len() {
-            self.stack.resize(new_top, LuaValue::nil());
+            self.resize(new_top)?;
         }
         self.stack_top = new_top;
+
+        Ok(())
     }
 
     /// Get stack value at absolute index
@@ -264,27 +276,34 @@ impl LuaState {
             return Err(LuaError::StackOverflow);
         }
         if index >= self.stack.len() {
-            self.stack.resize(index + 1, LuaValue::nil());
+            self.resize(index + 1)?;
         }
         self.stack[index] = value;
         Ok(())
     }
 
-    /// Insert a value at a specific stack position, shifting everything after it
-    pub fn stack_insert(&mut self, index: usize, value: LuaValue) -> LuaResult<()> {
-        if self.stack.len() + 1 >= self.safe_option.max_stack_size {
+    fn resize(&mut self, new_size: usize) -> LuaResult<()> {
+        if new_size > self.safe_option.max_stack_size {
             self.error(format!(
-                "stack overflow: attempted to insert at index {} exceeding maximum {}",
-                index, self.safe_option.max_stack_size
+                "stack overflow: attempted to resize to {} exceeding maximum {}",
+                new_size, self.safe_option.max_stack_size
             ));
             return Err(LuaError::StackOverflow);
         }
-        if index >= self.stack.len() {
-            self.stack.resize(index, LuaValue::nil());
-            self.stack.push(value);
-        } else {
-            self.stack.insert(index, value);
+        self.stack.resize(new_size, LuaValue::nil());
+        for upval_ptr in &self.open_upvalues_list {
+            if let LuaUpvalue::Open {
+                stack_index,
+                stack_ptr,
+            } = &mut upval_ptr.as_mut_ref().data
+            {
+                // Update cached pointer to new stack location
+                if *stack_index < self.stack.len() {
+                    stack_ptr.ptr = (&self.stack[*stack_index]) as *const LuaValue as *mut LuaValue;
+                }
+            }
         }
+
         Ok(())
     }
 
@@ -350,12 +369,6 @@ impl LuaState {
 
         self.error_msg = format!("{}{}", location, msg);
         LuaError::RuntimeError
-    }
-
-    /// Get error message
-    #[inline(always)]
-    pub fn error_msg(&self) -> &str {
-        &self.error_msg
     }
 
     /// Clear error state
@@ -483,6 +496,18 @@ impl LuaState {
 
                     // 4. Close the upvalue (move value to heap)
                     upval_ptr.as_mut_ref().data.close(value);
+                    let gc_ptr = GcObjectPtr::Upvalue(upval_ptr);
+
+                    if let Some(header) = gc_ptr.header_mut() {
+                        if !header.is_white() {
+                            // nw2black(uv);  /* closed upvalues cannot be gray */
+                            // luaC_barrier(L, uv, slot);
+                            header.make_black();
+                            if let Some(value_gc_ptr) = value.as_gc_ptr() {
+                                self.gc_barrier(upval_ptr, value_gc_ptr);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -499,8 +524,11 @@ impl LuaState {
 
         // Not found, create a new one
         let upval_ptr = {
+            let ptr = LuaValuePtr {
+                ptr: (&self.stack[stack_index]) as *const LuaValue as *mut LuaValue,
+            };
             let vm = self.vm_mut();
-            vm.create_upvalue_open(stack_index)
+            vm.create_upvalue_open(stack_index, ptr)?
         };
 
         // Add to HashMap for O(1) future lookups
@@ -508,18 +536,13 @@ impl LuaState {
 
         // Also add to sorted list for traversal (insert in sorted position, higher indices first)
         // Collect existing upvalue IDs and their stack indices
-        let upval_ptrs: Vec<_> = self.open_upvalues_list.iter().copied().collect();
-        let stack_indices: Vec<usize> = {
-            upval_ptrs
+        let insert_pos = {
+            self.open_upvalues_list
                 .iter()
                 .filter_map(|&ptr| ptr.as_ref().data.get_stack_index())
-                .collect()
+                .position(|idx| idx < stack_index)
+                .unwrap_or(self.open_upvalues_list.len())
         };
-
-        let insert_pos = stack_indices
-            .iter()
-            .position(|&idx| idx < stack_index)
-            .unwrap_or(stack_indices.len());
 
         self.open_upvalues_list.insert(insert_pos, upval_ptr);
 
@@ -548,8 +571,21 @@ impl LuaState {
 
     /// Truncate stack to specified length
     /// Used after function calls to remove temporary values
-    pub fn stack_truncate(&mut self, new_len: usize) {
+    pub fn stack_truncate(&mut self) {
+        let new_len = 0;
         if new_len < self.stack.len() {
+            for upval_ptr in &self.open_upvalues_list {
+                let upval = &mut upval_ptr.as_mut_ref().data;
+                if upval.is_open() {
+                    if let Some(stack_idx) = upval.get_stack_index() {
+                        if stack_idx >= new_len {
+                            // Invalidate upvalue pointing to truncated stack
+                            upval.close(self.stack[stack_idx]);
+                        }
+                    }
+                }
+            }
+
             self.stack.truncate(new_len);
         }
     }
@@ -567,7 +603,7 @@ impl LuaState {
             return Err(LuaError::StackOverflow);
         }
         if self.stack.len() < needed {
-            self.stack.resize(needed, LuaValue::nil());
+            self.resize(needed)?;
         }
 
         Ok(())
@@ -621,6 +657,10 @@ impl LuaState {
 
     pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
         unsafe { &mut *self.vm }
+    }
+
+    pub(crate) fn vm_ptr(&self) -> *mut LuaVM {
+        self.vm
     }
 
     // ===== Call Frame Management =====
@@ -760,7 +800,7 @@ impl LuaState {
             if new_size > self.safe_option.max_stack_size {
                 new_size = self.safe_option.max_stack_size;
             }
-            self.stack.resize(new_size, LuaValue::nil());
+            self.resize(new_size)?;
         }
 
         // Write at logical top position (L->top.p->value = value)
@@ -781,39 +821,51 @@ impl LuaState {
     // ===== Object Creation =====
 
     /// Create table
-    pub fn create_table(&mut self, narr: usize, nrec: usize) -> LuaValue {
+    pub fn create_table(&mut self, narr: usize, nrec: usize) -> CreateResult {
         self.vm_mut().create_table(narr, nrec)
     }
 
     /// Create function closure
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> LuaValue {
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> CreateResult {
         self.vm_mut().create_function(chunk, upvalues)
     }
 
+    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> LuaResult<UpvaluePtr> {
+        self.vm_mut().create_upvalue_closed(value)
+    }
+
+    pub fn create_upvalue_open(
+        &mut self,
+        stack_index: usize,
+        stack_ptr: LuaValuePtr,
+    ) -> LuaResult<UpvaluePtr> {
+        self.vm_mut().create_upvalue_open(stack_index, stack_ptr)
+    }
+
     /// Create/intern string (automatically handles short string interning)
-    pub fn create_string(&mut self, s: &str) -> LuaValue {
+    pub fn create_string(&mut self, s: &str) -> CreateResult {
         self.vm_mut().create_string(s)
     }
 
-    pub fn create_string_owned(&mut self, s: String) -> LuaValue {
+    pub fn create_string_owned(&mut self, s: String) -> CreateResult {
         self.vm_mut().create_string_owned(s)
     }
 
     /// Create userdata
-    pub fn create_userdata(&mut self, data: LuaUserdata) -> LuaValue {
+    pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.vm_mut().create_userdata(data)
     }
 
     // ===== Global Access =====
 
     /// Get global variable
-    pub fn get_global(&mut self, name: &str) -> Option<LuaValue> {
+    pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
         self.vm_mut().get_global(name)
     }
 
     /// Set global variable
-    pub fn set_global(&mut self, name: &str, value: LuaValue) {
-        self.vm_mut().set_global(name, value);
+    pub fn set_global(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
+        self.vm_mut().set_global(name, value)
     }
 
     // ===== Table Operations =====
@@ -834,6 +886,15 @@ impl LuaState {
 
     pub fn raw_seti(&mut self, table: &LuaValue, index: i64, value: LuaValue) -> bool {
         self.vm_mut().raw_seti(table, index, value)
+    }
+
+    pub fn get_error_msg(&mut self, e: LuaError) -> String {
+        match e {
+            LuaError::OutOfMemory => {
+                format!("out of memory: {}", self.vm_mut().gc.get_error_message())
+            }
+            _ => format!("{}: {}", e, std::mem::take(&mut self.error_msg)),
+        }
     }
 
     // ===== Protected Call (pcall/xpcall) =====
@@ -881,10 +942,10 @@ impl LuaState {
             if let Some(cfunc) = cfunc {
                 // Create frame for C function
                 let base = func_idx + 1;
-                if let Err(_) = self.push_frame(func, base, nargs, -1) {
+                if let Err(e) = self.push_frame(func, base, nargs, -1) {
                     self.stack.truncate(func_idx);
-                    let error_msg = std::mem::take(&mut self.error_msg);
-                    let err_str = self.create_string(&error_msg);
+                    let error_msg = self.get_error_msg(e);
+                    let err_str = self.create_string(&error_msg)?;
                     return Ok((false, vec![err_str]));
                 }
 
@@ -916,15 +977,15 @@ impl LuaState {
                         Ok((true, results))
                     }
                     Err(LuaError::Yield) => Err(LuaError::Yield),
-                    Err(_) => {
-                        let error_msg = std::mem::take(&mut self.error_msg);
-                        let err_str = self.create_string(&error_msg);
+                    Err(e) => {
+                        let error_msg = self.get_error_msg(e);
+                        let err_str = self.create_string(&error_msg)?;
                         self.stack.truncate(func_idx);
                         Ok((false, vec![err_str]))
                     }
                 }
             } else {
-                let err_str = self.create_string("not a function");
+                let err_str = self.create_string("not a function")?;
                 Ok((false, vec![err_str]))
             }
         } else {
@@ -938,10 +999,10 @@ impl LuaState {
             // Create call frame
             let base = func_idx + 1;
             // pcall expects all return values
-            if let Err(_) = self.push_frame(func, base, nargs, -1) {
+            if let Err(e) = self.push_frame(func, base, nargs, -1) {
                 self.stack.truncate(func_idx);
-                let error_msg = std::mem::take(&mut self.error_msg);
-                let err_str = self.create_string(&error_msg);
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
 
@@ -964,7 +1025,7 @@ impl LuaState {
                     Ok((true, results))
                 }
                 Err(LuaError::Yield) => Err(LuaError::Yield),
-                Err(_) => {
+                Err(e) => {
                     // Error occurred - clean up
 
                     // Close upvalues
@@ -981,8 +1042,8 @@ impl LuaState {
                     }
 
                     // Get error message
-                    let error_msg = std::mem::take(&mut self.error_msg);
-                    let err_str = self.create_string(&error_msg);
+                    let error_msg = self.get_error_msg(e);
+                    let err_str = self.create_string(&error_msg)?;
 
                     // Clean up stack
                     self.stack.truncate(func_idx);
@@ -1008,10 +1069,9 @@ impl LuaState {
         let func = match self.stack_get(func_idx) {
             Some(f) => f,
             None => {
-                self.error("pcall: invalid function index".to_string());
-                let err_str = self.create_string("pcall: invalid function index");
+                let err_str = self.create_string("pcall: invalid function index")?;
                 self.stack_set(func_idx, err_str)?;
-                self.set_top(func_idx + 1);
+                self.set_top(func_idx + 1)?;
                 return Ok((false, 1));
             }
         };
@@ -1048,7 +1108,7 @@ impl LuaState {
                 Ok((true, result_count))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
-            Err(_) => {
+            Err(e) => {
                 // Error - clean up and return error message
 
                 // Close upvalues
@@ -1064,12 +1124,12 @@ impl LuaState {
                 }
 
                 // Get error and push to stack
-                let error_msg = std::mem::take(&mut self.error_msg);
-                let err_str = self.create_string(&error_msg);
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
 
                 // Set error at func_idx and update stack top
                 self.stack_set(func_idx, err_str)?;
-                self.set_top(func_idx + 1);
+                self.set_top(func_idx + 1)?;
 
                 Ok((false, 1))
             }
@@ -1101,16 +1161,16 @@ impl LuaState {
 
         // Create call frame, expecting all return values
         let base = func_idx + 1;
-        if let Err(_) = self.push_frame(func, base, nargs, -1) {
+        if let Err(e) = self.push_frame(func, base, nargs, -1) {
             // Error during setup
-            self.set_top(handler_idx);
-            let error_msg = std::mem::take(&mut self.error_msg);
-            let err_str = self.create_string(&error_msg);
+            self.set_top(handler_idx)?;
+            let error_msg = self.get_error_msg(e);
+            let err_str = self.create_string(&error_msg)?;
             return Ok((false, vec![err_str]));
         }
 
         // Execute
-        let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
+        let result = execute::lua_execute_until(self, initial_depth);
 
         match result {
             Ok(()) => {
@@ -1128,13 +1188,13 @@ impl LuaState {
                     }
                 }
 
-                self.set_top(handler_idx);
+                self.set_top(handler_idx)?;
                 Ok((true, results))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
-            Err(_) => {
+            Err(e) => {
                 // Error occurred - call error handler
-                let error_msg = self.error_msg.clone();
+                let error_msg = self.get_error_msg(e);
 
                 // Clean up failed frames
                 if self.call_depth() > initial_depth {
@@ -1149,10 +1209,10 @@ impl LuaState {
 
                 // Set up error handler call
                 // Reset stack to [handler]
-                self.set_top(handler_idx + 1);
+                self.set_top(handler_idx + 1)?;
 
                 // Push error message as argument
-                let err_value = self.create_string(&error_msg);
+                let err_value = self.create_string(&error_msg)?;
                 self.push_value(err_value)?;
 
                 // Get handler and create frame
@@ -1161,14 +1221,14 @@ impl LuaState {
 
                 if let Err(_) = self.push_frame(handler, handler_base, 1, -1) {
                     // Error handler setup failed
-                    self.set_top(handler_idx);
+                    self.set_top(handler_idx)?;
                     let final_err =
-                        self.create_string(&format!("error in error handling: {}", error_msg));
+                        self.create_string(&format!("error in error handling: {}", error_msg))?;
                     return Ok((false, vec![final_err]));
                 }
 
                 // Execute error handler
-                let handler_result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
+                let handler_result = execute::lua_execute_until(self, initial_depth);
 
                 match handler_result {
                     Ok(()) => {
@@ -1187,17 +1247,17 @@ impl LuaState {
                         }
 
                         if results.is_empty() {
-                            results.push(self.create_string(&error_msg));
+                            results.push(self.create_string(&error_msg)?);
                         }
 
-                        self.set_top(handler_idx);
+                        self.set_top(handler_idx)?;
                         Ok((false, results))
                     }
                     Err(_) => {
                         // Error handler failed
-                        self.set_top(handler_idx);
+                        self.set_top(handler_idx)?;
                         let final_err =
-                            self.create_string(&format!("error in error handling: {}", error_msg));
+                            self.create_string(&format!("error in error handling: {}", error_msg))?;
                         Ok((false, vec![final_err]))
                     }
                 }
@@ -1235,7 +1295,7 @@ impl LuaState {
                         if let Some(stack_idx) = upval_ptr.as_ref().data.get_stack_index() {
                             // Get value from main thread's stack
                             let value = vm
-                                .main_state
+                                .main_state_ref()
                                 .stack
                                 .get(stack_idx)
                                 .copied()
@@ -1309,7 +1369,7 @@ impl LuaState {
 
             // Update stack top and current frame's top
             let new_top = func_idx + actual_nresults;
-            self.set_top(new_top);
+            self.set_top(new_top)?;
 
             if let Some(frame) = self.current_frame_mut() {
                 frame.top = new_top;
@@ -1349,7 +1409,7 @@ impl LuaState {
     pub fn gc_barrier(&mut self, upvalue_ptr: UpvaluePtr, value_gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
         let owner_ptr = GcObjectPtr::Upvalue(upvalue_ptr);
-        vm.gc.barrier(owner_ptr, value_gc_ptr);
+        vm.gc.barrier(self, owner_ptr, value_gc_ptr);
     }
 
     /// Backward GC barrier (luaC_barrierback in Lua 5.5)
@@ -1360,93 +1420,16 @@ impl LuaState {
         vm.gc.barrier_back(gc_ptr);
     }
 
+    #[inline(always)]
     pub fn check_gc(&mut self) -> LuaResult<bool> {
         let vm = unsafe { &mut *self.vm };
-        let do_step = vm.check_gc();
-
-        // Process any accumulated GC actions (finalizers, weak tables, etc.)
-        if vm.gc.has_pending_actions() {
-            let actions = vm.gc.take_pending_actions();
-            self.process_gc_actions(actions)?;
-        }
-
-        Ok(do_step)
+        let work = vm.check_gc(self);
+        Ok(work)
     }
 
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
         let vm = unsafe { &mut *self.vm };
-        vm.full_gc(false);
-
-        // Process any accumulated GC actions (finalizers, weak tables, etc.)
-        if vm.gc.has_pending_actions() {
-            let actions = vm.gc.take_pending_actions();
-            self.process_gc_actions(actions)?;
-        }
-
-        Ok(())
-    }
-
-    /// Process actions returned by GC (call finalizers, clean weak tables)
-    fn process_gc_actions(&mut self, actions: GcActions) -> LuaResult<()> {
-        if actions.to_finalize.is_empty() {
-            return Ok(());
-        }
-
-        // Enter finalizer mode - stop GC during finalizer execution
-        // This prevents objects from being collected while their finalizers run
-        self.vm_mut().gc.enter_finalizer_mode();
-
-        // Call __gc finalizers
-        if !actions.to_finalize.is_empty() {
-            match self.call_finalizers(actions.to_finalize) {
-                Ok(()) => {}
-                Err(e) => {
-                    // Exit finalizer mode before returning error
-                    self.vm_mut().gc.exit_finalizer_mode();
-                    return Err(e);
-                }
-            };
-        }
-        // Exit finalizer mode - resume normal GC
-        self.vm_mut().gc.exit_finalizer_mode();
-
-        Ok(())
-    }
-
-    /// Call __gc metamethods for objects pending finalization
-    fn call_finalizers(&mut self, to_finalize: Vec<GcObjectPtr>) -> LuaResult<()> {
-        use crate::lua_vm::get_metamethod_event;
-
-        for gc_ptr in to_finalize {
-            // Lua 5.5: udata2finalize() resets FINALIZEDBIT before calling __gc.
-            // This ensures resurrected objects are not finalized again unless
-            // they are explicitly re-registered.
-            if let Some(header) = gc_ptr.header_mut() {
-                header.clear_finalized();
-            }
-
-            // Convert GcId to LuaValue
-            let obj_value = match gc_ptr {
-                GcObjectPtr::Table(ptr) => LuaValue::table(ptr),
-                GcObjectPtr::Userdata(ptr) => {
-                    // Get userdata pointer
-                    LuaValue::userdata(ptr)
-                }
-                GcObjectPtr::Thread(ptr) => LuaValue::thread(ptr),
-                // Other types don't support __gc
-                _ => continue,
-            };
-
-            // Get __gc metamethod
-            if let Some(gc_method) = get_metamethod_event(self, &obj_value, TmKind::Gc) {
-                // Call __gc(obj) using pcall to handle errors safely
-                // In Lua 5.x, errors in finalizers are silently ignored
-                // (the error message is discarded to prevent cascade failures)
-                let _result = self.pcall(gc_method, vec![obj_value]);
-                // Silently ignore any errors
-            }
-        }
-
+        vm.full_gc(self, false);
         Ok(())
     }
 
@@ -1508,10 +1491,14 @@ impl LuaState {
         // Fallback: generic representation
         Ok(format!("{}", value))
     }
+
+    pub fn is_main_thread(&self) -> bool {
+        self.is_main
+    }
 }
 
 impl Default for LuaState {
     fn default() -> Self {
-        Self::new(1, std::ptr::null_mut(), SafeOption::default())
+        Self::new(1, std::ptr::null_mut(), false, SafeOption::default())
     }
 }

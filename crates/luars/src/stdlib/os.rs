@@ -64,7 +64,7 @@ fn os_date(l: &mut LuaState) -> LuaResult<usize> {
         .as_secs();
 
     let date_str = format!("timestamp: {}", timestamp);
-    let result = l.vm_mut().create_string(&date_str);
+    let result = l.vm_mut().create_string(&date_str)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -116,14 +116,14 @@ fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
     match output {
         Ok(result) => {
             let exit_code = result.status.code().unwrap_or(-1);
-            let exit_str = l.vm_mut().create_string("exit");
+            let exit_str = l.create_string("exit")?;
             l.push_value(LuaValue::boolean(result.status.success()))?;
             l.push_value(exit_str)?;
             l.push_value(LuaValue::integer(exit_code as i64))?;
             Ok(3)
         }
         Err(_) => {
-            let exit_str = l.vm_mut().create_string("exit");
+            let exit_str = l.create_string("exit")?;
             l.push_value(LuaValue::nil())?;
             l.push_value(exit_str)?;
             l.push_value(LuaValue::integer(-1))?;
@@ -140,7 +140,7 @@ fn os_getenv(l: &mut LuaState) -> LuaResult<usize> {
 
     match std::env::var(&varname) {
         Ok(value) => {
-            let result = l.vm_mut().create_string(&value);
+            let result = l.create_string(&value)?;
             l.push_value(result)?;
             Ok(1)
         }
@@ -163,7 +163,7 @@ fn os_remove(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         Err(e) => {
-            let err_msg = l.vm_mut().create_string(&format!("{}", e));
+            let err_msg = l.create_string(&format!("{}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -187,7 +187,7 @@ fn os_rename(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         Err(e) => {
-            let err_msg = l.vm_mut().create_string(&format!("{}", e));
+            let err_msg = l.create_string(&format!("{}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -202,7 +202,7 @@ fn os_setlocale(l: &mut LuaState) -> LuaResult<usize> {
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "C".to_string());
 
-    let result = l.vm_mut().create_string(&locale);
+    let result = l.create_string(&locale)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -216,7 +216,7 @@ fn os_tmpname(l: &mut LuaState) -> LuaResult<usize> {
         .as_nanos();
 
     let tmpname = format!("/tmp/lua_tmp_{}", timestamp);
-    let result = l.vm_mut().create_string(&tmpname);
+    let result = l.create_string(&tmpname)?;
     l.push_value(result)?;
     Ok(1)
 }

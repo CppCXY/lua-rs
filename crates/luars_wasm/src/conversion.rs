@@ -254,7 +254,7 @@ fn js_value_to_lua_impl(
 
     // Handle string
     if let Some(s) = value.as_string() {
-        return Ok(vm.create_string(&s));
+        return Ok(vm.create_string(&s)?);
     }
 
     // Handle Array
@@ -281,7 +281,7 @@ fn js_array_to_lua(
     let len = array.length() as usize;
 
     // Create Lua table with appropriate array size
-    let table = vm.create_table(len, 0);
+    let table = vm.create_table(len, 0)?;
 
     ctx.depth += 1;
 
@@ -309,7 +309,7 @@ fn js_object_to_lua(
     let len = keys.length() as usize;
 
     // Create Lua table
-    let table = vm.create_table(0, len);
+    let table = vm.create_table(0, len)?;
 
     ctx.depth += 1;
 
@@ -318,7 +318,7 @@ fn js_object_to_lua(
         if let Some(key_str) = key_js.as_string() {
             // Get value from object
             if let Ok(val_js) = js_sys::Reflect::get(&obj, &key_js) {
-                let lua_key = vm.create_string(&key_str);
+                let lua_key = vm.create_string(&key_str)?;
                 let lua_value = js_value_to_lua_impl(vm, &val_js, ctx)?;
                 vm.raw_set(&table, lua_key, lua_value);
             }

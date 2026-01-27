@@ -39,44 +39,38 @@ mod gc_object;
 mod object_allocator;
 mod string_interner;
 
-use crate::lua_value::{Chunk, LuaValue};
+use std::collections::HashSet;
+
+use crate::{
+    LuaResult, LuaTable,
+    lua_value::{Chunk, LuaValue},
+    lua_vm::{LuaError, LuaState, SafeOption, TmKind},
+};
 pub use gc_kind::*;
 pub use gc_object::*;
 pub use object_allocator::*;
 
-/// Actions that GC needs VM to perform after a GC step
-/// This allows GC to mark objects for finalization
-/// Weak tables are now cleaned directly during GC atomic phase
-#[derive(Default)]
-pub struct GcActions {
-    /// Objects that need their __gc finalizer called
-    pub to_finalize: Vec<GcObjectPtr>,
-}
-
 // GC Parameters (from lua.h)
-pub const PAUSE: usize = 0; // Pause between GC cycles (default 200%)
-pub const STEPMUL: usize = 1; // GC speed multiplier (default 200)
-pub const STEPSIZE: usize = 2; // Step size in KB (default 13KB)
-pub const MINORMUL: usize = 3; // Minor collection multiplier (default 20%)
-pub const MINORMAJOR: usize = 4; // Shift from minor to major (default 100%)
-pub const MAJORMINOR: usize = 5; // Shift from major to minor (default 100%)
+pub const MINORMUL: usize = 0; // Minor collection multiplier
+pub const MAJORMINOR: usize = 1; // Shift from major to minor
+pub const MINORMAJOR: usize = 2; // Shift from minor to major
+
+pub const PAUSE: usize = 3; // Pause between GC cycles (default 200%)
+pub const STEPMUL: usize = 4; // GC speed multiplier (default 200)
+pub const STEPSIZE: usize = 5; // Step size in KB (default 13KB)
+
 pub const GCPARAM_COUNT: usize = 6;
 
 // Default GC parameters (from Lua 5.5 lgc.h)
 // MUST match Lua 5.5 exactly for debugging consistency
-const DEFAULT_PAUSE: i32 = 200; // 200% (LUAI_GCPAUSE in lgc.h)
+const DEFAULT_PAUSE: i32 = 250; // 250% (LUAI_GCPAUSE in lgc.h)
 const DEFAULT_STEPMUL: i32 = 200; // 200% (LUAI_GCMUL in lgc.h)
-// LUAI_GCSTEPSIZE = (200 * sizeof(Table))
-// 在Rust中Table大小约为80字节，所以 200 * 80 = 16000字节
-// 但参数存储的是"单位"，在applygcparam时会乘以参数
-// 实际上STEPSIZE存储的是200，表示"200 * 某个基础单位"
-// 看lgc.c: applygcparam(g, STEPSIZE, 100) 意思是 (STEPSIZE * 100) / 100 = STEPSIZE
-// 然后setgcparam(g, STEPSIZE, LUAI_GCSTEPSIZE) 存储的就是字节数
-// 所以应该存储字节数！
-const DEFAULT_STEPSIZE: i32 = 16000; // ~200 * sizeof(Table) bytes
+const DEFAULT_STEPSIZE: i32 = 200 * std::mem::size_of::<LuaTable>() as i32; // ~13KB
 const DEFAULT_MINORMUL: i32 = 20; // 20%
-const DEFAULT_MINORMAJOR: i32 = 100; // 100%
-const DEFAULT_MAJORMINOR: i32 = 100; // 100%
+const DEFAULT_MINORMAJOR: i32 = 70; // 70%
+const DEFAULT_MAJORMINOR: i32 = 50; // 50%
+
+const GCSWEEPMAX: isize = 20; // Max steps per sweep call
 
 /// Maximum l_mem value (like MAX_LMEM in Lua 5.5)
 const MAX_LMEM: isize = isize::MAX;
@@ -235,8 +229,10 @@ impl GcState {
 
 /// Garbage Collector
 pub struct GC {
-    // General GC pool for all objects
-    pub(crate) gc_pool: GcPool,
+    //  gc objects
+    gc_list: GcList,
+
+    fixed_list: GcList,
     // === Debt and memory tracking ===
     /// GCdebt from Lua: bytes allocated but not yet "paid for"
     /// GC debt (like Lua 5.5 GCdebt)
@@ -268,11 +264,6 @@ pub struct GC {
     /// GC stopped by user (gcstp in Lua, GCSTPUSR bit)
     pub gc_stopped: bool,
 
-    // === Pending actions (for finalizers and weak tables) ===
-    /// Accumulated actions that need VM to process
-    /// This is filled during GC steps and retrieved by VM later
-    pending_actions: GcActions,
-
     /// Objects pending __gc finalization (Lua 5.5: g->tobefnz)
     ///
     /// We keep a Vec instead of a linked list; objects stay in the main pool.
@@ -287,38 +278,37 @@ pub struct GC {
 
     // === Gray lists (for marking) ===
     /// Regular gray objects waiting to be visited
-    pub gray: Vec<GcObjectPtr>,
+    gray: Vec<GcObjectPtr>,
 
     /// Objects to be revisited at atomic phase
-    pub grayagain: Vec<GcObjectPtr>,
+    grayagain: Vec<GcObjectPtr>,
 
     // === Weak table lists (Port of Lua 5.5) ===
     /// Weak value tables (only values are weak)
-    pub weak: Vec<TablePtr>,
+    weak: Vec<TablePtr>,
 
-    /// Ephemeron tables (keys are weak, but key存活则value存活)
-    pub ephemeron: Vec<TablePtr>,
+    /// Ephemeron tables (keys are weak)
+    ephemeron: Vec<TablePtr>,
 
     /// Fully weak tables (both keys and values are weak)
-    pub allweak: Vec<TablePtr>,
+    allweak: Vec<TablePtr>,
+
+    /// Threads with open upvalues
+    twups: Vec<ThreadPtr>,
+
+    /// Finalizers called during GC
+    finobj: Vec<GcObjectPtr>,
+
+    /// Young generation objects (G_NEW, G_SURVIVAL, G_OLD0)
+    /// Optimization: track young objects separately to avoid scanning entire heap
+    /// during minor collections. Lua 5.5 uses linked list pointers (survival, old1),
+    /// we use a separate vector for efficiency.
+    young_objects: Vec<GcObjectPtr>,
 
     // === Sweep state ===
     /// Current position in sweep (like Lua 5.5's sweepgc pointer)
     /// This ensures we don't re-scan the same objects
-    sweep_index: usize,
-
-    // === Generational collector pointers ===
-    /// Points to first survival object in allgc list
-    pub survival: Option<usize>,
-
-    /// Points to first old1 object
-    pub old1: Option<usize>,
-
-    /// Points to first really old object
-    pub reallyold: Option<usize>,
-
-    /// Points to first OLD1 object (optimization for markold)
-    pub firstold1: Option<usize>,
+    sweepgc: SweepGc,
 
     // === Statistics ===
     pub stats: GcStats,
@@ -326,6 +316,14 @@ pub struct GC {
     pub tm_gc: LuaValue,
 
     pub tm_mode: LuaValue,
+
+    max_memory_limit: isize,
+
+    tmp_max_memory_limit: Option<isize>,
+
+    gc_error_msg: Option<String>,
+
+    gc_memory_check: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -343,9 +341,10 @@ pub struct GcStats {
 }
 
 impl GC {
-    pub fn new() -> Self {
-        GC {
-            gc_pool: GcPool::new(),
+    pub fn new(option: SafeOption) -> Self {
+        let mut gc = GC {
+            gc_list: GcList::new(),
+            fixed_list: GcList::new(),
             gc_debt: 0, // Start with 0 debt, will be set after first allocation
             total_bytes: 0,
             gc_marked: 0,
@@ -356,34 +355,44 @@ impl GC {
             gc_emergency: false,
             gc_stopem: false,
             gc_stopped: false,
-            pending_actions: GcActions::default(),
             tobefnz: Vec::new(),
-            gc_params: [
-                code_param(DEFAULT_PAUSE as u32),      // PAUSE = 0
-                code_param(DEFAULT_STEPMUL as u32),    // STEPMUL = 1
-                code_param(DEFAULT_STEPSIZE as u32),   // STEPSIZE = 2
-                code_param(DEFAULT_MINORMUL as u32),   // MINORMUL = 3
-                code_param(DEFAULT_MINORMAJOR as u32), // MINORMAJOR = 4
-                code_param(DEFAULT_MAJORMINOR as u32), // MAJORMINOR = 5
-            ],
+            gc_params: [0; GCPARAM_COUNT], // Default to 100%
             gray: Vec::with_capacity(128),
             grayagain: Vec::with_capacity(64),
             weak: Vec::new(),
             ephemeron: Vec::new(),
             allweak: Vec::new(),
-            sweep_index: 0,
-            survival: None,
-            old1: None,
-            reallyold: None,
-            firstold1: None,
+            twups: Vec::new(),
+            finobj: Vec::new(),
+            young_objects: Vec::new(),
+            sweepgc: SweepGc::AllGc(0),
             stats: GcStats::default(),
             tm_gc: LuaValue::nil(),
             tm_mode: LuaValue::nil(),
-        }
+            max_memory_limit: option.max_memory_limit as isize,
+            tmp_max_memory_limit: None,
+            gc_error_msg: None,
+            gc_memory_check: true,
+        };
+
+        gc.gc_params[PAUSE] = code_param(DEFAULT_PAUSE as u32);
+        gc.gc_params[STEPMUL] = code_param(DEFAULT_STEPMUL as u32);
+        gc.gc_params[STEPSIZE] = code_param(DEFAULT_STEPSIZE as u32);
+        gc.gc_params[MINORMUL] = code_param(DEFAULT_MINORMUL as u32);
+        gc.gc_params[MINORMAJOR] = code_param(DEFAULT_MINORMAJOR as u32);
+        gc.gc_params[MAJORMINOR] = code_param(DEFAULT_MAJORMINOR as u32);
+
+        gc
+    }
+
+    /// Helper to remove a dead string from the string intern map
+    /// This is needed because object_allocator is in LuaVM, accessed via LuaState
+    fn remove_dead_string_from_intern(l: &mut LuaState, str_ptr: StringPtr) {
+        l.remove_dead_string(str_ptr);
     }
 
     /// Change to incremental mode (like minor2inc in Lua 5.5)
-    pub fn change_to_incremental_mode(&mut self, pool: &mut ObjectAllocator) {
+    pub fn change_to_incremental_mode(&mut self, l: &mut LuaState) {
         if self.gc_kind == GcKind::Inc {
             return; // Already in incremental mode
         }
@@ -394,38 +403,64 @@ impl GC {
         // Switch mode
         self.gc_kind = GcKind::Inc;
 
-        // Clear generational lists
-        self.reallyold = None;
-        self.old1 = None;
-        self.survival = None;
-
         // Enter sweep phase (like Lua 5.5's entersweep)
-        self.enter_sweep(pool);
+        self.enter_sweep(l);
 
         // Set debt for next step
         let stepsize = self.apply_param(STEPSIZE, 100);
         self.set_debt(stepsize);
     }
 
+    pub fn trace_object(&mut self, gc_object_owner: GcObjectOwner) -> LuaResult<()> {
+        let size = gc_object_owner.size_of_data();
+
+        // SAFETY CHECK: Prevent out-of-memory by limiting total allocation to MAX_MEMORY_LIMIT
+        let total_bytes = self.get_total_bytes();
+        let limit_bytes = self.get_limit_bytes();
+        if self.gc_memory_check && (total_bytes + size as isize > limit_bytes) {
+            // For simple test, later will return an error instead of panic
+            self.gc_error_msg = Some(format!(
+                "Memory limit exceeded: {} bytes allocated, attempting to allocate {} more bytes (limit: {} bytes)",
+                total_bytes, size, limit_bytes,
+            ));
+            return Err(LuaError::OutOfMemory);
+        }
+
+        let gc_ptr = gc_object_owner.as_gc_ptr();
+        let age = gc_object_owner.header().age();
+
+        self.gc_list.add(gc_object_owner);
+        self.track_size(size);
+
+        // Add young objects to tracking list for generational GC optimization
+        // Only track if in generational mode and object is young
+        if self.gc_kind == GcKind::GenMinor && age < G_OLD1 {
+            self.young_objects.push(gc_ptr);
+        }
+
+        Ok(())
+    }
+
     /// Track a new object allocation (like luaC_newobj in Lua)
     /// This increments debt - when debt becomes positive, GC should run
     ///
-    /// **CRITICAL**: Objects are created WHITE by ObjectPool.create_*() with current_white.
-    /// This function ONLY tracks memory accounting - it does NOT modify object colors.
-    /// The tri-color invariant is maintained by write barriers, not by track_object.
-    ///
-    /// Port of lgc.c: luaC_newobj creates objects as WHITE, then links to allgc list.
-    /// Barriers will mark them BLACK/GRAY if needed when stored into reachable objects.
-    ///
-    /// Lua 5.5内存分配：lmem.c中 g->GCdebt -= size (分配减少debt)
-    /// 维护不变量：GCtotalbytes = 实际分配字节 + GCdebt
     #[inline]
-    pub fn track_size(&mut self, size: usize) {
+    fn track_size(&mut self, size: usize) {
         let size_signed = size as isize;
 
         // Lua 5.5 lmem.c luaM_malloc_:
         self.gc_debt -= size_signed; // 分配减少debt
         self.stats.bytes_allocated += size;
+    }
+
+    pub fn fixed(&mut self, gc_ptr: GcObjectPtr) {
+        let gc_owner = self.gc_list.remove(gc_ptr);
+        if let Some(header) = gc_ptr.header_mut() {
+            header.set_age(G_OLD);
+            header.make_gray(); // Gray forever, like Lua 5.5
+        }
+
+        self.fixed_list.add(gc_owner);
     }
 
     /// Check if GC should run (debt > 0)
@@ -451,7 +486,7 @@ impl GC {
     pub fn set_debt(&mut self, mut debt: isize) {
         // Port of Lua 5.5's luaE_setdebt from lstate.c
         // Keep the real allocated bytes (total_bytes - gc_debt) invariant
-        let real_bytes = self.total_bytes - self.gc_debt;
+        let real_bytes = self.get_total_bytes();
 
         // Avoid overflow in total_bytes
         if debt > MAX_LMEM - real_bytes {
@@ -461,6 +496,28 @@ impl GC {
         // Maintain invariant: total_bytes = real_bytes + debt
         self.total_bytes = real_bytes + debt;
         self.gc_debt = debt;
+    }
+
+    fn get_total_bytes(&self) -> isize {
+        self.total_bytes - self.gc_debt
+    }
+
+    fn get_limit_bytes(&self) -> isize {
+        if let Some(tmp_limit) = self.tmp_max_memory_limit {
+            tmp_limit
+        } else {
+            self.max_memory_limit
+        }
+    }
+
+    /// set new additional temporary memory limit
+    pub fn set_temporary_memory_limit(&mut self, limit: isize) {
+        let current_total_bytes = self.get_total_bytes();
+        self.tmp_max_memory_limit = Some(current_total_bytes.saturating_add(limit));
+    }
+
+    pub fn clear_temporary_memory_limit(&mut self) {
+        self.tmp_max_memory_limit = None;
     }
 
     /// Apply GC parameter (like luaO_applyparam in Lua 5.5)
@@ -515,19 +572,6 @@ impl GC {
         &self.stats
     }
 
-    // ============ Pending Actions Management ============
-
-    /// Get accumulated GC actions that need VM processing
-    /// This retrieves and clears the pending actions
-    pub fn take_pending_actions(&mut self) -> GcActions {
-        std::mem::take(&mut self.pending_actions)
-    }
-
-    /// Check if there are pending actions waiting for VM
-    pub fn has_pending_actions(&self) -> bool {
-        !self.pending_actions.to_finalize.is_empty()
-    }
-
     /// Enter finalizer execution mode - temporarily stop GC to prevent
     /// objects from being collected while their finalizers are running
     pub fn enter_finalizer_mode(&mut self) {
@@ -561,30 +605,13 @@ impl GC {
     /// Check if an object is cleared (should be removed from weak table)
     /// For strings: marks them black and returns false (strings are 'values', never weak)
     /// For other objects: returns true if white (will be collected)
-    fn is_cleared(&mut self, gc_ptr: GcObjectPtr) -> bool {
+    fn is_cleared(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) -> bool {
         match gc_ptr.kind() {
             GcObjectKind::String | GcObjectKind::Binary => {
-                // Strings are 'values', so are never weak
-                // Mark the string black directly (strings have nothing to visit)
-                // Port of: markobject(g,o) -> reallymarkobject -> set2black for strings
-                if let Some(header) = gc_ptr.header_mut() {
-                    if header.is_white() {
-                        let size = header.size;
-                        header.make_black();
-                        self.gc_marked += size as isize;
-                    }
-                }
-
+                self.mark_object(l, gc_ptr);
                 false
             }
-            _ => {
-                // For other objects, check if they're white (will be collected)
-                if let Some(header) = gc_ptr.header() {
-                    header.is_white()
-                } else {
-                    true
-                }
-            }
+            _ => self.is_white(gc_ptr),
         }
     }
 
@@ -630,10 +657,13 @@ impl GC {
 
         if header.to_finalize() {
             return;
-        }
+        };
 
         if self.needs_finalization(gc_ptr) {
             header.set_finalized();
+            // CRITICAL: Add to finobj list so it will be tracked by GC
+            // This is required for generational GC to properly handle finalizers
+            self.finobj.push(gc_ptr);
         }
     }
 
@@ -685,36 +715,42 @@ impl GC {
     ///   } while (changed);
     /// }
     /// ```
-    fn converge_ephemerons(&mut self) {
-        let mut changed = true;
+    fn converge_ephemerons(&mut self, l: &mut LuaState) {
+        let mut changed;
         let mut dir = false;
-        let mut iteration = 0;
-        const MAX_ITERATIONS: usize = 1000;
 
-        while changed && iteration < MAX_ITERATIONS {
+        loop {
             let ephemeron_list = std::mem::take(&mut self.ephemeron);
             self.ephemeron.clear();
             changed = false;
-            iteration += 1;
 
             for table_ptr in ephemeron_list {
                 table_ptr.as_mut_ref().header.make_black();
 
-                let marked = self.traverse_ephemeron_atomic(table_ptr, dir);
+                let marked = self.traverse_ephemeron_atomic(l, table_ptr, dir);
                 if marked {
-                    while !self.gray.is_empty() {
-                        self.propagate_mark();
-                    }
+                    self.propagate_all(l);
                     changed = true;
                 }
             }
 
             dir = !dir;
+            if !changed {
+                break;
+            }
         }
     }
 
     /// Traverse ephemeron in atomic phase - returns true if any value was marked
-    fn traverse_ephemeron_atomic(&mut self, table_ptr: TablePtr, inv: bool) -> bool {
+    fn traverse_ephemeron_atomic(
+        &mut self,
+        l: &mut LuaState,
+        table_ptr: TablePtr,
+        inv: bool,
+    ) -> bool {
+        // CRITICAL FIX: Collect entries first to avoid borrow issues
+        // Must use iter_all here because we need to reverse for convergence
+        // But this is in atomic phase where GC should not be triggered
         let entries = table_ptr.as_ref().data.iter_all();
 
         let mut marked_any = false;
@@ -730,7 +766,7 @@ impl GC {
             let key_ptr = k.as_gc_ptr();
             let val_ptr = v.as_gc_ptr();
 
-            let key_is_cleared = key_ptr.map_or(false, |ptr| self.is_cleared(ptr));
+            let key_is_cleared = key_ptr.map_or(false, |ptr| self.is_cleared(l, ptr));
             let val_is_white = val_ptr.map_or(false, |ptr| self.is_white(ptr));
 
             if key_is_cleared {
@@ -739,7 +775,7 @@ impl GC {
                     has_white_white = true;
                 }
             } else if val_is_white {
-                self.mark_value(&v);
+                self.really_mark_object(l, val_ptr.unwrap());
                 marked_any = true;
             }
         }
@@ -769,22 +805,22 @@ impl GC {
 
     /// Port of Lua 5.5's clearbykeys
     /// Clear entries with unmarked keys from ephemeron and fully weak tables
-    fn clear_by_keys(&mut self) {
+    fn clear_by_keys(&mut self, l: &mut LuaState) {
         // Clear ephemeron tables
         let ephemeron_list = std::mem::take(&mut self.ephemeron);
         for table_ptr in ephemeron_list {
-            self.clear_table_by_keys(table_ptr);
+            self.clear_table_by_keys(l, table_ptr);
         }
 
         // Clear fully weak tables
         let allweak_list = std::mem::take(&mut self.allweak);
         for table_ptr in allweak_list {
-            self.clear_table_by_keys(table_ptr);
+            self.clear_table_by_keys(l, table_ptr);
         }
     }
 
     /// Clear entries with unmarked keys from a single table
-    fn clear_table_by_keys(&mut self, table_ptr: TablePtr) {
+    fn clear_table_by_keys(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
         let entries = table_ptr.as_ref().data.iter_keys();
 
         let mut keys_to_remove = Vec::new();
@@ -793,7 +829,7 @@ impl GC {
             if !key.is_string()
                 && let Some(key_ptr) = key.as_gc_ptr()
             {
-                if self.is_cleared(key_ptr) {
+                if self.is_cleared(l, key_ptr) {
                     keys_to_remove.push(key);
                 }
             }
@@ -808,52 +844,57 @@ impl GC {
 
     /// Port of Lua 5.5's clearbyvalues
     /// Clear entries with unmarked values from weak value tables
-    fn clear_by_values(&mut self) {
+    fn clear_by_values(&mut self, l: &mut LuaState) {
         let weak_list = self.weak.clone();
         for table_ptr in weak_list {
-            self.clear_table_by_values(table_ptr);
+            self.clear_table_by_values(l, table_ptr);
         }
 
         let allweak_list = self.allweak.clone();
         for table_ptr in allweak_list {
-            self.clear_table_by_values(table_ptr);
+            self.clear_table_by_values(l, table_ptr);
         }
     }
 
     /// Second pass of clear_by_values for resurrected objects
     /// Only process tables NOT in original lists (Lua 5.5: clearbyvalues(g, g->weak, origweak))
-    fn clear_by_values_range(&mut self, origweak: &[TablePtr], origall: &[TablePtr]) {
+    fn clear_by_values_range(
+        &mut self,
+        l: &mut LuaState,
+        origweak: &HashSet<TablePtr>,
+        origall: &HashSet<TablePtr>,
+    ) {
         // Process weak tables added after finalization
         let weak_list = self.weak.clone();
-        for table_id in weak_list {
-            if !origweak.contains(&table_id) {
-                self.clear_table_by_values(table_id);
+        for table_ptr in weak_list {
+            if !origweak.contains(&table_ptr) {
+                self.clear_table_by_values(l, table_ptr);
             }
         }
 
         // Process allweak tables added after finalization
         let allweak_list = self.allweak.clone();
-        for table_id in allweak_list {
-            if !origall.contains(&table_id) {
-                self.clear_table_by_values(table_id);
+        for table_ptr in allweak_list {
+            if !origall.contains(&table_ptr) {
+                self.clear_table_by_values(l, table_ptr);
             }
         }
     }
 
     /// Clear entries with unmarked values from a single table
-    fn clear_table_by_values(&mut self, table_ptr: TablePtr) {
-        let entries = table_ptr.as_ref().data.iter_all();
-
+    fn clear_table_by_values(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
+        // CRITICAL FIX: Use next() to avoid allocating Vec during sweep phase
         let mut keys_to_remove = Vec::new();
 
-        for (key, value) in entries {
-            if !value.is_string()
-                && let Some(val_ptr) = value.as_gc_ptr()
-            {
-                if self.is_cleared(val_ptr) {
-                    keys_to_remove.push(key);
+        let mut key = LuaValue::nil();
+        let table_data = &table_ptr.as_ref().data;
+        while let Some((k, value)) = table_data.next(&key) {
+            if let Some(val_ptr) = value.as_gc_ptr() {
+                if self.is_cleared(l, val_ptr) {
+                    keys_to_remove.push(k);
                 }
             }
+            key = k;
         }
 
         // Remove entries with dead values
@@ -867,36 +908,24 @@ impl GC {
 
     /// Main GC step function (like luaC_step in Lua 5.5)
     /// Actions are accumulated in pending_actions, retrieve with take_pending_actions()
-    pub fn step(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
-        self.step_internal(roots, pool, false)
-    }
-
-    /// Internal step function with force parameter
-    /// If force=true, ignore gc_stopped flag (used by collectgarbage("step"))
-    pub fn step_internal(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator, force: bool) {
+    pub fn step(&mut self, l: &mut LuaState) {
         // Lua 5.5 luaC_step:
         // if (!gcrunning(g)) {
         //   if (g->gcstp & GCSTPUSR) luaE_setdebt(g, 20000);
         // } else { ... }
 
         // Check if GC is stopped by user (unless forced)
-        if !force && self.gc_stopped {
+        if self.gc_stopped {
             // Lua 5.5: set reasonable debt to avoid being called at every check
             self.set_debt(20000);
             return;
         }
 
-        // If not forced, check debt
-        // Lua 5.5: luaC_condGC only runs step when GCdebt <= 0
-        if !force && self.gc_debt > 0 {
-            return; // Still have budget, no need to collect
-        }
-
         // Dispatch based on GC mode (like Lua 5.5 luaC_step)
         match self.gc_kind {
-            GcKind::Inc | GcKind::GenMajor => self.inc_step(roots, pool),
+            GcKind::Inc | GcKind::GenMajor => self.inc_step(l),
             GcKind::GenMinor => {
-                self.young_collection(roots, pool);
+                self.young_collection(l);
                 self.set_minor_debt();
             }
         }
@@ -926,7 +955,7 @@ impl GC {
     ///     luaE_setdebt(g, stepsize);
     /// }
     /// ```
-    fn inc_step(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
+    fn inc_step(&mut self, l: &mut LuaState) {
         // l_mem stepsize = applygcparam(g, STEPSIZE, 100);
         let stepsize = self.apply_param(STEPSIZE, 100);
 
@@ -938,18 +967,18 @@ impl GC {
 
         // Repeat until enough work is done (like Lua 5.5's do-while loop)
         loop {
-            let stres = self.single_step(roots, pool, fast);
+            let stres = self.single_step(l, fast);
 
             match stres {
-                StepResult::MinorMode => {
+                StepResult::Step2Minor => {
                     // Returned to minor collections
                     return;
                 }
-                StepResult::Pause => {
+                StepResult::Step2Pause => {
                     // End of cycle (step2pause in Lua)
                     break;
                 }
-                StepResult::Atomic => {
+                StepResult::AtomicStep => {
                     // Atomic step completed (atomicstep in Lua)
                     if !fast {
                         break;
@@ -980,21 +1009,12 @@ impl GC {
     }
 
     /// Single GC step (like singlestep in Lua 5.5)
-    fn single_step(
-        &mut self,
-        roots: &[LuaValue],
-        pool: &mut ObjectAllocator,
-        fast: bool,
-    ) -> StepResult {
-        if self.gc_stopem {
-            return StepResult::Work(0);
-        }
-
+    fn single_step(&mut self, l: &mut LuaState, fast: bool) -> StepResult {
         self.gc_stopem = true;
 
         let result = match self.gc_state {
             GcState::Pause => {
-                self.restart_collection(roots);
+                self.restart_collection(l);
                 // Set gc_state to Propagate AFTER restart_collection
                 // This matches Lua 5.5's logic in singlestep case GCSpause
                 self.gc_state = GcState::Propagate;
@@ -1005,56 +1025,65 @@ impl GC {
                     self.gc_state = GcState::EnterAtomic;
                     StepResult::Work(1)
                 } else {
-                    let work = self.propagate_mark();
+                    let work = self.propagate_mark(l);
                     StepResult::Work(work)
                 }
             }
             GcState::EnterAtomic => {
-                self.atomic(roots);
-                self.enter_sweep(pool);
-                StepResult::Atomic
+                self.atomic(l);
+                if self.check_major_minor(l) {
+                    StepResult::Step2Minor
+                } else {
+                    self.enter_sweep(l);
+                    StepResult::AtomicStep
+                }
             }
             GcState::SwpAllGc => {
-                let complete = self.sweep_step(pool, fast);
-                if complete {
-                    // Only one gc_pool, skip finobj and tobefnz phases
-                    self.gc_state = GcState::SwpEnd;
-                }
-                StepResult::Work(100) // GCSWEEPMAX equivalent
+                self.sweep_step(l, GcState::SwpFinObj, SweepGc::FinObj(0), fast);
+                StepResult::Work(GCSWEEPMAX) // GCSWEEPMAX equivalent
             }
             GcState::SwpFinObj => {
-                // Skip: we don't have separate finobj list
-                self.gc_state = GcState::SwpToBeFnz;
-                StepResult::Work(1)
+                self.sweep_step(l, GcState::SwpToBeFnz, SweepGc::ToBeFnz(0), fast);
+                StepResult::Work(GCSWEEPMAX)
             }
             GcState::SwpToBeFnz => {
-                // Skip: we don't have separate tobefnz list
-                self.gc_state = GcState::SwpEnd;
-                StepResult::Work(1)
+                self.sweep_step(l, GcState::SwpEnd, SweepGc::Done, fast);
+                StepResult::Work(GCSWEEPMAX)
             }
             GcState::SwpEnd => {
                 self.gc_state = GcState::CallFin;
-                StepResult::Work(100)
+                StepResult::Work(GCSWEEPMAX)
             }
             GcState::CallFin => {
                 // Lua 5.5: GCScallfin calls pending finalizers from 'tobefnz'.
-                // We delegate the actual calls to the VM via pending_actions.
-                if !self.tobefnz.is_empty() {
-                    self.pending_actions
-                        .to_finalize
-                        .extend(self.tobefnz.drain(..));
+                // Each step calls ONE finalizer (GCTM)
+                if !self.tobefnz.is_empty() && !self.gc_emergency {
+                    // Call one finalizer
+                    self.call_one_finalizer(l);
+                    // Stay in CallFin state to process more finalizers
+                    StepResult::Work(GCSWEEPMAX)
+                } else {
+                    // No more finalizers
+                    self.gc_state = GcState::Pause;
+                    StepResult::Step2Pause
                 }
-                self.gc_state = GcState::Pause;
-                StepResult::Pause
             }
             GcState::Atomic => {
                 // Should not reach here directly
-                StepResult::Work(0)
+                return StepResult::Work(0);
             }
         };
 
         self.gc_stopem = false;
         result
+    }
+
+    fn clear_gray_lists(&mut self) {
+        self.gray.clear();
+        self.grayagain.clear();
+        self.weak.clear();
+        self.ephemeron.clear();
+        self.allweak.clear();
     }
 
     /// Restart collection (like restartcollection in Lua 5.5)
@@ -1079,116 +1108,238 @@ impl GC {
     /// CRITICAL: Lua 5.5 calls cleargraylists which clears ALL gray lists including weak table lists.
     /// This is safe because restartcollection is only called from GCSpause state,
     /// meaning the previous cycle has completely finished (atomic phase cleared weak tables).
-    fn restart_collection(&mut self, roots: &[LuaValue]) {
+    fn restart_collection(&mut self, l: &mut LuaState) {
         self.stats.collection_count += 1;
 
         // CRITICAL: Reset sweep_index when starting a new cycle
         // This ensures the next sweep will scan all objects from the beginning
-        self.sweep_index = 0;
-
-        // NOTE: Do NOT set gc_state here! It should be set by the caller
-        // Lua 5.5's restartcollection does not set gcstate
+        self.sweepgc = SweepGc::Done;
 
         // Clear all gray lists (like Lua 5.5's cleargraylists)
-        self.gray.clear();
-        self.grayagain.clear();
-        // Lua 5.5 also clears weak table lists here:
-        self.weak.clear();
-        self.ephemeron.clear();
-        self.allweak.clear();
+        self.clear_gray_lists();
 
         self.gc_marked = 0;
 
-        // IMPORTANT: current_white was flipped in atomic phase.
-        // Objects from last cycle are now "other white" and will be collected if not marked.
-        // NO need to flip again or make_all_white - objects are already the right color!
-
-        // Mark roots
-        for value in roots.iter() {
-            self.mark_value(value);
+        // For full/incremental GC, young_objects is not used
+        // Clear it to avoid stale pointers after mode switch
+        if self.gc_kind != GcKind::GenMinor {
+            self.young_objects.clear();
         }
+
+        // Mark objects
+        let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
+        self.mark_object(l, main_thread_ptr.into());
+
+        let registry = l.vm_mut().registry;
+        // markvalue(g, &g->l_registry);
+        self.mark_value(l, &registry);
+
+        // markmt(g);  /* mark global metatables */
+        self.mark_mt(l);
 
         // markbeingfnz(g): mark any object pending finalization from previous cycle
         if !self.tobefnz.is_empty() {
-            let to_mark = self.tobefnz.clone();
-            for gc_ptr in to_mark {
-                match gc_ptr {
-                    GcObjectPtr::Table(p) => self.mark_value(&LuaValue::table(p)),
-                    GcObjectPtr::Userdata(p) => self.mark_value(&LuaValue::userdata(p)),
-                    GcObjectPtr::Thread(p) => self.mark_value(&LuaValue::thread(p)),
-                    _ => {}
-                }
-            }
-        }
-
-        // NOTE: Open upvalues are marked separately by VM calling mark_open_upvalues
-        // This is because we need thread access to get open_upvalues list
-    }
-
-    /// Mark open upvalues from a thread (like Lua 5.5's remarkupvals)
-    /// Open upvalues must be kept gray because their values can change
-    ///
-    /// Port of Lua 5.5's remarkupvals:
-    /// ```c
-    /// for (uv = thread->openupval; uv != NULL; uv = uv->u.open.next) {
-    ///   if (!iswhite(uv)) {
-    ///     markvalue(g, uv->v.p);  // mark the value the upvalue points to
-    ///   }
-    /// }
-    /// ```
-    pub fn mark_open_upvalues(&mut self, upvalues: &[UpvaluePtr], state: &crate::lua_vm::LuaState) {
-        for upval_ptr in upvalues {
-            let gc_upval = upval_ptr.as_mut_ref();
-            let header = &mut gc_upval.header;
-
-            if header.is_white() {
-                // Lua 5.5: open upvalues are kept gray, not black
-                header.make_gray();
-                self.gray.push(upval_ptr.clone().into());
-            }
-
-            // CRITICAL: Mark the value that the open upvalue points to
-            // This is the Lua 5.5 remarkupvals behavior
-            if let Some(stack_index) = gc_upval.data.get_stack_index() {
-                if let Some(value) = state.stack().get(stack_index) {
-                    self.mark_value(value);
-                }
+            for obj_ptr in self.tobefnz.clone() {
+                self.mark_object(l, obj_ptr.into());
             }
         }
     }
 
-    /// Mark a value (add to gray list if collectable)
-    ///
-    /// From lgc.c (Lua 5.5):
+    fn mark_mt(&mut self, l: &mut LuaState) {
+        for mt in l.vm_mut().get_basic_metatables() {
+            if let Some(mt_ptr) = mt.as_gc_ptr() {
+                self.mark_object(l, mt_ptr.into());
+            }
+        }
+    }
+
+    fn check_major_minor(&mut self, l: &mut LuaState) -> bool {
+        if self.gc_kind == GcKind::GenMinor {
+            let num_bytes = self.get_total_bytes();
+            let added_bytes = num_bytes - self.gc_majorminor;
+            let limit = self.apply_param(MAJORMINOR, added_bytes);
+            let to_be_collected = num_bytes - self.gc_marked;
+
+            if to_be_collected >= limit {
+                // atomic2gen(L, g);  /* return to generational mode */
+                // setminordebt(g);
+                self.atomic2gen(l);
+
+                return true;
+            }
+        }
+
+        self.gc_majorminor = self.gc_marked;
+        false
+    }
+
+    fn atomic2gen(&mut self, l: &mut LuaState) {
+        self.clear_gray_lists();
+        self.gc_state = GcState::SwpAllGc;
+
+        let mut to_clear_hash_set = HashSet::new();
+        self.sweep2old(l, &mut to_clear_hash_set);
+
+        if !to_clear_hash_set.is_empty() {
+            let finobjs = std::mem::take(&mut self.finobj);
+            for obj_ptr in finobjs {
+                if !to_clear_hash_set.contains(&obj_ptr) {
+                    self.finobj.push(obj_ptr);
+                }
+            }
+
+            // CRITICAL BUG FIX: Don't remove objects from tobefnz even if marked for clearing
+            // Objects in tobefnz need to have their finalizers called. If they're in
+            // to_clear_hash_set (white), we make them old+black to prevent collection.
+            // This fixes the issue where finalizers weren't called in generational GC.
+            let tobefnz = std::mem::take(&mut self.tobefnz);
+            for obj_ptr in tobefnz {
+                if to_clear_hash_set.contains(&obj_ptr) {
+                    // Object was marked for clearing but needs finalization
+                    // Remove from clear set and make it old+black
+                    to_clear_hash_set.remove(&obj_ptr);
+                    if let Some(header) = obj_ptr.header_mut() {
+                        header.set_age(G_OLD);
+                        header.make_black();
+                    }
+                }
+                self.tobefnz.push(obj_ptr);
+            }
+
+            for gc_ptr in to_clear_hash_set {
+                if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                    Self::remove_dead_string_from_intern(l, str_ptr);
+                }
+                self.gc_list.remove(gc_ptr);
+            }
+        }
+
+        self.gc_kind = GcKind::GenMinor;
+        self.gc_majorminor = self.gc_marked;
+        self.gc_marked = 0;
+
+        // After sweep2old, all objects are G_OLD, so young_objects is already empty
+        // (cleared in sweep2old). No need to rebuild.
+        debug_assert!(
+            self.young_objects.is_empty(),
+            "young_objects should be empty after sweep2old in atomic2gen"
+        );
+
+        self.finish_gen_cycle(l);
+    }
+
+    /// Finish a young-generation collection.
+    /// Port of Lua 5.5's finishgencycle:
     /// ```c
-    /// #define markvalue(g,o) { checkliveness(mainthread(g),o); \
-    ///   if (valiswhite(o)) reallymarkobject(g,gcvalue(o)); }
-    ///
-    /// static void reallymarkobject (global_State *g, GCObject *o) {
-    ///   g->GCmarked += objsize(o);
-    ///   switch (o->tt) {
-    ///     case LUA_VSHRSTR:
-    ///     case LUA_VLNGSTR: {
-    ///       set2black(o);  /* nothing to visit */
-    ///       break;
-    ///     }
-    ///     case LUA_VUPVAL: {
-    ///       UpVal *uv = gco2upv(o);
-    ///       if (upisopen(uv))
-    ///         set2gray(uv);  /* open upvalues are kept gray */
-    ///       else
-    ///         set2black(uv);  /* closed upvalues are visited here */
-    ///       markvalue(g, uv->v.p);
-    ///       break;
-    ///     }
-    ///     // ... tables, closures, threads, userdata, protos -> linkobjgclist(o, g->gray)
-    ///   }
+    /// static void finishgencycle (lua_State *L, global_State *g) {
+    ///   correctgraylists(g);
+    ///   checkSizes(L, g);
+    ///   g->gcstate = GCSpropagate;  /* skip restart */
+    ///   if (!g->gcemergency && luaD_checkminstack(L))
+    ///     callallpendingfinalizers(L);
     /// }
     /// ```
-    ///
-    /// CRITICAL: Only mark WHITE objects. Black objects from previous cycle became
-    /// "other white" after color flip, so they WILL be marked again.
-    /// Fixed objects (metamethod names) are kept GRAY forever, so they're naturally skipped.
+    fn finish_gen_cycle(&mut self, l: &mut LuaState) {
+        // 1. Correct gray lists (handle TOUCHED objects)
+        self.correct_gray_lists();
+
+        // 2. checkSizes - optional optimization to shrink tables
+        // Skip for now, not critical for correctness
+
+        // 3. Set state to Propagate (skip restart in next cycle)
+        self.gc_state = GcState::Propagate;
+
+        // 4. Call pending finalizers if not in emergency mode
+        if !self.gc_emergency && !self.tobefnz.is_empty() {
+            self.call_all_pending_finalizers(l);
+        }
+    }
+
+    /// Port of Lua 5.5's correctgraylists
+    /// Process TOUCHED objects and advance their ages
+    // static void correctgraylists (global_State *g) {
+    //      GCObject **list = correctgraylist(&g->grayagain);
+    //      *list = g->weak; g->weak = NULL;
+    //      list = correctgraylist(list);
+    //      *list = g->allweak; g->allweak = NULL;
+    //      list = correctgraylist(list);
+    //      *list = g->ephemeron; g->ephemeron = NULL;
+    //      correctgraylist(list);
+    // }
+    fn correct_gray_lists(&mut self) {
+        // Process grayagain list: handle TOUCHED objects
+        let mut grayagain_list = std::mem::take(&mut self.grayagain);
+        self.correct_gray_list(&mut grayagain_list);
+        self.grayagain = grayagain_list;
+
+        let mut weak_list = std::mem::take(&mut self.weak)
+            .iter()
+            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .collect::<Vec<_>>();
+        self.weak.clear();
+        // Process weak list: handle TOUCHED objects
+        self.correct_gray_list(&mut weak_list);
+        self.grayagain.extend(weak_list);
+
+        let mut allweak_list = std::mem::take(&mut self.allweak)
+            .iter()
+            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .collect::<Vec<_>>();
+        self.allweak.clear();
+
+        // Process allweak list: handle TOUCHED objects
+        self.correct_gray_list(&mut allweak_list);
+        self.grayagain.extend(allweak_list);
+
+        let mut ephemeron_list = std::mem::take(&mut self.ephemeron)
+            .iter()
+            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .collect::<Vec<_>>();
+        self.ephemeron.clear();
+
+        // Process ephemeron list: handle TOUCHED objects
+        self.correct_gray_list(&mut ephemeron_list);
+        self.grayagain.extend(ephemeron_list);
+    }
+
+    // ** Correct a list of gray objects. Return a pointer to the last element
+    // ** left on the list, so that we can link another list to the end of
+    // ** this one.
+    // ** Because this correction is done after sweeping, young objects might
+    // ** be turned white and still be in the list. They are only removed.
+    // ** 'TOUCHED1' objects are advanced to 'TOUCHED2' and remain on the list;
+    // ** Non-white threads also remain on the list. 'TOUCHED2' objects and
+    // ** anything else become regular old, are marked black, and are removed
+    // ** from the list.
+    fn correct_gray_list(&mut self, list: &mut Vec<GcObjectPtr>) {
+        let original_list = std::mem::take(list);
+
+        for gc_ptr in original_list {
+            if let Some(header) = gc_ptr.header_mut() {
+                if header.is_white() {
+                    // Object turned white during sweep - remove from list
+                    continue;
+                }
+
+                let age = header.age();
+                if age == G_TOUCHED1 {
+                    header.make_black();
+                    header.set_age(G_TOUCHED2);
+                    // Keep in list for next cycle
+                    list.push(gc_ptr);
+                } else if gc_ptr.kind() == GcObjectKind::Thread {
+                    // Non-white threads remain in list unchanged
+                    list.push(gc_ptr);
+                } else {
+                    if age == G_TOUCHED2 {
+                        // Other ages: become old and black, remove from list
+                        header.set_age(G_OLD);
+                    }
+                    header.make_black();
+                }
+            }
+        }
+    }
 
     /// Mark OLD1 objects for young collection (port of Lua 5.5's markold).
     /// In generational mode, OLD1 objects are those that just became old in the
@@ -1209,128 +1360,148 @@ impl GC {
     ///   }
     /// }
     /// ```
-    fn mark_old1(&mut self) {
-        // Iterate through all objects in gc_pool
-        // Find OLD1 objects and re-mark them if they're black
-        for i in 0..self.gc_pool.len() {
-            if let Some(owner) = self.gc_pool.get(i) {
+    ///
+    /// NOTE: Lua 5.5 uses linked lists (allgc, finobj, tobefnz) and passes
+    /// (from, to) pointers to mark a range. We use a unified Vec pool,
+    /// so we iterate all objects and check their age.
+    fn mark_old(&mut self, l: &mut LuaState) {
+        // Mark OLD1 objects in main gc_list (allgc in Lua 5.5)
+        for i in 0..self.gc_list.len() {
+            if let Some(owner) = self.gc_list.get(i) {
                 let gc_ptr = owner.as_gc_ptr();
                 if let Some(header) = gc_ptr.header_mut() {
                     if header.age() == G_OLD1 {
-                        // Assert: OLD1 objects should NOT be white
                         debug_assert!(!header.is_white(), "OLD1 object should not be white");
-
-                        // Advance age to G_OLD
                         header.set_age(G_OLD);
-
-                        // If it's black, re-mark it (add to gray list for traversal)
                         if header.is_black() {
-                            // Make it gray and add to gray list
-                            header.make_gray();
-                            self.gray.push(gc_ptr);
+                            self.really_mark_object(l, gc_ptr);
                         }
+                    }
+                }
+            }
+        }
+
+        // Mark OLD1 objects in finobj list
+        let finobj_list = self.finobj.clone();
+        for gc_ptr in finobj_list {
+            if let Some(header) = gc_ptr.header_mut() {
+                if header.age() == G_OLD1 {
+                    debug_assert!(!header.is_white(), "OLD1 finobj should not be white");
+                    header.set_age(G_OLD);
+                    if header.is_black() {
+                        self.really_mark_object(l, gc_ptr);
+                    }
+                }
+            }
+        }
+
+        // Mark OLD1 objects in tobefnz list
+        let tobefnz_list = self.tobefnz.clone();
+        for gc_ptr in tobefnz_list {
+            if let Some(header) = gc_ptr.header_mut() {
+                if header.age() == G_OLD1 {
+                    debug_assert!(!header.is_white(), "OLD1 tobefnz should not be white");
+                    header.set_age(G_OLD);
+                    if header.is_black() {
+                        self.really_mark_object(l, gc_ptr);
                     }
                 }
             }
         }
     }
 
-    fn mark_value(&mut self, value: &LuaValue) {
+    fn mark_value(&mut self, l: &mut LuaState, value: &LuaValue) {
         let Some(gc_ptr) = value.as_gc_ptr() else {
             return;
         };
 
-        match gc_ptr {
-            GcObjectPtr::Table(table_ptr) => {
-                let header = &mut table_ptr.as_mut_ref().header;
-
-                // Only mark white objects (fixed objects are gray, so they're skipped)
-                if header.is_white() {
-                    header.make_gray();
-                    self.gray.push(table_ptr.into());
-                }
-            }
-            GcObjectPtr::Function(func_ptr) => {
-                let header = &mut func_ptr.as_mut_ref().header;
-                if header.is_white() {
-                    header.make_gray();
-                    self.gray.push(func_ptr.into());
-                }
-            }
-            GcObjectPtr::String(string_ptr) => {
-                let header = &mut string_ptr.as_mut_ref().header;
-                if header.is_white() {
-                    header.make_black(); // Strings are leaves
-                    // Update gc_marked for strings (they don't go through gray list)
-                    self.gc_marked += header.size as isize;
-                }
-            }
-            GcObjectPtr::Binary(binary_ptr) => {
-                let header = &mut binary_ptr.as_mut_ref().header;
-                if header.is_white() {
-                    header.make_black(); // Binaries are leaves
-                    // Update gc_marked for binaries (they don't go through gray list)
-                    self.gc_marked += header.size as isize;
-                }
-            }
-            GcObjectPtr::Userdata(userdata_ptr) => {
-                let header = &mut userdata_ptr.as_mut_ref().header;
-                if header.is_white() {
-                    header.make_gray();
-                    self.gray.push(userdata_ptr.into());
-                }
-            }
-            GcObjectPtr::Thread(thread_ptr) => {
-                let header = &mut thread_ptr.as_mut_ref().header;
-                if header.is_white() {
-                    header.make_gray();
-                    self.gray.push(thread_ptr.into());
-                }
-            }
-            GcObjectPtr::Upvalue(upval_ptr) => {
-                let header = &mut upval_ptr.as_mut_ref().header;
-                if header.is_white() {
-                    header.make_gray();
-                    self.gray.push(upval_ptr.into());
-                }
-            }
-        }
+        self.mark_object(l, gc_ptr);
     }
 
     /// Mark all constants in a chunk and its nested chunks (like Lua 5.5's traverseproto)
-    fn mark_chunk_constants(&mut self, chunk: &Chunk) {
+    fn mark_chunk_constants(&mut self, l: &mut LuaState, chunk: &Chunk) -> usize {
         // Mark all constants in this chunk
         for constant in &chunk.constants {
-            self.mark_value(constant);
+            if let Some(gc_ptr) = constant.as_gc_ptr() {
+                self.mark_object(l, gc_ptr);
+            }
         }
+        let mut count = chunk.constants.len();
 
         // Recursively mark constants in child protos (nested functions)
         for child_chunk in &chunk.child_protos {
-            self.mark_chunk_constants(child_chunk);
+            count += self.mark_chunk_constants(l, child_chunk);
         }
+
+        count
     }
 
     // ============ Weak Table Traversal Functions (Port of Lua 5.5) ============
+    fn traverse_array(&mut self, l: &mut LuaState, table_ptr: TablePtr) -> bool {
+        let gc_table = table_ptr.as_ref();
+        let table = &gc_table.data;
+        let array_len = table.len();
+        let mut marked = false;
+        // Mark all array entries
+        for i in 1..=array_len {
+            if let Some(value) = table.raw_geti(i as i64) {
+                if let Some(gc_ptr) = value.as_gc_ptr() {
+                    if self.is_white(gc_ptr) {
+                        marked = true;
+                        self.mark_object(l, gc_ptr);
+                    }
+                }
+            }
+        }
+
+        marked
+    }
 
     /// Traverse a strong (non-weak) table - mark everything
-    fn traverse_strong_table(&mut self, table_ptr: TablePtr) -> isize {
+    fn traverse_strong_table(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
         let gc_table = table_ptr.as_mut_ref();
-        gc_table.header.make_black();
         let table = &gc_table.data;
-        let entries_vec = table.iter_all();
-
-        // Mark all entries
-        for (k, v) in &table.iter_all() {
-            self.mark_value(k);
-            self.mark_value(v);
+        if table.is_array() {
+            self.traverse_array(l, table_ptr);
+        } else {
+            // CRITICAL FIX: Use for_each_entry() to iterate by index directly
+            // This avoids both allocating Vec (iter_all) and repeated lookups (next)
+            // Port of Lua 5.5's direct pointer iteration: `for (n = gnode(h, 0); n < limit; n++)`
+            table.for_each_entry(|k, v| {
+                if let Some(k_ptr) = k.as_gc_ptr() {
+                    self.mark_object(l, k_ptr);
+                }
+                if let Some(v_ptr) = v.as_gc_ptr() {
+                    self.mark_object(l, v_ptr);
+                }
+            });
         }
 
-        // Mark metatable
-        if let Some(metatable) = table.get_metatable() {
-            self.mark_value(&metatable);
-        }
+        self.gen_link(table_ptr.into());
+    }
 
-        1 + entries_vec.len() as isize
+    // static void genlink (global_State *g, GCObject *o) {
+    //     lua_assert(isblack(o));
+    //     if (getage(o) == G_TOUCHED1) {  /* touched in this cycle? */
+    //         linkobjgclist(o, g->grayagain);  /* link it back in 'grayagain' */
+    //     }  /* everything else do not need to be linked back */
+    //     else if (getage(o) == G_TOUCHED2)
+    //         setage(o, G_OLD);  /* advance age */
+    //     }
+    // }
+    fn gen_link(&mut self, gc_ptr: GcObjectPtr) {
+        let Some(header) = gc_ptr.header_mut() else {
+            return;
+        };
+        debug_assert!(header.is_black(), "genlink called on non-black object");
+
+        if header.age() == G_TOUCHED1 {
+            // Touched in this cycle, link back to grayagain
+            self.grayagain.push(gc_ptr);
+        } else if header.age() == G_TOUCHED2 {
+            // Advance age to G_OLD
+            header.set_age(G_OLD);
+        }
     }
 
     /// Port of Lua 5.5's traverseweakvalue
@@ -1365,55 +1536,39 @@ impl GC {
     ///     genlink(g, obj2gco(h));
     /// }
     /// ```
-    fn traverse_weak_value(&mut self, table_ptr: TablePtr) -> isize {
-        let gc_table = table_ptr.as_mut_ref();
-        gc_table.header.make_black();
+    fn traverse_weak_value(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
+        let gc_table = table_ptr.as_ref();
         let table = &gc_table.data;
-        // Mark metatable
-        if let Some(metatable) = table.get_metatable() {
-            self.mark_value(&metatable);
-        }
 
-        // Lua 5.5 logic (from lgc.c traverseweakvalue):
-        // ```c
-        // if (g->gcstate == GCSpropagate)
-        //     linkgclist(h, g->grayagain);  /* must retraverse it in atomic phase */
-        // else if (hasclears)
-        //     linkgclist(h, g->weak);  /* has to be cleared later */
-        // ```
-        //
-        // CRITICAL: ONLY in Propagate state should we add to grayagain!
-        // In Pause/Atomic/other states, we directly mark and add to weak list.
-        if self.gc_state == GcState::Propagate {
-            self.grayagain.push(table_ptr.into());
-            return 1;
-        }
+        let mut has_clears = table.len() > 0;
 
-        // In atomic phase, mark keys and check values
-        let mut has_white_values = false;
-
-        let entries = table.iter_all();
-        for (k, v) in &entries {
+        // CRITICAL FIX: Use next() instead of iter_all() to avoid allocation
+        let mut key = LuaValue::nil();
+        while let Some((k, v)) = table.next(&key) {
             // Mark key (strong reference)
-            self.mark_value(k);
+            if let Some(key_ptr) = k.as_gc_ptr() {
+                self.mark_object(l, key_ptr);
+            }
 
-            // IMPORTANT: After marking the key, the value might also be marked
-            // if key and value refer to the same object (common in test cases)
-            // So we need to check the CURRENT state from pool, not the snapshot
             if let Some(val_ptr) = v.as_gc_ptr() {
                 // Re-check if value is STILL white after marking the key
-                if self.is_white(val_ptr) {
-                    has_white_values = true;
+                if !has_clears && self.is_cleared(l, val_ptr) {
+                    has_clears = true;
                 }
             }
+            key = k;
         }
 
-        // If has white values, add to weak list for clearing
-        if has_white_values {
+        if self.gc_state == GcState::Propagate {
+            // During propagation phase, keep in grayagain for atomic phase
+            self.grayagain.push(table_ptr.into());
+        } else if has_clears {
+            // In atomic phase, if has white values, add to weak list for clearing
             self.weak.push(table_ptr.into());
+        } else {
+            // Otherwise, genlink to check age
+            self.gen_link(table_ptr.into());
         }
-
-        1 + entries.len() as isize
     }
 
     /// Port of Lua 5.5's traverseephemeron
@@ -1463,115 +1618,166 @@ impl GC {
     ///   return marked;
     /// }
     /// ```
-    fn traverse_ephemeron(&mut self, table_ptr: TablePtr) -> isize {
+    fn traverse_ephemeron(&mut self, l: &mut LuaState, table_ptr: TablePtr) -> bool {
         let gc_table = table_ptr.as_mut_ref();
-        gc_table.header.make_black();
         let table = &gc_table.data;
+        let mut has_clears = false;
+        let mut has_ww = false; // white->white
 
-        // Mark metatable
-        if let Some(metatable) = table.get_metatable() {
-            self.mark_value(&metatable);
-        }
+        let mut marked = self.traverse_array(l, table_ptr);
 
-        // Lua 5.5 logic (from lgc.c traverseephemeron):
-        // ```c
-        // if (g->gcstate == GCSpropagate)
-        //     return propagate;  /* have to propagate again */
-        // else {  /* atomic phase */
-        //     ...
-        // }
-        // ```
-        //
-        // CRITICAL: ONLY in Propagate state should we return "propagate again"!
-        // In Propagate state, we add to grayagain and return.
-        // In other states (Pause/Atomic), we proceed to classify entries.
-        if self.gc_state == GcState::Propagate {
-            self.grayagain.push(table_ptr.into());
-            return 1;
-        }
-
-        // Atomic phase: check entries and classify table
-        let mut has_white_keys = false;
-        let mut has_white_white = false;
-        let mut marked_any = false;
-
-        let entries = table.iter_all();
-        for (k, v) in &entries {
+        let mut key = LuaValue::nil();
+        while let Some((k, v)) = table.next(&key) {
             let key_ptr = k.as_gc_ptr();
             let val_ptr = v.as_gc_ptr();
 
             // Check if key is cleared (iscleared will mark strings)
-            let key_is_cleared = key_ptr.map_or(false, |ptr| self.is_cleared(ptr));
+            let key_is_cleared = key_ptr.map_or(false, |ptr| self.is_cleared(l, ptr));
             let val_is_white = val_ptr.map_or(false, |ptr| self.is_white(ptr));
             if key_is_cleared {
-                has_white_keys = true;
+                has_clears = true;
                 if val_is_white {
-                    has_white_white = true;
+                    has_ww = true;
                 }
             } else if val_is_white {
+                marked = true;
                 // Key is alive, but value is white - mark the value
-                self.mark_value(v);
-                marked_any = true;
+                self.really_mark_object(l, val_ptr.unwrap());
+            }
+            key = k;
+        }
+
+        if self.gc_state == GcState::Propagate {
+            // During propagation phase, keep in grayagain for atomic phase
+            self.grayagain.push(table_ptr.into());
+        } else if has_ww {
+            // In atomic phase, if has white->white entries, add to ephemeron list
+            self.ephemeron.push(table_ptr.into());
+        } else if has_clears {
+            // If has cleared keys, add to allweak list for clearing
+            self.allweak.push(table_ptr.into());
+        } else {
+            // Otherwise, genlink to check age
+            self.gen_link(table_ptr.into());
+        }
+
+        marked
+    }
+
+    fn traverse_table(&mut self, l: &mut LuaState, table_ptr: TablePtr) -> usize {
+        // Port of Lua 5.5's traversetable with weak table handling
+        // Check weak mode first to decide how to traverse
+        let gc_table = table_ptr.as_mut_ref();
+        gc_table.header.make_black();
+
+        if let Some(metatable) = gc_table.data.get_metatable() {
+            self.mark_object(l, metatable.as_gc_ptr().unwrap());
+        }
+
+        let weak_mode = self.get_weak_mode(table_ptr);
+
+        match weak_mode {
+            None | Some((false, false)) => {
+                // Regular table (or invalid weak mode) - mark everything
+                self.traverse_strong_table(l, table_ptr);
+            }
+            Some((false, true)) => {
+                // Weak values only (__mode = 'v')
+                self.traverse_weak_value(l, table_ptr);
+            }
+            Some((true, false)) => {
+                // Weak keys only (__mode = 'k') - ephemeron
+                self.traverse_ephemeron(l, table_ptr);
+            }
+            Some((true, true)) => {
+                // Both weak (__mode = 'kv') - fully weak
+                if self.gc_state == GcState::Propagate {
+                    // During propagation phase, keep in grayagain for atomic phase
+                    self.grayagain.push(table_ptr.into());
+                } else {
+                    // In atomic phase, add to allweak list for clearing
+                    self.allweak.push(table_ptr.into());
+                }
             }
         }
 
-        // Add to appropriate list
-        if has_white_white {
-            // Has white->white entries, need convergence
-            self.ephemeron.push(table_ptr.into());
-        } else if has_white_keys {
-            // Has white keys but no white->white, just needs clearing
-            self.ephemeron.push(table_ptr.into());
-        }
-
-        // Return whether we marked anything (for convergence check)
-        if marked_any {
-            1 + entries.len() as isize
+        if gc_table.data.is_array() {
+            1 + gc_table.data.len() as usize // Estimate of work done
         } else {
-            1
+            1 + 2 * gc_table.data.hash_size() as usize // Estimate of work done
         }
     }
 
-    /// Port of Lua 5.5's traversetable (case 3: weak keys and values)
-    ///
-    /// From lgc.c (Lua 5.5):
-    /// ```c
-    /// case 3:  /* all weak; nothing to traverse */
-    ///   if (g->gcstate == GCSpropagate)
-    ///     linkgclist(h, g->grayagain);  /* must visit again its metatable */
-    ///   else
-    ///     linkgclist(h, g->allweak);  /* must clear collected entries */
-    ///   break;
-    /// ```
-    fn traverse_fully_weak(&mut self, table_ptr: TablePtr) -> isize {
-        let gc_table = table_ptr.as_mut_ref();
-        gc_table.header.make_black();
-        let table = &gc_table.data;
+    fn traverse_function(&mut self, l: &mut LuaState, func_ptr: FunctionPtr) -> usize {
+        // Mark the function black and get references to data we need
+        // (Fixed functions should never reach here - they stay gray forever
+        let gc_func = func_ptr.as_mut_ref();
+        gc_func.header.make_black();
 
-        // Don't mark keys or values - they're all weak
-
-        // Mark metatable
-        if let Some(metatable) = table.get_metatable() {
-            self.mark_value(&metatable);
+        let mut count = 1; // Estimate of work done
+        let func_body = &gc_func.data;
+        let upvalues = func_body.upvalues();
+        count += upvalues.len();
+        // Mark upvalues
+        for upval_ptr in upvalues {
+            self.mark_object(l, upval_ptr.clone().into());
         }
 
-        // Lua 5.5 logic (from lgc.c traverseallweak):
-        // ```c
-        // if (g->gcstate == GCSpropagate)
-        //     linkgclist(h, g->grayagain);
-        // else
-        //     linkgclist(h, g->allweak);
-        // ```
-        //
-        // CRITICAL: ONLY in Propagate state should we add to grayagain!
-        // In other states, directly add to allweak list.
-        if self.gc_state == GcState::Propagate {
-            self.grayagain.push(table_ptr.into());
-        } else {
-            self.allweak.push(table_ptr.into());
+        // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
+        if let Some(chunk) = gc_func.data.chunk() {
+            count += self.mark_chunk_constants(l, &chunk);
         }
 
-        1
+        count as usize // Estimate of work done
+    }
+
+    fn traverse_thread(&mut self, l: &mut LuaState, thread_ptr: ThreadPtr) -> usize {
+        // Mark the thread black and get references to data we need
+        let gc_thread = thread_ptr.as_mut_ref();
+        gc_thread.header.make_black();
+
+        let mut count = 1; // Estimate of work done
+        if gc_thread.header.is_old() || self.gc_state == GcState::Propagate {
+            self.grayagain.push(thread_ptr.into());
+        }
+
+        let state = &gc_thread.data;
+        for i in 0..state.get_top() {
+            if let Some(value) = state.stack().get(i) {
+                self.mark_value(l, value);
+            }
+        }
+        count += state.get_top();
+
+        for open_upval_ptr in state.open_upvalues() {
+            self.mark_object(l, open_upval_ptr.clone().into());
+        }
+
+        if self.gc_state == GcState::Atomic {
+            if !self.gc_emergency {
+                // luaD_shrinkstack(th); /* do not change stack in emergency cycle */
+                // TODO: implement stack shrinking if needed
+            }
+
+            // for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
+            //     setnilvalue(s2v(o));  /* clear dead stack slice */
+            //     /* 'remarkupvals' may have removed thread from 'twups' list */
+            // if (!isintwups(th) && th->openupval != NULL) {
+            //     th->twups = g->twups;  /* link it back to the list */
+            //     g->twups = th;
+            // }
+
+            if !self.is_in_twups(thread_ptr) && !state.open_upvalues().is_empty() {
+                self.twups.push(thread_ptr);
+            }
+        }
+
+        count as usize // Estimate of work done
+    }
+
+    fn is_in_twups(&self, thread_ptr: ThreadPtr) -> bool {
+        // Check if the thread is in the twups list
+        self.twups.contains(&thread_ptr)
     }
 
     /// Check if an object is white
@@ -1584,14 +1790,27 @@ impl GC {
     }
 
     /// Propagate mark for one gray object (like propagatemark in Lua 5.5)
-    fn propagate_mark(&mut self) -> isize {
+    /// /*
+    // ** traverse one gray object, turning it to black. Return an estimate
+    // ** of the number of slots traversed.
+    // */
+    // static l_mem propagatemark (global_State *g) {
+    //   GCObject *o = g->gray;
+    //   nw2black(o);
+    //   g->gray = *getgclist(o);  /* remove from 'gray' list */
+    //   switch (o->tt) {
+    //     case LUA_VTABLE: return traversetable(g, gco2t(o));
+    //     case LUA_VUSERDATA: return traverseudata(g, gco2u(o));
+    //     case LUA_VLCL: return traverseLclosure(g, gco2lcl(o));
+    //     case LUA_VCCL: return traverseCclosure(g, gco2ccl(o));
+    //     case LUA_VPROTO: return traverseproto(g, gco2p(o));
+    //     case LUA_VTHREAD: return traversethread(g, gco2th(o));
+    //     default: lua_assert(0); return 0;
+    //   }
+    // }
+    fn propagate_mark(&mut self, l: &mut LuaState) -> isize {
         if let Some(gc_ptr) = self.gray.pop() {
-            self.mark_one(gc_ptr);
-            // Use the size stored in GcObject (same as track_object and sweep)
-            // This ensures consistency across all GC operations
-            let size = gc_ptr.header().map(|it| it.size as isize).unwrap_or(0);
-            self.gc_marked += size;
-            size
+            self.propagate_mark_one(l, gc_ptr) as isize
         } else {
             0
         }
@@ -1600,359 +1819,353 @@ impl GC {
     /// Mark one object and traverse its references
     /// Like Lua 5.5's propagatemark: "nw2black(o);" then traverse
     /// Sets object to BLACK before traversing children
-    fn mark_one(&mut self, gc_ptr: GcObjectPtr) -> isize {
+    fn propagate_mark_one(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) -> usize {
         match gc_ptr {
-            GcObjectPtr::Table(table_ptr) => {
-                // Port of Lua 5.5's traversetable with weak table handling
-                // Check weak mode first to decide how to traverse
-
-                let weak_mode = self.get_weak_mode(table_ptr);
-
-                match weak_mode {
-                    None | Some((false, false)) => {
-                        // Regular table (or invalid weak mode) - mark everything
-                        self.traverse_strong_table(table_ptr)
-                    }
-                    Some((false, true)) => {
-                        // Weak values only (__mode = 'v')
-                        self.traverse_weak_value(table_ptr)
-                    }
-                    Some((true, false)) => {
-                        // Weak keys only (__mode = 'k') - ephemeron
-                        self.traverse_ephemeron(table_ptr)
-                    }
-                    Some((true, true)) => {
-                        // Both weak (__mode = 'kv') - fully weak
-                        self.traverse_fully_weak(table_ptr)
-                    }
-                }
-            }
-            GcObjectPtr::Function(func_ptr) => {
-                // Mark the function black and get references to data we need
-                // (Fixed functions should never reach here - they stay gray forever
-                let gc_func = func_ptr.as_mut_ref();
-                gc_func.header.make_black();
-
-                let upvalues = gc_func.data.upvalues();
-                // Mark upvalues
-                for upval_ptr in upvalues {
-                    let header = &mut upval_ptr.as_mut_ref().header;
-                    if header.is_white() {
-                        header.make_gray();
-                        self.gray.push(upval_ptr.clone().into());
-                    }
-                }
-
-                // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
-                if let Some(chunk) = gc_func.data.chunk() {
-                    self.mark_chunk_constants(&chunk);
-                    return 1
-                        + upvalues.len() as isize
-                        + chunk.constants.len() as isize
-                        + chunk.child_protos.len() as isize;
-                } else {
-                    return 1 + upvalues.len() as isize;
-                }
-            }
-            GcObjectPtr::Upvalue(upval_ptr) => {
-                // Port of Lua 5.5's reallymarkobject for LUA_VUPVAL:
-                // if (upisopen(uv))
-                //   set2gray(uv);  /* open upvalues are kept gray */
-                // else
-                //   set2black(uv);  /* closed upvalues are visited here */
-                // markvalue(g, uv->v.p);  /* mark its content */
-                let gc_upval = upval_ptr.as_mut_ref();
-
-                if gc_upval.data.is_open() {
-                    // Open upvalue: keep gray (value on stack may change)
-                    gc_upval.header.make_gray();
-                    // Note: value is on stack, will be marked when stack is traversed
-                    // But we should mark it here too for safety
-                    // Get stack index and mark that slot
-                    // Since we don't have access to LuaState here, we rely on
-                    // the stack being marked separately as a root
-                } else {
-                    // Closed upvalue: mark black and mark its value
-                    gc_upval.header.make_black();
-                    if let Some(val) = gc_upval.data.get_closed_value() {
-                        self.mark_value(&val);
-                    }
-                }
-
-                return 1;
-            }
-            GcObjectPtr::String(string_ptr) => {
-                let s = string_ptr.as_mut_ref();
-                s.header.make_black();
-                return 1;
-            }
-            GcObjectPtr::Binary(binary_ptr) => {
-                let b = binary_ptr.as_mut_ref();
-                b.header.make_black();
-                return 1;
-            }
+            GcObjectPtr::Table(table_ptr) => self.traverse_table(l, table_ptr),
+            GcObjectPtr::Function(func_ptr) => self.traverse_function(l, func_ptr),
             GcObjectPtr::Userdata(userdata_ptr) => {
                 // Userdata: mark the userdata itself and its metatable if any
                 let gc_ud = userdata_ptr.as_mut_ref();
                 gc_ud.header.make_black();
                 if let Some(metatable) = gc_ud.data.get_metatable() {
                     // Mark metatable if exists (it's a LuaValue, could be table)
-                    self.mark_value(&metatable);
+                    self.mark_value(l, &metatable);
                 }
 
-                return 1;
+                self.gen_link(gc_ptr);
+
+                1 // Estimate of work done
             }
-            GcObjectPtr::Thread(thread_ptr) => {
-                // Thread: mark all stack values and open upvalues
-                let gc_thread = thread_ptr.as_mut_ref();
-                gc_thread.header.make_black();
-                let l = &gc_thread.data;
-                let stack_top = l.stack_top;
-                for i in 0..stack_top {
-                    let value = &l.stack[i];
-                    self.mark_value(value);
-                }
-
-                // Mark all open upvalues
-                for upval_ptr in l.open_upvalues() {
-                    let gc_upvalue = upval_ptr.as_mut_ref();
-                    if gc_upvalue.header.is_white() {
-                        gc_upvalue.header.make_gray();
-                        self.gray.push(upval_ptr.clone().into());
-                    }
-                }
-
-                return 1 + stack_top as isize;
-            }
+            GcObjectPtr::Thread(thread_ptr) => self.traverse_thread(l, thread_ptr),
+            _ => 0,
         }
     }
 
     /// Atomic phase (like atomic in Lua 5.5)
-    fn atomic(&mut self, roots: &[LuaValue]) {
-        // Lua 5.5's atomic phase does:
-        // 1. Set gcstate = GCSatomic
-        // 2. Mark running thread, registry, global metatables
-        // 3. propagateall(g) - empty gray list
-        // 4. remarkupvals(g) - handle thread upvalues
-        // 5. propagateall(g) - propagate changes
-        // 6. g->gray = grayagain; propagateall(g) - process grayagain (WEAK TABLES!)
-        // 7. convergeephemerons(g) - converge ephemeron tables
-        // 8. clearbyvalues(weak & allweak) - first pass
-        // 9. separatetobefnz + markbeingfnz + propagateall - handle finalizers
-        // 10. convergeephemerons(g) - second pass after resurrection
-        // 11. clearbykeys(ephemeron & allweak) - clear dead keys
-        // 12. clearbyvalues(weak & allweak, origweak & origall) - clear resurrected
-        // 13. g->currentwhite = otherwhite(g) - FLIP WHITE COLOR
-
+    /// Atomic phase of GC - mark-and-sweep in one uninterruptible step
+    /// Port of Lua 5.5's atomic function from lgc.c
+    fn atomic(&mut self, l: &mut LuaState) {
         self.gc_state = GcState::Atomic;
 
-        // Mark roots again (they may have changed)
-        for value in roots {
-            self.mark_value(value);
-        }
+        // Mark main thread (running thread)
+        let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
+        self.mark_object(l, main_thread_ptr.into());
+
+        // Mark registry (global state)
+        let registry = l.vm_mut().registry;
+        self.mark_value(l, &registry);
+
+        // Mark global metatables (string, number, etc.)
+        self.mark_mt(l);
 
         // Propagate all marks (empty the gray list)
-        while !self.gray.is_empty() {
-            self.propagate_mark();
-        }
+        self.propagate_all(l);
 
-        // NOTE: remarkupvals should be called here by VM
-        // This marks values in open upvalues for non-marked threads
-        // Since we don't have thread list access here, VM must call
-        // mark_open_upvalues before calling atomic
+        self.remark_upvalues(l);
 
-        // Process grayagain list (objects that were blackened but then mutated)
-        // Moving them to gray list effectively
+        // Propagate changes from remark_upvalues
+        self.propagate_all(l);
+
         let grayagain = std::mem::take(&mut self.grayagain);
-        for gc_id in grayagain {
-            let size = self.mark_one(gc_id);
-            // Update gc_marked for objects processed from grayagain
-            self.gc_marked += size;
-        }
+        self.gray = grayagain;
+        self.propagate_all(l);
 
-        // Propagate again to handle anything pushed by grayagain processing
+        self.converge_ephemerons(l);
+
+        /* at this point, all strongly accessible objects are marked. */
+        /* Clear values from weak tables, before checking finalizers */
+        let origweak = self.weak.iter().cloned().collect::<HashSet<_>>();
+        let origall = self.allweak.iter().cloned().collect::<HashSet<_>>();
+
+        self.clear_by_values(l);
+
+        /* separate objects to be finalized */
+        self.separate_to_be_finalized(false);
+        /* mark objects that will be finalized */
+        self.mark_being_finalized(l);
+        /* remark, to propagate 'resurrection' */
+        self.propagate_all(l);
+
+        self.converge_ephemerons(l);
+
+        self.clear_by_keys(l);
+
+        self.clear_by_values_range(l, &origweak, &origall);
+
+        self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
+
+        debug_assert!(
+            self.gray.is_empty(),
+            "Gray list should be empty at end of atomic phase"
+        );
+    }
+
+    fn propagate_all(&mut self, l: &mut LuaState) {
         while !self.gray.is_empty() {
-            self.propagate_mark();
+            self.propagate_mark(l);
         }
+    }
 
-        // Port of Lua 5.5's atomic() phase for weak tables
-        // At this point, all strongly accessible objects are marked.
+    /// Port of Lua 5.5's remarkupvals from lgc.c
+    ///
+    /// ```c
+    /// static void remarkupvals (global_State *g) {
+    ///   lua_State *thread;
+    ///   lua_State **p = &g->twups;
+    ///   while ((thread = *p) != NULL) {
+    ///     lua_assert(!iswhite(thread));  /* threads are never white */
+    ///     if (isgray(thread) && thread->openupval != NULL)
+    ///       p = &thread->twups;  /* keep marked thread with upvalues in the list */
+    ///     else {  /* thread is black or has no upvalues */
+    ///       UpVal *uv;
+    ///       *p = thread->twups;  /* remove thread from the list */
+    ///       thread->twups = thread;  /* mark that it is out of list */
+    ///       for (uv = thread->openupval; uv != NULL; uv = uv->u.open.next) {
+    ///         lua_assert(getage(uv) <= getage(thread));
+    ///         if (!iswhite(uv))
+    ///           markvalue(g, uv->v.p);  /* remark upvalue's value */
+    ///       }
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    fn remark_upvalues(&mut self, l: &mut LuaState) {
+        let mut i = 0;
+        while i < self.twups.len() {
+            let thread_ptr = self.twups[i];
+            let thread = thread_ptr.as_ref();
 
-        // First convergence of ephemeron tables
-        self.converge_ephemerons();
+            debug_assert!(!thread.header.is_white(), "Thread should never be white");
 
-        // Clear weak values (first pass)
-        self.clear_by_values();
+            // if so, just move to the next thread
+            if thread.header.is_gray() && !thread.data.open_upvalues().is_empty() {
+                i += 1;
+                continue;
+            }
 
-        // Save original lists before finalization (Lua 5.5: origweak = g->weak; origall = g->allweak;)
-        let origweak = self.weak.clone();
-        let origall = self.allweak.clone();
+            // else, thread is black or has no upvalues
+            // note: swap_remove moves last element to index i
+            self.twups.swap_remove(i);
 
-        // 9. separatetobefnz + markbeingfnz + propagateall
-        // Objects are registered as finalizable (in Lua: moved to 'finobj') when
-        // their metatable gets a non-nil __gc. We model this with FINALIZEDBIT.
-        // Here we move unreachable ones (still WHITE) into `tobefnz` and mark them.
-        let pool_len = self.gc_pool.len();
-        for idx in 0..pool_len {
-            let Some(owner) = self.gc_pool.get(idx) else {
+            // remark upvalues
+            for upval_ptr in thread.data.open_upvalues() {
+                let upval = upval_ptr.as_ref();
+
+                // Upvalue age should not be older than its thread
+                debug_assert!(
+                    upval.header.age() <= thread.header.age(),
+                    "Upvalue should not be older than its thread"
+                );
+
+                if !upval.header.is_white() {
+                    // get value from upvalue and mark it
+                    let value = upval.data.get_value();
+                    self.mark_value(l, &value);
+                }
+            }
+        }
+    }
+
+    /// Enter sweep phase (like entersweep in Lua 5.5)
+    pub fn enter_sweep(&mut self, _l: &mut LuaState) {
+        self.gc_state = GcState::SwpAllGc;
+        // sweeptoalive
+        self.sweepgc = SweepGc::AllGc(0);
+    }
+
+    /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
+    fn sweep_step(
+        &mut self,
+        l: &mut LuaState,
+        next_state: GcState,
+        next_sweepgc: SweepGc,
+        fast: bool,
+    ) {
+        if !self.sweepgc.is_done() {
+            self.sweep_list(
+                l,
+                if fast {
+                    std::usize::MAX
+                } else {
+                    GCSWEEPMAX as usize
+                },
+            );
+        } else {
+            self.gc_state = next_state;
+            self.sweepgc = next_sweepgc;
+        }
+    }
+
+    /// Sweep a list of objects, freeing dead ones and resetting survivors
+    /// Port of Lua 5.5's sweeplist from lgc.c
+    ///
+    /// Lua 5.5 源码：
+    /// ```c
+    /// static GCObject **sweeplist (lua_State *L, GCObject **p, l_mem countin) {
+    ///   global_State *g = G(L);
+    ///   int ow = otherwhite(g);
+    ///   int white = luaC_white(g);  /* current white */
+    ///   while (*p != NULL && countin-- > 0) {
+    ///     GCObject *curr = *p;
+    ///     int marked = curr->marked;
+    ///     if (isdeadm(ow, marked)) {  /* is 'curr' dead? */
+    ///       *p = curr->next;  /* remove 'curr' from list */
+    ///       freeobj(L, curr);  /* erase 'curr' */
+    ///     }
+    ///     else {  /* change mark to 'white' and age to 'new' */
+    ///       curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
+    ///       p = &curr->next;  /* go to next element */
+    ///     }
+    ///   }
+    ///   return (*p == NULL) ? NULL : p;
+    /// }
+    /// ```
+    ///
+    fn sweep_list(&mut self, l: &mut LuaState, mut sweep_count: usize) {
+        let other_white = 1 - self.current_white;
+
+        // 根据 sweepgc 状态决定操作哪个列表
+        match &mut self.sweepgc {
+            SweepGc::AllGc(index) => {
+                // 扫描主 gc_list
+                while *index < self.gc_list.len() && sweep_count > 0 {
+                    let gc_ptr = self.gc_list.get(*index).unwrap().as_gc_ptr();
+
+                    if let Some(header) = gc_ptr.header() {
+                        // 检查是否是死对象（other white）
+                        if header.is_dead(other_white) {
+                            if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                                Self::remove_dead_string_from_intern(l, str_ptr);
+                            }
+
+                            let obj = self.gc_list.remove(gc_ptr);
+                            self.total_bytes -= obj.size() as isize;
+                            drop(obj);
+                        } else {
+                            // 存活对象：重置为当前白色 + G_NEW
+                            if let Some(header_mut) = gc_ptr.header_mut() {
+                                header_mut.make_white(self.current_white);
+                                header_mut.set_age(G_NEW);
+                            }
+                            *index += 1;
+                        }
+                    } else {
+                        *index += 1;
+                    }
+
+                    sweep_count -= 1;
+                }
+
+                // 如果扫描完成，标记为 Done
+                if *index >= self.gc_list.len() {
+                    self.sweepgc = SweepGc::Done;
+                }
+            }
+
+            SweepGc::FinObj(index) => {
+                // 扫描 finobj 列表（有终结器的对象）
+                while *index < self.finobj.len() && sweep_count > 0 {
+                    let gc_ptr = self.finobj[*index];
+
+                    if let Some(header) = gc_ptr.header() {
+                        if header.is_dead(other_white) {
+                            // 死对象且有终结器：移到 tobefnz
+                            self.tobefnz.push(gc_ptr);
+                            self.finobj.swap_remove(*index);
+                            // 不增加 index（因为 swap_remove）
+                        } else {
+                            // 存活对象：重置为当前白色 + G_NEW
+                            if let Some(header_mut) = gc_ptr.header_mut() {
+                                header_mut.make_white(self.current_white);
+                                header_mut.set_age(G_NEW);
+                            }
+                            *index += 1;
+                        }
+                    } else {
+                        *index += 1;
+                    }
+
+                    sweep_count -= 1;
+                }
+
+                if *index >= self.finobj.len() {
+                    self.sweepgc = SweepGc::Done;
+                }
+            }
+
+            SweepGc::ToBeFnz(index) => {
+                // 扫描 tobefnz 列表（等待终结的对象）
+                // 注意：tobefnz 中的对象不应该被清理，它们等待终结器调用
+                while *index < self.tobefnz.len() && sweep_count > 0 {
+                    let gc_ptr = self.tobefnz[*index];
+
+                    // tobefnz 中的对象保持原状，只是重置颜色
+                    if let Some(header_mut) = gc_ptr.header_mut() {
+                        header_mut.make_white(self.current_white);
+                        header_mut.set_age(G_NEW);
+                    }
+
+                    *index += 1;
+                    sweep_count -= 1;
+                }
+
+                if *index >= self.tobefnz.len() {
+                    self.sweepgc = SweepGc::Done;
+                }
+            }
+
+            SweepGc::Done => {
+                // 已经完成，不做任何事
+            }
+        }
+    }
+
+    fn sweep2old(&mut self, _l: &mut LuaState, to_clear_list: &mut HashSet<GcObjectPtr>) {
+        // CRITICAL: Use other_white to distinguish dead objects from new objects
+        // - current_white: new objects created in this cycle
+        // - other_white: dead objects from previous cycle
+        // Port of Lua 5.5 lgc.c sweep2old: uses isdeadm(ow, marked)
+        let other_white = GcHeader::otherwhite(self.current_white);
+
+        let mut i = self.gc_list.len();
+        while i > 0 {
+            i -= 1;
+
+            let Some(obj) = self.gc_list.get(i) else {
                 continue;
             };
-            let gc_ptr = owner.as_gc_ptr();
+            let gc_ptr = obj.as_gc_ptr();
+
             let Some(header) = gc_ptr.header() else {
                 continue;
             };
 
-            // Candidate: unreachable + registered as finalizable (FINALIZEDBIT set)
-            if header.is_white() && header.to_finalize() {
-                if !self.tobefnz.contains(&gc_ptr) {
-                    self.tobefnz.push(gc_ptr);
-                }
-            }
-        }
-
-        if !self.tobefnz.is_empty() {
-            // markbeingfnz: mark any object pending finalization so it (and anything
-            // reachable from it) survives this cycle.
-            let to_mark = self.tobefnz.clone();
-            for gc_ptr in to_mark {
-                match gc_ptr {
-                    GcObjectPtr::Table(p) => self.mark_value(&LuaValue::table(p)),
-                    GcObjectPtr::Userdata(p) => self.mark_value(&LuaValue::userdata(p)),
-                    GcObjectPtr::Thread(p) => self.mark_value(&LuaValue::thread(p)),
-                    _ => {}
-                }
-            }
-
-            while !self.gray.is_empty() {
-                self.propagate_mark();
-            }
-        }
-
-        // Second convergence after potential resurrection
-        self.converge_ephemerons();
-
-        // Clear weak keys from ephemeron and allweak tables
-        self.clear_by_keys();
-
-        // Clear weak values (second pass, only for resurrected objects)
-        // Lua 5.5: clearbyvalues(g, g->weak, origweak); clearbyvalues(g, g->allweak, origall);
-        // This clears new entries added after finalization
-        // Since we skip finalization, this should be a no-op, but keep it for correctness
-        self.clear_by_values_range(&origweak, &origall);
-
-        // Flip white color for next cycle
-        // After this, objects with old white are considered dead
-        self.current_white ^= 1;
-    }
-
-    /// Enter sweep phase (like entersweep in Lua 5.5)
-    pub fn enter_sweep(&mut self, _pool: &mut ObjectAllocator) {
-        self.gc_state = GcState::SwpAllGc;
-        self.sweep_index = 0; // Reset sweep position
-
-        // No longer need to cache object IDs - we'll iterate through pool directly
-        // This avoids the dangling pointer problem with swap_remove
-    }
-
-    /// Sweep step - collect dead objects (like sweepstep in Lua 5.5)
-    /// Returns true if sweep is complete (no more objects to sweep)
-    ///
-    /// Port of Lua 5.5's sweepstep: maintains sweep position (sweepgc pointer)
-    /// to avoid re-scanning already-swept objects
-    ///
-    /// CRITICAL: Lua 5.5's sweeplist does NOT handle finalization!
-    /// Objects with finalizers are in a separate 'finobj' list and handled by separatetobefnz.
-    /// Here we should ONLY:
-    /// 1. Free dead objects (isdeadm check)
-    /// 2. Reset surviving objects to current white
-    fn sweep_step(&mut self, pool: &mut ObjectAllocator, fast: bool) -> bool {
-        let max_sweep = if fast { usize::MAX } else { 100 };
-        let mut count = 0;
-        let other_white = 1 - self.current_white;
-        let mut total_iterations = 0usize;
-
-        // Sweep forward through pool, handling swap_remove correctly
-        while self.sweep_index < self.gc_pool.len() && count < max_sweep {
-            total_iterations += 1;
-            if total_iterations > 10000 {
-                break;
-            }
-
-            let current_idx = self.sweep_index;
-
-            // Get object info
-            let owner = &self.gc_pool.get(current_idx).unwrap();
-            let gc_ptr = owner.as_gc_ptr();
-            let header = owner.header();
-
-            debug_assert_eq!(
-                header.index, current_idx,
-                "GcHeader.index mismatch during sweep (pool corrupted?)"
-            );
-
-            // Check if object is dead (wrong white)
+            // CRITICAL FIX: Use is_dead(other_white) instead of is_white()
+            // is_white() returns true for BOTH current_white and other_white
+            // But we only want to clear objects with other_white (dead objects)
             if header.is_dead(other_white) {
-                // Dead object - remove it
-                // Save size BEFORE removing (after free, header is invalid!)
-                let size = header.size as usize;
-
-                // For strings, remove from interner first
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    pool.remove_str(str_ptr);
-                }
-
-                // Free the object (swap_remove: moves last to current_idx)
-                self.gc_pool.free(gc_ptr);
-
-                if size > 0 {
-                    self.gc_debt += size as isize;
-                    self.stats.bytes_freed += size;
-                    self.stats.objects_collected += 1;
-                }
-
-                // DON'T increment sweep_index - the object from end was moved here
-                // Next iteration will check that moved object
+                to_clear_list.insert(gc_ptr);
             } else {
-                // Surviving object - handle differently based on GC mode
                 if let Some(header_mut) = gc_ptr.header_mut() {
-                    if self.gc_kind == GcKind::Inc || self.gc_kind == GcKind::GenMajor {
-                        // INCREMENTAL MODE: Lua 5.5's sweeplist
-                        // All surviving objects go back to white + G_NEW
-                        // Port of: curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
-                        header_mut.make_white(self.current_white);
-                        header_mut.set_age(G_NEW);
-                    } else {
-                        // GENERATIONAL MODE (GenMinor): Lua 5.5's sweepgen
-                        // Only G_NEW objects go back to white; older objects keep their color
-                        let age = header_mut.age();
-                        if age == G_NEW {
-                            // New objects go back to white and become G_SURVIVAL
-                            header_mut.make_white(self.current_white);
-                            header_mut.set_age(G_SURVIVAL);
+                    header_mut.set_age(G_OLD);
+                    if gc_ptr.kind() == GcObjectKind::Thread {
+                        self.grayagain.push(gc_ptr);
+                    } else if let GcObjectPtr::Upvalue(upval_ptr) = gc_ptr {
+                        let gc_upval = upval_ptr.as_mut_ref();
+                        if gc_upval.data.is_open() {
+                            header_mut.make_gray();
                         } else {
-                            // Older objects keep their color and advance age
-                            // Port of Lua 5.5's nextage table
-                            let next_age = match age {
-                                G_SURVIVAL => G_OLD1,
-                                G_OLD0 => G_OLD1,
-                                G_OLD1 => G_OLD,
-                                G_OLD => G_OLD,           // already old
-                                G_TOUCHED1 => G_TOUCHED1, // keep same
-                                G_TOUCHED2 => G_TOUCHED2, // keep same
-                                _ => G_OLD,
-                            };
-                            header_mut.set_age(next_age);
+                            header_mut.make_black();
                         }
+                    } else {
+                        header_mut.make_black();
                     }
                 }
-                self.sweep_index += 1; // Move to next
             }
-
-            count += 1;
         }
 
-        // Return true if we've swept through the entire pool
-        self.sweep_index >= self.gc_pool.len()
+        // All objects are now OLD, clear young_objects list
+        self.young_objects.clear();
     }
 
     pub fn set_pause(&mut self) {
@@ -1969,10 +2182,6 @@ impl GC {
             debt = 0;
         }
         self.set_debt(debt);
-
-        // With IndexMap, no need to compact - it has no empty slots!
-        // shrink_to_fit() only reduces memory overhead, doesn't affect iteration
-        self.gc_pool.shrink_to_fit();
     }
     /// Check if we need to keep invariant (like keepinvariant in Lua 5.5)
     /// During marking phase, the invariant must be kept
@@ -1984,12 +2193,7 @@ impl GC {
     }
 
     /// Run GC until reaching a specific state (like luaC_runtilstate in Lua 5.5)
-    pub fn run_until_state(
-        &mut self,
-        target_state: GcState,
-        roots: &[LuaValue],
-        pool: &mut ObjectAllocator,
-    ) {
+    pub fn run_until_state(&mut self, l: &mut LuaState, target_state: GcState) {
         // Increase MAX_ITERATIONS to handle large object pools
         // With 100 objects per sweep step, we need more iterations for large heaps
         const MAX_ITERATIONS: usize = 100000;
@@ -2007,7 +2211,7 @@ impl GC {
 
         loop {
             let prev_state = self.gc_state;
-            self.single_step(roots, pool, true);
+            self.single_step(l, true);
             let new_state = self.gc_state;
             iterations += 1;
 
@@ -2095,13 +2299,13 @@ impl GC {
     /// 4. propagate again
     /// 5. converge ephemerons
     /// 6. clear weak tables
-    pub fn full_generation(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
+    pub fn full_generation(&mut self, l: &mut LuaState) {
         // If we're in Pause state, we need to do the state transition ourselves
         if self.gc_state == GcState::Pause {
             // CRITICAL: Call restart_collection WHILE STILL IN PAUSE STATE!
             // Lua 5.5's singlestep calls restartcollection() while gcstate==GCSpause,
             // THEN sets gcstate=GCSpropagate.
-            self.restart_collection(roots);
+            self.restart_collection(l);
 
             // NOW transition to Propagate state (like Lua 5.5's singlestep)
             self.gc_state = GcState::Propagate;
@@ -2109,17 +2313,17 @@ impl GC {
 
         // Step 2: Propagate gray list (weak tables will be added to grayagain)
         while !self.gray.is_empty() {
-            self.propagate_mark();
+            self.propagate_mark(l);
         }
 
         // Step 3: Call atomic phase (like youngcollection does)
         // atomic() will process grayagain, converge ephemerons, and clear weak tables
-        self.atomic(roots);
+        self.atomic(l);
 
         // Step 4: Sweep
-        self.enter_sweep(pool);
-        self.run_until_state(GcState::CallFin, roots, pool);
-        self.run_until_state(GcState::Pause, roots, pool);
+        self.enter_sweep(l);
+        self.run_until_state(l, GcState::CallFin);
+        self.run_until_state(l, GcState::Pause);
 
         // set_pause uses total_bytes (actual memory after sweep) as base
         self.set_pause();
@@ -2145,57 +2349,249 @@ impl GC {
         self.set_debt(debt);
     }
 
-    /// Young collection for generational mode
-    /// Port of Lua 5.5's youngcollection:
-    /// ```c
-    /// static void youngcollection (lua_State *L, global_State *g) {
-    ///   lua_assert(g->gcstate == GCSpropagate);
-    ///   if (g->firstold1) {
-    ///     markold(g, g->firstold1, g->reallyold);
-    ///     g->firstold1 = NULL;
-    ///   }
-    ///   markold(g, g->finobj, g->finobjrold);
-    ///   markold(g, g->tobefnz, NULL);
-    ///   atomic(L);  /* will lose 'g->marked' */
-    ///   /* sweep nursery and get a pointer to its last live element */
-    ///   g->gcstate = GCSswpallgc;
-    ///   psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
-    ///   ...
-    ///   finishgencycle(L, g);
-    /// }
-    /// ```
-    fn young_collection(&mut self, roots: &[LuaValue], pool: &mut ObjectAllocator) {
+    /// Age transition function (replaces Lua 5.5's nextage array)
+    /// Inlined for performance - compiler will optimize to jump table or branches
+    #[inline]
+    fn next_age(age: u8) -> u8 {
+        match age {
+            G_NEW => G_SURVIVAL,
+            G_SURVIVAL => G_OLD1,
+            G_OLD0 => G_OLD1,
+            G_OLD1 => G_OLD,
+            G_OLD => G_OLD,
+            G_TOUCHED1 => G_TOUCHED1,
+            G_TOUCHED2 => G_TOUCHED2,
+            _ => age,
+        }
+    }
+
+    fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
-        // Start collection: mark roots
-        self.restart_collection(roots);
-        self.gc_state = GcState::Propagate;
+        // CRITICAL: Set gc_stopem to prevent recursive GC during collection
+        // This matches Lua 5.5's behavior where GC steps check gc_stopem
+        let old_stopem = self.gc_stopem;
+        self.gc_stopem = true;
 
-        // CRITICAL: Mark OLD1 objects before propagation!
-        // In generational mode, OLD1 objects are black from the previous cycle.
-        // They must be re-traversed so their referenced young objects get marked.
-        // Port of Lua 5.5's markold call in youngcollection.
-        self.mark_old1();
+        let marked = self.gc_marked; // Preserve gc_marked
 
-        // Propagate all marks
-        while !self.gray.is_empty() {
-            self.propagate_mark();
+        // Ensure we're in the right state for young collection
+        // If not in Propagate, start from restart
+        if self.gc_state != GcState::Propagate {
+            self.restart_collection(l);
+            self.gc_state = GcState::Propagate;
+
+            // CRITICAL: After restart_collection, rebuild young_objects list
+            // The list may contain stale pointers if incremental GC ran before
+            // first young collection. Rebuild by scanning all objects with age < G_OLD1.
+            self.young_objects.clear();
+            for i in 0..self.gc_list.len() {
+                if let Some(obj) = self.gc_list.get(i) {
+                    let age = obj.header().age();
+                    if age < G_OLD1 {
+                        self.young_objects.push(obj.as_gc_ptr());
+                    }
+                }
+            }
         }
 
-        // CRITICAL: Call atomic phase!
-        // This flips current_white so sweep can identify dead objects
-        self.atomic(roots);
+        // Phase 1: Mark OLD1 objects (including finobj and tobefnz)
+        self.mark_old(l);
 
-        // Enter sweep phase
-        self.enter_sweep(pool);
+        // Phase 2: Atomic phase
+        self.atomic(l);
 
-        // Complete sweep (fast mode = sweep everything)
-        while !self.sweep_step(pool, true) {
-            // Continue sweeping until complete
+        // Phase 3: Sweep young generation and track promoted bytes
+        self.gc_state = GcState::SwpAllGc;
+        let added_old1 = self.sweep_gen(l);
+
+        // Phase 4: Update gc_marked with promoted bytes
+        self.gc_marked = marked + added_old1;
+
+        // Phase 5: Check if need to switch to major mode
+        // Skip this check on first generation (gc_majorminor == 0 means first time)
+        let is_first_gen = self.gc_majorminor == 0;
+        if is_first_gen {
+            self.gc_majorminor = self.gc_marked; // Initialize for next cycle
+            self.finish_gen_cycle(l);
+        } else if self.check_major_minor(l) {
+            // self.minor_to_incremental(l, KGC_GENMAJOR);
+            self.gc_marked = 0; // Avoid pause in first major cycle
+        } else {
+            self.finish_gen_cycle(l); // Still in minor mode; finish it
         }
 
-        // Return to pause state, ready for next cycle
-        self.gc_state = GcState::Pause;
+        // Restore gc_stopem
+        self.gc_stopem = old_stopem;
+    }
+
+    /// Sweep the young generation, promoting survivors
+    /// Port of Lua 5.5's sweepgen function
+    ///
+    /// Optimization: Only scans young_objects list instead of entire gc_list.
+    /// Lua 5.5 achieves this via linked list pointers (survival, old1, reallyold).
+    /// We track young objects in a separate Vec for O(young) instead of O(total).
+    ///
+    /// Returns: bytes promoted to OLD1 generation
+    fn sweep_gen(&mut self, l: &mut LuaState) -> isize {
+        let other_white = 1 - self.current_white;
+        let mut added_old1: isize = 0;
+
+        // Process young objects list (optimization: only young objects, not entire heap)
+        // Take ownership to avoid borrow conflicts
+        let young_list = std::mem::take(&mut self.young_objects);
+        let mut new_young_list = Vec::new();
+
+        for gc_ptr in young_list {
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
+
+            let age = header.age();
+
+            // Process young objects (G_NEW, G_SURVIVAL, G_OLD0)
+            if age == G_NEW {
+                let is_dead = header.is_dead(other_white);
+
+                if is_dead {
+                    // CRITICAL: Remove dead strings from intern map before dropping
+                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    }
+
+                    let obj = self.gc_list.remove(gc_ptr);
+                    self.total_bytes -= obj.size() as isize;
+                    drop(obj);
+                } else {
+                    // Alive: promote to G_SURVIVAL and make white
+                    if let Some(header_mut) = gc_ptr.header_mut() {
+                        header_mut.set_age(Self::next_age(age));
+                        header_mut.make_white(self.current_white);
+                    }
+                    new_young_list.push(gc_ptr); // Still young
+                }
+            } else if age == G_SURVIVAL || age == G_OLD0 {
+                let is_dead = header.is_dead(other_white);
+
+                if is_dead {
+                    // CRITICAL: Remove dead strings from intern map before dropping
+                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    }
+
+                    let obj = self.gc_list.remove(gc_ptr);
+                    self.total_bytes -= obj.size() as isize;
+                    drop(obj);
+                } else {
+                    // Alive: promote to OLD1 and KEEP COLOR (don't make white)
+                    if let Some(header_mut) = gc_ptr.header_mut() {
+                        let old_age = header_mut.age();
+                        debug_assert!(old_age != G_OLD1, "OLD1 should be advanced in mark_old");
+                        let new_age = Self::next_age(old_age);
+                        header_mut.set_age(new_age);
+
+                        // Track bytes becoming OLD1
+                        if new_age == G_OLD1 {
+                            if let Some(h) = gc_ptr.header() {
+                                added_old1 += h.size as isize;
+                            }
+                        }
+                    }
+                    // Promoted to OLD1, no longer in young list
+                }
+            } else {
+                // Object was promoted to OLD (age >= G_OLD1) in previous mark_old phase
+                // This can happen for OLD1 objects - they're not young anymore, skip them
+                // Don't add back to new_young_list
+            }
+        }
+
+        // Restore young_objects list with survivors
+        self.young_objects = new_young_list;
+
+        // Process finobj and tobefnz lists
+        added_old1 += self.sweep_gen_finobj();
+
+        added_old1
+    }
+
+    /// Sweep finobj list in generational mode
+    /// Returns: bytes promoted to OLD1 generation
+    fn sweep_gen_finobj(&mut self) -> isize {
+        let other_white = 1 - self.current_white;
+        let mut added_old1: isize = 0;
+        let mut i = 0;
+
+        while i < self.finobj.len() {
+            let gc_ptr = self.finobj[i];
+
+            if let Some(header) = gc_ptr.header() {
+                let age = header.age();
+
+                if age == G_NEW {
+                    if header.is_dead(other_white) {
+                        // Dead with finalizer: move to tobefnz
+                        self.tobefnz.push(gc_ptr);
+                        self.finobj.swap_remove(i);
+                        continue;
+                    } else {
+                        // Alive: promote to G_SURVIVAL and make white
+                        if let Some(header_mut) = gc_ptr.header_mut() {
+                            header_mut.set_age(Self::next_age(age));
+                            header_mut.make_white(self.current_white);
+                        }
+                    }
+                } else if age == G_SURVIVAL || age == G_OLD0 {
+                    if header.is_dead(other_white) {
+                        // Dead: move to tobefnz
+                        self.tobefnz.push(gc_ptr);
+                        self.finobj.swap_remove(i);
+                        continue;
+                    } else {
+                        // Alive: promote to G_OLD1 and keep color
+                        if let Some(header_mut) = gc_ptr.header_mut() {
+                            let old_age = header_mut.age();
+                            let new_age = Self::next_age(old_age);
+                            header_mut.set_age(new_age);
+
+                            // Track bytes becoming OLD1
+                            if new_age == G_OLD1 {
+                                if let Some(h) = gc_ptr.header() {
+                                    added_old1 += h.size as isize;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            i += 1;
+        }
+
+        // Also sweep tobefnz list
+        let mut j = 0;
+        while j < self.tobefnz.len() {
+            let gc_ptr = self.tobefnz[j];
+
+            if let Some(header) = gc_ptr.header_mut() {
+                let age = header.age();
+                if age < G_OLD && !header.is_dead(other_white) {
+                    // Resurrected or still alive: advance age
+                    let new_age = Self::next_age(age);
+                    header.set_age(new_age);
+
+                    if new_age == G_OLD1 {
+                        if let Some(h) = gc_ptr.header() {
+                            added_old1 += h.size as isize;
+                        }
+                    }
+                }
+            }
+
+            j += 1;
+        }
+
+        added_old1
     }
 
     // ============ GC Write Barriers (from lgc.c) ============
@@ -2203,7 +2599,7 @@ impl GC {
     /// Forward barrier (luaC_barrier_)
     /// Called when a black object 'o' is modified to point to white object 'v'
     /// This maintains the invariant: black objects cannot point to white objects
-    pub fn barrier(&mut self, o_ptr: GcObjectPtr, v_ptr: GcObjectPtr) {
+    pub fn barrier(&mut self, l: &mut LuaState, o_ptr: GcObjectPtr, v_ptr: GcObjectPtr) {
         // Check if 'o' is black and 'v' is white
         let (o_black, o_old) = if let Some(o) = o_ptr.header() {
             (o.is_black(), o.is_old())
@@ -2227,7 +2623,7 @@ impl GC {
         // Must keep invariant during mark phase
         if self.gc_state.keep_invariant() {
             // Mark 'v' immediately to restore invariant
-            self.mark_object(v_ptr);
+            self.mark_object(l, v_ptr);
 
             // Generational invariant: if 'o' is old, make 'v' OLD0
             if o_old {
@@ -2301,22 +2697,290 @@ impl GC {
         }
     }
 
-    /// Mark an object (helper for barrier)
-    fn mark_object(&mut self, gc_ptr: GcObjectPtr) {
-        if let Some(header) = gc_ptr.header_mut() {
-            // Only need to mark if it is white
-            if header.is_white() {
-                match gc_ptr.kind() {
-                    GcObjectKind::String | GcObjectKind::Binary => {
-                        header.make_black(); // Leaves become black immediately
-                    }
-                    _ => {
-                        header.make_gray(); // Others become gray
-                        self.gray.push(gc_ptr);
-                    }
+    /// Mark a value (add to gray list if collectable)
+    ///
+    /// From lgc.c (Lua 5.5):
+    /// ```c
+    /// #define markvalue(g,o) { checkliveness(mainthread(g),o); \
+    ///   if (valiswhite(o)) reallymarkobject(g,gcvalue(o)); }
+    ///
+    /// static void reallymarkobject (global_State *g, GCObject *o) {
+    ///   g->GCmarked += objsize(o);
+    ///   switch (o->tt) {
+    ///     case LUA_VSHRSTR:
+    ///     case LUA_VLNGSTR: {
+    ///       set2black(o);  /* nothing to visit */
+    ///       break;
+    ///     }
+    ///     case LUA_VUPVAL: {
+    ///       UpVal *uv = gco2upv(o);
+    ///       if (upisopen(uv))
+    ///         set2gray(uv);  /* open upvalues are kept gray */
+    ///       else
+    ///         set2black(uv);  /* closed upvalues are visited here */
+    ///       markvalue(g, uv->v.p);
+    ///       break;
+    ///     }
+    ///     // ... tables, closures, threads, userdata, protos -> linkobjgclist(o, g->gray)
+    ///   }
+    /// }
+    /// ```.
+    fn really_mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
+        self.gc_marked += gc_ptr.header().map(|it| it.size as isize).unwrap_or(0);
+        match gc_ptr {
+            GcObjectPtr::String(_) | GcObjectPtr::Binary(_) => {
+                gc_ptr.header_mut().unwrap().make_black(); // Leaves become black immediately
+            }
+            GcObjectPtr::Upvalue(upval_ptr) => {
+                let uv = upval_ptr.as_mut_ref();
+                if uv.data.is_open() {
+                    uv.header.make_gray();
+                } else {
+                    uv.header.make_black();
+                }
+
+                let value = &uv.data.get_value();
+                self.mark_value(l, value);
+            }
+            GcObjectPtr::Userdata(u_ptr) => {
+                let ud = u_ptr.as_mut_ref();
+                ud.header.make_black();
+                if let Some(metatable) = ud.data.get_metatable() {
+                    self.mark_object(l, metatable.as_gc_ptr().unwrap());
+                }
+            }
+            _ => {
+                let header = gc_ptr.header_mut().unwrap();
+                // CRITICAL: Only add to gray list if not already gray
+                // This prevents infinite loops in converge_ephemerons
+                if !header.is_gray() {
+                    header.make_gray(); // Others become gray
+                    self.gray.push(gc_ptr);
                 }
             }
         }
+    }
+
+    /// Mark an object (helper for barrier)
+    fn mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
+        if let Some(header) = gc_ptr.header_mut() {
+            // Only need to mark if it is white
+            if header.is_white() {
+                self.really_mark_object(l, gc_ptr);
+            }
+        }
+    }
+
+    /// Get the next object to be finalized from the 'tobefnz' list.
+    /// Port of Lua 5.5's udata2finalize:
+    /// ```c
+    /// static GCObject *udata2finalize (global_State *g) {
+    ///   GCObject *o = g->tobefnz;  /* get first element */
+    ///   lua_assert(tofinalize(o));
+    ///   g->tobefnz = o->next;  /* remove it from 'tobefnz' list */
+    ///   o->next = g->allgc;  /* return it to 'allgc' list */
+    ///   g->allgc = o;
+    ///   resetbit(o->marked, FINALIZEDBIT);  /* object is "normal" again */
+    ///   if (issweepphase(g))
+    ///     makewhite(g, o);  /* "sweep" object */
+    ///   else if (getage(o) == G_OLD1)
+    ///     g->firstold1 = o;  /* it is the first OLD1 object in the list */
+    ///   return o;
+    /// }
+    /// ```
+    ///
+    /// NOTE: In Rust with Vec pool, we don't physically move objects.
+    /// The object stays in gc_list, we just remove it from tobefnz.
+    fn udata2finalize(&mut self) -> Option<GcObjectPtr> {
+        if self.tobefnz.is_empty() {
+            return None;
+        }
+
+        // Get first element from tobefnz
+        let gc_ptr = self.tobefnz.pop()?;
+
+        // Reset FINALIZEDBIT (object is "normal" again)
+        if let Some(header) = gc_ptr.header_mut() {
+            header.clear_finalized();
+
+            // CRITICAL: Make the object white with current_white color
+            // This ensures that if the object is resurrected (referenced again)
+            // during finalization, it won't be swept in the next GC cycle.
+            // Lua 5.5 does this implicitly by calling resetbits which sets to
+            // currentwhite.
+            header.make_white(self.current_white);
+
+            // If age is G_OLD1 in generational mode, note this
+            // (In C, this updates g->firstold1 pointer)
+            // In our Vec pool design, we don't need to track this explicitly
+        }
+
+        Some(gc_ptr)
+    }
+
+    /// Call ONE finalizer (__gc metamethod) for the next object in tobefnz.
+    /// Port of Lua 5.5's GCTM:
+    /// ```c
+    /// static void GCTM (lua_State *L) {
+    ///   global_State *g = G(L);
+    ///   const TValue *tm;
+    ///   TValue v;
+    ///   lua_assert(!g->gcemergency);
+    ///   setgcovalue(L, &v, udata2finalize(g));
+    ///   tm = luaT_gettmbyobj(L, &v, TM_GC);
+    ///   if (!notm(tm)) {  /* is there a finalizer? */
+    ///     TStatus status;
+    ///     lu_byte oldah = L->allowhook;
+    ///     lu_byte oldgcstp  = g->gcstp;
+    ///     g->gcstp |= GCSTPGC;  /* avoid GC steps */
+    ///     L->allowhook = 0;  /* stop debug hooks during GC metamethod */
+    ///     setobj2s(L, L->top.p++, tm);  /* push finalizer... */
+    ///     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
+    ///     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */
+    ///     status = luaD_pcall(L, dothecall, NULL, savestack(L, L->top.p - 2), 0);
+    ///     L->ci->callstatus &= ~CIST_FIN;  /* not running a finalizer anymore */
+    ///     L->allowhook = oldah;  /* restore hooks */
+    ///     g->gcstp = oldgcstp;  /* restore state */
+    ///     if (l_unlikely(status != LUA_OK)) {  /* error while running __gc? */
+    ///       luaE_warnerror(L, "__gc");
+    ///       L->top.p--;  /* pops error object */
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    fn call_one_finalizer(&mut self, l: &mut LuaState) {
+        use crate::lua_vm::get_metamethod_event;
+
+        debug_assert!(!self.gc_emergency, "GCTM called during emergency GC");
+
+        // Get next object to finalize
+        let Some(gc_ptr) = self.udata2finalize() else {
+            return; // No more objects to finalize
+        };
+
+        // Convert GcObjectPtr to LuaValue
+        let obj_value = match gc_ptr {
+            GcObjectPtr::Table(ptr) => LuaValue::table(ptr),
+            GcObjectPtr::Userdata(ptr) => LuaValue::userdata(ptr),
+            GcObjectPtr::Thread(ptr) => LuaValue::thread(ptr),
+            // Other types don't support __gc
+            _ => return,
+        };
+
+        // Get __gc metamethod
+        let Some(gc_method) = get_metamethod_event(l, &obj_value, TmKind::Gc) else {
+            return; // No __gc metamethod
+        };
+
+        // Stop GC during finalization (g->gcstp |= GCSTPGC)
+        let old_stopped = self.gc_stopped;
+        let old_debt = self.gc_debt;
+        self.gc_stopped = true;
+
+        // TODO: Save and restore L->allowhook (requires VM support)
+        // TODO: Set L->ci->callstatus |= CIST_FIN (requires VM support)
+
+        // Call __gc(obj) using pcall to handle errors safely
+        let result = l.pcall(gc_method, vec![obj_value]);
+
+        // TODO: Clear CIST_FIN flag
+        // TODO: Restore allowhook
+
+        // Restore GC state
+        self.gc_stopped = old_stopped;
+        self.gc_debt = old_debt;
+
+        // If error occurred, warn but don't propagate
+        // Lua 5.5: luaE_warnerror(L, "__gc");
+        if result.is_err() {
+            let msg = l.get_error_msg(LuaError::RuntimeError);
+            eprintln!("Error in __gc metamethod: {}", msg);
+        }
+    }
+
+    /// Call all pending finalizers (used in non-step contexts like finish_gen_cycle).
+    /// This is NOT how Lua 5.5 normally runs finalizers (it uses GCTM one at a time),
+    /// but useful for batch processing when appropriate.
+    fn call_all_pending_finalizers(&mut self, l: &mut LuaState) {
+        while !self.tobefnz.is_empty() && !self.gc_emergency {
+            self.call_one_finalizer(l);
+        }
+    }
+
+    // static void separatetobefnz (global_State *g, int all) {
+    //     GCObject *curr;
+    //     GCObject **p = &g->finobj;
+    //     GCObject **lastnext = findlast(&g->tobefnz);
+    //     while ((curr = *p) != g->finobjold1) {  /* traverse all finalizable objects */
+    //         lua_assert(tofinalize(curr));
+    //         if (!(iswhite(curr) || all))  /* not being collected? */
+    //         p = &curr->next;  /* don't bother with it */
+    //         else {
+    //         if (curr == g->finobjsur)  /* removing 'finobjsur'? */
+    //             g->finobjsur = curr->next;  /* correct it */
+    //         *p = curr->next;  /* remove 'curr' from 'finobj' list */
+    //         curr->next = *lastnext;  /* link at the end of 'tobefnz' list */
+    //         *lastnext = curr;
+    //         lastnext = &curr->next;
+    //         }
+    //     }
+    // }
+    fn separate_to_be_finalized(&mut self, all: bool) {
+        let mut i = 0;
+        while i < self.finobj.len() {
+            let gc_ptr = self.finobj[i];
+
+            let is_white = gc_ptr
+                .header()
+                .map(|header| header.is_white())
+                .unwrap_or(false);
+
+            if is_white || all {
+                // Remove from finobj
+                self.finobj.swap_remove(i);
+                // Add to tobefnz
+                self.tobefnz.push(gc_ptr);
+            } else {
+                i += 1; // Only increment if not removed
+            }
+        }
+    }
+
+    fn mark_being_finalized(&mut self, l: &mut LuaState) {
+        for gc_ptr in self.tobefnz.clone() {
+            self.mark_object(l, gc_ptr);
+        }
+    }
+
+    pub fn get_error_message(&mut self) -> String {
+        if let Some(msg) = std::mem::take(&mut self.gc_error_msg) {
+            msg
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn disable_memory_check(&mut self) {
+        self.gc_memory_check = false;
+    }
+
+    pub fn enable_memory_check(&mut self) {
+        self.gc_memory_check = true;
+    }
+
+    pub fn check_memory(&mut self) -> LuaResult<()> {
+        let total_bytes = self.get_total_bytes();
+        let limit_bytes = self.get_limit_bytes();
+        if total_bytes > limit_bytes {
+            // For simple test, later will return an error instead of panic
+            self.gc_error_msg = Some(format!(
+                "Memory limit exceeded: {} bytes allocated (limit: {} bytes)",
+                total_bytes, limit_bytes,
+            ));
+            return Err(LuaError::OutOfMemory);
+        }
+
+        Ok(())
     }
 }
 
@@ -2324,14 +2988,27 @@ impl GC {
 #[derive(Debug)]
 enum StepResult {
     Work(isize), // Amount of work done
-    Pause,       // Reached pause state
-    Atomic,      // Completed atomic phase
-    #[allow(unused)]
-    MinorMode, // Returned to minor mode
+    Step2Pause,  // Reached pause state
+    AtomicStep,  // Completed atomic phase
+    Step2Minor,  // Returned to minor mode
 }
 
 impl Default for GC {
     fn default() -> Self {
-        Self::new()
+        Self::new(SafeOption::default())
+    }
+}
+
+#[derive(Debug)]
+enum SweepGc {
+    AllGc(usize),
+    FinObj(usize),
+    ToBeFnz(usize),
+    Done,
+}
+
+impl SweepGc {
+    fn is_done(&self) -> bool {
+        matches!(self, SweepGc::Done)
     }
 }

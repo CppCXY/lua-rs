@@ -120,7 +120,7 @@ fn utf8_char(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    let s = l.create_string(&result);
+    let s = l.create_string(&result)?;
     l.push_value(s)?;
     Ok(1)
 }
@@ -135,7 +135,7 @@ fn utf8_codes(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Create state table: {string = s, position = 0}
-    let state_table = l.create_table(2, 0);
+    let state_table = l.create_table(2, 0)?;
     let string_key = LuaValue::integer(1);
     let position_key = LuaValue::integer(2);
 

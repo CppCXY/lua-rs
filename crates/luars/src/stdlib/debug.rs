@@ -86,7 +86,7 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    let result = l.create_string(&trace);
+    let result = l.create_string(&trace)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -94,18 +94,16 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
 /// debug.getinfo([thread,] f [, what]) - Get function info
 fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
     // Simplified implementation: just return a table with basic info
-    let vm = l.vm_mut();
-    let info_table = vm.create_table(0, 4);
+    let info_table = l.create_table(0, 4)?;
 
     // Set some basic fields
-    let source_key = vm.create_string("source");
-    let source_val = vm.create_string("=[C]");
-    vm.raw_set(&info_table, source_key, source_val);
+    let source_key = l.create_string("source")?;
+    let source_val = l.create_string("=[C]")?;
+    l.raw_set(&info_table, source_key, source_val);
 
-    let what_key = vm.create_string("what");
-    let what_val = vm.create_string("C");
-    vm.raw_set(&info_table, what_key, what_val);
-
+    let what_key = l.create_string("what")?;
+    let what_val = l.create_string("C")?;
+    l.raw_set(&info_table, what_key, what_val);
     l.push_value(info_table)?;
     Ok(1)
 }

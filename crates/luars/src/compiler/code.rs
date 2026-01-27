@@ -990,7 +990,7 @@ fn integer_k(fs: &mut FuncState, i: i64) -> usize {
 // static int stringK (FuncState *fs, TString *s)
 pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     // Intern string to ObjectPool and get StringId
-    let string = fs.vm.create_string(&s);
+    let string = fs.vm.create_string(&s).unwrap();
 
     // Add LuaValue with StringId to constants (check for duplicates)
     // For strings, key == value (strings are deduplicated globally)

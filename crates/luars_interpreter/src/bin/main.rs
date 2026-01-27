@@ -7,7 +7,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
 
 const VERSION: &str = "Lua-RS 5.5 (compatible)";
-const COPYRIGHT: &str = "Copyright (C) 2026 lua-rs contributors";
+const COPYRIGHT: &str = "Copyright (C) 2026 lua-rs CppCXY";
 
 fn print_usage() {
     eprintln!("usage: lua [options] [script [args]]");
@@ -165,15 +165,15 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
         Ok(chunk) => {
             match vm.execute(Rc::new(chunk)) {
                 Ok(_) => Ok(()),
-                Err(_) => {
+                Err(e) => {
                     // Generate traceback for uncaught runtime errors
-                    let error_msg = vm.get_error_message();
-                    let traceback = vm.generate_traceback(error_msg);
+                    let error_msg = vm.get_error_message(e);
+                    let traceback = vm.generate_traceback(&error_msg);
                     Err(traceback.to_string())
                 }
             }
         }
-        Err(e) => Err(format!("{}: {}: {}", filename, e, vm.get_error_message())),
+        Err(e) => Err(format!("{}: {}: {}", filename, e, vm.get_error_message(e))),
     }
 }
 
@@ -292,7 +292,12 @@ fn main() {
     }
 
     // Create VM
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = LuaVM::new(SafeOption {
+        max_stack_size: 10000000,
+        max_call_depth: 256,
+        short_string_limit: 40,
+        max_memory_limit: 1024 * 1024 * 1024, // 1 GB
+    });
     vm.open_stdlib(stdlib::Stdlib::All).unwrap();
 
     // Setup arg table
@@ -311,9 +316,9 @@ fn main() {
     for code in &opts.execute_strings {
         match vm.compile(code) {
             Ok(chunk) => {
-                if let Err(_) = vm.execute(Rc::new(chunk)) {
-                    let error_msg = vm.get_error_message();
-                    let traceback = vm.generate_traceback(error_msg);
+                if let Err(e) = vm.execute(Rc::new(chunk)) {
+                    let error_msg = vm.get_error_message(e);
+                    let traceback = vm.generate_traceback(&error_msg);
                     eprintln!("lua: Runtime Error: {}", traceback);
                     std::process::exit(1);
                 }
