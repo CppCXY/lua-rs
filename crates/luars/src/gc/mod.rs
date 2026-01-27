@@ -1207,6 +1207,9 @@ impl GC {
             }
 
             for gc_ptr in to_clear_hash_set {
+                if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                    Self::remove_dead_string_from_intern(l, str_ptr);
+                }
                 self.gc_list.remove(gc_ptr);
             }
         }
@@ -2118,6 +2121,12 @@ impl GC {
     }
 
     fn sweep2old(&mut self, _l: &mut LuaState, to_clear_list: &mut HashSet<GcObjectPtr>) {
+        // CRITICAL: Use other_white to distinguish dead objects from new objects
+        // - current_white: new objects created in this cycle
+        // - other_white: dead objects from previous cycle
+        // Port of Lua 5.5 lgc.c sweep2old: uses isdeadm(ow, marked)
+        let other_white = GcHeader::otherwhite(self.current_white);
+        
         let mut i = self.gc_list.len();
         while i > 0 {
             i -= 1;
@@ -2131,7 +2140,10 @@ impl GC {
                 continue;
             };
 
-            if header.is_white() {
+            // CRITICAL FIX: Use is_dead(other_white) instead of is_white()
+            // is_white() returns true for BOTH current_white and other_white
+            // But we only want to clear objects with other_white (dead objects)
+            if header.is_dead(other_white) {
                 to_clear_list.insert(gc_ptr);
             } else {
                 if let Some(header_mut) = gc_ptr.header_mut() {
