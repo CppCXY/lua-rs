@@ -2,6 +2,7 @@
 mod hash_table;
 mod type_array;
 mod value_array;
+pub mod native_table;
 
 use super::lua_value::LuaValue;
 use crate::{

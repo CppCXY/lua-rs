@@ -826,6 +826,25 @@ impl LuaValue {
     fn raw_ptr_repr(&self) -> *const u8 {
         unsafe { self.value.ptr }
     }
+    
+    /// Get hash value for this LuaValue (for native table implementation)
+    #[inline(always)]
+    pub fn hash_value(&self) -> u64 {
+        let tt = self.tt();
+        
+        // Fast path for strings: use precomputed hash
+        if tt == LUA_VSTR {
+            return unsafe { (*(self.value.ptr as *const GcString)).data.hash };
+        }
+        
+        // For integers, use direct value
+        if tt == LUA_VNUMINT {
+            return unsafe { self.value.i as u64 };
+        }
+        
+        // For other types, use pointer or value bits
+        unsafe { self.value.i as u64 }
+    }
 }
 
 impl PartialEq for LuaValue {
