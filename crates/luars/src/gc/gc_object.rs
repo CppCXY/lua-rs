@@ -801,6 +801,52 @@ impl GcList {
     pub fn iter_ptrs(&self) -> impl Iterator<Item = GcObjectPtr> + '_ {
         self.gc_list.iter().map(|obj| obj.as_gc_ptr())
     }
+
+    /// Check if an object is in this list by checking its index
+    /// O(1) check using the object's stored index
+    #[inline]
+    pub fn contains(&self, gc_ptr: GcObjectPtr) -> bool {
+        let index = gc_ptr.index();
+        if index < self.gc_list.len() {
+            // Verify it's actually the same object (not just same index)
+            self.gc_list[index].as_gc_ptr() == gc_ptr
+        } else {
+            false
+        }
+    }
+
+    /// Try to remove an object, returning Some(owner) if found, None otherwise
+    #[inline]
+    pub fn try_remove(&mut self, gc_ptr: GcObjectPtr) -> Option<GcObjectOwner> {
+        if self.contains(gc_ptr) {
+            Some(self.remove(gc_ptr))
+        } else {
+            None
+        }
+    }
+
+    /// Get GcObjectOwner by index (for iteration with ownership)
+    /// This method panics if index is out of bounds
+    #[inline]
+    pub fn get_owner(&self, index: usize) -> &GcObjectOwner {
+        &self.gc_list[index]
+    }
+
+    /// Take all objects out and return as Vec, leaving self empty
+    #[inline]
+    pub fn take_all(&mut self) -> Vec<GcObjectOwner> {
+        std::mem::take(&mut self.gc_list)
+    }
+
+    /// Add multiple objects (used when moving between generation lists)
+    #[inline]
+    pub fn add_all(&mut self, objects: Vec<GcObjectOwner>) {
+        for mut obj in objects {
+            let index = self.gc_list.len();
+            obj.header_mut().index = index;
+            self.gc_list.push(obj);
+        }
+    }
 }
 
 impl Default for GcList {

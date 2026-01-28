@@ -332,7 +332,7 @@ pub fn call_tm_res(
 
     // Call the metamethod with nresults=1
     if metamethod.is_cfunction() {
-        call::call_c_function(lua_state, func_pos, 2, 1)?;
+        call_c_function(lua_state, func_pos, 2, 1)?;
     } else if let Some(func_body) = metamethod.as_lua_function() {
         let is_lua = func_body.is_lua_function();
 
