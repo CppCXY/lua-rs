@@ -870,13 +870,13 @@ impl GC {
     /// Clear entries with unmarked keys from ephemeron and fully weak tables
     fn clear_by_keys(&mut self, l: &mut LuaState) {
         // Clear ephemeron tables
-        let ephemeron_list = std::mem::take(&mut self.ephemeron);
+        let ephemeron_list = self.ephemeron.clone();
         for table_ptr in ephemeron_list {
             self.clear_table_by_keys(l, table_ptr);
         }
 
         // Clear fully weak tables
-        let allweak_list = std::mem::take(&mut self.allweak);
+        let allweak_list = self.allweak.clone();
         for table_ptr in allweak_list {
             self.clear_table_by_keys(l, table_ptr);
         }
@@ -889,9 +889,7 @@ impl GC {
         let mut keys_to_remove = Vec::new();
 
         for key in entries {
-            if !key.is_string()
-                && let Some(key_ptr) = key.as_gc_ptr()
-            {
+            if let Some(key_ptr) = key.as_gc_ptr() {
                 if self.is_cleared(l, key_ptr) {
                     keys_to_remove.push(key);
                 }
