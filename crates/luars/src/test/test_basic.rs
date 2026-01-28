@@ -1,13 +1,11 @@
 // Tests for basic library functions
 use crate::*;
 
-fn test_lua(code: &str) -> LuaResult<LuaValue> {
-    execute(code)
-}
-
 #[test]
 fn test_print() {
-    let result = test_lua(
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.execute_string(
         r#"
         print("Hello, World!")
         print(1, 2, 3)
