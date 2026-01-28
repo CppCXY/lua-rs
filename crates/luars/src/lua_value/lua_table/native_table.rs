@@ -170,12 +170,32 @@ impl NativeTable {
             *self.get_arr_tag(k) = luaval.tt;
             *self.get_arr_val(k) = luaval.value;
             
-            // Update lenhint if adding at the end
+            // Update lenhint
             let lenhint = *self.lenhint_ptr();
-            if lua_index == lenhint as i64 + 1 && !luaval.is_nil() {
-                *self.lenhint_ptr() = lenhint + 1;
-            } else if lua_index == lenhint as i64 && luaval.is_nil() && lenhint > 0 {
-                *self.lenhint_ptr() = lenhint - 1;
+            
+            if !luaval.is_nil() {
+                // Adding a non-nil value
+                if lua_index == lenhint as i64 + 1 {
+                    // Extending the array
+                    *self.lenhint_ptr() = lenhint + 1;
+                } else if lua_index > lenhint as i64 + 1 {
+                    // Adding beyond lenhint - lenhint stays the same (there's a hole)
+                }
+            } else {
+                // Setting to nil - need to recalculate lenhint if within current range
+                if lua_index <= lenhint as i64 {
+                    // Find the new lenhint by scanning backwards from lua_index-1
+                    let mut new_lenhint = (lua_index - 1) as u32;
+                    while new_lenhint > 0 {
+                        let check_idx = new_lenhint as usize - 1;
+                        let tag = *self.get_arr_tag(check_idx);
+                        if tag != LUA_VNIL && tag != LUA_VEMPTY {
+                            break;
+                        }
+                        new_lenhint -= 1;
+                    }
+                    *self.lenhint_ptr() = new_lenhint;
+                }
             }
         }
     }
