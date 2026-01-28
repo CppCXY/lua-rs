@@ -1543,21 +1543,18 @@ impl GC {
     fn traverse_strong_table(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
         let gc_table = table_ptr.as_mut_ref();
         let table = &gc_table.data;
-        if table.is_array() {
-            self.traverse_array(l, table_ptr);
-        } else {
-            // CRITICAL FIX: Use for_each_entry() to iterate by index directly
-            // This avoids both allocating Vec (iter_all) and repeated lookups (next)
-            // Port of Lua 5.5's direct pointer iteration: `for (n = gnode(h, 0); n < limit; n++)`
-            table.for_each_entry(|k, v| {
-                if let Some(k_ptr) = k.as_gc_ptr() {
-                    self.mark_object(l, k_ptr);
-                }
-                if let Some(v_ptr) = v.as_gc_ptr() {
-                    self.mark_object(l, v_ptr);
-                }
-            });
-        }
+        
+        // Use for_each_entry() to iterate all entries (both array and hash parts)
+        // This avoids both allocating Vec (iter_all) and repeated lookups (next)
+        // Port of Lua 5.5's direct pointer iteration: `for (n = gnode(h, 0); n < limit; n++)`
+        table.for_each_entry(|k, v| {
+            if let Some(k_ptr) = k.as_gc_ptr() {
+                self.mark_object(l, k_ptr);
+            }
+            if let Some(v_ptr) = v.as_gc_ptr() {
+                self.mark_object(l, v_ptr);
+            }
+        });
 
         self.gen_link(table_ptr.into());
     }
@@ -1783,11 +1780,8 @@ impl GC {
             }
         }
 
-        if gc_table.data.is_array() {
-            1 + gc_table.data.len() as usize // Estimate of work done
-        } else {
-            1 + 2 * gc_table.data.hash_size() as usize // Estimate of work done
-        }
+        // Estimate work done: 1 + total entries (array + hash)
+        1 + gc_table.data.len() + gc_table.data.hash_size()
     }
 
     fn traverse_function(&mut self, l: &mut LuaState, func_ptr: FunctionPtr) -> usize {
