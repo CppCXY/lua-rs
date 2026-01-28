@@ -1426,45 +1426,21 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    // CRITICAL: Update frame.top before potential metamethod call
-                    // This ensures metamethods don't overwrite active registers
-                    let write_pos = base + a;
-                    let call_info = lua_state.get_call_info_mut(frame_idx);
-                    if write_pos + 1 > call_info.top {
-                        call_info.top = write_pos + 1;
-                        lua_state.set_top(write_pos + 1)?;
-                    }
-
-                    // PERFORMANCE: Use cached upvalue pointer for direct access
-                    if b >= upvalue_ptrs.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("GETTABUP: invalid upvalue index {}", b))
-                        );
-                    }
-
                     let table_value = upvalue_ptrs[b].as_ref().data.get_value();
-
-                    // Get key from constants (K[C])
-                    if c >= constants.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("GETTABUP: invalid constant index {}", c))
-                        );
-                    }
                     let key = &constants[c];
 
-                    // Get value from table[key]
-                    // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
-                    // This is safe because LuaValue holds a valid pointer to the table data
+                    // Fast path: direct table access without metamethod
                     let result = if let Some(table) = table_value.as_table() {
-                        // Fast path: direct table access
-                        let direct_result = table.raw_get(key);
-
-                        if direct_result.is_some() {
-                            direct_result.unwrap()
+                        if let Some(val) = table.raw_get(key) {
+                            val
                         } else {
-                            // Key not found, try __index metamethod with Protect pattern
+                            // Key not found, need metamethod - update frame state
+                            let write_pos = base + a;
+                            let call_info = lua_state.get_call_info_mut(frame_idx);
+                            if write_pos + 1 > call_info.top {
+                                call_info.top = write_pos + 1;
+                                lua_state.set_top(write_pos + 1)?;
+                            }
                             save_pc!();
                             let result =
                                 helper::lookup_from_metatable(lua_state, &table_value, key);
@@ -1472,7 +1448,13 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                             result.unwrap_or(LuaValue::nil())
                         }
                     } else {
-                        // Not a table, try __index metamethod
+                        // Not a table, need metamethod
+                        let write_pos = base + a;
+                        let call_info = lua_state.get_call_info_mut(frame_idx);
+                        if write_pos + 1 > call_info.top {
+                            call_info.top = write_pos + 1;
+                            lua_state.set_top(write_pos + 1)?;
+                        }
                         save_pc!();
                         let result = helper::lookup_from_metatable(lua_state, &table_value, key);
                         restore_state!();
@@ -1490,38 +1472,17 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
 
-                    // PERFORMANCE: Use cached upvalue pointer for direct access
-                    if a >= upvalue_ptrs.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("SETTABUP: invalid upvalue index {}", a))
-                        );
-                    }
                     let table_value = upvalue_ptrs[a].as_ref().data.get_value();
-
-                    // Get key from constants (K[B])
-                    if b >= constants.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("SETTABUP: invalid constant index {}", b))
-                        );
-                    }
                     let key = constants[b];
 
                     // Get value (RK: register or constant)
                     let value = if k {
-                        if c >= constants.len() {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("SETTABUP: invalid constant".to_string()));
-                        }
                         constants[c]
                     } else {
-                        let stack = lua_state.stack_mut();
-                        stack[base + c]
+                        lua_state.stack_mut()[base + c]
                     };
 
                     // Set table[key] = value
-                    // OPTIMIZATION: Bypass ObjectPool lookup by accessing raw table pointer directly
                     if table_value.is_table() {
                         lua_state.raw_set(&table_value, key, value);
                     }

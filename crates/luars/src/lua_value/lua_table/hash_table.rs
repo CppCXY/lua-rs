@@ -2,18 +2,68 @@ use crate::{
     LuaResult, LuaValue,
     lua_value::{LuaTableImpl, lua_table::LuaInsertResult},
 };
-use ahash::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use indexmap::IndexMap;
 
-/// 高性能Lua哈希表实现 - 基于 indexmap + ahash
+/// 一个简单的 pass-through hasher，用于利用 LuaValue 的预计算哈希
+/// 对于字符串，LuaValue::hash() 直接使用预计算的哈希值，非常快
+#[derive(Default, Clone)]
+pub struct PassThroughHasher(u64);
+
+impl Hasher for PassThroughHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        // 简单的哈希组合，用于非字符串类型
+        for byte in bytes {
+            self.0 = self.0.wrapping_mul(31).wrapping_add(*byte as u64);
+        }
+    }
+    
+    #[inline(always)]
+    fn write_u64(&mut self, i: u64) {
+        // 对于字符串，LuaValue::hash() 会调用这个方法传入预计算的哈希值
+        // 我们直接使用它，不做额外计算
+        self.0 = i;
+    }
+    
+    #[inline(always)]
+    fn write_u8(&mut self, i: u8) {
+        self.0 = self.0.wrapping_mul(31).wrapping_add(i as u64);
+    }
+    
+    #[inline(always)]
+    fn write_i64(&mut self, i: i64) {
+        // 用于整数键
+        self.0 = i as u64;
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct PassThroughBuildHasher;
+
+impl BuildHasher for PassThroughBuildHasher {
+    type Hasher = PassThroughHasher;
+    
+    #[inline(always)]
+    fn build_hasher(&self) -> Self::Hasher {
+        PassThroughHasher(0)
+    }
+}
+
+/// 高性能Lua哈希表实现 - 基于 indexmap + PassThroughHasher
 ///
 /// 使用 indexmap::IndexMap 提供：
 /// 1. 高性能哈希表操作（基于 hashbrown）
 /// 2. 保持插入顺序（对 next() 迭代很重要）
-/// 3. ahash 提供更快的哈希算法
+/// 3. PassThroughHasher 直接利用 LuaValue 的预计算哈希值
 pub struct LuaHashTable {
-    /// 核心哈希表（使用 ahash）
-    map: IndexMap<LuaValue, LuaValue, RandomState>,
+    /// 核心哈希表（使用自定义 hasher）
+    map: IndexMap<LuaValue, LuaValue, PassThroughBuildHasher>,
 
     /// 数组部分长度记录（#操作符）
     array_len: usize,
@@ -22,7 +72,7 @@ pub struct LuaHashTable {
 impl LuaHashTable {
     pub fn new(capacity: usize) -> Self {
         Self {
-            map: IndexMap::with_capacity_and_hasher(capacity, RandomState::new()),
+            map: IndexMap::with_capacity_and_hasher(capacity, PassThroughBuildHasher),
             array_len: 0,
         }
     }
@@ -80,27 +130,31 @@ impl LuaTableImpl for LuaHashTable {
         LuaInsertResult::Update
     }
 
+    #[inline(always)]
     fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         self.map.get(key).copied()
     }
 
+    #[inline(always)]
     fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> LuaInsertResult {
-        let mut result = LuaInsertResult::Update;
         if value.is_nil() {
             self.map.shift_remove(key);
-            if let Some(k) = key.as_integer() {
-                self.update_array_len_remove(k);
+            if key.ttisinteger() {
+                self.update_array_len_remove(key.ivalue());
             }
-        } else {
-            if self.map.insert(*key, value).is_none() {
-                result = LuaInsertResult::NewKeyInserted;
-            }
-            if let Some(k) = key.as_integer() {
-                self.update_array_len_insert(k);
-            }
+            return LuaInsertResult::Update;
         }
-
-        result
+        
+        let old = self.map.insert(*key, value);
+        if key.ttisinteger() {
+            self.update_array_len_insert(key.ivalue());
+        }
+        
+        if old.is_none() {
+            LuaInsertResult::NewKeyInserted
+        } else {
+            LuaInsertResult::Update
+        }
     }
 
     fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {

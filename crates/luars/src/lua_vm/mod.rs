@@ -317,24 +317,19 @@ impl LuaVM {
         table.raw_get(key)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn raw_set(&mut self, table_value: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
         let Some(table) = table_value.as_table_mut() else {
             return false;
         };
         let new_key = table.raw_set(&key, value);
-        let mut need_barrier = false;
-        if new_key && key.is_collectable() {
-            // New key inserted - run GC barrier
-            need_barrier = true;
-        }
-
-        if value.is_collectable() {
-            need_barrier = true;
-        }
-
+        
         // GC backward barrier (luaC_barrierback)
-        // Tables use backward barrier since they may be modified many times
+        // Only needed when:
+        // 1. New key is inserted AND key is collectable, OR
+        // 2. Value is collectable
+        // Use branchless style for better performance
+        let need_barrier = (new_key && key.iscollectable()) || value.iscollectable();
         if need_barrier {
             self.gc.barrier_back(table_value.as_gc_ptr().unwrap());
         }

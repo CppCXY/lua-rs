@@ -829,24 +829,39 @@ impl LuaValue {
 }
 
 impl PartialEq for LuaValue {
+    #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
-        if self.tt() == other.tt() {
+        let tt = self.tt();
+        // Fast path: same type tag and same value bits
+        if tt == other.tt() {
+            // For all types except float-to-int comparison:
+            // - nil/boolean: value.i is 0/1, direct compare works
+            // - integer: direct i64 compare
+            // - string/table/function/etc: pointer compare (interned strings have same pointer)
+            // - float: bit-exact compare (NaN != NaN is correct for Lua)
             if unsafe { self.value.i == other.value.i } {
                 return true;
-            } else if self.ttisstring() {
-                // Compare string contents
+            }
+            // For strings, if pointers differ, content must differ (due to interning)
+            // So we don't need to compare content for short strings
+            // But long strings aren't interned, so we need to compare content
+            // LUA_VSTR = 0x44
+            if tt == LUA_VSTR {
+                // Compare string contents for long strings
                 let s1 = unsafe { &*(self.value.ptr as *const GcString) };
                 let s2 = unsafe { &*(other.value.ptr as *const GcString) };
-                return &s1.data == &s2.data;
+                // Fast path: if hash differs, strings differ
+                if s1.data.hash != s2.data.hash {
+                    return false;
+                }
+                return s1.data.str == s2.data.str;
             }
-
             return false;
-        } else if self.ttisinteger() && other.ttisfloat() {
+        } else if tt == LUA_VNUMINT && other.tt() == LUA_VNUMFLT {
             return self.ivalue() as f64 == other.fltvalue();
-        } else if self.ttisfloat() && other.ttisinteger() {
+        } else if tt == LUA_VNUMFLT && other.tt() == LUA_VNUMINT {
             return self.fltvalue() == other.ivalue() as f64;
         }
-
         false
     }
 }
@@ -933,10 +948,21 @@ impl std::fmt::Display for LuaValue {
 }
 
 impl std::hash::Hash for LuaValue {
-    #[inline]
+    #[inline(always)]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         let tt = self.tt();
 
+        // Fast path for strings: use precomputed hash directly
+        // This is the most common case for table lookups
+        // LUA_VSTR = 0x44 = LUA_TSTRING | BIT_ISCOLLECTABLE
+        if tt == LUA_VSTR {
+            // For strings, just hash the precomputed hash value
+            // No need to hash tt since we compare type in eq() anyway
+            let hash = unsafe { (*(self.value.ptr as *const GcString)).data.hash };
+            hash.hash(state);
+            return;
+        }
+        
         // Special handling for numbers to maintain equality invariant
         // (integer 1 == float 1.0, so they must hash the same)
         if tt == LUA_VNUMINT || tt == LUA_VNUMFLT {
@@ -955,10 +981,6 @@ impl std::hash::Hash for LuaValue {
         } else if tt <= LUA_VFALSE {
             // nil or boolean - hash type tag only
             tt.hash(state);
-        } else if self.ttisstring() {
-            tt.hash(state);
-            let s_ptr = unsafe { StringPtr::new(self.value.ptr as *const GcString) };
-            s_ptr.as_ref().data.hash.hash(state);
         } else {
             // Other GC types: hash type tag + pointer (they use identity for equality)
             tt.hash(state);

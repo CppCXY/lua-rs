@@ -175,6 +175,7 @@ impl LuaTable {
         }
     }
 
+    #[inline(always)]
     pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         match &self.impl_table {
             // LuaTableDetail::TypedArray(arr) => arr.raw_get(key),
@@ -184,9 +185,9 @@ impl LuaTable {
     }
 
     /// return true if new key inserted, false if updated existing key
+    #[inline(always)]
     pub(crate) fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
         let r = match &mut self.impl_table {
-            // LuaTableDetail::TypedArray(arr) => arr.raw_set(key, value),
             LuaTableDetail::ValueArray(arr) => arr.raw_set(key, value),
             LuaTableDetail::HashTable(map) => map.raw_set(key, value),
         };
