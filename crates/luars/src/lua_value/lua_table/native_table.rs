@@ -1,7 +1,7 @@
 // Native Lua 5.5-style table implementation
 // Port of ltable.c with minimal abstractions for maximum performance
 
-use crate::lua_value::{LuaValue, lua_value::{Value, LUA_VNIL}};
+use crate::lua_value::{LuaValue, lua_value::{Value, LUA_VNIL, LUA_VEMPTY}};
 use std::alloc::{self, Layout};
 use std::ptr;
 
@@ -17,13 +17,6 @@ struct Node {
     next: i32,
 }
 
-impl Node {
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.key.is_nil()
-    }
-}
-
 /// Dummy node for empty hash tables
 const DUMMY_NODE: Node = Node {
     value: LuaValue {
@@ -37,20 +30,34 @@ const DUMMY_NODE: Node = Node {
     next: 0,
 };
 
+// 禁用doc test
+
 /// Native Lua table implementation - mimics Lua 5.5's Table struct
+/// 
+/// Array layout (Lua 5.5 optimization):
+/// ```md,ignore
+///      Values                          Tags
+/// ----------------------------------------
+/// ... | Val1 | Val0 | lenhint | 0 | 1 | ...
+/// ----------------------------------------
+///                    ^ array pointer
+/// ```
+/// - Values are accessed with negative offsets: array[-1-k]
+/// - Tags are accessed with positive offsets: array[sizeof(u32) + k]
+/// - This saves 43% memory vs storing full TValue structs
 pub struct NativeTable {
-    /// Array part (for integer keys 1..asize)
-    array: *mut LuaValue,
-    /// Array size
+    /// Array pointer - points BETWEEN values and tags
+    /// Values stored at negative offsets, tags at positive offsets
+    /// Layout: [... Value1, Value0, lenhint(u32), tag0, tag1, ...]
+    ///                                ^ array points here
+    array: *mut u8,
+    /// Array size (number of elements)
     asize: u32,
     
     /// Hash part (Node array)
     node: *mut Node,
     /// log2 of hash size (size = 1 << lsizenode)
     lsizenode: u8,
-    
-    /// Cached array length for # operator
-    array_len: u32,
 }
 
 impl NativeTable {
@@ -61,7 +68,6 @@ impl NativeTable {
             asize: 0,
             node: ptr::null_mut(),
             lsizenode: 0,
-            array_len: 0,
         };
         
         // Allocate array part
@@ -108,52 +114,166 @@ impl NativeTable {
         self.node.is_null() || self.node == &DUMMY_NODE as *const Node as *mut Node
     }
     
+    /// Get pointer to tag for array index k (0-based C index)
+    #[inline(always)]
+    unsafe fn get_arr_tag(&self, k: usize) -> *mut u8 {
+        // array + sizeof(u32) + k
+        unsafe { self.array.add(std::mem::size_of::<u32>() + k) }
+    }
+    
+    /// Get pointer to value for array index k (0-based C index)
+    #[inline(always)]
+    unsafe fn get_arr_val(&self, k: usize) -> *mut Value {
+        // array - 1 - k (in Value units)
+        let value_ptr = self.array as *mut Value;
+        unsafe { value_ptr.sub(1 + k) }
+    }
+    
+    /// Get lenhint pointer
+    #[inline(always)]
+    unsafe fn lenhint_ptr(&self) -> *mut u32 {
+        self.array as *mut u32
+    }
+    
+    /// Read value from array at Lua index (1-based)
+    #[inline(always)]
+    unsafe fn read_array(&self, lua_index: i64) -> Option<LuaValue> {
+        if lua_index < 1 || lua_index > self.asize as i64 {
+            return None;
+        }
+        let k = (lua_index - 1) as usize; // Convert to 0-based C index
+        
+        unsafe {
+            let tt = *self.get_arr_tag(k);
+            
+            // Check if empty
+            if tt == LUA_VNIL || tt == LUA_VEMPTY {
+                return None;
+            }
+            
+            let val_ptr = self.get_arr_val(k);
+            let value = *val_ptr;
+            
+            Some(LuaValue { value, tt })
+        }
+    }
+    
+    /// Write value to array at Lua index (1-based)
+    #[inline(always)]
+    unsafe fn write_array(&mut self, lua_index: i64, luaval: LuaValue) {
+        if lua_index < 1 || lua_index > self.asize as i64 {
+            return;
+        }
+        let k = (lua_index - 1) as usize; // Convert to 0-based C index
+        
+        unsafe {
+            *self.get_arr_tag(k) = luaval.tt;
+            *self.get_arr_val(k) = luaval.value;
+            
+            // Update lenhint if adding at the end
+            let lenhint = *self.lenhint_ptr();
+            if lua_index == lenhint as i64 + 1 && !luaval.is_nil() {
+                *self.lenhint_ptr() = lenhint + 1;
+            } else if lua_index == lenhint as i64 && luaval.is_nil() && lenhint > 0 {
+                *self.lenhint_ptr() = lenhint - 1;
+            }
+        }
+    }
+    
     /// Resize array part
     fn resize_array(&mut self, new_size: u32) {
         if new_size == 0 {
             if !self.array.is_null() && self.asize > 0 {
-                let layout = Layout::array::<LuaValue>(self.asize as usize).unwrap();
-                unsafe { alloc::dealloc(self.array as *mut u8, layout) };
+                // Free old array
+                // Layout: [Values...][lenhint][Tags...]
+                let values_size = self.asize as usize * std::mem::size_of::<Value>();
+                let lenhint_size = std::mem::size_of::<u32>();
+                let tags_size = self.asize as usize;
+                let total_size = values_size + lenhint_size + tags_size;
+                
+                // array pointer points to lenhint, need to go back to start
+                let start_ptr = unsafe { self.array.sub(values_size) };
+                let layout = Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
+                unsafe { alloc::dealloc(start_ptr, layout) };
             }
             self.array = ptr::null_mut();
             self.asize = 0;
-            self.array_len = 0;
             return;
         }
         
         let old_size = self.asize;
-        let layout = Layout::array::<LuaValue>(new_size as usize).unwrap();
         
-        let new_array = unsafe { alloc::alloc(layout) as *mut LuaValue };
-        if new_array.is_null() {
+        // Calculate sizes
+        let values_size = new_size as usize * std::mem::size_of::<Value>();
+        let lenhint_size = std::mem::size_of::<u32>();
+        let tags_size = new_size as usize; // Each tag is 1 byte
+        let total_size = values_size + lenhint_size + tags_size;
+        
+        // Allocate new memory
+        let layout = Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
+        let start_ptr = unsafe { alloc::alloc(layout) };
+        if start_ptr.is_null() {
             panic!("Failed to allocate array");
         }
         
-        // Initialize new elements to nil
+        // Set array pointer to point at lenhint position
+        let new_array = unsafe { start_ptr.add(values_size) };
+        
+        // Initialize lenhint
         unsafe {
-            for i in 0..new_size {
-                ptr::write(new_array.add(i as usize), LuaValue::nil());
+            *(new_array as *mut u32) = 0;
+        }
+        
+        // Initialize all tags to nil
+        unsafe {
+            let tags_start = new_array.add(lenhint_size);
+            for i in 0..new_size as usize {
+                *tags_start.add(i) = LUA_VNIL;
             }
         }
         
-        // Copy old data
+        // Initialize all values to zero
+        unsafe {
+            let values_start = start_ptr as *mut Value;
+            for i in 0..new_size as usize {
+                ptr::write(values_start.add(i), Value { i: 0 });
+            }
+        }
+        
+        // Copy old data if exists
         if !self.array.is_null() && old_size > 0 {
             let copy_size = old_size.min(new_size) as usize;
+            
             unsafe {
-                ptr::copy_nonoverlapping(self.array, new_array, copy_size);
+                // Copy values - values are stored backward from array pointer
+                // Old: array_old - old_size*8 .. array_old
+                // New: array_new - new_size*8 .. array_new
+                // We need to copy the old values to the END of the new values section
+                let old_values_start = self.array.sub(old_size as usize * std::mem::size_of::<Value>()) as *const Value;
+                let new_values_end = new_array.sub(std::mem::size_of::<Value>()) as *mut Value;
+                let new_values_start_for_copy = new_values_end.sub(copy_size - 1);
+                ptr::copy_nonoverlapping(old_values_start, new_values_start_for_copy, copy_size);
+                
+                // Copy tags
+                let old_tags = self.array.add(std::mem::size_of::<u32>());
+                let new_tags = new_array.add(std::mem::size_of::<u32>());
+                ptr::copy_nonoverlapping(old_tags, new_tags, copy_size);
+                
+                // Copy lenhint
+                let old_lenhint = *(self.array as *const u32);
+                *(new_array as *mut u32) = old_lenhint.min(new_size);
             }
             
-            let old_layout = Layout::array::<LuaValue>(old_size as usize).unwrap();
-            unsafe { alloc::dealloc(self.array as *mut u8, old_layout) };
+            // Free old array
+            let old_values_size = old_size as usize * std::mem::size_of::<Value>();
+            let old_start = unsafe { self.array.sub(old_values_size) };
+            let old_total = old_values_size + lenhint_size + old_size as usize;
+            let old_layout = Layout::from_size_align(old_total, std::mem::align_of::<Value>()).unwrap();
+            unsafe { alloc::dealloc(old_start, old_layout) };
         }
         
         self.array = new_array;
         self.asize = new_size;
-        
-        // Update array_len if it's too large
-        if self.array_len > new_size {
-            self.array_len = new_size;
-        }
     }
     
     /// Resize hash part
@@ -232,10 +352,8 @@ impl NativeTable {
     /// Get value from array part
     #[inline(always)]
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
-        if key >= 1 && key <= self.asize as i64 {
-            let index = (key - 1) as usize;
-            let val = unsafe { *self.array.add(index) };
-            if !val.is_nil() {
+        unsafe {
+            if let Some(val) = self.read_array(key) {
                 return Some(val);
             }
         }
@@ -248,17 +366,22 @@ impl NativeTable {
     /// Set value in array part
     #[inline(always)]
     pub fn set_int(&mut self, key: i64, value: LuaValue) {
+        // If key is in valid array range
         if key >= 1 && key <= self.asize as i64 {
-            let index = (key - 1) as usize;
             unsafe {
-                *self.array.add(index) = value;
+                self.write_array(key, value);
             }
-            
-            // Update array_len
-            if key == self.array_len as i64 + 1 && !value.is_nil() {
-                self.array_len += 1;
-            } else if key == self.array_len as i64 && value.is_nil() {
-                self.array_len -= 1;
+            return;
+        }
+        
+        // If key is small positive integer, expand array
+        // This avoids putting simple sequential keys into hash part
+        if key >= 1 && key <= 64 {
+            // Resize array to accommodate this key
+            let new_size = ((key as u32).next_power_of_two()).max(4);
+            self.resize_array(new_size);
+            unsafe {
+                self.write_array(key, value);
             }
             return;
         }
@@ -327,10 +450,8 @@ impl NativeTable {
     pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         // Try array part for integers
         if let Some(i) = key.as_integer() {
-            if i >= 1 && i <= self.asize as i64 {
-                let index = (i - 1) as usize;
-                let val = unsafe { *self.array.add(index) };
-                if !val.is_nil() {
+            unsafe {
+                if let Some(val) = self.read_array(i) {
                     return Some(val);
                 }
             }
@@ -395,34 +516,259 @@ impl NativeTable {
         }
     }
     
-    /// Generic set
+    /// Generic set - returns true if new key was inserted
     #[inline(always)]
-    pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) {
+    pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
         // Try array part for integers
         if let Some(i) = key.as_integer() {
             if i >= 1 && i <= self.asize as i64 {
-                self.set_int(i, value);
-                return;
+                let was_nil = unsafe { self.read_array(i).is_none() };
+                unsafe {
+                    self.write_array(i, value);
+                }
+                return was_nil && !value.is_nil();
             }
         }
         
-        // Hash part
+        // Hash part - check if key exists
+        let key_exists = self.get_from_hash(key).is_some();
         self.set_node(*key, value);
+        !key_exists && !value.is_nil()
     }
     
     /// Get length (#t)
     #[inline(always)]
     pub fn len(&self) -> usize {
-        self.array_len as usize
+        if self.array.is_null() {
+            return 0;
+        }
+        unsafe { *self.lenhint_ptr() as usize }
+    }
+    
+    /// Get hash size
+    #[inline(always)]
+    pub fn hash_size(&self) -> usize {
+        self.sizenode()
+    }
+    
+    /// Insert value at lua_index (1-based), shifting elements forward
+    /// This is the efficient implementation for table.insert(t, pos, value)
+    pub fn insert_at(&mut self, lua_index: i64, value: LuaValue) -> bool {
+        if lua_index < 1 {
+            return false;
+        }
+        
+        let len = self.len() as i64;
+        
+        // If inserting beyond current length, just set it
+        if lua_index > len {
+            self.set_int(lua_index, value);
+            return true;
+        }
+        
+        // Need to shift elements - ensure array is large enough
+        let needed_size = (len + 1) as u32;
+        if needed_size > self.asize {
+            let new_size = needed_size.next_power_of_two().max(4);
+            self.resize_array(new_size);
+        }
+        
+        // Shift elements from lua_index to len forward by 1
+        unsafe {
+            for j in (lua_index..=len).rev() {
+                // Always read and shift, even if nil
+                let k = (j - 1) as usize;
+                let tt = *self.get_arr_tag(k);
+                let val_ptr = self.get_arr_val(k);
+                let val = *val_ptr;
+                
+                // Write to next position
+                let k_next = j as usize;
+                *self.get_arr_tag(k_next) = tt;
+                *self.get_arr_val(k_next) = val;
+            }
+            
+            // Insert at position
+            self.write_array(lua_index, value);
+            
+            // Update lenhint if we extended the array
+            if lua_index <= len {
+                // We shifted elements, so length increased by 1
+                let new_len = (len + 1) as u32;
+                *self.lenhint_ptr() = new_len;
+            }
+        }
+        
+        true
+    }
+    
+    /// Remove value at lua_index (1-based), shifting elements backward
+    /// This is the efficient implementation for table.remove(t, pos)
+    pub fn remove_at(&mut self, lua_index: i64) -> Option<LuaValue> {
+        if lua_index < 1 {
+            return None;
+        }
+        
+        let len = self.len() as i64;
+        
+        if lua_index > len {
+            return None;
+        }
+        
+        // Get the value to return
+        let value = unsafe { self.read_array(lua_index)? };
+        
+        // Shift elements from lua_index+1 to len backward by 1
+        unsafe {
+            for j in lua_index..len {
+                // Always read and shift, even if nil
+                let k_next = j as usize;
+                let tt = *self.get_arr_tag(k_next);
+                let val_ptr = self.get_arr_val(k_next);
+                let val = *val_ptr;
+                
+                // Write to current position
+                let k = (j - 1) as usize;
+                *self.get_arr_tag(k) = tt;
+                *self.get_arr_val(k) = val;
+            }
+            
+            // Clear the last position
+            self.write_array(len, LuaValue::nil());
+            
+            // Update lenhint - length decreased by 1
+            let new_len = (len - 1) as u32;
+            *self.lenhint_ptr() = new_len;
+        }
+        
+        Some(value)
+    }
+    
+    /// Iterate to next key-value pair
+    pub fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
+        // Start from nil - return first array element
+        if input_key.is_nil() {
+            // Try array part first
+            if self.asize > 0 {
+                unsafe {
+                    if let Some(val) = self.read_array(1) {
+                        return Some((LuaValue::integer(1), val));
+                    }
+                }
+            }
+            // Fall through to hash part
+            return self.next_hash(None);
+        }
+        
+        // If integer key, try continuing in array
+        if let Some(i) = input_key.as_integer() {
+            if i >= 1 && i < self.asize as i64 {
+                // Try next array element
+                let next_i = i + 1;
+                unsafe {
+                    if let Some(val) = self.read_array(next_i) {
+                        return Some((LuaValue::integer(next_i), val));
+                    }
+                }
+                // Continue searching in array
+                for next_i in (i + 2)..=self.asize as i64 {
+                    unsafe {
+                        if let Some(val) = self.read_array(next_i) {
+                            return Some((LuaValue::integer(next_i), val));
+                        }
+                    }
+                }
+                // Array exhausted, start hash
+                return self.next_hash(None);
+            }
+        }
+        
+        // Search in hash part
+        self.next_hash(Some(input_key))
+    }
+    
+    /// Helper for iterating hash part
+    fn next_hash(&self, input_key: Option<&LuaValue>) -> Option<(LuaValue, LuaValue)> {
+        let size = self.sizenode();
+        if size == 0 {
+            return None;
+        }
+        
+        let start_index = if let Some(key) = input_key {
+            // Find current key's position
+            let mut found = false;
+            let mut idx = 0;
+            for i in 0..size {
+                unsafe {
+                    let node = self.node.add(i);
+                    if !(*node).key.is_nil() && (*node).key == *key {
+                        idx = i + 1; // Start from next
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                return None; // Key not found
+            }
+            idx
+        } else {
+            0 // Start from beginning
+        };
+        
+        // Find next non-empty node
+        for i in start_index..size {
+            unsafe {
+                let node = self.node.add(i);
+                if !(*node).key.is_nil() {
+                    return Some(((*node).key, (*node).value));
+                }
+            }
+        }
+        
+        None
+    }
+    
+    /// GC-safe iteration: call f for each entry
+    pub fn for_each_entry<F>(&self, mut f: F)
+    where
+        F: FnMut(LuaValue, LuaValue),
+    {
+        // Iterate array part
+        for i in 1..=self.asize as i64 {
+            unsafe {
+                if let Some(val) = self.read_array(i) {
+                    f(LuaValue::integer(i), val);
+                }
+            }
+        }
+        
+        // Iterate hash part
+        let size = self.sizenode();
+        for i in 0..size {
+            unsafe {
+                let node = self.node.add(i);
+                if !(*node).key.is_nil() {
+                    f((*node).key, (*node).value);
+                }
+            }
+        }
     }
 }
 
 impl Drop for NativeTable {
     fn drop(&mut self) {
-        // Free array
+        // Free array - must deallocate from start pointer, not array pointer
         if !self.array.is_null() && self.asize > 0 {
-            let layout = Layout::array::<LuaValue>(self.asize as usize).unwrap();
-            unsafe { alloc::dealloc(self.array as *mut u8, layout) };
+            let values_size = self.asize as usize * std::mem::size_of::<Value>();
+            let lenhint_size = std::mem::size_of::<u32>();
+            let tags_size = self.asize as usize;
+            let total_size = values_size + lenhint_size + tags_size;
+            
+            // array points to lenhint, so start is array - values_size
+            let start_ptr = unsafe { self.array.sub(values_size) };
+            let layout = Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
+            unsafe { alloc::dealloc(start_ptr, layout) };
         }
         
         // Free hash

@@ -1,4 +1,4 @@
-use crate::{LuaResult, LuaValue, lua_value::LuaTableDetail, lua_vm::LuaState};
+use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 
 /// table.sort(list [, comp]) - Sort table in place
 pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
@@ -25,24 +25,17 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         LuaValue::nil()
     };
 
-    let impl_table = &mut table_ref.impl_table;
-    let mut sort_arr = match impl_table {
-        LuaTableDetail::ValueArray(arr) => arr.array.clone(),
-        // LuaTableDetail::TypedArray(arr) => arr
-        //     .array
-        //     .iter()
-        //     .map(|v| LuaValue {
-        //         tt: arr.tt,
-        //         value: v.clone(),
-        //     })
-        //     .collect(),
-        LuaTableDetail::HashTable(_) => {
-            // Sort HashTable
-            return Err(l.error("bad argument #1 to 'sort' (array expected)".to_string()));
+    // Extract array elements into a Vec for sorting
+    let mut sort_arr = Vec::with_capacity(len);
+    for i in 1..=len as i64 {
+        if let Some(val) = table_ref.raw_geti(i) {
+            sort_arr.push(val);
+        } else {
+            sort_arr.push(LuaValue::nil());
         }
-    };
+    }
 
-    // // Sort using Lua semantics comparison
+    // Sort using Lua semantics comparison
     if has_comp {
         // Custom comparison function
         sort_arr.sort_by(|a, b| {
@@ -98,20 +91,10 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'sort' (table expected)".to_string()));
     };
 
-    match &mut table_ref.impl_table {
-        LuaTableDetail::ValueArray(arr) => {
-            arr.array = sort_arr;
-        }
-        // LuaTableDetail::TypedArray(arr) => {
-        //     arr.array = sort_arr.into_iter().map(|v| v.value).collect();
-        // }
-        LuaTableDetail::HashTable(_) => {
-            // Sort HashTable
-            return Err(l.error("bad argument #1 to 'sort' (array expected)".to_string()));
-        }
-    };
+    for (i, val) in sort_arr.into_iter().enumerate() {
+        table_ref.raw_seti((i + 1) as i64, val);
+    }
 
-    // table_ref.array = arr;
     Ok(0)
 }
 
