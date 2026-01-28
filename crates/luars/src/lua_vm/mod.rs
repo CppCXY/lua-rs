@@ -323,7 +323,7 @@ impl LuaVM {
             return false;
         };
         let new_key = table.raw_set(&key, value);
-        
+
         // GC backward barrier (luaC_barrierback)
         // Only needed when:
         // 1. New key is inserted AND key is collectable, OR

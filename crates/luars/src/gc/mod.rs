@@ -242,18 +242,17 @@ pub struct GC {
     // - Dead objects in allgc/survival are freed
     // - Surviving allgc objects move to survival
     // - Surviving survival objects move to old
-    
     /// G_NEW objects (nursery) - newly created objects
     allgc: GcList,
-    
+
     /// G_SURVIVAL objects - survived one minor collection
     survival: GcList,
-    
+
     /// G_OLD1 objects - survived two collections, need marking in next young collection
     /// This is a performance optimization: instead of scanning entire old list in mark_old,
     /// we only scan this small list of recently promoted objects.
     old1: GcList,
-    
+
     /// G_OLD, G_TOUCHED1, G_TOUCHED2 objects - old generation (stable)
     old: GcList,
 
@@ -459,7 +458,7 @@ impl GC {
             G_OLD1 => self.old1.add(gc_object_owner),
             _ => self.old.add(gc_object_owner), // G_OLD0, G_OLD, G_TOUCHED*
         }
-        
+
         self.track_size(size);
 
         Ok(())
@@ -498,7 +497,7 @@ impl GC {
                 self.old.remove(gc_ptr)
             }
         };
-        
+
         if let Some(header) = gc_ptr.header_mut() {
             header.set_age(G_OLD);
             header.make_gray(); // Gray forever, like Lua 5.5
@@ -550,15 +549,15 @@ impl GC {
     pub fn allgc_len(&self) -> usize {
         self.allgc.len()
     }
-    
+
     pub fn survival_len(&self) -> usize {
         self.survival.len()
     }
-    
+
     pub fn old_len(&self) -> usize {
         self.old.len()
     }
-    
+
     pub fn fixed_len(&self) -> usize {
         self.fixed_list.len()
     }
@@ -682,14 +681,17 @@ impl GC {
         let metatable = match gc_ptr {
             GcObjectPtr::Table(table_ptr) => table_ptr.as_ref().data.get_metatable(),
             GcObjectPtr::Userdata(ud_ptr) => ud_ptr.as_ref().data.get_metatable(),
-            _ => return false, // Other types don't support __gc
+            _ => {
+                return false;
+            }
         };
 
         if let Some(metatable) = metatable {
             let gc_key = self.tm_gc;
             if let Some(mt_table) = metatable.as_table() {
                 if let Some(gc_field) = mt_table.raw_get(&gc_key) {
-                    return !gc_field.is_nil();
+                    let result = !gc_field.is_nil();
+                    return result;
                 }
             }
         }
@@ -924,6 +926,7 @@ impl GC {
         l: &mut LuaState,
         origweak: &HashSet<TablePtr>,
         origall: &HashSet<TablePtr>,
+        allweak_after_propagate: &[TablePtr],
     ) {
         // Process weak tables added after finalization
         let weak_list = self.weak.clone();
@@ -932,12 +935,11 @@ impl GC {
                 self.clear_table_by_values(l, table_ptr);
             }
         }
-
         // Process allweak tables added after finalization
-        let allweak_list = self.allweak.clone();
-        for table_ptr in allweak_list {
-            if !origall.contains(&table_ptr) {
-                self.clear_table_by_values(l, table_ptr);
+        // Use the saved list from before clear_by_keys emptied self.allweak
+        for table_ptr in allweak_after_propagate {
+            if !origall.contains(table_ptr) {
+                self.clear_table_by_values(l, *table_ptr);
             }
         }
     }
@@ -1271,10 +1273,18 @@ impl GC {
                 // Remove from the appropriate generation list
                 if let Some(header) = gc_ptr.header() {
                     match header.age() {
-                        G_NEW => { self.allgc.remove(gc_ptr); }
-                        G_SURVIVAL => { self.survival.remove(gc_ptr); }
-                        G_OLD1 => { self.old1.remove(gc_ptr); }
-                        _ => { self.old.remove(gc_ptr); }
+                        G_NEW => {
+                            self.allgc.remove(gc_ptr);
+                        }
+                        G_SURVIVAL => {
+                            self.survival.remove(gc_ptr);
+                        }
+                        G_OLD1 => {
+                            self.old1.remove(gc_ptr);
+                        }
+                        _ => {
+                            self.old.remove(gc_ptr);
+                        }
                     }
                 } else {
                     // Fallback: try each list
@@ -1446,11 +1456,14 @@ impl GC {
         // Take all objects from old1 - they will be moved to old after processing
         let old1_objects = self.old1.take_all();
         let mut to_old: Vec<GcObjectOwner> = Vec::new();
-        
+
         for gc_owner in old1_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
             if let Some(header) = gc_ptr.header_mut() {
-                debug_assert!(header.age() == G_OLD1, "old1 list should only contain G_OLD1 objects");
+                debug_assert!(
+                    header.age() == G_OLD1,
+                    "old1 list should only contain G_OLD1 objects"
+                );
                 debug_assert!(!header.is_white(), "OLD1 object should not be white");
                 header.set_age(G_OLD);
                 if header.is_black() {
@@ -1459,7 +1472,7 @@ impl GC {
             }
             to_old.push(gc_owner);
         }
-        
+
         // Move all processed OLD1 objects to old list
         self.old.add_all(to_old);
 
@@ -1543,7 +1556,7 @@ impl GC {
     fn traverse_strong_table(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
         let gc_table = table_ptr.as_mut_ref();
         let table = &gc_table.data;
-        
+
         // Use for_each_entry() to iterate all entries (both array and hash parts)
         // This avoids both allocating Vec (iter_all) and repeated lookups (next)
         // Port of Lua 5.5's direct pointer iteration: `for (n = gnode(h, 0); n < limit; n++)`
@@ -1957,18 +1970,21 @@ impl GC {
 
         /* separate objects to be finalized */
         self.separate_to_be_finalized(false);
-        
+
         /* mark objects that will be finalized */
         self.mark_being_finalized(l);
-        
+
         /* remark, to propagate 'resurrection' */
         self.propagate_all(l);
 
         self.converge_ephemerons(l);
 
+        // Save allweak list BEFORE clear_by_keys (which will empty it)
+        let allweak_before_clear_keys = self.allweak.clone();
+
         self.clear_by_keys(l);
 
-        self.clear_by_values_range(l, &origweak, &origall);
+        self.clear_by_values_range(l, &origweak, &origall, &allweak_before_clear_keys);
 
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
 
@@ -2280,7 +2296,10 @@ impl GC {
         let other_white = GcHeader::otherwhite(self.current_white);
 
         // Helper closure to process a single object
-        let process_object = |gc_ptr: GcObjectPtr, to_clear: &mut HashSet<GcObjectPtr>, grayagain: &mut Vec<GcObjectPtr>| -> bool {
+        let process_object = |gc_ptr: GcObjectPtr,
+                              to_clear: &mut HashSet<GcObjectPtr>,
+                              grayagain: &mut Vec<GcObjectPtr>|
+         -> bool {
             let Some(header) = gc_ptr.header() else {
                 return false; // Keep object (no header)
             };
@@ -2540,10 +2559,15 @@ impl GC {
         self.gc_state = GcState::SwpAllGc;
         self.sweep_full_gen(l);
 
-        // Step 5: Finalize and return to Pause
+        // Step 5: Call finalizers
         self.gc_state = GcState::CallFin;
-        // Call finalizers if needed (handled by single_step)
-        // For now, just transition to Pause
+
+        // Call all pending finalizers (like full_inc does)
+        while !self.tobefnz.is_empty() && !self.gc_emergency {
+            self.call_one_finalizer(l);
+        }
+
+        // Return to Pause
         self.gc_state = GcState::Pause;
 
         // set_pause uses total_bytes (actual memory after sweep) as base
@@ -2559,10 +2583,12 @@ impl GC {
         // Process allgc
         let allgc_objects = self.allgc.take_all();
         let mut allgc_survivors: Vec<GcObjectOwner> = Vec::new();
-        
+
         for mut gc_owner in allgc_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else { continue; };
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
 
             if header.is_dead(other_white) {
                 if let GcObjectPtr::String(str_ptr) = gc_ptr {
@@ -2576,14 +2602,16 @@ impl GC {
                 allgc_survivors.push(gc_owner);
             }
         }
-        
+
         // Process survival
         let survival_objects = self.survival.take_all();
         let mut survival_survivors: Vec<GcObjectOwner> = Vec::new();
-        
+
         for mut gc_owner in survival_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else { continue; };
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
 
             if header.is_dead(other_white) {
                 if let GcObjectPtr::String(str_ptr) = gc_ptr {
@@ -2597,14 +2625,16 @@ impl GC {
                 survival_survivors.push(gc_owner);
             }
         }
-        
+
         // Process old
         let old_objects = self.old.take_all();
         let mut old_survivors: Vec<GcObjectOwner> = Vec::new();
-        
+
         for mut gc_owner in old_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else { continue; };
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
 
             if header.is_dead(other_white) {
                 if let GcObjectPtr::String(str_ptr) = gc_ptr {
@@ -2622,10 +2652,12 @@ impl GC {
         // Process old1 (G_OLD1 objects waiting for next young collection)
         let old1_objects = self.old1.take_all();
         let mut old1_survivors: Vec<GcObjectOwner> = Vec::new();
-        
+
         for mut gc_owner in old1_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else { continue; };
+            let Some(header) = gc_ptr.header() else {
+                continue;
+            };
 
             if header.is_dead(other_white) {
                 if let GcObjectPtr::String(str_ptr) = gc_ptr {
@@ -2748,10 +2780,10 @@ impl GC {
         // Dead objects are freed, survivors are promoted to survival (G_SURVIVAL)
         let allgc_objects = self.allgc.take_all();
         let mut new_survival: Vec<GcObjectOwner> = Vec::new();
-        
+
         for mut gc_owner in allgc_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
-            
+
             let Some(header) = gc_ptr.header() else {
                 continue;
             };
@@ -2770,15 +2802,15 @@ impl GC {
                 new_survival.push(gc_owner);
             }
         }
-        
-        // Phase 2: Sweep survival list (G_SURVIVAL objects)  
+
+        // Phase 2: Sweep survival list (G_SURVIVAL objects)
         // Dead objects are freed, survivors are promoted to old1 (G_OLD1)
         let survival_objects = self.survival.take_all();
         let mut new_old1: Vec<GcObjectOwner> = Vec::new();
-        
+
         for mut gc_owner in survival_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
-            
+
             let Some(header) = gc_ptr.header() else {
                 continue;
             };
@@ -2804,7 +2836,7 @@ impl GC {
         // New G_NEW objects will be added to allgc during this cycle
         // allgc is now empty - ready for new allocations
         self.survival.add_all(new_survival);
-        self.old1.add_all(new_old1);  // Now go to old1, not old
+        self.old1.add_all(new_old1); // Now go to old1, not old
 
         // Process finobj and tobefnz lists
         added_old1 += self.sweep_gen_finobj();
@@ -3147,7 +3179,6 @@ impl GC {
     /// ```
     fn call_one_finalizer(&mut self, l: &mut LuaState) {
         use crate::lua_vm::get_metamethod_event;
-
         debug_assert!(!self.gc_emergency, "GCTM called during emergency GC");
 
         // Get next object to finalize
@@ -3161,7 +3192,9 @@ impl GC {
             GcObjectPtr::Userdata(ptr) => LuaValue::userdata(ptr),
             GcObjectPtr::Thread(ptr) => LuaValue::thread(ptr),
             // Other types don't support __gc
-            _ => return,
+            _ => {
+                return;
+            }
         };
 
         // Get __gc metamethod
@@ -3298,11 +3331,11 @@ impl Default for GC {
 
 #[derive(Debug)]
 enum SweepGc {
-    AllGc(usize),     // Sweeping allgc list (G_NEW objects)
-    Survival(usize),  // Sweeping survival list (G_SURVIVAL objects)
-    Old(usize),       // Sweeping old list (G_OLD1, G_OLD, G_TOUCHED* objects)
-    FinObj(usize),    // Sweeping finobj list
-    ToBeFnz(usize),   // Sweeping tobefnz list
+    AllGc(usize),    // Sweeping allgc list (G_NEW objects)
+    Survival(usize), // Sweeping survival list (G_SURVIVAL objects)
+    Old(usize),      // Sweeping old list (G_OLD1, G_OLD, G_TOUCHED* objects)
+    FinObj(usize),   // Sweeping finobj list
+    ToBeFnz(usize),  // Sweeping tobefnz list
     Done,
 }
 

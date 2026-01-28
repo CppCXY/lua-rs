@@ -87,7 +87,8 @@ impl LuaTable {
     }
 
     pub fn remove_array_at(&mut self, i: i64) -> LuaResult<LuaValue> {
-        self.impl_table.remove_at(i)
+        self.impl_table
+            .remove_at(i)
             .ok_or(LuaError::IndexOutOfBounds)
     }
 

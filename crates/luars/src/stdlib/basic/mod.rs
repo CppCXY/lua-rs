@@ -654,8 +654,10 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let old_len = gc.old_len();
             let fixed_len = gc.fixed_len();
             let total_bytes = gc.total_bytes - gc.gc_debt;
-            println!("GC Debug: allgc={}, survival={}, old={}, fixed={}, total_bytes={}", 
-                     allgc_len, survival_len, old_len, fixed_len, total_bytes);
+            println!(
+                "GC Debug: allgc={}, survival={}, old={}, fixed={}, total_bytes={}",
+                allgc_len, survival_len, old_len, fixed_len, total_bytes
+            );
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }

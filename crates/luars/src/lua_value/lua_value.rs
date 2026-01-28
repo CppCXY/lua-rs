@@ -826,22 +826,22 @@ impl LuaValue {
     fn raw_ptr_repr(&self) -> *const u8 {
         unsafe { self.value.ptr }
     }
-    
+
     /// Get hash value for this LuaValue (for native table implementation)
     #[inline(always)]
     pub fn hash_value(&self) -> u64 {
         let tt = self.tt();
-        
+
         // Fast path for strings: use precomputed hash
         if tt == LUA_VSTR {
             return unsafe { (*(self.value.ptr as *const GcString)).data.hash };
         }
-        
+
         // For integers, use direct value
         if tt == LUA_VNUMINT {
             return unsafe { self.value.i as u64 };
         }
-        
+
         // For other types, use pointer or value bits
         unsafe { self.value.i as u64 }
     }
@@ -981,7 +981,7 @@ impl std::hash::Hash for LuaValue {
             hash.hash(state);
             return;
         }
-        
+
         // Special handling for numbers to maintain equality invariant
         // (integer 1 == float 1.0, so they must hash the same)
         if tt == LUA_VNUMINT || tt == LUA_VNUMFLT {
