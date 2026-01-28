@@ -646,10 +646,25 @@ impl NativeTable {
     
     /// Iterate to next key-value pair
     pub fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
+        // Get lenhint for fast path
+        let lenhint = if self.asize > 0 {
+            unsafe { *self.lenhint_ptr() as i64 }
+        } else {
+            0
+        };
+        
         // Start from nil - return first array element
         if input_key.is_nil() {
             // Try array part first
-            if self.asize > 0 {
+            if lenhint >= 1 {
+                // Fast path: we know array[1] exists
+                unsafe {
+                    let val = *self.get_arr_val(0);
+                    let tt = *self.get_arr_tag(0);
+                    return Some((LuaValue::integer(1), LuaValue { value: val, tt }));
+                }
+            } else if self.asize > 0 {
+                // Slow path: need to check
                 unsafe {
                     if let Some(val) = self.read_array(1) {
                         return Some((LuaValue::integer(1), val));
@@ -662,19 +677,31 @@ impl NativeTable {
         
         // If integer key, try continuing in array
         if let Some(i) = input_key.as_integer() {
-            if i >= 1 && i < self.asize as i64 {
-                // Try next array element
+            if i >= 1 && i <= self.asize as i64 {
                 let next_i = i + 1;
-                unsafe {
-                    if let Some(val) = self.read_array(next_i) {
-                        return Some((LuaValue::integer(next_i), val));
+                
+                // Fast path: if next_i <= lenhint, we know it exists (no holes)
+                if next_i <= lenhint {
+                    unsafe {
+                        let k = (next_i - 1) as usize;
+                        let val = *self.get_arr_val(k);
+                        let tt = *self.get_arr_tag(k);
+                        return Some((LuaValue::integer(next_i), LuaValue { value: val, tt }));
                     }
                 }
-                // Continue searching in array
-                for next_i in (i + 2)..=self.asize as i64 {
+                // Slow path: might have holes
+                else if next_i <= self.asize as i64 {
                     unsafe {
                         if let Some(val) = self.read_array(next_i) {
                             return Some((LuaValue::integer(next_i), val));
+                        }
+                    }
+                    // Continue searching in array
+                    for scan_i in (next_i + 1)..=self.asize as i64 {
+                        unsafe {
+                            if let Some(val) = self.read_array(scan_i) {
+                                return Some((LuaValue::integer(scan_i), val));
+                            }
                         }
                     }
                 }
@@ -695,23 +722,33 @@ impl NativeTable {
         }
         
         let start_index = if let Some(key) = input_key {
-            // Find current key's position
-            let mut found = false;
-            let mut idx = 0;
-            for i in 0..size {
-                unsafe {
-                    let node = self.node.add(i);
-                    if !(*node).key.is_nil() && (*node).key == *key {
-                        idx = i + 1; // Start from next
-                        found = true;
+            // Use hash lookup to find the key quickly - O(1) instead of O(n)
+            let main_pos = self.mainposition(key);
+            let mut node = main_pos;
+            let mut found_index = None;
+            
+            // Follow collision chain
+            unsafe {
+                loop {
+                    if (*node).key == *key {
+                        // Found the key, calculate its index
+                        let idx = (node as usize - self.node as usize) / std::mem::size_of::<Node>();
+                        found_index = Some(idx + 1); // Start from next
                         break;
                     }
+                    
+                    let next_offset = (*node).next;
+                    if next_offset == 0 {
+                        break; // Not found in chain
+                    }
+                    node = node.offset(next_offset as isize);
                 }
             }
-            if !found {
-                return None; // Key not found
+            
+            match found_index {
+                Some(idx) => idx,
+                None => return None, // Key not found
             }
-            idx
         } else {
             0 // Start from beginning
         };
