@@ -646,6 +646,19 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(LuaValue::number(kb))?;
             Ok(1)
         }
+        "debug" => {
+            // Debug: print GC list sizes
+            let gc = &l.vm_mut().gc;
+            let allgc_len = gc.allgc_len();
+            let survival_len = gc.survival_len();
+            let old_len = gc.old_len();
+            let fixed_len = gc.fixed_len();
+            let total_bytes = gc.total_bytes - gc.gc_debt;
+            println!("GC Debug: allgc={}, survival={}, old={}, fixed={}, total_bytes={}", 
+                     allgc_len, survival_len, old_len, fixed_len, total_bytes);
+            l.push_value(LuaValue::integer(0))?;
+            Ok(1)
+        }
         "stop" => {
             // LUA_GCSTOP: Stop collector (like Lua's gcstp = GCSTPUSR)
             l.vm_mut().gc.gc_stopped = true;
