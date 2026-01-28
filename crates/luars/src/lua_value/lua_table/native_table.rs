@@ -463,6 +463,12 @@ impl NativeTable {
     
     /// Set value in hash part
     fn set_node(&mut self, key: LuaValue, value: LuaValue) {
+        // If setting to nil, we should delete the key
+        if value.is_nil() {
+            self.delete_node(&key);
+            return;
+        }
+        
         if self.sizenode() == 0 {
             // Need to allocate hash part
             self.resize_hash(2); // Start with 4 nodes
@@ -513,6 +519,36 @@ impl NativeTable {
             // No free nodes - need to resize
             self.resize_hash(self.lsizenode + 1);
             self.set_node(key, value);
+        }
+    }
+    
+    /// Delete a key from hash table
+    fn delete_node(&mut self, key: &LuaValue) {
+        if self.sizenode() == 0 {
+            return;
+        }
+        
+        unsafe {
+            let mp = self.mainposition(key);
+            let mut node = mp;
+            
+            // Find the node with this key
+            loop {
+                if (*node).key == *key {
+                    // Found it - mark as deleted by setting key to nil
+                    (*node).key = LuaValue::nil();
+                    (*node).value = LuaValue::nil();
+                    // Note: We keep the chain intact (next field) for iteration
+                    return;
+                }
+                
+                let next = (*node).next;
+                if next == 0 {
+                    // Key not found
+                    return;
+                }
+                node = node.offset(next as isize);
+            }
         }
     }
     
