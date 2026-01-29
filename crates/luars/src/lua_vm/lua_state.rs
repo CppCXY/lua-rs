@@ -851,6 +851,10 @@ impl LuaState {
         self.vm_mut().create_string_owned(s)
     }
 
+    pub fn create_binary(&mut self, data: Vec<u8>) -> CreateResult {
+        self.vm_mut().create_binary(data)
+    }
+
     /// Create userdata
     pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.vm_mut().create_userdata(data)
