@@ -205,9 +205,32 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     let env_upvalue = vm.create_upvalue_closed(vm.global)?;
     let func = vm.create_function(Rc::new(chunk), vec![env_upvalue])?;
 
-    // Push the function to be called by require
+    // Call the function to execute the module and get its return value
+    // The module should return its exports (usually a table)
     l.push_value(func)?;
-    Ok(1)
+    let func_idx = l.get_top() - 1;
+    let (success, result_count) = l.pcall_stack_based(func_idx, 0)?;
+    
+    if !success {
+        // Module threw an error
+        let error_val = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+        let error_msg = if let Some(err) = error_val.as_str() {
+            err.to_string()
+        } else {
+            "error loading module".to_string()
+        };
+        return Err(l.error(format!("error loading module from '{}': {}", filepath_str, error_msg)));
+    }
+    
+    // Return what the module returned (or nil if it returned nothing)
+    if result_count > 0 {
+        // Module returned a value, keep it on stack
+        Ok(1)
+    } else {
+        // Module returned nothing, return nil
+        l.push_value(LuaValue::nil())?;
+        Ok(1)
+    }
 }
 
 // Helper: Search for a file in path templates
