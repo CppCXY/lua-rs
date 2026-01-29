@@ -262,6 +262,20 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
                 let istailcall_key = l.create_string("istailcall")?;
                 let istailcall_val = LuaValue::boolean(false);
                 l.raw_set(&info_table, istailcall_key, istailcall_val);
+                
+                // extraargs: number of extra arguments passed through __call metamethods
+                // This equals nextraargs from the call frame
+                let extraargs_opt = if let Some(level) = arg1.as_integer() {
+                    l.get_frame(level as usize).map(|f| f.nextraargs)
+                } else {
+                    None
+                };
+                
+                if let Some(extraargs) = extraargs_opt {
+                    let extraargs_key = l.create_string("extraargs")?;
+                    let extraargs_val = LuaValue::integer(extraargs as i64);
+                    l.raw_set(&info_table, extraargs_key, extraargs_val);
+                }
             }
 
             if what_str.contains('f') {
