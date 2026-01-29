@@ -177,17 +177,32 @@ impl LuaState {
                     0
                 };
 
-                // CRITICAL: frame_top should be base + maxstacksize (not base + nparams)
                 // This is the maximum stack size that the function may use
                 // See luaD_precall in ldo.c:731: fsize = p->maxstacksize
                 maxstacksize = chunk.max_stack_size as usize;
+                
+                // If nparams < numparams, we need to pad with nils
+                // This ensures all parameters are properly initialized
+                if nparams < numparams {
+                    let start = base + nparams;
+                    let end = base + numparams;
+                    for i in start..end {
+                        if i >= self.stack.len() {
+                            self.stack.push(LuaValue::nil());
+                        } else {
+                            self.stack[i] = LuaValue::nil();
+                        }
+                    }
+                    // Also update stack_top if necessary
+                    if self.stack_top < end {
+                        self.stack_top = end;
+                    }
+                }
             }
         };
 
         // Calculate frame top: base + maxstacksize (Lua 5.5: ci->top = func + 1 + fsize)
         let frame_top = base + maxstacksize;
-
-        // OPTIMIZATION: Reuse existing CallInfo if available, otherwise allocate new
         if self.call_depth < self.call_stack.len() {
             // Reuse existing CallInfo slot (fast path)
             let frame = &mut self.call_stack[self.call_depth];
