@@ -1007,7 +1007,7 @@ impl LuaState {
             }
 
             // Execute via lua_execute_until - only execute the new frame
-            let result = crate::lua_vm::execute::lua_execute_until(self, initial_depth);
+            let result = execute::lua_execute_until(self, initial_depth);
 
             match result {
                 Ok(()) => {
@@ -1282,31 +1282,6 @@ impl LuaState {
 
             let func = self.stack[0];
 
-            // CRITICAL: Close all open upvalues in the function
-            // Open upvalues point to the parent thread's stack, which uses different indices
-            // For now, we close them to avoid cross-thread stack access issues
-            // TODO: Proper solution is to store ThreadId in Upvalue::Open
-            if let Some(func_body) = func.as_lua_function() {
-                let upvalue_ptrs = func_body.upvalues();
-                // TODO: check the correct implement
-                unsafe {
-                    let vm = &mut *self.vm;
-                    for upval_ptr in upvalue_ptrs {
-                        if let Some(stack_idx) = upval_ptr.as_ref().data.get_stack_index() {
-                            // Get value from main thread's stack
-                            let value = vm
-                                .main_state_ref()
-                                .stack
-                                .get(stack_idx)
-                                .copied()
-                                .unwrap_or(LuaValue::nil());
-
-                            upval_ptr.as_mut_ref().data.close(value);
-                        }
-                    }
-                }
-            }
-
             // Push arguments
             for arg in args {
                 self.stack.push(arg);
@@ -1318,7 +1293,7 @@ impl LuaState {
             self.push_frame(func, base, nargs, -1)?;
 
             // Execute until yield or completion
-            let result = crate::lua_vm::execute::lua_execute(self);
+            let result = execute::lua_execute(self);
 
             match result {
                 Ok(()) => {

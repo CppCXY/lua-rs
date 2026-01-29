@@ -3201,9 +3201,10 @@ impl GC {
         };
 
         // Stop GC during finalization (g->gcstp |= GCSTPGC)
-        let old_stopped = self.gc_stopped;
+        // GCSTPGC prevents GC reentrancy by making collectgarbage() return false
+        let old_stopem = self.gc_stopem;
         let old_debt = self.gc_debt;
-        self.gc_stopped = true;
+        self.gc_stopem = true; // This is GCSTPGC, not GCSTPUSR (gc_stopped)
 
         // TODO: Save and restore L->allowhook (requires VM support)
         // TODO: Set L->ci->callstatus |= CIST_FIN (requires VM support)
@@ -3215,7 +3216,7 @@ impl GC {
         // TODO: Restore allowhook
 
         // Restore GC state
-        self.gc_stopped = old_stopped;
+        self.gc_stopem = old_stopem;
         self.gc_debt = old_debt;
 
         // If error occurred, warn but don't propagate

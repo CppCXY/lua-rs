@@ -47,7 +47,6 @@ pub struct LuaVM {
     /// Main thread execution state (embedded)
     pub(crate) main_state: ThreadPtr,
 
-    #[allow(unused)]
     /// String metatable (shared by all strings)
     pub(crate) string_mt: Option<LuaValue>,
 
@@ -356,7 +355,6 @@ impl LuaVM {
         true
     }
 
-    /// Create a new table and register it with GC
     /// Create a string and register it with GC
     /// For short strings (4 bytes), use interning (global deduplication)
     /// Create a string value with automatic interning for short strings
@@ -392,22 +390,18 @@ impl LuaVM {
             .create_substring(&mut self.gc, s_value, start, end)
     }
 
-    // ============ Legacy GC Barrier Methods (deprecated) ============
-
-    /// Create a new table in object pool
-    /// GC tracks objects via ObjectPool iteration, no allgc list needed
+    /// Create a new table
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> CreateResult {
         self.object_allocator
             .create_table(&mut self.gc, array_size, hash_size)
     }
 
-    /// Create new userdata in object pool
+    /// Create new userdata
     pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.object_allocator.create_userdata(&mut self.gc, data)
     }
 
     /// Create a function in object pool
-    /// Tracks the object in GC's allgc list for efficient sweep
     #[inline(always)]
     pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> CreateResult {
         self.object_allocator
@@ -493,11 +487,6 @@ impl LuaVM {
 
     /// Full GC cycle for incremental mode (like fullinc in Lua 5.5)
     fn full_inc(&mut self, l: &mut LuaState) {
-        // NOTE: mark_open_upvalues should NOT be called here!
-        // In Lua 5.5, remarkupvals is called DURING the atomic phase,
-        // after restart_collection. Calling it here would add objects
-        // to the gray list, which then gets cleared by restart_collection.
-
         // If we're keeping invariant (in marking phase), sweep first
         if self.gc.keep_invariant() {
             self.gc.enter_sweep(l);
@@ -520,48 +509,6 @@ impl LuaVM {
         // In Lua 5.5, remarkupvals is called DURING the atomic phase.
         self.gc.full_generation(l);
     }
-
-    // /// Collect all GC roots (objects that must not be collected)
-    // pub fn collect_roots(&self) -> Vec<LuaValue> {
-    //     let mut roots = Vec::with_capacity(128);
-
-    //     // 1. Global table
-    //     roots.push(self.global);
-
-    //     // 2. Registry table (persistent objects storage)
-    //     roots.push(self.registry);
-
-    //     // 3. String metatable
-    //     if let Some(mt) = &self.string_mt {
-    //         roots.push(*mt);
-    //     }
-
-    //     // 4. All values in the logical stack (0..stack_top)
-    //     // Lua semantics: only slots below L->top are live. Slots above may contain
-    //     // stale temporaries and MUST NOT be treated as roots, otherwise weak-table
-    //     // tests will keep dead objects alive.
-    //     let top = self.main_state.get_top();
-    //     for i in 0..top {
-    //         if let Some(value) = self.main_state.stack_get(i) {
-    //             if !value.is_nil() {
-    //                 roots.push(value);
-    //             }
-    //         }
-    //     }
-
-    //     // 5. All call frames (functions being executed)
-    //     for i in 0..self.main_state.call_depth() {
-    //         if let Some(frame) = self.main_state.get_frame(i) {
-    //             roots.push(frame.func.clone());
-    //         }
-    //     }
-
-    //     // 6. Open upvalues - handled separately in GC by mark_open_upvalues
-    //     // Open upvalue objects themselves are marked directly by GC
-    //     // Their values (stack slots) are already marked above in step 4
-
-    //     roots
-    // }
 
     /// Get GC statistics
     pub fn gc_stats(&self) -> String {

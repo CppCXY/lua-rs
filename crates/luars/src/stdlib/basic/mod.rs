@@ -627,6 +627,17 @@ fn lua_rawequal(l: &mut LuaState) -> LuaResult<usize> {
 /// collectgarbage([opt [, arg, arg2]]) - Garbage collector control
 /// Lua 5.5 version with full parameter support including the new 'param' option
 fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
+    // Check if GC is internally stopped (like Lua 5.5's gcstp & (GCSTPGC | GCSTPCLS))
+    // GCSTPGC means GC is currently running (prevents reentrancy)
+    // From lapi.c line 1174: if (g->gcstp & (GCSTPGC | GCSTPCLS)) return -1;
+    if l.vm_mut().gc.gc_stopem {
+        // Return nil (false) to indicate GC is currently running
+        // In Lua 5.5, lua_gc returns -1, which is not returned to Lua code
+        // The Lua manual says collectgarbage returns false if it cannot run
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    }
+
     let arg1 = l.get_arg(1);
 
     let opt = arg1
@@ -644,21 +655,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let real_bytes = gc.total_bytes - gc.gc_debt; // gettotalbytes
             let kb = real_bytes.max(0) as f64 / 1024.0;
             l.push_value(LuaValue::number(kb))?;
-            Ok(1)
-        }
-        "debug" => {
-            // Debug: print GC list sizes
-            let gc = &l.vm_mut().gc;
-            let allgc_len = gc.allgc_len();
-            let survival_len = gc.survival_len();
-            let old_len = gc.old_len();
-            let fixed_len = gc.fixed_len();
-            let total_bytes = gc.total_bytes - gc.gc_debt;
-            println!(
-                "GC Debug: allgc={}, survival={}, old={}, fixed={}, total_bytes={}",
-                allgc_len, survival_len, old_len, fixed_len, total_bytes
-            );
-            l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
         "stop" => {
@@ -704,8 +700,6 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             // l_mem n = cast(l_mem, va_arg(argp, size_t));
             // if (n <= 0) n = g->GCdebt;
-            // 修正：当n_arg<=0时，使用STEPSIZE作为默认步长
-            // 否则如果debt是负数，debt - debt = 0不会触发GC
             let gc = &l.vm_mut().gc;
             let stepsize = gc.apply_param(STEPSIZE, 100);
             let n = if n_arg <= 0 { stepsize } else { n_arg as isize };
