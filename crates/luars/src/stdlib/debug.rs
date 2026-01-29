@@ -11,6 +11,13 @@ pub fn create_debug_lib() -> LibraryModule {
         "getinfo" => debug_getinfo,
         "getmetatable" => debug_getmetatable,
         "setmetatable" => debug_setmetatable,
+        "getregistry" => debug_getregistry,
+        "getlocal" => debug_getlocal,
+        "setlocal" => debug_setlocal,
+        "getupvalue" => debug_getupvalue,
+        "setupvalue" => debug_setupvalue,
+        "upvalueid" => debug_upvalueid,
+        "upvaluejoin" => debug_upvaluejoin,
         "gethook" => debug_gethook,
         "sethook" => debug_sethook,
     })
@@ -95,17 +102,172 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
 
 /// debug.getinfo([thread,] f [, what]) - Get function info
 fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
-    // Simplified implementation: just return a table with basic info
-    let info_table = l.create_table(0, 4)?;
+    // Parse arguments
+    let arg1 = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("getinfo requires at least 1 argument".to_string()))?;
+    let arg2 = l.get_arg(2);
 
-    // Set some basic fields
-    let source_key = l.create_string("source")?;
-    let source_val = l.create_string("=[C]")?;
-    l.raw_set(&info_table, source_key, source_val);
+    // Determine if arg1 is a function or a stack level
+    let (func, what_str) = if arg1.is_function() {
+        // arg1 is a function, arg2 is what
+        let what = if let Some(w) = arg2 {
+            if let Some(s) = w.as_str() {
+                s.to_string()
+            } else {
+                "flnSrtu".to_string() // Default what
+            }
+        } else {
+            "flnSrtu".to_string()
+        };
+        (arg1, what)
+    } else if let Some(level) = arg1.as_integer() {
+        // arg1 is a stack level, arg2 is what
+        let what = if let Some(w) = arg2 {
+            if let Some(s) = w.as_str() {
+                s.to_string()
+            } else {
+                "flnSrtu".to_string()
+            }
+        } else {
+            "flnSrtu".to_string()
+        };
 
-    let what_key = l.create_string("what")?;
-    let what_val = l.create_string("C")?;
-    l.raw_set(&info_table, what_key, what_val);
+        // Get function at stack level
+        let call_depth = l.call_depth();
+        if level < 0 || level as usize >= call_depth {
+            // Level out of range
+            return Ok(0);
+        }
+
+        let func = l
+            .get_frame_func(level as usize)
+            .ok_or_else(|| l.error("invalid stack level".to_string()))?;
+        (func, what)
+    } else {
+        return Err(
+            l.error("bad argument #1 to 'getinfo' (function or number expected)".to_string())
+        );
+    };
+
+    // Create result table
+    let info_table = l.create_table(0, 8)?;
+
+    // Process function info based on 'what' parameter
+    if let Some(lua_func) = func.as_lua_function() {
+        if let Some(chunk) = lua_func.chunk() {
+            // Lua function
+            if what_str.contains('S') {
+                // Source info
+                let source = chunk.source_name.as_deref().unwrap_or("?");
+                let source_key = l.create_string("source")?;
+                let source_val = l.create_string(source)?;
+                l.raw_set(&info_table, source_key, source_val);
+
+                let short_src_key = l.create_string("short_src")?;
+                let short_src_val = l.create_string(source)?;
+                l.raw_set(&info_table, short_src_key, short_src_val);
+
+                let linedefined_key = l.create_string("linedefined")?;
+                let linedefined_val = LuaValue::integer(chunk.linedefined as i64);
+                l.raw_set(&info_table, linedefined_key, linedefined_val);
+
+                let lastlinedefined_key = l.create_string("lastlinedefined")?;
+                let lastlinedefined_val = LuaValue::integer(chunk.lastlinedefined as i64);
+                l.raw_set(&info_table, lastlinedefined_key, lastlinedefined_val);
+
+                let what_key = l.create_string("what")?;
+                let what_val = l.create_string("Lua")?;
+                l.raw_set(&info_table, what_key, what_val);
+            }
+
+            if what_str.contains('l') {
+                // Current line (only meaningful for stack level, not direct function)
+                // For now, return -1 (unknown)
+                let currentline_key = l.create_string("currentline")?;
+                let currentline_val = LuaValue::integer(-1);
+                l.raw_set(&info_table, currentline_key, currentline_val);
+            }
+
+            if what_str.contains('u') {
+                // Upvalue info
+                let nups_key = l.create_string("nups")?;
+                let nups_val = LuaValue::integer(chunk.upvalue_count as i64);
+                l.raw_set(&info_table, nups_key, nups_val);
+
+                let nparams_key = l.create_string("nparams")?;
+                let nparams_val = LuaValue::integer(chunk.param_count as i64);
+                l.raw_set(&info_table, nparams_key, nparams_val);
+
+                let isvararg_key = l.create_string("isvararg")?;
+                let isvararg_val = LuaValue::boolean(chunk.is_vararg);
+                l.raw_set(&info_table, isvararg_key, isvararg_val);
+            }
+
+            if what_str.contains('n') {
+                // Name info (not implemented, use defaults)
+                let name_key = l.create_string("name")?;
+                let name_val = LuaValue::nil();
+                l.raw_set(&info_table, name_key, name_val);
+
+                let namewhat_key = l.create_string("namewhat")?;
+                let namewhat_val = l.create_string("")?;
+                l.raw_set(&info_table, namewhat_key, namewhat_val);
+            }
+
+            if what_str.contains('t') {
+                // Tail call info
+                let istailcall_key = l.create_string("istailcall")?;
+                let istailcall_val = LuaValue::boolean(false);
+                l.raw_set(&info_table, istailcall_key, istailcall_val);
+            }
+
+            if what_str.contains('f') {
+                // Function itself
+                let func_key = l.create_string("func")?;
+                l.raw_set(&info_table, func_key, func);
+            }
+        }
+    } else if func.is_cfunction() {
+        // C function
+        if what_str.contains('S') {
+            let source_key = l.create_string("source")?;
+            let source_val = l.create_string("=[C]")?;
+            l.raw_set(&info_table, source_key, source_val);
+
+            let short_src_key = l.create_string("short_src")?;
+            let short_src_val = l.create_string("[C]")?;
+            l.raw_set(&info_table, short_src_key, short_src_val);
+
+            let linedefined_key = l.create_string("linedefined")?;
+            let linedefined_val = LuaValue::integer(-1);
+            l.raw_set(&info_table, linedefined_key, linedefined_val);
+
+            let lastlinedefined_key = l.create_string("lastlinedefined")?;
+            let lastlinedefined_val = LuaValue::integer(-1);
+            l.raw_set(&info_table, lastlinedefined_key, lastlinedefined_val);
+
+            let what_key = l.create_string("what")?;
+            let what_val = l.create_string("C")?;
+            l.raw_set(&info_table, what_key, what_val);
+        }
+
+        if what_str.contains('n') {
+            let name_key = l.create_string("name")?;
+            let name_val = LuaValue::nil();
+            l.raw_set(&info_table, name_key, name_val);
+
+            let namewhat_key = l.create_string("namewhat")?;
+            let namewhat_val = l.create_string("")?;
+            l.raw_set(&info_table, namewhat_key, namewhat_val);
+        }
+
+        if what_str.contains('f') {
+            let func_key = l.create_string("func")?;
+            l.raw_set(&info_table, func_key, func);
+        }
+    }
+
     l.push_value(info_table)?;
     Ok(1)
 }
@@ -158,7 +320,7 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
 fn debug_gethook(_l: &mut LuaState) -> LuaResult<usize> {
     // TODO: Implement proper hook support
     // For now, return nil to indicate no hook is set
-    Ok(0)  // Return nothing (nil)
+    Ok(0) // Return nothing (nil)
 }
 
 /// debug.sethook([thread,] hook, mask [, count]) - Set a debug hook
@@ -166,5 +328,316 @@ fn debug_gethook(_l: &mut LuaState) -> LuaResult<usize> {
 fn debug_sethook(_l: &mut LuaState) -> LuaResult<usize> {
     // TODO: Implement proper hook support
     // For now, just accept the arguments and do nothing
-    Ok(0)  // Return nothing
+    Ok(0) // Return nothing
+}
+
+/// debug.getregistry() - Return the registry table
+fn debug_getregistry(l: &mut LuaState) -> LuaResult<usize> {
+    let registry = l.vm_mut().registry.clone();
+    l.push_value(registry)?;
+    Ok(1)
+}
+
+/// debug.getlocal([thread,] f, local) - Get the name and value of a local variable
+fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
+    // Parse arguments: [thread,] level/func, local_index
+    let arg1 = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("getlocal requires at least 2 arguments".to_string()))?;
+    let arg2 = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("getlocal requires at least 2 arguments".to_string()))?;
+
+    // For now, we only support level (not thread or function)
+    // arg1: level (stack level)
+    // arg2: local_index
+    let level = arg1
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #1 to 'getlocal' (number expected)".to_string()))?
+        as usize;
+    let local_index = arg2
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #2 to 'getlocal' (number expected)".to_string()))?
+        as usize;
+
+    // Get the call frame at the specified level
+    let call_depth = l.call_depth();
+    if level >= call_depth {
+        // Level out of range, return nil
+        return Ok(0);
+    }
+
+    // Get function at this level
+    let frame_func = l
+        .get_frame_func(level)
+        .ok_or_else(|| l.error("invalid stack level".to_string()))?;
+
+    if let Some(lua_func) = frame_func.as_lua_function() {
+        if let Some(chunk) = lua_func.chunk() {
+            // Get local variable name from chunk
+            if local_index > 0 && local_index <= chunk.locals.len() {
+                let name = &chunk.locals[local_index - 1];
+
+                // Get the value from the stack
+                // The local variables are at base + (local_index - 1)
+                let base = l.get_frame_base(level);
+                let value_idx = base + local_index - 1;
+
+                let top = l.get_top();
+                if value_idx < top {
+                    let value = l.stack_get(value_idx).unwrap_or(LuaValue::nil());
+                    let name_str = l.create_string(name)?;
+                    l.push_value(name_str)?;
+                    l.push_value(value)?;
+                    return Ok(2);
+                }
+            }
+        }
+    }
+
+    // No local variable found, return nil
+    Ok(0)
+}
+
+/// debug.setlocal([thread,] level, local, value) - Set the value of a local variable
+fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
+    // Parse arguments: [thread,] level, local_index, value
+    let level_val = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("setlocal requires at least 3 arguments".to_string()))?;
+    let local_val = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("setlocal requires at least 3 arguments".to_string()))?;
+    let value = l
+        .get_arg(3)
+        .ok_or_else(|| l.error("setlocal requires at least 3 arguments".to_string()))?;
+
+    let level = level_val
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #1 to 'setlocal' (number expected)".to_string()))?
+        as usize;
+    let local_index = local_val
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #2 to 'setlocal' (number expected)".to_string()))?
+        as usize;
+
+    // Get the call frame at the specified level
+    let call_depth = l.call_depth();
+    if level >= call_depth {
+        // Level out of range, return nil
+        return Ok(0);
+    }
+
+    // Get function at this level
+    let frame_func = l
+        .get_frame_func(level)
+        .ok_or_else(|| l.error("invalid stack level".to_string()))?;
+
+    if let Some(lua_func) = frame_func.as_lua_function() {
+        if let Some(chunk) = lua_func.chunk() {
+            // Get local variable name from chunk
+            if local_index > 0 && local_index <= chunk.locals.len() {
+                let name = &chunk.locals[local_index - 1];
+
+                // Set the value on the stack
+                let base = l.get_frame_base(level);
+                let value_idx = base + local_index - 1;
+
+                let top = l.get_top();
+                if value_idx < top {
+                    l.stack_set(value_idx, value)?;
+                    let name_str = l.create_string(name)?;
+                    l.push_value(name_str)?;
+                    return Ok(1);
+                }
+            }
+        }
+    }
+
+    // No local variable found, return nil
+    Ok(0)
+}
+
+/// debug.getupvalue(f, up) - Get the name and value of an upvalue
+fn debug_getupvalue(l: &mut LuaState) -> LuaResult<usize> {
+    let func = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("getupvalue requires 2 arguments".to_string()))?;
+    let up_index_val = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("getupvalue requires 2 arguments".to_string()))?;
+
+    // Check that first argument is a function
+    if !func.is_function() {
+        return Err(l.error("bad argument #1 to 'getupvalue' (function expected)".to_string()));
+    }
+
+    let up_index = up_index_val
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #2 to 'getupvalue' (number expected)".to_string()))?
+        as usize;
+
+    if let Some(lua_func) = func.as_lua_function() {
+        // Get upvalue from Lua function
+        let upvalues = lua_func.upvalues();
+        if up_index > 0 && up_index <= upvalues.len() {
+            let upvalue = &upvalues[up_index - 1];
+
+            // Get the name from chunk
+            if let Some(chunk) = lua_func.chunk() {
+                if up_index <= chunk.upvalue_descs.len() {
+                    // Create a name like "upvalue_N" or use actual name if available
+                    let name = format!("upvalue_{}", up_index);
+                    let name_str = l.create_string(&name)?;
+
+                    // Get the value
+                    let value = upvalue.as_ref().data.get_value();
+                    l.push_value(name_str)?;
+                    l.push_value(value)?;
+                    return Ok(2);
+                }
+            }
+        }
+    }
+
+    // No upvalue found, return nil
+    Ok(0)
+}
+
+/// debug.setupvalue(f, up, value) - Set the value of an upvalue
+fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
+    let func = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("setupvalue requires 3 arguments".to_string()))?;
+    let up_index_val = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("setupvalue requires 3 arguments".to_string()))?;
+    let _value = l
+        .get_arg(3)
+        .ok_or_else(|| l.error("setupvalue requires 3 arguments".to_string()))?;
+
+    // Check that first argument is a function
+    if !func.is_function() {
+        return Err(l.error("bad argument #1 to 'setupvalue' (function expected)".to_string()));
+    }
+
+    let up_index = up_index_val
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #2 to 'setupvalue' (number expected)".to_string()))?
+        as usize;
+
+    if let Some(lua_func) = func.as_lua_function() {
+        // Set upvalue in Lua function
+        let upvalues = lua_func.upvalues();
+        if up_index > 0 && up_index <= upvalues.len() {
+            let _upvalue = &upvalues[up_index - 1];
+            // We need to modify the upvalue, but we only have immutable access
+            // This is a limitation - for now we can't set upvalues from debug library
+            // In the future, we'd need to use Cell or RefCell for interior mutability
+            return Err(l.error(
+                "setupvalue is not yet fully implemented (cannot mutate upvalues)".to_string(),
+            ));
+        }
+    }
+
+    // No upvalue found, return nil
+    Ok(0)
+}
+
+/// debug.upvalueid(f, n) - Get a unique identifier for an upvalue
+fn debug_upvalueid(l: &mut LuaState) -> LuaResult<usize> {
+    let func = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("upvalueid requires 2 arguments".to_string()))?;
+    let up_index_val = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("upvalueid requires 2 arguments".to_string()))?;
+
+    // Check that first argument is a function
+    if !func.is_function() {
+        return Err(l.error("bad argument #1 to 'upvalueid' (function expected)".to_string()));
+    }
+
+    let up_index = up_index_val
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #2 to 'upvalueid' (number expected)".to_string()))?
+        as usize;
+
+    if let Some(lua_func) = func.as_lua_function() {
+        let upvalues = lua_func.upvalues();
+        if up_index > 0 && up_index <= upvalues.len() {
+            let upvalue = &upvalues[up_index - 1];
+            // Use the pointer address as unique ID
+            let id = upvalue.as_ptr() as usize as i64;
+            l.push_value(LuaValue::integer(id))?;
+            return Ok(1);
+        }
+    }
+
+    // Invalid upvalue index, return nil
+    Ok(0)
+}
+
+/// debug.upvaluejoin(f1, n1, f2, n2) - Make upvalue n1 of f1 refer to upvalue n2 of f2
+fn debug_upvaluejoin(l: &mut LuaState) -> LuaResult<usize> {
+    let func1 = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("upvaluejoin requires 4 arguments".to_string()))?;
+    let n1_val = l
+        .get_arg(2)
+        .ok_or_else(|| l.error("upvaluejoin requires 4 arguments".to_string()))?;
+    let func2 = l
+        .get_arg(3)
+        .ok_or_else(|| l.error("upvaluejoin requires 4 arguments".to_string()))?;
+    let n2_val = l
+        .get_arg(4)
+        .ok_or_else(|| l.error("upvaluejoin requires 4 arguments".to_string()))?;
+
+    // Check that arguments are functions
+    if !func1.is_function() || !func2.is_function() {
+        return Err(l.error("bad argument to 'upvaluejoin' (function expected)".to_string()));
+    }
+
+    // Check that they are Lua functions (not C functions)
+    if func1.is_cfunction() || func2.is_cfunction() {
+        return Err(l.error("bad argument to 'upvaluejoin' (Lua function expected)".to_string()));
+    }
+
+    let n1 = n1_val
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #2 to 'upvaluejoin' (number expected)".to_string()))?
+        as usize;
+    let n2 = n2_val
+        .as_integer()
+        .ok_or_else(|| l.error("bad argument #4 to 'upvaluejoin' (number expected)".to_string()))?
+        as usize;
+
+    // Get both Lua functions
+    let lua_func1 = func1
+        .as_lua_function()
+        .ok_or_else(|| l.error("upvaluejoin: function 1 is not a Lua function".to_string()))?;
+    let lua_func2 = func2
+        .as_lua_function()
+        .ok_or_else(|| l.error("upvaluejoin: function 2 is not a Lua function".to_string()))?;
+
+    // Check upvalue indices
+    let upvalues1 = lua_func1.upvalues();
+    let upvalues2 = lua_func2.upvalues();
+    if n1 == 0 || n1 > upvalues1.len() {
+        return Err(l.error(format!("invalid upvalue index {} for function 1", n1)));
+    }
+    if n2 == 0 || n2 > upvalues2.len() {
+        return Err(l.error(format!("invalid upvalue index {} for function 2", n2)));
+    }
+
+    // Clone the upvalue from func2
+    let _upvalue_to_share = upvalues2[n2 - 1].clone();
+
+    // Replace upvalue in func1 (this requires mutable access)
+    // Since we can't directly mutate through the immutable reference,
+    // we need to use interior mutability or unsafe code
+    // For now, this is a limitation - we return an error
+    return Err(
+        l.error("upvaluejoin is not yet fully implemented (cannot mutate upvalues)".to_string())
+    );
 }
