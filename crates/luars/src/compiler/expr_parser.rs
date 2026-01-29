@@ -811,7 +811,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
 
     // lparser.c:753: open_func calls enterblock(fs, bl, 0) - create function body block
-    // CRITICAL: Must be done BEFORE registering parameters, with nactvar=0
+    //  Must be done BEFORE registering parameters, with nactvar=0
     // This is critical - every function body needs an outer block!
     let func_bl_id = child_fs.compiler_state.alloc_blockcnt(BlockCnt {
         previous: None,

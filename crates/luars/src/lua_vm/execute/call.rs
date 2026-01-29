@@ -8,6 +8,7 @@
 /// - TAILCALL: replace current frame, return FrameAction::TailCall (main loop loads new chunk)
 use crate::{
     LuaValue,
+    lua_vm::call_info::call_status,
     lua_vm::{CFunction, LuaError, LuaResult, LuaState, TmKind, get_metamethod_event},
 };
 
@@ -27,6 +28,18 @@ pub fn handle_call(
     a: usize,
     b: usize,
     c: usize,
+) -> LuaResult<FrameAction> {
+    handle_call_internal(lua_state, base, a, b, c, 0)
+}
+
+/// Internal implementation with status parameter to track __call chain depth
+fn handle_call_internal(
+    lua_state: &mut LuaState,
+    base: usize,
+    a: usize,
+    b: usize,
+    c: usize,
+    status: u32,
 ) -> LuaResult<FrameAction> {
     // Get function position
     let func_idx = base + a;
@@ -78,6 +91,17 @@ pub fn handle_call(
             // Push new call frame with nresults from caller
             lua_state.push_frame(func, new_base, nargs, nresults)?;
 
+            // Update call_status with __call count if status is non-zero
+            if status != 0 {
+                let frame_idx = lua_state.call_depth() - 1;
+                let current_status = lua_state
+                    .get_frame(frame_idx)
+                    .map(|f| f.call_status)
+                    .unwrap_or(0);
+                let new_status = current_status | status;
+                lua_state.set_frame_call_status(frame_idx, new_status);
+            }
+
             // Return FrameAction::Call - main loop will load new chunk and continue
             Ok(FrameAction::Call)
         } else if new_func.is_c_function() {
@@ -90,9 +114,14 @@ pub fn handle_call(
             Err(lua_state.error("CALL: unknown function type".to_string()))
         }
     } else {
-        // Not a function - check for __call metamethod
         // Port of Lua 5.5's handling in ldo.c:tryfuncTM
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
+            // Check if __call chain is too long (max 15 levels)
+            let ccmt_count = call_status::get_ccmt_count(status);
+            if ccmt_count >= 15 {
+                return Err(lua_state.error("'__call' chain too long".to_string()));
+            }
+
             // We have __call metamethod
             // Need to shift arguments and insert function as first arg
             // Stack layout before: [func, arg1, arg2, ...]
@@ -118,11 +147,14 @@ pub fn handle_call(
             let new_top = first_arg + nargs + 1;
             lua_state.set_top(new_top)?;
 
+            // Increment __call counter in status
+            let new_status = call_status::set_ccmt_count(status, ccmt_count + 1);
+
             // Now call the metamethod with nargs+1 (including original func)
             // We need to adjust b: if b was 0 (varargs), keep it 0
             // otherwise increment it to account for the extra argument
             let new_b = if b == 0 { 0 } else { b + 1 };
-            return handle_call(lua_state, base, a, new_b, c);
+            return handle_call_internal(lua_state, base, a, new_b, c, new_status);
         } else {
             Err(lua_state.error(format!("attempt to call a {} value", func.type_name())))
         }
@@ -131,7 +163,6 @@ pub fn handle_call(
 
 /// Call a C function and handle results  
 /// Similar to Lua's precallC - much simpler than our initial attempt
-/// Lua 的做法：C 函数直接在当前栈上执行，返回结果数量
 pub fn call_c_function(
     lua_state: &mut LuaState,
     func_idx: usize,
@@ -158,11 +189,6 @@ pub fn call_c_function(
         return Err(lua_state.error("Not a callable value".to_string()));
     };
 
-    // Lua 的做法很简单：
-    // 1. Push 一个临时 CallInfo (用于 C 函数访问参数)
-    // 2. 调用 C 函数
-    // 3. 调用 luaD_poscall 处理返回值
-    // 我们简化版本：
     let call_base = func_idx + 1;
 
     // Push temporary frame for C function with nresults
@@ -210,13 +236,11 @@ pub fn call_c_function(
     let new_top = func_idx + final_nresults;
 
     // Set logical stack top (L->top.p) - does NOT truncate physical stack
-    // This is critical: old values remain in stack array but are "hidden"
+    // This is  old values remain in stack array but are "hidden"
     // This preserves caller's local variables which live below this top
     lua_state.set_top(new_top)?;
 
     lua_state.check_gc()?;
-    // Do NOT modify frame.top (ci->top) - it's the stack limit (base + maxstacksize)
-    // and should not change during execution
 
     Ok(())
 }
@@ -301,7 +325,7 @@ pub fn handle_tailcall(
     // This is needed for variable args (b==0) calculation
     let actual_stack_top = lua_state.get_top();
 
-    // CRITICAL: Sync stack_top with frame.top before reading arguments
+    //  Sync stack_top with frame.top before reading arguments
     // This ensures stack is properly bounded for subsequent operations
     if let Some(frame) = lua_state.current_frame() {
         let frame_top = frame.top;
@@ -343,29 +367,27 @@ pub fn handle_tailcall(
                 }
             }
 
-            // CRITICAL: Pad missing parameters and update nextraargs (like Lua 5.5)
+            // Pad missing parameters with nil if needed
             if let Some(chunk) = new_func.chunk() {
                 let numparams = chunk.param_count as usize;
-                
+
                 // Pad fixed parameters with nil if needed
                 if nargs < numparams {
                     for i in nargs..numparams {
                         lua_state.stack_set(base + i, LuaValue::nil())?;
                     }
                 }
-                
-                // CRITICAL: Update nextraargs for VARARG instruction
+
                 // nextraargs = max(0, nargs - numparams)
                 let new_nextraargs = if nargs > numparams {
                     (nargs - numparams) as i32
                 } else {
                     0
                 };
-                
+
                 let current_frame_idx = lua_state.call_depth() - 1;
                 lua_state.set_frame_nextraargs(current_frame_idx, new_nextraargs);
-                
-                // CRITICAL: Set stack_top to limit vararg range
+
                 // stack_top = base + max(nargs, numparams)
                 let narg1 = if nargs < numparams { numparams } else { nargs };
                 lua_state.set_top(base + narg1)?;
@@ -374,7 +396,6 @@ pub fn handle_tailcall(
             // Replace function at base-1 (where current function is)
             lua_state.stack_set(base - 1, func)?;
 
-            // CRITICAL: Update current frame's func field so main loop loads new chunk
             let current_frame_idx = lua_state.call_depth() - 1;
             lua_state.set_frame_func(current_frame_idx, func);
 
@@ -401,7 +422,6 @@ pub fn handle_tailcall(
                 lua_state.stack_set(base + i, result)?;
             }
 
-            // CRITICAL: Update frame top after moving results
             // The next RETURN instruction will use frame.top to determine how many values to return
             let new_top = base + nresults;
             lua_state.set_top(new_top)?;
@@ -471,7 +491,10 @@ pub fn handle_tailcall(
             let new_b = if b == 0 { 0 } else { b + 1 };
             return handle_tailcall(lua_state, base, a, new_b);
         } else {
-            Err(lua_state.error(format!("TAILCALL: attempt to call a {} value", func.type_name())))
+            Err(lua_state.error(format!(
+                "TAILCALL: attempt to call a {} value",
+                func.type_name()
+            )))
         }
     }
 }

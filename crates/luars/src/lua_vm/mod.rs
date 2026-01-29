@@ -1,6 +1,6 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
-mod call_info;
+pub mod call_info;
 mod const_string;
 mod execute;
 mod lua_error;
@@ -467,7 +467,7 @@ impl LuaVM {
     //
     /// Check GC and run a step if needed (like luaC_checkGC in Lua 5.5)
     ///
-    /// CRITICAL: Must check gc_stopped and gc_stopem before running GC!
+    ///  Must check gc_stopped and gc_stopem before running GC!
     /// - gc_stopped: User explicitly stopped GC (collectgarbage("stop"))
     /// - gc_stopem: GC is already running (prevents recursive GC during allocation)
     #[inline(always)]
@@ -602,8 +602,9 @@ impl LuaVM {
             let level_val = LuaValue::integer(0);
 
             // Call debug.traceback using protected_call
-            let (success, results) = self.protected_call(traceback_func, vec![msg_val, level_val])?;
-            
+            let (success, results) =
+                self.protected_call(traceback_func, vec![msg_val, level_val])?;
+
             if success {
                 if let Some(result) = results.first() {
                     if let Some(s) = result.as_str() {

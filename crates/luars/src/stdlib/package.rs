@@ -210,7 +210,7 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     l.push_value(func)?;
     let func_idx = l.get_top() - 1;
     let (success, result_count) = l.pcall_stack_based(func_idx, 0)?;
-    
+
     if !success {
         // Module threw an error
         let error_val = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
@@ -219,9 +219,12 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
         } else {
             "error loading module".to_string()
         };
-        return Err(l.error(format!("error loading module from '{}': {}", filepath_str, error_msg)));
+        return Err(l.error(format!(
+            "error loading module from '{}': {}",
+            filepath_str, error_msg
+        )));
     }
-    
+
     // Return what the module returned (or nil if it returned nothing)
     if result_count > 0 {
         // Module returned a value, keep it on stack

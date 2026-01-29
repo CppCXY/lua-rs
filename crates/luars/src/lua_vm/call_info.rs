@@ -6,20 +6,35 @@ use crate::lua_value::LuaValue;
 /// Call status flags (equivalent to Lua's CIST_* flags)
 pub mod call_status {
     /// Lua function (has bytecode)
-    pub const CIST_LUA: u8 = 1 << 0;
+    pub const CIST_LUA: u32 = 1 << 0;
     /// C function
-    pub const CIST_C: u8 = 1 << 1;
+    pub const CIST_C: u32 = 1 << 1;
     /// Function is a tail call
-    pub const CIST_TAIL: u8 = 1 << 2;
+    pub const CIST_TAIL: u32 = 1 << 2;
     #[allow(unused)]
     /// Call is running a for loop
-    pub const CIST_HOOKYIELD: u8 = 1 << 3;
+    pub const CIST_HOOKYIELD: u32 = 1 << 3;
     #[allow(unused)]
     /// Last hook yielded
-    pub const CIST_YPCALL: u8 = 1 << 4;
+    pub const CIST_YPCALL: u32 = 1 << 4;
     #[allow(unused)]
     /// Call is in error-protected mode (pcall/xpcall)
-    pub const CIST_FRESH: u8 = 1 << 5;
+    pub const CIST_FRESH: u32 = 1 << 5;
+
+    /// Offset for __call metamethod count (bits 8-11)
+    pub const CIST_CCMT: u32 = 8;
+    /// Mask for __call metamethod count (0xf at bits 8-11 = 0x0F00)
+    pub const MAX_CCMT: u32 = 0xF << CIST_CCMT;
+
+    /// Extract __call count from call_status
+    pub fn get_ccmt_count(call_status: u32) -> u8 {
+        ((call_status & MAX_CCMT) >> CIST_CCMT) as u8
+    }
+
+    /// Set __call count in call_status
+    pub fn set_ccmt_count(call_status: u32, count: u8) -> u32 {
+        (call_status & !MAX_CCMT) | (((count as u32) << CIST_CCMT) & MAX_CCMT)
+    }
 }
 
 /// Information about a single function call on the call stack
@@ -56,7 +71,7 @@ pub struct CallInfo {
 
     /// Call status flags (CIST_*)
     /// Equivalent to Lua's CallInfo.callstatus
-    pub call_status: u8,
+    pub call_status: u32,
 
     /// Number of extra arguments in vararg functions
     /// Equivalent to Lua's CallInfo.u.l.nextraargs

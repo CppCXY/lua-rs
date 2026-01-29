@@ -31,7 +31,7 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
-    lua_value::{LUA_VFALSE, LuaValue, LuaUpvalue},
+    lua_value::{LUA_VFALSE, LuaUpvalue, LuaValue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
         execute::helper::{
@@ -929,7 +929,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let value = lua_state.stack()[base + a];
                     // Get value to set
                     // Set value in upvalue (OPTIMIZED: Uses direct pointer)
-                    // CRITICAL: For open upvalues, write directly through stack_ptr
+                    //  For open upvalues, write directly through stack_ptr
                     // This is essential for coroutines: the stack_index may be in a different
                     // LuaState's stack (the parent thread), so we MUST use the pointer directly
                     let upval_ptr = upvalue_ptrs[b];

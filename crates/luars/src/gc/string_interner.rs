@@ -65,7 +65,7 @@ impl StringInterner {
         }
 
         if let Some(ptr) = found_ptr {
-            // CRITICAL: Resurrect the string if it's white (condemned to die)
+            //  Resurrect the string if it's white (condemned to die)
             // Even though we skipped "dead" strings above, this string might still be
             // current_white (not swept yet). Mark it BLACK to ensure it survives.
             let header = ptr.as_ref().header;

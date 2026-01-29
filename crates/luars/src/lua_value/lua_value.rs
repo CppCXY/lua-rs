@@ -928,7 +928,9 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Binary => write!(f, "binary(0x{:#x})", self.raw_ptr_repr() as usize),
             LuaValueKind::Table => write!(f, "table(0x{:#x})", self.raw_ptr_repr() as usize),
             LuaValueKind::Function => write!(f, "function(0x{:#x})", self.raw_ptr_repr() as usize),
-            LuaValueKind::CFunction => write!(f, "cfunction(0x{:#x})", self.raw_ptr_repr() as usize),
+            LuaValueKind::CFunction => {
+                write!(f, "cfunction(0x{:#x})", self.raw_ptr_repr() as usize)
+            }
             LuaValueKind::Userdata => write!(f, "userdata(0x{:#x})", self.raw_ptr_repr() as usize),
             LuaValueKind::Thread => write!(f, "thread(0x{:#x})", self.raw_ptr_repr() as usize),
         }
@@ -958,7 +960,9 @@ impl std::fmt::Display for LuaValue {
             LuaValueKind::Userdata => {
                 write!(f, "userdata(0x{:#x})", unsafe { self.value.ptr as usize })
             }
-            LuaValueKind::Thread => write!(f, "thread(0x{:#x})", unsafe { self.value.ptr as usize }),
+            LuaValueKind::Thread => {
+                write!(f, "thread(0x{:#x})", unsafe { self.value.ptr as usize })
+            }
             LuaValueKind::Binary => {
                 write!(f, "binary(0x{:#x})", unsafe { self.value.ptr as usize })
             }

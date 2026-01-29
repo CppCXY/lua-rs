@@ -222,7 +222,7 @@ fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
 
     if needs_close {
         // lparser.c:608-613: Need CLOSE instruction
-        // CRITICAL: Use label.stklevel computed when label was created,
+        //  Use label.stklevel computed when label was created,
         // not reglevel(label.nactvar), because actvar may have been modified by removevars
         let stklevel = label.stklevel;
 
@@ -285,7 +285,7 @@ fn createlabel(fs: &mut FuncState, name: &str, line: usize, last: bool) {
         }
     }
 
-    // CRITICAL: Compute stklevel AFTER nactvar is finalized
+    //  Compute stklevel AFTER nactvar is finalized
     // This ensures stklevel matches the correct nactvar value
     label.stklevel = fs.reglevel(label.nactvar);
 

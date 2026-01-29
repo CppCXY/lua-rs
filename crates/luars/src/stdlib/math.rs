@@ -343,7 +343,7 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
 
 fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
     use rand::SeedableRng;
-    
+
     // Lua 5.4+: math.randomseed() with no args uses time-based seed
     let seed = if let Some(arg) = l.get_arg(1) {
         if arg.is_nil() {

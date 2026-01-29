@@ -264,7 +264,11 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         let name = read_string(cursor)?;
         let is_local = read_u8(cursor)? != 0;
         let index = read_u32(cursor)?;
-        upvalue_descs.push(UpvalueDesc { name, is_local, index });
+        upvalue_descs.push(UpvalueDesc {
+            name,
+            is_local,
+            index,
+        });
     }
 
     // Read child prototypes
@@ -429,7 +433,11 @@ fn read_chunk_with_strings(
         let name = read_string(cursor)?;
         let is_local = read_u8(cursor)? != 0;
         let index = read_u32(cursor)?;
-        upvalue_descs.push(UpvalueDesc { name, is_local, index });
+        upvalue_descs.push(UpvalueDesc {
+            name,
+            is_local,
+            index,
+        });
     }
 
     // Read child prototypes

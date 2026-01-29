@@ -180,7 +180,7 @@ impl LuaState {
                 // This is the maximum stack size that the function may use
                 // See luaD_precall in ldo.c:731: fsize = p->maxstacksize
                 maxstacksize = chunk.max_stack_size as usize;
-                
+
                 // If nparams < numparams, we need to pad with nils
                 // This ensures all parameters are properly initialized
                 if nparams < numparams {
@@ -412,7 +412,7 @@ impl LuaState {
                 if let Some(func_obj) = ci.func.as_lua_function() {
                     if let Some(chunk) = func_obj.chunk() {
                         let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                        
+
                         // Format source name (strip @ prefix if present)
                         let source_display = if source.starts_with('@') {
                             &source[1..]
@@ -435,7 +435,8 @@ impl LuaState {
                         let what = if is_main { "main chunk" } else { "function" };
 
                         if line > 0 {
-                            result.push_str(&format!("\t{}:{}: in {}\n", source_display, line, what));
+                            result
+                                .push_str(&format!("\t{}:{}: in {}\n", source_display, line, what));
                         } else {
                             result.push_str(&format!("\t{}: in {}\n", source_display, what));
                         }
@@ -677,6 +678,12 @@ impl LuaState {
     pub fn set_frame_nextraargs(&mut self, frame_idx: usize, nextraargs: i32) {
         if let Some(frame) = self.call_stack.get_mut(frame_idx) {
             frame.nextraargs = nextraargs;
+        }
+    }
+
+    pub fn set_frame_call_status(&mut self, frame_idx: usize, call_status: u32) {
+        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+            frame.call_status = call_status;
         }
     }
 
@@ -1357,7 +1364,7 @@ impl LuaState {
                 return Err(self.error("cannot resume: no frame".to_string()));
             };
 
-            // CRITICAL: Close upvalues before popping the frame
+            //  Close upvalues before popping the frame
             // This ensures open upvalues don't point to invalid stack indices
             self.close_upvalues(frame_base);
 

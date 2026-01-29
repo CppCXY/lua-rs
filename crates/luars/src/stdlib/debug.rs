@@ -3,6 +3,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
+use crate::lua_vm::call_info::call_status;
 use crate::lua_vm::{LuaResult, LuaState, get_metatable};
 
 pub fn create_debug_lib() -> LibraryModule {
@@ -76,7 +77,7 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                     if let Some(chunk) = func_obj.chunk() {
                         // Lua function
                         let source = chunk.source_name.as_deref().unwrap_or("?");
-                        
+
                         // Format source name (strip @ prefix if present)
                         let source_display = if source.starts_with('@') {
                             &source[1..]
@@ -110,15 +111,25 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
 
                         if line > 0 {
                             if func_name.is_empty() {
-                                trace.push_str(&format!("\n\t{}:{}: in {}", source_display, line, name_what));
+                                trace.push_str(&format!(
+                                    "\n\t{}:{}: in {}",
+                                    source_display, line, name_what
+                                ));
                             } else {
-                                trace.push_str(&format!("\n\t{}:{}: in {} '{}'", source_display, line, name_what, func_name));
+                                trace.push_str(&format!(
+                                    "\n\t{}:{}: in {} '{}'",
+                                    source_display, line, name_what, func_name
+                                ));
                             }
                         } else {
                             if func_name.is_empty() {
-                                trace.push_str(&format!("\n\t{}: in {}", source_display, name_what));
+                                trace
+                                    .push_str(&format!("\n\t{}: in {}", source_display, name_what));
                             } else {
-                                trace.push_str(&format!("\n\t{}: in {} '{}'", source_display, name_what, func_name));
+                                trace.push_str(&format!(
+                                    "\n\t{}: in {} '{}'",
+                                    source_display, name_what, func_name
+                                ));
                             }
                         }
                     } else {
@@ -262,15 +273,17 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
                 let istailcall_key = l.create_string("istailcall")?;
                 let istailcall_val = LuaValue::boolean(false);
                 l.raw_set(&info_table, istailcall_key, istailcall_val);
-                
-                // extraargs: number of extra arguments passed through __call metamethods
-                // This equals nextraargs from the call frame
+
+                // extraargs: number of __call metamethods in the call chain
+                // Extract from call_status bits 8-11 (CIST_CCMT)
                 let extraargs_opt = if let Some(level) = arg1.as_integer() {
-                    l.get_frame(level as usize).map(|f| f.nextraargs)
+                    use crate::lua_vm::call_info::call_status;
+                    l.get_frame(level as usize)
+                        .map(|f| call_status::get_ccmt_count(f.call_status))
                 } else {
                     None
                 };
-                
+
                 if let Some(extraargs) = extraargs_opt {
                     let extraargs_key = l.create_string("extraargs")?;
                     let extraargs_val = LuaValue::integer(extraargs as i64);
@@ -321,6 +334,27 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
         if what_str.contains('f') {
             let func_key = l.create_string("func")?;
             l.raw_set(&info_table, func_key, func);
+        }
+
+        if what_str.contains('t') {
+            // Tail call info for C functions
+            let istailcall_key = l.create_string("istailcall")?;
+            let istailcall_val = LuaValue::boolean(false);
+            l.raw_set(&info_table, istailcall_key, istailcall_val);
+
+            // extraargs for C functions
+            let extraargs_opt = if let Some(level) = arg1.as_integer() {
+                l.get_frame(level as usize)
+                    .map(|f| call_status::get_ccmt_count(f.call_status))
+            } else {
+                None
+            };
+
+            if let Some(extraargs) = extraargs_opt {
+                let extraargs_key = l.create_string("extraargs")?;
+                let extraargs_val = LuaValue::integer(extraargs as i64);
+                l.raw_set(&info_table, extraargs_key, extraargs_val);
+            }
         }
     }
 

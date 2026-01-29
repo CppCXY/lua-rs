@@ -120,7 +120,7 @@ pub fn exec_settable(
         }
     }
 
-    // CRITICAL: Ensure stack_top protects call_info.top before calling metamethod
+    //  Ensure stack_top protects call_info.top before calling metamethod
     // call_info.top should NOT be modified - it's set once at function call
     // See Lua 5.5's savestate macro: L->top.p = ci->top.p
     let call_info_top = lua_state.get_call_info(frame_idx).top;
@@ -132,7 +132,7 @@ pub fn exec_settable(
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     helper::finishset(lua_state, &ra, &rb, val)?;
 
-    // CRITICAL: Restore top after metamethod call
+    //  Restore top after metamethod call
     // The metamethod may have changed stack_top, so we need to reset it
     lua_state.set_top(call_info_top)?;
 
@@ -218,7 +218,7 @@ pub fn exec_seti(
     let c = instr.get_c() as usize;
     let k = instr.get_k();
 
-    // CRITICAL: Ensure stack_top protects call_info.top
+    //  Ensure stack_top protects call_info.top
     let call_info_top = lua_state.get_call_info(frame_idx).top;
     if lua_state.get_top() < call_info_top {
         lua_state.set_top(call_info_top)?;
@@ -282,7 +282,7 @@ pub fn exec_getfield(
     let b = instr.get_b() as usize;
     let c = instr.get_c() as usize;
 
-    // CRITICAL: Update frame.top before potential metamethod call
+    //  Update frame.top before potential metamethod call
     let write_pos = base + a;
     let call_info = lua_state.get_call_info_mut(frame_idx);
     if write_pos + 1 > call_info.top {
@@ -407,7 +407,7 @@ pub fn exec_self(
         return Err(lua_state.error(format!("SELF: invalid constant index {}", c)));
     }
 
-    // CRITICAL: Update frame.top to cover R[A+1] (the object) and R[A] (the method)
+    //  Update frame.top to cover R[A+1] (the object) and R[A] (the method)
     // We write to A+1 and A. So we need top >= base + a + 2.
     let write_top = base + a + 2;
     let call_info = lua_state.get_call_info_mut(frame_idx);

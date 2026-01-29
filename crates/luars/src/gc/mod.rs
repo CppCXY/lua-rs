@@ -724,7 +724,7 @@ impl GC {
 
         if self.needs_finalization(gc_ptr) {
             header.set_finalized();
-            // CRITICAL: Add to finobj list so it will be tracked by GC
+            //  Add to finobj list so it will be tracked by GC
             // This is required for generational GC to properly handle finalizers
             self.finobj.push(gc_ptr);
         }
@@ -1166,13 +1166,13 @@ impl GC {
     /// }
     /// ```
     ///
-    /// CRITICAL: Lua 5.5 calls cleargraylists which clears ALL gray lists including weak table lists.
+    ///  Lua 5.5 calls cleargraylists which clears ALL gray lists including weak table lists.
     /// This is safe because restartcollection is only called from GCSpause state,
     /// meaning the previous cycle has completely finished (atomic phase cleared weak tables).
     fn restart_collection(&mut self, l: &mut LuaState) {
         self.stats.collection_count += 1;
 
-        // CRITICAL: Reset sweep_index when starting a new cycle
+        //  Reset sweep_index when starting a new cycle
         // This ensures the next sweep will scan all objects from the beginning
         self.sweepgc = SweepGc::Done;
 
@@ -2287,7 +2287,7 @@ impl GC {
     }
 
     fn sweep2old(&mut self, _l: &mut LuaState, to_clear_list: &mut HashSet<GcObjectPtr>) {
-        // CRITICAL: Use other_white to distinguish dead objects from new objects
+        //  Use other_white to distinguish dead objects from new objects
         // - current_white: new objects created in this cycle
         // - other_white: dead objects from previous cycle
         // Port of Lua 5.5 lgc.c sweep2old: uses isdeadm(ow, marked)
@@ -2535,7 +2535,7 @@ impl GC {
     pub fn full_generation(&mut self, l: &mut LuaState) {
         // If we're in Pause state, we need to do the state transition ourselves
         if self.gc_state == GcState::Pause {
-            // CRITICAL: Call restart_collection WHILE STILL IN PAUSE STATE!
+            //  Call restart_collection WHILE STILL IN PAUSE STATE!
             // Lua 5.5's singlestep calls restartcollection() while gcstate==GCSpause,
             // THEN sets gcstate=GCSpropagate.
             self.restart_collection(l);
@@ -2716,7 +2716,7 @@ impl GC {
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
-        // CRITICAL: Set gc_stopem to prevent recursive GC during collection
+        //  Set gc_stopem to prevent recursive GC during collection
         // This matches Lua 5.5's behavior where GC steps check gc_stopem
         let old_stopem = self.gc_stopem;
         self.gc_stopem = true;
@@ -3078,7 +3078,7 @@ impl GC {
             }
             _ => {
                 let header = gc_ptr.header_mut().unwrap();
-                // CRITICAL: Only add to gray list if not already gray
+                //  Only add to gray list if not already gray
                 // This prevents infinite loops in converge_ephemerons
                 if !header.is_gray() {
                     header.make_gray(); // Others become gray
@@ -3130,7 +3130,7 @@ impl GC {
         if let Some(header) = gc_ptr.header_mut() {
             header.clear_finalized();
 
-            // CRITICAL: Make the object white with current_white color
+            //  Make the object white with current_white color
             // This ensures that if the object is resurrected (referenced again)
             // during finalization, it won't be swept in the next GC cycle.
             // Lua 5.5 does this implicitly by calling resetbits which sets to

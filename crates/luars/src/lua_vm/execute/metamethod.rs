@@ -72,7 +72,7 @@ pub fn handle_mmbin(
     let pi = code[pc - 2]; // Previous instruction (the original arithmetic op)
     let result_reg = pi.get_a() as usize; // RA(pi) - result register from original instruction
 
-    // CRITICAL: Get base from frame, not parameter (parameter may be stale)
+    //  Get base from frame, not parameter (parameter may be stale)
     let base = lua_state.get_frame_base(frame_idx);
 
     // Get operands
@@ -90,7 +90,7 @@ pub fn handle_mmbin(
     // Call metamethod (may change stack/base)
     let result = try_bin_tm(lua_state, v1, v2, tm)?;
 
-    // CRITICAL: Reload base after metamethod call as it may have changed
+    //  Reload base after metamethod call as it may have changed
     let current_base = lua_state.get_frame_base(frame_idx);
 
     // Store result
@@ -135,7 +135,7 @@ pub fn handle_mmbini(
     let pi = code[pc - 2];
     let result_reg = pi.get_a() as usize;
 
-    // CRITICAL: Get base from frame, not parameter
+    //  Get base from frame, not parameter
     let base = lua_state.get_frame_base(frame_idx);
 
     // Get operand
@@ -159,7 +159,7 @@ pub fn handle_mmbini(
         try_bin_tm(lua_state, v1, v2, tm)?
     };
 
-    // CRITICAL: Reload base after metamethod call
+    //  Reload base after metamethod call
     let current_base = lua_state.get_frame_base(frame_idx);
 
     // Store result
@@ -205,7 +205,7 @@ pub fn handle_mmbink(
     let pi = code[pc - 2];
     let result_reg = pi.get_a() as usize;
 
-    // CRITICAL: Get base from frame, not parameter
+    //  Get base from frame, not parameter
     let base = lua_state.get_frame_base(frame_idx);
 
     // Get operand
@@ -232,7 +232,7 @@ pub fn handle_mmbink(
         try_bin_tm(lua_state, v1, v2, tm)?
     };
 
-    // CRITICAL: Reload base after metamethod call
+    //  Reload base after metamethod call
     let current_base = lua_state.get_frame_base(frame_idx);
 
     // Store result
@@ -317,7 +317,7 @@ pub fn call_tm_res(
     arg1: LuaValue,
     arg2: LuaValue,
 ) -> LuaResult<LuaValue> {
-    // CRITICAL: Port of Lua 5.5's Protect macro's savestate(L,ci)
+    //  Port of Lua 5.5's Protect macro's savestate(L,ci)
     // Before pushing arguments, set L->top.p = ci->top.p
     // This ensures func_pos starts at the correct position
     if let Some(frame) = lua_state.current_frame() {
@@ -349,7 +349,7 @@ pub fn call_tm_res(
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
 
-    // CRITICAL: Lua 5.5's behavior after luaD_call with nresults=1:
+    //  Lua 5.5's behavior after luaD_call with nresults=1:
     // - Return value is at position 'func' (replaces the function)
     // - L->top.p = func + 1 (points after the return value)
     // - setobjs2s(L, res, --L->top.p) does:
@@ -395,7 +395,7 @@ pub fn call_tm(
     arg2: LuaValue,
     arg3: LuaValue,
 ) -> LuaResult<()> {
-    // CRITICAL: Port of Lua 5.5's Protect macro's savestate(L,ci)
+    //  Port of Lua 5.5's Protect macro's savestate(L,ci)
     // Before pushing arguments, set L->top.p = ci->top.p
     // This ensures func_pos starts at the correct position
     if let Some(frame) = lua_state.current_frame() {

@@ -1795,7 +1795,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // isKint checks: (e->k == VKINT && !hasjumps(e))
                 if let ExpKind::VKINT = e2.kind {
                     if !e2.has_jumps() {
-                        // Critical: must check for no jumps (isKint requirement)
+                        //  must check for no jumps (isKint requirement)
                         let imm_val = e2.u.ival();
                         // For ADD: check if value fits in sC field (int2sC(i) = i + 127 must be in 0-255)
                         // So i must be in range -127 to 128
@@ -1830,7 +1830,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                 // But BOTH original and negated values must fit in range!
                 if let ExpKind::VKINT = e2.kind {
                     if !e2.has_jumps() {
-                        // Critical: isKint requirement
+                        //  isKint requirement
                         let imm_val = e2.u.ival();
                         let neg_imm = -imm_val;
                         // Both values must fit in -127..128 range (sC field capacity)

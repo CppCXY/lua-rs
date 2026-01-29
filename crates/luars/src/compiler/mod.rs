@@ -119,7 +119,7 @@ pub fn compile_code_with_name(
     let first_reg = fs.nvarstack();
     code::ret(&mut fs, first_reg, 0);
 
-    // CRITICAL: Port of close_func from lparser.c:885-891
+    //  Port of close_func from lparser.c:885-891
     // Must call leaveblock AFTER generating RETURN to solve pending gotos!
     // This resolves exported gotos that jumped out of inner blocks to labels in main chunk
     statement::leaveblock(&mut fs);
