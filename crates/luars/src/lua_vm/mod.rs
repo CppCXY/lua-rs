@@ -8,7 +8,7 @@ mod lua_state;
 pub mod opcode;
 mod safe_option;
 
-use crate::compiler::{compile_code, compile_code_with_name};
+use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::GC;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 pub use crate::lua_vm::call_info::CallInfo;
@@ -22,7 +22,9 @@ use crate::{CreateResult, GcKind, ObjectAllocator, ThreadPtr, UpvaluePtr, lib_re
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
+use rand::SeedableRng;
 use std::rc::Rc;
+use std::time::Instant;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
@@ -52,6 +54,14 @@ pub struct LuaVM {
 
     pub(crate) safe_option: SafeOption,
 
+    pub(crate) version: LuaLanguageLevel,
+
+    /// Random number generator (using rand crate for better quality)
+    pub(crate) rng: rand::rngs::StdRng,
+
+    /// Start time for os.clock() measurements
+    pub(crate) start_time: Instant,
+
     pub const_strings: ConstString,
 }
 
@@ -61,6 +71,11 @@ impl LuaVM {
         gc.set_temporary_memory_limit(isize::MAX / 2);
         let mut object_allocator = ObjectAllocator::new(option.clone());
         let cs = ConstString::new(&mut object_allocator, &mut gc);
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
         let mut vm = Box::new(LuaVM {
             global: LuaValue::nil(),
             registry: LuaValue::nil(),
@@ -69,6 +84,11 @@ impl LuaVM {
             main_state: ThreadPtr::null(), //,
             string_mt: None,
             safe_option: option.clone(),
+            version: LuaLanguageLevel::Lua55,
+            // Initialize RNG with a deterministic seed for reproducibility
+            rng: rand::rngs::StdRng::seed_from_u64(time),
+            // Record start time for os.clock()
+            start_time: Instant::now(),
             const_strings: cs,
         });
 

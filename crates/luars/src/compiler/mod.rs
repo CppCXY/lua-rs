@@ -17,9 +17,8 @@ pub use func_state::*;
 pub use parse_literal::*;
 
 use crate::LuaVM;
-use crate::compiler::parser::{
-    LuaLanguageLevel, LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig,
-};
+pub use crate::compiler::parser::LuaLanguageLevel;
+use crate::compiler::parser::{LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig};
 use crate::lua_value::Chunk;
 use crate::lua_vm::OpCode;
 
@@ -35,7 +34,7 @@ pub fn compile_code_with_name(
     vm: &mut LuaVM,
     chunk_name: &str,
 ) -> Result<Chunk, String> {
-    let level = LuaLanguageLevel::Lua55;
+    let level = vm.version;
     let tokenize_result = {
         let mut lexer = LuaTokenize::new(
             Reader::new(source),

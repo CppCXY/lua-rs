@@ -11,6 +11,8 @@ pub fn create_debug_lib() -> LibraryModule {
         "getinfo" => debug_getinfo,
         "getmetatable" => debug_getmetatable,
         "setmetatable" => debug_setmetatable,
+        "gethook" => debug_gethook,
+        "sethook" => debug_sethook,
     })
 }
 
@@ -149,4 +151,20 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
 
     l.push_value(value)?;
     Ok(1)
+}
+
+/// debug.gethook([thread]) - Get current hook settings
+/// Stub implementation: always returns nil (no hooks set)
+fn debug_gethook(_l: &mut LuaState) -> LuaResult<usize> {
+    // TODO: Implement proper hook support
+    // For now, return nil to indicate no hook is set
+    Ok(0)  // Return nothing (nil)
+}
+
+/// debug.sethook([thread,] hook, mask [, count]) - Set a debug hook
+/// Stub implementation: accepts arguments but does nothing
+fn debug_sethook(_l: &mut LuaState) -> LuaResult<usize> {
+    // TODO: Implement proper hook support
+    // For now, just accept the arguments and do nothing
+    Ok(0)  // Return nothing
 }

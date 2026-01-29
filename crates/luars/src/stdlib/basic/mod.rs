@@ -2,6 +2,7 @@
 // Implements: print, type, assert, error, tonumber, tostring,
 // select, ipairs, pairs, next, pcall, xpcall, getmetatable, setmetatable,
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
+mod parse_number;
 mod require;
 
 use std::rc::Rc;
@@ -10,6 +11,7 @@ use crate::gc::{code_param, decode_param};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
+use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use require::lua_require;
 
@@ -40,20 +42,23 @@ pub fn create_basic_lib() -> LibraryModule {
         "dofile" => lua_dofile,
         "warn" => lua_warn,
     })
-    .with_value("_VERSION", |vm| vm.create_string("Lua 5.5"))
+    .with_value("_VERSION", |vm| {
+        vm.create_string_owned(format!("{}", vm.version))
+    })
 }
 
 /// print(...) - Print values to stdout
 fn lua_print(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
+    let mut output = String::new();
     for (index, arg) in args.iter().enumerate() {
         let s = l.to_string(arg)?;
-        print!("{}", s);
+        output.push_str(&s);
         if index < args.len() - 1 {
-            print!("\t");
+            output.push('\t');
         }
     }
-    println!();
+    println!("{}", output);
     Ok(0)
 }
 
@@ -116,63 +121,6 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
     Err(l.error(message))
 }
 
-fn parse_lua_number(s: &str) -> LuaValue {
-    let s = s.trim();
-    if s.is_empty() {
-        return LuaValue::nil();
-    }
-
-    // Handle sign
-    let (sign, rest) = if s.starts_with('-') {
-        (-1i64, &s[1..])
-    } else if s.starts_with('+') {
-        (1i64, &s[1..])
-    } else {
-        (1i64, s)
-    };
-
-    let rest = rest.trim_start();
-
-    // Check for hex prefix (0x or 0X)
-    if rest.starts_with("0x") || rest.starts_with("0X") {
-        let hex_part = &rest[2..];
-
-        // Hex float contains '.' or 'p'/'P' - always treat as float
-        if hex_part.contains('.') || hex_part.to_lowercase().contains('p') {
-            // For hex float, just try to parse as float (Rust doesn't support hex float literals)
-            // Return nil for now - proper implementation would need custom parser
-            return LuaValue::nil();
-        }
-
-        // Plain hex integer
-        if let Ok(i) = u64::from_str_radix(hex_part, 16) {
-            let i = i as i64;
-            return LuaValue::integer(sign * i);
-        }
-        return LuaValue::nil();
-    }
-
-    // Decimal number - determine if integer or float
-    // Integer: no '.' and no 'e'/'E'
-    // Float: contains '.' or 'e'/'E'
-    let has_dot = rest.contains('.');
-    let has_exponent = rest.to_lowercase().contains('e');
-
-    if !has_dot && !has_exponent {
-        // Try as integer
-        if let Ok(i) = s.parse::<i64>() {
-            return LuaValue::integer(i);
-        }
-    }
-
-    // Try as float (either has '.'/e' or integer parse failed due to overflow)
-    if let Ok(f) = s.parse::<f64>() {
-        return LuaValue::float(f);
-    }
-
-    LuaValue::nil()
-}
-
 /// tonumber(e [, base]) - Convert to number
 fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
     let value = l
@@ -211,13 +159,12 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// tostring(v) - Convert to string
-/// OPTIMIZED: Fast path for common types
 fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
     let value = l
         .get_arg(1)
         .ok_or_else(|| l.error("tostring() requires argument 1".to_string()))?;
 
-    // Fast path: if already a string, return it directly
+    // if already a string, return it directly
     if value.is_string() {
         l.push_value(value)?;
         return Ok(1);
@@ -230,7 +177,6 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// select(index, ...) - Return subset of arguments
-/// ULTRA-OPTIMIZED: Fast path for "#" and direct stack manipulation
 fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
     let index_arg = l
         .get_arg(1)
@@ -323,9 +269,6 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("ipairs iterator: missing index".to_string()))?;
 
-    // Fast path: both table and index are valid
-    // CRITICAL: Get the value FIRST before any push_value operations
-    // to avoid dangling pointer issues when stack is reallocated
     let next_index_opt = index_val.as_integer();
     let value_opt = if let Some(table) = table_val.as_table() {
         if let Some(index) = next_index_opt {
@@ -385,8 +328,6 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
 
     let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
 
-    // CRITICAL: Get the result FIRST before any push_value operations
-    // to avoid dangling pointer issues when stack is reallocated
     let result = {
         let table = table_val
             .as_table()
@@ -430,11 +371,6 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
     // Call using stack-based API (no Vec allocation!)
     let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
 
-    // pcall_stack_based leaves results at func_idx
-    // We need to push them so call_c_function can handle them correctly
-    // Strategy: collect results, then push them
-
-    // Collect all results (success flag + actual results)
     let mut all_results = Vec::with_capacity(result_count + 1);
     all_results.push(LuaValue::boolean(success));
     for i in 0..result_count {
@@ -509,7 +445,6 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'setmetatable' (value expected)".to_string()))?;
 
-    // Now modify the table
     if let Some(table_ref) = table.as_table_mut() {
         match metatable.kind() {
             LuaValueKind::Nil => {
@@ -542,7 +477,6 @@ fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'rawget' (value expected)".to_string()))?;
 
-    // CRITICAL: Get the value FIRST before push_value to avoid dangling pointer
     let value = if let Some(table_ref) = table.as_table() {
         Some(table_ref.raw_get(&key).unwrap_or(LuaValue::nil()))
     } else {
@@ -569,8 +503,6 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #3 to 'rawset' (value expected)".to_string()))?;
 
     if table.is_table() {
-        // CRITICAL: rawset must still run the GC write barrier.
-        // Using VM's table_set keeps semantics (no metamethods) while preserving tri-color.
         l.raw_set(&table, key, value);
         l.push_value(table)?;
         return Ok(1);
@@ -966,9 +898,6 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// dofile([filename]) - Execute a file
-/// TODO: Implement protected_call for full functionality
-/// dofile([filename]) - Execute a Lua file
-/// If no filename is given, executes from stdin
 fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     let arg1 = l.get_arg(1);
 

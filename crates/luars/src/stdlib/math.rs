@@ -283,32 +283,11 @@ fn math_rad(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-/// Thread-local random state using xorshift64 algorithm
-/// Much faster than creating new RandomState each call
-use std::cell::Cell;
-thread_local! {
-    static RANDOM_STATE: Cell<u64> = Cell::new(0x853c49e6748fea9b_u64);
-}
-
-/// Fast xorshift64 random number generator
-#[inline(always)]
-fn xorshift64() -> u64 {
-    RANDOM_STATE.with(|state| {
-        let mut x = state.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        state.set(x);
-        x
-    })
-}
-
 fn math_random(l: &mut LuaState) -> LuaResult<usize> {
     let argc = l.arg_count();
 
-    // Generate random u64 and convert to [0, 1) float
-    let rand_u64 = xorshift64();
-    let random = (rand_u64 >> 11) as f64 / (1u64 << 53) as f64;
+    // Use rand crate for better quality random numbers
+    let random: f64 = rand::Rng::gen_range(&mut l.vm_mut().rng, 0.0..1.0);
 
     match argc {
         0 => {
@@ -363,14 +342,16 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
-    // Lua 5.4: math.randomseed() with no args uses time-based seed
+    use rand::SeedableRng;
+    
+    // Lua 5.4+: math.randomseed() with no args uses time-based seed
     let seed = if let Some(arg) = l.get_arg(1) {
         if arg.is_nil() {
             // Use time-based seed
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0x853c49e6748fea9b_u64)
+                .unwrap_or(0)
         } else if let Some(n) = arg.as_number() {
             n as u64
         } else {
@@ -381,21 +362,13 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x853c49e6748fea9b_u64)
+            .unwrap_or(0)
     };
 
-    // Seed the random state
-    RANDOM_STATE.with(|state| {
-        // Ensure seed is non-zero for xorshift
-        let s = if seed == 0 {
-            0x853c49e6748fea9b_u64
-        } else {
-            seed
-        };
-        state.set(s);
-    });
+    // Re-seed the RNG with the new seed
+    l.vm_mut().rng = rand::rngs::StdRng::seed_from_u64(seed);
 
-    // Lua 5.4 returns two values from randomseed
+    // Lua 5.4+ returns two values from randomseed (high and low 32 bits)
     l.push_value(LuaValue::integer((seed >> 32) as i64))?;
     l.push_value(LuaValue::integer((seed & 0xFFFFFFFF) as i64))?;
     Ok(2)
