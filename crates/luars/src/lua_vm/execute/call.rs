@@ -345,7 +345,6 @@ pub fn handle_tailcall(
 
             // CRITICAL: Pad missing parameters with nil (like push_frame does)
             // If nargs < numparams, set missing parameters to nil
-            // ALSO: Clear any positions beyond numparams to prevent vararg from reading stale data
             if let Some(chunk) = new_func.chunk() {
                 let numparams = chunk.param_count as usize;
                 
@@ -354,17 +353,6 @@ pub fn handle_tailcall(
                     for i in nargs..numparams {
                         lua_state.stack_set(base + i, LuaValue::nil())?;
                     }
-                }
-                
-                // CRITICAL: Clear positions after fixed parameters to prevent vararg
-                // from reading old argument values that were at func_idx+1+i
-                // For example, if args were at base+a+1, base+a+2, ... and we moved them to base, base+1, ...
-                // the old positions might still contain values that vararg could incorrectly read
-                // Clear from base+numparams to at least base+numparams+nargs
-                let clear_start = base + numparams;
-                let clear_end = clear_start + nargs;  // Clear as many positions as we had arguments
-                for i in clear_start..clear_end {
-                    lua_state.stack_set(i, LuaValue::nil())?;
                 }
             }
 

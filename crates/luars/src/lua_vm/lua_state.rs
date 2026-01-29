@@ -672,6 +672,14 @@ impl LuaState {
         }
     }
 
+    /// Set frame nextraargs by index (for tail calls)
+    #[inline(always)]
+    pub fn set_frame_nextraargs(&mut self, frame_idx: usize, nextraargs: i32) {
+        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+            frame.nextraargs = nextraargs;
+        }
+    }
+
     pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
         unsafe { &mut *self.vm }
     }

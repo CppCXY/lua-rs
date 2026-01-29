@@ -31,7 +31,7 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
-    lua_value::{LUA_VFALSE, LuaValue},
+    lua_value::{LUA_VFALSE, LuaValue, LuaUpvalue},
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
         execute::helper::{
@@ -929,14 +929,22 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     let value = lua_state.stack()[base + a];
                     // Get value to set
                     // Set value in upvalue (OPTIMIZED: Uses direct pointer)
-                    // ULTRA-OPTIMIZED: Direct double-pointer write
-                    // Matches Lua C: setobj(L, uv->v.p, s2v(ra))
+                    // CRITICAL: For open upvalues, write directly through stack_ptr
+                    // This is essential for coroutines: the stack_index may be in a different
+                    // LuaState's stack (the parent thread), so we MUST use the pointer directly
                     let upval_ptr = upvalue_ptrs[b];
-                    if let Some(stack_index) = upval_ptr.as_mut_ref().data.get_stack_index() {
-                        lua_state.stack_mut()[stack_index] = value;
-                    } else {
-                        // Closed upvalue: points to own storage
-                        upval_ptr.as_mut_ref().data.close(value);
+                    match &mut upval_ptr.as_mut_ref().data {
+                        LuaUpvalue::Open { stack_ptr, .. } => {
+                            // Direct pointer write to the original stack location
+                            // setobj(L, uv->v.p, s2v(ra))
+                            unsafe {
+                                *stack_ptr.ptr = value;
+                            }
+                        }
+                        LuaUpvalue::Closed(_) => {
+                            // Closed upvalue: update the heap storage
+                            upval_ptr.as_mut_ref().data.close(value);
+                        }
                     }
 
                     // GC barrier: luaC_barrier(L, uv, s2v(ra))
