@@ -140,6 +140,7 @@ fn write_chunk(
     // Write upvalue descriptors
     write_u32(buf, chunk.upvalue_descs.len() as u32);
     for desc in &chunk.upvalue_descs {
+        write_string(buf, &desc.name);
         buf.push(if desc.is_local { 1 } else { 0 });
         write_u32(buf, desc.index);
     }
@@ -198,6 +199,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
     // Write upvalue descriptors
     write_u32(buf, chunk.upvalue_descs.len() as u32);
     for desc in &chunk.upvalue_descs {
+        write_string(buf, &desc.name);
         buf.push(if desc.is_local { 1 } else { 0 });
         write_u32(buf, desc.index);
     }
@@ -259,9 +261,10 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     let desc_len = read_u32(cursor)? as usize;
     let mut upvalue_descs = Vec::with_capacity(desc_len);
     for _ in 0..desc_len {
+        let name = read_string(cursor)?;
         let is_local = read_u8(cursor)? != 0;
         let index = read_u32(cursor)?;
-        upvalue_descs.push(UpvalueDesc { is_local, index });
+        upvalue_descs.push(UpvalueDesc { name, is_local, index });
     }
 
     // Read child prototypes
@@ -423,9 +426,10 @@ fn read_chunk_with_strings(
     let desc_len = read_u32(cursor)? as usize;
     let mut upvalue_descs = Vec::with_capacity(desc_len);
     for _ in 0..desc_len {
+        let name = read_string(cursor)?;
         let is_local = read_u8(cursor)? != 0;
         let index = read_u32(cursor)?;
-        upvalue_descs.push(UpvalueDesc { is_local, index });
+        upvalue_descs.push(UpvalueDesc { name, is_local, index });
     }
 
     // Read child prototypes

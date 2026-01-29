@@ -919,6 +919,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     // This is different from Lua 5.1 which used pseudo-instructions after OP_CLOSURE
     for upval in &child_upvalues {
         child_chunk.upvalue_descs.push(UpvalueDesc {
+            name: upval.name.clone(), // upvalue name
             is_local: upval.in_stack, // true if captures parent local
             index: upval.idx as u32,  // index in parent's register or upvalue array
         });

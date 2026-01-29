@@ -486,9 +486,9 @@ fn debug_getupvalue(l: &mut LuaState) -> LuaResult<usize> {
             // Get the name from chunk
             if let Some(chunk) = lua_func.chunk() {
                 if up_index <= chunk.upvalue_descs.len() {
-                    // Create a name like "upvalue_N" or use actual name if available
-                    let name = format!("upvalue_{}", up_index);
-                    let name_str = l.create_string(&name)?;
+                    // Use actual upvalue name from chunk
+                    let name = &chunk.upvalue_descs[up_index - 1].name;
+                    let name_str = l.create_string(name)?;
 
                     // Get the value
                     let value = upvalue.as_ref().data.get_value();

@@ -157,6 +157,7 @@ pub struct LuaFunction {
 /// Upvalue descriptor
 #[derive(Debug, Clone)]
 pub struct UpvalueDesc {
+    pub name: String,   // upvalue name
     pub is_local: bool, // true if captures parent local, false if captures parent upvalue
     pub index: u32,     // index in parent's register or upvalue array
 }
