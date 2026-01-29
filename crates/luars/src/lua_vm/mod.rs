@@ -575,8 +575,54 @@ impl LuaVM {
     }
 
     /// Generate a stack traceback string
-    pub fn generate_traceback(&self, error_msg: &str) -> String {
-        // Delegate to LuaState's generate_traceback
+    pub fn generate_traceback(&mut self, error_msg: &str) -> String {
+        // Try to use debug.traceback if available
+        // We attempt to call debug.traceback(message, 1)
+        let result = (|| -> LuaResult<String> {
+            // Get debug table
+            let debug_table = match self.get_global("debug")? {
+                Some(v) if v.is_table() => v,
+                _ => return Ok(String::new()), // debug not available
+            };
+
+            // Get debug.traceback function
+            let traceback_func = {
+                let state = self.main_state();
+                let traceback_key = state.create_string("traceback")?;
+                match state.raw_get(&debug_table, &traceback_key) {
+                    Some(v) if v.is_function() => v,
+                    _ => return Ok(String::new()), // debug.traceback not available
+                }
+            };
+
+            // Create arguments: message and level
+            // Use level=0 to include the full traceback from error point
+            let state = self.main_state();
+            let msg_val = state.create_string(error_msg)?;
+            let level_val = LuaValue::integer(0);
+
+            // Call debug.traceback using protected_call
+            let (success, results) = self.protected_call(traceback_func, vec![msg_val, level_val])?;
+            
+            if success {
+                if let Some(result) = results.first() {
+                    if let Some(s) = result.as_str() {
+                        return Ok(s.to_string());
+                    }
+                }
+            }
+
+            Ok(String::new())
+        })();
+
+        match result {
+            Ok(s) if !s.is_empty() => s,
+            _ => self.fallback_traceback(error_msg),
+        }
+    }
+
+    /// Fallback traceback using Rust implementation
+    fn fallback_traceback(&self, error_msg: &str) -> String {
         let traceback = self.main_state_ref().generate_traceback();
         if !traceback.is_empty() {
             format!("{}\nstack traceback:\n{}", error_msg, traceback)

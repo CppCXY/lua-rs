@@ -397,6 +397,13 @@ impl LuaState {
                 if let Some(func_obj) = ci.func.as_lua_function() {
                     if let Some(chunk) = func_obj.chunk() {
                         let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                        
+                        // Format source name (strip @ prefix if present)
+                        let source_display = if source.starts_with('@') {
+                            &source[1..]
+                        } else {
+                            source
+                        };
 
                         // Get current line number from PC
                         let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
@@ -407,20 +414,15 @@ impl LuaState {
                             0
                         };
 
-                        if level == 0 {
-                            // Current function (where error occurred)
-                            if line > 0 {
-                                result.push_str(&format!("\t{}:{}: in main chunk\n", source, line));
-                            } else {
-                                result.push_str(&format!("\t{}: in main chunk\n", source));
-                            }
+                        // Determine if this is the main chunk
+                        // Main chunk has linedefined == 0, or is at bottom of call stack
+                        let is_main = chunk.linedefined == 0 || level == self.call_stack.len() - 1;
+                        let what = if is_main { "main chunk" } else { "function" };
+
+                        if line > 0 {
+                            result.push_str(&format!("\t{}:{}: in {}\n", source_display, line, what));
                         } else {
-                            // Called functions
-                            if line > 0 {
-                                result.push_str(&format!("\t{}:{}: in function\n", source, line));
-                            } else {
-                                result.push_str(&format!("\t{}: in function\n", source));
-                            }
+                            result.push_str(&format!("\t{}: in {}\n", source_display, what));
                         }
                         continue;
                     }

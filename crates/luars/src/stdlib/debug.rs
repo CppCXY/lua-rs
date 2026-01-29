@@ -55,9 +55,19 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
     // Get call stack info
     let call_depth = l.call_depth();
 
+    // Adjust level to skip the traceback function itself if called from Lua
+    let start_level = level;
+
     // Iterate through call frames, starting from 'level'
-    if level < call_depth {
-        for i in (level..call_depth).rev() {
+    if start_level < call_depth {
+        let mut shown = 0;
+        for i in (start_level..call_depth).rev() {
+            // Limit traceback to avoid overly long output
+            if shown >= 20 {
+                trace.push_str("\n\t...");
+                break;
+            }
+
             if let Some(func) = l.get_frame_func(i) {
                 let pc = l.get_frame_pc(i);
 
@@ -66,6 +76,13 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                     if let Some(chunk) = func_obj.chunk() {
                         // Lua function
                         let source = chunk.source_name.as_deref().unwrap_or("?");
+                        
+                        // Format source name (strip @ prefix if present)
+                        let source_display = if source.starts_with('@') {
+                            &source[1..]
+                        } else {
+                            source
+                        };
 
                         // Get line number from pc
                         let pc_idx = pc.saturating_sub(1) as usize;
@@ -76,21 +93,46 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                             0
                         };
 
-                        if line > 0 {
-                            trace.push_str(&format!("\n\t{}:{}: in function", source, line));
+                        // Determine function name and type
+                        // For now, use simplified logic - full implementation would need
+                        // to search locals/upvalues of calling frame
+                        let (name_what, func_name) = if chunk.linedefined == 0 {
+                            // Main chunk (linedefined == 0 means top-level code)
+                            ("main chunk", String::new())
+                        } else if i == call_depth - 1 {
+                            // Also main chunk if at bottom of stack
+                            ("main chunk", String::new())
                         } else {
-                            trace.push_str(&format!("\n\t{}: in function", source));
+                            // TODO: Search for function name in calling frame's locals/upvalues
+                            // This requires inspecting the previous frame's locals and upvalues
+                            ("function", String::new())
+                        };
+
+                        if line > 0 {
+                            if func_name.is_empty() {
+                                trace.push_str(&format!("\n\t{}:{}: in {}", source_display, line, name_what));
+                            } else {
+                                trace.push_str(&format!("\n\t{}:{}: in {} '{}'", source_display, line, name_what, func_name));
+                            }
+                        } else {
+                            if func_name.is_empty() {
+                                trace.push_str(&format!("\n\t{}: in {}", source_display, name_what));
+                            } else {
+                                trace.push_str(&format!("\n\t{}: in {} '{}'", source_display, name_what, func_name));
+                            }
                         }
                     } else {
                         // C closure
                         trace.push_str("\n\t[C]: in function");
                     }
                 } else if func.is_cfunction() {
-                    // C function
+                    // C function - try to get name
+                    // In full implementation, would track C function names
                     trace.push_str("\n\t[C]: in function");
                 } else {
                     trace.push_str("\n\t?: in function");
                 }
+                shown += 1;
             }
         }
     }
