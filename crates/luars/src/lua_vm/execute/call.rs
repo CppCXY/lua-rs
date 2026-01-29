@@ -343,8 +343,7 @@ pub fn handle_tailcall(
                 }
             }
 
-            // CRITICAL: Pad missing parameters with nil (like push_frame does)
-            // If nargs < numparams, set missing parameters to nil
+            // CRITICAL: Pad missing parameters and update nextraargs (like Lua 5.5)
             if let Some(chunk) = new_func.chunk() {
                 let numparams = chunk.param_count as usize;
                 
@@ -354,6 +353,22 @@ pub fn handle_tailcall(
                         lua_state.stack_set(base + i, LuaValue::nil())?;
                     }
                 }
+                
+                // CRITICAL: Update nextraargs for VARARG instruction
+                // nextraargs = max(0, nargs - numparams)
+                let new_nextraargs = if nargs > numparams {
+                    (nargs - numparams) as i32
+                } else {
+                    0
+                };
+                
+                let current_frame_idx = lua_state.call_depth() - 1;
+                lua_state.set_frame_nextraargs(current_frame_idx, new_nextraargs);
+                
+                // CRITICAL: Set stack_top to limit vararg range
+                // stack_top = base + max(nargs, numparams)
+                let narg1 = if nargs < numparams { numparams } else { nargs };
+                lua_state.set_top(base + narg1)?;
             }
 
             // Replace function at base-1 (where current function is)
