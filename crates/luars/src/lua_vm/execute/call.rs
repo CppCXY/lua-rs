@@ -411,7 +411,41 @@ pub fn handle_tailcall(
         call_c_function_tailcall(lua_state, func_idx, nargs, base)?;
         Ok(FrameAction::Continue)
     } else {
-        Err(lua_state.error("TAILCALL: attempt to call a non-function".to_string()))
+        // Not a function - check for __call metamethod
+        // Similar to handle_call's metamethod handling
+        if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
+            // We have __call metamethod
+            // Need to shift arguments and insert function as first arg
+            // Stack layout before: [func, arg1, arg2, ...]
+            // Stack layout after:  [__call, func, arg1, arg2, ...]
+
+            // First, shift arguments to make room for func as first arg
+            let first_arg = func_idx + 1;
+            for i in (0..nargs).rev() {
+                let val = lua_state
+                    .stack_get(first_arg + i)
+                    .unwrap_or(LuaValue::nil());
+                lua_state.stack_set(first_arg + i + 1, val)?;
+            }
+
+            // Set func as first arg of metamethod
+            lua_state.stack_set(first_arg, func)?;
+
+            // Set metamethod as the function to call
+            lua_state.stack_set(func_idx, mm)?;
+
+            // Update L->top.p to include the shifted argument
+            let new_top = first_arg + nargs + 1;
+            lua_state.set_top(new_top)?;
+
+            // Now tail-call the metamethod with nargs+1 (including original func)
+            // Recalculate b: if b was 0 (varargs), keep it 0
+            // otherwise increment it to account for the extra argument
+            let new_b = if b == 0 { 0 } else { b + 1 };
+            return handle_tailcall(lua_state, base, a, new_b);
+        } else {
+            Err(lua_state.error(format!("TAILCALL: attempt to call a {} value", func.type_name())))
+        }
     }
 }
 
