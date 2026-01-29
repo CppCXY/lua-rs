@@ -297,26 +297,25 @@ pub fn handle_tailcall(
     a: usize,
     b: usize,
 ) -> LuaResult<FrameAction> {
+    // Save the actual stack_top BEFORE syncing with frame.top
+    // This is needed for variable args (b==0) calculation
+    let actual_stack_top = lua_state.get_top();
+
     // CRITICAL: Sync stack_top with frame.top before reading arguments
-    // Same as handle_call - we need current top to calculate variable args
+    // This ensures stack is properly bounded for subsequent operations
     if let Some(frame) = lua_state.current_frame() {
         let frame_top = frame.top;
         lua_state.set_top(frame_top)?;
     }
 
     let nargs = if b == 0 {
-        // Variable args: use current frame's top
+        // Variable args: use actual_stack_top (saved above), NOT frame.top
+        // frame.top is the stack limit (base + maxstacksize), not current top
         let func_idx = base + a;
         let first_arg = func_idx + 1;
 
-        let frame_top = if let Some(frame) = lua_state.current_frame() {
-            frame.top
-        } else {
-            lua_state.get_top() // Use logical stack top
-        };
-
-        if frame_top > first_arg {
-            frame_top - first_arg
+        if actual_stack_top > first_arg {
+            actual_stack_top - first_arg
         } else {
             0
         }
@@ -341,6 +340,31 @@ pub fn handle_tailcall(
                     let dst_idx = base + dist;
                     lua_state.stack_set(dst_idx, arg)?;
                     dist += 1;
+                }
+            }
+
+            // CRITICAL: Pad missing parameters with nil (like push_frame does)
+            // If nargs < numparams, set missing parameters to nil
+            // ALSO: Clear any positions beyond numparams to prevent vararg from reading stale data
+            if let Some(chunk) = new_func.chunk() {
+                let numparams = chunk.param_count as usize;
+                
+                // Pad fixed parameters with nil if needed
+                if nargs < numparams {
+                    for i in nargs..numparams {
+                        lua_state.stack_set(base + i, LuaValue::nil())?;
+                    }
+                }
+                
+                // CRITICAL: Clear positions after fixed parameters to prevent vararg
+                // from reading old argument values that were at func_idx+1+i
+                // For example, if args were at base+a+1, base+a+2, ... and we moved them to base, base+1, ...
+                // the old positions might still contain values that vararg could incorrectly read
+                // Clear from base+numparams to at least base+numparams+nargs
+                let clear_start = base + numparams;
+                let clear_end = clear_start + nargs;  // Clear as many positions as we had arguments
+                for i in clear_start..clear_end {
+                    lua_state.stack_set(i, LuaValue::nil())?;
                 }
             }
 
