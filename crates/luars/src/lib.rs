@@ -10,6 +10,10 @@ pub mod lib_registry;
 pub mod lua_value;
 pub mod lua_vm;
 pub mod stdlib;
+
+#[cfg(feature = "serde")]
+pub mod serde;
+
 #[cfg(test)]
 use crate::lua_vm::SafeOption;
 pub use gc::*;

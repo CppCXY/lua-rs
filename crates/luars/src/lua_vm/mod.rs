@@ -228,6 +228,30 @@ impl LuaVM {
         Ok(())
     }
 
+    /// Serialize a Lua value to JSON (requires 'serde' feature)
+    #[cfg(feature = "serde")]
+    pub fn serialize_to_json(&self, value: &LuaValue) -> Result<serde_json::Value, String> {
+        crate::serde::lua_to_json(value)
+    }
+
+    /// Serialize a Lua value to a JSON string (requires 'serde' feature)
+    #[cfg(feature = "serde")]
+    pub fn serialize_to_json_string(&self, value: &LuaValue, pretty: bool) -> Result<String, String> {
+        crate::serde::lua_to_json_string(value, pretty)
+    }
+
+    /// Deserialize a JSON value to Lua (requires 'serde' feature)
+    #[cfg(feature = "serde")]
+    pub fn deserialize_from_json(&mut self, json: &serde_json::Value) -> Result<LuaValue, String> {
+        crate::serde::json_to_lua(json, self)
+    }
+
+    /// Deserialize a JSON string to Lua (requires 'serde' feature)
+    #[cfg(feature = "serde")]
+    pub fn deserialize_from_json_string(&mut self, json_str: &str) -> Result<LuaValue, String> {
+        crate::serde::json_string_to_lua(json_str, self)
+    }
+
     /// Execute a chunk in the main thread
     pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
         // Main chunk needs _ENV upvalue pointing to global table
@@ -763,4 +787,269 @@ impl LuaVM {
     }
 }
 
-
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_lua_ref_mechanism() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        
+        // Create some test values
+        let table = vm.create_table(0, 2).unwrap();
+        let num_key = vm.create_string("num").unwrap();
+        let str_key = vm.create_string("str").unwrap();
+        let str_val = vm.create_string("hello").unwrap();
+        vm.raw_set(&table, num_key, LuaValue::number(42.0));
+        vm.raw_set(&table, str_key, str_val);
+        
+        let number = LuaValue::number(123.456);
+        let nil_val = LuaValue::nil();
+        
+        // Test 1: Create references
+        let table_ref = vm.create_ref(table.clone());
+        let number_ref = vm.create_ref(number.clone());
+        let nil_ref = vm.create_ref(nil_val.clone());
+        
+        // Verify reference types
+        assert!(table_ref.is_registry_ref(), "Table should use registry");
+        assert!(!number_ref.is_registry_ref(), "Number should be direct");
+        assert!(!nil_ref.is_registry_ref(), "Nil should be direct");
+        
+        // Test 2: Retrieve values through references
+        let retrieved_table = vm.get_ref_value(&table_ref);
+        assert!(retrieved_table.is_table(), "Should retrieve table");
+        
+        let retrieved_num = vm.get_ref_value(&number_ref);
+        assert_eq!(retrieved_num.as_number(), Some(123.456), "Should retrieve number");
+        
+        let retrieved_nil = vm.get_ref_value(&nil_ref);
+        assert!(retrieved_nil.is_nil(), "Should retrieve nil");
+        
+        // Test 3: Verify table contents
+        let num_key2 = vm.create_string("num").unwrap();
+        let val = vm.raw_get(&retrieved_table, &num_key2);
+        assert_eq!(val.and_then(|v| v.as_number()), Some(42.0), "Table content should be preserved");
+        
+        // Test 4: Get ref IDs
+        let table_ref_id = table_ref.ref_id();
+        assert!(table_ref_id.is_some(), "Table ref should have ID");
+        assert!(table_ref_id.unwrap() > 0, "Ref ID should be positive");
+        
+        let number_ref_id = number_ref.ref_id();
+        assert!(number_ref_id.is_none(), "Number ref should not have ID");
+        
+        // Test 5: Release references
+        vm.release_ref(table_ref);
+        vm.release_ref(number_ref);
+        vm.release_ref(nil_ref);
+        
+        // Test 6: After release, ref should return nil
+        let after_release = vm.get_ref_value_by_id(table_ref_id.unwrap());
+        assert!(after_release.is_nil(), "Released ref should return nil");
+        
+        println!("✓ Lua ref mechanism test passed");
+    }
+    
+    #[test]
+    fn test_ref_id_reuse() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        
+        // Create and release multiple refs to test ID reuse
+        let t1 = vm.create_table(0, 0).unwrap();
+        let ref1 = vm.create_ref(t1);
+        let id1 = ref1.ref_id().unwrap();
+        
+        vm.release_ref(ref1);
+        
+        // Create another ref - should reuse the ID
+        let t2 = vm.create_table(0, 0).unwrap();
+        let ref2 = vm.create_ref(t2);
+        let id2 = ref2.ref_id().unwrap();
+        
+        assert_eq!(id1, id2, "Ref IDs should be reused");
+        
+        vm.release_ref(ref2);
+        
+        println!("✓ Ref ID reuse test passed");
+    }
+    
+    #[test]
+    fn test_multiple_refs() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        
+        // Create multiple refs and verify they don't interfere
+        let mut refs = Vec::new();
+        for i in 0..10 {
+            let table = vm.create_table(0, 1).unwrap();
+            let key = vm.create_string("value").unwrap();
+            let num_val = LuaValue::number(i as f64);
+            vm.raw_set(&table, key, num_val);
+            refs.push(vm.create_ref(table));
+        }
+        
+        // Verify all refs are still valid
+        for (i, lua_ref) in refs.iter().enumerate() {
+            let table = vm.get_ref_value(lua_ref);
+            let key = vm.create_string("value").unwrap();
+            let val = vm.raw_get(&table, &key);
+            assert_eq!(val.and_then(|v| v.as_number()), Some(i as f64), 
+                      "Ref {} should have correct value", i);
+        }
+        
+        // Release all refs
+        for lua_ref in refs {
+            vm.release_ref(lua_ref);
+        }
+        
+        println!("✓ Multiple refs test passed");
+    }
+    
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_json_serialization() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        
+        // Test 1: Simple values
+        let num = LuaValue::number(42.5);
+        let json = vm.serialize_to_json(&num).unwrap();
+        assert_eq!(json, serde_json::json!(42.5));
+        
+        let bool_val = LuaValue::boolean(true);
+        let json = vm.serialize_to_json(&bool_val).unwrap();
+        assert_eq!(json, serde_json::json!(true));
+        
+        let nil = LuaValue::nil();
+        let json = vm.serialize_to_json(&nil).unwrap();
+        assert_eq!(json, serde_json::json!(null));
+        
+        // Test 2: String
+        let str_val = vm.create_string("hello world").unwrap();
+        let json = vm.serialize_to_json(&str_val).unwrap();
+        assert_eq!(json, serde_json::json!("hello world"));
+        
+        // Test 3: Array-like table
+        let arr = vm.create_table(3, 0).unwrap();
+        vm.raw_set(&arr, LuaValue::number(1.0), LuaValue::number(10.0));
+        vm.raw_set(&arr, LuaValue::number(2.0), LuaValue::number(20.0));
+        vm.raw_set(&arr, LuaValue::number(3.0), LuaValue::number(30.0));
+        
+        let json = vm.serialize_to_json(&arr).unwrap();
+        assert_eq!(json, serde_json::json!([10, 20, 30]));
+        
+        // Test 4: Object-like table
+        let obj = vm.create_table(0, 2).unwrap();
+        let key1 = vm.create_string("name").unwrap();
+        let key2 = vm.create_string("age").unwrap();
+        let val1 = vm.create_string("Alice").unwrap();
+        vm.raw_set(&obj, key1, val1);
+        vm.raw_set(&obj, key2, LuaValue::number(30.0));
+        
+        let json = vm.serialize_to_json(&obj).unwrap();
+        let expected = serde_json::json!({"name": "Alice", "age": 30});
+        assert_eq!(json, expected);
+        
+        // Test 5: Nested structure
+        let root = vm.create_table(0, 2).unwrap();
+        let inner = vm.create_table(2, 0).unwrap();
+        vm.raw_set(&inner, LuaValue::number(1.0), LuaValue::number(1.0));
+        vm.raw_set(&inner, LuaValue::number(2.0), LuaValue::number(2.0));
+        
+        let key = vm.create_string("data").unwrap();
+        vm.raw_set(&root, key, inner);
+        let key2 = vm.create_string("count").unwrap();
+        vm.raw_set(&root, key2, LuaValue::number(100.0));
+        
+        let json = vm.serialize_to_json(&root).unwrap();
+        let expected = serde_json::json!({"data": [1, 2], "count": 100});
+        assert_eq!(json, expected);
+        
+        println!("✓ JSON serialization test passed");
+    }
+    
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_json_deserialization() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        
+        // Test 1: Simple values
+        let json = serde_json::json!(42);
+        let lua_val = vm.deserialize_from_json(&json).unwrap();
+        assert_eq!(lua_val.as_number(), Some(42.0));
+        
+        let json = serde_json::json!(true);
+        let lua_val = vm.deserialize_from_json(&json).unwrap();
+        assert_eq!(lua_val.as_bool(), Some(true));
+        
+        let json = serde_json::json!(null);
+        let lua_val = vm.deserialize_from_json(&json).unwrap();
+        assert!(lua_val.is_nil());
+        
+        // Test 2: String
+        let json = serde_json::json!("hello");
+        let lua_val = vm.deserialize_from_json(&json).unwrap();
+        assert_eq!(lua_val.as_str(), Some("hello"));
+        
+        // Test 3: Array
+        let json = serde_json::json!([1, 2, 3]);
+        let lua_val = vm.deserialize_from_json(&json).unwrap();
+        assert!(lua_val.is_table());
+        
+        let key1 = vm.create_string("1").unwrap();
+        let val1 = vm.raw_get(&lua_val, &LuaValue::number(1.0)).unwrap();
+        assert_eq!(val1.as_number(), Some(1.0));
+        
+        // Test 4: Object
+        let json = serde_json::json!({"name": "Bob", "age": 25});
+        let lua_val = vm.deserialize_from_json(&json).unwrap();
+        assert!(lua_val.is_table());
+        
+        let key = vm.create_string("name").unwrap();
+        let name = vm.raw_get(&lua_val, &key).unwrap();
+        assert_eq!(name.as_str(), Some("Bob"));
+        
+        println!("✓ JSON deserialization test passed");
+    }
+    
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_json_roundtrip() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        
+        // Create a complex Lua structure
+        let root = vm.create_table(0, 3).unwrap();
+        
+        let key1 = vm.create_string("name").unwrap();
+        let val1 = vm.create_string("Test").unwrap();
+        vm.raw_set(&root, key1, val1);
+        
+        let key2 = vm.create_string("count").unwrap();
+        vm.raw_set(&root, key2, LuaValue::number(42.0));
+        
+        let key3 = vm.create_string("items").unwrap();
+        let items = vm.create_table(3, 0).unwrap();
+        vm.raw_set(&items, LuaValue::number(1.0), LuaValue::number(10.0));
+        vm.raw_set(&items, LuaValue::number(2.0), LuaValue::number(20.0));
+        vm.raw_set(&items, LuaValue::number(3.0), LuaValue::number(30.0));
+        vm.raw_set(&root, key3, items);
+        
+        // Serialize to JSON
+        let json = vm.serialize_to_json(&root).unwrap();
+        
+        // Deserialize back to Lua
+        let reconstructed = vm.deserialize_from_json(&json).unwrap();
+        
+        // Verify structure
+        assert!(reconstructed.is_table());
+        
+        let key = vm.create_string("name").unwrap();
+        let name = vm.raw_get(&reconstructed, &key).unwrap();
+        assert_eq!(name.as_str(), Some("Test"));
+        
+        let key = vm.create_string("count").unwrap();
+        let count = vm.raw_get(&reconstructed, &key).unwrap();
+        assert_eq!(count.as_number(), Some(42.0));
+        
+        println!("✓ JSON roundtrip test passed");
+    }
+}
