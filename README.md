@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/CppCXY/lua-rs/workflows/CI/badge.svg)](https://github.com/CppCXY/lua-rs/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![crate](https://img.shields.io/crates/v/luars.svg?style=flat-square)](https://crates.io/crates/luars)
 
 > ⚠️ **Project Notice**: This is an experimental **Lua 5.5** interpreter implementation crafted primarily through AI-assisted programming. It explores the intersection of modern AI coding capabilities, the Rust programming language, and low-level VM architecture.
 
