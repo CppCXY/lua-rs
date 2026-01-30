@@ -69,7 +69,7 @@ impl LuaVM {
     pub fn new(option: SafeOption) -> Box<Self> {
         let mut gc = GC::new(option.clone());
         gc.set_temporary_memory_limit(isize::MAX / 2);
-        let mut object_allocator = ObjectAllocator::new(option.clone());
+        let mut object_allocator = ObjectAllocator::new();
         let cs = ConstString::new(&mut object_allocator, &mut gc);
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

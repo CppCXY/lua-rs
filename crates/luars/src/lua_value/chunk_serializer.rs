@@ -4,6 +4,7 @@
 use super::{Chunk, LuaValue, UpvalueDesc};
 use crate::Instruction;
 use crate::gc::ObjectAllocator;
+use crate::lua_vm::LuaVM;
 use std::io::{Cursor, Read};
 use std::rc::Rc;
 
@@ -75,6 +76,39 @@ pub fn deserialize_chunk(data: &[u8]) -> Result<Chunk, String> {
 
     // Read chunk data
     read_chunk(&mut cursor)
+}
+
+/// Deserialize binary data to a Chunk, directly creating strings with VM
+pub fn deserialize_chunk_with_strings_vm(data: &[u8], vm: &mut LuaVM) -> Result<Chunk, String> {
+    let mut cursor = Cursor::new(data);
+
+    // Verify magic number
+    let mut magic = [0u8; 6];
+    cursor
+        .read_exact(&mut magic)
+        .map_err(|e| format!("failed to read magic: {}", e))?;
+    if &magic != LUARS_MAGIC {
+        return Err("not a lua-rs bytecode file".to_string());
+    }
+
+    // Read version
+    let mut version = [0u8; 1];
+    cursor
+        .read_exact(&mut version)
+        .map_err(|e| format!("failed to read version: {}", e))?;
+    if version[0] != LUARS_VERSION {
+        return Err(format!("unsupported bytecode version: {}", version[0]));
+    }
+
+    // Read strip flag
+    let mut stripped = [0u8; 1];
+    cursor
+        .read_exact(&mut stripped)
+        .map_err(|_| "failed to read strip flag")?;
+
+    // Read chunk data, creating strings directly with VM
+    let chunk = read_chunk_with_vm(&mut cursor, vm)?;
+    Ok(chunk)
 }
 
 /// Deserialize binary data to a Chunk, returning string constants separately
@@ -312,13 +346,15 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     })
 }
 
-// Constant type tags
-const TAG_NIL: u8 = 0;
-const TAG_BOOL_FALSE: u8 = 1;
-const TAG_BOOL_TRUE: u8 = 2;
-const TAG_INTEGER: u8 = 3;
-const TAG_FLOAT: u8 = 4;
-const TAG_STRING: u8 = 5;
+// Constant type tags (from Lua 5.5 lundump.h)
+// These match Lua's internal type tags
+const TAG_NIL: u8 = 0x00; // LUA_VNIL
+const TAG_BOOL_FALSE: u8 = 0x01; // LUA_VFALSE  
+const TAG_BOOL_TRUE: u8 = 0x11; // LUA_VTRUE
+const TAG_FLOAT: u8 = 0x03; // LUA_VNUMFLT
+const TAG_INTEGER: u8 = 0x13; // LUA_VNUMINT
+const TAG_SHORT_STRING: u8 = 0x04; // LUA_VSHRSTR
+const TAG_LONG_STRING: u8 = 0x14; // LUA_VLNGSTR
 
 fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), String> {
     if value.is_nil() {
@@ -332,7 +368,13 @@ fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), S
         buf.push(TAG_FLOAT);
         write_f64(buf, f);
     } else if let Some(lua_string) = value.as_str() {
-        buf.push(TAG_STRING);
+        // Use short string tag for strings <= 40 bytes, long string otherwise
+        // This matches Lua 5.5's LUAI_MAXSHORTLEN
+        if lua_string.len() <= 40 {
+            buf.push(TAG_SHORT_STRING);
+        } else {
+            buf.push(TAG_LONG_STRING);
+        }
         write_string(buf, lua_string);
     } else {
         buf.push(TAG_NIL);
@@ -371,7 +413,7 @@ fn read_constant_with_strings(
         TAG_BOOL_TRUE => Ok(LuaValue::boolean(true)),
         TAG_INTEGER => Ok(LuaValue::integer(read_i64(cursor)?)),
         TAG_FLOAT => Ok(LuaValue::number(read_f64(cursor)?)),
-        TAG_STRING => {
+        TAG_SHORT_STRING | TAG_LONG_STRING => {
             let s = read_string(cursor)?;
             // Store string for later, use nil as placeholder
             strings.push((const_index, s));
@@ -389,7 +431,7 @@ fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<LuaValue, String> {
         TAG_BOOL_TRUE => Ok(LuaValue::boolean(true)),
         TAG_INTEGER => Ok(LuaValue::integer(read_i64(cursor)?)),
         TAG_FLOAT => Ok(LuaValue::number(read_f64(cursor)?)),
-        TAG_STRING => {
+        TAG_SHORT_STRING | TAG_LONG_STRING => {
             // Skip the string data, return nil as placeholder
             let len = read_u32(cursor)? as usize;
             let mut buf = vec![0u8; len];
@@ -397,6 +439,100 @@ fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<LuaValue, String> {
                 .read_exact(&mut buf)
                 .map_err(|e| format!("read error: {}", e))?;
             Ok(LuaValue::nil())
+        }
+        _ => Err(format!("unknown constant tag: {}", tag)),
+    }
+}
+
+fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chunk, String> {
+    // Read code
+    let code_len = read_u32(cursor)? as usize;
+    let mut code = Vec::with_capacity(code_len);
+    for _ in 0..code_len {
+        code.push(Instruction::from_u32(read_u32(cursor)?));
+    }
+
+    // Read constants with direct VM string creation
+    let const_len = read_u32(cursor)? as usize;
+    let mut constants = Vec::with_capacity(const_len);
+    for _ in 0..const_len {
+        constants.push(read_constant_with_vm(cursor, vm)?);
+    }
+
+    // Read metadata
+    let upvalue_count = read_u32(cursor)? as usize;
+    let param_count = read_u32(cursor)? as usize;
+    let is_vararg = read_u8(cursor)? != 0;
+    let max_stack_size = read_u32(cursor)? as usize;
+
+    // Read upvalue descriptors
+    let desc_len = read_u32(cursor)? as usize;
+    let mut upvalue_descs = Vec::with_capacity(desc_len);
+    for _ in 0..desc_len {
+        let name = read_string(cursor)?;
+        let is_local = read_u8(cursor)? != 0;
+        let index = read_u32(cursor)?;
+        upvalue_descs.push(UpvalueDesc {
+            name,
+            is_local,
+            index,
+        });
+    }
+
+    // Read child prototypes recursively with VM
+    let child_len = read_u32(cursor)? as usize;
+    let mut child_protos = Vec::with_capacity(child_len);
+    for _ in 0..child_len {
+        child_protos.push(Rc::new(read_chunk_with_vm(cursor, vm)?));
+    }
+
+    // Read debug info
+    let source_name = read_optional_string(cursor)?;
+
+    let locals_len = read_u32(cursor)? as usize;
+    let mut locals = Vec::with_capacity(locals_len);
+    for _ in 0..locals_len {
+        locals.push(read_string(cursor)?);
+    }
+
+    let line_len = read_u32(cursor)? as usize;
+    let mut line_info = Vec::with_capacity(line_len);
+    for _ in 0..line_len {
+        line_info.push(read_u32(cursor)?);
+    }
+
+    Ok(Chunk {
+        code,
+        constants,
+        child_protos,
+        upvalue_count,
+        param_count,
+        is_vararg,
+        max_stack_size,
+        upvalue_descs,
+        source_name,
+        locals,
+        line_info,
+        needs_vararg_table: false,
+        use_hidden_vararg: false,
+        linedefined: 0,
+        lastlinedefined: 0,
+    })
+}
+
+fn read_constant_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<LuaValue, String> {
+    let tag = read_u8(cursor)?;
+    match tag {
+        TAG_NIL => Ok(LuaValue::nil()),
+        TAG_BOOL_FALSE => Ok(LuaValue::boolean(false)),
+        TAG_BOOL_TRUE => Ok(LuaValue::boolean(true)),
+        TAG_INTEGER => Ok(LuaValue::integer(read_i64(cursor)?)),
+        TAG_FLOAT => Ok(LuaValue::number(read_f64(cursor)?)),
+        TAG_SHORT_STRING | TAG_LONG_STRING => {
+            let s = read_string(cursor)?;
+            // Directly create string with VM
+            vm.create_string_owned(s)
+                .map_err(|e| format!("failed to create string: {}", e))
         }
         _ => Err(format!("unknown constant tag: {}", tag)),
     }

@@ -1,9 +1,12 @@
 // Native Lua 5.5-style table implementation
 // Port of ltable.c with minimal abstractions for maximum performance
 
-use crate::lua_value::{
-    LuaValue,
-    lua_value::{LUA_VEMPTY, LUA_VNIL, Value},
+use crate::{
+    StringInterner,
+    lua_value::{
+        LuaValue,
+        lua_value::{LUA_VEMPTY, LUA_VNIL, Value},
+    },
 };
 use std::alloc::{self, Layout};
 use std::ptr;
@@ -433,17 +436,23 @@ impl NativeTable {
             return None;
         }
 
-        // Fast path for short strings - direct pointer comparison
+        // Fast path for short strings only - direct pointer comparison
+        // Long strings (>40 chars) are NOT interned, so must use general case
         if key.is_string() {
-            return self.get_shortstr_fast(key);
+            if let Some(s) = key.as_str() {
+                // Only use fast path for short strings (<=40 chars)
+                if s.len() <= StringInterner::SHORT_STRING_LIMIT {
+                    return self.get_shortstr_fast(key);
+                }
+            }
         }
 
-        // General case
+        // General case (includes long strings)
         let mut node = self.mainposition(key);
 
         loop {
             unsafe {
-                // Compare keys
+                // Compare keys with proper equality (handles long string content comparison)
                 if (*node).key == *key {
                     let val = (*node).value;
                     return if val.is_nil() { None } else { Some(val) };

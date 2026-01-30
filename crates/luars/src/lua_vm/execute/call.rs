@@ -193,10 +193,7 @@ pub fn resolve_call_chain(
             // Continue loop to check if mm also needs __call resolution
         } else {
             // No __call metamethod and not a function
-            return Err(lua_state.error(format!(
-                "attempt to call a {} value",
-                func.type_name()
-            )));
+            return Err(lua_state.error(format!("attempt to call a {} value", func.type_name())));
         }
     }
 }
@@ -397,13 +394,13 @@ pub fn handle_tailcall(
     if let Some(new_func) = func.as_lua_function() {
         if new_func.is_lua_function() {
             let current_frame_idx = lua_state.call_depth() - 1;
-            
+
             // Close upvalues from current call before moving arguments
             // This is critical: like Lua 5.5's OP_TAILCALL which calls luaF_closeupval(L, base)
             // We need to close upvalues that reference the current frame's locals
             // because we're about to overwrite them with the new function's arguments
             lua_state.close_upvalues(base);
-            
+
             // Like Lua 5.5's luaD_pretailcall: move function and arguments down together
             // Move func + args: [func, arg1, arg2, ...] to [ci->func, ci->func+1, ci->func+2, ...]
             // This is: [base-1, base, base+1, ...] positions
@@ -420,7 +417,7 @@ pub fn handle_tailcall(
 
             // After moving, update func reference to the moved position
             let moved_func = lua_state.stack_get(base - 1).unwrap_or(func);
-            
+
             // Get the moved function body for parameter info
             let moved_func_body = moved_func.as_lua_function().ok_or_else(|| {
                 lua_state.error("TAILCALL: moved function is not a Lua function".to_string())
@@ -519,11 +516,11 @@ pub fn handle_tailcall(
     } else {
         // Not a function - resolve __call chain first
         let actual_nargs = resolve_call_chain(lua_state, func_idx, nargs)?;
-        
+
         // After resolution, recurse once to handle the actual call
         // (but won't recurse again since __call chain is now resolved)
         let new_b = if b == 0 {
-            0  // Keep varargs indicator
+            0 // Keep varargs indicator
         } else {
             // Adjust b for the additional arguments from __call chain
             let delta = actual_nargs - nargs;

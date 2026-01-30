@@ -15,16 +15,15 @@ pub struct StringInterner {
     // 使用 ahash 作为哈希算法以提升性能
     map: HashMap<u64, Vec<StringPtr>, RandomState>,
 
-    short_string_limit: usize,
-
     hashbuilder: RandomState,
 }
 
 impl StringInterner {
-    pub fn new(short_string_limit: usize) -> Self {
+    pub const SHORT_STRING_LIMIT: usize = 40;
+
+    pub fn new() -> Self {
         Self {
             map: HashMap::with_capacity_and_hasher(256, RandomState::new()),
-            short_string_limit,
             hashbuilder: RandomState::new(),
         }
     }
@@ -33,7 +32,7 @@ impl StringInterner {
     pub fn intern(&mut self, s: &str, gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
         let hash = self.hash_string(s);
-        if s.len() > self.short_string_limit {
+        if s.len() > Self::SHORT_STRING_LIMIT {
             // Long strings are not interned
             let size = (std::mem::size_of::<GcString>() + s.len()) as u32;
             let lua_string = LuaString::new(s.to_string(), hash);

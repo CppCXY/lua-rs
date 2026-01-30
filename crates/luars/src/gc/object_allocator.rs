@@ -11,7 +11,7 @@
 use crate::gc::gc_object::FunctionBody;
 use crate::gc::string_interner::StringInterner;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
-use crate::lua_vm::{CFunction, LuaState, SafeOption};
+use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     GC, GcBinary, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata, Instruction,
     LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
@@ -25,25 +25,18 @@ pub type CreateResult = LuaResult<LuaValue>;
 /// - Large objects (Table, Thread) use BoxPool<T> to avoid copy on resize
 /// - ALL strings are interned via StringInterner for O(1) equality checks
 pub struct ObjectAllocator {
-    strings: StringInterner,   // Private - use create_string() to intern
-    short_string_limit: usize, // Obsolete - kept for backwards compatibility
+    strings: StringInterner, // Private - use create_string() to intern
 }
 
 impl ObjectAllocator {
-    pub fn new(option: SafeOption) -> Self {
+    pub fn new() -> Self {
         let pool = Self {
-            strings: StringInterner::new(option.short_string_limit),
-            short_string_limit: option.short_string_limit,
+            strings: StringInterner::new(),
         };
 
         pool
     }
 
-    /// Get short string limit (now obsolete - all strings are interned)
-    /// Kept for backwards compatibility, returns a default value
-    pub fn get_short_string_limit(&self) -> usize {
-        self.short_string_limit
-    }
     // ==================== String Operations ====================
 
     /// Create or intern a string (Lua-style with proper hash collision handling)
@@ -104,8 +97,21 @@ impl ObjectAllocator {
                 return Ok(s_value);
             }
 
-            // Copy substring to avoid borrowing issue
-            &string[start..end]
+            // Lua allows slicing at any byte position, even in the middle of UTF-8 characters
+            // We need to handle this safely
+            let bytes = string.as_bytes();
+            let substring_bytes = &bytes[start..end];
+
+            // Try to create a valid UTF-8 string from these bytes
+            // If invalid, create a binary value to preserve the original bytes
+            match std::str::from_utf8(substring_bytes) {
+                Ok(valid_str) => valid_str,
+                Err(_) => {
+                    // Invalid UTF-8 - create binary value to preserve original bytes
+                    // This is important for binary data like bytecode
+                    return self.create_binary(gc, substring_bytes.to_vec());
+                }
+            }
         };
 
         // Intern the substring - will be deduplicated if it already exists

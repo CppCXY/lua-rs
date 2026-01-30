@@ -18,7 +18,7 @@ pub use lua_value::{
     LUA_VNUMINT, LUA_VTRUE,
 };
 
-use crate::{Instruction, TablePtr};
+use crate::{Instruction, StringInterner, TablePtr};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LuaValuePtr {
@@ -217,6 +217,14 @@ impl LuaString {
 
     pub fn as_str(&self) -> &str {
         &self.str
+    }
+
+    pub fn is_short(&self) -> bool {
+        self.str.len() <= StringInterner::SHORT_STRING_LIMIT
+    }
+
+    pub fn is_long(&self) -> bool {
+        self.str.len() > StringInterner::SHORT_STRING_LIMIT
     }
 }
 

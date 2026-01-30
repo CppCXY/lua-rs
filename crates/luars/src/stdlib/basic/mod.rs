@@ -773,7 +773,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let chunk_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'load' (value expected)".to_string()))?;
-    
+
     // Save all arguments before potentially calling reader function
     // because calling the reader will modify the stack
     let chunkname_arg = l.get_arg(2).and_then(|v| v.as_str().map(|s| s.to_string()));
@@ -790,7 +790,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         loop {
             // Call the reader function
             l.push_value(chunk_val)?;
-            
+
             let func_idx = l.get_top() - 1;
             let call_result = l.pcall_stack_based(func_idx, 0);
 
@@ -806,10 +806,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                     // Error occurred in reader function
                     let error_val = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
                     l.set_top(func_idx)?;
-                    
+
                     // Return nil + error message
                     l.push_value(LuaValue::nil())?;
-                    let err_msg = l.create_string(&format!("error in reader function: {}", error_val))?;
+                    let err_msg =
+                        l.create_string(&format!("error in reader function: {}", error_val))?;
                     l.push_value(err_msg)?;
                     return Ok(2);
                 }
@@ -819,29 +820,45 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 }
             };
 
-            // Clean up stack
-            l.set_top(func_idx)?;
-            
             // nil or empty string means end of input
             if result.is_nil() {
+                l.set_top(func_idx)?;
                 break;
             }
-            
-            if let Some(s) = result.as_str() {
-                if s.is_empty() {
+
+            // Get raw bytes - support both string and binary types
+            // IMPORTANT: Use as_binary() first to avoid UTF-8 conversion issues
+            // when reading binary bytecode one byte at a time
+            let bytes_opt = if let Some(b) = result.as_binary() {
+                Some(b)
+            } else if let Some(s) = result.as_str() {
+                Some(s.as_bytes())
+            } else {
+                None
+            };
+
+            if let Some(bytes) = bytes_opt {
+                if bytes.is_empty() {
+                    l.set_top(func_idx)?;
                     break;
                 }
-                
+
                 // Check if first byte is binary marker (0x1B for Lua bytecode)
-                if first_chunk && !s.is_empty() && s.as_bytes()[0] == 0x1B {
+                if first_chunk && !bytes.is_empty() && bytes[0] == 0x1B {
                     is_binary = true;
                 }
-                
-                accumulated.extend_from_slice(s.as_bytes());
+
+                // IMPORTANT: Copy the bytes BEFORE calling set_top
+                // because set_top may allow GC to run
+                accumulated.extend_from_slice(bytes);
                 first_chunk = false;
+
+                // Clean up stack
+                l.set_top(func_idx)?;
             } else {
                 // Reader function returned non-string value (not nil)
                 // Return nil + error message like Lua does
+                l.set_top(func_idx)?;
                 l.push_value(LuaValue::nil())?;
                 let err_msg = l.create_string("reader function must return a string")?;
                 l.push_value(err_msg)?;
@@ -889,19 +906,10 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let env = env_arg;
 
     let chunk_result = if is_binary {
-        // Deserialize binary bytecode
+        // Deserialize binary bytecode with VM to directly create strings
         let vm = l.vm_mut();
-        match chunk_serializer::deserialize_chunk_with_strings(&code_bytes) {
-            Ok((mut chunk, string_constants)) => {
-                // Register string constants in the object pool and update constants
-                for (const_idx, string_val) in string_constants {
-                    let string_val = vm.create_string_owned(string_val)?;
-                    if const_idx < chunk.constants.len() {
-                        chunk.constants[const_idx] = string_val;
-                    }
-                }
-                Ok(chunk)
-            }
+        match chunk_serializer::deserialize_chunk_with_strings_vm(&code_bytes, vm) {
+            Ok(chunk) => Ok(chunk),
             Err(e) => Err(format!("binary load error: {}", e)),
         }
     } else {

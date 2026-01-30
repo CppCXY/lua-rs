@@ -49,6 +49,7 @@ use crate::{
 pub use gc_kind::*;
 pub use gc_object::*;
 pub use object_allocator::*;
+pub use string_interner::*;
 
 // GC Parameters (from lua.h)
 pub const MINORMUL: usize = 0; // Minor collection multiplier
