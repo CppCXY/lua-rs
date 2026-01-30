@@ -803,12 +803,18 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                     }
                 }
                 Ok((false, _)) => {
-                    // Error occurred
+                    // Error occurred in reader function
                     let error_val = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
                     l.set_top(func_idx)?;
-                    return Err(l.error(format!("error in reader function: {}", error_val)));
+                    
+                    // Return nil + error message
+                    l.push_value(LuaValue::nil())?;
+                    let err_msg = l.create_string(&format!("error in reader function: {}", error_val))?;
+                    l.push_value(err_msg)?;
+                    return Ok(2);
                 }
                 Err(e) => {
+                    // Fatal error, propagate it
                     return Err(e);
                 }
             };
@@ -834,7 +840,12 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 accumulated.extend_from_slice(s.as_bytes());
                 first_chunk = false;
             } else {
-                return Err(l.error("reader function must return a string".to_string()));
+                // Reader function returned non-string value (not nil)
+                // Return nil + error message like Lua does
+                l.push_value(LuaValue::nil())?;
+                let err_msg = l.create_string("reader function must return a string")?;
+                l.push_value(err_msg)?;
+                return Ok(2);
             }
         }
 
@@ -852,8 +863,27 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     // Optional chunk name for error messages
     let chunkname = chunkname_arg.unwrap_or_else(|| "=(load)".to_string());
 
-    // Optional mode ("b", "t", or "bt") - we only support "t" (text)
-    let _mode = mode_arg.unwrap_or_else(|| "bt".to_string());
+    // Optional mode ("b", "t", or "bt")
+    let mode = mode_arg.unwrap_or_else(|| "bt".to_string());
+
+    // Check if mode allows this chunk type
+    if is_binary {
+        // Binary chunk - mode must allow binary ("b" or "bt")
+        if !mode.contains('b') {
+            l.push_value(LuaValue::nil())?;
+            let err_msg = l.create_string("attempt to load a binary chunk (mode is 'text')")?;
+            l.push_value(err_msg)?;
+            return Ok(2);
+        }
+    } else {
+        // Text chunk - mode must allow text ("t" or "bt")
+        if !mode.contains('t') {
+            l.push_value(LuaValue::nil())?;
+            let err_msg = l.create_string("attempt to load a text chunk (mode is 'binary')")?;
+            l.push_value(err_msg)?;
+            return Ok(2);
+        }
+    }
 
     // Optional environment table
     let env = env_arg;

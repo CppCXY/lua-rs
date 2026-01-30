@@ -74,7 +74,9 @@ impl<'a> Reader<'a> {
     }
 
     pub fn bump(&mut self) {
-        if self.current != EOF {
+        // Check if we're really at EOF by position, not character value
+        let total_consumed = self.current_buffer_byte_pos + self.current_buffer_byte_len;
+        if total_consumed < self.text.len() {
             self.current_buffer_byte_len += self.current.len_utf8();
             self.prev = self.current;
             self.current = self.next;
@@ -100,7 +102,10 @@ impl<'a> Reader<'a> {
     }
 
     pub fn is_eof(&self) -> bool {
-        self.current == EOF
+        // Check if we've reached the end by position, not by character value
+        // This is important because the source code might contain actual null bytes
+        let total_consumed = self.current_buffer_byte_pos + self.current_buffer_byte_len;
+        total_consumed >= self.text.len()
     }
 
     pub fn is_start_of_line(&self) -> bool {
