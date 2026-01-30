@@ -4,6 +4,7 @@ pub mod call_info;
 mod const_string;
 mod execute;
 mod lua_error;
+mod lua_ref;
 mod lua_state;
 pub mod opcode;
 mod safe_option;
@@ -15,6 +16,8 @@ pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
+pub use crate::lua_vm::lua_ref::{LuaRefValue, RefId, LUA_REFNIL, LUA_NOREF};
+use crate::lua_vm::lua_ref::RefManager;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
@@ -39,6 +42,9 @@ pub struct LuaVM {
 
     /// Registry table (like Lua's LUA_REGISTRYINDEX)
     pub(crate) registry: LuaValue,
+
+    /// Reference manager for luaL_ref/luaL_unref mechanism
+    pub(crate) ref_manager: RefManager,
 
     /// Object pool for unified object management
     pub(crate) object_allocator: ObjectAllocator,
@@ -79,6 +85,7 @@ impl LuaVM {
         let mut vm = Box::new(LuaVM {
             global: LuaValue::nil(),
             registry: LuaValue::nil(),
+            ref_manager: RefManager::new(),
             object_allocator,
             gc,
             main_state: ThreadPtr::null(), //,
@@ -150,6 +157,70 @@ impl LuaVM {
     pub fn registry_get(&mut self, key: &str) -> LuaResult<Option<LuaValue>> {
         let key = self.create_string(key)?;
         Ok(self.raw_get(&self.registry, &key))
+    }
+
+    /// Create a reference to a Lua value (like luaL_ref in C API)
+    /// 
+    /// This stores the value in the registry and returns a LuaRefValue.
+    /// - For nil: returns LUA_REFNIL (no storage)
+    /// - For GC objects: stores in registry, returns ref ID
+    /// - For simple values: stores directly in LuaRefValue
+    /// 
+    /// You must call release_ref() when done to free registry entries.
+    pub fn create_ref(&mut self, value: LuaValue) -> LuaRefValue {
+        // Nil gets special treatment (no storage)
+        if value.is_nil() {
+            return LuaRefValue::new_direct(LuaValue::nil());
+        }
+        
+        // For GC objects (tables, functions, strings, userdata, etc.)
+        // store in registry to keep them alive
+        if value.is_collectable() {
+            let ref_id = self.ref_manager.alloc_ref_id();
+            self.registry_seti(ref_id as i64, value);
+            LuaRefValue::new_registry(ref_id)
+        } else {
+            // For simple values (numbers, booleans), store directly
+            LuaRefValue::new_direct(value)
+        }
+    }
+    
+    /// Get the value from a reference
+    pub fn get_ref_value(&self, lua_ref: &LuaRefValue) -> LuaValue {
+        lua_ref.get(self)
+    }
+    
+    /// Release a reference created by create_ref (like luaL_unref in C API)
+    /// 
+    /// This frees the registry entry and allows the value to be garbage collected.
+    /// After calling this, the LuaRefValue should not be used.
+    pub fn release_ref(&mut self, lua_ref: LuaRefValue) {
+        if let Some(ref_id) = lua_ref.ref_id() {
+            // Remove from registry
+            self.registry_seti(ref_id as i64, LuaValue::nil());
+            // Return ref_id to free list
+            self.ref_manager.free_ref_id(ref_id);
+        }
+        // Direct references don't need cleanup
+    }
+    
+    /// Release a reference by raw ID (for C API compatibility)
+    pub fn release_ref_id(&mut self, ref_id: RefId) {
+        if ref_id > 0 {
+            self.registry_seti(ref_id as i64, LuaValue::nil());
+            self.ref_manager.free_ref_id(ref_id);
+        }
+    }
+    
+    /// Get value from registry by raw ref ID (for C API compatibility)
+    pub fn get_ref_value_by_id(&self, ref_id: RefId) -> LuaValue {
+        if ref_id == LUA_REFNIL {
+            return LuaValue::nil();
+        }
+        if ref_id <= 0 {
+            return LuaValue::nil();
+        }
+        self.registry_geti(ref_id as i64).unwrap_or(LuaValue::nil())
     }
 
     pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
@@ -691,3 +762,5 @@ impl LuaVM {
         mts
     }
 }
+
+
