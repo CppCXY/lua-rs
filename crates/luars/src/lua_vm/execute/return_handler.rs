@@ -33,7 +33,7 @@ pub fn handle_return(
     frame_idx: usize,
     a: usize,
     b: usize,
-    c: usize,
+    _c: usize,
     k: bool,
 ) -> LuaResult<FrameAction> {
     // n = number of results (B-1), if B=0 then return all values to top
@@ -52,11 +52,12 @@ pub fn handle_return(
     }
 
     // Adjust for vararg functions (nparams1 = C)
-    // In vararg functions, we need to move the function pointer back
-    if c > 0 {
-        // This adjusts for extra arguments that were pushed
-        // TODO: Implement vararg adjustment when vararg system is complete
-    }
+    // Lua 5.5 adjusts ci->func.p here: if (nparams1) ci->func.p -= ci->u.l.nextraargs + nparams1;
+    // This reverses the shift done by buildhiddenargs (ci->func.p += totalargs + 1)
+    // In our implementation, we use func_offset to track the original func position,
+    // so we don't need explicit adjustment here. The calculation below already handles it:
+    // func_pos = base - func_offset
+    // where func_offset was set by buildhiddenargs to (new_base - original_func_pos)
 
     // Move return values to correct position
     // After buildhiddenargs, we need to use func_offset to find original position

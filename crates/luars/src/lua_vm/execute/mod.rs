@@ -81,8 +81,25 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
             .get_frame_func(frame_idx)
             .ok_or(LuaError::RuntimeError)?;
 
+        // Skip C function frames - they are executed synchronously by do_call_function
+        // We only execute Lua functions here
+        if func_value.is_cfunction() || !func_value.is_function() {
+            // C function or non-function value
+            // This should not happen in normal execution, as C functions
+            // are called directly and pop their frame before returning
+            return Err(lua_state.error(format!(
+                "Unexpected {} frame in lua_execute_until at frame {}",
+                func_value.type_name(),
+                frame_idx
+            )));
+        }
+
         let Some(func_body) = func_value.as_lua_function() else {
-            return Err(lua_state.error("Current frame is not a function".to_string()));
+            return Err(lua_state.error(format!(
+                "Current frame is not a Lua function: got {} value at frame {}",
+                func_value.type_name(),
+                frame_idx
+            )));
         };
 
         let Some(chunk) = func_body.chunk() else {

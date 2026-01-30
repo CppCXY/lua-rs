@@ -141,6 +141,15 @@ impl LuaState {
         nparams: usize,
         nresults: i32,
     ) -> LuaResult<()> {
+        // Validate that func is actually a callable value
+        let is_callable =
+            func.is_function() || func.is_cfunction() || func.as_lua_function().is_some();
+
+        if !is_callable {
+            self.error(format!("attempt to call a {} value", func.type_name()));
+            return Err(LuaError::RuntimeError);
+        }
+
         // 检查栈深度限制
         if self.call_depth >= self.safe_option.max_call_depth {
             self.error(format!(
@@ -398,8 +407,13 @@ impl LuaState {
     pub fn generate_traceback(&self) -> String {
         let mut result = String::new();
 
+        // Only iterate through valid frames (up to call_depth)
+        // call_stack Vec may contain residual data beyond call_depth
+        let valid_frames = &self.call_stack[..self.call_depth];
+
         // Iterate through call stack from newest to oldest
-        for (level, ci) in self.call_stack.iter().rev().enumerate() {
+        // Start from level 0 (most recent frame, not counting the error frame itself)
+        for (level, ci) in valid_frames.iter().rev().enumerate() {
             if level >= 20 {
                 result.push_str("\t...\n");
                 break;
@@ -430,8 +444,9 @@ impl LuaState {
                         };
 
                         // Determine if this is the main chunk
-                        // Main chunk has linedefined == 0, or is at bottom of call stack
-                        let is_main = chunk.linedefined == 0 || level == self.call_stack.len() - 1;
+                        // Main chunk has linedefined == 0
+                        // Also check if this is at the bottom of the valid call stack
+                        let is_main = chunk.linedefined == 0 || level == valid_frames.len() - 1;
                         let what = if is_main { "main chunk" } else { "function" };
 
                         if line > 0 {
@@ -636,19 +651,34 @@ impl LuaState {
     /// Get frame PC by index
     #[inline(always)]
     pub fn get_frame_pc(&self, frame_idx: usize) -> u32 {
-        self.call_stack.get(frame_idx).map(|f| f.pc).unwrap_or(0)
+        // Only return PC if frame is within current call_depth (valid frames)
+        if frame_idx < self.call_depth {
+            self.call_stack.get(frame_idx).map(|f| f.pc).unwrap_or(0)
+        } else {
+            0
+        }
     }
 
     /// Get frame function by index
     #[inline(always)]
     pub fn get_frame_func(&self, frame_idx: usize) -> Option<LuaValue> {
-        self.call_stack.get(frame_idx).map(|f| f.func)
+        // Only return frame if it's within current call_depth (valid frames)
+        if frame_idx < self.call_depth {
+            self.call_stack.get(frame_idx).map(|f| f.func)
+        } else {
+            None
+        }
     }
 
     /// Get frame by index (for GC root collection)
     #[inline(always)]
     pub fn get_frame(&self, frame_idx: usize) -> Option<&CallInfo> {
-        self.call_stack.get(frame_idx)
+        // Only return frame if it's within current call_depth (valid frames)
+        if frame_idx < self.call_depth {
+            self.call_stack.get(frame_idx)
+        } else {
+            None
+        }
     }
 
     /// Get all open upvalues (for GC root collection)
@@ -668,6 +698,19 @@ impl LuaState {
     /// Set frame function by index (for tail calls)
     #[inline(always)]
     pub fn set_frame_func(&mut self, frame_idx: usize, func: LuaValue) {
+        // Validate that func is callable before setting it
+        let is_callable =
+            func.is_function() || func.is_cfunction() || func.as_lua_function().is_some();
+
+        if !is_callable {
+            // This should not happen in correct code, but防御性编程
+            eprintln!(
+                "WARNING: Attempting to set non-callable value as frame func: {:?}",
+                func
+            );
+            return;
+        }
+
         if let Some(frame) = self.call_stack.get_mut(frame_idx) {
             frame.func = func;
         }
@@ -1055,6 +1098,12 @@ impl LuaState {
                         }
                     }
 
+                    // Ensure call_depth is back to initial_depth
+                    // (normally RETURN should have handled this, but double-check)
+                    while self.call_depth() > initial_depth {
+                        self.pop_frame();
+                    }
+
                     // Clean up stack
                     self.stack.truncate(func_idx);
 
@@ -1224,6 +1273,12 @@ impl LuaState {
                     }
                 }
 
+                // Ensure call_depth is back to initial_depth
+                // (normally RETURN should have handled this, but double-check)
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+
                 self.set_top(handler_idx)?;
                 Ok((true, results))
             }
@@ -1290,7 +1345,11 @@ impl LuaState {
                         Ok((false, results))
                     }
                     Err(_) => {
-                        // Error handler failed
+                        // Error handler failed - clean up its frame
+                        while self.call_depth() > initial_depth {
+                            self.pop_frame();
+                        }
+
                         self.set_top(handler_idx)?;
                         let final_err =
                             self.create_string(&format!("error in error handling: {}", error_msg))?;
