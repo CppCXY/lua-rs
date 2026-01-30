@@ -851,8 +851,10 @@ impl PartialEq for LuaValue {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         let tt = self.tt();
+        let other_tt = other.tt();
+        
         // Fast path: same type tag and same value bits
-        if tt == other.tt() {
+        if tt == other_tt {
             // For all types except float-to-int comparison:
             // - nil/boolean: value.i is 0/1, direct compare works
             // - integer: direct i64 compare
@@ -875,11 +877,29 @@ impl PartialEq for LuaValue {
                 }
                 return s1.data.str == s2.data.str;
             }
+            // Binary values need content comparison
+            if tt == LUA_VBINARY {
+                let b1 = unsafe { &*(self.value.ptr as *const GcBinary) };
+                let b2 = unsafe { &*(other.value.ptr as *const GcBinary) };
+                return b1.data == b2.data;
+            }
             return false;
-        } else if tt == LUA_VNUMINT && other.tt() == LUA_VNUMFLT {
+        } else if tt == LUA_VNUMINT && other_tt == LUA_VNUMFLT {
             return self.ivalue() as f64 == other.fltvalue();
-        } else if tt == LUA_VNUMFLT && other.tt() == LUA_VNUMINT {
+        } else if tt == LUA_VNUMFLT && other_tt == LUA_VNUMINT {
             return self.fltvalue() == other.ivalue() as f64;
+        } else if (tt == LUA_VSTR && other_tt == LUA_VBINARY) || (tt == LUA_VBINARY && other_tt == LUA_VSTR) {
+            // Compare string and binary content
+            let (str_bytes, bin_bytes) = if tt == LUA_VSTR {
+                let s = unsafe { &*(self.value.ptr as *const GcString) };
+                let b = unsafe { &*(other.value.ptr as *const GcBinary) };
+                (s.data.str.as_bytes(), b.data.as_slice())
+            } else {
+                let b = unsafe { &*(self.value.ptr as *const GcBinary) };
+                let s = unsafe { &*(other.value.ptr as *const GcString) };
+                (s.data.str.as_bytes(), b.data.as_slice())
+            };
+            return str_bytes == bin_bytes;
         }
         false
     }

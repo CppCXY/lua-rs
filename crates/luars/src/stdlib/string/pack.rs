@@ -1,16 +1,19 @@
 // String pack/unpack functions
 // Implements: string.pack, string.unpack, string.packsize
 //
-// Supports a subset of Lua 5.3+ binary data packing:
+// Supports Lua 5.4+ binary data packing:
 // - b/B: signed/unsigned byte (1 byte)
 // - h/H: signed/unsigned short (2 bytes)
 // - i/I: signed/unsigned int (4 bytes)
 // - l/L: signed/unsigned long (4 bytes, same as i/I)
+// - j: lua_Integer (8 bytes, i64)
+// - T: size_t (8 bytes on 64-bit platforms)
 // - f: float (4 bytes)
 // - d: double (8 bytes)
+// - n: lua_Number (8 bytes, f64)
 // - z: zero-terminated string
 // - cn: fixed-length string of n bytes
-// All formats use little-endian byte order
+// All formats use little-endian byte order by default
 
 use crate::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
@@ -96,32 +99,84 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             'i' | 'l' => {
-                // signed int (4 bytes, little-endian)
+                // signed int - check for size suffix (i[n] where n is 1-16)
+                let mut size_str = String::new();
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                
+                let size = if size_str.is_empty() {
+                    4 // default int size
+                } else {
+                    let n: usize = size_str.parse().map_err(|_| {
+                        l.error("bad argument to 'pack' (invalid size)".to_string())
+                    })?;
+                    if n < 1 || n > 16 {
+                        return Err(l.error("integral size out of limits".to_string()));
+                    }
+                    n
+                };
+
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
-                let n = l
+                let mut val = l
                     .get_arg(value_idx)
                     .and_then(|v| v.as_integer())
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
-                    })? as i32;
-                result.extend_from_slice(&n.to_le_bytes());
+                    })?;
+                
+                // Pack the value as signed integer with specified size
+                for _ in 0..size {
+                    result.push((val & 0xFF) as u8);
+                    val >>= 8;
+                }
                 value_idx += 1;
             }
 
             'I' | 'L' => {
-                // unsigned int (4 bytes, little-endian)
+                // unsigned int - check for size suffix (I[n] where n is 1-16)
+                let mut size_str = String::new();
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                
+                let size = if size_str.is_empty() {
+                    4 // default int size
+                } else {
+                    let n: usize = size_str.parse().map_err(|_| {
+                        l.error("bad argument to 'pack' (invalid size)".to_string())
+                    })?;
+                    if n < 1 || n > 16 {
+                        return Err(l.error("integral size out of limits".to_string()));
+                    }
+                    n
+                };
+
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
-                let n = l
+                let mut val = l
                     .get_arg(value_idx)
                     .and_then(|v| v.as_integer())
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
-                    })? as u32;
-                result.extend_from_slice(&n.to_le_bytes());
+                    })? as u64;
+                
+                // Pack the value as unsigned integer with specified size
+                for _ in 0..size {
+                    result.push((val & 0xFF) as u8);
+                    val >>= 8;
+                }
                 value_idx += 1;
             }
 
@@ -142,6 +197,51 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
 
             'd' => {
                 // double (8 bytes, little-endian)
+                if value_idx > argc {
+                    return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
+                }
+                let n = l
+                    .get_arg(value_idx)
+                    .and_then(|v| v.as_number())
+                    .ok_or_else(|| {
+                        l.error("bad argument to 'pack' (number expected)".to_string())
+                    })?;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+
+            'j' => {
+                // lua_Integer (8 bytes, i64, little-endian)
+                if value_idx > argc {
+                    return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
+                }
+                let n = l
+                    .get_arg(value_idx)
+                    .and_then(|v| v.as_integer())
+                    .ok_or_else(|| {
+                        l.error("bad argument to 'pack' (number expected)".to_string())
+                    })?;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+
+            'T' => {
+                // size_t (8 bytes on 64-bit, little-endian)
+                if value_idx > argc {
+                    return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
+                }
+                let n = l
+                    .get_arg(value_idx)
+                    .and_then(|v| v.as_integer())
+                    .ok_or_else(|| {
+                        l.error("bad argument to 'pack' (number expected)".to_string())
+                    })? as u64;
+                result.extend_from_slice(&n.to_le_bytes());
+                value_idx += 1;
+            }
+
+            'n' => {
+                // lua_Number (8 bytes, f64, little-endian) - same as 'd'
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -247,8 +347,39 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
             ' ' | '\t' | '\n' | '\r' => continue,
             'b' | 'B' => size += 1,
             'h' | 'H' => size += 2,
-            'i' | 'I' | 'l' | 'L' | 'f' => size += 4,
+            
+            'i' | 'I' | 'l' | 'L' => {
+                // Check for size suffix (i[n] or I[n] where n is 1-16)
+                let mut size_str = String::new();
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                
+                if size_str.is_empty() {
+                    size += 4; // default int size
+                } else {
+                    let n: usize = size_str.parse().map_err(|_| {
+                        l.error("bad argument to 'packsize' (invalid size)".to_string())
+                    })?;
+                    if n < 1 || n > 16 {
+                        return Err(l.error("integral size out of limits".to_string()));
+                    }
+                    size += n;
+                }
+            }
+            
+            'f' => size += 4,
             'd' => size += 8,
+            'j' | 'n' | 'T' => {
+                // j: lua_Integer (8 bytes, i64)
+                // n: lua_Number (8 bytes, f64)
+                // T: size_t (8 bytes on 64-bit platforms)
+                size += 8;
+            }
             'x' => size += 1,
 
             'c' => {
@@ -357,31 +488,79 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             'i' | 'l' => {
-                if idx + 4 > bytes.len() {
+                // signed int - check for size suffix (i[n] where n is 1-16)
+                let mut size_str = String::new();
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                
+                let size = if size_str.is_empty() {
+                    4 // default int size
+                } else {
+                    let n: usize = size_str.parse().map_err(|_| {
+                        l.error("bad argument to 'unpack' (invalid size)".to_string())
+                    })?;
+                    if n < 1 || n > 16 {
+                        return Err(l.error("integral size out of limits".to_string()));
+                    }
+                    n
+                };
+
+                if idx + size > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = i32::from_le_bytes([
-                    bytes[idx],
-                    bytes[idx + 1],
-                    bytes[idx + 2],
-                    bytes[idx + 3],
-                ]);
-                results.push(LuaValue::integer(val as i64));
-                idx += 4;
+                
+                // Unpack signed integer with specified size
+                let mut val: i64 = 0;
+                for i in (0..size).rev() {
+                    val = (val << 8) | (bytes[idx + i] as i64);
+                }
+                // Sign extend if the highest bit is set
+                if size < 8 && (bytes[idx + size - 1] & 0x80) != 0 {
+                    val |= !0i64 << (size * 8);
+                }
+                results.push(LuaValue::integer(val));
+                idx += size;
             }
 
             'I' | 'L' => {
-                if idx + 4 > bytes.len() {
+                // unsigned int - check for size suffix (I[n] where n is 1-16)
+                let mut size_str = String::new();
+                while let Some(&digit) = chars.peek() {
+                    if digit.is_ascii_digit() {
+                        size_str.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                
+                let size = if size_str.is_empty() {
+                    4 // default int size
+                } else {
+                    let n: usize = size_str.parse().map_err(|_| {
+                        l.error("bad argument to 'unpack' (invalid size)".to_string())
+                    })?;
+                    if n < 1 || n > 16 {
+                        return Err(l.error("integral size out of limits".to_string()));
+                    }
+                    n
+                };
+
+                if idx + size > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = u32::from_le_bytes([
-                    bytes[idx],
-                    bytes[idx + 1],
-                    bytes[idx + 2],
-                    bytes[idx + 3],
-                ]);
+                
+                // Unpack unsigned integer with specified size
+                let mut val: u64 = 0;
+                for i in (0..size).rev() {
+                    val = (val << 8) | (bytes[idx + i] as u64);
+                }
                 results.push(LuaValue::integer(val as i64));
-                idx += 4;
+                idx += size;
             }
 
             'f' => {
@@ -399,6 +578,63 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             'd' => {
+                if idx + 8 > bytes.len() {
+                    return Err(l.error("data string too short".to_string()));
+                }
+                let val = f64::from_le_bytes([
+                    bytes[idx],
+                    bytes[idx + 1],
+                    bytes[idx + 2],
+                    bytes[idx + 3],
+                    bytes[idx + 4],
+                    bytes[idx + 5],
+                    bytes[idx + 6],
+                    bytes[idx + 7],
+                ]);
+                results.push(LuaValue::number(val));
+                idx += 8;
+            }
+
+            'j' => {
+                // lua_Integer (8 bytes, i64, little-endian)
+                if idx + 8 > bytes.len() {
+                    return Err(l.error("data string too short".to_string()));
+                }
+                let val = i64::from_le_bytes([
+                    bytes[idx],
+                    bytes[idx + 1],
+                    bytes[idx + 2],
+                    bytes[idx + 3],
+                    bytes[idx + 4],
+                    bytes[idx + 5],
+                    bytes[idx + 6],
+                    bytes[idx + 7],
+                ]);
+                results.push(LuaValue::integer(val));
+                idx += 8;
+            }
+
+            'T' => {
+                // size_t (8 bytes on 64-bit, little-endian)
+                if idx + 8 > bytes.len() {
+                    return Err(l.error("data string too short".to_string()));
+                }
+                let val = u64::from_le_bytes([
+                    bytes[idx],
+                    bytes[idx + 1],
+                    bytes[idx + 2],
+                    bytes[idx + 3],
+                    bytes[idx + 4],
+                    bytes[idx + 5],
+                    bytes[idx + 6],
+                    bytes[idx + 7],
+                ]);
+                results.push(LuaValue::integer(val as i64));
+                idx += 8;
+            }
+
+            'n' => {
+                // lua_Number (8 bytes, f64, little-endian) - same as 'd'
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
