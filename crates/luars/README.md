@@ -2,7 +2,6 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/luars.svg)](https://crates.io/crates/luars)
-[![Documentation](https://docs.rs/luars/badge.svg)](https://docs.rs/luars)
 
 A Lua 5.5 runtime implementation in Rust, providing both interpreter and embedding capabilities.
 
@@ -58,16 +57,15 @@ luars = { version = "0.1", features = ["serde"] }
 use luars::lua_vm::LuaVM;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut vm = LuaVM::new();
-    
-    // Execute Lua code
-    vm.execute(r#"
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.execute_string(r#"
         function greet(name)
             return "Hello, " .. name .. "!"
         end
         
         print(greet("World"))
-    "#)?;
+    "#);
     
     Ok(())
 }
@@ -128,11 +126,10 @@ Please open an issue before starting major work to discuss the approach.
 ## Roadmap
 
 - [ ] Complete debug library implementation
-- [ ] Standard Lua bytecode compatibility
 - [ ] Performance optimizations
 - [ ] More comprehensive test coverage
 - [ ] Better error messages and stack traces
-- [ ] C API compatibility layer
+
 
 ## License
 
