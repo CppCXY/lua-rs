@@ -602,7 +602,7 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
     let up_index_val = l
         .get_arg(2)
         .ok_or_else(|| l.error("setupvalue requires 3 arguments".to_string()))?;
-    let _value = l
+    let value = l
         .get_arg(3)
         .ok_or_else(|| l.error("setupvalue requires 3 arguments".to_string()))?;
 
@@ -620,13 +620,50 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
         // Set upvalue in Lua function
         let upvalues = lua_func.upvalues();
         if up_index > 0 && up_index <= upvalues.len() {
-            let _upvalue = &upvalues[up_index - 1];
-            // We need to modify the upvalue, but we only have immutable access
-            // This is a limitation - for now we can't set upvalues from debug library
-            // In the future, we'd need to use Cell or RefCell for interior mutability
-            return Err(l.error(
-                "setupvalue is not yet fully implemented (cannot mutate upvalues)".to_string(),
-            ));
+            let upvalue_ptr = upvalues[up_index - 1];
+            
+            // Get the upvalue name from the chunk
+            let upvalue_name = if let Some(chunk) = lua_func.chunk() {
+                if up_index - 1 < chunk.upvalue_descs.len() {
+                    chunk.upvalue_descs[up_index - 1].name.clone()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            
+            // Set the upvalue value (similar to SETUPVAL instruction)
+            let upval_ref = upvalue_ptr.as_mut_ref();
+            match &mut upval_ref.data {
+                crate::lua_value::LuaUpvalue::Open { stack_ptr, .. } => {
+                    // Open upvalue: write to stack location
+                    unsafe {
+                        *stack_ptr.ptr = value;
+                    }
+                }
+                crate::lua_value::LuaUpvalue::Closed(_) => {
+                    // Closed upvalue: update heap storage
+                    upval_ref.data.close(value);
+                }
+            }
+            
+            // GC barrier if needed
+            if value.is_collectable() {
+                if let Some(value_gc_ptr) = value.as_gc_ptr() {
+                    l.gc_barrier(upvalue_ptr, value_gc_ptr);
+                }
+            }
+            
+            // Return the upvalue name
+            if !upvalue_name.is_empty() {
+                let name_val = l.create_string(&upvalue_name)?;
+                l.push_value(name_val)?;
+                return Ok(1);
+            } else {
+                l.push_value(LuaValue::nil())?;
+                return Ok(1);
+            }
         }
     }
 

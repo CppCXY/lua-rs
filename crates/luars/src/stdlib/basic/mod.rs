@@ -925,14 +925,29 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
     match chunk_result {
         Ok(chunk) => {
-            // Create upvalue for _ENV (global table)
-            let env_upvalue_id = if let Some(env) = env {
-                l.create_upvalue_closed(env)?
-            } else {
-                let global = l.vm_mut().global.clone();
-                l.create_upvalue_closed(global)?
-            };
-            let upvalues = vec![env_upvalue_id];
+            // Create upvalues for the function
+            // According to Lua documentation:
+            // - If chunk has upvalues, the first one should be _ENV (global environment)
+            // - Other upvalues are initialized to nil
+            let upvalue_count = chunk.upvalue_count;
+            let mut upvalues = Vec::with_capacity(upvalue_count);
+            
+            for i in 0..upvalue_count {
+                if i == 0 {
+                    // First upvalue is _ENV
+                    let env_upvalue_id = if let Some(env) = env {
+                        l.create_upvalue_closed(env)?
+                    } else {
+                        let global = l.vm_mut().global.clone();
+                        l.create_upvalue_closed(global)?
+                    };
+                    upvalues.push(env_upvalue_id);
+                } else {
+                    // Other upvalues are initialized to nil
+                    let nil_upvalue = l.create_upvalue_closed(LuaValue::nil())?;
+                    upvalues.push(nil_upvalue);
+                }
+            }
 
             let func = l.create_function(Rc::new(chunk), upvalues)?;
             l.push_value(func)?;
