@@ -377,10 +377,10 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                                 if let Some(digit) = chars.peek() {
                                     if digit.is_ascii_digit() {
                                         dec.push(*digit);
+                                        chars.next();
                                     } else {
                                         break;
                                     }
-                                    chars.next();
                                 }
                             }
                             if let Ok(value) = dec.parse::<u8>() {

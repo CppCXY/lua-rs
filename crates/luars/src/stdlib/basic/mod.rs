@@ -773,33 +773,90 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let chunk_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'load' (value expected)".to_string()))?;
-    let arg2 = l.get_arg(2);
-    let arg3 = l.get_arg(3);
-    let arg4 = l.get_arg(4);
+    
+    // Save all arguments before potentially calling reader function
+    // because calling the reader will modify the stack
+    let chunkname_arg = l.get_arg(2).and_then(|v| v.as_str().map(|s| s.to_string()));
+    let mode_arg = l.get_arg(3).and_then(|v| v.as_str().map(|s| s.to_string()));
+    let env_arg = l.get_arg(4);
 
     // Get the chunk string or binary data
-    let (code_bytes, is_binary) = if let Some(b) = chunk_val.as_binary() {
+    let (code_bytes, is_binary) = if chunk_val.is_function() {
+        // chunk is a reader function - call it repeatedly to get source
+        let mut accumulated = Vec::new();
+        let mut is_binary = false;
+        let mut first_chunk = true;
+
+        loop {
+            // Call the reader function
+            l.push_value(chunk_val)?;
+            
+            let func_idx = l.get_top() - 1;
+            let call_result = l.pcall_stack_based(func_idx, 0);
+
+            let result = match call_result {
+                Ok((true, result_count)) => {
+                    if result_count > 0 {
+                        l.stack_get(func_idx).unwrap_or(LuaValue::nil())
+                    } else {
+                        LuaValue::nil()
+                    }
+                }
+                Ok((false, _)) => {
+                    // Error occurred
+                    let error_val = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+                    l.set_top(func_idx)?;
+                    return Err(l.error(format!("error in reader function: {}", error_val)));
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+
+            // Clean up stack
+            l.set_top(func_idx)?;
+            
+            // nil or empty string means end of input
+            if result.is_nil() {
+                break;
+            }
+            
+            if let Some(s) = result.as_str() {
+                if s.is_empty() {
+                    break;
+                }
+                
+                // Check if first byte is binary marker (0x1B for Lua bytecode)
+                if first_chunk && !s.is_empty() && s.as_bytes()[0] == 0x1B {
+                    is_binary = true;
+                }
+                
+                accumulated.extend_from_slice(s.as_bytes());
+                first_chunk = false;
+            } else {
+                return Err(l.error("reader function must return a string".to_string()));
+            }
+        }
+
+        (accumulated, is_binary)
+    } else if let Some(b) = chunk_val.as_binary() {
         (b.to_vec(), true)
     } else if let Some(s) = chunk_val.as_str() {
         // Check if this is binary bytecode by looking at first byte
         let is_binary = s.as_bytes().first() == Some(&0x1B);
         (s.as_bytes().to_vec(), is_binary)
     } else {
-        return Err(l.error("bad argument #1 to 'load' (string expected)".to_string()));
+        return Err(l.error("bad argument #1 to 'load' (function or string expected)".to_string()));
     };
 
     // Optional chunk name for error messages
-    let chunkname = arg2
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "=(load)".to_string());
+    let chunkname = chunkname_arg.unwrap_or_else(|| "=(load)".to_string());
 
     // Optional mode ("b", "t", or "bt") - we only support "t" (text)
-    let _mode = arg3
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "bt".to_string());
+    let _mode = mode_arg.unwrap_or_else(|| "bt".to_string());
 
     // Optional environment table
-    let env = arg4;
+    let env = env_arg;
 
     let chunk_result = if is_binary {
         // Deserialize binary bytecode
