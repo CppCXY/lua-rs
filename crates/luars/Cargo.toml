@@ -2,6 +2,13 @@
 name = "luars"
 version = "0.1.0"
 edition = "2024"
+authors = ["CppCXY"]
+description = "A library for lua 5.5 runtime implementation in Rust"
+license = "MIT"
+repository = "https://github.com/CppCXY/lua-rs"
+readme = "README.md"
+keywords = ["lua", "runtime", "interpreter"]
+categories = ["development-tools"]
 
 [features]
 default = []

@@ -1,0 +1,139 @@
+# luars
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/luars.svg)](https://crates.io/crates/luars)
+[![Documentation](https://docs.rs/luars/badge.svg)](https://docs.rs/luars)
+
+A Lua 5.5 runtime implementation in Rust, providing both interpreter and embedding capabilities.
+
+> ⚠️ **Work in Progress**: This library is under active development and not yet feature-complete. While core functionality is working, some advanced features and edge cases may not be fully implemented. Use in production environments at your own risk.
+
+## Features
+
+- **Lua 5.5 Core**: Implements Lua 5.5 language semantics
+- **Pure Rust**: Written entirely in Rust with no C dependencies
+- **Embeddable**: Designed to be embedded in Rust applications
+- **Standard Libraries**: Comprehensive coverage of Lua standard libraries
+- **UTF-8 Strings**: All Lua strings are valid UTF-8 (non-standard but safer)
+- **Optional Serde**: JSON serialization support for Lua values (feature-gated)
+
+## Current Status
+
+### ✅ Implemented
+- Core language features (operators, control flow, functions, tables)
+- Metatables and metamethods
+- Coroutines
+- Garbage collection
+- Most standard libraries: `string`, `table`, `math`, `io`, `os`, `coroutine`, `utf8`, `package`
+- String pack/unpack with Lua 5.4+ formats (`i[n]`, `I[n]`, `j`, `n`, `T`)
+- Lua reference mechanism (luaL_ref/luaL_unref)
+- Optional JSON serialization via serde feature
+
+### ⚠️ Known Limitations
+- **UTF-8 Only Strings**: Unlike standard Lua, strings must be valid UTF-8. Binary data should use the binary type from `string.pack`/`string.unpack`.
+- **Custom Bytecode Format**: Uses LuaRS-specific bytecode format, not compatible with standard Lua bytecode.
+- **Partial Debug Library**: Some introspection features are not yet implemented.
+- **Performance**: While functional, performance optimizations are ongoing.
+
+### 🚧 Incomplete Features
+- Some advanced metatable behaviors
+- Full debug library introspection
+- Complete compliance with all Lua 5.5 edge cases
+
+## Usage
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+luars = "0.1"
+
+# Optional: Enable JSON serialization support
+luars = { version = "0.1", features = ["serde"] }
+```
+
+### Basic Example
+
+```rust
+use luars::lua_vm::LuaVM;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = LuaVM::new();
+    
+    // Execute Lua code
+    vm.execute(r#"
+        function greet(name)
+            return "Hello, " .. name .. "!"
+        end
+        
+        print(greet("World"))
+    "#)?;
+    
+    Ok(())
+}
+```
+
+## Standard Library Coverage
+
+| Library | Status | Notes |
+|---------|--------|-------|
+| `basic` | ✅ Complete | All core functions implemented |
+| `string` | ✅ Complete | UTF-8 strings only |
+| `table` | ✅ Complete | All table manipulation functions |
+| `math` | ✅ Complete | Full math library including random |
+| `io` | ✅ Complete | File I/O operations |
+| `os` | ✅ Complete | Operating system facilities |
+| `coroutine` | ✅ Complete | Full coroutine support |
+| `utf8` | ✅ Complete | UTF-8 string operations |
+| `package` | ✅ Complete | Module system with require |
+| `debug` | ⚠️ Partial | Some introspection features missing |
+
+## Differences from Standard Lua
+
+1. **UTF-8 Strings**: All Lua strings must be valid UTF-8. The `\xNN` escape sequences that would produce invalid UTF-8 are not supported. Use `string.pack()` for binary data.
+
+2. **Bytecode Format**: Uses a custom LuaRS bytecode format. `string.dump()` output is not compatible with standard Lua.
+
+3. **String/Binary Comparison**: String and binary values can be compared for equality, unlike standard Lua where they would be different types.
+
+## Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/CppCXY/lua-rs
+cd lua-rs
+
+# Build the library
+cargo build --release
+
+# Run tests
+cargo test
+
+# Build with serde support
+cargo build --release --features serde
+```
+
+## Contributing
+
+Contributions are welcome! This project is actively developed and we appreciate:
+
+- Bug reports and fixes
+- Performance improvements
+- Documentation improvements
+- Test cases for edge cases
+- Feature implementations
+
+Please open an issue before starting major work to discuss the approach.
+
+## Roadmap
+
+- [ ] Complete debug library implementation
+- [ ] Standard Lua bytecode compatibility
+- [ ] Performance optimizations
+- [ ] More comprehensive test coverage
+- [ ] Better error messages and stack traces
+- [ ] C API compatibility layer
+
+## License
+
+MIT License - See [LICENSE](../../LICENSE) file for details.
