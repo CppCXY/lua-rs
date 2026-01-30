@@ -695,6 +695,14 @@ impl LuaState {
         }
     }
 
+    /// Set frame top by index (for tail calls)
+    #[inline(always)]
+    pub fn set_frame_top(&mut self, frame_idx: usize, top: usize) {
+        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+            frame.top = top;
+        }
+    }
+
     /// Set frame function by index (for tail calls)
     #[inline(always)]
     pub fn set_frame_func(&mut self, frame_idx: usize, func: LuaValue) {

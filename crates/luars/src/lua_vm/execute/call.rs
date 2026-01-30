@@ -396,26 +396,45 @@ pub fn handle_tailcall(
     // Check if it's a function
     if let Some(new_func) = func.as_lua_function() {
         if new_func.is_lua_function() {
-            // Move arguments to current frame base
-            let mut dist = 0;
-            for i in 0..nargs {
-                let src_idx = func_idx + 1 + i;
-                if let Some(arg) = lua_state.stack_get(src_idx) {
-                    let dst_idx = base + dist;
-                    lua_state.stack_set(dst_idx, arg)?;
-                    dist += 1;
+            let current_frame_idx = lua_state.call_depth() - 1;
+            
+            // Close upvalues from current call before moving arguments
+            // This is critical: like Lua 5.5's OP_TAILCALL which calls luaF_closeupval(L, base)
+            // We need to close upvalues that reference the current frame's locals
+            // because we're about to overwrite them with the new function's arguments
+            lua_state.close_upvalues(base);
+            
+            // Like Lua 5.5's luaD_pretailcall: move function and arguments down together
+            // Move func + args: [func, arg1, arg2, ...] to [ci->func, ci->func+1, ci->func+2, ...]
+            // This is: [base-1, base, base+1, ...] positions
+            let narg1 = nargs + 1; // Include function itself
+            for i in 0..narg1 {
+                let src_idx = func_idx + i;
+                let dst_idx = (base - 1) + i;
+                if let Some(val) = lua_state.stack_get(src_idx) {
+                    lua_state.stack_set(dst_idx, val)?;
+                } else {
+                    lua_state.stack_set(dst_idx, LuaValue::nil())?;
                 }
             }
 
+            // After moving, update func reference to the moved position
+            let moved_func = lua_state.stack_get(base - 1).unwrap_or(func);
+            
+            // Get the moved function body for parameter info
+            let moved_func_body = moved_func.as_lua_function().ok_or_else(|| {
+                lua_state.error("TAILCALL: moved function is not a Lua function".to_string())
+            })?;
+
             // Pad missing parameters with nil if needed
-            if let Some(chunk) = new_func.chunk() {
+            if let Some(chunk) = moved_func_body.chunk() {
                 let numparams = chunk.param_count as usize;
+                let mut current_nargs = nargs;
 
                 // Pad fixed parameters with nil if needed
-                if nargs < numparams {
-                    for i in nargs..numparams {
-                        lua_state.stack_set(base + i, LuaValue::nil())?;
-                    }
+                while current_nargs < numparams {
+                    lua_state.stack_set(base + current_nargs, LuaValue::nil())?;
+                    current_nargs += 1;
                 }
 
                 // nextraargs = max(0, nargs - numparams)
@@ -425,19 +444,19 @@ pub fn handle_tailcall(
                     0
                 };
 
-                let current_frame_idx = lua_state.call_depth() - 1;
                 lua_state.set_frame_nextraargs(current_frame_idx, new_nextraargs);
 
-                // stack_top = base + max(nargs, numparams)
-                let narg1 = if nargs < numparams { numparams } else { nargs };
-                lua_state.set_top(base + narg1)?;
+                // Update frame top: func + 1 + maxstacksize
+                let frame_top = (base - 1) + 1 + chunk.max_stack_size;
+                lua_state.set_frame_top(current_frame_idx, frame_top);
+
+                // Set stack top: func + narg1 (after padding)
+                let stack_top = base + current_nargs;
+                lua_state.set_top(stack_top)?;
             }
 
-            // Replace function at base-1 (where current function is)
-            lua_state.stack_set(base - 1, func)?;
-
-            let current_frame_idx = lua_state.call_depth() - 1;
-            lua_state.set_frame_func(current_frame_idx, func);
+            // Update frame func pointer to the moved function
+            lua_state.set_frame_func(current_frame_idx, moved_func);
 
             // Reset PC to 0 to start executing the new function from beginning
             lua_state.set_frame_pc(current_frame_idx, 0);
