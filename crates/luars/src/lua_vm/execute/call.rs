@@ -45,10 +45,7 @@ fn handle_call_internal(
     let func_idx = base + a;
 
     // Calculate nargs and set stack_top
-    // Port of Lua 5.5's OP_CALL: if (b != 0) L->top.p = ra + b;
     let nargs = if b == 0 {
-        // Variable args: stack_top was already set by previous instruction
-        // Arguments are from func_idx+1 to stack_top
         let current_top = lua_state.get_top();
         if current_top > func_idx + 1 {
             current_top - func_idx - 1
@@ -56,8 +53,6 @@ fn handle_call_internal(
             0
         }
     } else {
-        // Fixed args: set stack_top to func_idx + b
-        // b includes the function itself, so args = b - 1
         lua_state.set_top(func_idx + b)?;
         b - 1
     };
@@ -73,12 +68,9 @@ fn handle_call_internal(
         .stack_get(func_idx)
         .ok_or_else(|| lua_state.error("CALL: function not found".to_string()))?;
 
-    // Check if it's a light C function (most common case for stdlib functions)
+    // Check if it's a light C function
     if func.is_cfunction() {
-        // Light C function call: execute directly
         call_c_function(lua_state, func_idx, nargs, nresults)?;
-
-        // C function executed synchronously, continue with current frame
         return Ok(FrameAction::Continue);
     }
 
@@ -86,9 +78,7 @@ fn handle_call_internal(
     if let Some(new_func) = func.as_lua_function() {
         if new_func.is_lua_function() {
             // Lua function call: push new frame
-            let new_base = func_idx + 1; // Arguments start after function
-
-            // Push new call frame with nresults from caller
+            let new_base = func_idx + 1;
             lua_state.push_frame(func, new_base, nargs, nresults)?;
 
             // Update call_status with __call count if status is non-zero
@@ -102,32 +92,23 @@ fn handle_call_internal(
                 lua_state.set_frame_call_status(frame_idx, new_status);
             }
 
-            // Return FrameAction::Call - main loop will load new chunk and continue
             Ok(FrameAction::Call)
         } else if new_func.is_c_function() {
-            // GC C function call: execute directly
             call_c_function(lua_state, func_idx, nargs, nresults)?;
-
-            // C function executed synchronously, continue with current frame
             Ok(FrameAction::Continue)
         } else {
             Err(lua_state.error("CALL: unknown function type".to_string()))
         }
     } else {
-        // Port of Lua 5.5's handling in ldo.c:tryfuncTM
+        // Handle __call metamethod
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
-            // Check if __call chain is too long (max 15 levels)
+            // Check __call chain depth
             let ccmt_count = call_status::get_ccmt_count(status);
             if ccmt_count >= 15 {
                 return Err(lua_state.error("'__call' chain too long".to_string()));
             }
 
-            // We have __call metamethod
-            // Need to shift arguments and insert function as first arg
-            // Stack layout before: [func, arg1, arg2, ...]
-            // Stack layout after:  [__call, func, arg1, arg2, ...]
-
-            // First, shift arguments to make room for func as first arg
+            // Shift arguments to make room for original func as first arg
             let first_arg = func_idx + 1;
             for i in (0..nargs).rev() {
                 let val = lua_state
@@ -142,21 +123,80 @@ fn handle_call_internal(
             // Set metamethod as the function to call
             lua_state.stack_set(func_idx, mm)?;
 
-            // Update L->top.p to include the shifted argument
-            // Do NOT modify frame.top (ci->top) - it's immutable stack limit
+            // Update stack top
             let new_top = first_arg + nargs + 1;
             lua_state.set_top(new_top)?;
 
             // Increment __call counter in status
             let new_status = call_status::set_ccmt_count(status, ccmt_count + 1);
 
-            // Now call the metamethod with nargs+1 (including original func)
-            // We need to adjust b: if b was 0 (varargs), keep it 0
-            // otherwise increment it to account for the extra argument
+            // Recursively call with adjusted parameters
             let new_b = if b == 0 { 0 } else { b + 1 };
             return handle_call_internal(lua_state, base, a, new_b, c, new_status);
         } else {
             Err(lua_state.error(format!("attempt to call a {} value", func.type_name())))
+        }
+    }
+}
+
+/// Resolve __call metamethod chain in place
+/// Modifies stack to replace non-callable with its __call chain
+/// Returns (actual_arg_count) after resolution
+/// func_idx position stays the same, but stack content is modified
+pub fn resolve_call_chain(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    arg_count: usize,
+) -> LuaResult<usize> {
+    let mut current_arg_count = arg_count;
+    let mut ccmt_depth = 0;
+
+    loop {
+        let func = lua_state
+            .stack_get(func_idx)
+            .ok_or_else(|| lua_state.error("resolve_call_chain: function not found".to_string()))?;
+
+        // Check if we have a callable function
+        if func.is_cfunction() || func.is_lua_function() {
+            // Found a real function - done
+            return Ok(current_arg_count);
+        }
+
+        // Try to get __call metamethod
+        if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
+            // Check chain depth
+            ccmt_depth += 1;
+            if ccmt_depth >= 15 {
+                return Err(lua_state.error("'__call' chain too long".to_string()));
+            }
+
+            // Shift arguments right to make room for original func as first arg
+            // Stack: [func, arg1, arg2, ...] -> [mm, func, arg1, arg2, ...]
+            let first_arg = func_idx + 1;
+            for i in (0..current_arg_count).rev() {
+                let val = lua_state
+                    .stack_get(first_arg + i)
+                    .unwrap_or(LuaValue::nil());
+                lua_state.stack_set(first_arg + i + 1, val)?;
+            }
+
+            // Set original func as first argument
+            lua_state.stack_set(first_arg, func)?;
+
+            // Set metamethod as the new function
+            lua_state.stack_set(func_idx, mm)?;
+
+            // Update arg count and stack top
+            current_arg_count += 1;
+            lua_state.set_top(first_arg + current_arg_count)?;
+
+            // Continue loop to check if mm also needs __call resolution
+        } else {
+            // No __call metamethod and not a function
+            return Err(lua_state.error(format!(
+                "attempt to call a {} value",
+                func.type_name()
+            )));
         }
     }
 }
@@ -458,44 +498,19 @@ pub fn handle_tailcall(
         call_c_function_tailcall(lua_state, func_idx, nargs, base)?;
         Ok(FrameAction::Continue)
     } else {
-        // Not a function - check for __call metamethod
-        // Similar to handle_call's metamethod handling
-        if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
-            // We have __call metamethod
-            // Need to shift arguments and insert function as first arg
-            // Stack layout before: [func, arg1, arg2, ...]
-            // Stack layout after:  [__call, func, arg1, arg2, ...]
-
-            // First, shift arguments to make room for func as first arg
-            let first_arg = func_idx + 1;
-            for i in (0..nargs).rev() {
-                let val = lua_state
-                    .stack_get(first_arg + i)
-                    .unwrap_or(LuaValue::nil());
-                lua_state.stack_set(first_arg + i + 1, val)?;
-            }
-
-            // Set func as first arg of metamethod
-            lua_state.stack_set(first_arg, func)?;
-
-            // Set metamethod as the function to call
-            lua_state.stack_set(func_idx, mm)?;
-
-            // Update L->top.p to include the shifted argument
-            let new_top = first_arg + nargs + 1;
-            lua_state.set_top(new_top)?;
-
-            // Now tail-call the metamethod with nargs+1 (including original func)
-            // Recalculate b: if b was 0 (varargs), keep it 0
-            // otherwise increment it to account for the extra argument
-            let new_b = if b == 0 { 0 } else { b + 1 };
-            return handle_tailcall(lua_state, base, a, new_b);
+        // Not a function - resolve __call chain first
+        let actual_nargs = resolve_call_chain(lua_state, func_idx, nargs)?;
+        
+        // After resolution, recurse once to handle the actual call
+        // (but won't recurse again since __call chain is now resolved)
+        let new_b = if b == 0 {
+            0  // Keep varargs indicator
         } else {
-            Err(lua_state.error(format!(
-                "TAILCALL: attempt to call a {} value",
-                func.type_name()
-            )))
-        }
+            // Adjust b for the additional arguments from __call chain
+            let delta = actual_nargs - nargs;
+            b + delta
+        };
+        return handle_tailcall(lua_state, base, a, new_b);
     }
 }
 

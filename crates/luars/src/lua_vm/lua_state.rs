@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
-use crate::lua_vm::execute::call::call_c_function;
+use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute_until};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
@@ -992,7 +992,31 @@ impl LuaState {
         let initial_depth = self.call_depth();
         let func_idx = self.stack.len();
 
-        // Check if it's a C function - handle differently
+        // Push function and args to stack
+        self.stack.push(func);
+        for arg in args {
+            self.stack.push(arg);
+        }
+        let arg_count = self.stack.len() - func_idx - 1;
+
+        // Resolve __call chain if needed
+
+        let actual_arg_count = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok(count) => count,
+            Err(e) => {
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                self.stack.truncate(func_idx);
+                return Ok((false, vec![err_str]));
+            }
+        };
+
+        // Get resolved function
+        let func = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("pcall: function not found".to_string()))?;
+
+        // Check if it's a C function
         let is_c_function = if func.is_cfunction() {
             true
         } else if let Some(func_body) = func.as_lua_function() {
@@ -1002,13 +1026,6 @@ impl LuaState {
         };
 
         if is_c_function {
-            // C function - call directly
-            self.stack.push(func);
-            let nargs = args.len();
-            for arg in args {
-                self.stack.push(arg);
-            }
-
             // Get the C function pointer
             let cfunc = if func.is_cfunction() {
                 func.as_cfunction()
@@ -1021,7 +1038,7 @@ impl LuaState {
             if let Some(cfunc) = cfunc {
                 // Create frame for C function
                 let base = func_idx + 1;
-                if let Err(e) = self.push_frame(func, base, nargs, -1) {
+                if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
                     self.stack.truncate(func_idx);
                     let error_msg = self.get_error_msg(e);
                     let err_str = self.create_string(&error_msg)?;
@@ -1069,16 +1086,9 @@ impl LuaState {
             }
         } else {
             // Lua function - use lua_execute
-            self.stack.push(func);
-            let nargs = args.len();
-            for arg in args {
-                self.stack.push(arg);
-            }
-
-            // Create call frame
             let base = func_idx + 1;
             // pcall expects all return values
-            if let Err(e) = self.push_frame(func, base, nargs, -1) {
+            if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
                 self.stack.truncate(func_idx);
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1150,19 +1160,26 @@ impl LuaState {
         // Save current call stack depth
         let initial_depth = self.call_depth();
 
-        // Get function from stack
-        let func = match self.stack_get(func_idx) {
-            Some(f) => f,
-            None => {
-                let err_str = self.create_string("pcall: invalid function index")?;
+        // Resolve __call metamethod chain if needed
+
+        let actual_arg_count = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok(count) => count,
+            Err(e) => {
+                // __call resolution failed - return error
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
                 self.stack_set(func_idx, err_str)?;
                 self.set_top(func_idx + 1)?;
                 return Ok((false, 1));
             }
         };
 
+        // Now func_idx contains a real callable (after __call resolution)
+        let func = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("pcall: function not found after resolution".to_string()))?;
+
         // Call the function using the internal call machinery
-        // This handles both C and Lua functions correctly
         let result = if func.is_cfunction()
             || func
                 .as_lua_function()
@@ -1171,13 +1188,16 @@ impl LuaState {
         {
             // C function - call directly
             call_c_function(
-                self, func_idx, arg_count, -1, // MULTRET - want all results
+                self,
+                func_idx,
+                actual_arg_count,
+                -1, // MULTRET - want all results
             )
             .map(|_| ())
         } else {
             // Lua function - push frame and execute, expecting all return values
             let base = func_idx + 1;
-            self.push_frame(func, base, arg_count, -1)?;
+            self.push_frame(func, base, actual_arg_count, -1)?;
             lua_execute_until(self, initial_depth)
         };
 
@@ -1231,7 +1251,6 @@ impl LuaState {
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save error handler and function on stack
-        // Use stack_top to track positions (Fix stack overflow/drift)
         let handler_idx = self.stack_top;
         self.push_value(err_handler)?;
 
@@ -1239,14 +1258,31 @@ impl LuaState {
         let func_idx = self.stack_top;
         self.push_value(func)?;
 
-        let nargs = args.len();
         for arg in args {
             self.push_value(arg)?;
         }
+        let arg_count = self.stack_top - func_idx - 1;
+
+        // Resolve __call chain if needed
+
+        let actual_arg_count = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok(count) => count,
+            Err(e) => {
+                self.set_top(handler_idx)?;
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                return Ok((false, vec![err_str]));
+            }
+        };
+
+        // Get resolved function
+        let func = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("xpcall: function not found".to_string()))?;
 
         // Create call frame, expecting all return values
         let base = func_idx + 1;
-        if let Err(e) = self.push_frame(func, base, nargs, -1) {
+        if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
             // Error during setup
             self.set_top(handler_idx)?;
             let error_msg = self.get_error_msg(e);
