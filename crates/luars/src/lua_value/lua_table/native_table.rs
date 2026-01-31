@@ -419,8 +419,8 @@ impl NativeTable {
         }
 
         // If key is small positive integer, expand array
-        // This avoids putting simple sequential keys into hash part
-        if key >= 1 && key <= 64 {
+        // Conservative threshold to avoid memory waste
+        if key >= 1 && key <= 4 {
             // Resize array to accommodate this key
             let new_size = ((key as u32).next_power_of_two()).max(4);
             self.resize_array(new_size);
