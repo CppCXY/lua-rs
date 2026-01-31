@@ -418,16 +418,19 @@ impl NativeTable {
             return;
         }
 
-        // If key is small positive integer, expand array
-        // Conservative threshold to avoid memory waste
-        if key >= 1 && key <= 4 {
-            // Resize array to accommodate this key
-            let new_size = ((key as u32).next_power_of_two()).max(4);
-            self.resize_array(new_size);
-            unsafe {
-                self.write_array(key, value);
+        // Only expand array if key is exactly length+1 (push operation)
+        // This avoids creating sparse arrays with large holes
+        if key >= 1 {
+            let current_len = self.len() as i64;
+            if key == current_len + 1 {
+                // This is a push operation, expand array
+                let new_size = ((key as u32).next_power_of_two()).max(4);
+                self.resize_array(new_size);
+                unsafe {
+                    self.write_array(key, value);
+                }
+                return;
             }
-            return;
         }
 
         // Put in hash part
@@ -623,12 +626,28 @@ impl NativeTable {
     pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
         // Try array part for integers
         if let Some(i) = key.as_integer() {
+            // If key is in valid array range
             if i >= 1 && i <= self.asize as i64 {
                 let was_nil = unsafe { self.read_array(i).is_none() };
                 unsafe {
                     self.write_array(i, value);
                 }
                 return was_nil && !value.is_nil();
+            }
+
+            // Only expand array if key is exactly length+1 (push operation)
+            // This avoids creating sparse arrays with large holes
+            if i >= 1 {
+                let current_len = self.len() as i64;
+                if i == current_len + 1 {
+                    // This is a push operation, expand array
+                    let new_size = ((i as u32).next_power_of_two()).max(4);
+                    self.resize_array(new_size);
+                    unsafe {
+                        self.write_array(i, value);
+                    }
+                    return true;  // New key inserted
+                }
             }
         }
 
