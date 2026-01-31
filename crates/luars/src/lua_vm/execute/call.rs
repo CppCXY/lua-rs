@@ -102,11 +102,14 @@ fn handle_call_internal(
     } else {
         // Handle __call metamethod
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
-            // Check __call chain depth
+            // Check __call chain depth (bits 8-11 can hold 0-15, so max is 15)
+            // Lua 5.5: if ((status & MAX_CCMT) == MAX_CCMT) error
+            // MAX_CCMT = 0xF << 8, so when all 4 bits are 1 (count == 15), we error
             let ccmt_count = call_status::get_ccmt_count(status);
-            if ccmt_count >= 15 {
+            if ccmt_count == 15 {
                 return Err(lua_state.error("'__call' chain too long".to_string()));
             }
+
 
             // Shift arguments to make room for original func as first arg
             let first_arg = func_idx + 1;
@@ -164,11 +167,12 @@ pub fn resolve_call_chain(
 
         // Try to get __call metamethod
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
-            // Check chain depth
-            ccmt_depth += 1;
-            if ccmt_depth >= 15 {
+            // Check chain depth (Lua 5.5 allows up to 15 __call layers)
+            // We check BEFORE incrementing, so if we're already at 15, error
+            if ccmt_depth == 15 {
                 return Err(lua_state.error("'__call' chain too long".to_string()));
             }
+            ccmt_depth += 1;
 
             // Shift arguments right to make room for original func as first arg
             // Stack: [func, arg1, arg2, ...] -> [mm, func, arg1, arg2, ...]

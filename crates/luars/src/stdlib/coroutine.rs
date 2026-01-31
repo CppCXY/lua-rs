@@ -216,8 +216,12 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
             Ok(results.len())
         }
         Err(e) => {
-            // Error occurred - propagate it
-            let error_msg = format!("coroutine error: {:?}", e);
+            // Error occurred - get the detailed error message from the thread
+            let error_msg = if let Some(thread) = thread_val.as_thread_mut() {
+                thread.get_error_msg(e)
+            } else {
+                String::new()
+            };
             Err(l.error(error_msg))
         }
     }
