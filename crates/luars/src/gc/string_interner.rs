@@ -29,54 +29,54 @@ impl StringInterner {
     }
 
     /// Intern a string - returns existing StringId if already interned, creates new otherwise
+    #[inline]
     pub fn intern(&mut self, s: &str, gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
         let hash = self.hash_string(s);
+        let slen = s.len();
         
         // Long strings are not interned (like Lua 5.5)
-        if s.len() > Self::SHORT_STRING_LIMIT {
-            let size = (std::mem::size_of::<GcString>() + s.len()) as u32;
+        if slen > Self::SHORT_STRING_LIMIT {
+            let size = (std::mem::size_of::<GcString>() + slen) as u32;
             let lua_string = LuaString::new(s.to_string(), hash);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
-            // Return as long string (not interned)
             return Ok(LuaValue::longstring(ptr));
         }
 
         // Short strings: check if already interned
-        let mut found_ptr = None;
+        // OPTIMIZATION: Check length first (cheapest comparison)
         if let Some(ptrs) = self.map.get(&hash) {
             for &ptr in ptrs {
-                // Quick check: compare string content directly (already in cache line)
-                if ptr.as_ref().data.as_str() == s {
-                    // Found! Check if it's dead and needs resurrection
-                    let header = ptr.as_ref().header;
-                    if header.is_white() {
-                        // Resurrect by marking black (like Lua 5.5's changewhite)
-                        ptr.as_mut_ref().header.make_black();
+                let gc_str = ptr.as_ref();
+                // Fast path: compare length first, then content
+                if gc_str.data.str.len() == slen {
+                    // Length matches, check content
+                    if gc_str.data.str == s {
+                        // Found! Resurrect if needed
+                        if gc_str.header.is_white() {
+                            ptr.as_mut_ref().header.make_black();
+                        }
+                        return Ok(LuaValue::shortstring(ptr));
                     }
-                    found_ptr = Some(ptr);
-                    break;
                 }
             }
         }
 
-        if let Some(ptr) = found_ptr {
-            return Ok(LuaValue::shortstring(ptr)); // Return as short string
-        }
-
-        // Not found - create new short string with correct white color
-        let size = (std::mem::size_of::<GcString>() + s.len()) as u32;
+        // Not found - create new short string
+        let size = (std::mem::size_of::<GcString>() + slen) as u32;
         let lua_string = LuaString::new(s.to_string(), hash);
         let gc_string =
             GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
         gc.trace_object(gc_string)?;
+        
+        // Add to intern map
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
 
-        Ok(LuaValue::shortstring(ptr)) // Return as short string
+        Ok(LuaValue::shortstring(ptr))
     }
 
     /// Fast hash function - uses ahash for speed
