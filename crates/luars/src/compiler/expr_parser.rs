@@ -135,7 +135,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                     // Intern string to ObjectPool and get StringId
                     let string = fs.vm.create_string(&s).unwrap();
                     // Create VKSTR expression (not VK!) - will convert to VK when needed
-                    *v = ExpDesc::new_vkstr(string.as_string_ptr().unwrap());
+                    *v = ExpDesc::new_vkstr(string);
                 }
                 Err(e) => {
                     return Err(fs.syntax_error(&format!("invalid string literal: {}", e)));
@@ -243,7 +243,7 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                 // which creates VKSTR without calling stringK immediately.
                 // The stringK call happens later in luaK_self via luaK_exp2K (lcode.c:1333)
                 let string = fs.vm.create_string(&method_name).unwrap();
-                let mut key = ExpDesc::new_vkstr(string.as_string_ptr().unwrap());
+                let mut key = ExpDesc::new_vkstr(string);
                 code::self_op(fs, v, &mut key);
 
                 funcargs(fs, v)?;
@@ -410,7 +410,7 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
     let string = fs.vm.create_string(&varname).unwrap();
     let mut key = ExpDesc::new_void();
     key.kind = ExpKind::VKSTR;
-    key.u = ExpUnion::Str(string.as_string_ptr().unwrap());
+    key.u = ExpUnion::Str(string);
     key.t = -1;
     key.f = -1;
 

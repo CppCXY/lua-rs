@@ -75,9 +75,13 @@ pub const LUA_VLIGHTUSERDATA: u8 = makevariant!(LUA_TLIGHTUSERDATA, 0);
 // Collectable types (bit 6 set)
 pub const BIT_ISCOLLECTABLE: u8 = 1 << 6;
 
-pub const LUA_VSTR: u8 = LUA_TSTRING | BIT_ISCOLLECTABLE; // 0x44 - short string
-pub const LUA_VBINARY: u8 = makevariant!(LUA_TSTRING, 1) | BIT_ISCOLLECTABLE; // 0x54 - binary data
+// String variants (like Lua 5.5: LUA_VSHRSTR and LUA_VLNGSTR)
+pub const LUA_VSHRSTR: u8 = LUA_TSTRING | BIT_ISCOLLECTABLE; // 0x44 - short string (interned)
+pub const LUA_VLNGSTR: u8 = makevariant!(LUA_TSTRING, 1) | BIT_ISCOLLECTABLE; // 0x54 - long string (not interned)
+pub const LUA_VBINARY: u8 = makevariant!(LUA_TSTRING, 2) | BIT_ISCOLLECTABLE; // 0x64 - binary data
 pub const LUA_VTABLE: u8 = LUA_TTABLE | BIT_ISCOLLECTABLE; // 0x45
+
+// Compatibility alias (short string is the default)
 pub const LUA_VFUNCTION: u8 = LUA_TFUNCTION | BIT_ISCOLLECTABLE; // 0x46  
 pub const LUA_VUSERDATA: u8 = LUA_TUSERDATA | BIT_ISCOLLECTABLE; // 0x47
 pub const LUA_VTHREAD: u8 = LUA_TTHREAD | BIT_ISCOLLECTABLE; // 0x48
@@ -211,14 +215,25 @@ impl LuaValue {
 
     // ============ In-place mutators (for VM performance) ============
 
-    /// Create a string value from StringId
+    /// Create a short string value (interned, <= 40 bytes)
     #[inline(always)]
-    pub fn string(ptr: StringPtr) -> Self {
+    pub fn shortstring(ptr: StringPtr) -> Self {
         Self {
             value: Value {
                 ptr: ptr.as_ptr() as *const u8,
-            }, // Pointer set later
-            tt: LUA_VSTR,
+            },
+            tt: LUA_VSHRSTR,
+        }
+    }
+
+    /// Create a long string value (not interned, > 40 bytes)
+    #[inline(always)]
+    pub fn longstring(ptr: StringPtr) -> Self {
+        Self {
+            value: Value {
+                ptr: ptr.as_ptr() as *const u8,
+            },
+            tt: LUA_VLNGSTR,
         }
     }
 
@@ -502,6 +517,11 @@ impl LuaValue {
     #[inline(always)]
     pub fn is_string(&self) -> bool {
         self.ttisstring()
+    }
+
+    #[inline(always)]
+    pub fn is_short_string(&self) -> bool {
+        self.checktag(LUA_VSHRSTR)
     }
 
     #[inline(always)]
@@ -833,7 +853,7 @@ impl LuaValue {
         let tt = self.tt();
 
         // Fast path for strings: use precomputed hash
-        if tt == LUA_VSTR {
+        if tt == LUA_VSHRSTR || tt == LUA_VLNGSTR {
             return unsafe { (*(self.value.ptr as *const GcString)).data.hash };
         }
 
@@ -852,7 +872,7 @@ impl PartialEq for LuaValue {
     fn eq(&self, other: &Self) -> bool {
         let tt = self.tt();
         let other_tt = other.tt();
-        
+
         // Fast path: same type tag and same value bits
         if tt == other_tt {
             // For all types except float-to-int comparison:
@@ -863,43 +883,24 @@ impl PartialEq for LuaValue {
             if unsafe { self.value.i == other.value.i } {
                 return true;
             }
-            // For strings, if pointers differ, content must differ (due to interning)
-            // So we don't need to compare content for short strings
-            // But long strings aren't interned, so we need to compare content
-            // LUA_VSTR = 0x44
-            if tt == LUA_VSTR {
-                // Compare string contents for long strings
-                let s1 = unsafe { &*(self.value.ptr as *const GcString) };
-                let s2 = unsafe { &*(other.value.ptr as *const GcString) };
-                // Fast path: if hash differs, strings differ
-                if s1.data.hash != s2.data.hash {
-                    return false;
+            return match tt {
+                LUA_VSHRSTR => false, // different pointers, different interned strings
+                LUA_VLNGSTR => {
+                    let s1 = unsafe { &*(self.value.ptr as *const GcString) };
+                    let s2 = unsafe { &*(other.value.ptr as *const GcString) };
+                    s1.data.hash == s2.data.hash && s1.data.str == s2.data.str
                 }
-                return s1.data.str == s2.data.str;
-            }
-            // Binary values need content comparison
-            if tt == LUA_VBINARY {
-                let b1 = unsafe { &*(self.value.ptr as *const GcBinary) };
-                let b2 = unsafe { &*(other.value.ptr as *const GcBinary) };
-                return b1.data == b2.data;
-            }
-            return false;
+                LUA_VBINARY => {
+                    let b1 = unsafe { &*(self.value.ptr as *const GcBinary) };
+                    let b2 = unsafe { &*(other.value.ptr as *const GcBinary) };
+                    b1.data == b2.data
+                }
+                _ => false,
+            };
         } else if tt == LUA_VNUMINT && other_tt == LUA_VNUMFLT {
             return self.ivalue() as f64 == other.fltvalue();
         } else if tt == LUA_VNUMFLT && other_tt == LUA_VNUMINT {
             return self.fltvalue() == other.ivalue() as f64;
-        } else if (tt == LUA_VSTR && other_tt == LUA_VBINARY) || (tt == LUA_VBINARY && other_tt == LUA_VSTR) {
-            // Compare string and binary content
-            let (str_bytes, bin_bytes) = if tt == LUA_VSTR {
-                let s = unsafe { &*(self.value.ptr as *const GcString) };
-                let b = unsafe { &*(other.value.ptr as *const GcBinary) };
-                (s.data.str.as_bytes(), b.data.as_slice())
-            } else {
-                let b = unsafe { &*(self.value.ptr as *const GcBinary) };
-                let s = unsafe { &*(other.value.ptr as *const GcString) };
-                (s.data.str.as_bytes(), b.data.as_slice())
-            };
-            return str_bytes == bin_bytes;
         }
         false
     }
@@ -997,10 +998,10 @@ impl std::hash::Hash for LuaValue {
 
         // Fast path for strings: use precomputed hash directly
         // This is the most common case for table lookups
-        // LUA_VSTR = 0x44 = LUA_TSTRING | BIT_ISCOLLECTABLE
-        if tt == LUA_VSTR {
+        // Both short strings (LUA_VSHRSTR = 0x44) and long strings (LUA_VLNGSTR = 0x54)
+        if tt == LUA_VSHRSTR || tt == LUA_VLNGSTR {
             // For strings, just hash the precomputed hash value
-            // No need to hash tt since we compare type in eq() anyway
+            // No need to hash tt since string vs binary is distinguished in eq()
             let hash = unsafe { (*(self.value.ptr as *const GcString)).data.hash };
             hash.hash(state);
             return;

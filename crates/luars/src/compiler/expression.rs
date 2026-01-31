@@ -1,4 +1,4 @@
-use crate::StringPtr;
+use crate::LuaValue;
 
 // Port of expdesc from lcode.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,7 @@ pub enum ExpUnion {
     // for generic use
     Info(i32),
     // for VKSTR
-    Str(StringPtr),
+    Str(LuaValue),
     // for VKINT
     IVal(i64),
     // for VKFLT
@@ -60,9 +60,9 @@ impl ExpUnion {
         }
     }
 
-    pub fn str(&self) -> StringPtr {
+    pub fn str(&self) -> &LuaValue {
         match self {
-            ExpUnion::Str(sid) => *sid,
+            ExpUnion::Str(s_value) => s_value,
             _ => panic!("ExpUnion does not contain str"),
         }
     }
@@ -184,10 +184,11 @@ impl ExpDesc {
         }
     }
 
-    pub fn new_vkstr(string_ptr: StringPtr) -> Self {
+    pub fn new_vkstr(s_value: LuaValue) -> Self {
+        debug_assert!(s_value.is_string(), "Expected LuaValue to be a string");
         ExpDesc {
             kind: ExpKind::VKSTR,
-            u: ExpUnion::Str(string_ptr),
+            u: ExpUnion::Str(s_value),
             t: -1,
             f: -1,
         }

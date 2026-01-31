@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 
 use crate::lua_value::LuaString;
-use crate::{CreateResult, GC, GcHeader, GcObjectOwner, GcString, LuaValue, StringPtr};
+use crate::{CreateResult, GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
 /// Complete string interner - ALL strings are interned for maximum performance
 /// - Same content always returns same StringId
@@ -32,31 +32,31 @@ impl StringInterner {
     pub fn intern(&mut self, s: &str, gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
         let hash = self.hash_string(s);
+        
+        // Long strings are not interned (like Lua 5.5)
         if s.len() > Self::SHORT_STRING_LIMIT {
-            // Long strings are not interned
             let size = (std::mem::size_of::<GcString>() + s.len()) as u32;
             let lua_string = LuaString::new(s.to_string(), hash);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
-            return Ok(LuaValue::string(ptr));
+            // Return as long string (not interned)
+            return Ok(LuaValue::longstring(ptr));
         }
 
-        // Check if already interned
+        // Short strings: check if already interned
         let mut found_ptr = None;
         if let Some(ptrs) = self.map.get(&hash) {
             for &ptr in ptrs {
-                let header = ptr.as_ref().header;
-                let other_white = GcHeader::otherwhite(current_white);
-
-                // Skip dead strings (marked with other_white, will be swept)
-                // A string is dead if it has the "other white" bit set
-                if header.is_dead(other_white) {
-                    continue;
-                }
-
+                // Quick check: compare string content directly (already in cache line)
                 if ptr.as_ref().data.as_str() == s {
+                    // Found! Check if it's dead and needs resurrection
+                    let header = ptr.as_ref().header;
+                    if header.is_white() {
+                        // Resurrect by marking black (like Lua 5.5's changewhite)
+                        ptr.as_mut_ref().header.make_black();
+                    }
                     found_ptr = Some(ptr);
                     break;
                 }
@@ -64,17 +64,10 @@ impl StringInterner {
         }
 
         if let Some(ptr) = found_ptr {
-            //  Resurrect the string if it's white (condemned to die)
-            // Even though we skipped "dead" strings above, this string might still be
-            // current_white (not swept yet). Mark it BLACK to ensure it survives.
-            let header = ptr.as_ref().header;
-            if header.is_white() {
-                ptr.as_mut_ref().header.make_black();
-            }
-            return Ok(LuaValue::string(ptr));
+            return Ok(LuaValue::shortstring(ptr)); // Return as short string
         }
 
-        // Not found - create with correct white color (Port of lgc.c: luaC_newobj)
+        // Not found - create new short string with correct white color
         let size = (std::mem::size_of::<GcString>() + s.len()) as u32;
         let lua_string = LuaString::new(s.to_string(), hash);
         let gc_string =
@@ -83,7 +76,7 @@ impl StringInterner {
         gc.trace_object(gc_string)?;
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
 
-        Ok(LuaValue::string(ptr))
+        Ok(LuaValue::shortstring(ptr)) // Return as short string
     }
 
     /// Fast hash function - uses ahash for speed
