@@ -64,6 +64,9 @@ pub struct NativeTable {
     node: *mut Node,
     /// log2 of hash size (size = 1 << lsizenode)
     lsizenode: u8,
+    /// Last free position in hash table (optimization like Lua 5.5)
+    /// Points to next candidate for free slot search
+    lastfree: *mut Node,
 }
 
 impl NativeTable {
@@ -74,6 +77,7 @@ impl NativeTable {
             asize: 0,
             node: ptr::null_mut(),
             lsizenode: 0,
+            lastfree: ptr::null_mut(),
         };
 
         // Allocate array part
@@ -354,6 +358,8 @@ impl NativeTable {
 
         self.node = new_node;
         self.lsizenode = new_lsize;
+        // Initialize lastfree to end of node array (Lua 5.5 optimization)
+        self.lastfree = unsafe { new_node.add(new_size) };
 
         // Rehash old entries
         if !was_dummy && old_size > 0 {
@@ -506,6 +512,25 @@ impl NativeTable {
     }
 
     /// Set value in hash part
+    /// Find a free position in hash table (Lua 5.5 optimization with lastfree)
+    fn getfreepos(&mut self) -> Option<*mut Node> {
+        if self.sizenode() == 0 {
+            return None;
+        }
+
+        unsafe {
+            // Search backwards from lastfree (Lua 5.5 pattern)
+            while self.lastfree > self.node {
+                self.lastfree = self.lastfree.offset(-1);
+                if (*self.lastfree).key.is_nil() {
+                    return Some(self.lastfree);
+                }
+            }
+        }
+
+        None // Table is full
+    }
+
     fn set_node(&mut self, key: LuaValue, value: LuaValue) {
         // If setting to nil, we should delete the key
         if value.is_nil() {
@@ -544,21 +569,17 @@ impl NativeTable {
                 node = node.offset(next as isize);
             }
 
-            // Need to add new node - find free position
-            let size = self.sizenode();
-            for i in (0..size).rev() {
-                let free_node = self.node.add(i);
-                if (*free_node).key.is_nil() {
-                    // Found free node
-                    (*free_node).key = key;
-                    (*free_node).value = value;
-                    (*free_node).next = 0;
+            // Need to add new node - find free position using getfreepos
+            if let Some(free_node) = self.getfreepos() {
+                // Found free node
+                (*free_node).key = key;
+                (*free_node).value = value;
+                (*free_node).next = 0;
 
-                    // Link to chain
-                    (*node).next = (free_node as isize - node as isize) as i32
-                        / std::mem::size_of::<Node>() as i32;
-                    return;
-                }
+                // Link to chain
+                (*node).next = (free_node as isize - node as isize) as i32
+                    / std::mem::size_of::<Node>() as i32;
+                return;
             }
 
             // No free nodes - need to resize
