@@ -262,14 +262,16 @@ fn write_chunk_with_dedup(
 
     // Write debug info (if not stripped)
     if strip {
-        write_u32(buf, 0); // no source name
+        write_u32(buf, 0); // no source name (len=0)
+        write_u32(buf, 0); // index=0 means None
         write_u32(buf, 0); // no locals
         write_u32(buf, 0); // no line info
     } else {
         if let Some(ref name) = chunk.source_name {
             write_string_with_dedup(buf, name, string_table)?;  // Use dedup for source name
         } else {
-            write_u32(buf, 0);
+            write_u32(buf, 0); // len = 0
+            write_u32(buf, 0); // index = 0 means None
         }
 
         write_u32(buf, chunk.locals.len() as u32);
@@ -563,15 +565,22 @@ fn write_string_with_dedup(buf: &mut Vec<u8>, s: &str, string_table: &mut HashMa
     // Check if string was already written
     if let Some(&index) = string_table.get(s) {
         // Write index reference (0 length + index)
-        write_u32(buf, 0); // size = 0 means "reuse"
-        write_u32(buf, index); // index of existing string
+        write_u32(buf, 0); // size = 0 means "reuse or empty"
+        write_u32(buf, index); // index of existing string (1-based, >0)
     } else {
         // New string: assign it an index and write it
         let new_index = string_table.len() as u32 + 1; // 1-based indexing
         string_table.insert(s.to_string(), new_index);
         
         // Write the actual string
-        write_string(buf, s);
+        if s.is_empty() {
+            // Empty string: write len=0, index=0 (special case)
+            write_u32(buf, 0); // len = 0
+            write_u32(buf, 0); // index = 0 means new empty string
+        } else {
+            // Non-empty string: write normally
+            write_string(buf, s);
+        }
     }
     Ok(())
 }
@@ -983,9 +992,23 @@ fn read_string_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mut Vec<Str
     let len = read_u32(cursor)? as usize;
     
     if len == 0 {
-        // This is a reference to an existing string
+        // Could be a reference or an empty string
         let index = read_u32(cursor)? as usize;
-        if index == 0 || index > string_table.len() {
+        
+        if index == 0 {
+            // Empty string (new)
+            let s = String::new();
+            string_table.push(s.clone());
+            return Ok(s);
+        }
+        
+        // This is a reference to an existing string
+        if index > string_table.len() {
+            eprintln!("ERROR: String reference index {} out of range (table size: {})", index, string_table.len());
+            eprintln!("String table contents (first 50):");
+            for (i, s) in string_table.iter().take(50).enumerate() {
+                eprintln!("  [{}]: {:?}", i + 1, if s.len() > 50 { &s[..50] } else { s });
+            }
             return Err(format!("invalid string reference index: {}", index));
         }
         Ok(string_table[index - 1].clone())
@@ -1007,19 +1030,20 @@ fn read_optional_string_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mu
     let len = read_u32(cursor)? as usize;
     
     if len == 0 {
-        // Could be None or a reference
-        // Peek next 4 bytes to check if it's a reference
-        let pos = cursor.position();
-        if let Ok(index_u32) = read_u32(cursor) {
+        // Read next u32 to determine if it's None or a reference
+        let index_u32 = read_u32(cursor)?;
+        if index_u32 == 0 {
+            // It's None
+            return Ok(None);
+        } else {
+            // It's a reference
             let index = index_u32 as usize;
-            if index > 0 && index <= string_table.len() {
-                // It's a valid reference
-                return Ok(Some(string_table[index - 1].clone()));
+            if index > string_table.len() {
+                eprintln!("ERROR in read_optional: String reference index {} out of range (table size: {})", index, string_table.len());
+                return Err(format!("invalid string reference index: {}", index));
             }
+            return Ok(Some(string_table[index - 1].clone()));
         }
-        // Reset position and treat as None
-        cursor.set_position(pos);
-        return Ok(None);
     }
     
     // Regular string
