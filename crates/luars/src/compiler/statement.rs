@@ -524,6 +524,12 @@ pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
         *e = ExpDesc::new_void(); // Reset ExpDesc for next expression
         expr_internal(fs, e)?;
         n += 1;
+        
+        // Check limit: Lua allows at most 254 return values
+        // (255 is reserved for LUA_MULTRET)
+        if n > 254 {
+            return Err("too many returns".to_string());
+        }
     }
 
     Ok(n)

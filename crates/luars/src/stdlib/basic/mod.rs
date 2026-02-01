@@ -932,7 +932,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         };
         let vm = l.vm_mut();
         vm.compile_with_name(&code_str, &chunkname)
-            .map_err(|e| format!("{}", e))
+            .map_err(|e| {
+                // Get the actual error message from VM
+                let msg = vm.get_error_message(e);
+                msg
+            })
     };
 
     match chunk_result {
