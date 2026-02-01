@@ -447,12 +447,9 @@ impl NativeTable {
 
         // Fast path for short strings only - direct pointer comparison
         // Long strings (>40 chars) are NOT interned, so must use general case
-        if key.is_string() {
+        if key.is_short_string() {
             if let Some(s) = key.as_str() {
-                // Only use fast path for short strings (<=40 chars)
-                if s.len() <= StringInterner::SHORT_STRING_LIMIT {
-                    return self.get_shortstr_fast(key);
-                }
+                return self.get_shortstr_fast(key);
             }
         }
 
@@ -646,7 +643,7 @@ impl NativeTable {
                     unsafe {
                         self.write_array(i, value);
                     }
-                    return true;  // New key inserted
+                    return true; // New key inserted
                 }
             }
         }
