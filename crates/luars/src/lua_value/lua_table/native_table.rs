@@ -443,7 +443,7 @@ impl NativeTable {
         // Fast path for short strings only - direct pointer comparison
         // Long strings (>40 chars) are NOT interned, so must use general case
         if key.is_short_string() {
-            if let Some(s) = key.as_str() {
+            if let Some(_s) = key.as_str() {
                 return self.get_shortstr_fast(key);
             }
         }

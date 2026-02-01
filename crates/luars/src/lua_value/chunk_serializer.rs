@@ -35,7 +35,7 @@ pub fn serialize_chunk_with_pool(
     Ok(buf)
 }
 
-/// Serialize a Chunk to binary format (no string constants supported)
+/// Serialize a Chunk to binary format (with string deduplication but no VM strings)
 pub fn serialize_chunk(chunk: &Chunk, strip: bool) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
 
@@ -44,8 +44,11 @@ pub fn serialize_chunk(chunk: &Chunk, strip: bool) -> Result<Vec<u8>, String> {
     buf.push(LUARS_VERSION);
     buf.push(if strip { 1 } else { 0 });
 
-    // Write chunk data without pool access (strings will be nil)
-    write_chunk_no_pool(&mut buf, chunk, strip)?;
+    // Create string table for deduplication
+    let mut string_table = HashMap::new();
+
+    // Write chunk data with string deduplication (but constants will be nil)
+    write_chunk_no_pool_with_dedup(&mut buf, chunk, strip, &mut string_table)?;
 
     Ok(buf)
 }
@@ -157,6 +160,7 @@ pub fn deserialize_chunk_with_strings(
     Ok((chunk, strings))
 }
 
+#[allow(dead_code)]
 fn write_chunk(
     buf: &mut Vec<u8>,
     chunk: &Chunk,
@@ -288,6 +292,73 @@ fn write_chunk_with_dedup(
     Ok(())
 }
 
+fn write_chunk_no_pool_with_dedup(
+    buf: &mut Vec<u8>,
+    chunk: &Chunk,
+    strip: bool,
+    string_table: &mut HashMap<String, u32>,
+) -> Result<(), String> {
+    // Write code
+    write_u32(buf, chunk.code.len() as u32);
+    for &instr in &chunk.code {
+        write_u32(buf, instr.as_u32());
+    }
+
+    // Write constants (without pool, strings become nil)
+    write_u32(buf, chunk.constants.len() as u32);
+    for constant in &chunk.constants {
+        write_constant_no_pool(buf, constant)?;
+    }
+
+    // Write metadata
+    write_u32(buf, chunk.upvalue_count as u32);
+    write_u32(buf, chunk.param_count as u32);
+    buf.push(if chunk.is_vararg { 1 } else { 0 });
+    write_u32(buf, chunk.max_stack_size as u32);
+
+    // Write upvalue descriptors with deduplication
+    write_u32(buf, chunk.upvalue_descs.len() as u32);
+    for desc in &chunk.upvalue_descs {
+        write_string_with_dedup(buf, &desc.name, string_table)?;
+        buf.push(if desc.is_local { 1 } else { 0 });
+        write_u32(buf, desc.index);
+    }
+
+    // Write child prototypes
+    write_u32(buf, chunk.child_protos.len() as u32);
+    for child in &chunk.child_protos {
+        write_chunk_no_pool_with_dedup(buf, child, strip, string_table)?;
+    }
+
+    // Write debug info with deduplication
+    if strip {
+        write_u32(buf, 0);
+        write_u32(buf, 0);
+        write_u32(buf, 0);
+        write_u32(buf, 0);
+    } else {
+        if let Some(ref name) = chunk.source_name {
+            write_string_with_dedup(buf, name, string_table)?;
+        } else {
+            write_u32(buf, 0);
+            write_u32(buf, 0);
+        }
+
+        write_u32(buf, chunk.locals.len() as u32);
+        for local in &chunk.locals {
+            write_string_with_dedup(buf, local, string_table)?;
+        }
+
+        write_u32(buf, chunk.line_info.len() as u32);
+        for &line in &chunk.line_info {
+            write_u32(buf, line);
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<(), String> {
     // Write code
     write_u32(buf, chunk.code.len() as u32);
@@ -347,6 +418,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
     Ok(())
 }
 
+#[allow(dead_code)]
 fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
@@ -509,6 +581,7 @@ const TAG_INTEGER: u8 = 0x13; // LUA_VNUMINT
 const TAG_SHORT_STRING: u8 = 0x04; // LUA_VSHRSTR
 const TAG_LONG_STRING: u8 = 0x14; // LUA_VLNGSTR
 
+#[allow(dead_code)]
 fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), String> {
     if value.is_nil() {
         buf.push(TAG_NIL);
@@ -626,6 +699,7 @@ fn read_constant_with_strings(
     }
 }
 
+#[allow(dead_code)]
 fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<LuaValue, String> {
     let tag = read_u8(cursor)?;
     match tag {
@@ -647,6 +721,7 @@ fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<LuaValue, String> {
     }
 }
 
+#[allow(dead_code)]
 fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chunk, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
@@ -723,6 +798,7 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
     })
 }
 
+#[allow(dead_code)]
 fn read_constant_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<LuaValue, String> {
     let tag = read_u8(cursor)?;
     match tag {
