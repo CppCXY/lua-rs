@@ -687,6 +687,16 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn as_lua_function_mut(&self) -> Option<&mut FunctionBody> {
+        if self.ttisluafunction() {
+            let func = unsafe { &mut *(self.value.ptr as *mut GcFunction) };
+            Some(&mut func.data)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
     pub fn as_cfunction(&self) -> Option<CFunction> {
         if self.ttiscfunction() {
             Some(self.fvalue())

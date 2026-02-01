@@ -758,13 +758,15 @@ fn debug_upvaluejoin(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Clone the upvalue from func2
-    let _upvalue_to_share = upvalues2[n2 - 1].clone();
+    let upvalue_to_share = upvalues2[n2 - 1].clone();
 
-    // Replace upvalue in func1 (this requires mutable access)
-    // Since we can't directly mutate through the immutable reference,
-    // we need to use interior mutability or unsafe code
-    // For now, this is a limitation - we return an error
-    return Err(
-        l.error("upvaluejoin is not yet fully implemented (cannot mutate upvalues)".to_string())
-    );
+    // Replace upvalue in func1 - we need mutable access
+    let lua_func1_mut = func1
+        .as_lua_function_mut()
+        .ok_or_else(|| l.error("upvaluejoin: cannot get mutable reference to function 1".to_string()))?;
+    
+    let upvalues1_mut = lua_func1_mut.upvalues_mut();
+    upvalues1_mut[n1 - 1] = upvalue_to_share;
+
+    Ok(0)
 }

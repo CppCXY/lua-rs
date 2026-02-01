@@ -1,12 +1,9 @@
 // Native Lua 5.5-style table implementation
 // Port of ltable.c with minimal abstractions for maximum performance
 
-use crate::{
-    StringInterner,
-    lua_value::{
-        LuaValue,
-        lua_value::{LUA_VEMPTY, LUA_VNIL, Value},
-    },
+use crate::lua_value::{
+    LuaValue,
+    lua_value::{LUA_VEMPTY, LUA_VNIL, Value},
 };
 use std::alloc::{self, Layout};
 use std::ptr;
@@ -35,8 +32,6 @@ const DUMMY_NODE: Node = Node {
     },
     next: 0,
 };
-
-// 禁用doc test
 
 /// Native Lua table implementation - mimics Lua 5.5's Table struct
 ///
