@@ -878,7 +878,19 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Optional chunk name for error messages
-    let chunkname = chunkname_arg.unwrap_or_else(|| "=(load)".to_string());
+    // If not provided and chunk is text, use the source code itself (or a prefix)
+    let chunkname = if let Some(name) = chunkname_arg {
+        name
+    } else if !is_binary {
+        // For text chunks, use the source code as chunk name (like Lua 5.5)
+        // This allows the source to be preserved in the bytecode
+        match String::from_utf8(code_bytes.clone()) {
+            Ok(s) => s,
+            Err(_) => "=(load)".to_string(),
+        }
+    } else {
+        "=(load)".to_string()
+    };
 
     // Optional mode ("b", "t", or "bt")
     let mode = mode_arg.unwrap_or_else(|| "bt".to_string());
