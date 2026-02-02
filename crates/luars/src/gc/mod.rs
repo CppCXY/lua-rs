@@ -885,6 +885,8 @@ impl GC {
 
     /// Clear entries with unmarked keys from a single table
     fn clear_table_by_keys(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
+        // CRITICAL FIX: Collect all keys first to avoid holding reference during is_cleared()
+        // This prevents use-after-free and borrowing issues
         let entries = table_ptr.as_ref().data.iter_keys();
 
         let mut keys_to_remove = Vec::new();
@@ -945,18 +947,21 @@ impl GC {
 
     /// Clear entries with unmarked values from a single table
     fn clear_table_by_values(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
-        // CRITICAL FIX: Use next() to avoid allocating Vec during sweep phase
+        // CRITICAL FIX: Collect all entries first to avoid:
+        // 1. Use-after-free issues when calling is_cleared() during iteration
+        // 2. Borrowing conflicts between table reference and is_cleared()
+        // 3. Inefficient repeated lookups with next()
+        // This is safe in atomic phase where we need correctness over minimal allocation
+        let entries = table_ptr.as_ref().data.iter_all();
+
         let mut keys_to_remove = Vec::new();
 
-        let mut key = LuaValue::nil();
-        let table_data = &table_ptr.as_ref().data;
-        while let Some((k, value)) = table_data.next(&key) {
+        for (k, value) in entries {
             if let Some(val_ptr) = value.as_gc_ptr() {
                 if self.is_cleared(l, val_ptr) {
                     keys_to_remove.push(k);
                 }
             }
-            key = k;
         }
 
         // Remove entries with dead values
