@@ -323,7 +323,7 @@ impl<'a> LuaTokenize<'a> {
     }
 
     fn lex_white_space(&mut self) -> LuaTokenKind {
-        self.reader.eat_while(|ch| ch == ' ' || ch == '\t');
+        self.reader.eat_while(|ch| ch == ' ' || ch == '\t' || ch == '\x0B' || ch == '\x0C');
         LuaTokenKind::TkWhitespace
     }
 

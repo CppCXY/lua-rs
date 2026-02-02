@@ -1618,6 +1618,10 @@ impl LuaState {
                     return Ok(s.to_string());
                 }
             }
+            LuaValueKind::Function | LuaValueKind::CFunction => {
+                // Functions: use default representation (no metatable support for functions)
+                return Ok(format!("{}", value));
+            }
             _ => {
                 // Check for __tostring metamethod
                 if let Some(mm) = get_metamethod_event(self, value, TmKind::ToString) {

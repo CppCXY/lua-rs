@@ -1069,7 +1069,13 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     if !success {
         // Error occurred - results[0] contains error message
         if !results.is_empty() {
-            return Err(LuaError::RuntimeError);
+            // Re-throw the error with the actual message
+            let error_msg = if let Some(msg_str) = results[0].as_str() {
+                msg_str.to_string()
+            } else {
+                results[0].to_string()
+            };
+            return Err(l.error(error_msg));
         }
         return Err(l.error("error in dofile".to_string()));
     }
