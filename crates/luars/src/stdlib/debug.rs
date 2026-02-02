@@ -3,7 +3,6 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::call_info::call_status;
 use crate::lua_vm::{LuaResult, LuaState, get_metatable};
 
 pub fn create_debug_lib() -> LibraryModule {
@@ -278,7 +277,14 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
                 // Extract from call_status bits 8-11 (CIST_CCMT)
                 let extraargs_opt = if let Some(level) = arg1.as_integer() {
                     use crate::lua_vm::call_info::call_status;
-                    l.get_frame(level as usize)
+                    // Convert relative level to absolute frame index
+                    // level 0 = debug.getinfo itself
+                    // level 1 = caller of debug.getinfo
+                    // level n = call_depth - 1 - n
+                    let current_depth = l.call_depth();
+                    let frame_idx = current_depth.checked_sub(1 + level as usize);
+                    frame_idx
+                        .and_then(|idx| l.get_frame(idx))
                         .map(|f| call_status::get_ccmt_count(f.call_status))
                 } else {
                     None
@@ -344,7 +350,12 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
 
             // extraargs for C functions
             let extraargs_opt = if let Some(level) = arg1.as_integer() {
-                l.get_frame(level as usize)
+                use crate::lua_vm::call_info::call_status;
+                // Convert relative level to absolute frame index
+                let current_depth = l.call_depth();
+                let frame_idx = current_depth.checked_sub(1 + level as usize);
+                frame_idx
+                    .and_then(|idx| l.get_frame(idx))
                     .map(|f| call_status::get_ccmt_count(f.call_status))
             } else {
                 None

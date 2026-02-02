@@ -10,7 +10,7 @@ use crate::compiler::parser::{
     to_unary_operator,
 };
 use crate::compiler::statement::{self, mark_upval};
-use crate::compiler::{VarKind, code, string_k};
+use crate::compiler::{VarKind, binary_k, code, string_k};
 use crate::lua_value::UpvalueDesc;
 use crate::lua_vm::OpCode;
 
@@ -131,9 +131,12 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             let text = fs.lexer.current_token_text();
             let string_content = parse_string_token_value(text, fs.lexer.current_token());
             match string_content {
-                Ok(s) => {
-                    // Intern string to ObjectPool and get StringId
-                    let string = fs.vm.create_string(&s).unwrap();
+                Ok(bytes) => {
+                    // Try to create a valid UTF-8 string, otherwise create binary
+                    let string = match String::from_utf8(bytes.clone()) {
+                        Ok(s) => fs.vm.create_string(&s).unwrap(),
+                        Err(_) => fs.vm.create_binary(bytes).unwrap(),
+                    };
                     // Create VKSTR expression (not VK!) - will convert to VK when needed
                     *v = ExpDesc::new_vkstr(string);
                 }
@@ -291,8 +294,11 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
         LuaTokenKind::TkString | LuaTokenKind::TkLongString => {
             // funcargs -> STRING
             let text = fs.lexer.current_token_text();
-            let string_content = parse_string_token_value(text, fs.lexer.current_token())?;
-            let k_idx = string_k(fs, string_content);
+            let vec8 = parse_string_token_value(text, fs.lexer.current_token())?;
+            let k_idx = match String::from_utf8(vec8.clone()) {
+                Ok(s) => string_k(fs, s),
+                Err(_) => binary_k(fs, vec8),
+            };
             fs.lexer.bump();
             args = ExpDesc::new_k(k_idx);
         }

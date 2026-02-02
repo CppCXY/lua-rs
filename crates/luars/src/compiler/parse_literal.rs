@@ -232,7 +232,7 @@ pub fn parse_float_token_value(num_text: &str) -> Result<f64, String> {
     Ok(value)
 }
 
-pub fn parse_string_token_value(text: &str, kind: LuaTokenKind) -> Result<String, String> {
+pub fn parse_string_token_value(text: &str, kind: LuaTokenKind) -> Result<Vec<u8>, String> {
     match kind {
         LuaTokenKind::TkString => normal_string_value(text),
         LuaTokenKind::TkLongString => long_string_value(text),
@@ -240,7 +240,7 @@ pub fn parse_string_token_value(text: &str, kind: LuaTokenKind) -> Result<String
     }
 }
 
-fn long_string_value(text: &str) -> Result<String, String> {
+fn long_string_value(text: &str) -> Result<Vec<u8>, String> {
     if text.len() < 4 {
         return Err(format!("String too short"));
     }
@@ -302,15 +302,16 @@ fn long_string_value(text: &str) -> Result<String, String> {
     // In Lua's read_long_string, both '\n' and '\r' are saved as '\n'
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
 
-    Ok(normalized)
+    Ok(normalized.into_bytes())
 }
 
-fn normal_string_value(text: &str) -> Result<String, String> {
+fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
     if text.len() < 2 {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
 
-    let mut result = String::with_capacity(text.len() - 2);
+    // Use Vec<u8> to handle raw bytes, then convert to String
+    let mut result = Vec::with_capacity(text.len() - 2);
     let mut chars = text.chars().peekable();
     let delimiter = chars.next().unwrap();
 
@@ -319,19 +320,19 @@ fn normal_string_value(text: &str) -> Result<String, String> {
             '\\' => {
                 if let Some(next_char) = chars.next() {
                     match next_char {
-                        'a' => result.push('\u{0007}'), // Bell
-                        'b' => result.push('\u{0008}'), // Backspace
-                        'f' => result.push('\u{000C}'), // Formfeed
-                        'n' => result.push('\n'),       // Newline
-                        'r' => result.push('\r'),       // Carriage return
-                        't' => result.push('\t'),       // Horizontal tab
-                        'v' => result.push('\u{000B}'), // Vertical tab
+                        'a' => result.push(0x07), // Bell
+                        'b' => result.push(0x08), // Backspace
+                        'f' => result.push(0x0C), // Formfeed
+                        'n' => result.push(b'\n'),       // Newline
+                        'r' => result.push(b'\r'),       // Carriage return
+                        't' => result.push(b'\t'),       // Horizontal tab
+                        'v' => result.push(0x0B), // Vertical tab
                         'x' => {
                             // Hexadecimal escape sequence
                             let hex = chars.by_ref().take(2).collect::<String>();
                             if hex.len() == 2 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
                                 if let Ok(value) = u8::from_str_radix(&hex, 16) {
-                                    result.push(value as char);
+                                    result.push(value);
                                 }
                             } else {
                                 return Err(format!(
@@ -351,14 +352,15 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                                         // Try standard Unicode first
                                         if let Some(unicode_char) = std::char::from_u32(code_point)
                                         {
-                                            result.push(unicode_char);
+                                            // Push as UTF-8 bytes
+                                            let mut buf = [0u8; 4];
+                                            let s = unicode_char.encode_utf8(&mut buf);
+                                            result.extend_from_slice(s.as_bytes());
                                         } else {
                                             // For values > 0x10FFFF, encode as UTF-8 manually
                                             // This matches Lua's luaO_utf8esc behavior
                                             let utf8_bytes = encode_utf8_extended(code_point);
-                                            for byte in utf8_bytes {
-                                                result.push(byte as char);
-                                            }
+                                            result.extend_from_slice(&utf8_bytes);
                                         }
                                     } else {
                                         return Err(format!(
@@ -384,10 +386,10 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                                 }
                             }
                             if let Ok(value) = dec.parse::<u8>() {
-                                result.push(value as char);
+                                result.push(value);
                             }
                         }
-                        '\\' | '\'' | '\"' => result.push(next_char),
+                        '\\' | '\'' | '\"' => result.push(next_char as u8),
                         'z' => {
                             // Skip whitespace
                             while let Some(c) = chars.peek() {
@@ -398,7 +400,7 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                             }
                         }
                         '\r' | '\n' => {
-                            result.push(next_char);
+                            result.push(next_char as u8);
                         }
                         _ => {
                             return Err(format!("Invalid escape sequence '\\{}'", next_char));
@@ -410,10 +412,14 @@ fn normal_string_value(text: &str) -> Result<String, String> {
                 if c == delimiter {
                     break;
                 }
-                result.push(c);
+                // Push character as UTF-8 bytes
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                result.extend_from_slice(s.as_bytes());
             }
         }
     }
 
+    // Return raw bytes - caller will decide whether to create String or Binary
     Ok(result)
 }

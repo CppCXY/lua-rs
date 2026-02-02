@@ -1009,8 +1009,8 @@ impl LuaState {
 
         // Resolve __call chain if needed
 
-        let actual_arg_count = match resolve_call_chain(self, func_idx, arg_count) {
-            Ok(count) => count,
+        let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok((count, depth)) => (count, depth),
             Err(e) => {
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1051,6 +1051,15 @@ impl LuaState {
                     let error_msg = self.get_error_msg(e);
                     let err_str = self.create_string(&error_msg)?;
                     return Ok((false, vec![err_str]));
+                }
+                
+                // Set ccmt count in call_status
+                if ccmt_depth > 0 {
+                    use crate::lua_vm::call_info::call_status;
+                    let frame_idx = self.call_depth - 1;
+                    if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                        frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                    }
                 }
 
                 // Call C function
@@ -1170,8 +1179,8 @@ impl LuaState {
 
         // Resolve __call metamethod chain if needed
 
-        let actual_arg_count = match resolve_call_chain(self, func_idx, arg_count) {
-            Ok(count) => count,
+        let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok((count, depth)) => (count, depth),
             Err(e) => {
                 // __call resolution failed - return error
                 let error_msg = self.get_error_msg(e);
@@ -1206,6 +1215,16 @@ impl LuaState {
             // Lua function - push frame and execute, expecting all return values
             let base = func_idx + 1;
             self.push_frame(func, base, actual_arg_count, -1)?;
+            
+            // Set ccmt count in call_status for Lua functions too
+            if ccmt_depth > 0 {
+                use crate::lua_vm::call_info::call_status;
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+            
             lua_execute_until(self, initial_depth)
         };
 
@@ -1273,8 +1292,8 @@ impl LuaState {
 
         // Resolve __call chain if needed
 
-        let actual_arg_count = match resolve_call_chain(self, func_idx, arg_count) {
-            Ok(count) => count,
+        let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok((count, depth)) => (count, depth),
             Err(e) => {
                 self.set_top(handler_idx)?;
                 let error_msg = self.get_error_msg(e);
@@ -1296,6 +1315,15 @@ impl LuaState {
             let error_msg = self.get_error_msg(e);
             let err_str = self.create_string(&error_msg)?;
             return Ok((false, vec![err_str]));
+        }
+        
+        // Set ccmt count in call_status
+        if ccmt_depth > 0 {
+            use crate::lua_vm::call_info::call_status;
+            let frame_idx = self.call_depth - 1;
+            if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+            }
         }
 
         // Execute

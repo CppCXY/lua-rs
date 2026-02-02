@@ -143,13 +143,13 @@ fn handle_call_internal(
 
 /// Resolve __call metamethod chain in place
 /// Modifies stack to replace non-callable with its __call chain
-/// Returns (actual_arg_count) after resolution
+/// Returns (actual_arg_count, ccmt_depth) after resolution
 /// func_idx position stays the same, but stack content is modified
 pub fn resolve_call_chain(
     lua_state: &mut LuaState,
     func_idx: usize,
     arg_count: usize,
-) -> LuaResult<usize> {
+) -> LuaResult<(usize, u8)> {
     let mut current_arg_count = arg_count;
     let mut ccmt_depth = 0;
 
@@ -161,7 +161,7 @@ pub fn resolve_call_chain(
         // Check if we have a callable function
         if func.is_cfunction() || func.is_lua_function() {
             // Found a real function - done
-            return Ok(current_arg_count);
+            return Ok((current_arg_count, ccmt_depth));
         }
 
         // Try to get __call metamethod
@@ -518,7 +518,7 @@ pub fn handle_tailcall(
         Ok(FrameAction::Continue)
     } else {
         // Not a function - resolve __call chain first
-        let actual_nargs = resolve_call_chain(lua_state, func_idx, nargs)?;
+        let (actual_nargs, _ccmt_depth) = resolve_call_chain(lua_state, func_idx, nargs)?;
 
         // After resolution, recurse once to handle the actual call
         // (but won't recurse again since __call chain is now resolved)

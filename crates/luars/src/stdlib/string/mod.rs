@@ -365,7 +365,22 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
 
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
     let plain = l.get_arg(4).map(|v| v.is_truthy()).unwrap_or(false);
-    let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
+    
+    // Convert Lua 1-based index (with negative support) to Rust 0-based index
+    let start_pos = if init > 0 {
+        (init - 1) as usize
+    } else if init < 0 {
+        // Negative index: count from end
+        let abs_init = (-init) as usize;
+        if abs_init > s_str.len() {
+            0
+        } else {
+            s_str.len() - abs_init
+        }
+    } else {
+        // init == 0, treat as 1
+        0
+    };
 
     // Fast path: check if pattern contains special characters
     let has_special = pattern.bytes().any(|c| {

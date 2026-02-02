@@ -997,6 +997,15 @@ pub fn string_k(fs: &mut FuncState, s: String) -> usize {
     add_constant(fs, string)
 }
 
+pub fn binary_k(fs: &mut FuncState, v: Vec<u8>) -> usize {
+    // Intern binary data to ObjectPool and get BinaryId
+    let binary = fs.vm.create_binary(v).unwrap();
+
+    // Add LuaValue with BinaryId to constants (check for duplicates)
+    // For binaries, key == value (binaries are deduplicated globally)
+    add_constant(fs, binary)
+}
+
 // Port of str2K from lcode.c:738-742
 // static void str2K (FuncState *fs, expdesc *e)
 // Convert a VKSTR to a VK
