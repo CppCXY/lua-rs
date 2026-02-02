@@ -368,26 +368,31 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                             if let Some('{') = chars.next() {
                                 let unicode_hex =
                                     chars.by_ref().take_while(|c| *c != '}').collect::<String>();
-                                if let Ok(code_point) = u32::from_str_radix(&unicode_hex, 16) {
-                                    // Lua allows UTF-8 values up to 0x7FFFFFFF (from llex.c:351)
-                                    if code_point <= 0x7FFFFFFF {
-                                        // Try standard Unicode first
-                                        if let Some(unicode_char) = std::char::from_u32(code_point)
-                                        {
-                                            // Push as UTF-8 bytes
-                                            let mut buf = [0u8; 4];
-                                            let s = unicode_char.encode_utf8(&mut buf);
-                                            result.extend_from_slice(s.as_bytes());
+                                match u32::from_str_radix(&unicode_hex, 16) {
+                                    Ok(code_point) => {
+                                        // Lua allows UTF-8 values up to 0x7FFFFFFF (from llex.c:351)
+                                        if code_point <= 0x7FFFFFFF {
+                                            // Try standard Unicode first
+                                            if let Some(unicode_char) = std::char::from_u32(code_point)
+                                            {
+                                                // Push as UTF-8 bytes
+                                                let mut buf = [0u8; 4];
+                                                let s = unicode_char.encode_utf8(&mut buf);
+                                                result.extend_from_slice(s.as_bytes());
+                                            } else {
+                                                // For values > 0x10FFFF, encode as UTF-8 manually
+                                                // This matches Lua's luaO_utf8esc behavior
+                                                let utf8_bytes = encode_utf8_extended(code_point);
+                                                result.extend_from_slice(&utf8_bytes);
+                                            }
                                         } else {
-                                            // For values > 0x10FFFF, encode as UTF-8 manually
-                                            // This matches Lua's luaO_utf8esc behavior
-                                            let utf8_bytes = encode_utf8_extended(code_point);
-                                            result.extend_from_slice(&utf8_bytes);
+                                            return Err(format!(
+                                                "UTF-8 value too large"
+                                            ));
                                         }
-                                    } else {
-                                        return Err(format!(
-                                            "UTF-8 value too large"
-                                        ));
+                                    }
+                                    Err(_) => {
+                                        return Err(format!("UTF-8 value too large"));
                                     }
                                 }
                             }

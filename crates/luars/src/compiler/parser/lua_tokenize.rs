@@ -392,40 +392,151 @@ impl<'a> LuaTokenize<'a> {
                     // Unicode escape: \u{XXX}
                     self.reader.bump(); // skip 'u'
                     if self.reader.current_char() != '{' {
-                        self.error(|| format!("missing '{{' in unicode escape"));
+                        // Missing '{' after \u
+                        // Get context: extract chars before current position
+                        // current_text() includes from token start (the quote) to after 'u'
+                        let text_before = self.reader.current_text();
+                        // Skip opening quote and get last few chars
+                        let context_start = if text_before.len() > 6 {
+                            // Get last 5 chars (will include `abc\u`)
+                            &text_before[text_before.len() - 5..]
+                        } else if text_before.len() > 1 {
+                            &text_before[1..]  // Skip opening quote
+                        } else {
+                            ""
+                        };
+                        let mut ctx = String::from(context_start);
+                        let next_ch = self.reader.current_char();
+                        if next_ch != '\0' && next_ch != '\n' && next_ch != '\r' {
+                            ctx.push(next_ch);
+                        }
+                        self.error(|| format!("missing '{{' in unicode escape near '{}'", ctx));
                         return LuaTokenKind::TkString;
                     }
                     self.reader.bump(); // skip '{'
-                    // Read hex digits until '}'
-                    let mut has_digits = false;
+                    
+                    // Collect hex digits
+                    let mut hex_digits = String::new();
                     while self.reader.current_char() != '}' {
                         let ch = self.reader.current_char();
                         if ch == '\0' || ch == '\n' || ch == '\r' {
-                            self.error(|| format!("unfinished unicode escape"));
+                            // Unfinished escape
+                            let text_before = self.reader.current_text();
+                            let context_start = if text_before.len() > 11 {
+                                &text_before[text_before.len() - 10..]
+                            } else if text_before.len() > 1 {
+                                &text_before[1..]
+                            } else {
+                                ""
+                            };
+                            let ctx = String::from(context_start);
+                            self.error(|| format!("unfinished unicode escape near '{}'", ctx));
                             return LuaTokenKind::TkString;
                         }
                         if !ch.is_ascii_hexdigit() {
-                            self.error(|| format!("hexadecimal digit expected in unicode escape"));
+                            // Non-hex character
+                            let text_before = self.reader.current_text();
+                            let context_start = if text_before.len() > 11 {
+                                &text_before[text_before.len() - 10..]
+                            } else if text_before.len() > 1 {
+                                &text_before[1..]
+                            } else {
+                                ""
+                            };
+                            let mut ctx = String::from(context_start);
+                            ctx.push(ch);
+                            self.error(|| format!("hexadecimal digit expected in unicode escape near '{}'", ctx));
                             return LuaTokenKind::TkString;
                         }
-                        has_digits = true;
+                        hex_digits.push(ch);
                         self.reader.bump();
                     }
-                    if !has_digits {
-                        self.error(|| format!("empty unicode escape"));
+                    
+                    if hex_digits.is_empty() {
+                        let text_before = self.reader.current_text();
+                        let context_start = if text_before.len() > 11 {
+                            &text_before[text_before.len() - 10..]
+                        } else if text_before.len() > 1 {
+                            &text_before[1..]
+                        } else {
+                            ""
+                        };
+                        let mut ctx = String::from(context_start);
+                        let next_ch = self.reader.current_char();
+                        if next_ch != '\0' && next_ch != '\n' && next_ch != '\r' {
+                            ctx.push(next_ch);
+                        }
+                        self.error(|| format!("hexadecimal digit expected in unicode escape near '{}'", ctx));
                         return LuaTokenKind::TkString;
                     }
-                    self.reader.bump(); // skip '}'
+                    
+                    // Validate UTF-8 value range (0 to 0x7FFFFFFF)
+                    match u32::from_str_radix(&hex_digits, 16) {
+                        Ok(val) if val > 0x7FFFFFFF => {
+                            // Value too large, include context in error
+                            let text_before = self.reader.current_text();
+                            let context_start = if text_before.len() > 16 {
+                                &text_before[text_before.len() - 15..]
+                            } else if text_before.len() > 1 {
+                                &text_before[1..]
+                            } else {
+                                ""
+                            };
+                            // Don't include the closing } - the error is about the value
+                            // being too large, which is detected before we accept the }
+                            let ctx = String::from(context_start);
+                            self.error(|| format!("UTF-8 value too large near '{}'", ctx));
+                            return LuaTokenKind::TkString;
+                        }
+                        Err(_) => {
+                            // Parse error means value too large for u32
+                            let text_before = self.reader.current_text();
+                            let context_start = if text_before.len() > 16 {
+                                &text_before[text_before.len() - 15..]
+                            } else if text_before.len() > 1 {
+                                &text_before[1..]
+                            } else {
+                                ""
+                            };
+                            let ctx = String::from(context_start);
+                            self.error(|| format!("UTF-8 value too large near '{}'", ctx));
+                            return LuaTokenKind::TkString;
+                        }
+                        Ok(_) => {
+                            // Valid value, skip '}'
+                            self.reader.bump();
+                        }
+                    }
                 }
                 '\r' | '\n' => {
                     self.lex_new_line();
                 }
                 '0'..='9' => {
-                    // Decimal escape: \DDD (up to 3 digits)
-                    let mut count = 0;
+                    // Decimal escape: \DDD (up to 3 digits, max 255)
+                    let start_ch = self.reader.current_char();
+                    let mut digits = String::new();
+                    digits.push(start_ch);
+                    self.reader.bump();
+                    
+                    let mut count = 1;
                     while count < 3 && self.reader.current_char().is_ascii_digit() {
+                        digits.push(self.reader.current_char());
                         self.reader.bump();
                         count += 1;
+                    }
+                    
+                    // Validate range (0-255)
+                    if let Ok(val) = digits.parse::<u16>() {
+                        if val > 255 {
+                            // Include next char in error context if it's not special
+                            let mut ctx = format!("\\{}", digits);
+                            let next_ch = self.reader.current_char();
+                            if next_ch != '\0' && next_ch != '\n' && next_ch != '\r' {
+                                ctx.push(next_ch);
+                            }
+                            self.error(|| format!("decimal escape too large near '{}'", ctx));
+                            return LuaTokenKind::TkString;
+                        }
                     }
                 }
                 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v' | '\\' | '\'' | '\"' => {
@@ -435,7 +546,7 @@ impl<'a> LuaTokenize<'a> {
                 _ => {
                     // Invalid escape sequence
                     let ch = self.reader.current_char();
-                    self.error(|| format!("invalid escape sequence '\\{}'", ch));
+                    self.error(|| format!("invalid escape sequence near '\\{}'", ch));
                     return LuaTokenKind::TkString;
                 }
             }
@@ -473,7 +584,7 @@ impl<'a> LuaTokenize<'a> {
         }
 
         if !end {
-            self.error(|| format!("unfinished long string or comment"));
+            self.error(|| format!("unfinished long string or comment near <eof>"));
         }
 
         LuaTokenKind::TkLongString
