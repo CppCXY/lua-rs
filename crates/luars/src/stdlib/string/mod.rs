@@ -56,11 +56,14 @@ fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
     let start = if i < 0 { len + i + 1 } else { i };
     let end = if j < 0 { len + j + 1 } else { j };
 
-    if start < 1 || start > len {
+    // Clamp start and end to valid range [1, len]
+    let start = start.max(1);
+    let end = end.min(len);
+
+    // If start > end after clamping, return empty
+    if start > end || start > len {
         return Ok(0);
     }
-
-    let end = end.min(len);
 
     // FAST PATH: Single byte return (most common case)
     if start == end && start >= 1 && start <= len {
@@ -249,6 +252,29 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
         let empty = vm.create_string("")?;
         l.push_value(empty)?;
         return Ok(1);
+    }
+
+    // Check for result size overflow
+    // Lua limits string size to avoid memory issues
+    const MAX_STRING_SIZE: i64 = 1 << 30; // 1GB limit
+    let s_len = s_str.len() as i64;
+    
+    // Check for overflow before multiplying
+    if s_len > 0 && n > MAX_STRING_SIZE / s_len {
+        return Err(l.error("resulting string too large".to_string()));
+    }
+    
+    // Calculate total size including separators
+    let total_size = if let Some(v) = sep_value {
+        let sep_len = v.as_str().map(|s| s.len()).unwrap_or(0) as i64;
+        let sep_total = sep_len.saturating_mul(n - 1);
+        s_len.saturating_mul(n).saturating_add(sep_total)
+    } else {
+        s_len.saturating_mul(n)
+    };
+
+    if total_size > MAX_STRING_SIZE {
+        return Err(l.error("resulting string too large".to_string()));
     }
 
     let mut result = String::new();
