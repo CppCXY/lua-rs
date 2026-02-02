@@ -360,7 +360,8 @@ impl NativeTable {
         // Initialize lastfree to end of node array (Lua 5.5 optimization)
         self.lastfree = unsafe { new_node.add(new_size) };
 
-        // Rehash old entries
+        // Rehash old entries - CRITICAL: Use raw_set to respect array/hash invariant
+        // lua5.5's reinserthash calls newcheckedkey which checks keyinarray
         if !was_dummy && old_size > 0 {
             for i in 0..old_size {
                 unsafe {
@@ -368,7 +369,9 @@ impl NativeTable {
                     if !(*old_n).key.is_nil() {
                         let key = (*old_n).key;
                         let value = (*old_n).value;
-                        self.set_node(key, value);
+                        // Must use raw_set here, not set_node!
+                        // raw_set will put integer keys in [1..asize] into array part only
+                        self.raw_set(&key, value);
                     }
                 }
             }
@@ -619,35 +622,37 @@ impl NativeTable {
 
     /// Generic set - returns true if new key was inserted
     #[inline(always)]
+    /// Port of lua5.5's newcheckedkey logic in luaH_set/luaH_setint
+    /// CRITICAL INVARIANT: integer keys in [1..asize] must ONLY exist in array part!
     pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
-        // Try array part for integers
+        // Check if key is an integer in array range (lua5.5's keyinarray check)
         if let Some(i) = key.as_integer() {
-            // If key is in valid array range
             if i >= 1 && i <= self.asize as i64 {
+                // Key is in array range - set in array part ONLY
                 let was_nil = unsafe { self.read_array(i).is_none() };
                 unsafe {
                     self.write_array(i, value);
                 }
                 return was_nil && !value.is_nil();
             }
-
-            // Only expand array if key is exactly length+1 (push operation)
-            // This avoids creating sparse arrays with large holes
+            
+            // Integer key outside current array range
+            // If it's a push operation (i == len+1), expand array
             if i >= 1 {
                 let current_len = self.len() as i64;
                 if i == current_len + 1 {
-                    // This is a push operation, expand array
                     let new_size = ((i as u32).next_power_of_two()).max(4);
                     self.resize_array(new_size);
                     unsafe {
                         self.write_array(i, value);
                     }
-                    return true; // New key inserted
+                    return true;
                 }
             }
         }
 
-        // Hash part - check if key exists
+        // Not in array range - use hash part
+        // lua5.5's insertkey/newcheckedkey logic
         let key_exists = self.get_from_hash(key).is_some();
         self.set_node(*key, value);
         !key_exists && !value.is_nil()
@@ -762,157 +767,97 @@ impl NativeTable {
     }
 
     /// Iterate to next key-value pair
-    pub fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
-        // Get lenhint for fast path
-        let lenhint = if self.asize > 0 {
-            unsafe { *self.lenhint_ptr() as i64 }
-        } else {
-            0
-        };
-
-        // Start from nil - return first array element
-        if input_key.is_nil() {
-            // Try array part first
-            if lenhint >= 1 {
-                // Fast path: check if array[1] exists
-                unsafe {
-                    if let Some(val) = self.read_array(1) {
-                        return Some((LuaValue::integer(1), val));
-                    }
-                    // array[1] is nil, scan forward
-                    for scan_i in 2..=lenhint.min(self.asize as i64) {
-                        if let Some(val) = self.read_array(scan_i) {
-                            return Some((LuaValue::integer(scan_i), val));
-                        }
-                    }
-                    // All values up to lenhint are nil, check beyond
-                    if lenhint < self.asize as i64 {
-                        for scan_i in (lenhint + 1)..=self.asize as i64 {
-                            if let Some(val) = self.read_array(scan_i) {
-                                return Some((LuaValue::integer(scan_i), val));
-                            }
-                        }
-                    }
-                }
-            } else if self.asize > 0 {
-                // Slow path: need to check
-                unsafe {
-                    if let Some(val) = self.read_array(1) {
-                        return Some((LuaValue::integer(1), val));
-                    }
-                }
-            }
-            // Fall through to hash part
-            return self.next_hash(None);
+    /// Port of lua5.5's findindex
+    /// Returns the unified index for table traversal:
+    /// - 0 for nil (first iteration)
+    /// - 1..asize for array indices
+    /// - (asize+1)..(asize+hashsize) for hash indices
+    fn findindex(&self, key: &LuaValue) -> Option<u32> {
+        // First iteration
+        if key.is_nil() {
+            return Some(0);
         }
 
-        // If integer key, try continuing in array
-        if let Some(i) = input_key.as_integer() {
+        // Check if key is in array part (lua5.5's keyinarray)
+        // For integer keys in [1..asize], return the index directly
+        if let Some(i) = key.as_integer() {
             if i >= 1 && i <= self.asize as i64 {
-                let next_i = i + 1;
-
-                // Fast path: if next_i <= lenhint, try it first
-                if next_i <= lenhint {
-                    unsafe {
-                        // Check if the value exists (not nil)
-                        if let Some(val) = self.read_array(next_i) {
-                            return Some((LuaValue::integer(next_i), val));
-                        }
-                        // Value is nil, need to scan forward
-                        for scan_i in (next_i + 1)..=lenhint.min(self.asize as i64) {
-                            if let Some(val) = self.read_array(scan_i) {
-                                return Some((LuaValue::integer(scan_i), val));
-                            }
-                        }
-                        // All values up to lenhint are nil, check beyond lenhint
-                        if lenhint < self.asize as i64 {
-                            for scan_i in (lenhint + 1)..=self.asize as i64 {
-                                if let Some(val) = self.read_array(scan_i) {
-                                    return Some((LuaValue::integer(scan_i), val));
-                                }
-                            }
-                        }
-                        // Array exhausted
-                        return self.next_hash(None);
-                    }
-                }
-                // Slow path: might have holes
-                else if next_i <= self.asize as i64 {
-                    unsafe {
-                        if let Some(val) = self.read_array(next_i) {
-                            return Some((LuaValue::integer(next_i), val));
-                        }
-                    }
-                    // Continue searching in array
-                    for scan_i in (next_i + 1)..=self.asize as i64 {
-                        unsafe {
-                            if let Some(val) = self.read_array(scan_i) {
-                                return Some((LuaValue::integer(scan_i), val));
-                            }
-                        }
-                    }
-                }
-                // Array exhausted, start hash
-                return self.next_hash(None);
+                return Some(i as u32);
             }
         }
 
-        // Search in hash part
-        self.next_hash(Some(input_key))
-    }
-
-    /// Helper for iterating hash part
-    fn next_hash(&self, input_key: Option<&LuaValue>) -> Option<(LuaValue, LuaValue)> {
+        // Key must be in hash part - search for it (lua5.5's getgeneric)
         let size = self.sizenode();
         if size == 0 {
-            return None;
+            return None; // No hash part, key not found
         }
 
-        let start_index = if let Some(key) = input_key {
-            // Use hash lookup to find the key quickly - O(1) instead of O(n)
-            let main_pos = self.mainposition(key);
-            let mut node = main_pos;
-            let mut found_index = None;
+        let main_pos = self.mainposition(key);
+        let mut node = main_pos;
 
-            // Follow collision chain
-            unsafe {
-                loop {
-                    if (*node).key == *key {
-                        // Found the key, calculate its index
-                        let idx =
-                            (node as usize - self.node as usize) / std::mem::size_of::<Node>();
-                        found_index = Some(idx + 1); // Start from next
-                        break;
-                    }
-
-                    let next_offset = (*node).next;
-                    if next_offset == 0 {
-                        break; // Not found in chain
-                    }
-                    node = node.offset(next_offset as isize);
+        unsafe {
+            loop {
+                // Check if this node has our key
+                if (*node).key == *key {
+                    // Found the key, calculate its unified index
+                    let hash_idx = (node as usize - self.node as usize) / std::mem::size_of::<Node>();
+                    return Some((hash_idx as u32 + 1) + self.asize);
                 }
-            }
 
-            match found_index {
-                Some(idx) => idx,
-                None => return None, // Key not found
+                let next_offset = (*node).next;
+                if next_offset == 0 {
+                    // Key not found in chain
+                    return None;
+                }
+                node = node.offset(next_offset as isize);
             }
-        } else {
-            0 // Start from beginning
+        }
+    }
+
+    /// Port of lua5.5's luaH_next
+    /// Table iteration following the unified indexing scheme
+    pub fn next(&self, key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
+        let asize = self.asize;
+        
+        // Get starting index from the input key
+        let mut i = match self.findindex(key) {
+            Some(idx) => idx,
+            None => return None, // Invalid key (not found in table)
         };
 
-        // Find next non-empty node
-        for i in start_index..size {
+        // First, scan the array part [i..asize)
+        while i < asize {
             unsafe {
-                let node = self.node.add(i);
+                let tag = *self.get_arr_tag(i as usize);
+                if tag != LUA_VNIL && tag != LUA_VEMPTY {
+                    // Found a non-empty array entry
+                    let lua_index = (i + 1) as i64;
+                    let value = self.read_array(lua_index).unwrap();
+                    return Some((LuaValue::integer(lua_index), value));
+                }
+            }
+            i += 1;
+        }
+
+        // Array exhausted, now scan hash part
+        let hash_size = self.sizenode() as u32;
+        i -= asize; // Convert unified index to hash index
+        
+        while i < hash_size {
+            unsafe {
+                let node = self.node.add(i as usize);
                 if !(*node).key.is_nil() {
+                    // Found a non-empty hash entry
                     return Some(((*node).key, (*node).value));
                 }
             }
+            i += 1;
         }
 
-        None
+        None // No more elements
     }
+
+
 
     /// GC-safe iteration: call f for each entry
     pub fn for_each_entry<F>(&self, mut f: F)
