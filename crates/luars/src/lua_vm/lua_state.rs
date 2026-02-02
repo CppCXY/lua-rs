@@ -1620,7 +1620,8 @@ impl LuaState {
                         if let Some(s) = result.as_str() {
                             return Ok(s.to_string());
                         }
-                        return Ok(format!("{}", result));
+                        // __tostring must return a string
+                        return Err(self.error("'__tostring' must return a string".to_string()));
                     } else {
                         return Err(
                             self.error("error in __tostring metamethod: no result".to_string())

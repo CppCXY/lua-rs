@@ -68,9 +68,11 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
             'c' => format_char(&mut result, arg, l)?,
             'd' | 'i' => format_int(&mut result, arg, &flags, l)?,
             'o' => format_octal(&mut result, arg, &flags, l)?,
-            'u' => format_uint(&mut result, arg, l)?,
+            'u' => format_uint(&mut result, arg, &flags, l)?,
             'x' => format_hex(&mut result, arg, &flags, false, l)?,
             'X' => format_hex(&mut result, arg, &flags, true, l)?,
+            'a' => format_hex_float(&mut result, arg, &flags, false, l)?,
+            'A' => format_hex_float(&mut result, arg, &flags, true, l)?,
             'e' => format_sci(&mut result, arg, &flags, false, l)?,
             'E' => format_sci(&mut result, arg, &flags, true, l)?,
             'f' => format_float(&mut result, arg, &flags, l)?,
@@ -119,21 +121,113 @@ fn format_char(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<
 fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
     
-    // Format the number first
-    let num_str = format!("{}", num);
-    
-    // Parse flags: look for -, 0, and width
-    let mut chars = flags.chars();
+    // Parse flags: look for -, +, 0, width, and precision
     let mut left_align = false;
     let mut zero_pad = false;
+    let mut plus_sign = false;
     let mut width = 0;
+    let mut parsing_width = false;
     
-    // First pass: check for - and 0 flags
+    let mut chars = flags.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '-' if !parsing_width => left_align = true,
+            '+' if !parsing_width => plus_sign = true,
+            '0' if !parsing_width && width == 0 => zero_pad = true,
+            '1'..='9' if !parsing_width => {
+                parsing_width = true;
+                width = ch.to_digit(10).unwrap() as usize;
+            }
+            '0'..='9' if parsing_width => {
+                width = width * 10 + ch.to_digit(10).unwrap() as usize;
+            }
+            '.' => break,
+            _ => {}
+        }
+    }
+    
+    // Parse precision
+    let precision = if let Some(dot_pos) = flags.find('.') {
+        flags[dot_pos + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<usize>()
+            .ok()
+    } else {
+        None
+    };
+    
+    // Extract sign and absolute value
+    let is_negative = num < 0;
+    let abs_num = if is_negative {
+        num.wrapping_neg() as u64
+    } else {
+        num as u64
+    };
+    
+    // Format the absolute number
+    let mut num_str = format!("{}", abs_num);
+    
+    // Apply precision (minimum digits)
+    if let Some(prec) = precision {
+        if num_str.len() < prec {
+            let padding = prec - num_str.len();
+            num_str.insert_str(0, &"0".repeat(padding));
+        }
+        zero_pad = false; // Precision overrides zero-padding
+    }
+    
+    // Add sign
+    let sign = if is_negative {
+        "-"
+    } else if plus_sign {
+        "+"
+    } else {
+        ""
+    };
+    
+    let total_len = sign.len() + num_str.len();
+    
+    if width > total_len {
+        let padding = width - total_len;
+        if left_align {
+            buf.push_str(sign);
+            buf.push_str(&num_str);
+            buf.extend(std::iter::repeat(' ').take(padding));
+        } else if zero_pad {
+            buf.push_str(sign);
+            buf.extend(std::iter::repeat('0').take(padding));
+            buf.push_str(&num_str);
+        } else {
+            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.push_str(sign);
+            buf.push_str(&num_str);
+        }
+    } else {
+        buf.push_str(sign);
+        buf.push_str(&num_str);
+    }
+    
+    Ok(())
+}
+
+#[inline]
+fn format_octal(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+    let num = get_int(arg, l).map_err(|e| l.error(e))?;
+    
+    // Parse flags: look for -, #, 0, and width
+    let mut left_align = false;
+    let mut zero_pad = false;
+    let mut alt_form = false;
+    let mut width = 0;
     let mut parsing_flags = true;
+    
     for ch in flags.chars() {
         if parsing_flags {
             match ch {
                 '-' => left_align = true,
+                '#' => alt_form = true,
                 '0' if width == 0 => zero_pad = true,
                 '1'..='9' => {
                     parsing_flags = false;
@@ -146,45 +240,56 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
         }
     }
     
-    let num_len = num_str.len();
+    // Format the octal number
+    let mut octal_str = format!("{:o}", num);
+    
+    // Add prefix if # flag and non-zero
+    if alt_form && num != 0 && !octal_str.starts_with('0') {
+        octal_str.insert(0, '0');
+    }
+    
+    let num_len = octal_str.len();
     if width > num_len {
         let padding = width - num_len;
         if left_align {
-            buf.push_str(&num_str);
+            buf.push_str(&octal_str);
             buf.extend(std::iter::repeat(' ').take(padding));
         } else if zero_pad {
-            // Handle sign for zero padding
-            if num_str.starts_with('-') {
-                buf.push('-');
-                buf.extend(std::iter::repeat('0').take(padding));
-                buf.push_str(&num_str[1..]);
-            } else {
-                buf.extend(std::iter::repeat('0').take(padding));
-                buf.push_str(&num_str);
-            }
+            buf.extend(std::iter::repeat('0').take(padding));
+            buf.push_str(&octal_str);
         } else {
             buf.extend(std::iter::repeat(' ').take(padding));
-            buf.push_str(&num_str);
+            buf.push_str(&octal_str);
         }
     } else {
-        buf.push_str(&num_str);
+        buf.push_str(&octal_str);
     }
+    
     Ok(())
 }
 
 #[inline]
-fn format_octal(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+fn format_uint(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
-    if flags.contains('#') && num != 0 {
-        buf.push('0');
+    
+    // Parse precision (e.g., ".0" or just ".")
+    let precision = if let Some(dot_pos) = flags.find('.') {
+        let prec_str = &flags[dot_pos + 1..];
+        let prec_str = prec_str.trim_end_matches(|c: char| !c.is_ascii_digit());
+        if prec_str.is_empty() {
+            Some(0) // "." without number means precision 0
+        } else {
+            prec_str.parse::<usize>().ok()
+        }
+    } else {
+        None
+    };
+    
+    // If precision is 0 and value is 0, output empty string
+    if precision == Some(0) && num == 0 {
+        return Ok(());
     }
-    write!(buf, "{:o}", num).unwrap();
-    Ok(())
-}
-
-#[inline]
-fn format_uint(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
-    let num = get_int(arg, l).map_err(|e| l.error(e))?;
+    
     write!(buf, "{}", num as u64).unwrap();
     Ok(())
 }
@@ -199,16 +304,220 @@ fn format_hex(
 ) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
 
-    if flags.contains('#') && num != 0 {
-        buf.push_str(if upper { "0X" } else { "0x" });
-    }
-
-    if upper {
-        write!(buf, "{:X}", num).unwrap();
+    // Format the hex number
+    let hex_str = if upper {
+        format!("{:X}", num)
     } else {
-        write!(buf, "{:x}", num).unwrap();
+        format!("{:x}", num)
+    };
+    
+    // Parse flags for width and zero-padding
+    let mut zero_pad = false;
+    let mut left_align = false;
+    let mut width = 0;
+    let mut parsing_flags = true;
+    
+    for ch in flags.chars() {
+        if parsing_flags {
+            match ch {
+                '0' if width == 0 => zero_pad = true,
+                '-' => left_align = true,
+                '#' => {},
+                '1'..='9' => {
+                    parsing_flags = false;
+                    width = ch.to_digit(10).unwrap() as usize;
+                }
+                _ => {}
+            }
+        } else if ch.is_ascii_digit() {
+            width = width * 10 + ch.to_digit(10).unwrap() as usize;
+        }
     }
+    
+    // Add prefix if needed
+    let prefix = if flags.contains('#') && num != 0 {
+        if upper { "0X" } else { "0x" }
+    } else {
+        ""
+    };
+    
+    let total_len = prefix.len() + hex_str.len();
+    
+    if width > total_len {
+        let padding = width - total_len;
+        if left_align {
+            buf.push_str(prefix);
+            buf.push_str(&hex_str);
+            buf.extend(std::iter::repeat(' ').take(padding));
+        } else if zero_pad {
+            buf.push_str(prefix);
+            buf.extend(std::iter::repeat('0').take(padding));
+            buf.push_str(&hex_str);
+        } else {
+            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.push_str(prefix);
+            buf.push_str(&hex_str);
+        }
+    } else {
+        buf.push_str(prefix);
+        buf.push_str(&hex_str);
+    }
+    
     Ok(())
+}
+
+/// Format hexadecimal float (%a/%A) - IEEE 754 hex representation
+#[inline]
+fn format_hex_float(
+    buf: &mut String,
+    arg: &LuaValue,
+    flags: &str,
+    upper: bool,
+    l: &mut LuaState,
+) -> LuaResult<()> {
+    let num = get_num(arg, l).map_err(|e| l.error(e))?;
+    
+    // Parse flags for + sign
+    let plus_sign = flags.contains('+');
+    
+    // Parse precision (number of hex digits after decimal point)
+    let precision = if let Some(dot_pos) = flags.find('.') {
+        flags[dot_pos + 1..]
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse::<usize>()
+            .ok()
+    } else {
+        None
+    };
+    
+    // Handle special cases
+    if num.is_nan() {
+        buf.push_str(if upper { "NAN" } else { "nan" });
+        return Ok(());
+    }
+    
+    if num.is_infinite() {
+        if num.is_sign_positive() {
+            if plus_sign {
+                buf.push('+');
+            }
+            buf.push_str(if upper { "INF" } else { "inf" });
+        } else {
+            buf.push_str(if upper { "-INF" } else { "-inf" });
+        }
+        return Ok(());
+    }
+    
+    // Handle zero
+    if num == 0.0 {
+        // Check for negative zero
+        if num.is_sign_negative() {
+            buf.push('-');
+        } else if plus_sign {
+            buf.push('+');
+        }
+        
+        if let Some(prec) = precision {
+            buf.push_str(if upper { "0X0" } else { "0x0" });
+            if prec > 0 {
+                buf.push('.');
+                buf.extend(std::iter::repeat('0').take(prec));
+            }
+            buf.push(if upper { 'P' } else { 'p' });
+            buf.push_str("+0");
+        } else {
+            buf.push_str(if upper { "0X0P+0" } else { "0x0p+0" });
+        }
+        return Ok(());
+    }
+    
+    // Extract sign
+    let is_negative = num.is_sign_negative();
+    let abs_num = num.abs();
+    
+    if is_negative {
+        buf.push('-');
+    } else if plus_sign {
+        buf.push('+');
+    }
+    
+    // Decompose into mantissa and exponent
+    // IEEE 754: value = mantissa * 2^exponent
+    // We want: 0x1.hhhhhp±e format where mantissa is normalized to [1, 2)
+    
+    let bits = abs_num.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7FF) as i32;
+    let mantissa_bits = bits & 0xFFFFFFFFFFFFF;
+    
+    if exponent_bits == 0 {
+        // Subnormal number
+        let binary_exp = -1022 - 52;
+        
+        // Normalize: find first 1 bit
+        let leading_zeros = mantissa_bits.leading_zeros() - 12; // 64 - 52 bits
+        let normalized_mantissa = mantissa_bits << (leading_zeros + 1);
+        let actual_exp = binary_exp + leading_zeros as i32;
+        
+        buf.push_str(if upper { "0X1" } else { "0x1" });
+        
+        // Output fractional part
+        let frac = (normalized_mantissa >> 1) & 0x7FFFFFFFFFFFF;
+        format_hex_fraction(buf, frac, precision, upper);
+        
+        buf.push(if upper { 'P' } else { 'p' });
+        buf.push_str(&format!("{:+}", actual_exp));
+    } else {
+        // Normal number
+        let binary_exp = exponent_bits - 1023;
+        
+        buf.push_str(if upper { "0X1" } else { "0x1" });
+        
+        // Output fractional part
+        format_hex_fraction(buf, mantissa_bits, precision, upper);
+        
+        buf.push(if upper { 'P' } else { 'p' });
+        buf.push_str(&format!("{:+}", binary_exp));
+    }
+    
+    Ok(())
+}
+
+// Helper function to format the fractional part of hex float
+fn format_hex_fraction(buf: &mut String, mantissa_bits: u64, precision: Option<usize>, upper: bool) {
+    if let Some(prec) = precision {
+        if prec > 0 {
+            buf.push('.');
+            // Convert 52 bits to hex string (13 hex digits)
+            let hex_str = format!("{:013x}", mantissa_bits);
+            // Take only the requested precision
+            let output = if prec < hex_str.len() {
+                &hex_str[..prec]
+            } else {
+                &hex_str
+            };
+            if upper {
+                buf.push_str(&output.to_uppercase());
+            } else {
+                buf.push_str(output);
+            }
+            // Pad with zeros if needed
+            if prec > hex_str.len() {
+                buf.extend(std::iter::repeat('0').take(prec - hex_str.len()));
+            }
+        }
+    } else {
+        // No precision specified: output all significant digits (trim trailing zeros)
+        if mantissa_bits != 0 {
+            buf.push('.');
+            let hex_str = format!("{:013x}", mantissa_bits);
+            let trimmed = hex_str.trim_end_matches('0');
+            if upper {
+                buf.push_str(&trimmed.to_uppercase());
+            } else {
+                buf.push_str(trimmed);
+            }
+        }
+    }
 }
 
 #[inline]

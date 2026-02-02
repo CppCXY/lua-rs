@@ -23,7 +23,9 @@ pub fn parse_lua_number(s: &str) -> LuaValue {
 
         // Hex float contains '.' or 'p'/'P' - always treat as float
         if hex_part.contains('.') || hex_part.to_lowercase().contains('p') {
-            // TODO support this
+            if let Some(f) = parse_hex_float(hex_part) {
+                return LuaValue::float(sign as f64 * f);
+            }
             return LuaValue::nil();
         }
 
@@ -52,4 +54,60 @@ pub fn parse_lua_number(s: &str) -> LuaValue {
     }
 
     LuaValue::nil()
+}
+
+/// Parse hexadecimal float format (e.g., "0x1.8p+1" = 3.0)
+/// Format: [integer_part][.fractional_part][p|P[+|-]exponent]
+/// Returns Some(f64) on success, None on parse error
+fn parse_hex_float(s: &str) -> Option<f64> {
+    // Split by 'p' or 'P' to separate mantissa and exponent
+    let (mantissa_str, exp_str) = if let Some(pos) = s.to_lowercase().find('p') {
+        (&s[..pos], &s[pos + 1..])
+    } else {
+        // No exponent, treat whole string as mantissa with exponent 0
+        (s, "0")
+    };
+
+    // Parse mantissa (hex digits with optional decimal point)
+    let mut mantissa = 0.0f64;
+    let mut found_dot = false;
+    let mut fraction_digits = 0u32;
+
+    for ch in mantissa_str.chars() {
+        if ch == '.' {
+            if found_dot {
+                return None; // Multiple decimal points
+            }
+            found_dot = true;
+        } else if let Some(digit) = ch.to_digit(16) {
+            mantissa = mantissa * 16.0 + digit as f64;
+            if found_dot {
+                fraction_digits += 1;
+            }
+        } else if !ch.is_whitespace() {
+            return None; // Invalid character
+        }
+    }
+
+    // Apply fractional part scaling (each hex digit after '.' is divided by 16^n)
+    if fraction_digits > 0 {
+        mantissa /= 16.0f64.powi(fraction_digits as i32);
+    }
+
+    // Parse binary exponent (decimal number after 'p')
+    let exp_str = exp_str.trim();
+    if exp_str.is_empty() && mantissa_str.contains(|c| c == 'p' || c == 'P') {
+        return None; // 'p' present but no exponent
+    }
+
+    let exponent: i32 = if !exp_str.is_empty() {
+        exp_str.parse().ok()?
+    } else {
+        0
+    };
+
+    // Combine: mantissa * 2^exponent
+    let result = mantissa * 2.0f64.powi(exponent);
+
+    Some(result)
 }
