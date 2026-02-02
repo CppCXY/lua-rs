@@ -1,12 +1,12 @@
 // Code generation - Port from lcode.c (Lua 5.4.8)
 // This file corresponds to lua-5.5.0/src/lcode.c
+use crate::LuaValue;
 use crate::compiler::expression::{ExpDesc, ExpKind};
 use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::compiler::{ExpUnion, IndVars};
 use crate::lua_value::LuaValueKind;
 use crate::lua_vm::{Instruction, OpCode, TmKind};
-use crate::LuaValue;
 
 // Port of int2sC from lcode.c (macro)
 // Convert integer to sC format (with OFFSET_sC = 128)

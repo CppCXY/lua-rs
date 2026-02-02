@@ -931,12 +931,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             Err(_) => return Err(l.error("invalid UTF-8 in text code".to_string())),
         };
         let vm = l.vm_mut();
-        vm.compile_with_name(&code_str, &chunkname)
-            .map_err(|e| {
-                // Get the actual error message from VM
-                let msg = vm.get_error_message(e);
-                msg
-            })
+        vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
+            // Get the actual error message from VM
+            let msg = vm.get_error_message(e);
+            msg
+        })
     };
 
     match chunk_result {
@@ -947,7 +946,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             // - Other upvalues are initialized to nil
             let upvalue_count = chunk.upvalue_count;
             let mut upvalues = Vec::with_capacity(upvalue_count);
-            
+
             for i in 0..upvalue_count {
                 if i == 0 {
                     // First upvalue is _ENV

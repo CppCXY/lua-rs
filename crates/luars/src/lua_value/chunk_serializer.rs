@@ -5,9 +5,9 @@ use super::{Chunk, LuaValue, UpvalueDesc};
 use crate::Instruction;
 use crate::gc::ObjectAllocator;
 use crate::lua_vm::LuaVM;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::rc::Rc;
-use std::collections::HashMap;
 
 // Magic number for lua-rs bytecode (different from official Lua)
 const LUARS_MAGIC: &[u8] = b"\x1bLuaRS";
@@ -272,7 +272,7 @@ fn write_chunk_with_dedup(
         write_u32(buf, 0); // no line info
     } else {
         if let Some(ref name) = chunk.source_name {
-            write_string_with_dedup(buf, name, string_table)?;  // Use dedup for source name
+            write_string_with_dedup(buf, name, string_table)?; // Use dedup for source name
         } else {
             write_u32(buf, 0); // len = 0
             write_u32(buf, 0); // index = 0 means None
@@ -280,7 +280,7 @@ fn write_chunk_with_dedup(
 
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
-            write_string_with_dedup(buf, local, string_table)?;  // Use dedup for local names
+            write_string_with_dedup(buf, local, string_table)?; // Use dedup for local names
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -495,7 +495,10 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     })
 }
 
-fn read_chunk_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mut Vec<String>) -> Result<Chunk, String> {
+fn read_chunk_with_dedup(
+    cursor: &mut Cursor<&[u8]>,
+    string_table: &mut Vec<String>,
+) -> Result<Chunk, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -608,7 +611,11 @@ fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), S
     Ok(())
 }
 
-fn write_constant_with_dedup(buf: &mut Vec<u8>, value: &LuaValue, string_table: &mut HashMap<String, u32>) -> Result<(), String> {
+fn write_constant_with_dedup(
+    buf: &mut Vec<u8>,
+    value: &LuaValue,
+    string_table: &mut HashMap<String, u32>,
+) -> Result<(), String> {
     if value.is_nil() {
         buf.push(TAG_NIL);
     } else if let Some(b) = value.as_boolean() {
@@ -634,7 +641,11 @@ fn write_constant_with_dedup(buf: &mut Vec<u8>, value: &LuaValue, string_table: 
     Ok(())
 }
 
-fn write_string_with_dedup(buf: &mut Vec<u8>, s: &str, string_table: &mut HashMap<String, u32>) -> Result<(), String> {
+fn write_string_with_dedup(
+    buf: &mut Vec<u8>,
+    s: &str,
+    string_table: &mut HashMap<String, u32>,
+) -> Result<(), String> {
     // Check if string was already written
     if let Some(&index) = string_table.get(s) {
         // Write index reference (0 length + index)
@@ -644,7 +655,7 @@ fn write_string_with_dedup(buf: &mut Vec<u8>, s: &str, string_table: &mut HashMa
         // New string: assign it an index and write it
         let new_index = string_table.len() as u32 + 1; // 1-based indexing
         string_table.insert(s.to_string(), new_index);
-        
+
         // Write the actual string
         if s.is_empty() {
             // Empty string: write len=0, index=0 (special case)
@@ -817,7 +828,11 @@ fn read_constant_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<L
     }
 }
 
-fn read_chunk_with_vm_dedup(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM, string_table: &mut Vec<String>) -> Result<Chunk, String> {
+fn read_chunk_with_vm_dedup(
+    cursor: &mut Cursor<&[u8]>,
+    vm: &mut LuaVM,
+    string_table: &mut Vec<String>,
+) -> Result<Chunk, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -893,7 +908,11 @@ fn read_chunk_with_vm_dedup(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM, string_t
     })
 }
 
-fn read_constant_with_vm_dedup(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM, string_table: &mut Vec<String>) -> Result<LuaValue, String> {
+fn read_constant_with_vm_dedup(
+    cursor: &mut Cursor<&[u8]>,
+    vm: &mut LuaVM,
+    string_table: &mut Vec<String>,
+) -> Result<LuaValue, String> {
     let tag = read_u8(cursor)?;
     match tag {
         TAG_NIL => Ok(LuaValue::nil()),
@@ -1064,26 +1083,37 @@ fn read_optional_string(cursor: &mut Cursor<&[u8]>) -> Result<Option<String>, St
     ))
 }
 
-fn read_string_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mut Vec<String>) -> Result<String, String> {
+fn read_string_with_dedup(
+    cursor: &mut Cursor<&[u8]>,
+    string_table: &mut Vec<String>,
+) -> Result<String, String> {
     let len = read_u32(cursor)? as usize;
-    
+
     if len == 0 {
         // Could be a reference or an empty string
         let index = read_u32(cursor)? as usize;
-        
+
         if index == 0 {
             // Empty string (new)
             let s = String::new();
             string_table.push(s.clone());
             return Ok(s);
         }
-        
+
         // This is a reference to an existing string
         if index > string_table.len() {
-            eprintln!("ERROR: String reference index {} out of range (table size: {})", index, string_table.len());
+            eprintln!(
+                "ERROR: String reference index {} out of range (table size: {})",
+                index,
+                string_table.len()
+            );
             eprintln!("String table contents (first 50):");
             for (i, s) in string_table.iter().take(50).enumerate() {
-                eprintln!("  [{}]: {:?}", i + 1, if s.len() > 50 { &s[..50] } else { s });
+                eprintln!(
+                    "  [{}]: {:?}",
+                    i + 1,
+                    if s.len() > 50 { &s[..50] } else { s }
+                );
             }
             return Err(format!("invalid string reference index: {}", index));
         }
@@ -1095,16 +1125,19 @@ fn read_string_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mut Vec<Str
             .read_exact(&mut buf)
             .map_err(|e| format!("read error: {}", e))?;
         let s = String::from_utf8(buf).map_err(|e| format!("invalid utf8: {}", e))?;
-        
+
         // Add to string table for future references
         string_table.push(s.clone());
         Ok(s)
     }
 }
 
-fn read_optional_string_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mut Vec<String>) -> Result<Option<String>, String> {
+fn read_optional_string_with_dedup(
+    cursor: &mut Cursor<&[u8]>,
+    string_table: &mut Vec<String>,
+) -> Result<Option<String>, String> {
     let len = read_u32(cursor)? as usize;
-    
+
     if len == 0 {
         // Read next u32 to determine if it's None or a reference
         let index_u32 = read_u32(cursor)?;
@@ -1115,26 +1148,33 @@ fn read_optional_string_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mu
             // It's a reference
             let index = index_u32 as usize;
             if index > string_table.len() {
-                eprintln!("ERROR in read_optional: String reference index {} out of range (table size: {})", index, string_table.len());
+                eprintln!(
+                    "ERROR in read_optional: String reference index {} out of range (table size: {})",
+                    index,
+                    string_table.len()
+                );
                 return Err(format!("invalid string reference index: {}", index));
             }
             return Ok(Some(string_table[index - 1].clone()));
         }
     }
-    
+
     // Regular string
     let mut buf = vec![0u8; len];
     cursor
         .read_exact(&mut buf)
         .map_err(|e| format!("read error: {}", e))?;
     let s = String::from_utf8(buf).map_err(|e| format!("invalid utf8: {}", e))?;
-    
+
     // Add to string table
     string_table.push(s.clone());
     Ok(Some(s))
 }
 
-fn read_constant_with_dedup(cursor: &mut Cursor<&[u8]>, string_table: &mut Vec<String>) -> Result<LuaValue, String> {
+fn read_constant_with_dedup(
+    cursor: &mut Cursor<&[u8]>,
+    string_table: &mut Vec<String>,
+) -> Result<LuaValue, String> {
     let tag = read_u8(cursor)?;
     match tag {
         TAG_NIL => Ok(LuaValue::nil()),

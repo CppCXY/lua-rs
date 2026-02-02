@@ -34,7 +34,7 @@ impl StringInterner {
         let current_white = gc.current_white;
         let hash = self.hash_string(s);
         let slen = s.len();
-        
+
         // Long strings are not interned (like Lua 5.5)
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
@@ -72,7 +72,7 @@ impl StringInterner {
             GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
         gc.trace_object(gc_string)?;
-        
+
         // Add to intern map
         self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
 

@@ -621,7 +621,7 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
         let upvalues = lua_func.upvalues();
         if up_index > 0 && up_index <= upvalues.len() {
             let upvalue_ptr = upvalues[up_index - 1];
-            
+
             // Get the upvalue name from the chunk
             let upvalue_name = if let Some(chunk) = lua_func.chunk() {
                 if up_index - 1 < chunk.upvalue_descs.len() {
@@ -632,7 +632,7 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
             } else {
                 String::new()
             };
-            
+
             // Set the upvalue value (similar to SETUPVAL instruction)
             let upval_ref = upvalue_ptr.as_mut_ref();
             match &mut upval_ref.data {
@@ -647,14 +647,14 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
                     upval_ref.data.close(value);
                 }
             }
-            
+
             // GC barrier if needed
             if value.is_collectable() {
                 if let Some(value_gc_ptr) = value.as_gc_ptr() {
                     l.gc_barrier(upvalue_ptr, value_gc_ptr);
                 }
             }
-            
+
             // Return the upvalue name
             if !upvalue_name.is_empty() {
                 let name_val = l.create_string(&upvalue_name)?;
@@ -761,10 +761,10 @@ fn debug_upvaluejoin(l: &mut LuaState) -> LuaResult<usize> {
     let upvalue_to_share = upvalues2[n2 - 1].clone();
 
     // Replace upvalue in func1 - we need mutable access
-    let lua_func1_mut = func1
-        .as_lua_function_mut()
-        .ok_or_else(|| l.error("upvaluejoin: cannot get mutable reference to function 1".to_string()))?;
-    
+    let lua_func1_mut = func1.as_lua_function_mut().ok_or_else(|| {
+        l.error("upvaluejoin: cannot get mutable reference to function 1".to_string())
+    })?;
+
     let upvalues1_mut = lua_func1_mut.upvalues_mut();
     upvalues1_mut[n1 - 1] = upvalue_to_share;
 

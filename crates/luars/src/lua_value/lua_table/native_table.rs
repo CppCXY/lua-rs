@@ -450,9 +450,7 @@ impl NativeTable {
         // Fast path for short strings only - direct pointer comparison
         // Long strings (>40 chars) are NOT interned, so must use general case
         if key.is_short_string() {
-            if let Some(_s) = key.as_str() {
-                return self.get_shortstr_fast(key);
-            }
+            return self.get_shortstr_fast(key);
         }
 
         // General case (includes long strings)
@@ -635,7 +633,7 @@ impl NativeTable {
                 }
                 return was_nil && !value.is_nil();
             }
-            
+
             // Integer key outside current array range
             // If it's a push operation (i == len+1), expand array
             if i >= 1 {
@@ -800,7 +798,8 @@ impl NativeTable {
                 // Check if this node has our key
                 if (*node).key == *key {
                     // Found the key, calculate its unified index
-                    let hash_idx = (node as usize - self.node as usize) / std::mem::size_of::<Node>();
+                    let hash_idx =
+                        (node as usize - self.node as usize) / std::mem::size_of::<Node>();
                     return Some((hash_idx as u32 + 1) + self.asize);
                 }
 
@@ -818,7 +817,7 @@ impl NativeTable {
     /// Table iteration following the unified indexing scheme
     pub fn next(&self, key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
         let asize = self.asize;
-        
+
         // Get starting index from the input key
         let mut i = match self.findindex(key) {
             Some(idx) => idx,
@@ -842,7 +841,7 @@ impl NativeTable {
         // Array exhausted, now scan hash part
         let hash_size = self.sizenode() as u32;
         i -= asize; // Convert unified index to hash index
-        
+
         while i < hash_size {
             unsafe {
                 let node = self.node.add(i as usize);
@@ -856,8 +855,6 @@ impl NativeTable {
 
         None // No more elements
     }
-
-
 
     /// GC-safe iteration: call f for each entry
     pub fn for_each_entry<F>(&self, mut f: F)

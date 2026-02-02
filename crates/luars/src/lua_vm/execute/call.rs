@@ -110,7 +110,6 @@ fn handle_call_internal(
                 return Err(lua_state.error("'__call' chain too long".to_string()));
             }
 
-
             // Shift arguments to make room for original func as first arg
             let first_arg = func_idx + 1;
             for i in (0..nargs).rev() {

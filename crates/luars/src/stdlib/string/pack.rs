@@ -108,7 +108,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 let size = if size_str.is_empty() {
                     4 // default int size
                 } else {
@@ -130,7 +130,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })?;
-                
+
                 // Pack the value as signed integer with specified size
                 for _ in 0..size {
                     result.push((val & 0xFF) as u8);
@@ -149,7 +149,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 let size = if size_str.is_empty() {
                     4 // default int size
                 } else {
@@ -171,7 +171,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })? as u64;
-                
+
                 // Pack the value as unsigned integer with specified size
                 for _ in 0..size {
                     result.push((val & 0xFF) as u8);
@@ -347,7 +347,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
             ' ' | '\t' | '\n' | '\r' => continue,
             'b' | 'B' => size += 1,
             'h' | 'H' => size += 2,
-            
+
             'i' | 'I' | 'l' | 'L' => {
                 // Check for size suffix (i[n] or I[n] where n is 1-16)
                 let mut size_str = String::new();
@@ -358,7 +358,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 if size_str.is_empty() {
                     size += 4; // default int size
                 } else {
@@ -371,7 +371,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                     size += n;
                 }
             }
-            
+
             'f' => size += 4,
             'd' => size += 8,
             'j' | 'n' | 'T' => {
@@ -497,7 +497,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 let size = if size_str.is_empty() {
                     4 // default int size
                 } else {
@@ -513,7 +513,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + size > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                
+
                 // Unpack signed integer with specified size
                 let mut val: i64 = 0;
                 for i in (0..size).rev() {
@@ -537,7 +537,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 let size = if size_str.is_empty() {
                     4 // default int size
                 } else {
@@ -553,7 +553,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + size > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                
+
                 // Unpack unsigned integer with specified size
                 let mut val: u64 = 0;
                 for i in (0..size).rev() {
