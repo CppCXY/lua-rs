@@ -44,6 +44,10 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
             if matches!(c, '-' | '+' | ' ' | '#' | '0' | '1'..='9' | '.') {
                 flags.push(c);
                 chars.next();
+                // Check for format string too long (max 99 for width/precision)
+                if flags.len() > 200 {
+                    return Err(l.error("invalid format (too long)".to_string()));
+                }
             } else {
                 break;
             }
@@ -53,6 +57,9 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         let fmt_char = chars
             .next()
             .ok_or_else(|| l.error("incomplete format".to_string()))?;
+
+        // Validate format specifier and flags combination
+        validate_format(&flags, fmt_char, l)?;
 
         // Get argument
         let arg = args.get(arg_index).ok_or_else(|| {
@@ -81,13 +88,117 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
             's' => format_string(&mut result, arg, &flags, l)?,
             'q' => format_quoted(&mut result, arg, l)?,
             'p' => format_pointer(&mut result, arg, &flags)?,
-            _ => return Err(l.error(format!("invalid option '%{}' to 'format'", fmt_char))),
+            'F' => return Err(l.error("invalid option '%F' to 'format' (invalid conversion)".to_string())),
+            _ => return Err(l.error(format!("invalid option '%{}' to 'format' (invalid conversion)", fmt_char))),
         }
     }
 
     let result_str = l.create_string_owned(result)?;
     l.push_value(result_str)?;
     Ok(1)
+}
+
+// Validate format specifier and flags combination
+fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<()> {
+    // Check for modifiers on %q
+    if fmt_char == 'q' && !flags.is_empty() {
+        return Err(l.error("specifier '%q' cannot have modifiers (width, precision, flags)".to_string()));
+    }
+    
+    // Parse flags properly
+    let has_zero_flag = flags.starts_with('0') || flags.chars()
+        .skip_while(|c| matches!(c, '-' | '+' | ' ' | '#'))
+        .next() == Some('0');
+    let has_hash = flags.contains('#');
+    
+    let (width, precision) = parse_width_precision(flags);
+    
+    // Check width/precision limits (max 99)
+    if let Some(w) = width {
+        if w > 99 {
+            return Err(l.error("invalid format (invalid conversion)".to_string()));
+        }
+    }
+    if let Some(p) = precision {
+        if p > 99 {
+            return Err(l.error("invalid format (invalid conversion)".to_string()));
+        }
+    }
+    
+    // Format-specific validation
+    match fmt_char {
+        'c' => {
+            // %c cannot have precision or 0 flag
+            if precision.is_some() {
+                return Err(l.error("invalid format (invalid conversion)".to_string()));
+            }
+            if has_zero_flag {
+                return Err(l.error("invalid format (invalid conversion)".to_string()));
+            }
+        }
+        's' => {
+            // %s cannot have 0 flag
+            if has_zero_flag {
+                return Err(l.error("invalid format (invalid conversion)".to_string()));
+            }
+        }
+        'd' | 'i' => {
+            // %d/%i cannot have # flag
+            if has_hash {
+                return Err(l.error("invalid format (invalid conversion)".to_string()));
+            }
+        }
+        'p' => {
+            // %p cannot have precision
+            if precision.is_some() {
+                return Err(l.error("invalid format (invalid conversion)".to_string()));
+            }
+        }
+        _ => {}
+    }
+    
+    Ok(())
+}
+
+// Parse width and precision from flags string
+fn parse_width_precision(flags: &str) -> (Option<usize>, Option<usize>) {
+    let mut width = None;
+    let mut precision = None;
+    
+    if let Some(dot_pos) = flags.find('.') {
+        // Parse width before dot
+        let width_str: String = flags[..dot_pos]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !width_str.is_empty() {
+            width = width_str.parse().ok();
+        }
+        
+        // Parse precision after dot
+        let prec_str: String = flags[dot_pos + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !prec_str.is_empty() {
+            precision = prec_str.parse().ok();
+        } else {
+            precision = Some(0); // "." without digits means precision 0
+        }
+    } else {
+        // No dot, only width
+        let width_str: String = flags
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !width_str.is_empty() {
+            width = width_str.parse().ok();
+        }
+    }
+    
+    (width, precision)
 }
 
 // Helper functions - all inline for performance

@@ -258,12 +258,12 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     // Lua limits string size to avoid memory issues
     const MAX_STRING_SIZE: i64 = 1 << 30; // 1GB limit
     let s_len = s_str.len() as i64;
-    
+
     // Check for overflow before multiplying
     if s_len > 0 && n > MAX_STRING_SIZE / s_len {
         return Err(l.error("resulting string too large".to_string()));
     }
-    
+
     // Calculate total size including separators
     let total_size = if let Some(v) = sep_value {
         let sep_len = v.as_str().map(|s| s.len()).unwrap_or(0) as i64;
@@ -391,7 +391,7 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
 
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
     let plain = l.get_arg(4).map(|v| v.is_truthy()).unwrap_or(false);
-    
+
     // Convert Lua 1-based index (with negative support) to Rust 0-based index
     let start_pos = if init > 0 {
         (init - 1) as usize
@@ -704,21 +704,34 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         state_ref.raw_seti(3, LuaValue::integer(0)); // position
     }
 
-    // Return: iterator function, state table, nil (initial control variable)
-    l.push_value(LuaValue::cfunction(gmatch_iterator))?;
-    l.push_value(state_table)?;
-    l.push_value(LuaValue::nil())?;
-    Ok(3)
+    // Create a C closure with the state table as upvalue
+    let vm = l.vm_mut();
+    let closure = vm.create_c_closure(gmatch_iterator, vec![state_table])?;
+    l.push_value(closure)?;
+    Ok(1)
 }
 
 /// Iterator function for string.gmatch
-/// Called as: f(state, control_var)
+/// Called as: f() - state is stored in upvalue[0]
 fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
-    // Arg 1: state table
-    // Arg 2: control variable (unused, we use state.position)
-    let state_table_value = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("gmatch iterator: state expected".to_string()))?;
+    // Get current function from call frame
+    let func_val = l
+        .current_frame()
+        .map(|frame| frame.func.clone())
+        .ok_or_else(|| l.error("gmatch iterator: no active call frame".to_string()))?;
+
+    // Get upvalue from C closure
+    let state_table_value = if let Some(c_closure) = func_val.as_lua_function() {
+        let upvalues = c_closure.upvalues();
+        if upvalues.is_empty() {
+            return Err(l.error("gmatch iterator: no upvalues".to_string()));
+        }
+        let upval_ptr = upvalues[0];
+        let upval_ref = upval_ptr.as_ref();
+        upval_ref.data.get_value()
+    } else {
+        return Err(l.error("gmatch iterator: not a C closure".to_string()));
+    };
 
     let Some(state_ref) = state_table_value.as_table() else {
         return Err(l.error("gmatch iterator: state is not a table".to_string()));
@@ -728,16 +741,16 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
     let Some(s_val) = state_ref.raw_geti(1) else {
         return Err(l.error("gmatch iterator: string not found in state".to_string()));
     };
-    let Some(s_str) = s_val.as_str() else {
-        return Err(l.error("gmatch iterator: string invalid".to_string()));
-    };
+    let s_str = s_val
+        .as_str()
+        .ok_or_else(|| l.error("gmatch iterator: string invalid".to_string()))?;
 
     let Some(pattern_val) = state_ref.raw_geti(2) else {
         return Err(l.error("gmatch iterator: pattern not found in state".to_string()));
     };
-    let Some(pattern_str) = pattern_val.as_str() else {
-        return Err(l.error("gmatch iterator: pattern invalid".to_string()));
-    };
+    let pattern_str = pattern_val
+        .as_str()
+        .ok_or_else(|| l.error("gmatch iterator: pattern invalid".to_string()))?;
 
     let position_value = state_ref.raw_geti(3).unwrap_or(LuaValue::integer(0));
     let position = position_value.as_integer().unwrap_or(0) as usize;

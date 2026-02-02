@@ -80,6 +80,36 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         .and_then(|v| v.as_integer())
         .unwrap_or_else(|| table.len() as i64);
 
+    // If i > j, return empty string immediately
+    if i > j {
+        let result = l.create_string("")?;
+        l.push_value(result)?;
+        return Ok(1);
+    }
+
+    // Check for reasonable table indices (Lua has limits on table size)
+    // Lua 5.4 uses a limit based on the maximum size of the array part
+    const MAX_TABLE_INDEX: i64 = (1 << 26) - 1; // About 67 million, reasonable for array indices
+    
+    if i < 1 {
+        return Err(l.error(format!("invalid value (at index {})", i)));
+    }
+    
+    // Check if indices are out of reasonable range
+    // But allow it if the table actually has values at those indices
+    let table_has_large_indices = i > MAX_TABLE_INDEX || j > MAX_TABLE_INDEX;
+    if table_has_large_indices {
+        // Check if table actually has values in the requested range
+        let has_value_at_i = table.raw_geti(i).is_some();
+        let has_value_at_j = if i == j { has_value_at_i } else { table.raw_geti(j).is_some() };
+        
+        if !has_value_at_i && !has_value_at_j {
+            // Table doesn't have values at these large indices, report error at the first large index
+            let error_idx = if i > MAX_TABLE_INDEX { i } else { j };
+            return Err(l.error(format!("invalid value (at index {})", error_idx)));
+        }
+    }
+
     let mut parts = Vec::new();
     for idx in i..=j {
         if let Some(value) = table.raw_geti(idx) {
