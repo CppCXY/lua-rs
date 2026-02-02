@@ -272,11 +272,162 @@ fn match_impl(
             }
         }
         Pattern::Seq(patterns) => {
-            for pat in patterns {
-                match match_impl(pat, text, pos, captures) {
+            // Special handling for repeat patterns followed by other patterns
+            let mut i = 0;
+            while i < patterns.len() {
+                if i + 1 < patterns.len() {
+                    // Check if current pattern is a repeat (lazy or greedy)
+                    match &patterns[i] {
+                        Pattern::Repeat { mode: RepeatMode::Lazy, pattern: inner } => {
+                            // Lazy repeat: try matching 0, 1, 2, ... until rest succeeds
+                            let rest_patterns = &patterns[i + 1..];
+                            let saved_captures_len = captures.len();
+                            
+                            let mut try_pos = pos;
+                            loop {
+                                // Try matching the rest from try_pos
+                                let mut test_pos = try_pos;
+                                let mut success = true;
+                                
+                                for pat in rest_patterns {
+                                    match match_impl(pat, text, test_pos, captures) {
+                                        Some(new_pos) => test_pos = new_pos,
+                                        None => {
+                                            success = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if success {
+                                    return Some(test_pos);
+                                }
+                                
+                                captures.truncate(saved_captures_len);
+                                
+                                // Try matching one more repetition
+                                if try_pos >= text.len() {
+                                    return None;
+                                }
+                                
+                                match match_impl(inner, text, try_pos, captures) {
+                                    Some(new_pos) => {
+                                        if new_pos == try_pos {
+                                            try_pos += 1;
+                                        } else {
+                                            try_pos = new_pos;
+                                        }
+                                    }
+                                    None => return None,
+                                }
+                                
+                                captures.truncate(saved_captures_len);
+                            }
+                        }
+                        Pattern::Repeat { mode: RepeatMode::ZeroOrMore, pattern: inner } => {
+                            // Greedy repeat: match as many as possible, then backtrack
+                            let rest_patterns = &patterns[i + 1..];
+                            let saved_captures_len = captures.len();
+                            
+                            // First, collect all possible match positions
+                            let mut match_positions = vec![pos];
+                            let mut curr_pos = pos;
+                            while let Some(new_pos) = match_impl(inner, text, curr_pos, captures) {
+                                if new_pos == curr_pos {
+                                    break; // Avoid infinite loop
+                                }
+                                match_positions.push(new_pos);
+                                curr_pos = new_pos;
+                            }
+                            
+                            captures.truncate(saved_captures_len);
+                            
+                            // Try from longest match to shortest
+                            for &try_pos in match_positions.iter().rev() {
+                                let mut test_pos = try_pos;
+                                let mut success = true;
+                                
+                                for pat in rest_patterns {
+                                    match match_impl(pat, text, test_pos, captures) {
+                                        Some(new_pos) => test_pos = new_pos,
+                                        None => {
+                                            success = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if success {
+                                    return Some(test_pos);
+                                }
+                                
+                                captures.truncate(saved_captures_len);
+                            }
+                            
+                            return None;
+                        }
+                        Pattern::Repeat { mode: RepeatMode::OneOrMore, pattern: inner } => {
+                            // OneOrMore: similar to ZeroOrMore but requires at least one match
+                            let rest_patterns = &patterns[i + 1..];
+                            let saved_captures_len = captures.len();
+                            
+                            // Must match at least once
+                            let first_pos = match match_impl(inner, text, pos, captures) {
+                                Some(p) => p,
+                                None => return None,
+                            };
+                            
+                            captures.truncate(saved_captures_len);
+                            
+                            // Collect all possible match positions (starting from first match)
+                            let mut match_positions = vec![first_pos];
+                            let mut curr_pos = first_pos;
+                            while let Some(new_pos) = match_impl(inner, text, curr_pos, captures) {
+                                if new_pos == curr_pos {
+                                    break;
+                                }
+                                match_positions.push(new_pos);
+                                curr_pos = new_pos;
+                            }
+                            
+                            captures.truncate(saved_captures_len);
+                            
+                            // Try from longest match to shortest
+                            for &try_pos in match_positions.iter().rev() {
+                                let mut test_pos = try_pos;
+                                let mut success = true;
+                                
+                                for pat in rest_patterns {
+                                    match match_impl(pat, text, test_pos, captures) {
+                                        Some(new_pos) => test_pos = new_pos,
+                                        None => {
+                                            success = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if success {
+                                    return Some(test_pos);
+                                }
+                                
+                                captures.truncate(saved_captures_len);
+                            }
+                            
+                            return None;
+                        }
+                        _ => {
+                            // Not a repeat pattern that needs special handling
+                        }
+                    }
+                }
+                
+                // Normal matching for this pattern
+                match match_impl(&patterns[i], text, pos, captures) {
                     Some(new_pos) => pos = new_pos,
                     None => return None,
                 }
+                i += 1;
             }
             Some(pos)
         }

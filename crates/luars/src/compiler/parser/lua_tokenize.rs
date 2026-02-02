@@ -359,17 +359,90 @@ impl<'a> LuaTokenize<'a> {
                         }
                     }
                 }
+                'x' => {
+                    // Hexadecimal escape: \xHH
+                    self.reader.bump(); // skip 'x'
+                    // Need exactly 2 hex digits
+                    let ch1 = self.reader.current_char();
+                    if !ch1.is_ascii_hexdigit() {
+                        // Build error message with context
+                        let mut ctx = String::from("\\x");
+                        if ch1 != '\0' && ch1 != '\n' && ch1 != '\r' {
+                            ctx.push(ch1);
+                        }
+                        self.error(|| format!("hexadecimal digit expected near '{}'", ctx));
+                        return LuaTokenKind::TkString;
+                    }
+                    self.reader.bump();
+                    
+                    let ch2 = self.reader.current_char();
+                    if !ch2.is_ascii_hexdigit() {
+                        // Build error message with context
+                        let mut ctx = String::from("\\x");
+                        ctx.push(ch1);
+                        if ch2 != '\0' && ch2 != '\n' && ch2 != '\r' {
+                            ctx.push(ch2);
+                        }
+                        self.error(|| format!("hexadecimal digit expected near '{}'", ctx));
+                        return LuaTokenKind::TkString;
+                    }
+                    self.reader.bump();
+                }
+                'u' => {
+                    // Unicode escape: \u{XXX}
+                    self.reader.bump(); // skip 'u'
+                    if self.reader.current_char() != '{' {
+                        self.error(|| format!("missing '{{' in unicode escape"));
+                        return LuaTokenKind::TkString;
+                    }
+                    self.reader.bump(); // skip '{'
+                    // Read hex digits until '}'
+                    let mut has_digits = false;
+                    while self.reader.current_char() != '}' {
+                        let ch = self.reader.current_char();
+                        if ch == '\0' || ch == '\n' || ch == '\r' {
+                            self.error(|| format!("unfinished unicode escape"));
+                            return LuaTokenKind::TkString;
+                        }
+                        if !ch.is_ascii_hexdigit() {
+                            self.error(|| format!("hexadecimal digit expected in unicode escape"));
+                            return LuaTokenKind::TkString;
+                        }
+                        has_digits = true;
+                        self.reader.bump();
+                    }
+                    if !has_digits {
+                        self.error(|| format!("empty unicode escape"));
+                        return LuaTokenKind::TkString;
+                    }
+                    self.reader.bump(); // skip '}'
+                }
                 '\r' | '\n' => {
                     self.lex_new_line();
                 }
-                _ => {
+                '0'..='9' => {
+                    // Decimal escape: \DDD (up to 3 digits)
+                    let mut count = 0;
+                    while count < 3 && self.reader.current_char().is_ascii_digit() {
+                        self.reader.bump();
+                        count += 1;
+                    }
+                }
+                'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v' | '\\' | '\'' | '\"' => {
+                    // Valid single-character escapes
                     self.reader.bump();
+                }
+                _ => {
+                    // Invalid escape sequence
+                    let ch = self.reader.current_char();
+                    self.error(|| format!("invalid escape sequence '\\{}'", ch));
+                    return LuaTokenKind::TkString;
                 }
             }
         }
 
         if self.reader.current_char() != quote {
-            self.error(|| format!("unfinished string"));
+            self.error(|| format!("unfinished string near <eof>"));
             return LuaTokenKind::TkString;
         }
 
