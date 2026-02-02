@@ -65,7 +65,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
 
         // Format based on type
         match fmt_char {
-            'c' => format_char(&mut result, arg, l)?,
+            'c' => format_char(&mut result, arg, &flags, l)?,
             'd' | 'i' => format_int(&mut result, arg, &flags, l)?,
             'o' => format_octal(&mut result, arg, &flags, l)?,
             'u' => format_uint(&mut result, arg, &flags, l)?,
@@ -76,8 +76,8 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
             'e' => format_sci(&mut result, arg, &flags, false, l)?,
             'E' => format_sci(&mut result, arg, &flags, true, l)?,
             'f' => format_float(&mut result, arg, &flags, l)?,
-            'g' => format_auto(&mut result, arg, false, l)?,
-            'G' => format_auto(&mut result, arg, true, l)?,
+            'g' => format_auto(&mut result, arg, &flags, false, l)?,
+            'G' => format_auto(&mut result, arg, &flags, true, l)?,
             's' => format_string(&mut result, arg, &flags, l)?,
             'q' => format_quoted(&mut result, arg, l)?,
             'p' => format_pointer(&mut result, arg, &flags)?,
@@ -107,14 +107,40 @@ fn get_int(arg: &LuaValue, _l: &LuaState) -> Result<i64, String> {
 }
 
 #[inline]
-fn format_char(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
+fn format_char(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
-    if (0..=255).contains(&num) {
-        buf.push(num as u8 as char);
-        Ok(())
-    } else {
-        Err(l.error("bad argument to 'format' (value out of range for %c)".to_string()))
+    if !(0..=255).contains(&num) {
+        return Err(l.error("bad argument to 'format' (value out of range for %c)".to_string()));
     }
+    
+    let ch = num as u8 as char;
+    
+    // Parse flags for width and left align
+    let left_align = flags.contains('-');
+    let width = flags.chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<usize>()
+        .ok();
+    
+    if let Some(w) = width {
+        if w > 1 {
+            if left_align {
+                buf.push(ch);
+                buf.extend(std::iter::repeat(' ').take(w - 1));
+            } else {
+                buf.extend(std::iter::repeat(' ').take(w - 1));
+                buf.push(ch);
+            }
+        } else {
+            buf.push(ch);
+        }
+    } else {
+        buf.push(ch);
+    }
+    
+    Ok(())
 }
 
 #[inline]
@@ -530,26 +556,69 @@ fn format_sci(
 ) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
 
-    // Parse precision from flags (e.g., ".2")
-    if let Some(dot_pos) = flags.find('.') {
-        if let Ok(prec) = flags[dot_pos + 1..]
-            .trim_end_matches(|c: char| !c.is_ascii_digit())
-            .parse::<usize>()
-        {
-            if upper {
-                write!(buf, "{:.prec$E}", num, prec = prec).unwrap();
-            } else {
-                write!(buf, "{:.prec$e}", num, prec = prec).unwrap();
-            }
-            return Ok(());
+    // Parse flags
+    let plus_sign = flags.contains('+');
+    let space_sign = flags.contains(' ');
+    
+    // Parse precision
+    let precision = if let Some(dot_pos) = flags.find('.') {
+        let prec_str = &flags[dot_pos + 1..];
+        let prec_str = prec_str.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
+        if prec_str.is_empty() {
+            Some(6)
+        } else {
+            prec_str.parse::<usize>().ok()
+        }
+    } else {
+        None
+    };
+    
+    // Format the number
+    let mut result = if let Some(prec) = precision {
+        if upper {
+            format!("{:.prec$E}", num, prec = prec)
+        } else {
+            format!("{:.prec$e}", num, prec = prec)
+        }
+    } else {
+        if upper {
+            format!("{:E}", num)
+        } else {
+            format!("{:e}", num)
+        }
+    };
+    
+    // Fix exponent format: ensure it has sign and at least 2 digits (ISO C requirement)
+    let exp_char = if upper { 'E' } else { 'e' };
+    if let Some(exp_pos) = result.find(exp_char) {
+        let (mantissa, exponent) = result.split_at(exp_pos);
+        let exp_str = &exponent[1..]; // Skip 'E' or 'e'
+        
+        // Parse exponent
+        let (sign, exp_digits) = if exp_str.starts_with('+') || exp_str.starts_with('-') {
+            let s = exp_str.chars().next().unwrap();
+            (s.to_string(), &exp_str[1..])
+        } else {
+            ("+".to_string(), exp_str)
+        };
+        
+        // Ensure at least 2 digits
+        let exp_num = exp_digits.parse::<i32>().unwrap_or(0);
+        let formatted_exp = format!("{:02}", exp_num);
+        
+        result = format!("{}{}{}{}", mantissa, exp_char, sign, formatted_exp);
+    }
+    
+    // Add sign
+    if !result.starts_with('-') {
+        if plus_sign {
+            result.insert(0, '+');
+        } else if space_sign {
+            result.insert(0, ' ');
         }
     }
-
-    if upper {
-        write!(buf, "{:E}", num).unwrap();
-    } else {
-        write!(buf, "{:e}", num).unwrap();
-    }
+    
+    buf.push_str(&result);
     Ok(())
 }
 
@@ -557,35 +626,163 @@ fn format_sci(
 fn format_float(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
 
-    // Parse precision from flags (e.g., ".2")
-    if let Some(dot_pos) = flags.find('.') {
-        if let Ok(prec) = flags[dot_pos + 1..]
-            .trim_end_matches(|c: char| !c.is_ascii_digit())
-            .parse::<usize>()
-        {
-            write!(buf, "{:.prec$}", num, prec = prec).unwrap();
-            return Ok(());
+    // Parse flags
+    let plus_sign = flags.contains('+');
+    let alt_form = flags.contains('#');
+    let zero_pad = flags.contains('0');
+    let left_align = flags.contains('-');
+    
+    // Parse width
+    let width = flags.chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit() && *c != '.')
+        .collect::<String>()
+        .parse::<usize>()
+        .ok();
+    
+    // Parse precision
+    let precision = if let Some(dot_pos) = flags.find('.') {
+        let prec_str = &flags[dot_pos + 1..];
+        let prec_str = prec_str.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
+        if prec_str.is_empty() {
+            Some(0)
+        } else {
+            prec_str.parse::<usize>().ok()
+        }
+    } else {
+        None
+    };
+    
+    // Format the number
+    let mut result = if let Some(prec) = precision {
+        format!("{:.prec$}", num, prec = prec)
+    } else {
+        format!("{}", num)
+    };
+    
+    // Add decimal point if # flag and no decimal point
+    if alt_form && !result.contains('.') && !result.contains('e') && !result.contains('E') {
+        result.push('.');
+    }
+    
+    // Add sign
+    if !result.starts_with('-') && plus_sign {
+        result.insert(0, '+');
+    }
+    
+    // Apply width
+    if let Some(w) = width {
+        if result.len() < w {
+            let padding = w - result.len();
+            if left_align {
+                result.push_str(&" ".repeat(padding));
+            } else if zero_pad {
+                let sign_char = if result.starts_with('-') || result.starts_with('+') {
+                    Some(result.remove(0))
+                } else {
+                    None
+                };
+                if let Some(sign) = sign_char {
+                    result.insert(0, sign);
+                    result.insert_str(1, &"0".repeat(padding));
+                } else {
+                    result.insert_str(0, &"0".repeat(padding));
+                }
+            } else {
+                result.insert_str(0, &" ".repeat(padding));
+            }
         }
     }
-
-    write!(buf, "{}", num).unwrap();
+    
+    buf.push_str(&result);
     Ok(())
 }
 
 #[inline]
-fn format_auto(buf: &mut String, arg: &LuaValue, upper: bool, l: &mut LuaState) -> LuaResult<()> {
+fn format_auto(buf: &mut String, arg: &LuaValue, flags: &str, upper: bool, l: &mut LuaState) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
 
-    // Use scientific for very large/small numbers
-    if num.abs() < 0.0001 || num.abs() >= 1e10 {
-        if upper {
-            write!(buf, "{:E}", num).unwrap();
+    // Parse flags
+    let plus_sign = flags.contains('+');
+    let space_sign = flags.contains(' ');
+    
+    // Parse precision (for %g, precision is significant figures, default 6, minimum 1)
+    let precision = if let Some(dot_pos) = flags.find('.') {
+        let prec_str = &flags[dot_pos + 1..];
+        let prec_str = prec_str.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
+        if prec_str.is_empty() {
+            6
         } else {
-            write!(buf, "{:e}", num).unwrap();
+            prec_str.parse::<usize>().unwrap_or(6).max(1)
         }
     } else {
-        write!(buf, "{}", num).unwrap();
+        6
+    };
+    
+    // Determine if we should use scientific notation
+    // %g uses scientific notation if exponent < -4 or >= precision
+    let abs_num = num.abs();
+    let use_scientific = if abs_num == 0.0 {
+        false
+    } else {
+        let exponent = abs_num.log10().floor() as i32;
+        exponent < -4 || exponent >= precision as i32
+    };
+    
+    let mut result = if use_scientific {
+        // Use scientific notation
+        let exp_char = if upper { 'E' } else { 'e' };
+        let formatted = format!("{:.prec$e}", num, prec = precision - 1);
+        
+        // Fix exponent format
+        if let Some(exp_pos) = formatted.find(exp_char) {
+            let (mantissa, exponent) = formatted.split_at(exp_pos);
+            let exp_str = &exponent[1..];
+            
+            let (sign, exp_digits) = if exp_str.starts_with('+') || exp_str.starts_with('-') {
+                let s = exp_str.chars().next().unwrap();
+                (s.to_string(), &exp_str[1..])
+            } else {
+                ("+".to_string(), exp_str)
+            };
+            
+            let exp_num = exp_digits.parse::<i32>().unwrap_or(0);
+            let formatted_exp = format!("{:03}", exp_num);
+            
+            let mut res = format!("{}{}{}{}", mantissa, exp_char, sign, formatted_exp);
+            // Remove trailing zeros from mantissa
+            if res.contains('.') {
+                if let Some(e_pos) = res.find(exp_char) {
+                    let mantissa_part = &res[..e_pos];
+                    let exp_part = &res[e_pos..];
+                    let trimmed = mantissa_part.trim_end_matches('0').trim_end_matches('.');
+                    res = format!("{}{}", trimmed, exp_part);
+                }
+            }
+            res
+        } else {
+            formatted
+        }
+    } else {
+        // Use fixed notation
+        let mut res = format!("{:.prec$}", num, prec = precision - 1);
+        // Remove trailing zeros
+        if res.contains('.') {
+            res = res.trim_end_matches('0').trim_end_matches('.').to_string();
+        }
+        res
+    };
+    
+    // Add sign
+    if !result.starts_with('-') {
+        if plus_sign {
+            result.insert(0, '+');
+        } else if space_sign {
+            result.insert(0, ' ');
+        }
     }
+    
+    buf.push_str(&result);
     Ok(())
 }
 
@@ -609,14 +806,18 @@ fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState
         return Err(l.error("string contains zeros".to_string()));
     }
     
-    // Check for precision (e.g., %.20s means max 20 chars)
+    // Check for precision (e.g., %.20s means max 20 chars, %.s means 0 chars)
     let final_str = if let Some(dot_pos) = flags.find('.') {
-        if let Ok(precision) = flags[dot_pos + 1..].parse::<usize>() {
-            if precision < s_content.len() {
-                &s_content[..precision]
-            } else {
-                &s_content
-            }
+        let prec_str = &flags[dot_pos + 1..];
+        let prec_str = prec_str.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
+        let precision = if prec_str.is_empty() {
+            0 // "." without number means precision 0
+        } else {
+            prec_str.parse::<usize>().unwrap_or(s_content.len())
+        };
+        
+        if precision < s_content.len() {
+            &s_content[..precision]
         } else {
             &s_content
         }
