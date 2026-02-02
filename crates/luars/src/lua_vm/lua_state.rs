@@ -1459,8 +1459,18 @@ impl LuaState {
             let base = 1; // Arguments start at index 1 (function is at 0)
             self.push_frame(func, base, nargs, -1)?;
 
+            // Check if function is C or Lua
+            let is_c_function = func.is_cfunction() || 
+                (func.is_function() && func.as_lua_function().map_or(false, |f| f.is_c_function()));
+
             // Execute until yield or completion
-            let result = execute::lua_execute(self);
+            let result = if is_c_function {
+                // Call C function directly
+                execute::call::call_c_function(self, 0, nargs, -1)
+            } else {
+                // Execute Lua bytecode
+                execute::lua_execute(self)
+            };
 
             match result {
                 Ok(()) => {

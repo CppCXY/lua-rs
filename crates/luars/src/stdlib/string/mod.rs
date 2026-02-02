@@ -8,6 +8,7 @@ mod string_format;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
+use crate::gc::FunctionBody;
 
 pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
@@ -720,17 +721,21 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
         .map(|frame| frame.func.clone())
         .ok_or_else(|| l.error("gmatch iterator: no active call frame".to_string()))?;
 
-    // Get upvalue from C closure
-    let state_table_value = if let Some(c_closure) = func_val.as_lua_function() {
-        let upvalues = c_closure.upvalues();
-        if upvalues.is_empty() {
-            return Err(l.error("gmatch iterator: no upvalues".to_string()));
+    // Get upvalue from function (must be a C closure)
+    let state_table_value = if let Some(func_body) = func_val.as_lua_function() {
+        // Check if it's a C closure
+        if let FunctionBody::CClosure(_, upvalues) = func_body {
+            if upvalues.is_empty() {
+                return Err(l.error("gmatch iterator: no upvalues".to_string()));
+            }
+            let upval_ptr = upvalues[0];
+            let upval_ref = upval_ptr.as_ref();
+            upval_ref.data.get_value()
+        } else {
+            return Err(l.error("gmatch iterator: not a C closure".to_string()));
         }
-        let upval_ptr = upvalues[0];
-        let upval_ref = upval_ptr.as_ref();
-        upval_ref.data.get_value()
     } else {
-        return Err(l.error("gmatch iterator: not a C closure".to_string()));
+        return Err(l.error("gmatch iterator: not a function".to_string()));
     };
 
     let Some(state_ref) = state_table_value.as_table() else {
