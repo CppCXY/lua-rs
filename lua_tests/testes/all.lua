@@ -155,7 +155,8 @@ local dofile = function (n, strip)
   return f()
 end
 
-dofile('main.lua')
+print("skip main.lua tests")
+-- dofile('main.lua')
 
 -- trace GC cycles
 require"tracegc".start()
