@@ -7,7 +7,7 @@
   1. Pre-calculate total length to avoid reallocation
   2. Short string optimization (stack buffer)
   3. Empty string fast path
-  4. Direct buffer writing (no intermediate Vec)
+  4. Direct buffer writing (no intermediate allocations)
   5. String interning reuse
 ----------------------------------------------------------------------*/
 
@@ -16,32 +16,29 @@ use crate::{
     lua_vm::{LuaResult, LuaState},
 };
 
-/// Convert value to string representation
-/// Returns Some(string, was_already_string) if convertible, None otherwise
+/// Write value's string representation directly to buffer
+/// Returns Some(was_already_string) if convertible, None otherwise
+/// This avoids temporary string allocations
 #[inline]
-fn value_to_string_content(value: &LuaValue) -> Option<(String, bool)> {
+fn value_to_string_write(value: &LuaValue, buf: &mut String) -> Option<bool> {
     // Fast path: already a string (using direct pointer)
     if let Some(s) = value.as_str() {
-        return Some((s.to_string(), true));
+        buf.push_str(s);
+        return Some(true);
     }
 
     // Convert other types to string (only number and bool can be auto-converted)
-    let s = if let Some(i) = value.as_integer() {
-        i.to_string()
+    if let Some(i) = value.as_integer() {
+        buf.push_str(&i.to_string());
+        Some(false)
     } else if let Some(f) = value.as_float() {
-        // Lua number formatting
-        if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e14 {
-            format!("{:.1}", f)
-        } else {
-            f.to_string()
-        }
+        buf.push_str(&f.to_string());
+        Some(false)
     } else {
         // Table, function, nil, bool=false, etc. cannot be auto-converted
         // Let caller decide whether to try metamethod
-        return None;
-    };
-
-    Some((s, false))
+        None
+    }
 }
 
 /// Optimized string concatenation matching Lua 5.5 behavior
@@ -66,8 +63,10 @@ pub fn concat_strings(
         if val.is_string() {
             return Ok(val); // Already a string
         }
-        if let Some((s, _)) = value_to_string_content(&val) {
-            return lua_state.create_string(&s);
+        // Convert to string
+        let mut result = String::new();
+        if value_to_string_write(&val, &mut result).is_some() {
+            return lua_state.create_string(&result);
         } else {
             // Cannot convert - need metamethod
             return Err(lua_state.error(format!(
@@ -104,12 +103,11 @@ pub fn concat_strings(
 
         return lua_state.create_string(&result);
     }
-    // Collect values first - try to convert each to string
+    
+    // Slow path: convert each value to string directly into result buffer
     for i in 0..n {
         let value = lua_state.stack_mut()[base + a + i];
-        if let Some((s, _was_string)) = value_to_string_content(&value) {
-            result.push_str(&s);
-        } else {
+        if value_to_string_write(&value, &mut result).is_none() {
             // Cannot convert this value - need metamethod
             return Err(lua_state.error(format!(
                 "attempt to concatenate a {} value",

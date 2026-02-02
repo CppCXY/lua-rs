@@ -57,10 +57,12 @@ impl LuaTable {
         self.impl_table.hash_size() == 0
     }
 
+    #[inline(always)]
     pub fn raw_geti(&self, key: i64) -> Option<LuaValue> {
         self.impl_table.get_int(key)
     }
 
+    #[inline(always)]
     pub(crate) fn raw_seti(&mut self, key: i64, value: LuaValue) {
         self.impl_table.set_int(key, value);
     }
