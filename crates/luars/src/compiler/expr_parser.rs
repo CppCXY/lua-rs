@@ -141,7 +141,8 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                     *v = ExpDesc::new_vkstr(string);
                 }
                 Err(e) => {
-                    return Err(fs.syntax_error(&format!("invalid string literal: {}", e)));
+                    // Use token_error to get "near <token>" format
+                    return Err(fs.token_error(&e));
                 }
             }
             fs.lexer.bump();

@@ -186,14 +186,21 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
         };
 
         // Get function at stack level
+        // Level mapping: level 0 = current function (getinfo itself)
+        //                level 1 = caller of current function
+        //                level n = n steps up the call stack
+        // Frame index mapping: frame call_depth-1 = top of stack (most recent)
+        //                      frame 0 = bottom of stack (oldest)
+        // So: frame_idx = call_depth - 1 - level
         let call_depth = l.call_depth();
         if level < 0 || level as usize >= call_depth {
             // Level out of range
             return Ok(0);
         }
 
+        let frame_idx = call_depth - 1 - (level as usize);
         let func = l
-            .get_frame_func(level as usize)
+            .get_frame_func(frame_idx)
             .ok_or_else(|| l.error("invalid stack level".to_string()))?;
         (func, what)
     } else {
@@ -234,10 +241,26 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             if what_str.contains('l') {
-                // Current line (only meaningful for stack level, not direct function)
-                // For now, return -1 (unknown)
+                // Current line (only meaningful for stack level)
                 let currentline_key = l.create_string("currentline")?;
-                let currentline_val = LuaValue::integer(-1);
+                let currentline_val = if let Some(level) = arg1.as_integer() {
+                    // Get PC from the specified call frame
+                    // Use same frame_idx calculation as above
+                    let call_depth = l.call_depth();
+                    let frame_idx = call_depth - 1 - (level as usize);
+                    let pc = l.get_frame_pc(frame_idx);
+                    // Get line number from pc
+                    let pc_idx = pc.saturating_sub(1) as usize;
+                    let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
+                        chunk.line_info[pc_idx] as i64
+                    } else {
+                        -1
+                    };
+                    LuaValue::integer(line)
+                } else {
+                    // Direct function reference - no current line
+                    LuaValue::integer(-1)
+                };
                 l.raw_set(&info_table, currentline_key, currentline_val);
             }
 

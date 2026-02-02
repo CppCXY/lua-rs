@@ -299,10 +299,33 @@ fn long_string_value(text: &str) -> Result<Vec<u8>, String> {
     let content = &text[i..(text.len() - equal_num - 2)];
 
     // Port of llex.c:302-306: normalize all line endings to '\n'
-    // In Lua's read_long_string, both '\n' and '\r' are saved as '\n'
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    // In Lua, the following sequences are treated as a single line break:
+    // \n, \r, \r\n, and \n\r
+    // We need to process character by character to handle all cases correctly
+    let mut normalized = Vec::with_capacity(content.len());
+    let mut chars = content.chars();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            normalized.push(b'\n');
+            // Skip following \n if present
+            if let Some('\n') = chars.clone().next() {
+                chars.next();
+            }
+        } else if c == '\n' {
+            normalized.push(b'\n');
+            // Skip following \r if present
+            if let Some('\r') = chars.clone().next() {
+                chars.next();
+            }
+        } else {
+            // Push character as UTF-8 bytes
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            normalized.extend_from_slice(s.as_bytes());
+        }
+    }
 
-    Ok(normalized.into_bytes())
+    Ok(normalized)
 }
 
 fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
@@ -336,8 +359,7 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                 }
                             } else {
                                 return Err(format!(
-                                    "Invalid hexadecimal escape sequence '\\x{}'",
-                                    hex
+                                    "hexadecimal digit expected",
                                 ));
                             }
                         }
@@ -364,8 +386,7 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                         }
                                     } else {
                                         return Err(format!(
-                                            "Invalid unicode escape sequence '\\u{{{}}}'",
-                                            unicode_hex
+                                            "UTF-8 value too large"
                                         ));
                                     }
                                 }
@@ -403,7 +424,7 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                             result.push(next_char as u8);
                         }
                         _ => {
-                            return Err(format!("Invalid escape sequence '\\{}'", next_char));
+                            return Err(format!("invalid escape sequence '\\{}'", next_char));
                         }
                     }
                 }

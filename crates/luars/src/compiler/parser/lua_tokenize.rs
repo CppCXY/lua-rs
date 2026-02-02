@@ -347,8 +347,17 @@ impl<'a> LuaTokenize<'a> {
             match self.reader.current_char() {
                 'z' => {
                     self.reader.bump();
-                    self.reader
-                        .eat_while(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n');
+                    // Skip whitespace after \z, tracking line numbers
+                    while !self.reader.is_eof() {
+                        let c = self.reader.current_char();
+                        if c == ' ' || c == '\t' || c == '\x0B' || c == '\x0C' {
+                            self.reader.bump();
+                        } else if c == '\r' || c == '\n' {
+                            self.lex_new_line();
+                        } else {
+                            break;
+                        }
+                    }
                 }
                 '\r' | '\n' => {
                     self.lex_new_line();
