@@ -187,10 +187,12 @@ impl NativeTable {
                     // Adding beyond lenhint - lenhint stays the same (there's a hole)
                 }
             } else {
-                // Setting to nil - need to recalculate lenhint if within current range
-                if lua_index <= lenhint as i64 {
-                    // Find the new lenhint by scanning backwards from lua_index-1
-                    let mut new_lenhint = (lua_index - 1) as u32;
+                // Setting to nil
+                // Only reduce lenhint if we're clearing the last element
+                // For holes in the middle, pairs() will skip them correctly
+                if lua_index == lenhint as i64 {
+                    // Find the new lenhint by scanning backwards
+                    let mut new_lenhint = lua_index as u32 - 1;
                     while new_lenhint > 0 {
                         let check_idx = new_lenhint as usize - 1;
                         let tag = *self.get_arr_tag(check_idx);
@@ -201,6 +203,8 @@ impl NativeTable {
                     }
                     *self.lenhint_ptr() = new_lenhint;
                 }
+                // If clearing an element in the middle, lenhint stays the same
+                // This allows pairs() to continue iterating past holes
             }
         }
     }
@@ -770,11 +774,25 @@ impl NativeTable {
         if input_key.is_nil() {
             // Try array part first
             if lenhint >= 1 {
-                // Fast path: we know array[1] exists
+                // Fast path: check if array[1] exists
                 unsafe {
-                    let val = *self.get_arr_val(0);
-                    let tt = *self.get_arr_tag(0);
-                    return Some((LuaValue::integer(1), LuaValue { value: val, tt }));
+                    if let Some(val) = self.read_array(1) {
+                        return Some((LuaValue::integer(1), val));
+                    }
+                    // array[1] is nil, scan forward
+                    for scan_i in 2..=lenhint.min(self.asize as i64) {
+                        if let Some(val) = self.read_array(scan_i) {
+                            return Some((LuaValue::integer(scan_i), val));
+                        }
+                    }
+                    // All values up to lenhint are nil, check beyond
+                    if lenhint < self.asize as i64 {
+                        for scan_i in (lenhint + 1)..=self.asize as i64 {
+                            if let Some(val) = self.read_array(scan_i) {
+                                return Some((LuaValue::integer(scan_i), val));
+                            }
+                        }
+                    }
                 }
             } else if self.asize > 0 {
                 // Slow path: need to check
@@ -793,13 +811,29 @@ impl NativeTable {
             if i >= 1 && i <= self.asize as i64 {
                 let next_i = i + 1;
 
-                // Fast path: if next_i <= lenhint, we know it exists (no holes)
+                // Fast path: if next_i <= lenhint, try it first
                 if next_i <= lenhint {
                     unsafe {
-                        let k = (next_i - 1) as usize;
-                        let val = *self.get_arr_val(k);
-                        let tt = *self.get_arr_tag(k);
-                        return Some((LuaValue::integer(next_i), LuaValue { value: val, tt }));
+                        // Check if the value exists (not nil)
+                        if let Some(val) = self.read_array(next_i) {
+                            return Some((LuaValue::integer(next_i), val));
+                        }
+                        // Value is nil, need to scan forward
+                        for scan_i in (next_i + 1)..=lenhint.min(self.asize as i64) {
+                            if let Some(val) = self.read_array(scan_i) {
+                                return Some((LuaValue::integer(scan_i), val));
+                            }
+                        }
+                        // All values up to lenhint are nil, check beyond lenhint
+                        if lenhint < self.asize as i64 {
+                            for scan_i in (lenhint + 1)..=self.asize as i64 {
+                                if let Some(val) = self.read_array(scan_i) {
+                                    return Some((LuaValue::integer(scan_i), val));
+                                }
+                            }
+                        }
+                        // Array exhausted
+                        return self.next_hash(None);
                     }
                 }
                 // Slow path: might have holes
