@@ -705,7 +705,7 @@ impl<'a> LuaTokenize<'a> {
 
         if self.reader.current_char().is_alphabetic() {
             let ch = self.reader.current_char();
-            self.error(|| format!("unexpected character '%{ch}' after number literal", ch = ch));
+            self.error(|| format!("malformed number near '%{ch}'", ch = ch));
         }
 
         match state {

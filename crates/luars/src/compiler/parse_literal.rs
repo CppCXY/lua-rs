@@ -282,17 +282,28 @@ fn long_string_value(text: &str) -> Result<Vec<u8>, String> {
     }
 
     // lua special rule for long string
+    // Skip the first line ending if present (any form: \r, \n, \r\n, \n\r)
     if let Some((_, first_content_char)) = chars.next() {
         if first_content_char == '\r' {
             if let Some((_, next_char)) = chars.next() {
                 if next_char == '\n' {
-                    i += 2;
+                    i += 2; // \r\n
                 } else {
-                    i += 1;
+                    i += 1; // \r
                 }
+            } else {
+                i += 1; // \r at end
             }
         } else if first_content_char == '\n' {
-            i += 1;
+            if let Some((_, next_char)) = chars.next() {
+                if next_char == '\r' {
+                    i += 2; // \n\r
+                } else {
+                    i += 1; // \n
+                }
+            } else {
+                i += 1; // \n at end
+            }
         }
     }
 
@@ -425,8 +436,21 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                 chars.next();
                             }
                         }
-                        '\r' | '\n' => {
-                            result.push(next_char as u8);
+                        '\r' => {
+                            // Normalize line endings: \r, \n, \r\n, \n\r all become \n
+                            // Check if next char is \n
+                            if let Some(&'\n') = chars.peek() {
+                                chars.next(); // consume \n
+                            }
+                            result.push(b'\n');
+                        }
+                        '\n' => {
+                            // Normalize line endings: \r, \n, \r\n, \n\r all become \n
+                            // Check if next char is \r
+                            if let Some(&'\r') = chars.peek() {
+                                chars.next(); // consume \r
+                            }
+                            result.push(b'\n');
                         }
                         _ => {
                             return Err(format!("invalid escape sequence '\\{}'", next_char));

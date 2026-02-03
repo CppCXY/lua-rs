@@ -784,8 +784,9 @@ impl LuaState {
 
     /// Get all return values from stack starting at stack_base
     pub fn get_all_return_values(&self, stack_base: usize) -> Vec<LuaValue> {
-        let count = if self.stack.len() > stack_base {
-            self.stack.len() - stack_base
+        let top = self.get_top();
+        let count = if top > stack_base {
+            top - stack_base
         } else {
             0
         };
@@ -933,7 +934,7 @@ impl LuaState {
     pub fn create_string_owned(&mut self, s: String) -> CreateResult {
         self.vm_mut().create_string_owned(s)
     }
-    
+
     pub fn create_binary(&mut self, data: Vec<u8>) -> CreateResult {
         self.vm_mut().create_binary(data)
     }

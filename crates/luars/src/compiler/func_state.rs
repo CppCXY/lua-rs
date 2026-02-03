@@ -216,10 +216,15 @@ impl<'a> FuncState<'a> {
     pub fn token_error(&self, msg: &str) -> String {
         let token_text = self.lexer.current_token_text();
         let line = self.lexer.line;
-        format!(
-            "{}:{}: {} near '{}'",
-            self.source_name, line, msg, token_text
-        )
+        // Special handling for <eof> - don't add quotes around it
+        if token_text == "<eof>" {
+            format!("{}:{}: {} near {}", self.source_name, line, msg, token_text)
+        } else {
+            format!(
+                "{}:{}: {} near '{}'",
+                self.source_name, line, msg, token_text
+            )
+        }
     }
 
     pub fn current_block_cnt(&mut self) -> Option<&mut BlockCnt> {
