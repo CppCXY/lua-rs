@@ -428,16 +428,14 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
     let Some(fmt_str) = fmt_value.as_str() else {
         return Err(l.error("bad argument #1 to 'unpack' (string expected)".to_string()));
     };
-    let fmt_str = fmt_str.to_string();
 
     let s_value = l
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'unpack' (string expected)".to_string()))?;
 
-    let Some(s_str) = s_value.as_str() else {
+    let Some(bytes) = s_value.as_binary() else {
         return Err(l.error("bad argument #2 to 'unpack' (string expected)".to_string()));
     };
-    let bytes = s_str.as_bytes().to_vec();
 
     let pos = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1) as usize;
 
