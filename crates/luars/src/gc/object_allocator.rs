@@ -78,44 +78,45 @@ impl ObjectAllocator {
         start: usize,
         end: usize,
     ) -> CreateResult {
-        let string = match s_value.as_str() {
-            Some(s) => s,
-            None => return self.create_string(gc, ""),
+        // Get bytes - handle both string and binary types
+        let bytes = if let Some(s) = s_value.as_str() {
+            s.as_bytes()
+        } else if let Some(b) = s_value.as_binary() {
+            b
+        } else {
+            return self.create_string(gc, "");
         };
-        // Extract substring info first
-        let substring = {
-            // Clamp indices
-            let start = start.min(string.len());
-            let end = end.min(string.len());
+        
+        // Extract substring info
+        // Clamp indices
+        let start = start.min(bytes.len());
+        let end = end.min(bytes.len());
 
-            if start >= end {
-                return self.create_string(gc, "");
+        if start >= end {
+            return self.create_string(gc, "");
+        }
+
+        // Fast path: return original if full range
+        if start == 0 && end == bytes.len() {
+            return Ok(s_value);
+        }
+
+        // Extract the byte range
+        let substring_bytes = &bytes[start..end];
+
+        // Try to create a valid UTF-8 string from these bytes
+        // If invalid, create a binary value to preserve the original bytes
+        match std::str::from_utf8(substring_bytes) {
+            Ok(valid_str) => {
+                // Valid UTF-8 - intern as string
+                self.create_string(gc, valid_str)
             }
-
-            // Fast path: return original if full range
-            if start == 0 && end == string.len() {
-                return Ok(s_value);
+            Err(_) => {
+                // Invalid UTF-8 - create binary value to preserve original bytes
+                // This is important for binary data like bytecode
+                self.create_binary(gc, substring_bytes.to_vec())
             }
-
-            // Lua allows slicing at any byte position, even in the middle of UTF-8 characters
-            // We need to handle this safely
-            let bytes = string.as_bytes();
-            let substring_bytes = &bytes[start..end];
-
-            // Try to create a valid UTF-8 string from these bytes
-            // If invalid, create a binary value to preserve the original bytes
-            match std::str::from_utf8(substring_bytes) {
-                Ok(valid_str) => valid_str,
-                Err(_) => {
-                    // Invalid UTF-8 - create binary value to preserve original bytes
-                    // This is important for binary data like bytecode
-                    return self.create_binary(gc, substring_bytes.to_vec());
-                }
-            }
-        };
-
-        // Intern the substring - will be deduplicated if it already exists
-        self.create_string(gc, substring)
+        }
     }
 
     // ==================== Table Operations ====================

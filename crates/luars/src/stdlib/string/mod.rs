@@ -329,7 +329,13 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.sub' (string expected)".to_string()))?;
-    let Some(s) = s_value.as_str() else {
+    
+    // Get string data - handle both string and binary types
+    let s_bytes = if let Some(s) = s_value.as_str() {
+        s.as_bytes()
+    } else if let Some(bytes) = s_value.as_binary() {
+        bytes
+    } else {
         return Err(l.error("bad argument #1 to 'string.sub' (string expected)".to_string()));
     };
 
@@ -345,7 +351,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     // Get string length and compute byte indices
     let vm = l.vm_mut();
     let (start_byte, end_byte) = {
-        let byte_len = s.len() as i64;
+        let byte_len = s_bytes.len() as i64;
 
         // Lua string.sub uses byte positions, not character positions!
         let start = if i < 0 { byte_len + i + 1 } else { i };
@@ -543,10 +549,16 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'gsub' (string expected)".to_string()))?;
-    let Some(s_str) = s_value.as_str() else {
+    
+    // Get string data - handle both string and binary types
+    let s_str = if let Some(s) = s_value.as_str() {
+        s.to_string()
+    } else if let Some(bytes) = s_value.as_binary() {
+        // For binary data, use lossy conversion to string for pattern matching
+        String::from_utf8_lossy(bytes).into_owned()
+    } else {
         return Err(l.error("bad argument #1 to 'gsub' (string expected)".to_string()));
     };
-    let s_str = s_str.to_string();
 
     let pattern_value = l
         .get_arg(2)
