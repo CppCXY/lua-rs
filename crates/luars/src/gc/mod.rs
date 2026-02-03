@@ -1201,6 +1201,12 @@ impl GC {
         // markmt(g);  /* mark global metatables */
         self.mark_mt(l);
 
+        // Mark all threads in twups list (threads with open upvalues)
+        // This ensures they are not white when remark_upvalues is called in atomic phase
+        for thread_ptr in self.twups.clone() {
+            self.mark_object(l, thread_ptr.into());
+        }
+
         // markbeingfnz(g): mark any object pending finalization from previous cycle
         if !self.tobefnz.is_empty() {
             for obj_ptr in self.tobefnz.clone() {
