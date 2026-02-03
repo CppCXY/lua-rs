@@ -18,6 +18,97 @@
 use crate::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
 
+/// Endianness for pack/unpack operations
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Endianness {
+    Little,
+    Big,
+    Native,
+}
+
+impl Endianness {
+    /// Convert bytes based on endianness
+    fn to_bytes<T: ToBytes>(self, value: T) -> Vec<u8> {
+        match self {
+            Endianness::Little => value.to_le_bytes(),
+            Endianness::Big => value.to_be_bytes(),
+            Endianness::Native => value.to_ne_bytes(),
+        }
+    }
+
+    /// Convert from bytes based on endianness
+    fn from_bytes<T: FromBytes>(self, bytes: &[u8]) -> T {
+        match self {
+            Endianness::Little => T::from_le_bytes(bytes),
+            Endianness::Big => T::from_be_bytes(bytes),
+            Endianness::Native => T::from_ne_bytes(bytes),
+        }
+    }
+}
+
+/// Trait for types that can be converted to bytes with different endianness
+trait ToBytes {
+    fn to_le_bytes(self) -> Vec<u8>;
+    fn to_be_bytes(self) -> Vec<u8>;
+    fn to_ne_bytes(self) -> Vec<u8>;
+}
+
+/// Trait for types that can be converted from bytes with different endianness
+trait FromBytes: Sized {
+    fn from_le_bytes(bytes: &[u8]) -> Self;
+    fn from_be_bytes(bytes: &[u8]) -> Self;
+    fn from_ne_bytes(bytes: &[u8]) -> Self;
+}
+
+// Implement ToBytes for integer types
+macro_rules! impl_to_bytes {
+    ($($t:ty),*) => {
+        $(
+            impl ToBytes for $t {
+                fn to_le_bytes(self) -> Vec<u8> {
+                    <$t>::to_le_bytes(self).to_vec()
+                }
+                fn to_be_bytes(self) -> Vec<u8> {
+                    <$t>::to_be_bytes(self).to_vec()
+                }
+                fn to_ne_bytes(self) -> Vec<u8> {
+                    <$t>::to_ne_bytes(self).to_vec()
+                }
+            }
+        )*
+    };
+}
+
+impl_to_bytes!(i16, u16, i32, u32, i64, u64, f32, f64);
+
+// Implement FromBytes for integer types  
+macro_rules! impl_from_bytes {
+    ($($t:ty, $size:expr),*) => {
+        $(
+            impl FromBytes for $t {
+                fn from_le_bytes(bytes: &[u8]) -> Self {
+                    let mut arr = [0u8; $size];
+                    arr.copy_from_slice(&bytes[..$size]);
+                    <$t>::from_le_bytes(arr)
+                }
+                fn from_be_bytes(bytes: &[u8]) -> Self {
+                    let mut arr = [0u8; $size];
+                    arr.copy_from_slice(&bytes[..$size]);
+                    <$t>::from_be_bytes(arr)
+                }
+                fn from_ne_bytes(bytes: &[u8]) -> Self {
+                    let mut arr = [0u8; $size];
+                    arr.copy_from_slice(&bytes[..$size]);
+                    <$t>::from_ne_bytes(arr)
+                }
+            }
+        )*
+    };
+}
+
+impl_from_bytes!(i16, 2, u16, 2, i32, 4, u32, 4, i64, 8, u64, 8, f32, 4, f64, 8);
+
+
 /// string.pack(fmt, v1, v2, ...) - Pack values into binary string
 pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
     let fmt_value = l
@@ -33,6 +124,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
     let mut result = Vec::new();
     let mut value_idx = 2; // Start from argument 2 (after format string)
     let mut chars = fmt_str.chars().peekable();
+    let mut endianness = Endianness::Native; // Default to native endianness
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -69,7 +161,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             'h' => {
-                // signed short (2 bytes, little-endian)
+                // signed short (2 bytes)
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -79,12 +171,12 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })? as i16;
-                result.extend_from_slice(&n.to_le_bytes());
+                result.extend_from_slice(&endianness.to_bytes(n));
                 value_idx += 1;
             }
 
             'H' => {
-                // unsigned short (2 bytes, little-endian)
+                // unsigned short (2 bytes)
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -94,7 +186,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })? as u16;
-                result.extend_from_slice(&n.to_le_bytes());
+                result.extend_from_slice(&endianness.to_bytes(n));
                 value_idx += 1;
             }
 
@@ -124,7 +216,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
-                let mut val = l
+                let val = l
                     .get_arg(value_idx)
                     .and_then(|v| v.as_integer())
                     .ok_or_else(|| {
@@ -132,10 +224,39 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     })?;
 
                 // Pack the value as signed integer with specified size
-                for _ in 0..size {
-                    result.push((val & 0xFF) as u8);
-                    val >>= 8;
-                }
+                let bytes = match endianness {
+                    Endianness::Little => {
+                        let mut bytes = Vec::new();
+                        let mut v = val;
+                        for _ in 0..size {
+                            bytes.push((v & 0xFF) as u8);
+                            v >>= 8;
+                        }
+                        bytes
+                    }
+                    Endianness::Big => {
+                        let mut bytes = Vec::new();
+                        let mut v = val;
+                        for _ in 0..size {
+                            bytes.push((v & 0xFF) as u8);
+                            v >>= 8;
+                        }
+                        bytes.reverse();
+                        bytes
+                    }
+                    Endianness::Native => {
+                        let mut bytes = Vec::new();
+                        let mut v = val;
+                        for _ in 0..size {
+                            bytes.push((v & 0xFF) as u8);
+                            v >>= 8;
+                        }
+                        #[cfg(target_endian = "big")]
+                        bytes.reverse();
+                        bytes
+                    }
+                };
+                result.extend_from_slice(&bytes);
                 value_idx += 1;
             }
 
@@ -165,7 +286,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
-                let mut val = l
+                let val = l
                     .get_arg(value_idx)
                     .and_then(|v| v.as_integer())
                     .ok_or_else(|| {
@@ -173,15 +294,44 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     })? as u64;
 
                 // Pack the value as unsigned integer with specified size
-                for _ in 0..size {
-                    result.push((val & 0xFF) as u8);
-                    val >>= 8;
-                }
+                let bytes = match endianness {
+                    Endianness::Little => {
+                        let mut bytes = Vec::new();
+                        let mut v = val;
+                        for _ in 0..size {
+                            bytes.push((v & 0xFF) as u8);
+                            v >>= 8;
+                        }
+                        bytes
+                    }
+                    Endianness::Big => {
+                        let mut bytes = Vec::new();
+                        let mut v = val;
+                        for _ in 0..size {
+                            bytes.push((v & 0xFF) as u8);
+                            v >>= 8;
+                        }
+                        bytes.reverse();
+                        bytes
+                    }
+                    Endianness::Native => {
+                        let mut bytes = Vec::new();
+                        let mut v = val;
+                        for _ in 0..size {
+                            bytes.push((v & 0xFF) as u8);
+                            v >>= 8;
+                        }
+                        #[cfg(target_endian = "big")]
+                        bytes.reverse();
+                        bytes
+                    }
+                };
+                result.extend_from_slice(&bytes);
                 value_idx += 1;
             }
 
             'f' => {
-                // float (4 bytes, little-endian)
+                // float (4 bytes)
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -191,12 +341,12 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })? as f32;
-                result.extend_from_slice(&n.to_le_bytes());
+                result.extend_from_slice(&endianness.to_bytes(n));
                 value_idx += 1;
             }
 
             'd' => {
-                // double (8 bytes, little-endian)
+                // double (8 bytes)
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -206,42 +356,62 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })?;
-                result.extend_from_slice(&n.to_le_bytes());
+                result.extend_from_slice(&endianness.to_bytes(n));
                 value_idx += 1;
             }
 
             'j' => {
-                // lua_Integer (8 bytes, i64, little-endian)
+                // lua_Integer (8 bytes, i64)
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
-                let n = l
-                    .get_arg(value_idx)
-                    .and_then(|v| v.as_integer())
-                    .ok_or_else(|| {
-                        l.error("bad argument to 'pack' (number expected)".to_string())
-                    })?;
-                result.extend_from_slice(&n.to_le_bytes());
+                let value = l.get_arg(value_idx).ok_or_else(|| {
+                    l.error("bad argument to 'pack' (number expected)".to_string())
+                })?;
+                let n = if let Some(i) = value.as_integer() {
+                    i
+                } else if let Some(f) = value.as_number() {
+                    // For float input to integer pack, use lua_numbertointeger semantics
+                    // This truncates/wraps the float to fit in i64
+                    if f.is_finite() {
+                        // Use f64's bit representation as i64 for large numbers
+                        // This matches Lua's behavior for pack('j', large_float)
+                        f as i64
+                    } else {
+                        0
+                    }
+                } else {
+                    return Err(l.error("bad argument to 'pack' (number expected)".to_string()));
+                };
+                result.extend_from_slice(&endianness.to_bytes(n));
                 value_idx += 1;
             }
 
             'T' => {
-                // size_t (8 bytes on 64-bit, little-endian)
+                // size_t (8 bytes on 64-bit)
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
-                let n = l
-                    .get_arg(value_idx)
-                    .and_then(|v| v.as_integer())
-                    .ok_or_else(|| {
-                        l.error("bad argument to 'pack' (number expected)".to_string())
-                    })? as u64;
-                result.extend_from_slice(&n.to_le_bytes());
+                let value = l.get_arg(value_idx).ok_or_else(|| {
+                    l.error("bad argument to 'pack' (number expected)".to_string())
+                })?;
+                let n = if let Some(i) = value.as_integer() {
+                    i as u64
+                } else if let Some(f) = value.as_number() {
+                    if f.is_finite() {
+                        f as u64
+                    } else {
+                        0
+                    }
+                } else {
+                    return Err(l.error("bad argument to 'pack' (number expected)".to_string()));
+                };
+                result.extend_from_slice(&endianness.to_bytes(n));
                 value_idx += 1;
             }
 
             'n' => {
-                // lua_Number (8 bytes, f64, little-endian) - same as 'd'
+                // lua_Number (8 bytes, f64) - same as 'd'
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -251,7 +421,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })?;
-                result.extend_from_slice(&n.to_le_bytes());
+                result.extend_from_slice(&endianness.to_bytes(n));
                 value_idx += 1;
             }
 
@@ -308,9 +478,55 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 result.push(0);
             }
 
+            'X' => {
+                // Alignment padding - peek at next format option to determine alignment
+                if let Some(&next_ch) = chars.peek() {
+                    // Determine alignment size based on next format option
+                    let align = match next_ch {
+                        'b' | 'B' => 1,
+                        'h' | 'H' => 2,
+                        'i' | 'I' | 'l' | 'L' | 'f' => {
+                            // Check for size suffix on integers
+                            let mut temp_chars = chars.clone();
+                            temp_chars.next(); // skip the format char
+                            let mut size_str = String::new();
+                            while let Some(&digit) = temp_chars.peek() {
+                                if digit.is_ascii_digit() {
+                                    size_str.push(temp_chars.next().unwrap());
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !size_str.is_empty() && (next_ch == 'i' || next_ch == 'I' || next_ch == 'l' || next_ch == 'L') {
+                                size_str.parse::<usize>().unwrap_or(4)
+                            } else if next_ch == 'f' {
+                                4
+                            } else {
+                                4 // default int size
+                            }
+                        }
+                        'd' | 'n' | 'j' | 'T' => 8,
+                        _ => 1,
+                    };
+                    // Add padding bytes to align to boundary
+                    if align > 1 {
+                        let padding = (align - (result.len() % align)) % align;
+                        for _ in 0..padding {
+                            result.push(0);
+                        }
+                    }
+                }
+            }
+
             '<' | '>' | '=' | '!' => {
-                // endianness/alignment modifiers - we ignore these for now
-                // (always use little-endian)
+                // Update endianness based on modifier
+                match ch {
+                    '<' => endianness = Endianness::Little,
+                    '>' => endianness = Endianness::Big,
+                    '=' => endianness = Endianness::Native,
+                    '!' => {}, // '!' sets alignment but doesn't change endianness
+                    _ => {}
+                }
             }
 
             _ => {
@@ -382,6 +598,45 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
             }
             'x' => size += 1,
 
+            'X' => {
+                // Alignment padding - peek at next format option to determine alignment
+                if let Some(&next_ch) = chars.peek() {
+                    // Determine alignment size based on next format option
+                    let align = match next_ch {
+                        'b' | 'B' => 1,
+                        'h' | 'H' => 2,
+                        'i' | 'I' | 'l' | 'L' | 'f' => {
+                            // Check for size suffix on integers
+                            let mut temp_chars = chars.clone();
+                            temp_chars.next(); // skip the 'i'/'I'/'l'/'L'
+                            let mut size_str = String::new();
+                            while let Some(&digit) = temp_chars.peek() {
+                                if digit.is_ascii_digit() {
+                                    size_str.push(temp_chars.next().unwrap());
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !size_str.is_empty() && (next_ch == 'i' || next_ch == 'I' || next_ch == 'l' || next_ch == 'L') {
+                                size_str.parse::<usize>().unwrap_or(4)
+                            } else if next_ch == 'f' {
+                                4
+                            } else {
+                                4 // default int size
+                            }
+                        }
+                        'd' | 'n' | 'j' | 'T' => 8,
+                        _ => 1, // For other options, use minimal alignment
+                    };
+                    // Add padding to align to boundary
+                    if align > 1 {
+                        let padding = (align - (size % align)) % align;
+                        size += padding;
+                    }
+                }
+                // X itself doesn't add size, it just aligns
+            }
+
             'c' => {
                 // fixed-length string - read size
                 let mut size_str = String::new();
@@ -433,7 +688,11 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'unpack' (string expected)".to_string()))?;
 
-    let Some(bytes) = s_value.as_binary() else {
+    let bytes: &[u8] = if let Some(binary) = s_value.as_binary() {
+        binary
+    } else if let Some(string) = s_value.as_str() {
+        string.as_bytes()
+    } else {
         return Err(l.error("bad argument #2 to 'unpack' (string expected)".to_string()));
     };
 
@@ -446,6 +705,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
     let mut idx = pos - 1; // Convert to 0-based
     let mut results = Vec::new();
     let mut chars = fmt_str.chars().peekable();
+    let mut endianness = Endianness::Native; // Default to native endianness
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -471,7 +731,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 2 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = i16::from_le_bytes([bytes[idx], bytes[idx + 1]]);
+                let val: i16 = endianness.from_bytes(&bytes[idx..idx+2]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 2;
             }
@@ -480,7 +740,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 2 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = u16::from_le_bytes([bytes[idx], bytes[idx + 1]]);
+                let val: u16 = endianness.from_bytes(&bytes[idx..idx+2]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 2;
             }
@@ -513,14 +773,54 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 }
 
                 // Unpack signed integer with specified size
-                let mut val: i64 = 0;
-                for i in (0..size).rev() {
-                    val = (val << 8) | (bytes[idx + i] as i64);
-                }
-                // Sign extend if the highest bit is set
-                if size < 8 && (bytes[idx + size - 1] & 0x80) != 0 {
-                    val |= !0i64 << (size * 8);
-                }
+                let val: i64 = match endianness {
+                    Endianness::Little => {
+                        let mut v: i64 = 0;
+                        for i in (0..size).rev() {
+                            v = (v << 8) | (bytes[idx + i] as i64);
+                        }
+                        // Sign extend if the highest bit is set
+                        if size < 8 && (bytes[idx + size - 1] & 0x80) != 0 {
+                            v |= !0i64 << (size * 8);
+                        }
+                        v
+                    }
+                    Endianness::Big => {
+                        let mut v: i64 = 0;
+                        for i in 0..size {
+                            v = (v << 8) | (bytes[idx + i] as i64);
+                        }
+                        // Sign extend if the highest bit is set
+                        if size < 8 && (bytes[idx] & 0x80) != 0 {
+                            v |= !0i64 << (size * 8);
+                        }
+                        v
+                    }
+                    Endianness::Native => {
+                        #[cfg(target_endian = "little")]
+                        {
+                            let mut v: i64 = 0;
+                            for i in (0..size).rev() {
+                                v = (v << 8) | (bytes[idx + i] as i64);
+                            }
+                            if size < 8 && (bytes[idx + size - 1] & 0x80) != 0 {
+                                v |= !0i64 << (size * 8);
+                            }
+                            v
+                        }
+                        #[cfg(target_endian = "big")]
+                        {
+                            let mut v: i64 = 0;
+                            for i in 0..size {
+                                v = (v << 8) | (bytes[idx + i] as i64);
+                            }
+                            if size < 8 && (bytes[idx] & 0x80) != 0 {
+                                v |= !0i64 << (size * 8);
+                            }
+                            v
+                        }
+                    }
+                };
                 results.push(LuaValue::integer(val));
                 idx += size;
             }
@@ -553,10 +853,40 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 }
 
                 // Unpack unsigned integer with specified size
-                let mut val: u64 = 0;
-                for i in (0..size).rev() {
-                    val = (val << 8) | (bytes[idx + i] as u64);
-                }
+                let val: u64 = match endianness {
+                    Endianness::Little => {
+                        let mut v: u64 = 0;
+                        for i in (0..size).rev() {
+                            v = (v << 8) | (bytes[idx + i] as u64);
+                        }
+                        v
+                    }
+                    Endianness::Big => {
+                        let mut v: u64 = 0;
+                        for i in 0..size {
+                            v = (v << 8) | (bytes[idx + i] as u64);
+                        }
+                        v
+                    }
+                    Endianness::Native => {
+                        #[cfg(target_endian = "little")]
+                        {
+                            let mut v: u64 = 0;
+                            for i in (0..size).rev() {
+                                v = (v << 8) | (bytes[idx + i] as u64);
+                            }
+                            v
+                        }
+                        #[cfg(target_endian = "big")]
+                        {
+                            let mut v: u64 = 0;
+                            for i in 0..size {
+                                v = (v << 8) | (bytes[idx + i] as u64);
+                            }
+                            v
+                        }
+                    }
+                };
                 results.push(LuaValue::integer(val as i64));
                 idx += size;
             }
@@ -565,12 +895,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 4 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = f32::from_le_bytes([
-                    bytes[idx],
-                    bytes[idx + 1],
-                    bytes[idx + 2],
-                    bytes[idx + 3],
-                ]);
+                let val: f32 = endianness.from_bytes(&bytes[idx..idx+4]);
                 results.push(LuaValue::number(val as f64));
                 idx += 4;
             }
@@ -579,73 +904,37 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = f64::from_le_bytes([
-                    bytes[idx],
-                    bytes[idx + 1],
-                    bytes[idx + 2],
-                    bytes[idx + 3],
-                    bytes[idx + 4],
-                    bytes[idx + 5],
-                    bytes[idx + 6],
-                    bytes[idx + 7],
-                ]);
+                let val: f64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::number(val));
                 idx += 8;
             }
 
             'j' => {
-                // lua_Integer (8 bytes, i64, little-endian)
+                // lua_Integer (8 bytes, i64)
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = i64::from_le_bytes([
-                    bytes[idx],
-                    bytes[idx + 1],
-                    bytes[idx + 2],
-                    bytes[idx + 3],
-                    bytes[idx + 4],
-                    bytes[idx + 5],
-                    bytes[idx + 6],
-                    bytes[idx + 7],
-                ]);
+                let val: i64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::integer(val));
                 idx += 8;
             }
 
             'T' => {
-                // size_t (8 bytes on 64-bit, little-endian)
+                // size_t (8 bytes on 64-bit)
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = u64::from_le_bytes([
-                    bytes[idx],
-                    bytes[idx + 1],
-                    bytes[idx + 2],
-                    bytes[idx + 3],
-                    bytes[idx + 4],
-                    bytes[idx + 5],
-                    bytes[idx + 6],
-                    bytes[idx + 7],
-                ]);
+                let val: u64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 8;
             }
 
             'n' => {
-                // lua_Number (8 bytes, f64, little-endian) - same as 'd'
+                // lua_Number (8 bytes, f64) - same as 'd'
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val = f64::from_le_bytes([
-                    bytes[idx],
-                    bytes[idx + 1],
-                    bytes[idx + 2],
-                    bytes[idx + 3],
-                    bytes[idx + 4],
-                    bytes[idx + 5],
-                    bytes[idx + 6],
-                    bytes[idx + 7],
-                ]);
+                let val: f64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::number(val));
                 idx += 8;
             }
@@ -696,8 +985,53 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 idx += 1;
             }
 
+            'X' => {
+                // Alignment padding - peek at next format option to determine alignment
+                if let Some(&next_ch) = chars.peek() {
+                    // Determine alignment size based on next format option
+                    let align = match next_ch {
+                        'b' | 'B' => 1,
+                        'h' | 'H' => 2,
+                        'i' | 'I' | 'l' | 'L' | 'f' => {
+                            // Check for size suffix on integers
+                            let mut temp_chars = chars.clone();
+                            temp_chars.next(); // skip the format char
+                            let mut size_str = String::new();
+                            while let Some(&digit) = temp_chars.peek() {
+                                if digit.is_ascii_digit() {
+                                    size_str.push(temp_chars.next().unwrap());
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !size_str.is_empty() && (next_ch == 'i' || next_ch == 'I' || next_ch == 'l' || next_ch == 'L') {
+                                size_str.parse::<usize>().unwrap_or(4)
+                            } else if next_ch == 'f' {
+                                4
+                            } else {
+                                4 // default int size
+                            }
+                        }
+                        'd' | 'n' | 'j' | 'T' => 8,
+                        _ => 1,
+                    };
+                    // Skip padding bytes to align to boundary
+                    if align > 1 {
+                        let padding = (align - (idx % align)) % align;
+                        idx += padding;
+                    }
+                }
+            }
+
             '<' | '>' | '=' | '!' => {
-                // endianness/alignment modifiers - ignore
+                // Update endianness based on modifier
+                match ch {
+                    '<' => endianness = Endianness::Little,
+                    '>' => endianness = Endianness::Big,
+                    '=' => endianness = Endianness::Native,
+                    '!' => {}, // '!' sets alignment but doesn't change endianness
+                    _ => {}
+                }
             }
 
             _ => {

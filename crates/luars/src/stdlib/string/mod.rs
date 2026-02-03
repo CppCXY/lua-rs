@@ -231,10 +231,15 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.rep' (string expected)".to_string()))?;
-    let Some(s_str) = s_value.as_str() else {
+    
+    // Accept both string and binary types
+    let s_bytes = if let Some(s_str) = s_value.as_str() {
+        s_str.as_bytes().to_vec()
+    } else if let Some(binary) = s_value.as_binary() {
+        binary.to_vec()
+    } else {
         return Err(l.error("bad argument #1 to 'string.rep' (string expected)".to_string()));
     };
-    let s_str = s_str.to_string();
 
     // Get parameters
     let n_value = l.get_arg(2);
@@ -258,7 +263,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     // Check for result size overflow
     // Lua limits string size to avoid memory issues
     const MAX_STRING_SIZE: i64 = 1 << 30; // 1GB limit
-    let s_len = s_str.len() as i64;
+    let s_len = s_bytes.len() as i64;
 
     // Check for overflow before multiplying
     if s_len > 0 && n > MAX_STRING_SIZE / s_len {
@@ -266,44 +271,51 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Calculate total size including separators
-    let total_size = if let Some(v) = sep_value {
-        let sep_len = v.as_str().map(|s| s.len()).unwrap_or(0) as i64;
-        let sep_total = sep_len.saturating_mul(n - 1);
-        s_len.saturating_mul(n).saturating_add(sep_total)
+    let sep_bytes = if let Some(v) = sep_value {
+        if let Some(s) = v.as_str() {
+            s.as_bytes().to_vec()
+        } else if let Some(b) = v.as_binary() {
+            b.to_vec()
+        } else {
+            Vec::new()
+        }
     } else {
-        s_len.saturating_mul(n)
+        Vec::new()
     };
+
+    let sep_len = sep_bytes.len() as i64;
+    let sep_total = sep_len.saturating_mul(n - 1);
+    let total_size = s_len.saturating_mul(n).saturating_add(sep_total);
 
     if total_size > MAX_STRING_SIZE {
         return Err(l.error("resulting string too large".to_string()));
     }
 
-    let mut result = String::new();
-    match sep_value {
-        Some(v) => {
-            let Some(sep_str) = v.as_str() else {
-                return Err(
-                    l.error("bad argument #3 to 'string.rep' (string expected)".to_string())
-                );
-            };
-            let sep_str = sep_str.to_string();
-
-            for i in 0..n {
-                if i > 0 && !sep_str.is_empty() {
-                    result.push_str(&sep_str);
-                }
-                result.push_str(&s_str);
+    let mut result = Vec::new();
+    if sep_value.is_some() && !sep_bytes.is_empty() {
+        for i in 0..n {
+            if i > 0 {
+                result.extend_from_slice(&sep_bytes);
             }
+            result.extend_from_slice(&s_bytes);
         }
-        None => {
-            for _ in 0..n {
-                result.push_str(&s_str);
-            }
+    } else {
+        for _ in 0..n {
+            result.extend_from_slice(&s_bytes);
+        }
+    }
+
+    // Return binary if input was binary, otherwise string
+    let result_val = if s_value.as_binary().is_some() {
+        vm.create_binary(result)?
+    } else {
+        // Try to convert to UTF-8 string
+        match String::from_utf8(result) {
+            Ok(s) => vm.create_string_owned(s)?,
+            Err(e) => vm.create_binary(e.into_bytes())?,
         }
     };
-
-    let result = vm.create_string_owned(result)?;
-    l.push_value(result)?;
+    l.push_value(result_val)?;
     Ok(1)
 }
 
@@ -312,13 +324,30 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
     })?;
-    let Some(s) = s_value.as_str() else {
+    
+    // Accept both string and binary types
+    let s_bytes = if let Some(s) = s_value.as_str() {
+        s.as_bytes()
+    } else if let Some(bytes) = s_value.as_binary() {
+        bytes
+    } else {
         return Err(l.error("bad argument #1 to 'string.reverse' (string expected)".to_string()));
     };
 
     let vm = l.vm_mut();
-    let reversed = s.chars().rev().collect::<String>();
-    let result = vm.create_string_owned(reversed)?;
+    let mut reversed = s_bytes.to_vec();
+    reversed.reverse();
+    
+    // Return binary if input was binary, otherwise try string
+    let result = if s_value.as_binary().is_some() {
+        vm.create_binary(reversed)?
+    } else {
+        match String::from_utf8(reversed.clone()) {
+            Ok(s) => vm.create_string_owned(s)?,
+            Err(_) => vm.create_binary(reversed)?,
+        }
+    };
+    
     l.push_value(result)?;
     Ok(1)
 }

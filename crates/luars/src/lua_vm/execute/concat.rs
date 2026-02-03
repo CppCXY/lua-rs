@@ -20,25 +20,25 @@ use crate::{
 /// Returns Some(was_already_string) if convertible, None otherwise
 /// This avoids temporary string allocations
 #[inline]
-fn value_to_string_write(value: &LuaValue, buf: &mut String) -> Option<bool> {
+fn value_to_bytes_write(value: &LuaValue, buf: &mut Vec<u8>) -> Option<bool> {
     // Fast path: already a string (using direct pointer)
     if let Some(s) = value.as_str() {
-        buf.push_str(s);
+        buf.extend_from_slice(s.as_bytes());
         return Some(true);
     }
 
-    // Handle binary data by converting to lossy UTF-8
+    // Handle binary data directly
     if let Some(bytes) = value.as_binary() {
-        buf.push_str(&String::from_utf8_lossy(bytes));
+        buf.extend_from_slice(bytes);
         return Some(true);
     }
 
     // Convert other types to string (only number and bool can be auto-converted)
     if let Some(i) = value.as_integer() {
-        buf.push_str(&i.to_string());
+        buf.extend_from_slice(i.to_string().as_bytes());
         Some(false)
     } else if let Some(f) = value.as_float() {
-        buf.push_str(&f.to_string());
+        buf.extend_from_slice(f.to_string().as_bytes());
         Some(false)
     } else {
         // Table, function, nil, bool=false, etc. cannot be auto-converted
@@ -66,13 +66,17 @@ pub fn concat_strings(
         // Single value - convert to string if needed
         let stack = lua_state.stack_mut();
         let val = stack[base + a];
-        if val.is_string() {
-            return Ok(val); // Already a string
+        if val.is_string() || val.is_binary() {
+            return Ok(val); // Already a string or binary
         }
         // Convert to string
-        let mut result = String::new();
-        if value_to_string_write(&val, &mut result).is_some() {
-            return lua_state.create_string(&result);
+        let mut result = Vec::new();
+        if value_to_bytes_write(&val, &mut result).is_some() {
+            // Try to create string, fall back to binary if not valid UTF-8
+            return match String::from_utf8(result.clone()) {
+                Ok(s) => lua_state.create_string(&s),
+                Err(_) => lua_state.create_binary(result),
+            };
         } else {
             // Cannot convert - need metamethod
             return Err(lua_state.error(format!(
@@ -82,11 +86,11 @@ pub fn concat_strings(
         }
     }
 
-    let mut result = String::new();
+    let mut result = Vec::new();
 
     for i in 0..n {
         let value = lua_state.stack_mut()[base + a + i];
-        if value_to_string_write(&value, &mut result).is_none() {
+        if value_to_bytes_write(&value, &mut result).is_none() {
             // Cannot convert this value - need metamethod
             return Err(lua_state.error(format!(
                 "attempt to concatenate a {} value",
@@ -95,7 +99,11 @@ pub fn concat_strings(
         }
     }
 
-    lua_state.create_string_owned(result)
+    // Try to create string, fall back to binary if not valid UTF-8
+    match String::from_utf8(result.clone()) {
+        Ok(s) => lua_state.create_string_owned(s),
+        Err(_) => lua_state.create_binary(result),
+    }
 }
 
 #[cfg(test)]

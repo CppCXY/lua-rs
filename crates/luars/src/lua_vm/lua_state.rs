@@ -147,20 +147,6 @@ impl LuaState {
         self.c_call_depth
     }
 
-    /// Increment C call depth (called on C function entry)
-    #[inline(always)]
-    pub(crate) fn inc_c_call_depth(&mut self) {
-        self.c_call_depth += 1;
-    }
-
-    /// Decrement C call depth (called on C function exit)
-    #[inline(always)]
-    pub(crate) fn dec_c_call_depth(&mut self) {
-        if self.c_call_depth > 0 {
-            self.c_call_depth -= 1;
-        }
-    }
-
     /// Push a new call frame (equivalent to Lua's luaD_precall)
     /// OPTIMIZED: Reuses CallInfo slots, only allocates when needed
     pub fn push_frame(
@@ -188,22 +174,27 @@ impl LuaState {
             return Err(LuaError::StackOverflow);
         }
 
-        // 检查C调用深度限制(C栈 - 不受尾调用优化影响)
-        // Like Lua's: if (getCcalls(L) >= LUAI_MAXCCALLS) luaE_checkcstack(L);
-        if self.c_call_depth >= self.safe_option.max_call_depth {
-            self.error(format!(
-                "C stack overflow (C call depth: {})",
-                self.c_call_depth
-            ));
-            return Err(LuaError::StackOverflow);
-        }
-
-        // Determine call status based on function type
-        let call_status = if func.is_cfunction()
+        // Determine call status and check C call depth for C functions
+        let is_c_function = func.is_cfunction()
             || func
                 .as_lua_function()
                 .map(|f| f.is_c_function())
-                .unwrap_or(false)
+                .unwrap_or(false);
+
+        // C函数需要增加C调用深度(类似Lua的nCcalls)
+        // 在push_frame中统一管理,避免在pcall/xpcall中手动管理
+        if is_c_function {
+            if self.c_call_depth >= self.safe_option.max_call_depth {
+                self.error(format!(
+                    "C stack overflow (C call depth: {})",
+                    self.c_call_depth
+                ));
+                return Err(LuaError::StackOverflow);
+            }
+            self.c_call_depth += 1;
+        }
+
+        let call_status = if is_c_function
         {
             CIST_C
         } else {
@@ -294,8 +285,18 @@ impl LuaState {
     pub fn pop_frame(&mut self) -> Option<CallInfo> {
         if self.call_depth > 0 {
             self.call_depth -= 1;
-            // Return a clone for compatibility (caller may need frame data)
-            self.call_stack.get(self.call_depth).cloned()
+            let frame = self.call_stack.get(self.call_depth).cloned();
+            
+            // 如果是C函数帧，减少C调用深度
+            if let Some(ref f) = frame {
+                if f.is_c() {
+                    if self.c_call_depth > 0 {
+                        self.c_call_depth -= 1;
+                    }
+                }
+            }
+            
+            frame
         } else {
             None
         }
@@ -1036,9 +1037,6 @@ impl LuaState {
         func: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Increment C call depth (pcall is a C function)
-        self.inc_c_call_depth();
-
         // Save state for cleanup
         let initial_depth = self.call_depth();
         let func_idx = self.stack.len();
@@ -1055,7 +1053,6 @@ impl LuaState {
         let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
-                self.dec_c_call_depth();  // Exit pcall on error
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
                 self.stack.truncate(func_idx);
@@ -1091,7 +1088,6 @@ impl LuaState {
                 // Create frame for C function
                 let base = func_idx + 1;
                 if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
-                    self.dec_c_call_depth();  // Exit pcall on error
                     self.stack.truncate(func_idx);
                     let error_msg = self.get_error_msg(e);
                     let err_str = self.create_string(&error_msg)?;
@@ -1132,15 +1128,10 @@ impl LuaState {
                         // Clean up stack
                         self.stack.truncate(func_idx);
 
-                        self.dec_c_call_depth();  // Exit pcall on success
                         Ok((true, results))
                     }
-                    Err(LuaError::Yield) => {
-                        self.dec_c_call_depth();  // Exit pcall on yield
-                        Err(LuaError::Yield)
-                    }
+                    Err(LuaError::Yield) => Err(LuaError::Yield),
                     Err(e) => {
-                        self.dec_c_call_depth();  // Exit pcall on error
                         let error_msg = self.get_error_msg(e);
                         let err_str = self.create_string(&error_msg)?;
                         self.stack.truncate(func_idx);
@@ -1148,7 +1139,6 @@ impl LuaState {
                     }
                 }
             } else {
-                self.dec_c_call_depth();  // Exit pcall on error
                 let err_str = self.create_string("not a function")?;
                 Ok((false, vec![err_str]))
             }
@@ -1157,7 +1147,6 @@ impl LuaState {
             let base = func_idx + 1;
             // pcall expects all return values
             if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
-                self.dec_c_call_depth();  // Exit pcall on error
                 self.stack.truncate(func_idx);
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1186,13 +1175,9 @@ impl LuaState {
                     // Clean up stack
                     self.stack.truncate(func_idx);
 
-                    self.dec_c_call_depth();  // Exit pcall on success
                     Ok((true, results))
                 }
-                Err(LuaError::Yield) => {
-                    self.dec_c_call_depth();  // Exit pcall on yield
-                    Err(LuaError::Yield)
-                }
+                Err(LuaError::Yield) => Err(LuaError::Yield),
                 Err(e) => {
                     // Error occurred - clean up
 
@@ -1216,7 +1201,6 @@ impl LuaState {
                     // Clean up stack
                     self.stack.truncate(func_idx);
 
-                    self.dec_c_call_depth();  // Exit pcall on error
                     Ok((false, vec![err_str]))
                 }
             }
@@ -1231,9 +1215,6 @@ impl LuaState {
         func_idx: usize,
         arg_count: usize,
     ) -> LuaResult<(bool, usize)> {
-        // Increment C call depth (pcall is a C function)
-        self.inc_c_call_depth();
-
         // Save current call stack depth
         let initial_depth = self.call_depth();
 
@@ -1243,7 +1224,6 @@ impl LuaState {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
                 // __call resolution failed - return error
-                self.dec_c_call_depth();  // Exit pcall on error
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
                 self.stack_set(func_idx, err_str)?;
@@ -1298,13 +1278,9 @@ impl LuaState {
                 } else {
                     0
                 };
-                self.dec_c_call_depth();  // Exit pcall on success
                 Ok((true, result_count))
             }
-            Err(LuaError::Yield) => {
-                self.dec_c_call_depth();  // Exit pcall on yield
-                Err(LuaError::Yield)
-            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(e) => {
                 // Error - clean up and return error message
 
@@ -1328,7 +1304,6 @@ impl LuaState {
                 self.stack_set(func_idx, err_str)?;
                 self.set_top(func_idx + 1)?;
 
-                self.dec_c_call_depth();  // Exit pcall on error
                 Ok((false, 1))
             }
         }
@@ -1343,9 +1318,6 @@ impl LuaState {
         args: Vec<LuaValue>,
         err_handler: LuaValue,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Increment C call depth (xpcall is a C function)
-        self.inc_c_call_depth();
-
         // Save error handler and function on stack
         let handler_idx = self.stack_top;
         self.push_value(err_handler)?;
@@ -1364,7 +1336,6 @@ impl LuaState {
         let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
-                self.dec_c_call_depth();  // Exit xpcall on error
                 self.set_top(handler_idx)?;
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1381,7 +1352,6 @@ impl LuaState {
         let base = func_idx + 1;
         if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
             // Error during setup
-            self.dec_c_call_depth();  // Exit xpcall on error
             self.set_top(handler_idx)?;
             let error_msg = self.get_error_msg(e);
             let err_str = self.create_string(&error_msg)?;
@@ -1423,13 +1393,9 @@ impl LuaState {
                 }
 
                 self.set_top(handler_idx)?;
-                self.dec_c_call_depth();  // Exit xpcall on success
                 Ok((true, results))
             }
-            Err(LuaError::Yield) => {
-                self.dec_c_call_depth();  // Exit xpcall on yield
-                Err(LuaError::Yield)
-            }
+            Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(e) => {
                 // Error occurred - call error handler
                 let error_msg = self.get_error_msg(e);
@@ -1460,7 +1426,6 @@ impl LuaState {
                 if let Err(_) = self.push_frame(handler, handler_base, 1, -1) {
                     // Error handler setup failed
                     self.set_top(handler_idx)?;
-                    self.dec_c_call_depth();  // Exit xpcall on error
                     let final_err =
                         self.create_string(&format!("error in error handling: {}", error_msg))?;
                     return Ok((false, vec![final_err]));
@@ -1490,7 +1455,6 @@ impl LuaState {
                         }
 
                         self.set_top(handler_idx)?;
-                        self.dec_c_call_depth();  // Exit xpcall with error handled
                         Ok((false, results))
                     }
                     Err(_) => {
@@ -1500,7 +1464,6 @@ impl LuaState {
                         }
 
                         self.set_top(handler_idx)?;
-                        self.dec_c_call_depth();  // Exit xpcall with error handler failed
                         let final_err =
                             self.create_string(&format!("error in error handling: {}", error_msg))?;
                         Ok((false, vec![final_err]))

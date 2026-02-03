@@ -912,6 +912,24 @@ impl PartialEq for LuaValue {
             return self.ivalue() as f64 == other.fltvalue();
         } else if tt == LUA_VNUMFLT && other_tt == LUA_VNUMINT {
             return self.fltvalue() == other.ivalue() as f64;
+        } else if (tt == LUA_VSHRSTR || tt == LUA_VLNGSTR) && other_tt == LUA_VBINARY {
+            // Compare string with binary - compare bytes
+            let str_bytes = if tt == LUA_VSHRSTR {
+                unsafe { &*(self.value.ptr as *const GcString) }.data.str.as_bytes()
+            } else {
+                unsafe { &*(self.value.ptr as *const GcString) }.data.str.as_bytes()
+            };
+            let binary_bytes = &unsafe { &*(other.value.ptr as *const GcBinary) }.data;
+            return str_bytes == binary_bytes.as_slice();
+        } else if tt == LUA_VBINARY && (other_tt == LUA_VSHRSTR || other_tt == LUA_VLNGSTR) {
+            // Compare binary with string - compare bytes
+            let binary_bytes = &unsafe { &*(self.value.ptr as *const GcBinary) }.data;
+            let str_bytes = if other_tt == LUA_VSHRSTR {
+                unsafe { &*(other.value.ptr as *const GcString) }.data.str.as_bytes()
+            } else {
+                unsafe { &*(other.value.ptr as *const GcString) }.data.str.as_bytes()
+            };
+            return binary_bytes.as_slice() == str_bytes;
         }
         false
     }
