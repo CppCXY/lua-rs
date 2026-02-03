@@ -985,15 +985,16 @@ fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
         return Err(l.error("no literal representation for value in 'format'".to_string()));
     }
     
-    // For strings, convert and quote
-    let s = if let Some(s) = arg.as_str() {
-        s.to_string()
+    // For strings, get bytes - handle both string and binary types
+    let bytes = if let Some(s) = arg.as_str() {
+        s.as_bytes()
+    } else if let Some(b) = arg.as_binary() {
+        b
     } else {
-        l.to_string(arg)?
+        return Err(l.error("no literal representation for value in 'format'".to_string()));
     };
 
     buf.push('"');
-    let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];

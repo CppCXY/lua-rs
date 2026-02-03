@@ -583,6 +583,7 @@ const TAG_FLOAT: u8 = 0x03; // LUA_VNUMFLT
 const TAG_INTEGER: u8 = 0x13; // LUA_VNUMINT
 const TAG_SHORT_STRING: u8 = 0x04; // LUA_VSHRSTR
 const TAG_LONG_STRING: u8 = 0x14; // LUA_VLNGSTR
+const TAG_BINARY: u8 = 0x24; // LUA_VBINARY (custom tag for binary data)
 
 #[allow(dead_code)]
 fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), String> {
@@ -635,6 +636,11 @@ fn write_constant_with_dedup(
             buf.push(TAG_LONG_STRING);
         }
         write_string_with_dedup(buf, lua_string, string_table)?;
+    } else if let Some(binary) = value.as_binary() {
+        // Binary data: write as TAG_BINARY with raw bytes
+        buf.push(TAG_BINARY);
+        write_u32(buf, binary.len() as u32);
+        buf.extend_from_slice(binary);
     } else {
         buf.push(TAG_NIL);
     }
@@ -925,6 +931,16 @@ fn read_constant_with_vm_dedup(
             // Directly create string with VM
             vm.create_string_owned(s)
                 .map_err(|e| format!("failed to create string: {}", e))
+        }
+        TAG_BINARY => {
+            // Read binary data
+            let len = read_u32(cursor)? as usize;
+            let mut bytes = vec![0u8; len];
+            cursor.read_exact(&mut bytes)
+                .map_err(|e| format!("failed to read binary data: {}", e))?;
+            // Create binary value with VM
+            vm.create_binary(bytes)
+                .map_err(|e| format!("failed to create binary: {}", e))
         }
         _ => Err(format!("unknown constant tag: {}", tag)),
     }

@@ -1529,6 +1529,10 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                         // String: get length directly
                         let len = s.len();
                         setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                    } else if let Some(bytes) = rb.as_binary() {
+                        // Binary: get length directly
+                        let len = bytes.len();
+                        setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
                     } else if let Some(table) = rb.as_table() {
                         // Table: check for __len metamethod first
                         let has_metatable = table.get_metatable().is_some();
