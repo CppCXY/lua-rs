@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
-use crate::lua_vm::execute::{self, lua_execute_until};
+use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 use crate::{Chunk, CreateResult, GcObjectPtr, LuaVM, StringPtr, ThreadPtr, UpvaluePtr};
@@ -1154,7 +1154,7 @@ impl LuaState {
             }
 
             // Execute via lua_execute_until - only execute the new frame
-            let result = execute::lua_execute_until(self, initial_depth);
+            let result = execute::lua_execute(self, initial_depth);
 
             match result {
                 Ok(()) => {
@@ -1266,7 +1266,7 @@ impl LuaState {
                 }
             }
             
-            lua_execute_until(self, initial_depth)
+            lua_execute(self, initial_depth)
         };
 
         match result {
@@ -1368,7 +1368,7 @@ impl LuaState {
         }
 
         // Execute
-        let result = execute::lua_execute_until(self, initial_depth);
+        let result = execute::lua_execute(self, initial_depth);
 
         match result {
             Ok(()) => {
@@ -1432,7 +1432,7 @@ impl LuaState {
                 }
 
                 // Execute error handler
-                let handler_result = execute::lua_execute_until(self, initial_depth);
+                let handler_result = execute::lua_execute(self, initial_depth);
 
                 match handler_result {
                     Ok(()) => {
@@ -1510,7 +1510,7 @@ impl LuaState {
                 execute::call::call_c_function(self, 0, nargs, -1)
             } else {
                 // Execute Lua bytecode
-                execute::lua_execute(self)
+                execute::lua_execute(self, 0)
             };
 
             match result {
@@ -1569,7 +1569,7 @@ impl LuaState {
             }
 
             // Execute until yield or completion
-            let result = execute::lua_execute(self);
+            let result = execute::lua_execute(self, 0);
 
             match result {
                 Ok(()) => {

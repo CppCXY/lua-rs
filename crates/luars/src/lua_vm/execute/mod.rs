@@ -43,20 +43,6 @@ use crate::{
 pub use helper::{get_metamethod_event, get_metatable};
 pub use metamethod::TmKind;
 
-/// Main VM execution entry point
-///
-/// Executes bytecode starting from current PC in the active call frame
-/// Returns when all frames are popped (depth reaches 0)
-///
-/// Architecture: Lua-style single loop, NOT recursive calls
-/// - CALL (Lua): push frame, reload chunk/upvalues, continue loop
-/// - CALL (C): execute directly, return immediately (no frame push)
-/// - RETURN: pop frame, reload chunk/upvalues, continue loop
-/// - TAILCALL: replace frame, reload chunk/upvalues, continue loop
-pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
-    lua_execute_until(lua_state, 0)
-}
-
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
 /// without affecting caller frames
@@ -65,7 +51,7 @@ pub fn lua_execute(lua_state: &mut LuaState) -> LuaResult<()> {
 /// - Uses labeled loops instead of goto for context switching
 /// - Function calls/returns just update pointers and continue
 /// - Zero Rust function call overhead
-pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
+pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
     // STARTFUNC: Function context switching point (like Lua C's startfunc label)
     'startfunc: loop {
         // Check if we've reached target depth
@@ -1077,7 +1063,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     save_pc!();
 
                     // Delegate to call handler
-                    match call::handle_call(lua_state, base, a, b, c) {
+                    match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {
                             // C function executed, continue in current frame
                             restore_state!();
@@ -1366,7 +1352,7 @@ pub fn lua_execute_until(lua_state: &mut LuaState, target_depth: usize) -> LuaRe
                     // Call iterator function at base+a+3
                     // Arguments: 2 (state and control)
                     // Results: c (number of loop variables)
-                    match call::handle_call(lua_state, base, a + 3, 3, c + 1) {
+                    match call::handle_call(lua_state, base, a + 3, 3, c + 1, 0) {
                         Ok(FrameAction::Continue) => {
                             // C function completed, results already in place
                             // Fall through to next instruction (TFORLOOP)

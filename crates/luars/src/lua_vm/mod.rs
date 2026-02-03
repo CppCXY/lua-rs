@@ -306,7 +306,7 @@ impl LuaVM {
 
     /// Main VM execution loop (equivalent to luaV_execute)
     fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
-        lua_execute(self.main_state())?;
+        lua_execute(self.main_state(), 0)?;
 
         let main_state = self.main_state();
         // Collect all values from logical stack (0 to stack_top) as return values

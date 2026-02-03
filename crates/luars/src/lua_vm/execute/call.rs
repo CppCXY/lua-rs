@@ -21,19 +21,7 @@ pub enum FrameAction {
 
 /// Handle CALL opcode - Lua style (push frame, don't recurse)
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
-#[inline]
 pub fn handle_call(
-    lua_state: &mut LuaState,
-    base: usize,
-    a: usize,
-    b: usize,
-    c: usize,
-) -> LuaResult<FrameAction> {
-    handle_call_internal(lua_state, base, a, b, c, 0)
-}
-
-/// Internal implementation with status parameter to track __call chain depth
-fn handle_call_internal(
     lua_state: &mut LuaState,
     base: usize,
     a: usize,
@@ -134,7 +122,7 @@ fn handle_call_internal(
 
             // Recursively call with adjusted parameters
             let new_b = if b == 0 { 0 } else { b + 1 };
-            return handle_call_internal(lua_state, base, a, new_b, c, new_status);
+            return handle_call(lua_state, base, a, new_b, c, new_status);
         } else {
             Err(lua_state.error(format!("attempt to call a {} value", func.type_name())))
         }

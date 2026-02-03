@@ -1,7 +1,7 @@
 use crate::lua_value::LuaValue;
 use crate::lua_vm::execute::call::{self, call_c_function};
 use crate::lua_vm::execute::helper::get_binop_metamethod;
-use crate::lua_vm::execute::lua_execute_until;
+use crate::lua_vm::execute::lua_execute;
 use crate::lua_vm::opcode::Instruction;
 /// Metamethod operations
 ///
@@ -341,7 +341,7 @@ pub fn call_tm_res(
             let caller_depth = lua_state.call_depth();
 
             lua_state.push_frame(metamethod, new_base, 2, 1)?;
-            lua_execute_until(lua_state, caller_depth)?;
+            lua_execute(lua_state, caller_depth)?;
         } else {
             call_c_function(lua_state, func_pos, 2, 1)?;
         }
@@ -421,7 +421,7 @@ pub fn call_tm(
             let caller_depth = lua_state.call_depth();
 
             lua_state.push_frame(metamethod, new_base, 3, 0)?;
-            lua_execute_until(lua_state, caller_depth)?;
+            lua_execute(lua_state, caller_depth)?;
         } else {
             call_c_function(lua_state, func_pos, 3, 0)?;
         }
