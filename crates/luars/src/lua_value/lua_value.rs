@@ -632,7 +632,8 @@ impl LuaValue {
 
     #[inline(always)]
     pub fn as_str(&self) -> Option<&str> {
-        if self.ttisstring() {
+        // String type but not binary
+        if self.ttisstring() && !self.ttisbinary() {
             Some(unsafe {
                 let ptr = self.value.ptr;
                 let s: &GcString = &*(ptr as *const GcString);

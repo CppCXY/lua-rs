@@ -5,10 +5,10 @@ mod pack;
 mod pattern;
 mod string_format;
 
+use crate::gc::FunctionBody;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
-use crate::gc::FunctionBody;
 
 pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
@@ -377,18 +377,24 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'find' (string expected)".to_string()))?;
-    let Some(s_str) = s_value.as_str() else {
+
+    // Get string data - handle both string and binary types
+    let s_str = if let Some(s) = s_value.as_str() {
+        s
+    } else {
         return Err(l.error("bad argument #1 to 'find' (string expected)".to_string()));
     };
-    let s_str = s_str.to_string();
 
     let pattern_value = l
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'find' (string expected)".to_string()))?;
-    let Some(pattern) = pattern_value.as_str() else {
+
+    // Get pattern data - handle both string and binary types
+    let pattern = if let Some(p) = pattern_value.as_str() {
+        p
+    } else {
         return Err(l.error("bad argument #2 to 'find' (string expected)".to_string()));
     };
-    let pattern = pattern.to_string();
 
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
     let plain = l.get_arg(4).map(|v| v.is_truthy()).unwrap_or(false);

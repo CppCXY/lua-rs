@@ -27,6 +27,12 @@ fn value_to_string_write(value: &LuaValue, buf: &mut String) -> Option<bool> {
         return Some(true);
     }
 
+    // Handle binary data by converting to lossy UTF-8
+    if let Some(bytes) = value.as_binary() {
+        buf.push_str(&String::from_utf8_lossy(bytes));
+        return Some(true);
+    }
+
     // Convert other types to string (only number and bool can be auto-converted)
     if let Some(i) = value.as_integer() {
         buf.push_str(&i.to_string());
@@ -76,35 +82,8 @@ pub fn concat_strings(
         }
     }
 
-    // Multiple values - optimize concat
-    // Phase 1: Check for empty string optimization and collect lengths
-    let mut total_len = 0usize;
-    let mut all_strings = true;
-    // Collect string_ids first (no borrow conflict)
-    let stack = lua_state.stack_mut();
-    let mut strings = Vec::with_capacity(n);
-    for i in 0..n {
-        let val = &stack[base + a + i];
-        if let Some(str) = val.as_str() {
-            total_len += str.len();
-            strings.push(str);
-        } else {
-            all_strings = false;
-            break;
-        }
-    }
+    let mut result = String::new();
 
-    let mut result = String::with_capacity(total_len);
-    // Fast path: all strings already, check for optimizations
-    if all_strings {
-        for s in strings {
-            result.push_str(s);
-        }
-
-        return lua_state.create_string(&result);
-    }
-    
-    // Slow path: convert each value to string directly into result buffer
     for i in 0..n {
         let value = lua_state.stack_mut()[base + a + i];
         if value_to_string_write(&value, &mut result).is_none() {

@@ -231,17 +231,18 @@ impl<'a> LuaTokenize<'a> {
                 LuaTokenKind::TkPow
             }
             '#' => {
+                // Check if shebang BEFORE bumping
+                let is_line_start = self.reader.is_start_of_line();
                 self.reader.bump();
-                if self.reader.is_start_of_line() && self.line == 1 {
+                
+                // Shebang only on first line at start, and must be followed by !
+                if is_line_start && self.line == 1 {
                     self.reader.eat_while(|ch| ch != '\n' && ch != '\r');
                     return LuaTokenKind::TkShebang;
                 }
 
-                if self.reader.current_char() != '!' {
-                    return LuaTokenKind::TkLen;
-                }
-                self.reader.eat_while(|ch| ch != '\n' && ch != '\r');
-                LuaTokenKind::TkShebang
+                // Otherwise it's the length operator
+                LuaTokenKind::TkLen
             }
             '&' => {
                 self.reader.bump();
