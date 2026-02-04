@@ -1034,7 +1034,32 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     table_ops::exec_gettable(lua_state, instr, base, frame_idx, &mut pc)?;
                 }
                 OpCode::GetI => {
-                    table_ops::exec_geti(lua_state, instr, base, frame_idx, &mut pc)?;
+                    // GETI: R[A] := R[B][C] (integer key)
+                    // HOT PATH: Uses fast_geti() for zero-cost abstraction
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as i64;
+
+                    let stack = lua_state.stack_mut();
+                    let rb = stack[base + b];
+
+                    // Try fast path via inline fast_geti
+                    let result = if let Some(table_ref) = rb.as_table() {
+                        table_ref.impl_table.fast_geti(c)
+                    } else {
+                        None
+                    };
+
+                    if let Some(val) = result {
+                        // Fast path succeeded
+                        let stack = lua_state.stack_mut();
+                        stack[base + a] = val;
+                    } else {
+                        // Slow path: metamethod lookup
+                        save_pc!();
+                        table_ops::exec_geti(lua_state, instr, base, frame_idx, &mut pc)?;
+                        restore_state!();
+                    }
                 }
                 OpCode::GetField => {
                     table_ops::exec_getfield(

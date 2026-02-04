@@ -5,6 +5,7 @@ use crate::lua_value::{
     LuaValue,
     lua_value::{LUA_VEMPTY, LUA_VNIL, Value},
 };
+
 use std::alloc::{self, Layout};
 use std::ptr;
 
@@ -47,13 +48,10 @@ const DUMMY_NODE: Node = Node {
 /// - Tags are accessed with positive offsets: array[sizeof(u32) + k]
 /// - This saves 43% memory vs storing full TValue structs
 pub struct NativeTable {
-    /// Array pointer - points BETWEEN values and tags
-    /// Values stored at negative offsets, tags at positive offsets
-    /// Layout: [... Value1, Value0, lenhint(u32), tag0, tag1, ...]
-    ///                                ^ array points here
-    array: *mut u8,
-    /// Array size (number of elements)
-    asize: u32,
+    /// Array pointer - points BETWEEN values and tags (PUBLIC for VM hot path)
+    pub(crate) array: *mut u8,
+    /// Array size in elements (PUBLIC for VM hot path)
+    pub(crate) asize: u32,
 
     /// Hash part (Node array)
     node: *mut Node,
@@ -395,18 +393,45 @@ impl NativeTable {
         unsafe { self.node.add(index) }
     }
 
+    /// Fast GETI path - mirrors Lua 5.5's luaH_fastgeti macro
+    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
+    /// Called directly from VM execute loop for maximum performance
+    #[inline(always)]
+    pub fn fast_geti(&self, key: i64) -> Option<LuaValue> {
+        // Fast path: array bounds check
+        if key >= 1 && key <= self.asize as i64 {
+            let k = (key - 1) as usize;
+            unsafe {
+                // Direct array access (zero function calls)
+                // Layout: Tags at array + sizeof(u32) + k
+                //         Values at array - sizeof(Value) * (1 + k)
+                let tag_ptr = (self.array as *const u8).add(4 + k);
+                let tt = *tag_ptr;
+                
+                if tt != LUA_VNIL && tt != LUA_VEMPTY {
+                    let value_ptr = (self.array as *mut Value).sub(1 + k);
+                    let value = *value_ptr;
+                    return Some(LuaValue { value, tt });
+                }
+            }
+            return None;
+        }
+        
+        // Slow path: hash part lookup
+        if self.sizenode() > 0 {
+            let key_val = LuaValue::integer(key);
+            return self.get_from_hash(&key_val);
+        }
+        
+        None
+    }
+
     /// Get value from array part
+    /// OPTIMIZED: Inline array access for maximum performance
     #[inline(always)]
     pub fn get_int(&self, key: i64) -> Option<LuaValue> {
-        unsafe {
-            if let Some(val) = self.read_array(key) {
-                return Some(val);
-            }
-        }
-
-        // Try hash part
-        let key_val = LuaValue::integer(key);
-        self.get_from_hash(&key_val)
+        // Delegate to fast_geti for consistency
+        self.fast_geti(key)
     }
 
     /// Set value in array part
@@ -474,24 +499,30 @@ impl NativeTable {
     }
 
     /// Fast path for short string lookup - mimics luaH_Hgetshortstr
+    /// OPTIMIZED: Reduced branches in hot loop
     #[inline(always)]
     fn get_shortstr_fast(&self, key: &LuaValue) -> Option<LuaValue> {
         let mut node = self.mainposition(key);
+        let key_ptr = unsafe { key.value.i };
 
         unsafe {
-            loop {
+            // Unroll first iteration (most common case: found in main position)
+            if (*node).key.is_string() && (*node).key.value.i == key_ptr {
+                let val = (*node).value;
+                return if val.is_nil() { None } else { Some(val) };
+            }
+
+            let mut next = (*node).next;
+            while next != 0 {
+                node = node.offset(next as isize);
                 // Short strings: pointer comparison only (interned)
-                if (*node).key.is_string() && (*node).key.value.i == key.value.i {
+                if (*node).key.is_string() && (*node).key.value.i == key_ptr {
                     let val = (*node).value;
                     return if val.is_nil() { None } else { Some(val) };
                 }
-
-                let next = (*node).next;
-                if next == 0 {
-                    return None;
-                }
-                node = node.offset(next as isize);
+                next = (*node).next;
             }
+            None
         }
     }
 
