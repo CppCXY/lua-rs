@@ -545,8 +545,8 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = align_str.parse().map_err(|_| {
                         l.error("bad argument to 'pack' (invalid alignment)".to_string())
                     })?;
-                    if n < 1 || n > 8 {
-                        return Err(l.error("alignment out of limits [1,8]".to_string()));
+                    if n < 1 || n > 16 {
+                        return Err(l.error("alignment out of limits [1,16]".to_string()));
                     }
                     // Check if n is a power of 2
                     if n & (n - 1) != 0 {
@@ -708,8 +708,8 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = align_str.parse().map_err(|_| {
                         l.error("bad argument to 'packsize' (invalid alignment)".to_string())
                     })?;
-                    if n < 1 || n > 8 {
-                        return Err(l.error("alignment out of limits [1,8]".to_string()));
+                    if n < 1 || n > 16 {
+                        return Err(l.error("alignment out of limits [1,16]".to_string()));
                     }
                     // Check if n is a power of 2
                     if n & (n - 1) != 0 {
@@ -1091,15 +1091,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("data string too short".to_string()));
                 }
                 let val: i64 = endianness.from_bytes(&bytes[idx..idx+8]);
-                // Check if this might be a float packed as integer (for large float values)
-                // Try to interpret as f64 and see if it's a valid float
-                let as_float = f64::from_bits(val as u64);
-                if as_float.is_finite() && as_float.abs() > 1e20 {
-                    // This looks like a large float that was packed via IEEE754 bits
-                    results.push(LuaValue::number(as_float));
-                } else {
-                    results.push(LuaValue::integer(val));
-                }
+                results.push(LuaValue::integer(val));
                 idx += 8;
             }
 
@@ -1238,8 +1230,8 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = align_str.parse().map_err(|_| {
                         l.error("bad argument to 'unpack' (invalid alignment)".to_string())
                     })?;
-                    if n < 1 || n > 8 {
-                        return Err(l.error("alignment out of limits [1,8]".to_string()));
+                    if n < 1 || n > 16 {
+                        return Err(l.error("alignment out of limits [1,16]".to_string()));
                     }
                     // Check if n is a power of 2
                     if n & (n - 1) != 0 {

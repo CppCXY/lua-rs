@@ -1021,7 +1021,11 @@ impl LuaState {
             LuaError::OutOfMemory => {
                 format!("out of memory: {}", self.vm_mut().gc.get_error_message())
             }
-            _ => format!("{}: {}", e, std::mem::take(&mut self.error_msg)),
+            _ => {
+                // Return just the error message without "Runtime Error: " prefix
+                // to match Lua 5.5 behavior (pcall returns the raw error message)
+                std::mem::take(&mut self.error_msg)
+            }
         }
     }
 
