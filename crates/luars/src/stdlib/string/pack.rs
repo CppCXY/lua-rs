@@ -108,6 +108,25 @@ macro_rules! impl_from_bytes {
 
 impl_from_bytes!(i16, 2, u16, 2, i32, 4, u32, 4, i64, 8, u64, 8, f32, 4, f64, 8);
 
+// Helper function to check alignment requirements
+fn check_alignment(size: usize, max_alignment: usize) -> Result<(), String> {
+    // Alignment is min(size, max_alignment)
+    let align = size.min(max_alignment);
+    // Check if alignment is power of 2 (and > 1)
+    if align > 1 && (align & (align - 1)) != 0 {
+        return Err("format asks for alignment not power of 2".to_string());
+    }
+    Ok(())
+}
+
+// Helper function to check size overflow (for packsize)
+fn checked_add_size(current: usize, add: usize) -> Result<usize, String> {
+    const MAX_SIZE: usize = i64::MAX as usize;
+    if current > MAX_SIZE - add {
+        return Err("format result too large".to_string());
+    }
+    Ok(current + add)
+}
 
 /// string.pack(fmt, v1, v2, ...) - Pack values into binary string
 pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
@@ -125,6 +144,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
     let mut value_idx = 2; // Start from argument 2 (after format string)
     let mut chars = fmt_str.chars().peekable();
     let mut endianness = Endianness::Native; // Default to native endianness
+    let mut max_alignment: usize = 1; // Default max alignment
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -213,6 +233,9 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     n
                 };
 
+                // Check alignment requirements
+                check_alignment(size, max_alignment).map_err(|e| l.error(e))?;
+
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -222,6 +245,15 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })?;
+
+                // For size < 8, check if value fits in the specified number of bytes
+                if size < 8 {
+                    let max_val = (1i64 << (size * 8 - 1)) - 1;
+                    let min_val = -(1i64 << (size * 8 - 1));
+                    if val > max_val || val < min_val {
+                        return Err(l.error("integer overflow".to_string()));
+                    }
+                }
 
                 // Pack the value as signed integer with specified size
                 let bytes = match endianness {
@@ -283,15 +315,33 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     n
                 };
 
+                // Check alignment requirements
+                check_alignment(size, max_alignment).map_err(|e| l.error(e))?;
+
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
-                let val = l
+                let val_i64 = l
                     .get_arg(value_idx)
                     .and_then(|v| v.as_integer())
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
-                    })? as u64;
+                    })?;
+                
+                // Check for negative values in unsigned format
+                if val_i64 < 0 {
+                    return Err(l.error("unsigned overflow".to_string()));
+                }
+                
+                let val = val_i64 as u64;
+
+                // For size < 8, check if value fits in the specified number of bytes
+                if size < 8 {
+                    let max_val = (1u64 << (size * 8)) - 1;
+                    if val > max_val {
+                        return Err(l.error("unsigned overflow".to_string()));
+                    }
+                }
 
                 // Pack the value as unsigned integer with specified size
                 let bytes = match endianness {
@@ -381,6 +431,29 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 value_idx += 1;
             }
 
+            'J' => {
+                // unsigned lua_Integer (8 bytes, u64)
+                if value_idx > argc {
+                    return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
+                }
+                let value = l.get_arg(value_idx).ok_or_else(|| {
+                    l.error("bad argument to 'pack' (number expected)".to_string())
+                })?;
+                let n = if let Some(i) = value.as_integer() {
+                    // Check for negative values
+                    if i < 0 {
+                        return Err(l.error("unsigned overflow".to_string()));
+                    }
+                    i as u64
+                } else if let Some(f) = value.as_number() {
+                    f.to_bits()
+                } else {
+                    return Err(l.error("bad argument to 'pack' (number expected)".to_string()));
+                };
+                result.extend_from_slice(&endianness.to_bytes(n));
+                value_idx += 1;
+            }
+
             'T' => {
                 // size_t (8 bytes on 64-bit)
                 if value_idx > argc {
@@ -454,6 +527,10 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .parse()
                     .map_err(|_| l.error("bad argument to 'pack' (invalid size)".to_string()))?;
 
+                // Check if adding this size would overflow
+                checked_add_size(result.len(), size)
+                    .map_err(|_| l.error("pack result too long".to_string()))?;
+
                 if value_idx > argc {
                     return Err(l.error("bad argument to 'pack' (not enough values)".to_string()));
                 }
@@ -504,7 +581,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                                 4 // default int size
                             }
                         }
-                        'd' | 'n' | 'j' | 'T' => 8,
+                        'd' | 'n' | 'j' | 'J' | 'T' => 8,
                         _ => 1,
                     };
                     // Add padding bytes to align to boundary
@@ -538,7 +615,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     }
                 }
                 
-                let _alignment = if align_str.is_empty() {
+                max_alignment = if align_str.is_empty() {
                     // No number specified, use default max alignment (8 for double)
                     8
                 } else {
@@ -554,8 +631,6 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     }
                     n
                 };
-                // Note: We'd need to store max_alignment in the loop to properly implement this.
-                // For now, just validate and consume the number.
             }
 
             _ => {
@@ -590,8 +665,8 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
     while let Some(ch) = chars.next() {
         match ch {
             ' ' | '\t' | '\n' | '\r' => continue,
-            'b' | 'B' => size += 1,
-            'h' | 'H' => size += 2,
+            'b' | 'B' => size = checked_add_size(size, 1).map_err(|e| l.error(e))?,
+            'h' | 'H' => size = checked_add_size(size, 2).map_err(|e| l.error(e))?,
 
             'i' | 'I' | 'l' | 'L' => {
                 // Check for size suffix (i[n] or I[n] where n is 1-16)
@@ -605,7 +680,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                 }
 
                 if size_str.is_empty() {
-                    size += 4; // default int size
+                    size = checked_add_size(size, 4).map_err(|e| l.error(e))?; // default int size
                 } else {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'packsize' (invalid size)".to_string())
@@ -613,19 +688,20 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                     if n < 1 || n > 16 {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
-                    size += n;
+                    size = checked_add_size(size, n).map_err(|e| l.error(e))?;
                 }
             }
 
-            'f' => size += 4,
-            'd' => size += 8,
-            'j' | 'n' | 'T' => {
+            'f' => size = checked_add_size(size, 4).map_err(|e| l.error(e))?,
+            'd' => size = checked_add_size(size, 8).map_err(|e| l.error(e))?,
+            'j' | 'J' | 'n' | 'T' => {
                 // j: lua_Integer (8 bytes, i64)
+                // J: unsigned lua_Integer (8 bytes, u64)
                 // n: lua_Number (8 bytes, f64)
                 // T: size_t (8 bytes on 64-bit platforms)
-                size += 8;
+                size = checked_add_size(size, 8).map_err(|e| l.error(e))?;
             }
-            'x' => size += 1,
+            'x' => size = checked_add_size(size, 1).map_err(|e| l.error(e))?,
 
             'X' => {
                 // Alignment padding - peek at next format option to determine alignment
@@ -654,13 +730,13 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                                 4 // default int size
                             }
                         }
-                        'd' | 'n' | 'j' | 'T' => 8,
+                        'd' | 'n' | 'j' | 'J' | 'T' => 8,
                         _ => 1, // For other options, use minimal alignment
                     };
                     // Add padding to align to boundary
                     if align > 1 {
                         let padding = (align - (size % align)) % align;
-                        size += padding;
+                        size = checked_add_size(size, padding).map_err(|e| l.error(e))?;
                     }
                 }
                 // X itself doesn't add size, it just aligns
@@ -682,7 +758,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                 let n: usize = size_str.parse().map_err(|_| {
                     l.error("bad argument to 'packsize' (invalid format)".to_string())
                 })?;
-                size += n;
+                size = checked_add_size(size, n).map_err(|e| l.error(e))?;
             }
 
             'z' | 's' => {
@@ -930,18 +1006,6 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         }
                     }
                 };
-                // Check if this might be a float packed as integer (for large float values)
-                // Only treat as float if it's truly out of i64 range
-                if size >= 8 {
-                    let as_float = f64::from_bits(val as u64);
-                    // Only return float if it's a very large value that exceeded i64 range
-                    // AND if the original value was likely a float (indicated by magnitude)
-                    if as_float.is_finite() && as_float.abs() > 1e20 {
-                        results.push(LuaValue::number(as_float));
-                        idx += size;
-                        continue;
-                    }
-                }
                 results.push(LuaValue::integer(val));
                 idx += size;
             }
@@ -1053,16 +1117,6 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         }
                     }
                 };
-                // Check if this might be a float packed as integer (for large float values)
-                if size >= 8 {
-                    let as_float = f64::from_bits(val);
-                    if as_float.is_finite() && as_float.abs() > 1e20 {
-                        // This looks like a large float that was packed via IEEE754 bits
-                        results.push(LuaValue::number(as_float));
-                        idx += size;
-                        continue;
-                    }
-                }
                 results.push(LuaValue::integer(val as i64));
                 idx += size;
             }
@@ -1092,6 +1146,16 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 }
                 let val: i64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::integer(val));
+                idx += 8;
+            }
+
+            'J' => {
+                // unsigned lua_Integer (8 bytes, u64)
+                if idx + 8 > bytes.len() {
+                    return Err(l.error("data string too short".to_string()));
+                }
+                let val: u64 = endianness.from_bytes(&bytes[idx..idx+8]);
+                results.push(LuaValue::integer(val as i64));
                 idx += 8;
             }
 
