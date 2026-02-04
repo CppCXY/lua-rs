@@ -56,37 +56,27 @@ pub fn handle_call(
         .stack_get(func_idx)
         .ok_or_else(|| lua_state.error("CALL: function not found".to_string()))?;
 
-    // Check if it's a light C function
-    if func.is_cfunction() {
+    // Check if it's a GC function (Lua or C)
+    if func.is_lua_function() {
+        // Lua function call: push new frame
+        let new_base = func_idx + 1;
+        lua_state.push_frame(func, new_base, nargs, nresults)?;
+
+        // Update call_status with __call count if status is non-zero
+        if status != 0 {
+            let frame_idx = lua_state.call_depth() - 1;
+            let current_status = lua_state
+                .get_frame(frame_idx)
+                .map(|f| f.call_status)
+                .unwrap_or(0);
+            let new_status = current_status | status;
+            lua_state.set_frame_call_status(frame_idx, new_status);
+        }
+
+        Ok(FrameAction::Call)
+    } else if func.is_c_callable() {
         call_c_function(lua_state, func_idx, nargs, nresults)?;
         return Ok(FrameAction::Continue);
-    }
-
-    // Check if it's a GC function (Lua or C)
-    if let Some(new_func) = func.as_lua_function() {
-        if new_func.is_lua_function() {
-            // Lua function call: push new frame
-            let new_base = func_idx + 1;
-            lua_state.push_frame(func, new_base, nargs, nresults)?;
-
-            // Update call_status with __call count if status is non-zero
-            if status != 0 {
-                let frame_idx = lua_state.call_depth() - 1;
-                let current_status = lua_state
-                    .get_frame(frame_idx)
-                    .map(|f| f.call_status)
-                    .unwrap_or(0);
-                let new_status = current_status | status;
-                lua_state.set_frame_call_status(frame_idx, new_status);
-            }
-
-            Ok(FrameAction::Call)
-        } else if new_func.is_c_function() {
-            call_c_function(lua_state, func_idx, nargs, nresults)?;
-            Ok(FrameAction::Continue)
-        } else {
-            Err(lua_state.error("CALL: unknown function type".to_string()))
-        }
     } else {
         // Handle __call metamethod
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
@@ -147,7 +137,7 @@ pub fn resolve_call_chain(
             .ok_or_else(|| lua_state.error("resolve_call_chain: function not found".to_string()))?;
 
         // Check if we have a callable function
-        if func.is_cfunction() || func.is_lua_function() {
+        if func.is_c_callable() || func.is_lua_function() {
             // Found a real function - done
             return Ok((current_arg_count, ccmt_depth));
         }
@@ -203,16 +193,12 @@ pub fn call_c_function(
         .ok_or_else(|| lua_state.error("C function not found".to_string()))?;
 
     // Get the C function pointer - handle both light C functions and GC C functions
-    let c_func: CFunction = if func.is_cfunction() {
+    let c_func: CFunction = if let Some(c_func) = func.as_cfunction() {
         // Light C function - extract directly from value
-        unsafe {
-            let func_ptr = func.value.f as usize;
-            std::mem::transmute(func_ptr)
-        }
-    } else if let Some(func) = func.as_lua_function() {
+        c_func
+    } else if let Some(cclsoure) = func.as_cclosure() {
         // GC function - need to get from object pool
-        func.c_function()
-            .ok_or_else(|| lua_state.error("Not a C function".to_string()))?
+        cclsoure.func()
     } else {
         return Err(lua_state.error("Not a callable value".to_string()));
     };
@@ -382,125 +368,74 @@ pub fn handle_tailcall(
         .ok_or_else(|| lua_state.error("TAILCALL: function not found".to_string()))?;
 
     // Check if it's a function
-    if let Some(new_func) = func.as_lua_function() {
-        if new_func.is_lua_function() {
-            let current_frame_idx = lua_state.call_depth() - 1;
+    if func.is_lua_function() {
+        let current_frame_idx = lua_state.call_depth() - 1;
 
-            // Close upvalues from current call before moving arguments
-            // This is critical: like Lua 5.5's OP_TAILCALL which calls luaF_closeupval(L, base)
-            // We need to close upvalues that reference the current frame's locals
-            // because we're about to overwrite them with the new function's arguments
-            lua_state.close_upvalues(base);
+        // Close upvalues from current call before moving arguments
+        // This is critical: like Lua 5.5's OP_TAILCALL which calls luaF_closeupval(L, base)
+        // We need to close upvalues that reference the current frame's locals
+        // because we're about to overwrite them with the new function's arguments
+        lua_state.close_upvalues(base);
 
-            // Like Lua 5.5's luaD_pretailcall: move function and arguments down together
-            // Move func + args: [func, arg1, arg2, ...] to [ci->func, ci->func+1, ci->func+2, ...]
-            // This is: [base-1, base, base+1, ...] positions
-            let narg1 = nargs + 1; // Include function itself
-            for i in 0..narg1 {
-                let src_idx = func_idx + i;
-                let dst_idx = (base - 1) + i;
-                if let Some(val) = lua_state.stack_get(src_idx) {
-                    lua_state.stack_set(dst_idx, val)?;
-                } else {
-                    lua_state.stack_set(dst_idx, LuaValue::nil())?;
-                }
-            }
-
-            // After moving, update func reference to the moved position
-            let moved_func = lua_state.stack_get(base - 1).unwrap_or(func);
-
-            // Get the moved function body for parameter info
-            let moved_func_body = moved_func.as_lua_function().ok_or_else(|| {
-                lua_state.error("TAILCALL: moved function is not a Lua function".to_string())
-            })?;
-
-            // Pad missing parameters with nil if needed
-            if let Some(chunk) = moved_func_body.chunk() {
-                let numparams = chunk.param_count as usize;
-                let mut current_nargs = nargs;
-
-                // Pad fixed parameters with nil if needed
-                while current_nargs < numparams {
-                    lua_state.stack_set(base + current_nargs, LuaValue::nil())?;
-                    current_nargs += 1;
-                }
-
-                // nextraargs = max(0, nargs - numparams)
-                let new_nextraargs = if nargs > numparams {
-                    (nargs - numparams) as i32
-                } else {
-                    0
-                };
-
-                lua_state.set_frame_nextraargs(current_frame_idx, new_nextraargs);
-
-                // Update frame top: func + 1 + maxstacksize
-                let frame_top = (base - 1) + 1 + chunk.max_stack_size;
-                lua_state.set_frame_top(current_frame_idx, frame_top);
-
-                // Set stack top: func + narg1 (after padding)
-                let stack_top = base + current_nargs;
-                lua_state.set_top(stack_top)?;
-            }
-
-            // Update frame func pointer to the moved function
-            lua_state.set_frame_func(current_frame_idx, moved_func);
-
-            // Reset PC to 0 to start executing the new function from beginning
-            lua_state.set_frame_pc(current_frame_idx, 0);
-
-            // Return FrameAction::TailCall - main loop will load new chunk and continue
-            Ok(FrameAction::TailCall)
-        } else if new_func.is_c_function() {
-            // C function tail call: execute directly and continue
-            call_c_function(lua_state, func_idx, nargs, -1)?;
-
-            // Move results to current frame base (for return)
-            // Use stack_top to determine actual number of results
-            let result_top = lua_state.get_top();
-            let nresults = if result_top > func_idx {
-                result_top - func_idx
+        // Like Lua 5.5's luaD_pretailcall: move function and arguments down together
+        // Move func + args: [func, arg1, arg2, ...] to [ci->func, ci->func+1, ci->func+2, ...]
+        // This is: [base-1, base, base+1, ...] positions
+        let narg1 = nargs + 1; // Include function itself
+        for i in 0..narg1 {
+            let src_idx = func_idx + i;
+            let dst_idx = (base - 1) + i;
+            if let Some(val) = lua_state.stack_get(src_idx) {
+                lua_state.stack_set(dst_idx, val)?;
             } else {
-                0
-            };
-
-            for i in 0..nresults {
-                let result = lua_state.stack_get(func_idx + i).unwrap_or(LuaValue::nil());
-                lua_state.stack_set(base + i, result)?;
+                lua_state.stack_set(dst_idx, LuaValue::nil())?;
             }
-
-            // The next RETURN instruction will use frame.top to determine how many values to return
-            let new_top = base + nresults;
-            lua_state.set_top(new_top)?;
-            if let Some(frame) = lua_state.current_frame_mut() {
-                frame.top = new_top;
-            }
-
-            // C function done, just continue (it's like a return for tail call)
-            Ok(FrameAction::Continue)
-        } else if func.is_cfunction() {
-            // Light C function tail call
-            call_c_function(lua_state, func_idx, nargs, -1)?;
-
-            // Move results to current frame base
-            // Use stack_top to determine actual number of results
-            let result_top = lua_state.get_top();
-            let nresults = if result_top > func_idx {
-                result_top - func_idx
-            } else {
-                0
-            };
-
-            for i in 0..nresults {
-                let result = lua_state.stack_get(func_idx + i).unwrap_or(LuaValue::nil());
-                lua_state.stack_set(base + i, result)?;
-            }
-
-            Ok(FrameAction::Continue)
-        } else {
-            Err(lua_state.error("TAILCALL: unknown function type".to_string()))
         }
-    } else if func.is_cfunction() {
+
+        // After moving, update func reference to the moved position
+        let moved_func = lua_state.stack_get(base - 1).unwrap_or(func);
+
+        // Get the moved function body for parameter info
+        let moved_func_body = moved_func.as_lua_function().ok_or_else(|| {
+            lua_state.error("TAILCALL: moved function is not a Lua function".to_string())
+        })?;
+
+        // Pad missing parameters with nil if needed
+        let chunk = moved_func_body.chunk();
+        let numparams = chunk.param_count as usize;
+        let mut current_nargs = nargs;
+
+        // Pad fixed parameters with nil if needed
+        while current_nargs < numparams {
+            lua_state.stack_set(base + current_nargs, LuaValue::nil())?;
+            current_nargs += 1;
+        }
+
+        // nextraargs = max(0, nargs - numparams)
+        let new_nextraargs = if nargs > numparams {
+            (nargs - numparams) as i32
+        } else {
+            0
+        };
+
+        lua_state.set_frame_nextraargs(current_frame_idx, new_nextraargs);
+
+        // Update frame top: func + 1 + maxstacksize
+        let frame_top = (base - 1) + 1 + chunk.max_stack_size;
+        lua_state.set_frame_top(current_frame_idx, frame_top);
+
+        // Set stack top: func + narg1 (after padding)
+        let stack_top = base + current_nargs;
+        lua_state.set_top(stack_top)?;
+
+        // Update frame func pointer to the moved function
+        lua_state.set_frame_func(current_frame_idx, moved_func);
+
+        // Reset PC to 0 to start executing the new function from beginning
+        lua_state.set_frame_pc(current_frame_idx, 0);
+
+        // Return FrameAction::TailCall - main loop will load new chunk and continue
+        Ok(FrameAction::TailCall)
+    } else if func.is_cfunction() || func.is_cclosure() {
         // Light C function tail call (direct, not from object pool)
         call_c_function_tailcall(lua_state, func_idx, nargs, base)?;
         Ok(FrameAction::Continue)
@@ -535,14 +470,10 @@ fn call_c_function_tailcall(
         .ok_or_else(|| lua_state.error("C function not found".to_string()))?;
 
     // Get the C function pointer
-    let c_func: CFunction = if func.is_cfunction() {
-        unsafe {
-            let func_ptr = func.value.f as usize;
-            std::mem::transmute(func_ptr)
-        }
-    } else if let Some(func) = func.as_lua_function() {
-        func.c_function()
-            .ok_or_else(|| lua_state.error("Not a C function".to_string()))?
+    let c_func: CFunction = if let Some(c_func) = func.as_cfunction() {
+        c_func
+    } else if let Some(cclosure) = func.as_cclosure() {
+        cclosure.func()
     } else {
         return Err(lua_state.error("Not a callable value".to_string()));
     };

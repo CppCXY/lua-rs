@@ -1,6 +1,6 @@
 use crate::{
     GcObjectKind, LuaFunction, LuaTable,
-    lua_value::{LuaString, LuaUpvalue, LuaUserdata},
+    lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata},
     lua_vm::LuaState,
 };
 
@@ -292,12 +292,13 @@ impl<T> Gc<T> {
 }
 
 pub type GcString = Gc<LuaString>;
+pub type GcBinary = Gc<Vec<u8>>;
 pub type GcTable = Gc<LuaTable>;
 pub type GcFunction = Gc<LuaFunction>;
+pub type GcCClosure = Gc<CClosureFunction>;
 pub type GcUpvalue = Gc<LuaUpvalue>;
 pub type GcThread = Gc<LuaState>;
 pub type GcUserdata = Gc<LuaUserdata>;
-pub type GcBinary = Gc<Vec<u8>>;
 
 #[derive(Debug)]
 pub struct GcPtr<T> {
@@ -366,22 +367,24 @@ impl<T> GcPtr<T> {
 }
 
 pub type UpvaluePtr = GcPtr<GcUpvalue>;
+pub type BinaryPtr = GcPtr<GcBinary>;
 pub type TablePtr = GcPtr<GcTable>;
 pub type StringPtr = GcPtr<GcString>;
 pub type FunctionPtr = GcPtr<GcFunction>;
-pub type BinaryPtr = GcPtr<GcBinary>;
+pub type CClosurePtr = GcPtr<GcCClosure>;
 pub type UserdataPtr = GcPtr<GcUserdata>;
 pub type ThreadPtr = GcPtr<GcThread>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GcObjectPtr {
     String(StringPtr),
+    Binary(BinaryPtr),
     Table(TablePtr),
     Function(FunctionPtr),
+    CClosure(CClosurePtr),
     Upvalue(UpvaluePtr),
     Thread(ThreadPtr),
     Userdata(UserdataPtr),
-    Binary(BinaryPtr),
 }
 
 impl GcObjectPtr {
@@ -390,6 +393,7 @@ impl GcObjectPtr {
             GcObjectPtr::String(p) => Some(&p.as_ref().header),
             GcObjectPtr::Table(p) => Some(&p.as_ref().header),
             GcObjectPtr::Function(p) => Some(&p.as_ref().header),
+            GcObjectPtr::CClosure(p) => Some(&p.as_ref().header),
             GcObjectPtr::Upvalue(p) => Some(&p.as_ref().header),
             GcObjectPtr::Thread(p) => Some(&p.as_ref().header),
             GcObjectPtr::Userdata(p) => Some(&p.as_ref().header),
@@ -402,6 +406,7 @@ impl GcObjectPtr {
             GcObjectPtr::String(p) => Some(&mut p.as_mut_ref().header),
             GcObjectPtr::Table(p) => Some(&mut p.as_mut_ref().header),
             GcObjectPtr::Function(p) => Some(&mut p.as_mut_ref().header),
+            GcObjectPtr::CClosure(p) => Some(&mut p.as_mut_ref().header),
             GcObjectPtr::Upvalue(p) => Some(&mut p.as_mut_ref().header),
             GcObjectPtr::Thread(p) => Some(&mut p.as_mut_ref().header),
             GcObjectPtr::Userdata(p) => Some(&mut p.as_mut_ref().header),
@@ -414,6 +419,7 @@ impl GcObjectPtr {
             GcObjectPtr::String(_) => GcObjectKind::String,
             GcObjectPtr::Table(_) => GcObjectKind::Table,
             GcObjectPtr::Function(_) => GcObjectKind::Function,
+            GcObjectPtr::CClosure(_) => GcObjectKind::CClosure,
             GcObjectPtr::Upvalue(_) => GcObjectKind::Upvalue,
             GcObjectPtr::Thread(_) => GcObjectKind::Thread,
             GcObjectPtr::Userdata(_) => GcObjectKind::Userdata,
@@ -426,6 +432,7 @@ impl GcObjectPtr {
             GcObjectPtr::String(p) => p.as_ref().header.index,
             GcObjectPtr::Table(p) => p.as_ref().header.index,
             GcObjectPtr::Function(p) => p.as_ref().header.index,
+            GcObjectPtr::CClosure(p) => p.as_ref().header.index,
             GcObjectPtr::Upvalue(p) => p.as_ref().header.index,
             GcObjectPtr::Thread(p) => p.as_ref().header.index,
             GcObjectPtr::Userdata(p) => p.as_ref().header.index,
@@ -483,6 +490,12 @@ impl From<UserdataPtr> for GcObjectPtr {
     }
 }
 
+impl From<CClosurePtr> for GcObjectPtr {
+    fn from(ptr: CClosurePtr) -> Self {
+        GcObjectPtr::CClosure(ptr)
+    }
+}
+
 // ============ GC-managed Objects ============
 pub enum GcObjectOwner {
     String(Box<GcString>),
@@ -491,6 +504,7 @@ pub enum GcObjectOwner {
     Upvalue(Box<GcUpvalue>),
     Thread(Box<GcThread>),
     Userdata(Box<GcUserdata>),
+    CClosure(Box<GcCClosure>),
     Binary(Box<GcBinary>),
 }
 
@@ -504,6 +518,7 @@ impl GcObjectOwner {
             GcObjectOwner::String(s) => &s.header,
             GcObjectOwner::Table(t) => &t.header,
             GcObjectOwner::Function(f) => &f.header,
+            GcObjectOwner::CClosure(c) => &c.header,
             GcObjectOwner::Upvalue(u) => &u.header,
             GcObjectOwner::Thread(t) => &t.header,
             GcObjectOwner::Userdata(u) => &u.header,
@@ -516,6 +531,7 @@ impl GcObjectOwner {
             GcObjectOwner::String(s) => &mut s.header,
             GcObjectOwner::Table(t) => &mut t.header,
             GcObjectOwner::Function(f) => &mut f.header,
+            GcObjectOwner::CClosure(c) => &mut c.header,
             GcObjectOwner::Upvalue(u) => &mut u.header,
             GcObjectOwner::Thread(t) => &mut t.header,
             GcObjectOwner::Userdata(u) => &mut u.header,
@@ -574,6 +590,13 @@ impl GcObjectOwner {
         }
     }
 
+    pub fn as_closure_ptr(&self) -> Option<CClosurePtr> {
+        match self {
+            GcObjectOwner::CClosure(c) => Some(CClosurePtr::new(c.as_ref() as *const GcCClosure)),
+            _ => None,
+        }
+    }
+
     pub fn as_gc_ptr(&self) -> GcObjectPtr {
         match self {
             GcObjectOwner::String(s) => {
@@ -596,6 +619,9 @@ impl GcObjectOwner {
             }
             GcObjectOwner::Binary(b) => {
                 GcObjectPtr::Binary(BinaryPtr::new(b.as_ref() as *const GcBinary))
+            }
+            GcObjectOwner::CClosure(c) => {
+                GcObjectPtr::CClosure(CClosurePtr::new(c.as_ref() as *const GcCClosure))
             }
         }
     }
@@ -631,6 +657,13 @@ impl GcObjectOwner {
     pub fn as_userdata_mut(&mut self) -> Option<&mut LuaUserdata> {
         match self {
             GcObjectOwner::Userdata(u) => Some(&mut u.data),
+            _ => None,
+        }
+    }
+
+    pub fn as_cclosure_mut(&mut self) -> Option<&mut CClosureFunction> {
+        match self {
+            GcObjectOwner::CClosure(c) => Some(&mut c.data),
             _ => None,
         }
     }

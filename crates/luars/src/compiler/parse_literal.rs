@@ -123,7 +123,11 @@ pub fn parse_int_token_value(num_text: &str) -> Result<NumberResult, String> {
                         // for (; lisxdigit(*s); s++) {
                         //     a = a * 16 + luaO_hexavalue(*s);  // 自然溢出
                         // }
-                        let base = if matches!(repr, IntegerRepr::Hex) { 16u64 } else { 2u64 };
+                        let base = if matches!(repr, IntegerRepr::Hex) {
+                            16u64
+                        } else {
+                            2u64
+                        };
                         let mut value = 0u64;
                         for c in hex_str.chars() {
                             if let Some(digit) = c.to_digit(base as u32) {
@@ -339,13 +343,13 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
             '\\' => {
                 if let Some(next_char) = chars.next() {
                     match next_char {
-                        'a' => result.push(0x07), // Bell
-                        'b' => result.push(0x08), // Backspace
-                        'f' => result.push(0x0C), // Formfeed
-                        'n' => result.push(b'\n'),       // Newline
-                        'r' => result.push(b'\r'),       // Carriage return
-                        't' => result.push(b'\t'),       // Horizontal tab
-                        'v' => result.push(0x0B), // Vertical tab
+                        'a' => result.push(0x07),  // Bell
+                        'b' => result.push(0x08),  // Backspace
+                        'f' => result.push(0x0C),  // Formfeed
+                        'n' => result.push(b'\n'), // Newline
+                        'r' => result.push(b'\r'), // Carriage return
+                        't' => result.push(b'\t'), // Horizontal tab
+                        'v' => result.push(0x0B),  // Vertical tab
                         'x' => {
                             // Hexadecimal escape sequence
                             let hex = chars.by_ref().take(2).collect::<String>();
@@ -354,9 +358,7 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                     result.push(value);
                                 }
                             } else {
-                                return Err(format!(
-                                    "hexadecimal digit expected",
-                                ));
+                                return Err(format!("hexadecimal digit expected",));
                             }
                         }
                         'u' => {
@@ -369,7 +371,8 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                         // Lua allows UTF-8 values up to 0x7FFFFFFF (from llex.c:351)
                                         if code_point <= 0x7FFFFFFF {
                                             // Try standard Unicode first
-                                            if let Some(unicode_char) = std::char::from_u32(code_point)
+                                            if let Some(unicode_char) =
+                                                std::char::from_u32(code_point)
                                             {
                                                 // Push as UTF-8 bytes
                                                 let mut buf = [0u8; 4];
@@ -382,9 +385,7 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                                 result.extend_from_slice(&utf8_bytes);
                                             }
                                         } else {
-                                            return Err(format!(
-                                                "UTF-8 value too large"
-                                            ));
+                                            return Err(format!("UTF-8 value too large"));
                                         }
                                     }
                                     Err(_) => {

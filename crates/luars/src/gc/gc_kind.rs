@@ -4,8 +4,9 @@ pub enum GcObjectKind {
     String = 0,
     Table = 1,
     Function = 2,
-    Upvalue = 3,
-    Thread = 4,
-    Userdata = 5,
-    Binary = 6,
+    CClosure = 3,
+    Upvalue = 4,
+    Thread = 5,
+    Userdata = 6,
+    Binary = 7,
 }

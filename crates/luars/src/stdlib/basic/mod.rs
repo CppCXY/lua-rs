@@ -78,7 +78,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
         LuaValueKind::String => "string",
         LuaValueKind::Binary => "string", // Binary is also a string type
         LuaValueKind::Table => "table",
-        LuaValueKind::Function | LuaValueKind::CFunction => "function",
+        LuaValueKind::Function | LuaValueKind::CFunction | LuaValueKind::CClosure => "function",
         LuaValueKind::Userdata => "userdata",
         LuaValueKind::Thread => "thread",
     };

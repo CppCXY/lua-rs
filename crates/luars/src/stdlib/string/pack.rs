@@ -81,7 +81,7 @@ macro_rules! impl_to_bytes {
 
 impl_to_bytes!(i16, u16, i32, u32, i64, u64, f32, f64);
 
-// Implement FromBytes for integer types  
+// Implement FromBytes for integer types
 macro_rules! impl_from_bytes {
     ($($t:ty, $size:expr),*) => {
         $(
@@ -106,7 +106,9 @@ macro_rules! impl_from_bytes {
     };
 }
 
-impl_from_bytes!(i16, 2, u16, 2, i32, 4, u32, 4, i64, 8, u64, 8, f32, 4, f64, 8);
+impl_from_bytes!(
+    i16, 2, u16, 2, i32, 4, u32, 4, i64, 8, u64, 8, f32, 4, f64, 8
+);
 
 // Helper function to check alignment requirements
 fn check_alignment(size: usize, max_alignment: usize) -> Result<(), String> {
@@ -368,12 +370,12 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     .ok_or_else(|| {
                         l.error("bad argument to 'pack' (number expected)".to_string())
                     })?;
-                
+
                 // Check for negative values in unsigned format
                 if val_i64 < 0 {
                     return Err(l.error("unsigned overflow".to_string()));
                 }
-                
+
                 let val = val_i64 as u64;
 
                 // For size < 8, check if value fits in the specified number of bytes
@@ -597,12 +599,12 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 } else {
                     return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
                 };
-                
+
                 // Check if string is too long for the specified size
                 if bytes.len() > size {
                     return Err(l.error("string longer than given size".to_string()));
                 }
-                
+
                 result.extend_from_slice(bytes);
                 // Pad with zeros if needed
                 for _ in bytes.len()..size {
@@ -621,7 +623,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 let size_bytes = if size_str.is_empty() {
                     8 // default size_t (8 bytes on 64-bit)
                 } else {
@@ -648,7 +650,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
                 };
                 let str_len = bytes.len();
-                
+
                 // Check if string length fits in the specified size
                 if size_bytes < 8 {
                     let max_len = (1usize << (size_bytes * 8)) - 1;
@@ -656,7 +658,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                         return Err(l.error("string length does not fit".to_string()));
                     }
                 }
-                
+
                 // Pack the string length first
                 let len_bytes = match endianness {
                     Endianness::Little => {
@@ -690,13 +692,13 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                         bytes
                     }
                 };
-                
+
                 // Check overflow before adding
                 checked_add_size(result.len(), size_bytes)
                     .map_err(|_| l.error("pack result too long".to_string()))?;
                 checked_add_size(result.len() + size_bytes, str_len)
                     .map_err(|_| l.error("pack result too long".to_string()))?;
-                
+
                 result.extend_from_slice(&len_bytes);
                 result.extend_from_slice(bytes);
                 value_idx += 1;
@@ -714,7 +716,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("invalid next option for option 'X'".to_string()));
                 }
                 let next_ch = next_ch.unwrap();
-                
+
                 // Determine alignment size based on next format option
                 let natural_align = match next_ch {
                     'b' | 'B' => {
@@ -736,7 +738,12 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                                 break;
                             }
                         }
-                        if !size_str.is_empty() && (next_ch == 'i' || next_ch == 'I' || next_ch == 'l' || next_ch == 'L') {
+                        if !size_str.is_empty()
+                            && (next_ch == 'i'
+                                || next_ch == 'I'
+                                || next_ch == 'l'
+                                || next_ch == 'L')
+                        {
                             let n = size_str.parse::<usize>().unwrap_or(4);
                             if n < 1 || n > 16 {
                                 return Err(l.error(format!("({}) out of limits [1,16]", n)));
@@ -752,7 +759,8 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                         chars.next(); // consume the next format char
                         8
                     }
-                    ' ' | '\t' | '\n' | '\r' | 'X' | '<' | '>' | '=' | '!' | 'c' | 's' | 'z' | 'x' => {
+                    ' ' | '\t' | '\n' | '\r' | 'X' | '<' | '>' | '=' | '!' | 'c' | 's' | 'z'
+                    | 'x' => {
                         // Invalid options for X alignment
                         return Err(l.error("invalid next option for option 'X'".to_string()));
                     }
@@ -792,7 +800,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 max_alignment = if align_str.is_empty() {
                     // No number specified, use default max alignment (8 for double)
                     8
@@ -910,7 +918,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("invalid next option for option 'X'".to_string()));
                 }
                 let next_ch = next_ch.unwrap();
-                
+
                 // Determine alignment size based on next format option
                 let natural_align = match next_ch {
                     'b' | 'B' => {
@@ -932,7 +940,12 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                                 break;
                             }
                         }
-                        if !size_str.is_empty() && (next_ch == 'i' || next_ch == 'I' || next_ch == 'l' || next_ch == 'L') {
+                        if !size_str.is_empty()
+                            && (next_ch == 'i'
+                                || next_ch == 'I'
+                                || next_ch == 'l'
+                                || next_ch == 'L')
+                        {
                             let n = size_str.parse::<usize>().unwrap_or(4);
                             if n < 1 || n > 16 {
                                 return Err(l.error(format!("({}) out of limits [1,16]", n)));
@@ -948,7 +961,8 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                         chars.next(); // consume the next format char
                         8
                     }
-                    ' ' | '\t' | '\n' | '\r' | 'X' | '<' | '>' | '=' | '!' | 'c' | 's' | 'z' | 'x' => {
+                    ' ' | '\t' | '\n' | '\r' | 'X' | '<' | '>' | '=' | '!' | 'c' | 's' | 'z'
+                    | 'x' => {
                         // Invalid options for X alignment
                         return Err(l.error("invalid next option for option 'X'".to_string()));
                     }
@@ -1003,7 +1017,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 if !align_str.is_empty() {
                     let n: usize = align_str.parse().map_err(|_| {
                         l.error("bad argument to 'packsize' (invalid alignment)".to_string())
@@ -1072,13 +1086,13 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
     } else {
         pos_arg
     };
-    
+
     // Check if initial position is within string bounds
     let pos_usize = pos as usize;
     if pos_usize > bytes.len() + 1 {
         return Err(l.error("initial position out of string".to_string()));
     }
-    
+
     // Convert to usize
     let pos_usize = pos as usize;
 
@@ -1113,7 +1127,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 2 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: i16 = endianness.from_bytes(&bytes[idx..idx+2]);
+                let val: i16 = endianness.from_bytes(&bytes[idx..idx + 2]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 2;
             }
@@ -1123,7 +1137,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 2 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: u16 = endianness.from_bytes(&bytes[idx..idx+2]);
+                let val: u16 = endianness.from_bytes(&bytes[idx..idx + 2]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 2;
             }
@@ -1170,7 +1184,11 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         }
                         // For size > 8, check that extra bytes are sign extension
                         if size > 8 {
-                            let sign_byte = if (bytes[idx + 7] & 0x80) != 0 { 0xFF } else { 0x00 };
+                            let sign_byte = if (bytes[idx + 7] & 0x80) != 0 {
+                                0xFF
+                            } else {
+                                0x00
+                            };
                             for i in 8..size {
                                 if bytes[idx + i] != sign_byte {
                                     return Err(l.error(format!(
@@ -1218,7 +1236,11 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                                 v |= !0i64 << (size * 8);
                             }
                             if size > 8 {
-                                let sign_byte = if (bytes[idx + 7] & 0x80) != 0 { 0xFF } else { 0x00 };
+                                let sign_byte = if (bytes[idx + 7] & 0x80) != 0 {
+                                    0xFF
+                                } else {
+                                    0x00
+                                };
                                 for i in 8..size {
                                     if bytes[idx + i] != sign_byte {
                                         return Err(l.error(format!(
@@ -1377,7 +1399,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 4 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: f32 = endianness.from_bytes(&bytes[idx..idx+4]);
+                let val: f32 = endianness.from_bytes(&bytes[idx..idx + 4]);
                 results.push(LuaValue::number(val as f64));
                 idx += 4;
             }
@@ -1387,7 +1409,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: f64 = endianness.from_bytes(&bytes[idx..idx+8]);
+                let val: f64 = endianness.from_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::number(val));
                 idx += 8;
             }
@@ -1398,7 +1420,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: i64 = endianness.from_bytes(&bytes[idx..idx+8]);
+                let val: i64 = endianness.from_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::integer(val));
                 idx += 8;
             }
@@ -1409,7 +1431,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: u64 = endianness.from_bytes(&bytes[idx..idx+8]);
+                let val: u64 = endianness.from_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 8;
             }
@@ -1420,7 +1442,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: u64 = endianness.from_bytes(&bytes[idx..idx+8]);
+                let val: u64 = endianness.from_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 8;
             }
@@ -1431,7 +1453,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: f64 = endianness.from_bytes(&bytes[idx..idx+8]);
+                let val: f64 = endianness.from_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::number(val));
                 idx += 8;
             }
@@ -1487,7 +1509,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 let size_bytes = if size_str.is_empty() {
                     8 // default size_t (8 bytes on 64-bit)
                 } else {
@@ -1504,7 +1526,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + size_bytes > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                
+
                 let str_len: usize = match endianness {
                     Endianness::Little => {
                         let mut v: usize = 0;
@@ -1545,14 +1567,14 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         v
                     }
                 };
-                
+
                 idx += size_bytes;
-                
+
                 // Read the string data
                 if idx + str_len > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                
+
                 let binary_val = l.create_binary(bytes[idx..idx + str_len].to_vec())?;
                 results.push(binary_val);
                 idx += str_len;
@@ -1573,7 +1595,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("invalid next option for option 'X'".to_string()));
                 }
                 let next_ch = next_ch.unwrap();
-                
+
                 // Determine alignment size based on next format option
                 let natural_align = match next_ch {
                     'b' | 'B' => {
@@ -1595,7 +1617,12 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                                 break;
                             }
                         }
-                        if !size_str.is_empty() && (next_ch == 'i' || next_ch == 'I' || next_ch == 'l' || next_ch == 'L') {
+                        if !size_str.is_empty()
+                            && (next_ch == 'i'
+                                || next_ch == 'I'
+                                || next_ch == 'l'
+                                || next_ch == 'L')
+                        {
                             size_str.parse::<usize>().unwrap_or(4)
                         } else if next_ch == 'f' {
                             4
@@ -1607,7 +1634,8 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         chars.next(); // consume the next format char
                         8
                     }
-                    ' ' | '\t' | '\n' | '\r' | 'X' | '<' | '>' | '=' | '!' | 'c' | 's' | 'z' | 'x' => {
+                    ' ' | '\t' | '\n' | '\r' | 'X' | '<' | '>' | '=' | '!' | 'c' | 's' | 'z'
+                    | 'x' => {
                         // Invalid options for X alignment
                         return Err(l.error("invalid next option for option 'X'".to_string()));
                     }
@@ -1645,7 +1673,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                         break;
                     }
                 }
-                
+
                 max_alignment = if align_str.is_empty() {
                     // No number specified, use default max alignment (8 for double)
                     8

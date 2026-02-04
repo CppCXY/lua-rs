@@ -234,7 +234,7 @@ impl<'a> LuaTokenize<'a> {
                 // Check if shebang BEFORE bumping
                 let is_line_start = self.reader.is_start_of_line();
                 self.reader.bump();
-                
+
                 // Shebang only on first line at start, and must be followed by !
                 if is_line_start && self.line == 1 {
                     self.reader.eat_while(|ch| ch != '\n' && ch != '\r');
@@ -324,7 +324,8 @@ impl<'a> LuaTokenize<'a> {
     }
 
     fn lex_white_space(&mut self) -> LuaTokenKind {
-        self.reader.eat_while(|ch| ch == ' ' || ch == '\t' || ch == '\x0B' || ch == '\x0C');
+        self.reader
+            .eat_while(|ch| ch == ' ' || ch == '\t' || ch == '\x0B' || ch == '\x0C');
         LuaTokenKind::TkWhitespace
     }
 
@@ -375,7 +376,7 @@ impl<'a> LuaTokenize<'a> {
                         return LuaTokenKind::TkString;
                     }
                     self.reader.bump();
-                    
+
                     let ch2 = self.reader.current_char();
                     if !ch2.is_ascii_hexdigit() {
                         // Build error message with context
@@ -402,7 +403,7 @@ impl<'a> LuaTokenize<'a> {
                             // Get last 5 chars (will include `abc\u`)
                             &text_before[text_before.len() - 5..]
                         } else if text_before.len() > 1 {
-                            &text_before[1..]  // Skip opening quote
+                            &text_before[1..] // Skip opening quote
                         } else {
                             ""
                         };
@@ -415,7 +416,7 @@ impl<'a> LuaTokenize<'a> {
                         return LuaTokenKind::TkString;
                     }
                     self.reader.bump(); // skip '{'
-                    
+
                     // Collect hex digits
                     let mut hex_digits = String::new();
                     while self.reader.current_char() != '}' {
@@ -446,13 +447,18 @@ impl<'a> LuaTokenize<'a> {
                             };
                             let mut ctx = String::from(context_start);
                             ctx.push(ch);
-                            self.error(|| format!("hexadecimal digit expected in unicode escape near '{}'", ctx));
+                            self.error(|| {
+                                format!(
+                                    "hexadecimal digit expected in unicode escape near '{}'",
+                                    ctx
+                                )
+                            });
                             return LuaTokenKind::TkString;
                         }
                         hex_digits.push(ch);
                         self.reader.bump();
                     }
-                    
+
                     if hex_digits.is_empty() {
                         let text_before = self.reader.current_text();
                         let context_start = if text_before.len() > 11 {
@@ -467,10 +473,15 @@ impl<'a> LuaTokenize<'a> {
                         if next_ch != '\0' && next_ch != '\n' && next_ch != '\r' {
                             ctx.push(next_ch);
                         }
-                        self.error(|| format!("hexadecimal digit expected in unicode escape near '{}'", ctx));
+                        self.error(|| {
+                            format!(
+                                "hexadecimal digit expected in unicode escape near '{}'",
+                                ctx
+                            )
+                        });
                         return LuaTokenKind::TkString;
                     }
-                    
+
                     // Validate UTF-8 value range (0 to 0x7FFFFFFF)
                     match u32::from_str_radix(&hex_digits, 16) {
                         Ok(val) if val > 0x7FFFFFFF => {
@@ -518,14 +529,14 @@ impl<'a> LuaTokenize<'a> {
                     let mut digits = String::new();
                     digits.push(start_ch);
                     self.reader.bump();
-                    
+
                     let mut count = 1;
                     while count < 3 && self.reader.current_char().is_ascii_digit() {
                         digits.push(self.reader.current_char());
                         self.reader.bump();
                         count += 1;
                     }
-                    
+
                     // Validate range (0-255)
                     if let Ok(val) = digits.parse::<u16>() {
                         if val > 255 {

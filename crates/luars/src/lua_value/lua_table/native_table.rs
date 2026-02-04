@@ -407,7 +407,7 @@ impl NativeTable {
                 //         Values at array - sizeof(Value) * (1 + k)
                 let tag_ptr = (self.array as *const u8).add(4 + k);
                 let tt = *tag_ptr;
-                
+
                 if tt != LUA_VNIL && tt != LUA_VEMPTY {
                     let value_ptr = (self.array as *mut Value).sub(1 + k);
                     let value = *value_ptr;
@@ -416,13 +416,13 @@ impl NativeTable {
             }
             return None;
         }
-        
+
         // Slow path: hash part lookup
         if self.sizenode() > 0 {
             let key_val = LuaValue::integer(key);
             return self.get_from_hash(&key_val);
         }
-        
+
         None
     }
 
@@ -483,12 +483,12 @@ impl NativeTable {
         if self.sizenode() == 0 {
             return None;
         }
-        
+
         // GETFIELD only uses short string keys (interned)
         if key.is_short_string() {
             return self.get_shortstr_fast(key);
         }
-        
+
         None
     }
 
@@ -501,16 +501,16 @@ impl NativeTable {
         if !key.is_short_string() {
             return false;
         }
-        
+
         if self.sizenode() == 0 {
             // Need to allocate - can't do in fast path
             return false;
         }
-        
+
         // Try to find existing key or free slot in main position
         let mp = self.mainposition(key);
         let key_ptr = unsafe { key.value.i };
-        
+
         unsafe {
             // Check main position first
             if (*mp).key.is_string() && (*mp).key.value.i == key_ptr {
@@ -518,7 +518,7 @@ impl NativeTable {
                 (*mp).value = value;
                 return true;
             }
-            
+
             // If main position is free, use it
             if (*mp).key.is_nil() {
                 (*mp).key = *key;
@@ -526,7 +526,7 @@ impl NativeTable {
                 (*mp).next = 0;
                 return true;
             }
-            
+
             // Check collision chain
             let mut node = mp;
             let mut next = (*node).next;
@@ -540,7 +540,7 @@ impl NativeTable {
                 next = (*node).next;
             }
         }
-        
+
         // Key not found and complex insertion needed - use slow path
         false
     }

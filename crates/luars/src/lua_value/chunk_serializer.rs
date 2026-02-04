@@ -936,7 +936,8 @@ fn read_constant_with_vm_dedup(
             // Read binary data
             let len = read_u32(cursor)? as usize;
             let mut bytes = vec![0u8; len];
-            cursor.read_exact(&mut bytes)
+            cursor
+                .read_exact(&mut bytes)
                 .map_err(|e| format!("failed to read binary data: {}", e))?;
             // Create binary value with VM
             vm.create_binary(bytes)

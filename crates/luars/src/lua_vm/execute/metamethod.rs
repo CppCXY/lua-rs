@@ -333,18 +333,12 @@ pub fn call_tm_res(
     // Call the metamethod with nresults=1
     if metamethod.is_cfunction() {
         call_c_function(lua_state, func_pos, 2, 1)?;
-    } else if let Some(func_body) = metamethod.as_lua_function() {
-        let is_lua = func_body.is_lua_function();
+    } else if metamethod.is_lua_function() {
+        let new_base = func_pos + 1;
+        let caller_depth = lua_state.call_depth();
 
-        if is_lua {
-            let new_base = func_pos + 1;
-            let caller_depth = lua_state.call_depth();
-
-            lua_state.push_frame(metamethod, new_base, 2, 1)?;
-            lua_execute(lua_state, caller_depth)?;
-        } else {
-            call_c_function(lua_state, func_pos, 2, 1)?;
-        }
+        lua_state.push_frame(metamethod, new_base, 2, 1)?;
+        lua_execute(lua_state, caller_depth)?;
     } else {
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
@@ -413,18 +407,12 @@ pub fn call_tm(
     // Call with 0 results (nresults=0)
     if metamethod.is_cfunction() {
         call::call_c_function(lua_state, func_pos, 3, 0)?;
-    } else if let Some(func_body) = metamethod.as_lua_function() {
-        let is_lua = func_body.is_lua_function();
+    } else if metamethod.is_lua_function() {
+        let new_base = func_pos + 1;
+        let caller_depth = lua_state.call_depth();
 
-        if is_lua {
-            let new_base = func_pos + 1;
-            let caller_depth = lua_state.call_depth();
-
-            lua_state.push_frame(metamethod, new_base, 3, 0)?;
-            lua_execute(lua_state, caller_depth)?;
-        } else {
-            call_c_function(lua_state, func_pos, 3, 0)?;
-        }
+        lua_state.push_frame(metamethod, new_base, 3, 0)?;
+        lua_execute(lua_state, caller_depth)?;
     } else {
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }

@@ -19,7 +19,6 @@ use crate::{
     Chunk, UpvaluePtr,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
-use std::rc::Rc;
 
 /// Handle OP_CLOSURE instruction
 /// Create a closure from prototype Bx and store in R[A]
@@ -30,7 +29,7 @@ pub fn handle_closure(
     base: usize,
     a: usize,
     bx: usize,
-    current_chunk: &Rc<Chunk>,
+    current_chunk: &Chunk,
     parent_upvalues: &[UpvaluePtr],
 ) -> LuaResult<()> {
     // Get child prototype

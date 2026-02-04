@@ -9,11 +9,11 @@
 // 6. GC headers embedded in objects for mark-sweep
 
 use crate::gc::string_interner::StringInterner;
-use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
+use crate::lua_value::{CClosureFunction, Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    GC, GcBinary, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata, Instruction,
-    LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
+    GC, GcBinary, GcCClosure, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata,
+    Instruction, LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
 };
 use std::rc::Rc;
 
@@ -186,7 +186,7 @@ impl ObjectAllocator {
         let size = (upval_size + instr_size + const_size + child_size + line_size) as u32;
 
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
-            LuaFunction::Lua(chunk, upvalue_ptrs),
+            LuaFunction::new(chunk, upvalue_ptrs),
             current_white,
             size,
         )));
@@ -203,19 +203,19 @@ impl ObjectAllocator {
         &mut self,
         gc: &mut GC,
         func: CFunction,
-        upvalue_ptrs: Vec<UpvaluePtr>,
+        upvalues: Vec<LuaValue>,
     ) -> CreateResult {
         let current_white = gc.current_white;
         let size = std::mem::size_of::<CFunction>() as u32
-            + (upvalue_ptrs.len() as u32 * std::mem::size_of::<UpvaluePtr>() as u32);
-        let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
-            LuaFunction::CClosure(func, upvalue_ptrs),
+            + (upvalues.len() as u32 * std::mem::size_of::<LuaValue>() as u32);
+        let gc_func = GcObjectOwner::CClosure(Box::new(GcCClosure::new(
+            CClosureFunction::new(func, upvalues),
             current_white,
             size,
         )));
-        let ptr = gc_func.as_function_ptr().unwrap();
+        let ptr = gc_func.as_closure_ptr().unwrap();
         gc.trace_object(gc_func)?;
-        Ok(LuaValue::function(ptr))
+        Ok(LuaValue::cclosure(ptr))
     }
 
     // ==================== Upvalue Operations ====================

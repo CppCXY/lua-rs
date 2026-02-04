@@ -109,7 +109,8 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
     if loader.is_nil() {
         // Return error message like Lua 5.5
         let modname_str = modname_val.as_str().unwrap_or("?");
-        let err_msg = l.create_string(&format!("\n\tno field package.preload['{}']", modname_str))?;
+        let err_msg =
+            l.create_string(&format!("\n\tno field package.preload['{}']", modname_str))?;
         l.push_value(err_msg)?;
         Ok(1)
     } else {
@@ -382,12 +383,12 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let rep_val = l.get_arg(4);
-    
+
     #[cfg(windows)]
     let default_rep = "\\";
     #[cfg(not(windows))]
     let default_rep = "/";
-    
+
     let rep = if let Some(rep_val) = &rep_val {
         rep_val.as_str().unwrap_or(default_rep)
     } else {

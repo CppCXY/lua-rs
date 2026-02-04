@@ -232,63 +232,64 @@ impl PartialEq for LuaString {
     }
 }
 
-
-/// Function body - either Lua bytecode or C function
-pub enum LuaFunction {
-    /// Lua function with bytecode chunk
-    /// Now includes cached upvalue pointers for direct access (zero-overhead like Lua C)
-    Lua(Rc<Chunk>, Vec<UpvaluePtr>),
-    /// C function (native Rust function) with cached upvalues
-    CClosure(CFunction, Vec<UpvaluePtr>),
+pub struct LuaFunction {
+    chunk: Rc<Chunk>,
+    upvalue_ptrs: Vec<UpvaluePtr>,
 }
 
 impl LuaFunction {
-    /// Check if this is a C function (any C variant)
-    #[inline(always)]
-    pub fn is_c_function(&self) -> bool {
-        matches!(self, LuaFunction::CClosure(_, _))
-    }
-
-    /// Check if this is a Lua function
-    #[inline(always)]
-    pub fn is_lua_function(&self) -> bool {
-        matches!(self, LuaFunction::Lua(_, _))
+    pub fn new(chunk: Rc<Chunk>, upvalue_ptrs: Vec<UpvaluePtr>) -> Self {
+        LuaFunction {
+            chunk,
+            upvalue_ptrs,
+        }
     }
 
     /// Get the chunk if this is a Lua function
     #[inline(always)]
-    pub fn chunk(&self) -> Option<&Rc<Chunk>> {
-        match &self {
-            LuaFunction::Lua(chunk, _) => Some(chunk),
-            _ => None,
-        }
-    }
-
-    /// Get the C function pointer if this is any C function variant
-    #[inline(always)]
-    pub fn c_function(&self) -> Option<CFunction> {
-        match &self {
-            LuaFunction::CClosure(f, _) => Some(*f),
-            LuaFunction::Lua(_, _) => None,
-        }
+    pub fn chunk(&self) -> &Chunk {
+        &self.chunk
     }
 
     /// Get cached upvalues (direct pointers for fast access)
     #[inline(always)]
     pub fn upvalues(&self) -> &Vec<UpvaluePtr> {
-        match &self {
-            LuaFunction::CClosure(_, uv) => uv,
-            LuaFunction::Lua(_, uv) => uv,
-        }
+        &self.upvalue_ptrs
     }
 
     /// Get mutable access to cached upvalues for updating pointers
     #[inline(always)]
     pub fn upvalues_mut(&mut self) -> &mut Vec<UpvaluePtr> {
-        match self {
-            LuaFunction::CClosure(_, uv) => uv,
-            LuaFunction::Lua(_, uv) => uv,
-        }
+        &mut self.upvalue_ptrs
+    }
+}
+
+pub struct CClosureFunction {
+    func: CFunction,
+    upvalues: Vec<LuaValue>,
+}
+
+impl CClosureFunction {
+    pub fn new(func: CFunction, upvalues: Vec<LuaValue>) -> Self {
+        CClosureFunction { func, upvalues }
+    }
+
+    /// Get the C function pointer
+    #[inline(always)]
+    pub fn func(&self) -> CFunction {
+        self.func
+    }
+
+    /// Get upvalues
+    #[inline(always)]
+    pub fn upvalues(&self) -> &Vec<LuaValue> {
+        &self.upvalues
+    }
+
+    /// Get mutable access to upvalues
+    #[inline(always)]
+    pub fn upvalues_mut(&mut self) -> &mut Vec<LuaValue> {
+        &mut self.upvalues
     }
 }
 

@@ -1,7 +1,6 @@
 // Coroutine library - Full implementation
 // Implements: create, resume, yield, status, running, wrap, isyieldable
 
-use crate::LuaFunction;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
@@ -191,13 +190,12 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
     // Get the thread from upvalue
     let mut thread_val = LuaValue::nil();
     if let Some(frame) = l.current_frame() {
-        if let Some(func_body) = frame.func.as_lua_function() {
+        if let Some(cclosure) = frame.func.as_cclosure() {
             // Check if it's a C closure (coroutine.wrap creates a C closure)
-            if let LuaFunction::CClosure(_, upvalues) = func_body {
-                if let Some(upval_ptr) = upvalues.get(0) {
-                    // Upvalue should be closed with the thread value
-                    thread_val = upval_ptr.as_ref().data.get_value();
-                }
+
+            if let Some(upval) = cclosure.upvalues().get(0) {
+                // Upvalue should be closed with the thread value
+                thread_val = upval.clone();
             }
         }
     };

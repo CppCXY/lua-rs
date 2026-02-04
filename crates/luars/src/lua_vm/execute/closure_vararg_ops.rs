@@ -15,7 +15,6 @@ use crate::{
     lua_value::{Chunk, LuaValue},
     lua_vm::{Instruction, LuaResult, LuaState, OpCode},
 };
-use std::rc::Rc;
 
 use super::{
     closure_handler,
@@ -28,7 +27,7 @@ pub fn exec_closure(
     lua_state: &mut LuaState,
     instr: Instruction,
     base: usize,
-    chunk: &Rc<Chunk>,
+    chunk: &Chunk,
     upvalue_ptrs: &[UpvaluePtr],
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
@@ -47,7 +46,7 @@ pub fn exec_vararg(
     instr: Instruction,
     base: usize,
     frame_idx: usize,
-    chunk: &Rc<Chunk>,
+    chunk: &Chunk,
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
     let b = instr.get_b() as usize;
@@ -149,7 +148,7 @@ pub fn exec_vararg(
 pub fn exec_varargprep(
     lua_state: &mut LuaState,
     frame_idx: usize,
-    chunk: &Rc<Chunk>,
+    chunk: &Chunk,
     base: &mut usize,
 ) -> LuaResult<()> {
     // Calculate total arguments and extra arguments

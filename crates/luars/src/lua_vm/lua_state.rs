@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::branch::unlikely;
 use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
-use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
+use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::safe_option::SafeOption;
@@ -175,15 +175,11 @@ impl LuaState {
 
         // Cache lua_function extraction (avoid repeated enum matching)
         // This single call replaces multiple is_c_function/as_lua_function checks
-        let lua_func = func.as_lua_function();
 
         // Determine function type and extract metadata in one pass
-        let (is_c_function, maxstacksize, numparams, nextraargs) = if let Some(func_obj) = lua_func
-        {
-            if func_obj.is_c_function() {
-                // C function path
-                (true, nparams, nparams, 0)
-            } else if let Some(chunk) = func_obj.chunk() {
+        let (is_c_function, maxstacksize, numparams, nextraargs) =
+            if let Some(func_obj) = func.as_lua_function() {
+                let chunk = func_obj.chunk();
                 // Lua function with chunk
                 let numparams = chunk.param_count;
                 let nextraargs = if nparams > numparams {
@@ -192,18 +188,14 @@ impl LuaState {
                     0
                 };
                 (false, chunk.max_stack_size as usize, numparams, nextraargs)
+            } else if func.is_c_callable() {
+                // Light C function
+                (true, nparams, nparams, 0)
             } else {
-                // Lua function without chunk (shouldn't happen, but handle gracefully)
-                (false, nparams, nparams, 0)
-            }
-        } else if func.is_cfunction() {
-            // Light C function
-            (true, nparams, nparams, 0)
-        } else {
-            // Not callable - this should be prevented by caller
-            debug_assert!(false, "push_frame called with non-callable value");
-            return Err(self.error(format!("attempt to call a {} value", func.type_name())));
-        };
+                // Not callable - this should be prevented by caller
+                debug_assert!(false, "push_frame called with non-callable value");
+                return Err(self.error(format!("attempt to call a {} value", func.type_name())));
+            };
 
         // Check C call depth if needed
         if is_c_function {
@@ -400,21 +392,20 @@ impl LuaState {
         if let Some(ci) = self.current_frame() {
             if ci.is_lua() {
                 if let Some(func_obj) = ci.func.as_lua_function() {
-                    if let Some(chunk) = func_obj.chunk() {
-                        let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                            chunk.line_info[ci.pc as usize - 1] as usize
-                        } else if !chunk.line_info.is_empty() {
-                            chunk.line_info[0] as usize
-                        } else {
-                            0
-                        };
-                        location = if line > 0 {
-                            format!("{}:{}: ", source, line)
-                        } else {
-                            format!("{}: ", source)
-                        };
-                    }
+                    let chunk = func_obj.chunk();
+                    let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                    let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                        chunk.line_info[ci.pc as usize - 1] as usize
+                    } else if !chunk.line_info.is_empty() {
+                        chunk.line_info[0] as usize
+                    } else {
+                        0
+                    };
+                    location = if line > 0 {
+                        format!("{}:{}: ", source, line)
+                    } else {
+                        format!("{}: ", source)
+                    };
                 }
             }
         };
@@ -452,39 +443,37 @@ impl LuaState {
                 // Lua function - get source and line info
 
                 if let Some(func_obj) = ci.func.as_lua_function() {
-                    if let Some(chunk) = func_obj.chunk() {
-                        let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                    let chunk = func_obj.chunk();
+                    let source = chunk.source_name.as_deref().unwrap_or("[string]");
 
-                        // Format source name (strip @ prefix if present)
-                        let source_display = if source.starts_with('@') {
-                            &source[1..]
-                        } else {
-                            source
-                        };
+                    // Format source name (strip @ prefix if present)
+                    let source_display = if source.starts_with('@') {
+                        &source[1..]
+                    } else {
+                        source
+                    };
 
-                        // Get current line number from PC
-                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                            chunk.line_info[ci.pc as usize - 1] as usize
-                        } else if !chunk.line_info.is_empty() {
-                            chunk.line_info[0] as usize
-                        } else {
-                            0
-                        };
+                    // Get current line number from PC
+                    let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                        chunk.line_info[ci.pc as usize - 1] as usize
+                    } else if !chunk.line_info.is_empty() {
+                        chunk.line_info[0] as usize
+                    } else {
+                        0
+                    };
 
-                        // Determine if this is the main chunk
-                        // Main chunk has linedefined == 0
-                        // Also check if this is at the bottom of the valid call stack
-                        let is_main = chunk.linedefined == 0 || level == valid_frames.len() - 1;
-                        let what = if is_main { "main chunk" } else { "function" };
+                    // Determine if this is the main chunk
+                    // Main chunk has linedefined == 0
+                    // Also check if this is at the bottom of the valid call stack
+                    let is_main = chunk.linedefined == 0 || level == valid_frames.len() - 1;
+                    let what = if is_main { "main chunk" } else { "function" };
 
-                        if line > 0 {
-                            result
-                                .push_str(&format!("\t{}:{}: in {}\n", source_display, line, what));
-                        } else {
-                            result.push_str(&format!("\t{}: in {}\n", source_display, what));
-                        }
-                        continue;
+                    if line > 0 {
+                        result.push_str(&format!("\t{}:{}: in {}\n", source_display, line, what));
+                    } else {
+                        result.push_str(&format!("\t{}: in {}\n", source_display, what));
                     }
+                    continue;
                 }
 
                 result.push_str("\t[?]: in function\n");
@@ -1058,82 +1047,68 @@ impl LuaState {
             .ok_or_else(|| self.error("pcall: function not found".to_string()))?;
 
         // Check if it's a C function
-        let is_c_function = if func.is_cfunction() {
-            true
-        } else if let Some(func_body) = func.as_lua_function() {
-            func_body.is_c_function()
-        } else {
-            false
-        };
+        let is_c_callable = func.is_c_callable();
+        if is_c_callable {
+            // Create frame for C function
+            let base = func_idx + 1;
+            if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
+                self.stack.truncate(func_idx);
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                return Ok((false, vec![err_str]));
+            }
 
-        if is_c_function {
+            // Set ccmt count in call_status
+            if ccmt_depth > 0 {
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+
             // Get the C function pointer
-            let cfunc = if func.is_cfunction() {
-                func.as_cfunction()
-            } else if let Some(func_body) = func.as_lua_function() {
-                func_body.c_function()
+            let cfunc = if let Some(c_func) = func.as_cfunction() {
+                c_func
+            } else if let Some(closure) = func.as_cclosure() {
+                closure.func()
             } else {
-                None
+                unreachable!()
             };
 
-            if let Some(cfunc) = cfunc {
-                // Create frame for C function
-                let base = func_idx + 1;
-                if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
+            // Call C function
+            let result = cfunc(self);
+
+            // Pop frame
+            self.pop_frame();
+
+            match result {
+                Ok(nresults) => {
+                    // Success - collect results
+                    let mut results = Vec::new();
+                    let result_start = if self.stack.len() >= nresults {
+                        self.stack.len() - nresults
+                    } else {
+                        0
+                    };
+
+                    for i in result_start..self.stack.len() {
+                        if let Some(val) = self.stack_get(i) {
+                            results.push(val);
+                        }
+                    }
+
+                    // Clean up stack
                     self.stack.truncate(func_idx);
+
+                    Ok((true, results))
+                }
+                Err(LuaError::Yield) => Err(LuaError::Yield),
+                Err(e) => {
                     let error_msg = self.get_error_msg(e);
                     let err_str = self.create_string(&error_msg)?;
-                    return Ok((false, vec![err_str]));
+                    self.stack.truncate(func_idx);
+                    Ok((false, vec![err_str]))
                 }
-
-                // Set ccmt count in call_status
-                if ccmt_depth > 0 {
-                    use crate::lua_vm::call_info::call_status;
-                    let frame_idx = self.call_depth - 1;
-                    if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                        frame.call_status =
-                            call_status::set_ccmt_count(frame.call_status, ccmt_depth);
-                    }
-                }
-
-                // Call C function
-                let result = cfunc(self);
-
-                // Pop frame
-                self.pop_frame();
-
-                match result {
-                    Ok(nresults) => {
-                        // Success - collect results
-                        let mut results = Vec::new();
-                        let result_start = if self.stack.len() >= nresults {
-                            self.stack.len() - nresults
-                        } else {
-                            0
-                        };
-
-                        for i in result_start..self.stack.len() {
-                            if let Some(val) = self.stack_get(i) {
-                                results.push(val);
-                            }
-                        }
-
-                        // Clean up stack
-                        self.stack.truncate(func_idx);
-
-                        Ok((true, results))
-                    }
-                    Err(LuaError::Yield) => Err(LuaError::Yield),
-                    Err(e) => {
-                        let error_msg = self.get_error_msg(e);
-                        let err_str = self.create_string(&error_msg)?;
-                        self.stack.truncate(func_idx);
-                        Ok((false, vec![err_str]))
-                    }
-                }
-            } else {
-                let err_str = self.create_string("not a function")?;
-                Ok((false, vec![err_str]))
             }
         } else {
             // Lua function - use lua_execute
@@ -1231,12 +1206,7 @@ impl LuaState {
             .ok_or_else(|| self.error("pcall: function not found after resolution".to_string()))?;
 
         // Call the function using the internal call machinery
-        let result = if func.is_cfunction()
-            || func
-                .as_lua_function()
-                .and_then(|f| f.c_function())
-                .is_some()
-        {
+        let result = if func.is_c_callable() {
             // C function - call directly
             call_c_function(
                 self,
@@ -1493,13 +1463,8 @@ impl LuaState {
             let base = 1; // Arguments start at index 1 (function is at 0)
             self.push_frame(func, base, nargs, -1)?;
 
-            // Check if function is C or Lua
-            let is_c_function = func.is_cfunction()
-                || (func.is_function()
-                    && func.as_lua_function().map_or(false, |f| f.is_c_function()));
-
             // Execute until yield or completion
-            let result = if is_c_function {
+            let result = if func.is_c_callable() {
                 // Call C function directly
                 execute::call::call_c_function(self, 0, nargs, -1)
             } else {

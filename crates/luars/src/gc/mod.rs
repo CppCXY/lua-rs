@@ -1823,8 +1823,22 @@ impl GC {
         }
 
         // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
-        if let Some(chunk) = gc_func.data.chunk() {
-            count += self.mark_chunk_constants(l, &chunk);
+        count += self.mark_chunk_constants(l, gc_func.data.chunk());
+
+        count as usize // Estimate of work done
+    }
+
+    fn traverse_cclosure(&mut self, l: &mut LuaState, closure_ptr: CClosurePtr) -> usize {
+        // Mark the C closure black and get references to data we need
+        let gc_closure = closure_ptr.as_mut_ref();
+        gc_closure.header.make_black();
+
+        let mut count = 1; // Estimate of work done
+        let upvalues = gc_closure.data.upvalues();
+        count += upvalues.len();
+        // Mark upvalues
+        for upval in upvalues {
+            self.mark_value(l, upval);
         }
 
         count as usize // Estimate of work done
@@ -1922,6 +1936,7 @@ impl GC {
         match gc_ptr {
             GcObjectPtr::Table(table_ptr) => self.traverse_table(l, table_ptr),
             GcObjectPtr::Function(func_ptr) => self.traverse_function(l, func_ptr),
+            GcObjectPtr::CClosure(closure_ptr) => self.traverse_cclosure(l, closure_ptr),
             GcObjectPtr::Userdata(userdata_ptr) => {
                 // Userdata: mark the userdata itself and its metatable if any
                 let gc_ud = userdata_ptr.as_mut_ref();

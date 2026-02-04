@@ -73,69 +73,63 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
 
                 // Try to get function info
                 if let Some(func_obj) = func.as_lua_function() {
-                    if let Some(chunk) = func_obj.chunk() {
-                        // Lua function
-                        let source = chunk.source_name.as_deref().unwrap_or("?");
+                    let chunk = func_obj.chunk();
+                    // Lua function
+                    let source = chunk.source_name.as_deref().unwrap_or("?");
 
-                        // Format source name (strip @ prefix if present)
-                        let source_display = if source.starts_with('@') {
-                            &source[1..]
-                        } else {
-                            source
-                        };
+                    // Format source name (strip @ prefix if present)
+                    let source_display = if source.starts_with('@') {
+                        &source[1..]
+                    } else {
+                        source
+                    };
 
-                        // Get line number from pc
-                        let pc_idx = pc.saturating_sub(1) as usize;
-                        let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len()
-                        {
-                            chunk.line_info[pc_idx]
-                        } else {
-                            0
-                        };
+                    // Get line number from pc
+                    let pc_idx = pc.saturating_sub(1) as usize;
+                    let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
+                        chunk.line_info[pc_idx]
+                    } else {
+                        0
+                    };
 
-                        // Determine function name and type
-                        // For now, use simplified logic - full implementation would need
-                        // to search locals/upvalues of calling frame
-                        let (name_what, func_name) = if chunk.linedefined == 0 {
-                            // Main chunk (linedefined == 0 means top-level code)
-                            ("main chunk", String::new())
-                        } else if i == call_depth - 1 {
-                            // Also main chunk if at bottom of stack
-                            ("main chunk", String::new())
-                        } else {
-                            // TODO: Search for function name in calling frame's locals/upvalues
-                            // This requires inspecting the previous frame's locals and upvalues
-                            ("function", String::new())
-                        };
+                    // Determine function name and type
+                    // For now, use simplified logic - full implementation would need
+                    // to search locals/upvalues of calling frame
+                    let (name_what, func_name) = if chunk.linedefined == 0 {
+                        // Main chunk (linedefined == 0 means top-level code)
+                        ("main chunk", String::new())
+                    } else if i == call_depth - 1 {
+                        // Also main chunk if at bottom of stack
+                        ("main chunk", String::new())
+                    } else {
+                        // TODO: Search for function name in calling frame's locals/upvalues
+                        // This requires inspecting the previous frame's locals and upvalues
+                        ("function", String::new())
+                    };
 
-                        if line > 0 {
-                            if func_name.is_empty() {
-                                trace.push_str(&format!(
-                                    "\n\t{}:{}: in {}",
-                                    source_display, line, name_what
-                                ));
-                            } else {
-                                trace.push_str(&format!(
-                                    "\n\t{}:{}: in {} '{}'",
-                                    source_display, line, name_what, func_name
-                                ));
-                            }
+                    if line > 0 {
+                        if func_name.is_empty() {
+                            trace.push_str(&format!(
+                                "\n\t{}:{}: in {}",
+                                source_display, line, name_what
+                            ));
                         } else {
-                            if func_name.is_empty() {
-                                trace
-                                    .push_str(&format!("\n\t{}: in {}", source_display, name_what));
-                            } else {
-                                trace.push_str(&format!(
-                                    "\n\t{}: in {} '{}'",
-                                    source_display, name_what, func_name
-                                ));
-                            }
+                            trace.push_str(&format!(
+                                "\n\t{}:{}: in {} '{}'",
+                                source_display, line, name_what, func_name
+                            ));
                         }
                     } else {
-                        // C closure
-                        trace.push_str("\n\t[C]: in function");
+                        if func_name.is_empty() {
+                            trace.push_str(&format!("\n\t{}: in {}", source_display, name_what));
+                        } else {
+                            trace.push_str(&format!(
+                                "\n\t{}: in {} '{}'",
+                                source_display, name_what, func_name
+                            ));
+                        }
                     }
-                } else if func.is_cfunction() {
+                } else if func.is_c_callable() {
                     // C function - try to get name
                     // In full implementation, would track C function names
                     trace.push_str("\n\t[C]: in function");
@@ -214,119 +208,118 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
 
     // Process function info based on 'what' parameter
     if let Some(lua_func) = func.as_lua_function() {
-        if let Some(chunk) = lua_func.chunk() {
-            // Lua function
-            if what_str.contains('S') {
-                // Source info
-                let source = chunk.source_name.as_deref().unwrap_or("?");
-                let source_key = l.create_string("source")?;
-                let source_val = l.create_string(source)?;
-                l.raw_set(&info_table, source_key, source_val);
+        let chunk = lua_func.chunk();
+        // Lua function
+        if what_str.contains('S') {
+            // Source info
+            let source = chunk.source_name.as_deref().unwrap_or("?");
+            let source_key = l.create_string("source")?;
+            let source_val = l.create_string(source)?;
+            l.raw_set(&info_table, source_key, source_val);
 
-                let short_src_key = l.create_string("short_src")?;
-                let short_src_val = l.create_string(source)?;
-                l.raw_set(&info_table, short_src_key, short_src_val);
+            let short_src_key = l.create_string("short_src")?;
+            let short_src_val = l.create_string(source)?;
+            l.raw_set(&info_table, short_src_key, short_src_val);
 
-                let linedefined_key = l.create_string("linedefined")?;
-                let linedefined_val = LuaValue::integer(chunk.linedefined as i64);
-                l.raw_set(&info_table, linedefined_key, linedefined_val);
+            let linedefined_key = l.create_string("linedefined")?;
+            let linedefined_val = LuaValue::integer(chunk.linedefined as i64);
+            l.raw_set(&info_table, linedefined_key, linedefined_val);
 
-                let lastlinedefined_key = l.create_string("lastlinedefined")?;
-                let lastlinedefined_val = LuaValue::integer(chunk.lastlinedefined as i64);
-                l.raw_set(&info_table, lastlinedefined_key, lastlinedefined_val);
+            let lastlinedefined_key = l.create_string("lastlinedefined")?;
+            let lastlinedefined_val = LuaValue::integer(chunk.lastlinedefined as i64);
+            l.raw_set(&info_table, lastlinedefined_key, lastlinedefined_val);
 
-                let what_key = l.create_string("what")?;
-                let what_val = l.create_string("Lua")?;
-                l.raw_set(&info_table, what_key, what_val);
-            }
+            let what_key = l.create_string("what")?;
+            let what_val = l.create_string("Lua")?;
+            l.raw_set(&info_table, what_key, what_val);
+        }
 
-            if what_str.contains('l') {
-                // Current line (only meaningful for stack level)
-                let currentline_key = l.create_string("currentline")?;
-                let currentline_val = if let Some(level) = arg1.as_integer() {
-                    // Get PC from the specified call frame
-                    // Use same frame_idx calculation as above
-                    let call_depth = l.call_depth();
-                    let frame_idx = call_depth - 1 - (level as usize);
-                    let pc = l.get_frame_pc(frame_idx);
-                    // Get line number from pc
-                    let pc_idx = pc.saturating_sub(1) as usize;
-                    let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
-                        chunk.line_info[pc_idx] as i64
-                    } else {
-                        -1
-                    };
-                    LuaValue::integer(line)
+        if what_str.contains('l') {
+            // Current line (only meaningful for stack level)
+            let currentline_key = l.create_string("currentline")?;
+            let currentline_val = if let Some(level) = arg1.as_integer() {
+                // Get PC from the specified call frame
+                // Use same frame_idx calculation as above
+                let call_depth = l.call_depth();
+                let frame_idx = call_depth - 1 - (level as usize);
+                let pc = l.get_frame_pc(frame_idx);
+                // Get line number from pc
+                let pc_idx = pc.saturating_sub(1) as usize;
+                let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
+                    chunk.line_info[pc_idx] as i64
                 } else {
-                    // Direct function reference - no current line
-                    LuaValue::integer(-1)
+                    -1
                 };
-                l.raw_set(&info_table, currentline_key, currentline_val);
-            }
+                LuaValue::integer(line)
+            } else {
+                // Direct function reference - no current line
+                LuaValue::integer(-1)
+            };
+            l.raw_set(&info_table, currentline_key, currentline_val);
+        }
 
-            if what_str.contains('u') {
-                // Upvalue info
-                let nups_key = l.create_string("nups")?;
-                let nups_val = LuaValue::integer(chunk.upvalue_count as i64);
-                l.raw_set(&info_table, nups_key, nups_val);
+        if what_str.contains('u') {
+            // Upvalue info
+            let nups_key = l.create_string("nups")?;
+            let nups_val = LuaValue::integer(chunk.upvalue_count as i64);
+            l.raw_set(&info_table, nups_key, nups_val);
 
-                let nparams_key = l.create_string("nparams")?;
-                let nparams_val = LuaValue::integer(chunk.param_count as i64);
-                l.raw_set(&info_table, nparams_key, nparams_val);
+            let nparams_key = l.create_string("nparams")?;
+            let nparams_val = LuaValue::integer(chunk.param_count as i64);
+            l.raw_set(&info_table, nparams_key, nparams_val);
 
-                let isvararg_key = l.create_string("isvararg")?;
-                let isvararg_val = LuaValue::boolean(chunk.is_vararg);
-                l.raw_set(&info_table, isvararg_key, isvararg_val);
-            }
+            let isvararg_key = l.create_string("isvararg")?;
+            let isvararg_val = LuaValue::boolean(chunk.is_vararg);
+            l.raw_set(&info_table, isvararg_key, isvararg_val);
+        }
 
-            if what_str.contains('n') {
-                // Name info (not implemented, use defaults)
-                let name_key = l.create_string("name")?;
-                let name_val = LuaValue::nil();
-                l.raw_set(&info_table, name_key, name_val);
+        if what_str.contains('n') {
+            // Name info (not implemented, use defaults)
+            let name_key = l.create_string("name")?;
+            let name_val = LuaValue::nil();
+            l.raw_set(&info_table, name_key, name_val);
 
-                let namewhat_key = l.create_string("namewhat")?;
-                let namewhat_val = l.create_string("")?;
-                l.raw_set(&info_table, namewhat_key, namewhat_val);
-            }
+            let namewhat_key = l.create_string("namewhat")?;
+            let namewhat_val = l.create_string("")?;
+            l.raw_set(&info_table, namewhat_key, namewhat_val);
+        }
 
-            if what_str.contains('t') {
-                // Tail call info
-                let istailcall_key = l.create_string("istailcall")?;
-                let istailcall_val = LuaValue::boolean(false);
-                l.raw_set(&info_table, istailcall_key, istailcall_val);
+        if what_str.contains('t') {
+            // Tail call info
+            let istailcall_key = l.create_string("istailcall")?;
+            let istailcall_val = LuaValue::boolean(false);
+            l.raw_set(&info_table, istailcall_key, istailcall_val);
 
-                // extraargs: number of __call metamethods in the call chain
-                // Extract from call_status bits 8-11 (CIST_CCMT)
-                let extraargs_opt = if let Some(level) = arg1.as_integer() {
-                    use crate::lua_vm::call_info::call_status;
-                    // Convert relative level to absolute frame index
-                    // level 0 = debug.getinfo itself
-                    // level 1 = caller of debug.getinfo
-                    // level n = call_depth - 1 - n
-                    let current_depth = l.call_depth();
-                    let frame_idx = current_depth.checked_sub(1 + level as usize);
-                    frame_idx
-                        .and_then(|idx| l.get_frame(idx))
-                        .map(|f| call_status::get_ccmt_count(f.call_status))
-                } else {
-                    None
-                };
+            // extraargs: number of __call metamethods in the call chain
+            // Extract from call_status bits 8-11 (CIST_CCMT)
+            let extraargs_opt = if let Some(level) = arg1.as_integer() {
+                use crate::lua_vm::call_info::call_status;
+                // Convert relative level to absolute frame index
+                // level 0 = debug.getinfo itself
+                // level 1 = caller of debug.getinfo
+                // level n = call_depth - 1 - n
+                let current_depth = l.call_depth();
+                let frame_idx = current_depth.checked_sub(1 + level as usize);
+                frame_idx
+                    .and_then(|idx| l.get_frame(idx))
+                    .map(|f| call_status::get_ccmt_count(f.call_status))
+            } else {
+                None
+            };
 
-                if let Some(extraargs) = extraargs_opt {
-                    let extraargs_key = l.create_string("extraargs")?;
-                    let extraargs_val = LuaValue::integer(extraargs as i64);
-                    l.raw_set(&info_table, extraargs_key, extraargs_val);
-                }
-            }
-
-            if what_str.contains('f') {
-                // Function itself
-                let func_key = l.create_string("func")?;
-                l.raw_set(&info_table, func_key, func);
+            if let Some(extraargs) = extraargs_opt {
+                let extraargs_key = l.create_string("extraargs")?;
+                let extraargs_val = LuaValue::integer(extraargs as i64);
+                l.raw_set(&info_table, extraargs_key, extraargs_val);
             }
         }
-    } else if func.is_cfunction() {
+
+        if what_str.contains('f') {
+            // Function itself
+            let func_key = l.create_string("func")?;
+            l.raw_set(&info_table, func_key, func);
+        }
+    } else if func.is_c_callable() {
         // C function
         if what_str.contains('S') {
             let source_key = l.create_string("source")?;
@@ -497,24 +490,23 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("invalid stack level".to_string()))?;
 
     if let Some(lua_func) = frame_func.as_lua_function() {
-        if let Some(chunk) = lua_func.chunk() {
-            // Get local variable name from chunk
-            if local_index > 0 && local_index <= chunk.locals.len() {
-                let name = &chunk.locals[local_index - 1];
+        let chunk = lua_func.chunk();
+        // Get local variable name from chunk
+        if local_index > 0 && local_index <= chunk.locals.len() {
+            let name = &chunk.locals[local_index - 1];
 
-                // Get the value from the stack
-                // The local variables are at base + (local_index - 1)
-                let base = l.get_frame_base(level);
-                let value_idx = base + local_index - 1;
+            // Get the value from the stack
+            // The local variables are at base + (local_index - 1)
+            let base = l.get_frame_base(level);
+            let value_idx = base + local_index - 1;
 
-                let top = l.get_top();
-                if value_idx < top {
-                    let value = l.stack_get(value_idx).unwrap_or(LuaValue::nil());
-                    let name_str = l.create_string(name)?;
-                    l.push_value(name_str)?;
-                    l.push_value(value)?;
-                    return Ok(2);
-                }
+            let top = l.get_top();
+            if value_idx < top {
+                let value = l.stack_get(value_idx).unwrap_or(LuaValue::nil());
+                let name_str = l.create_string(name)?;
+                l.push_value(name_str)?;
+                l.push_value(value)?;
+                return Ok(2);
             }
         }
     }
@@ -558,22 +550,21 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("invalid stack level".to_string()))?;
 
     if let Some(lua_func) = frame_func.as_lua_function() {
-        if let Some(chunk) = lua_func.chunk() {
-            // Get local variable name from chunk
-            if local_index > 0 && local_index <= chunk.locals.len() {
-                let name = &chunk.locals[local_index - 1];
+        let chunk = lua_func.chunk();
+        // Get local variable name from chunk
+        if local_index > 0 && local_index <= chunk.locals.len() {
+            let name = &chunk.locals[local_index - 1];
 
-                // Set the value on the stack
-                let base = l.get_frame_base(level);
-                let value_idx = base + local_index - 1;
+            // Set the value on the stack
+            let base = l.get_frame_base(level);
+            let value_idx = base + local_index - 1;
 
-                let top = l.get_top();
-                if value_idx < top {
-                    l.stack_set(value_idx, value)?;
-                    let name_str = l.create_string(name)?;
-                    l.push_value(name_str)?;
-                    return Ok(1);
-                }
+            let top = l.get_top();
+            if value_idx < top {
+                l.stack_set(value_idx, value)?;
+                let name_str = l.create_string(name)?;
+                l.push_value(name_str)?;
+                return Ok(1);
             }
         }
     }
@@ -608,18 +599,17 @@ fn debug_getupvalue(l: &mut LuaState) -> LuaResult<usize> {
             let upvalue = &upvalues[up_index - 1];
 
             // Get the name from chunk
-            if let Some(chunk) = lua_func.chunk() {
-                if up_index <= chunk.upvalue_descs.len() {
-                    // Use actual upvalue name from chunk
-                    let name = &chunk.upvalue_descs[up_index - 1].name;
-                    let name_str = l.create_string(name)?;
+            let chunk = lua_func.chunk();
+            if up_index <= chunk.upvalue_descs.len() {
+                // Use actual upvalue name from chunk
+                let name = &chunk.upvalue_descs[up_index - 1].name;
+                let name_str = l.create_string(name)?;
 
-                    // Get the value
-                    let value = upvalue.as_ref().data.get_value();
-                    l.push_value(name_str)?;
-                    l.push_value(value)?;
-                    return Ok(2);
-                }
+                // Get the value
+                let value = upvalue.as_ref().data.get_value();
+                l.push_value(name_str)?;
+                l.push_value(value)?;
+                return Ok(2);
             }
         }
     }
@@ -656,13 +646,10 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
         if up_index > 0 && up_index <= upvalues.len() {
             let upvalue_ptr = upvalues[up_index - 1];
 
+            let chunk = lua_func.chunk();
             // Get the upvalue name from the chunk
-            let upvalue_name = if let Some(chunk) = lua_func.chunk() {
-                if up_index - 1 < chunk.upvalue_descs.len() {
-                    chunk.upvalue_descs[up_index - 1].name.clone()
-                } else {
-                    String::new()
-                }
+            let upvalue_name = if up_index - 1 < chunk.upvalue_descs.len() {
+                chunk.upvalue_descs[up_index - 1].name.clone()
             } else {
                 String::new()
             };

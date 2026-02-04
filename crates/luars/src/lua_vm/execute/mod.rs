@@ -72,7 +72,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         // Skip C function frames - they are executed synchronously by do_call_function
         // We only execute Lua functions here
-        if func_value.is_cfunction() || !func_value.is_function() {
+        if unlikely(func_value.is_c_callable()) {
             // C function or non-function value
             // This should not happen in normal execution, as C functions
             // are called directly and pop their frame before returning
@@ -83,7 +83,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             )));
         }
 
-        let Some(func_body) = func_value.as_lua_function() else {
+        let Some(lua_func) = func_value.as_lua_function() else {
             return Err(lua_state.error(format!(
                 "Current frame is not a Lua function: got {} value at frame {}",
                 func_value.type_name(),
@@ -91,11 +91,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             )));
         };
 
-        let Some(chunk) = func_body.chunk() else {
-            return Err(lua_state.error("Lua function has no chunk".to_string()));
-        };
+        let chunk = lua_func.chunk();
 
-        let upvalue_ptrs = func_body.upvalues();
+        let upvalue_ptrs = lua_func.upvalues();
 
         // Load frame state
         let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
@@ -1086,7 +1084,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         // Slow path: metamethod lookup
                         save_pc!();
-                        table_ops::exec_getfield(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                        table_ops::exec_getfield(
+                            lua_state, instr, constants, base, frame_idx, &mut pc,
+                        )?;
                         restore_state!();
                     }
                 }
@@ -1121,7 +1121,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if !fast_path_ok {
                         // Slow path: metamethod or hash part
                         save_pc!();
-                        table_ops::exec_seti(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                        table_ops::exec_seti(
+                            lua_state, instr, constants, base, frame_idx, &mut pc,
+                        )?;
                         restore_state!();
                     } else {
                         lua_state.check_gc()?;
@@ -1154,7 +1156,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if !fast_path_ok {
                         // Slow path: metamethod, new key insertion, or non-table
                         save_pc!();
-                        table_ops::exec_setfield(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                        table_ops::exec_setfield(
+                            lua_state, instr, constants, base, frame_idx, &mut pc,
+                        )?;
                         restore_state!();
                     } else {
                         lua_state.check_gc()?;
@@ -1922,10 +1926,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         .as_lua_function()
                         .ok_or(LuaError::RuntimeError)?;
                     // Get param_count from the function's chunk
-                    let param_count = {
-                        let chunk = func_obj.chunk().ok_or(LuaError::RuntimeError)?;
-                        chunk.param_count
-                    };
+                    let param_count = func_obj.chunk().param_count;
 
                     let stack = lua_state.stack_mut();
                     let ra_idx = base + a;

@@ -531,15 +531,8 @@ impl LuaVM {
     /// The upvalues are automatically created as closed upvalues with the given values
     #[inline]
     pub fn create_c_closure(&mut self, func: CFunction, upvalues: Vec<LuaValue>) -> CreateResult {
-        // Create closed upvalues for each value
-        let mut upvalue_ids: Vec<UpvaluePtr> = vec![];
-        for val in upvalues {
-            let upval_ptr = self.create_upvalue_closed(val)?;
-            upvalue_ids.push(upval_ptr);
-        }
-
         self.object_allocator
-            .create_c_closure(&mut self.gc, func, upvalue_ids)
+            .create_c_closure(&mut self.gc, func, upvalues)
     }
 
     /// Create an open upvalue pointing to a stack index
