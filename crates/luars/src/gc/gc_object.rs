@@ -1,10 +1,7 @@
-// ============ GC Header ============
-use std::rc::Rc;
-
 use crate::{
-    Chunk, GcObjectKind, LuaTable,
+    GcObjectKind, LuaFunction, LuaTable,
     lua_value::{LuaString, LuaUpvalue, LuaUserdata},
-    lua_vm::{CFunction, LuaState},
+    lua_vm::LuaState,
 };
 
 // ============ GC Constants (from Lua 5.5 lgc.h) ============
@@ -296,7 +293,7 @@ impl<T> Gc<T> {
 
 pub type GcString = Gc<LuaString>;
 pub type GcTable = Gc<LuaTable>;
-pub type GcFunction = Gc<FunctionBody>;
+pub type GcFunction = Gc<LuaFunction>;
 pub type GcUpvalue = Gc<LuaUpvalue>;
 pub type GcThread = Gc<LuaState>;
 pub type GcUserdata = Gc<LuaUserdata>;
@@ -610,7 +607,7 @@ impl GcObjectOwner {
         }
     }
 
-    pub fn as_function_mut(&mut self) -> Option<&mut FunctionBody> {
+    pub fn as_function_mut(&mut self) -> Option<&mut LuaFunction> {
         match self {
             GcObjectOwner::Function(f) => Some(&mut f.data),
             _ => None,
@@ -640,65 +637,6 @@ impl GcObjectOwner {
 
     pub fn size_of_data(&self) -> usize {
         self.header().size as usize
-    }
-}
-
-/// Function body - either Lua bytecode or C function
-pub enum FunctionBody {
-    /// Lua function with bytecode chunk
-    /// Now includes cached upvalue pointers for direct access (zero-overhead like Lua C)
-    Lua(Rc<Chunk>, Vec<UpvaluePtr>),
-    /// C function (native Rust function) with cached upvalues
-    CClosure(CFunction, Vec<UpvaluePtr>),
-}
-
-impl FunctionBody {
-    /// Check if this is a C function (any C variant)
-    #[inline(always)]
-    pub fn is_c_function(&self) -> bool {
-        matches!(self, FunctionBody::CClosure(_, _))
-    }
-
-    /// Check if this is a Lua function
-    #[inline(always)]
-    pub fn is_lua_function(&self) -> bool {
-        matches!(self, FunctionBody::Lua(_, _))
-    }
-
-    /// Get the chunk if this is a Lua function
-    #[inline(always)]
-    pub fn chunk(&self) -> Option<&Rc<Chunk>> {
-        match &self {
-            FunctionBody::Lua(chunk, _) => Some(chunk),
-            _ => None,
-        }
-    }
-
-    /// Get the C function pointer if this is any C function variant
-    #[inline(always)]
-    pub fn c_function(&self) -> Option<CFunction> {
-        match &self {
-            FunctionBody::CClosure(f, _) => Some(*f),
-            FunctionBody::Lua(_, _) => None,
-        }
-    }
-
-    /// Get cached upvalues (direct pointers for fast access)
-    #[inline(always)]
-    pub fn upvalues(&self) -> &Vec<UpvaluePtr> {
-        match &self {
-            FunctionBody::CClosure(_, uv) => uv,
-            FunctionBody::Lua(_, uv) => uv,
-        }
-    }
-
-    /// Get mutable access to cached upvalues for updating pointers
-    #[inline(always)]
-    pub fn upvalues_mut(&mut self) -> &mut Vec<UpvaluePtr> {
-        match self {
-            FunctionBody::CClosure(_, uv) => uv,
-            FunctionBody::Lua(_, uv) => uv,
-        }
     }
 }
 

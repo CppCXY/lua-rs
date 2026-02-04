@@ -5,10 +5,10 @@ mod pack;
 mod pattern;
 mod string_format;
 
-use crate::gc::FunctionBody;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
+use crate::LuaFunction;
 
 pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
@@ -231,7 +231,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.rep' (string expected)".to_string()))?;
-    
+
     // Accept both string and binary types
     let s_bytes = if let Some(s_str) = s_value.as_str() {
         s_str.as_bytes().to_vec()
@@ -324,7 +324,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
     })?;
-    
+
     // Accept both string and binary types
     let s_bytes = if let Some(s) = s_value.as_str() {
         s.as_bytes()
@@ -337,7 +337,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     let vm = l.vm_mut();
     let mut reversed = s_bytes.to_vec();
     reversed.reverse();
-    
+
     // Return binary if input was binary, otherwise try string
     let result = if s_value.as_binary().is_some() {
         vm.create_binary(reversed)?
@@ -347,7 +347,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
             Err(_) => vm.create_binary(reversed)?,
         }
     };
-    
+
     l.push_value(result)?;
     Ok(1)
 }
@@ -358,7 +358,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.sub' (string expected)".to_string()))?;
-    
+
     // Get string data - handle both string and binary types
     let s_bytes = if let Some(s) = s_value.as_str() {
         s.as_bytes()
@@ -578,7 +578,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'gsub' (string expected)".to_string()))?;
-    
+
     // Get string data - handle both string and binary types
     let s_str = if let Some(s) = s_value.as_str() {
         s.to_string()
@@ -771,7 +771,7 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
     // Get upvalue from function (must be a C closure)
     let state_table_value = if let Some(func_body) = func_val.as_lua_function() {
         // Check if it's a C closure
-        if let FunctionBody::CClosure(_, upvalues) = func_body {
+        if let LuaFunction::CClosure(_, upvalues) = func_body {
             if upvalues.is_empty() {
                 return Err(l.error("gmatch iterator: no upvalues".to_string()));
             }

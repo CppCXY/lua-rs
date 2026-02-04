@@ -8,13 +8,12 @@
 // 5. Free list for slot reuse
 // 6. GC headers embedded in objects for mark-sweep
 
-use crate::gc::gc_object::FunctionBody;
 use crate::gc::string_interner::StringInterner;
 use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     GC, GcBinary, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata, Instruction,
-    LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
+    LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
 };
 use std::rc::Rc;
 
@@ -86,7 +85,7 @@ impl ObjectAllocator {
         } else {
             return self.create_string(gc, "");
         };
-        
+
         // Extract substring info
         // Clamp indices
         let start = start.min(bytes.len());
@@ -187,7 +186,7 @@ impl ObjectAllocator {
         let size = (upval_size + instr_size + const_size + child_size + line_size) as u32;
 
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
-            FunctionBody::Lua(chunk, upvalue_ptrs),
+            LuaFunction::Lua(chunk, upvalue_ptrs),
             current_white,
             size,
         )));
@@ -210,7 +209,7 @@ impl ObjectAllocator {
         let size = std::mem::size_of::<CFunction>() as u32
             + (upvalue_ptrs.len() as u32 * std::mem::size_of::<UpvaluePtr>() as u32);
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
-            FunctionBody::CClosure(func, upvalue_ptrs),
+            LuaFunction::CClosure(func, upvalue_ptrs),
             current_white,
             size,
         )));

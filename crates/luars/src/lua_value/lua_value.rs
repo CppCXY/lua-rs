@@ -31,7 +31,7 @@
 use crate::lua_value::LuaUserdata;
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    BinaryPtr, FunctionBody, FunctionPtr, GcBinary, GcFunction, GcObjectPtr, GcString, GcTable,
+    BinaryPtr, LuaFunction, FunctionPtr, GcBinary, GcFunction, GcObjectPtr, GcString, GcTable,
     GcThread, GcUserdata, LuaTable, StringPtr, TablePtr, ThreadPtr, UserdataPtr,
 };
 
@@ -678,7 +678,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_lua_function(&self) -> Option<&FunctionBody> {
+    pub fn as_lua_function(&self) -> Option<&LuaFunction> {
         if self.ttisluafunction() {
             let func = unsafe { &*(self.value.ptr as *const GcFunction) };
             Some(&func.data)
@@ -688,7 +688,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_lua_function_mut(&self) -> Option<&mut FunctionBody> {
+    pub fn as_lua_function_mut(&self) -> Option<&mut LuaFunction> {
         if self.ttisluafunction() {
             let func = unsafe { &mut *(self.value.ptr as *mut GcFunction) };
             Some(&mut func.data)

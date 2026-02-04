@@ -18,7 +18,8 @@ pub use lua_value::{
     LUA_VNUMINT, LUA_VTRUE,
 };
 
-use crate::{Instruction, StringInterner, TablePtr};
+use crate::lua_vm::CFunction;
+use crate::{Instruction, StringInterner, TablePtr, UpvaluePtr};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LuaValuePtr {
@@ -149,11 +150,6 @@ impl fmt::Debug for LuaUserdata {
     }
 }
 
-pub struct LuaFunction {
-    pub chunk: Rc<Chunk>,
-    pub upvalues: Vec<Rc<LuaUpvalue>>,
-}
-
 /// Upvalue descriptor
 #[derive(Debug, Clone)]
 pub struct UpvalueDesc {
@@ -233,6 +229,66 @@ impl Eq for LuaString {}
 impl PartialEq for LuaString {
     fn eq(&self, other: &Self) -> bool {
         self.hash == other.hash && self.str == other.str
+    }
+}
+
+
+/// Function body - either Lua bytecode or C function
+pub enum LuaFunction {
+    /// Lua function with bytecode chunk
+    /// Now includes cached upvalue pointers for direct access (zero-overhead like Lua C)
+    Lua(Rc<Chunk>, Vec<UpvaluePtr>),
+    /// C function (native Rust function) with cached upvalues
+    CClosure(CFunction, Vec<UpvaluePtr>),
+}
+
+impl LuaFunction {
+    /// Check if this is a C function (any C variant)
+    #[inline(always)]
+    pub fn is_c_function(&self) -> bool {
+        matches!(self, LuaFunction::CClosure(_, _))
+    }
+
+    /// Check if this is a Lua function
+    #[inline(always)]
+    pub fn is_lua_function(&self) -> bool {
+        matches!(self, LuaFunction::Lua(_, _))
+    }
+
+    /// Get the chunk if this is a Lua function
+    #[inline(always)]
+    pub fn chunk(&self) -> Option<&Rc<Chunk>> {
+        match &self {
+            LuaFunction::Lua(chunk, _) => Some(chunk),
+            _ => None,
+        }
+    }
+
+    /// Get the C function pointer if this is any C function variant
+    #[inline(always)]
+    pub fn c_function(&self) -> Option<CFunction> {
+        match &self {
+            LuaFunction::CClosure(f, _) => Some(*f),
+            LuaFunction::Lua(_, _) => None,
+        }
+    }
+
+    /// Get cached upvalues (direct pointers for fast access)
+    #[inline(always)]
+    pub fn upvalues(&self) -> &Vec<UpvaluePtr> {
+        match &self {
+            LuaFunction::CClosure(_, uv) => uv,
+            LuaFunction::Lua(_, uv) => uv,
+        }
+    }
+
+    /// Get mutable access to cached upvalues for updating pointers
+    #[inline(always)]
+    pub fn upvalues_mut(&mut self) -> &mut Vec<UpvaluePtr> {
+        match self {
+            LuaFunction::CClosure(_, uv) => uv,
+            LuaFunction::Lua(_, uv) => uv,
+        }
     }
 }
 
