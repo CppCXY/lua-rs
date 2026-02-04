@@ -1155,26 +1155,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
-                    // Save PC before call
+
                     save_pc!();
 
-                    // Delegate to call handler
                     match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {
-                            // C function executed, continue in current frame
                             restore_state!();
                         }
                         Ok(FrameAction::Call) => {
-                            // Lua function pushed new frame
-                            // Continue to 'startfunc to load new function context
                             continue 'startfunc;
                         }
                         Ok(FrameAction::TailCall) => {
-                            // Tail call replaced current frame
                             continue 'startfunc;
                         }
                         Ok(FrameAction::Return) => {
-                            // Shouldn't happen from handle_call
                             continue 'startfunc;
                         }
                         Err(e) => return Err(e),
