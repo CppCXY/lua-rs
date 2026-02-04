@@ -467,6 +467,13 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
     if let Some(arg_val) = arg {
         // Set new output file
         if let Some(filename) = arg_val.as_str() {
+            // Create parent directories if they don't exist
+            if let Some(parent) = std::path::Path::new(filename).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            
             // Open file for writing
             let file = match std::fs::File::create(filename) {
                 Ok(f) => f,
