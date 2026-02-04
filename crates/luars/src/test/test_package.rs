@@ -102,11 +102,13 @@ fn test_package_searchers() {
         assert(type(package.searchers) == "table")
         assert(type(package.searchers[1]) == "function")  -- preload searcher
         assert(type(package.searchers[2]) == "function")  -- lua file searcher
-        assert(package.searchers[3] == nil)  -- we only have 2 searchers
+        assert(type(package.searchers[3]) == "function")  -- C module searcher
+        assert(type(package.searchers[4]) == "function")  -- all-in-one C searcher
+        assert(package.searchers[5] == nil)  -- we have 4 searchers total
     "#,
     );
 
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "Error: {:?}", result.err());
 }
 
 #[test]
