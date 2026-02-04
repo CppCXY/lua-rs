@@ -64,41 +64,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
 
         let frame_idx = current_depth - 1;
-
         // ===== LOAD FRAME CONTEXT =====
-        let func_value = lua_state
-            .get_frame_func(frame_idx)
-            .ok_or(LuaError::RuntimeError)?;
-
-        // Skip C function frames - they are executed synchronously by do_call_function
-        // We only execute Lua functions here
-        if unlikely(func_value.is_c_callable()) {
-            // C function or non-function value
-            // This should not happen in normal execution, as C functions
-            // are called directly and pop their frame before returning
-            return Err(lua_state.error(format!(
-                "Unexpected {} frame in lua_execute_until at frame {}",
-                func_value.type_name(),
-                frame_idx
-            )));
-        }
+        let Some(ci) = lua_state.get_frame(frame_idx) else {
+            return Err(lua_state.error(format!("No function found for frame {}", frame_idx)));
+        };
+        let func_value = ci.func;
+        let mut pc = ci.pc as usize;
+        let mut base = ci.base;
 
         let Some(lua_func) = func_value.as_lua_function() else {
             return Err(lua_state.error(format!(
                 "Current frame is not a Lua function: got {} value at frame {}",
-                func_value.type_name(),
+                ci.func.type_name(),
                 frame_idx
             )));
         };
 
         let chunk = lua_func.chunk();
-
         let upvalue_ptrs = lua_func.upvalues();
-
-        // Load frame state
-        let mut pc = lua_state.get_frame_pc(frame_idx) as usize;
-        let mut base = lua_state.get_frame_base(frame_idx);
-
         // Pre-grow stack
         let needed_size = base + chunk.max_stack_size;
         lua_state.grow_stack(needed_size)?;
