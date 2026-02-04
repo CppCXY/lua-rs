@@ -1062,9 +1062,33 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::GetField => {
-                    table_ops::exec_getfield(
-                        lua_state, instr, constants, base, frame_idx, &mut pc,
-                    )?;
+                    // GETFIELD: R[A] := R[B][K[C]:string]
+                    // HOT PATH: Uses fast_getfield() for zero-cost abstraction
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let stack = lua_state.stack_mut();
+                    let rb = stack[base + b];
+                    let key = &constants[c];
+
+                    // Try fast path: table with string key
+                    let result = if let Some(table_ref) = rb.as_table() {
+                        table_ref.impl_table.fast_getfield(key)
+                    } else {
+                        None
+                    };
+
+                    if let Some(val) = result {
+                        // Fast path succeeded
+                        let stack = lua_state.stack_mut();
+                        stack[base + a] = val;
+                    } else {
+                        // Slow path: metamethod lookup
+                        save_pc!();
+                        table_ops::exec_getfield(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                        restore_state!();
+                    }
                 }
                 OpCode::SetTable => {
                     table_ops::exec_settable(
@@ -1072,12 +1096,69 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     )?;
                 }
                 OpCode::SetI => {
-                    table_ops::exec_seti(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                    // SETI: R[A][B] := RK(C) (integer key)
+                    // HOT PATH: Uses fast_seti() for zero-cost abstraction
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+                    let k = instr.get_k();
+
+                    let stack = lua_state.stack();
+                    let ra = stack[base + a];
+                    let value = if k { constants[c] } else { stack[base + c] };
+
+                    // Try fast path: table with array access
+                    let fast_path_ok = if let Some(table_ref) = ra.as_table_mut() {
+                        if !table_ref.has_metatable() {
+                            table_ref.impl_table.fast_seti(b as i64, value)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !fast_path_ok {
+                        // Slow path: metamethod or hash part
+                        save_pc!();
+                        table_ops::exec_seti(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                        restore_state!();
+                    } else {
+                        lua_state.check_gc()?;
+                    }
                 }
                 OpCode::SetField => {
-                    table_ops::exec_setfield(
-                        lua_state, instr, constants, base, frame_idx, &mut pc,
-                    )?;
+                    // SETFIELD: R[A][K[B]:string] := RK(C)
+                    // HOT PATH: Uses fast_setfield() for zero-cost abstraction
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+                    let k = instr.get_k();
+
+                    let stack = lua_state.stack();
+                    let ra = stack[base + a];
+                    let key = &constants[b];
+                    let value = if k { constants[c] } else { stack[base + c] };
+
+                    // Try fast path: table without metatable
+                    let fast_path_ok = if let Some(table_ref) = ra.as_table_mut() {
+                        if !table_ref.has_metatable() {
+                            table_ref.impl_table.fast_setfield(key, value)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if !fast_path_ok {
+                        // Slow path: metamethod, new key insertion, or non-table
+                        save_pc!();
+                        table_ops::exec_setfield(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                        restore_state!();
+                    } else {
+                        lua_state.check_gc()?;
+                    }
                 }
                 OpCode::Self_ => {
                     table_ops::exec_self(lua_state, instr, constants, base, frame_idx, &mut pc)?;
@@ -1461,6 +1542,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 // ============================================================
                 OpCode::GetTabUp => {
                     // R[A] := UpValue[B][K[C]:shortstring]
+                    // HOT PATH: Uses fast_getfield() to avoid save_pc/restore_state
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
@@ -1468,26 +1550,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let table_value = upvalue_ptrs[b].as_ref().data.get_value();
                     let key = &constants[c];
 
-                    // Fast path: direct table access without metamethod
-                    let result = if let Some(table) = table_value.as_table() {
-                        if let Some(val) = table.raw_get(key) {
-                            val
-                        } else {
-                            // Key not found, need metamethod - update frame state
-                            let write_pos = base + a;
-                            let call_info = lua_state.get_call_info_mut(frame_idx);
-                            if write_pos + 1 > call_info.top {
-                                call_info.top = write_pos + 1;
-                                lua_state.set_top(write_pos + 1)?;
-                            }
-                            save_pc!();
-                            let result =
-                                helper::lookup_from_metatable(lua_state, &table_value, key);
-                            restore_state!();
-                            result.unwrap_or(LuaValue::nil())
-                        }
+                    // Try fast path: direct table access
+                    let result = if let Some(table_ref) = table_value.as_table() {
+                        table_ref.impl_table.fast_getfield(key)
                     } else {
-                        // Not a table, need metamethod
+                        None
+                    };
+
+                    if let Some(val) = result {
+                        // Fast path succeeded - no save_pc/restore_state needed!
+                        let stack = lua_state.stack_mut();
+                        stack[base + a] = val;
+                    } else {
+                        // Slow path: metamethod lookup
                         let write_pos = base + a;
                         let call_info = lua_state.get_call_info_mut(frame_idx);
                         if write_pos + 1 > call_info.top {
@@ -1497,11 +1572,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         save_pc!();
                         let result = helper::lookup_from_metatable(lua_state, &table_value, key);
                         restore_state!();
-                        result.unwrap_or(LuaValue::nil())
-                    };
-
-                    let stack = lua_state.stack_mut();
-                    stack[base + a] = result;
+                        let stack = lua_state.stack_mut();
+                        stack[base + a] = result.unwrap_or(LuaValue::nil());
+                    }
                 }
 
                 OpCode::SetTabUp => {

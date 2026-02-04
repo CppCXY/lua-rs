@@ -434,14 +434,25 @@ impl NativeTable {
         self.fast_geti(key)
     }
 
-    /// Set value in array part
+    /// Fast SETI path - mirrors Lua 5.5's luaH_fastseti macro
+    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
     #[inline(always)]
-    pub fn set_int(&mut self, key: i64, value: LuaValue) {
-        // If key is in valid array range
+    pub fn fast_seti(&mut self, key: i64, value: LuaValue) -> bool {
+        // Fast path: array bounds check
         if key >= 1 && key <= self.asize as i64 {
             unsafe {
                 self.write_array(key, value);
             }
+            return true;
+        }
+        false
+    }
+
+    /// Set value in array part
+    #[inline(always)]
+    pub fn set_int(&mut self, key: i64, value: LuaValue) {
+        // Try fast path first
+        if self.fast_seti(key, value) {
             return;
         }
 
@@ -463,6 +474,75 @@ impl NativeTable {
         // Put in hash part
         let key_val = LuaValue::integer(key);
         self.set_node(key_val, value);
+    }
+
+    /// Fast GETFIELD path - for short string keys (most common in field access)
+    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
+    #[inline(always)]
+    pub fn fast_getfield(&self, key: &LuaValue) -> Option<LuaValue> {
+        if self.sizenode() == 0 {
+            return None;
+        }
+        
+        // GETFIELD only uses short string keys (interned)
+        if key.is_short_string() {
+            return self.get_shortstr_fast(key);
+        }
+        
+        None
+    }
+
+    /// Fast SETFIELD path - for short string keys
+    /// Returns true if successfully set in hash part (no metatable, key exists or room available)
+    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
+    #[inline(always)]
+    pub fn fast_setfield(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+        // Only handles short strings (SETFIELD always uses short string keys)
+        if !key.is_short_string() {
+            return false;
+        }
+        
+        if self.sizenode() == 0 {
+            // Need to allocate - can't do in fast path
+            return false;
+        }
+        
+        // Try to find existing key or free slot in main position
+        let mp = self.mainposition(key);
+        let key_ptr = unsafe { key.value.i };
+        
+        unsafe {
+            // Check main position first
+            if (*mp).key.is_string() && (*mp).key.value.i == key_ptr {
+                // Found existing key - update value
+                (*mp).value = value;
+                return true;
+            }
+            
+            // If main position is free, use it
+            if (*mp).key.is_nil() {
+                (*mp).key = *key;
+                (*mp).value = value;
+                (*mp).next = 0;
+                return true;
+            }
+            
+            // Check collision chain
+            let mut node = mp;
+            let mut next = (*node).next;
+            while next != 0 {
+                node = node.offset(next as isize);
+                if (*node).key.is_string() && (*node).key.value.i == key_ptr {
+                    // Found in chain - update value
+                    (*node).value = value;
+                    return true;
+                }
+                next = (*node).next;
+            }
+        }
+        
+        // Key not found and complex insertion needed - use slow path
+        false
     }
 
     /// Get value from hash part - CRITICAL HOT PATH
