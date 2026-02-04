@@ -1064,14 +1064,20 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
         let len = bytes.len() as i64;
         let adjusted = len + pos_arg + 1;
         if adjusted < 1 {
-            return Err(l.error("bad argument #3 to 'unpack' (position out of range)".to_string()));
+            return Err(l.error("initial position out of string".to_string()));
         }
         adjusted
     } else if pos_arg == 0 {
-        return Err(l.error("bad argument #3 to 'unpack' (position out of range)".to_string()));
+        return Err(l.error("initial position out of string".to_string()));
     } else {
         pos_arg
     };
+    
+    // Check if initial position is within string bounds
+    let pos_usize = pos as usize;
+    if pos_usize > bytes.len() + 1 {
+        return Err(l.error("initial position out of string".to_string()));
+    }
     
     // Convert to usize
     let pos_usize = pos as usize;
@@ -1088,7 +1094,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
 
             'b' => {
                 if idx >= bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 results.push(LuaValue::integer(bytes[idx] as i8 as i64));
                 idx += 1;
@@ -1096,7 +1102,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
 
             'B' => {
                 if idx >= bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 results.push(LuaValue::integer(bytes[idx] as i64));
                 idx += 1;
@@ -1105,7 +1111,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
             'h' => {
                 skip_alignment_padding(&mut idx, 2, max_alignment);
                 if idx + 2 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: i16 = endianness.from_bytes(&bytes[idx..idx+2]);
                 results.push(LuaValue::integer(val as i64));
@@ -1115,7 +1121,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
             'H' => {
                 skip_alignment_padding(&mut idx, 2, max_alignment);
                 if idx + 2 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: u16 = endianness.from_bytes(&bytes[idx..idx+2]);
                 results.push(LuaValue::integer(val as i64));
@@ -1148,7 +1154,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 skip_alignment_padding(&mut idx, size, max_alignment);
 
                 if idx + size > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
 
                 // Unpack signed integer with specified size
@@ -1279,7 +1285,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 skip_alignment_padding(&mut idx, size, max_alignment);
 
                 if idx + size > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
 
                 // Unpack unsigned integer with specified size
@@ -1369,7 +1375,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
             'f' => {
                 skip_alignment_padding(&mut idx, 4, max_alignment);
                 if idx + 4 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: f32 = endianness.from_bytes(&bytes[idx..idx+4]);
                 results.push(LuaValue::number(val as f64));
@@ -1379,7 +1385,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
             'd' => {
                 skip_alignment_padding(&mut idx, 8, max_alignment);
                 if idx + 8 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: f64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::number(val));
@@ -1390,7 +1396,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 // lua_Integer (8 bytes, i64)
                 skip_alignment_padding(&mut idx, 8, max_alignment);
                 if idx + 8 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: i64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::integer(val));
@@ -1401,7 +1407,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 // unsigned lua_Integer (8 bytes, u64)
                 skip_alignment_padding(&mut idx, 8, max_alignment);
                 if idx + 8 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: u64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::integer(val as i64));
@@ -1412,7 +1418,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 // size_t (8 bytes on 64-bit)
                 skip_alignment_padding(&mut idx, 8, max_alignment);
                 if idx + 8 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: u64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::integer(val as i64));
@@ -1423,7 +1429,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 // lua_Number (8 bytes, f64) - same as 'd'
                 skip_alignment_padding(&mut idx, 8, max_alignment);
                 if idx + 8 > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 let val: f64 = endianness.from_bytes(&bytes[idx..idx+8]);
                 results.push(LuaValue::number(val));
@@ -1437,7 +1443,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     idx += 1;
                 }
                 if idx >= bytes.len() {
-                    return Err(l.error("unfinished string in data".to_string()));
+                    return Err(l.error("unfinished string for format 'z'".to_string()));
                 }
                 // Create binary value for the extracted bytes
                 let binary_val = l.create_binary(bytes[start..idx].to_vec())?;
@@ -1463,7 +1469,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     .map_err(|_| l.error("bad argument to 'unpack' (invalid size)".to_string()))?;
 
                 if idx + size > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 // Create binary value for the fixed-length data
                 let binary_val = l.create_binary(bytes[idx..idx + size].to_vec())?;
@@ -1496,20 +1502,25 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
 
                 // Read the string length
                 if idx + size_bytes > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 
                 let str_len: usize = match endianness {
                     Endianness::Little => {
                         let mut v: usize = 0;
-                        for i in 0..size_bytes {
+                        for i in 0..size_bytes.min(std::mem::size_of::<usize>()) {
                             v |= (bytes[idx + i] as usize) << (i * 8);
                         }
                         v
                     }
                     Endianness::Big => {
                         let mut v: usize = 0;
-                        for i in 0..size_bytes {
+                        let start = if size_bytes > std::mem::size_of::<usize>() {
+                            size_bytes - std::mem::size_of::<usize>()
+                        } else {
+                            0
+                        };
+                        for i in start..size_bytes {
                             v = (v << 8) | (bytes[idx + i] as usize);
                         }
                         v
@@ -1517,12 +1528,19 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     Endianness::Native => {
                         let mut v: usize = 0;
                         #[cfg(target_endian = "little")]
-                        for i in 0..size_bytes {
+                        for i in 0..size_bytes.min(std::mem::size_of::<usize>()) {
                             v |= (bytes[idx + i] as usize) << (i * 8);
                         }
                         #[cfg(target_endian = "big")]
-                        for i in 0..size_bytes {
-                            v = (v << 8) | (bytes[idx + i] as usize);
+                        {
+                            let start = if size_bytes > std::mem::size_of::<usize>() {
+                                size_bytes - std::mem::size_of::<usize>()
+                            } else {
+                                0
+                            };
+                            for i in start..size_bytes {
+                                v = (v << 8) | (bytes[idx + i] as usize);
+                            }
                         }
                         v
                     }
@@ -1532,7 +1550,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 
                 // Read the string data
                 if idx + str_len > bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 
                 let binary_val = l.create_binary(bytes[idx..idx + str_len].to_vec())?;
@@ -1543,7 +1561,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
             'x' => {
                 // padding byte - skip
                 if idx >= bytes.len() {
-                    return Err(l.error("out of string".to_string()));
+                    return Err(l.error("data string too short".to_string()));
                 }
                 idx += 1;
             }
