@@ -85,17 +85,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         l.push_value(modname_val)?;
         let func_idx = l.get_top() - 2;
 
-        let (success, _) = l.pcall_stack_based(func_idx, 1)?;
-
-        // pcall_stack_based 对C函数可能不正确更新 stack_top
-        // 手动检查结果（searchers 最多返回 2 个值）
-        let mut result_count = 0;
-        if l.stack_get(func_idx).is_some() {
-            result_count = 1;
-            if l.stack_get(func_idx + 1).is_some() {
-                result_count = 2;
-            }
-        }
+        let (success, result_count) = l.pcall_stack_based(func_idx, 1)?;
 
         if !success {
             // Searcher threw an error

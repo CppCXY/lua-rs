@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::branch::unlikely;
 use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
@@ -149,102 +150,97 @@ impl LuaState {
 
     /// Push a new call frame (equivalent to Lua's luaD_precall)
     /// OPTIMIZED: Reuses CallInfo slots, only allocates when needed
-    pub fn push_frame(
+    ///
+    /// PERFORMANCE CRITICAL: This function is called on every function invocation
+    /// Optimizations:
+    /// - Assumes func is callable (checked by caller)
+    /// - Caches as_lua_function() result to avoid repeated enum matching
+    /// - Uses batch nil filling instead of loops
+    /// - Minimizes branches in hot path
+    #[inline]
+    pub(crate) fn push_frame(
         &mut self,
         func: LuaValue,
         base: usize,
         nparams: usize,
         nresults: i32,
     ) -> LuaResult<()> {
-        // Validate that func is actually a callable value
-        let is_callable =
-            func.is_function() || func.is_cfunction() || func.as_lua_function().is_some();
-
-        if !is_callable {
-            self.error(format!("attempt to call a {} value", func.type_name()));
-            return Err(LuaError::RuntimeError);
-        }
-
-        // 检查栈深度限制(Lua栈)
-        if self.call_depth >= self.safe_option.max_call_depth {
-            self.error(format!(
+        // Fast path: check stack depth (branch predictor friendly - usually succeeds)
+        if unlikely(self.call_depth >= self.safe_option.max_call_depth) {
+            return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
-            ));
-            return Err(LuaError::StackOverflow);
+            )));
         }
 
-        // Determine call status and check C call depth for C functions
-        let is_c_function = func.is_cfunction()
-            || func
-                .as_lua_function()
-                .map(|f| f.is_c_function())
-                .unwrap_or(false);
+        // Cache lua_function extraction (avoid repeated enum matching)
+        // This single call replaces multiple is_c_function/as_lua_function checks
+        let lua_func = func.as_lua_function();
 
-        // C函数需要增加C调用深度(类似Lua的nCcalls)
-        // 在push_frame中统一管理,避免在pcall/xpcall中手动管理
-        if is_c_function {
-            if self.c_call_depth >= self.safe_option.max_call_depth {
-                self.error(format!(
-                    "C stack overflow (C call depth: {})",
-                    self.c_call_depth
-                ));
-                return Err(LuaError::StackOverflow);
-            }
-            self.c_call_depth += 1;
-        }
-
-        let call_status = if is_c_function
+        // Determine function type and extract metadata in one pass
+        let (is_c_function, maxstacksize, numparams, nextraargs) = if let Some(func_obj) = lua_func
         {
-            CIST_C
-        } else {
-            CIST_LUA
-        };
-
-        // Calculate nextraargs for vararg functions
-        // nextraargs = number of arguments passed beyond the function's fixed parameters
-        let mut nextraargs = 0;
-        let mut maxstacksize = nparams; // Default for C functions
-
-        if let Some(func) = func.as_lua_function() {
-            if let Some(chunk) = func.chunk() {
-                // For Lua functions with prototypes
+            if func_obj.is_c_function() {
+                // C function path
+                (true, nparams, nparams, 0)
+            } else if let Some(chunk) = func_obj.chunk() {
+                // Lua function with chunk
                 let numparams = chunk.param_count;
-                nextraargs = if nparams > numparams {
+                let nextraargs = if nparams > numparams {
                     (nparams - numparams) as i32
                 } else {
                     0
                 };
-
-                // This is the maximum stack size that the function may use
-                // See luaD_precall in ldo.c:731: fsize = p->maxstacksize
-                maxstacksize = chunk.max_stack_size as usize;
-
-                // If nparams < numparams, we need to pad with nils
-                // This ensures all parameters are properly initialized
-                if nparams < numparams {
-                    let start = base + nparams;
-                    let end = base + numparams;
-                    for i in start..end {
-                        if i >= self.stack.len() {
-                            self.stack.push(LuaValue::nil());
-                        } else {
-                            self.stack[i] = LuaValue::nil();
-                        }
-                    }
-                    // Also update stack_top if necessary
-                    if self.stack_top < end {
-                        self.stack_top = end;
-                    }
-                }
+                (false, chunk.max_stack_size as usize, numparams, nextraargs)
+            } else {
+                // Lua function without chunk (shouldn't happen, but handle gracefully)
+                (false, nparams, nparams, 0)
             }
+        } else if func.is_cfunction() {
+            // Light C function
+            (true, nparams, nparams, 0)
+        } else {
+            // Not callable - this should be prevented by caller
+            debug_assert!(false, "push_frame called with non-callable value");
+            return Err(self.error(format!("attempt to call a {} value", func.type_name())));
         };
 
-        // Calculate frame top: base + maxstacksize (Lua 5.5: ci->top = func + 1 + fsize)
+        // Check C call depth if needed
+        if is_c_function {
+            if unlikely(self.c_call_depth >= self.safe_option.max_call_depth) {
+                return Err(self.error(format!(
+                    "C stack overflow (C call depth: {})",
+                    self.c_call_depth
+                )));
+            }
+            self.c_call_depth += 1;
+        }
+
+        // Fill missing parameters with nil (optimized batch operation)
+        if nparams < numparams {
+            let start = base + nparams;
+            let end = base + numparams;
+
+            // Ensure stack capacity
+            if self.stack.len() < end {
+                self.stack.resize(end, LuaValue::nil());
+            } else {
+                // Batch fill with nil (faster than loop)
+                self.stack[start..end].fill(LuaValue::nil());
+            }
+
+            // Update stack_top if necessary
+            if self.stack_top < end {
+                self.stack_top = end;
+            }
+        }
+
+        let call_status = if is_c_function { CIST_C } else { CIST_LUA };
         let frame_top = base + maxstacksize;
+
+        // Fast path: reuse existing CallInfo slot (most common case)
         if self.call_depth < self.call_stack.len() {
-            // Reuse existing CallInfo slot (fast path)
-            let frame = &mut self.call_stack[self.call_depth];
+            let frame = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
             frame.func = func;
             frame.base = base;
             frame.func_offset = 1;
@@ -254,8 +250,8 @@ impl LuaState {
             frame.call_status = call_status;
             frame.nextraargs = nextraargs;
         } else {
-            // Need to allocate new CallInfo (first time reaching this depth)
-            let frame = CallInfo {
+            // Slow path: allocate new CallInfo (first time reaching this depth)
+            self.call_stack.push(CallInfo {
                 func,
                 base,
                 func_offset: 1,
@@ -264,29 +260,21 @@ impl LuaState {
                 nresults,
                 call_status,
                 nextraargs,
-            };
-            self.call_stack.push(frame);
+            });
         }
 
-        // Increment depth (like moving L->ci pointer)
         self.call_depth += 1;
-
-        // NOTE: Do NOT set stack_top here!
-        // For Lua functions: stack_top should remain at the position after all passed arguments
-        // (including vararg). luaD_precall in Lua 5.5 does NOT modify L->top.
-        // For C functions: caller is responsible for setting correct stack_top.
-        // ci->top is the LIMIT (base + maxstacksize), not the current top.
-
         Ok(())
     }
 
     /// Pop call frame (equivalent to Lua's luaD_poscall)
     /// OPTIMIZED: Only decrements depth, never releases memory (Lua-style)
-    pub fn pop_frame(&mut self) -> Option<CallInfo> {
+    #[inline]
+    pub(crate) fn pop_frame(&mut self) -> Option<CallInfo> {
         if self.call_depth > 0 {
             self.call_depth -= 1;
             let frame = self.call_stack.get(self.call_depth).cloned();
-            
+
             // 如果是C函数帧，减少C调用深度
             if let Some(ref f) = frame {
                 if f.is_c() {
@@ -295,7 +283,7 @@ impl LuaState {
                     }
                 }
             }
-            
+
             frame
         } else {
             None
@@ -1097,13 +1085,14 @@ impl LuaState {
                     let err_str = self.create_string(&error_msg)?;
                     return Ok((false, vec![err_str]));
                 }
-                
+
                 // Set ccmt count in call_status
                 if ccmt_depth > 0 {
                     use crate::lua_vm::call_info::call_status;
                     let frame_idx = self.call_depth - 1;
                     if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                        frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                        frame.call_status =
+                            call_status::set_ccmt_count(frame.call_status, ccmt_depth);
                     }
                 }
 
@@ -1260,7 +1249,7 @@ impl LuaState {
             // Lua function - push frame and execute, expecting all return values
             let base = func_idx + 1;
             self.push_frame(func, base, actual_arg_count, -1)?;
-            
+
             // Set ccmt count in call_status for Lua functions too
             if ccmt_depth > 0 {
                 use crate::lua_vm::call_info::call_status;
@@ -1269,7 +1258,7 @@ impl LuaState {
                     frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
                 }
             }
-            
+
             lua_execute(self, initial_depth)
         };
 
@@ -1361,7 +1350,7 @@ impl LuaState {
             let err_str = self.create_string(&error_msg)?;
             return Ok((false, vec![err_str]));
         }
-        
+
         // Set ccmt count in call_status
         if ccmt_depth > 0 {
             use crate::lua_vm::call_info::call_status;
@@ -1505,8 +1494,9 @@ impl LuaState {
             self.push_frame(func, base, nargs, -1)?;
 
             // Check if function is C or Lua
-            let is_c_function = func.is_cfunction() || 
-                (func.is_function() && func.as_lua_function().map_or(false, |f| f.is_c_function()));
+            let is_c_function = func.is_cfunction()
+                || (func.is_function()
+                    && func.as_lua_function().map_or(false, |f| f.is_c_function()));
 
             // Execute until yield or completion
             let result = if is_c_function {

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaError, LuaResult, LuaState};
+use crate::lua_vm::{LuaResult, LuaState};
 
 pub fn create_package_lib() -> LibraryModule {
     crate::lib_module!("package", {
@@ -53,6 +53,8 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     // Fill searchers array
     searchers_table.raw_seti(1, LuaValue::cfunction(searcher_preload));
     searchers_table.raw_seti(2, LuaValue::cfunction(searcher_lua));
+    searchers_table.raw_seti(3, LuaValue::cfunction(searcher_c));
+    searchers_table.raw_seti(4, LuaValue::cfunction(searcher_c_all_in_one));
 
     // Set all fields in package table
     l.raw_set(&package_table, loaded_key, loaded_table);
@@ -105,7 +107,10 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
         .unwrap_or(LuaValue::nil());
 
     if loader.is_nil() {
-        l.push_value(LuaValue::boolean(false))?;
+        // Return error message like Lua 5.5
+        let modname_str = modname_val.as_str().unwrap_or("?");
+        let err_msg = l.create_string(&format!("\n\tno field package.preload['{}']", modname_str))?;
+        l.push_value(err_msg)?;
         Ok(1)
     } else {
         l.push_value(loader)?;
@@ -136,10 +141,10 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
     let path_key = l.create_string("path")?;
 
     let Some(path_value) = package_table.raw_get(&path_key) else {
-        return Err(LuaError::RuntimeError);
+        return Err(l.error("'package.path' must be a string".to_string()));
     };
     let Some(path_str) = path_value.as_str() else {
-        return Err(LuaError::RuntimeError);
+        return Err(l.error("'package.path' must be a string".to_string()));
     };
 
     // Search for the file
@@ -236,6 +241,97 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
+// Searcher 3: Search package.cpath for C modules (not supported, always returns error)
+fn searcher_c(l: &mut LuaState) -> LuaResult<usize> {
+    let modname_val = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("module name expected".to_string()))?;
+
+    let Some(modname) = modname_val.as_str() else {
+        return Err(l.error("module name expected".to_string()));
+    };
+
+    let package_val = l
+        .get_global("package")?
+        .ok_or_else(|| l.error("package table not found".to_string()))?;
+
+    let Some(package_table) = package_val.as_table() else {
+        return Err(l.error("Invalid package table".to_string()));
+    };
+
+    let cpath_key = l.create_string("cpath")?;
+
+    let Some(cpath_value) = package_table.raw_get(&cpath_key) else {
+        return Err(l.error("'package.cpath' must be a string".to_string()));
+    };
+    let Some(cpath_str) = cpath_value.as_str() else {
+        return Err(l.error("'package.cpath' must be a string".to_string()));
+    };
+
+    // We don't support C modules, but we need to return proper error message
+    let err = format!(
+        "\n\tno file '{}'",
+        cpath_str
+            .split(';')
+            .map(|template| { template.replace('?', &modname.replace('.', "/")) })
+            .collect::<Vec<_>>()
+            .join("'\n\tno file '")
+    );
+    let err_str = l.create_string(&err)?;
+    l.push_value(err_str)?;
+    Ok(1)
+}
+
+// Searcher 4: Search package.cpath for "all-in-one" C module
+fn searcher_c_all_in_one(l: &mut LuaState) -> LuaResult<usize> {
+    let modname_val = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("module name expected".to_string()))?;
+
+    let Some(modname) = modname_val.as_str() else {
+        return Err(l.error("module name expected".to_string()));
+    };
+
+    // If modname has no '.', it's a root module, return nothing
+    if !modname.contains('.') {
+        return Ok(0);
+    }
+
+    // For all-in-one loader, we search for the root module name
+    // e.g., for "a.b.c", we search for "a"
+    let root_modname = modname.split('.').next().unwrap_or(modname);
+
+    let package_val = l
+        .get_global("package")?
+        .ok_or_else(|| l.error("package table not found".to_string()))?;
+
+    let Some(package_table) = package_val.as_table() else {
+        return Err(l.error("Invalid package table".to_string()));
+    };
+
+    let cpath_key = l.create_string("cpath")?;
+
+    let Some(cpath_value) = package_table.raw_get(&cpath_key) else {
+        return Err(l.error("'package.cpath' must be a string".to_string()));
+    };
+    let Some(cpath_str) = cpath_value.as_str() else {
+        return Err(l.error("'package.cpath' must be a string".to_string()));
+    };
+
+    // We don't support C modules, but we need to return proper error message
+    let err = format!(
+        "\n\tno file '{}'",
+        cpath_str
+            .split(';')
+            .map(|template| { template.replace('?', &root_modname.replace('.', "/")) })
+            .collect::<Vec<_>>()
+            .join("'\n\tno file '")
+    );
+    let err_str = l.create_string(&err)?;
+    l.push_value(err_str)?;
+    Ok(1)
+}
+
 // Helper: Search for a file in path templates
 fn search_path(name: &str, path: &str, sep: &str, rep: &str) -> LuaResult<Option<String>> {
     let searchname = name.replace(sep, rep);
@@ -286,10 +382,16 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let rep_val = l.get_arg(4);
+    
+    #[cfg(windows)]
+    let default_rep = "\\";
+    #[cfg(not(windows))]
+    let default_rep = "/";
+    
     let rep = if let Some(rep_val) = &rep_val {
-        rep_val.as_str().unwrap_or("/")
+        rep_val.as_str().unwrap_or(default_rep)
     } else {
-        "/"
+        default_rep
     };
 
     match search_path(&name_str, &path_str, &sep, &rep)? {
