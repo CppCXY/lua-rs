@@ -499,12 +499,12 @@ impl GC {
             }
         };
 
+        self.fixed_list.add(gc_owner);
+
         if let Some(header) = gc_ptr.header_mut() {
             header.set_age(G_OLD);
             header.make_gray(); // Gray forever, like Lua 5.5
         }
-
-        self.fixed_list.add(gc_owner);
     }
 
     /// Check if GC should run (debt > 0)
@@ -1855,6 +1855,7 @@ impl GC {
         }
 
         let state = &gc_thread.data;
+        
         for i in 0..state.get_top() {
             if let Some(value) = state.stack().get(i) {
                 self.mark_value(l, value);

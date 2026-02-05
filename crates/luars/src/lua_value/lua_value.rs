@@ -776,6 +776,7 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
     pub fn as_string_ptr(&self) -> Option<StringPtr> {
         if self.ttisstring() {
             Some(StringPtr::new(unsafe { self.value.ptr as *mut GcString }))
@@ -784,6 +785,7 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
     pub fn as_binary_ptr(&self) -> Option<BinaryPtr> {
         if self.ttisbinary() {
             Some(BinaryPtr::new(unsafe { self.value.ptr as *mut GcBinary }))
@@ -792,6 +794,7 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
     pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
         if self.ttisfunction() {
             Some(FunctionPtr::new(unsafe {
@@ -802,6 +805,7 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
     pub fn as_cclosure_ptr(&self) -> Option<CClosurePtr> {
         if self.is_cclosure() {
             Some(CClosurePtr::new(unsafe {
@@ -812,6 +816,7 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
     pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
         if self.ttisfulluserdata() {
             Some(UserdataPtr::new(unsafe {
@@ -822,6 +827,7 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
     pub fn as_thread_ptr(&self) -> Option<ThreadPtr> {
         if self.ttisthread() {
             Some(ThreadPtr::new(unsafe { self.value.ptr as *mut GcThread }))
@@ -830,6 +836,7 @@ impl LuaValue {
         }
     }
 
+    #[inline(always)]
     pub fn as_gc_ptr(&self) -> Option<GcObjectPtr> {
         match self.kind() {
             LuaValueKind::Table => self.as_table_ptr().map(GcObjectPtr::Table),

@@ -294,18 +294,22 @@ impl LuaState {
         if new_top > self.stack.len() {
             self.resize(new_top)?;
         }
+        
+        // Clear dead stack slots when shrinking (to prevent GC from seeing stale references)
+        // This matches Lua 5.4's behavior: set values beyond new_top to nil
+        if new_top < self.stack_top {
+            for i in new_top..self.stack_top {
+                if i < self.stack.len() {
+                    self.stack[i] = LuaValue::nil();
+                }
+            }
+        }
+        
         self.stack_top = new_top;
 
         Ok(())
     }
-
-    /// Unsafe version of set_top that assumes stack is already large enough
-    /// SAFETY: Caller must ensure new_top <= stack.len()
-    #[inline(always)]
-    pub(crate) unsafe fn set_top_unchecked(&mut self, new_top: usize) {
-        self.stack_top = new_top;
-    }
-
+    
     /// Get stack value at absolute index
     #[inline(always)]
     pub fn stack_get(&self, index: usize) -> Option<LuaValue> {
@@ -1561,6 +1565,7 @@ impl LuaState {
 
     /// Forward GC barrier (luaC_barrier in Lua 5.5)
     /// Called when modifying an object to point to another object
+    #[inline(always)]
     pub fn gc_barrier(&mut self, upvalue_ptr: UpvaluePtr, value_gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
         let owner_ptr = GcObjectPtr::Upvalue(upvalue_ptr);

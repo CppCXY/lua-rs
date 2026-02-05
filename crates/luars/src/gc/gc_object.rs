@@ -46,6 +46,8 @@ pub struct GcHeader {
     pub marked: u8,   // Color and age bits combined
     pub size: u32,    // Size of the object in bytes (for memory tracking)
     pub index: usize, // Index in the GC pool
+    #[cfg(debug_assertions)]
+    released: bool,
 }
 
 impl Default for GcHeader {
@@ -58,6 +60,8 @@ impl Default for GcHeader {
             marked: G_NEW, // Age 0, no color bits set (gray state - WRONG for new objects!)
             size: 0,
             index: 0,
+            #[cfg(debug_assertions)]
+            released: false,
         }
     }
 }
@@ -79,6 +83,8 @@ impl GcHeader {
             marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
             size,
             index: 0,
+            #[cfg(debug_assertions)]
+            released: false,
         }
     }
 
@@ -275,6 +281,36 @@ impl GcHeader {
     pub fn is_marked(&self) -> bool {
         !self.is_white()
     }
+
+    #[allow(unused)]
+    pub fn mark_released(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.released = true;
+        }
+    }
+
+    #[allow(unused)]
+    pub fn mark_unreleased(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.released = false;
+        }
+    }
+
+    #[allow(unused)]
+    pub fn is_released(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            return self.released;
+        }
+
+        false
+    }
+}
+
+pub trait HasGcHeader {
+    fn header(&self) -> &GcHeader;
 }
 
 pub struct Gc<T> {
@@ -291,6 +327,12 @@ impl<T> Gc<T> {
     }
 }
 
+impl<T> HasGcHeader for Gc<T> {
+    fn header(&self) -> &GcHeader {
+        &self.header
+    }
+}
+
 pub type GcString = Gc<LuaString>;
 pub type GcBinary = Gc<Vec<u8>>;
 pub type GcTable = Gc<LuaTable>;
@@ -301,12 +343,12 @@ pub type GcThread = Gc<LuaState>;
 pub type GcUserdata = Gc<LuaUserdata>;
 
 #[derive(Debug)]
-pub struct GcPtr<T> {
+pub struct GcPtr<T: HasGcHeader> {
     ptr: u64,
     _marker: std::marker::PhantomData<*const T>,
 }
 
-impl<T> std::hash::Hash for GcPtr<T> {
+impl<T: HasGcHeader> std::hash::Hash for GcPtr<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.ptr.hash(state);
     }
@@ -314,23 +356,23 @@ impl<T> std::hash::Hash for GcPtr<T> {
 
 // Manual implementation of Clone and Copy to avoid trait bound requirements on T
 // GcPtr is always Copy regardless of T, since it only stores a u64 pointer
-impl<T> Clone for GcPtr<T> {
+impl<T: HasGcHeader> Clone for GcPtr<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for GcPtr<T> {}
+impl<T: HasGcHeader> Copy for GcPtr<T> {}
 
-impl<T> Eq for GcPtr<T> {}
+impl<T: HasGcHeader> Eq for GcPtr<T> {}
 
-impl<T> PartialEq for GcPtr<T> {
+impl<T: HasGcHeader> PartialEq for GcPtr<T> {
     fn eq(&self, other: &Self) -> bool {
         self.ptr == other.ptr
     }
 }
 
-impl<T> GcPtr<T> {
+impl<T: HasGcHeader> GcPtr<T> {
     pub fn new(ptr: *const T) -> Self {
         Self {
             ptr: ptr as u64,
@@ -354,11 +396,29 @@ impl<T> GcPtr<T> {
     }
 
     pub fn as_mut_ref(&self) -> &mut T {
-        unsafe { &mut *(self.as_mut_ptr()) }
+        if cfg!(debug_assertions) {
+            let ref_ = unsafe { &mut *(self.as_mut_ptr()) };
+            debug_assert!(
+                !ref_.header().is_released(),
+                "Accessing released GC object (as_mut_ref)!"
+            );
+            ref_
+        } else {
+            unsafe { &mut *(self.as_mut_ptr()) }
+        }
     }
 
     pub fn as_ref(&self) -> &T {
-        unsafe { &*(self.as_ptr()) }
+        if cfg!(debug_assertions) {
+            let ref_ = unsafe { &*(self.as_ptr()) };
+            debug_assert!(
+                !ref_.header().is_released(),
+                "Accessing released GC object (as_ref)!"
+            );
+            ref_
+        } else {
+            unsafe { &*(self.as_ptr()) }
+        }
     }
 
     pub fn is_null(&self) -> bool {
@@ -510,10 +570,30 @@ pub enum GcObjectOwner {
 
 impl GcObjectOwner {
     pub fn size(&self) -> usize {
-        self.header().size as usize
+        self.header_unchecked().size as usize
     }
 
     pub fn header(&self) -> &GcHeader {
+        let header = match self {
+            GcObjectOwner::String(s) => &s.header,
+            GcObjectOwner::Table(t) => &t.header,
+            GcObjectOwner::Function(f) => &f.header,
+            GcObjectOwner::CClosure(c) => &c.header,
+            GcObjectOwner::Upvalue(u) => &u.header,
+            GcObjectOwner::Thread(t) => &t.header,
+            GcObjectOwner::Userdata(u) => &u.header,
+            GcObjectOwner::Binary(b) => &b.header,
+        };
+
+        debug_assert!(
+            !header.is_released(),
+            "GC object is marked released but still accessed",
+        );
+
+        header
+    }
+
+    pub(crate) fn header_unchecked(&self) -> &GcHeader {
         match self {
             GcObjectOwner::String(s) => &s.header,
             GcObjectOwner::Table(t) => &t.header,
@@ -527,6 +607,26 @@ impl GcObjectOwner {
     }
 
     pub fn header_mut(&mut self) -> &mut GcHeader {
+        let header = match self {
+            GcObjectOwner::String(s) => &mut s.header,
+            GcObjectOwner::Table(t) => &mut t.header,
+            GcObjectOwner::Function(f) => &mut f.header,
+            GcObjectOwner::CClosure(c) => &mut c.header,
+            GcObjectOwner::Upvalue(u) => &mut u.header,
+            GcObjectOwner::Thread(t) => &mut t.header,
+            GcObjectOwner::Userdata(u) => &mut u.header,
+            GcObjectOwner::Binary(b) => &mut b.header,
+        };
+
+        debug_assert!(
+            !header.is_released(),
+            "GC object is marked released but still accessed",
+        );
+
+        header
+    }
+
+    pub(crate) fn header_mut_unchecked(&mut self) -> &mut GcHeader {
         match self {
             GcObjectOwner::String(s) => &mut s.header,
             GcObjectOwner::Table(t) => &mut t.header,
@@ -703,7 +803,10 @@ impl GcList {
     #[inline]
     pub fn add(&mut self, mut value: GcObjectOwner) {
         let index = self.gc_list.len();
-        value.header_mut().index = index;
+        value.header_mut_unchecked().index = index;
+        #[cfg(debug_assertions)]
+        value.header_mut_unchecked().mark_unreleased(); // Mark as unreleased for debug assertions
+
         self.gc_list.push(value);
     }
 
@@ -720,7 +823,13 @@ impl GcList {
         }
 
         // swap_remove: O(1) removal by moving last element to this position
-        self.gc_list.swap_remove(index)
+        if cfg!(debug_assertions) {
+            let mut removed_obj = self.gc_list.swap_remove(index);
+            removed_obj.header_mut().mark_released(); // Mark as released for debug assertions
+            removed_obj
+        } else {
+            self.gc_list.swap_remove(index)
+        }
     }
 
     /// Current number of live objects (always equals Vec length, no holes!)

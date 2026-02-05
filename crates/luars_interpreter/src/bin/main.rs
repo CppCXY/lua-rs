@@ -295,7 +295,8 @@ fn main() {
     // Create VM
     let mut vm = LuaVM::new(SafeOption {
         max_stack_size: 10000000,
-        max_call_depth: if cfg!(debug_assertions) { 156 } else { 256 },
+        // 问就是rust在debug版本递归限制太小了
+        max_call_depth: if cfg!(debug_assertions) { 30 } else { 256 },
         max_memory_limit: 1024 * 1024 * 1024, // 1 GB
     });
     vm.open_stdlib(stdlib::Stdlib::All).unwrap();

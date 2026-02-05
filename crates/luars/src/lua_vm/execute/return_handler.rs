@@ -116,9 +116,7 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
     // OPTIMIZATION: Most common case - caller doesn't want results
     if wanted_results == 0 {
         lua_state.pop_call_frame();
-        unsafe {
-            lua_state.set_top_unchecked(func_pos);
-        }
+        lua_state.set_top(func_pos)?;
         return Ok(());
     }
 
@@ -162,9 +160,7 @@ pub fn handle_return1(
 
         // Pop frame and set top inline
         lua_state.pop_call_frame();
-        unsafe {
-            lua_state.set_top_unchecked(func_pos + 1);
-        }
+        lua_state.set_top(func_pos + 1)?;
         return Ok(());
     }
 
