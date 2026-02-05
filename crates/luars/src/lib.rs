@@ -4,7 +4,6 @@
 #[cfg(test)]
 mod test;
 
-mod branch;
 pub mod compiler;
 pub mod gc;
 pub mod lib_registry;

@@ -17,8 +17,6 @@
   This matches Lua's lvm.c design where everything is pointer-based
 ----------------------------------------------------------------------*/
 
-use crate::branch::{likely, unlikely};
-
 pub mod call;
 mod closure_handler;
 mod concat;
@@ -31,6 +29,7 @@ mod closure_vararg_ops;
 mod comparison_ops;
 mod table_ops;
 
+use branches::{likely, unlikely};
 use call::FrameAction;
 
 use crate::{

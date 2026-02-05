@@ -5,7 +5,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::branch::unlikely;
+use branches::unlikely;
+
 use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
