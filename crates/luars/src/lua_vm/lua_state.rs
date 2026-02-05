@@ -159,7 +159,7 @@ impl LuaState {
     #[inline]
     pub(crate) fn push_frame(
         &mut self,
-        func: LuaValue,
+        func: &LuaValue,
         base: usize,
         nparams: usize,
         nresults: i32,
@@ -233,7 +233,7 @@ impl LuaState {
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
             *ci = CallInfo {
-                func,
+                func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top,
@@ -244,8 +244,8 @@ impl LuaState {
             };
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
-            self.call_stack.push(CallInfo {
-                func,
+            let ci = CallInfo {
+                func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top,
@@ -253,7 +253,8 @@ impl LuaState {
                 nresults,
                 call_status,
                 nextraargs,
-            });
+            };
+            self.call_stack.push(ci);
         }
 
         self.call_depth += 1;
@@ -1053,7 +1054,7 @@ impl LuaState {
         if is_c_callable {
             // Create frame for C function
             let base = func_idx + 1;
-            if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
+            if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack.truncate(func_idx);
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1116,7 +1117,7 @@ impl LuaState {
             // Lua function - use lua_execute
             let base = func_idx + 1;
             // pcall expects all return values
-            if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
+            if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack.truncate(func_idx);
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1220,7 +1221,7 @@ impl LuaState {
         } else {
             // Lua function - push frame and execute, expecting all return values
             let base = func_idx + 1;
-            self.push_frame(func, base, actual_arg_count, -1)?;
+            self.push_frame(&func, base, actual_arg_count, -1)?;
 
             // Set ccmt count in call_status for Lua functions too
             if ccmt_depth > 0 {
@@ -1315,7 +1316,7 @@ impl LuaState {
 
         // Create call frame, expecting all return values
         let base = func_idx + 1;
-        if let Err(e) = self.push_frame(func, base, actual_arg_count, -1) {
+        if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
             // Error during setup
             self.set_top(handler_idx)?;
             let error_msg = self.get_error_msg(e);
@@ -1388,7 +1389,7 @@ impl LuaState {
                 let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
                 let handler_base = handler_idx + 1;
 
-                if let Err(_) = self.push_frame(handler, handler_base, 1, -1) {
+                if let Err(_) = self.push_frame(&handler, handler_base, 1, -1) {
                     // Error handler setup failed
                     self.set_top(handler_idx)?;
                     let final_err =
@@ -1463,7 +1464,7 @@ impl LuaState {
             // Create initial frame, expecting all return values
             let nargs = self.stack.len() - 1; // -1 for function itself
             let base = 1; // Arguments start at index 1 (function is at 0)
-            self.push_frame(func, base, nargs, -1)?;
+            self.push_frame(&func, base, nargs, -1)?;
 
             // Execute until yield or completion
             let result = if func.is_c_callable() {

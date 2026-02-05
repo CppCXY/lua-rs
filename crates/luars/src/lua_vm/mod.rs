@@ -293,7 +293,7 @@ impl LuaVM {
         // base points to first argument (func_idx + 1), following Lua convention
         let base = func_idx + 1;
         // Top-level call expects multiple return values
-        main_state.push_frame(func, base, nargs, -1)?;
+        main_state.push_frame(&func, base, nargs, -1)?;
 
         // Run the VM execution loop
         let results = self.run()?;

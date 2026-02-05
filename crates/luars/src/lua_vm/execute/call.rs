@@ -60,7 +60,7 @@ pub fn handle_call(
     if func.is_lua_function() {
         // Lua function call: push new frame
         let new_base = func_idx + 1;
-        lua_state.push_frame(func, new_base, nargs, nresults)?;
+        lua_state.push_frame(&func, new_base, nargs, nresults)?;
 
         // Update call_status with __call count if status is non-zero
         if status != 0 {
@@ -206,7 +206,7 @@ pub fn call_c_function(
     let call_base = func_idx + 1;
 
     // Push temporary frame for C function with nresults
-    lua_state.push_frame(func, call_base, nargs, nresults)?;
+    lua_state.push_frame(&func, call_base, nargs, nresults)?;
 
     // Call the C function (it returns number of results)
     let result = c_func(lua_state);
@@ -482,7 +482,7 @@ fn call_c_function_tailcall(
 
     // Push temporary frame for C function
     // Tail call inherits caller's nresults (-1 for multi-return)
-    lua_state.push_frame(func, call_base, nargs, -1)?;
+    lua_state.push_frame(&func, call_base, nargs, -1)?;
 
     // Call the C function
     let n = c_func(lua_state)?;
