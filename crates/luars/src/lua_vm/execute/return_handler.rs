@@ -16,6 +16,7 @@
   5. Set top pointer correctly
 ----------------------------------------------------------------------*/
 
+use branches::likely;
 use crate::{
     lua_value::LuaValue,
     lua_vm::{LuaResult, LuaState},
@@ -113,19 +114,21 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
         call_info.nresults as usize
     };
 
-    // Fill with nil if caller expects results
-    if wanted_results > 0 {
-        for i in 0..wanted_results {
-            lua_state.stack_set(func_pos + i, LuaValue::nil())?;
-        }
-        lua_state.set_top(func_pos + wanted_results)?;
-    } else {
-        lua_state.set_top(func_pos)?;
+    // OPTIMIZATION: Most common case - caller doesn't want results
+    if likely(wanted_results == 0) {
+        lua_state.pop_call_frame();
+        unsafe { lua_state.set_top_unchecked(func_pos); }
+        return Ok(());
     }
 
-    // Pop current call frame
+    // Slow path: Fill with nil if caller expects results
+    let stack = lua_state.stack_mut();
+    for i in 0..wanted_results {
+        stack[func_pos + i] = LuaValue::nil();
+    }
+    
     lua_state.pop_call_frame();
-
+    lua_state.set_top(func_pos + wanted_results)?;
     Ok(())
 }
 
@@ -139,50 +142,46 @@ pub fn handle_return1(
     frame_idx: usize,
     a: usize,
 ) -> LuaResult<()> {
-    // Get the single return value
-    let return_val = {
-        let stack = lua_state.stack_mut();
-        stack[base + a]
-    };
-
-    // Get caller's frame to find where return values should go
-    // In Lua 5.5, return values go to the position where the function was called
+    // Get call info first
     let call_info = lua_state.get_call_info(frame_idx);
-
-    // Check if we're the main frame or have a caller
-    let func_pos = if frame_idx == 0 {
-        // Main frame - use base - 1
-        if call_info.base > 0 {
-            call_info.base - 1
-        } else {
-            0
-        }
-    } else {
-        // Use func_offset to find original position after buildhiddenargs
-        call_info.base - call_info.func_offset
-    };
+    let func_pos = call_info.base - call_info.func_offset;
     let wanted_results = if call_info.nresults < 0 {
         1 // LUA_MULTRET for return1 means 1
     } else {
         call_info.nresults as usize
     };
 
+    // OPTIMIZATION: Direct stack access for common case
+    let stack = lua_state.stack_mut();
+    
+    if likely(wanted_results == 1) {
+        // Most common: caller wants exactly 1 result
+        let return_val = stack[base + a];
+        stack[func_pos] = return_val;
+        
+        // Pop frame and set top inline
+        lua_state.pop_call_frame();
+        unsafe { lua_state.set_top_unchecked(func_pos + 1); }
+        return Ok(());
+    }
+    
     if wanted_results == 0 {
         // Caller doesn't want any results
+        lua_state.pop_call_frame();
         lua_state.set_top(func_pos)?;
-    } else {
-        // Set the first result
-        lua_state.stack_set(func_pos, return_val)?;
-
-        // Fill remaining with nil if caller wants more
-        for i in 1..wanted_results {
-            lua_state.stack_set(func_pos + i, LuaValue::nil())?;
-        }
-        lua_state.set_top(func_pos + wanted_results)?;
+        return Ok(());
     }
-
-    // Pop current call frame
+    
+    // Slow path: caller wants multiple results from single return
+    let return_val = stack[base + a];
+    stack[func_pos] = return_val;
+    
+    // Fill remaining with nil
+    for i in 1..wanted_results {
+        stack[func_pos + i] = LuaValue::nil();
+    }
+    
     lua_state.pop_call_frame();
-
+    lua_state.set_top(func_pos + wanted_results)?;
     Ok(())
 }

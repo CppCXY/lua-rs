@@ -306,6 +306,13 @@ impl LuaState {
         Ok(())
     }
 
+    /// Unsafe version of set_top that assumes stack is already large enough
+    /// SAFETY: Caller must ensure new_top <= stack.len()
+    #[inline(always)]
+    pub(crate) unsafe fn set_top_unchecked(&mut self, new_top: usize) {
+        self.stack_top = new_top;
+    }
+
     /// Get stack value at absolute index
     #[inline(always)]
     pub fn stack_get(&self, index: usize) -> Option<LuaValue> {

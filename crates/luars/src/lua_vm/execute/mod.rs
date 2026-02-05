@@ -39,6 +39,8 @@ use crate::{
         execute::helper::{
             fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
             tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger, ttisstring,
+            // Pointer versions for zero-cost arithmetic
+            pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat, pttisinteger,
         },
     },
 };
@@ -218,27 +220,26 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    // OPTIMIZATION: Use raw slice access to reduce bounds checking
+                    // OPTIMIZATION: Use raw pointers to eliminate bounds checking and borrowing overhead
                     let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1 = stack.get_unchecked(base + b);
-                        let v2 = stack.get_unchecked(base + c);
+                        let v1_ptr = stack.as_ptr().add(base + b);
+                        let v2_ptr = stack.as_ptr().add(base + c);
+                        let ra_ptr = stack.as_mut_ptr().add(base + a);
 
                         // Fast path: both integers (most common case)
-                        if ttisinteger(v1) && ttisinteger(v2) {
-                            let i1 = ivalue(v1);
-                            let i2 = ivalue(v2);
-                            let ra = stack.get_unchecked_mut(base + a);
-                            setivalue(ra, i1.wrapping_add(i2));
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            psetivalue(ra_ptr, i1.wrapping_add(i2));
                             pc += 1; // Skip metamethod on success
                         }
                         // Slow path: try float conversion
                         else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
-                            if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                                let ra = stack.get_unchecked_mut(base + a);
-                                setfltvalue(ra, n1 + n2);
+                            if tonumberns(&*v1_ptr, &mut n1) && tonumberns(&*v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 + n2);
                                 pc += 1; // Skip metamethod on success
                             }
                             // else: fall through to MMBIN (next instruction)
@@ -252,23 +253,22 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let sc = instr.get_sc();
 
-                    // OPTIMIZATION: Use get_unchecked to avoid bounds checking
+                    // OPTIMIZATION: Use raw pointers for zero-cost abstraction
                     let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1 = stack.get_unchecked(base + b);
+                        let v1_ptr = stack.as_ptr().add(base + b);
+                        let ra_ptr = stack.as_mut_ptr().add(base + a);
 
                         // Fast path: integer (most common)
-                        if ttisinteger(v1) {
-                            let iv1 = ivalue(v1);
-                            let ra = stack.get_unchecked_mut(base + a);
-                            setivalue(ra, iv1.wrapping_add(sc as i64));
+                        if pttisinteger(v1_ptr) {
+                            let iv1 = pivalue(v1_ptr);
+                            psetivalue(ra_ptr, iv1.wrapping_add(sc as i64));
                             pc += 1; // Skip metamethod on success
                         }
                         // Slow path: float
-                        else if ttisfloat(v1) {
-                            let nb = fltvalue(v1);
-                            let ra = stack.get_unchecked_mut(base + a);
-                            setfltvalue(ra, nb + (sc as f64));
+                        else if pttisfloat(v1_ptr) {
+                            let nb = pfltvalue(v1_ptr);
+                            psetfltvalue(ra_ptr, nb + (sc as f64));
                             pc += 1; // Skip metamethod on success
                         }
                         // else: fall through to MMBINI (next instruction)
@@ -282,21 +282,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1 = stack.get_unchecked(base + b);
-                        let v2 = stack.get_unchecked(base + c);
+                        let v1_ptr = stack.as_ptr().add(base + b);
+                        let v2_ptr = stack.as_ptr().add(base + c);
+                        let ra_ptr = stack.as_mut_ptr().add(base + a);
 
-                        if ttisinteger(v1) && ttisinteger(v2) {
-                            let i1 = ivalue(v1);
-                            let i2 = ivalue(v2);
-                            let ra = stack.get_unchecked_mut(base + a);
-                            setivalue(ra, i1.wrapping_sub(i2));
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            psetivalue(ra_ptr, i1.wrapping_sub(i2));
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
-                            if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                                let ra = stack.get_unchecked_mut(base + a);
-                                setfltvalue(ra, n1 - n2);
+                            if tonumberns(&*v1_ptr, &mut n1) && tonumberns(&*v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 - n2);
                                 pc += 1;
                             }
                         }
@@ -310,21 +309,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1 = stack.get_unchecked(base + b);
-                        let v2 = stack.get_unchecked(base + c);
+                        let v1_ptr = stack.as_ptr().add(base + b);
+                        let v2_ptr = stack.as_ptr().add(base + c);
+                        let ra_ptr = stack.as_mut_ptr().add(base + a);
 
-                        if ttisinteger(v1) && ttisinteger(v2) {
-                            let i1 = ivalue(v1);
-                            let i2 = ivalue(v2);
-                            let ra = stack.get_unchecked_mut(base + a);
-                            setivalue(ra, i1.wrapping_mul(i2));
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            psetivalue(ra_ptr, i1.wrapping_mul(i2));
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
-                            if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                                let ra = stack.get_unchecked_mut(base + a);
-                                setfltvalue(ra, n1 * n2);
+                            if tonumberns(&*v1_ptr, &mut n1) && tonumberns(&*v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 * n2);
                                 pc += 1;
                             }
                         }
@@ -1154,9 +1152,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
-
+                    
                     save_pc!();
-
                     match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {
                             restore_state!();
