@@ -108,7 +108,8 @@ impl Instruction {
     pub fn set_opcode(&mut self, op: OpCode) {
         unsafe {
             self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
-                | ((op as u32).unchecked_shl(Self::POS_OP) & Self::mask1(Self::SIZE_OP, Self::POS_OP));
+                | ((op as u32).unchecked_shl(Self::POS_OP)
+                    & Self::mask1(Self::SIZE_OP, Self::POS_OP));
         }
     }
 
@@ -122,7 +123,8 @@ impl Instruction {
     #[inline(always)]
     fn set_arg(&mut self, v: u32, pos: u32, size: u32) {
         unsafe {
-            self.0 = (self.0 & Self::mask0(size, pos)) | (v.unchecked_shl(pos) & Self::mask1(size, pos));
+            self.0 =
+                (self.0 & Self::mask0(size, pos)) | (v.unchecked_shl(pos) & Self::mask1(size, pos));
         }
     }
 
@@ -263,7 +265,11 @@ impl Instruction {
 
     pub fn create_abx(op: OpCode, a: u32, bx: u32) -> Self {
         unsafe {
-            Self((op as u32).unchecked_shl(Self::POS_OP) | a.unchecked_shl(Self::POS_A) | bx.unchecked_shl(Self::POS_BX))
+            Self(
+                (op as u32).unchecked_shl(Self::POS_OP)
+                    | a.unchecked_shl(Self::POS_A)
+                    | bx.unchecked_shl(Self::POS_BX),
+            )
         }
     }
 
@@ -272,14 +278,15 @@ impl Instruction {
     }
 
     pub fn create_ax(op: OpCode, ax: u32) -> Self {
-        unsafe {
-            Self((op as u32).unchecked_shl(Self::POS_OP) | ax.unchecked_shl(Self::POS_AX))
-        }
+        unsafe { Self((op as u32).unchecked_shl(Self::POS_OP) | ax.unchecked_shl(Self::POS_AX)) }
     }
 
     pub fn create_sj(op: OpCode, sj: i32) -> Self {
         unsafe {
-            Self((op as u32).unchecked_shl(Self::POS_OP) | ((sj + Self::OFFSET_SJ) as u32).unchecked_shl(Self::POS_SJ))
+            Self(
+                (op as u32).unchecked_shl(Self::POS_OP)
+                    | ((sj + Self::OFFSET_SJ) as u32).unchecked_shl(Self::POS_SJ),
+            )
         }
     }
 
