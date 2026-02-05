@@ -113,8 +113,9 @@ global function deep (n)
   if n>0 then deep(n-1) end
 end
 deep(10)
-deep(180)
-
+if not DEBUG then
+  deep(180)
+end
 
 print"testing tail calls"
 
@@ -167,7 +168,6 @@ do   -- C-stack overflow while handling C-stack overflow
   local err, msg = xpcall(loop, loop)
   assert(not err and string.find(msg, "error"))
 end
-
 
 
 do   -- tail calls x chain of __call

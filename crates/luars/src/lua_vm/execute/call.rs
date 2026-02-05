@@ -339,12 +339,14 @@ pub fn handle_tailcall(
     // This is needed for variable args (b==0) calculation
     let actual_stack_top = lua_state.get_top();
 
-    //  Sync stack_top with frame.top before reading arguments
-    // This ensures stack is properly bounded for subsequent operations
-    if let Some(frame) = lua_state.current_frame() {
-        let frame_top = frame.top;
-        lua_state.set_top(frame_top)?;
-    }
+    // REMOVED: Sync stack_top with frame.top
+    // This was causing issues when resolve_call_chain increased stack_top beyond frame.top
+    // and then this sync would truncate it, losing arguments
+    //
+    // if let Some(frame) = lua_state.current_frame() {
+    //     let frame_top = frame.top;
+    //     lua_state.set_top(frame_top)?;
+    // }
 
     let nargs = if b == 0 {
         // Variable args: use actual_stack_top (saved above), NOT frame.top

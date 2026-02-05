@@ -167,9 +167,7 @@ f()
 
 print("skip db.lua tests")
 -- dofile('db.lua')
-if not DEBUG then
-  assert(dofile('calls.lua') == deep and deep)
-end
+assert(dofile('calls.lua') == deep and deep)
 _G.deep = nil
 olddofile('strings.lua')
 olddofile('literals.lua')
