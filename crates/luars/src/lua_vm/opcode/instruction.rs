@@ -89,7 +89,7 @@ impl Instruction {
     // Create masks
     #[inline(always)]
     fn mask1(n: u32, p: u32) -> u32 {
-        (!(!0u32 << n)) << p
+        unsafe { (!((!0u32).unchecked_shl(n))).unchecked_shl(p) }
     }
 
     #[inline(always)]
@@ -106,20 +106,24 @@ impl Instruction {
 
     #[inline(always)]
     pub fn set_opcode(&mut self, op: OpCode) {
-        self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
-            | ((op as u32) << Self::POS_OP & Self::mask1(Self::SIZE_OP, Self::POS_OP));
+        unsafe {
+            self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
+                | ((op as u32).unchecked_shl(Self::POS_OP) & Self::mask1(Self::SIZE_OP, Self::POS_OP));
+        }
     }
 
     // Generic argument getter
     #[inline(always)]
     fn get_arg(&self, pos: u32, size: u32) -> u32 {
-        (self.0 >> pos) & Self::mask1(size, 0)
+        unsafe { self.0.unchecked_shr(pos) & Self::mask1(size, 0) }
     }
 
     // Generic argument setter
     #[inline(always)]
     fn set_arg(&mut self, v: u32, pos: u32, size: u32) {
-        self.0 = (self.0 & Self::mask0(size, pos)) | ((v << pos) & Self::mask1(size, pos));
+        unsafe {
+            self.0 = (self.0 & Self::mask0(size, pos)) | (v.unchecked_shl(pos) & Self::mask1(size, pos));
+        }
     }
 
     // Field accessors
@@ -221,38 +225,46 @@ impl Instruction {
 
     // Instruction creation
     pub fn create_abc(op: OpCode, a: u32, b: u32, c: u32) -> Self {
-        Self(
-            ((op as u32) << Self::POS_OP)
-                | (a << Self::POS_A)
-                | (b << Self::POS_B)
-                | (c << Self::POS_C),
-        )
+        unsafe {
+            Self(
+                (op as u32).unchecked_shl(Self::POS_OP)
+                    | a.unchecked_shl(Self::POS_A)
+                    | b.unchecked_shl(Self::POS_B)
+                    | c.unchecked_shl(Self::POS_C),
+            )
+        }
     }
 
     pub fn create_abck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> Self {
-        Self(
-            ((op as u32) << Self::POS_OP)
-                | (a << Self::POS_A)
-                | ((if k { 1 } else { 0 }) << Self::POS_K)
-                | (b << Self::POS_B)
-                | (c << Self::POS_C),
-        )
+        unsafe {
+            Self(
+                (op as u32).unchecked_shl(Self::POS_OP)
+                    | a.unchecked_shl(Self::POS_A)
+                    | (if k { 1u32 } else { 0u32 }).unchecked_shl(Self::POS_K)
+                    | b.unchecked_shl(Self::POS_B)
+                    | c.unchecked_shl(Self::POS_C),
+            )
+        }
     }
 
     // Create instruction in vABCk format (variable-size B and C fields)
     // Used for instructions like NEWTABLE where C field is 10 bits instead of 8
     pub fn create_vabck(op: OpCode, a: u32, b: u32, c: u32, k: bool) -> Self {
-        Self(
-            ((op as u32) << Self::POS_OP)
-                | (a << Self::POS_A)
-                | ((if k { 1 } else { 0 }) << Self::POS_K)
-                | (b << Self::POS_V_B)
-                | (c << Self::POS_V_C),
-        )
+        unsafe {
+            Self(
+                (op as u32).unchecked_shl(Self::POS_OP)
+                    | a.unchecked_shl(Self::POS_A)
+                    | (if k { 1u32 } else { 0u32 }).unchecked_shl(Self::POS_K)
+                    | b.unchecked_shl(Self::POS_V_B)
+                    | c.unchecked_shl(Self::POS_V_C),
+            )
+        }
     }
 
     pub fn create_abx(op: OpCode, a: u32, bx: u32) -> Self {
-        Self(((op as u32) << Self::POS_OP) | (a << Self::POS_A) | (bx << Self::POS_BX))
+        unsafe {
+            Self((op as u32).unchecked_shl(Self::POS_OP) | a.unchecked_shl(Self::POS_A) | bx.unchecked_shl(Self::POS_BX))
+        }
     }
 
     pub fn create_asbx(op: OpCode, a: u32, sbx: i32) -> Self {
@@ -260,22 +272,26 @@ impl Instruction {
     }
 
     pub fn create_ax(op: OpCode, ax: u32) -> Self {
-        Self(((op as u32) << Self::POS_OP) | (ax << Self::POS_AX))
+        unsafe {
+            Self((op as u32).unchecked_shl(Self::POS_OP) | ax.unchecked_shl(Self::POS_AX))
+        }
     }
 
     pub fn create_sj(op: OpCode, sj: i32) -> Self {
-        Self(((op as u32) << Self::POS_OP) | (((sj + Self::OFFSET_SJ) as u32) << Self::POS_SJ))
+        unsafe {
+            Self((op as u32).unchecked_shl(Self::POS_OP) | ((sj + Self::OFFSET_SJ) as u32).unchecked_shl(Self::POS_SJ))
+        }
     }
 
     // Helper: RK(x) - if k then K[x] else R[x]
     #[inline(always)]
     pub fn is_k(x: u32) -> bool {
-        x & (1 << (Self::SIZE_B - 1)) != 0
+        unsafe { x & 1u32.unchecked_shl(Self::SIZE_B - 1) != 0 }
     }
 
     #[inline(always)]
     pub fn rk_index(x: u32) -> u32 {
-        x & !(1 << (Self::SIZE_B - 1))
+        unsafe { x & !1u32.unchecked_shl(Self::SIZE_B - 1) }
     }
 
     // Convenience aliases for backwards compatibility
