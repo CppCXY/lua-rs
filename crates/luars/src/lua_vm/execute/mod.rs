@@ -1168,9 +1168,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         Ok(FrameAction::TailCall) => {
                             continue 'startfunc;
                         }
-                        Ok(FrameAction::Return) => {
-                            continue 'startfunc;
-                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -1192,7 +1189,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             // Tail call replaced frame
                             continue 'startfunc;
                         }
-                        Ok(FrameAction::Call) | Ok(FrameAction::Return) => {
+                        Ok(FrameAction::Call) => {
                             // Shouldn't happen from handle_tailcall
                             continue 'startfunc;
                         }
@@ -1452,7 +1449,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             // Lua function pushed new frame
                             continue 'startfunc;
                         }
-                        Ok(FrameAction::TailCall) | Ok(FrameAction::Return) => {
+                        Ok(FrameAction::TailCall) => {
                             continue 'startfunc;
                         }
                         Err(e) => return Err(e),

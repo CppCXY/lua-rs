@@ -21,12 +21,11 @@ use crate::{
     lua_vm::{LuaResult, LuaState},
 };
 
-use super::call::FrameAction;
-
 /// Handle OP_RETURN instruction
 /// Returns N values from R[A] to R[A+B-2]
 ///
 /// Based on lvm.c:1763-1783
+#[inline(always)]
 pub fn handle_return(
     lua_state: &mut LuaState,
     base: usize,
@@ -35,7 +34,7 @@ pub fn handle_return(
     b: usize,
     _c: usize,
     k: bool,
-) -> LuaResult<FrameAction> {
+) -> LuaResult<()> {
     // n = number of results (B-1), if B=0 then return all values to top
     let mut nres = if b == 0 {
         // Return all values from R[A] to logical top (L->top.p)
@@ -97,20 +96,14 @@ pub fn handle_return(
     let new_top = func_pos + nres;
     lua_state.set_top(new_top)?;
 
-    // Check if this was the top-level frame
-    if lua_state.call_depth() == 0 {
-        // No more frames, execution complete
-        return Ok(FrameAction::Return);
-    }
-
-    // Continue execution in caller's frame
-    Ok(FrameAction::Continue)
+    Ok(())
 }
 
 /// Handle OP_RETURN0 instruction (optimized for no return values)
 ///
 /// Based on lvm.c:1784-1800
-pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<FrameAction> {
+#[inline(always)]
+pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
     // Get caller's expected results
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = call_info.base - call_info.func_offset;
@@ -133,23 +126,19 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<F
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Check if this was the top-level frame
-    if lua_state.call_depth() == 0 {
-        return Ok(FrameAction::Return);
-    }
-
-    Ok(FrameAction::Continue)
+    Ok(())
 }
 
 /// Handle OP_RETURN1 instruction (optimized for single return value)
 ///
 /// Based on lvm.c:1801-1827
+#[inline(always)]
 pub fn handle_return1(
     lua_state: &mut LuaState,
     base: usize,
     frame_idx: usize,
     a: usize,
-) -> LuaResult<FrameAction> {
+) -> LuaResult<()> {
     // Get the single return value
     let return_val = {
         let stack = lua_state.stack_mut();
@@ -195,10 +184,5 @@ pub fn handle_return1(
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Check if this was the top-level frame
-    if lua_state.call_depth() == 0 {
-        return Ok(FrameAction::Return);
-    }
-
-    Ok(FrameAction::Continue)
+    Ok(())
 }

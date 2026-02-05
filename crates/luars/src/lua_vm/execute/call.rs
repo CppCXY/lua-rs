@@ -13,7 +13,6 @@ use crate::{
 };
 
 pub enum FrameAction {
-    Return,   // Frame finished, return to caller
     Call,     // Pushed new frame, execute callee
     TailCall, // Replaced current frame, execute tail callee
     Continue, // C function executed, continue current frame
@@ -21,6 +20,7 @@ pub enum FrameAction {
 
 /// Handle CALL opcode - Lua style (push frame, don't recurse)
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
+#[inline]
 pub fn handle_call(
     lua_state: &mut LuaState,
     base: usize,
