@@ -16,7 +16,6 @@
   5. Set top pointer correctly
 ----------------------------------------------------------------------*/
 
-use branches::likely;
 use crate::{
     lua_value::LuaValue,
     lua_vm::{LuaResult, LuaState},
@@ -115,9 +114,11 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
     };
 
     // OPTIMIZATION: Most common case - caller doesn't want results
-    if likely(wanted_results == 0) {
+    if wanted_results == 0 {
         lua_state.pop_call_frame();
-        unsafe { lua_state.set_top_unchecked(func_pos); }
+        unsafe {
+            lua_state.set_top_unchecked(func_pos);
+        }
         return Ok(());
     }
 
@@ -126,7 +127,7 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
     for i in 0..wanted_results {
         stack[func_pos + i] = LuaValue::nil();
     }
-    
+
     lua_state.pop_call_frame();
     lua_state.set_top(func_pos + wanted_results)?;
     Ok(())
@@ -153,34 +154,36 @@ pub fn handle_return1(
 
     // OPTIMIZATION: Direct stack access for common case
     let stack = lua_state.stack_mut();
-    
-    if likely(wanted_results == 1) {
+
+    if wanted_results == 1 {
         // Most common: caller wants exactly 1 result
         let return_val = stack[base + a];
         stack[func_pos] = return_val;
-        
+
         // Pop frame and set top inline
         lua_state.pop_call_frame();
-        unsafe { lua_state.set_top_unchecked(func_pos + 1); }
+        unsafe {
+            lua_state.set_top_unchecked(func_pos + 1);
+        }
         return Ok(());
     }
-    
+
     if wanted_results == 0 {
         // Caller doesn't want any results
         lua_state.pop_call_frame();
         lua_state.set_top(func_pos)?;
         return Ok(());
     }
-    
+
     // Slow path: caller wants multiple results from single return
     let return_val = stack[base + a];
     stack[func_pos] = return_val;
-    
+
     // Fill remaining with nil
     for i in 1..wanted_results {
         stack[func_pos + i] = LuaValue::nil();
     }
-    
+
     lua_state.pop_call_frame();
     lua_state.set_top(func_pos + wanted_results)?;
     Ok(())

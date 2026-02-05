@@ -29,7 +29,6 @@ mod closure_vararg_ops;
 mod comparison_ops;
 mod table_ops;
 
-use branches::{likely, unlikely};
 use call::FrameAction;
 
 use crate::{
@@ -37,10 +36,27 @@ use crate::{
     lua_vm::{
         LuaError, LuaResult, LuaState, OpCode,
         execute::helper::{
-            fltvalue, ivalue, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
-            tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger, ttisstring,
+            fltvalue,
+            ivalue,
             // Pointer versions for zero-cost arithmetic
-            pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat, pttisinteger,
+            pfltvalue,
+            pivalue,
+            psetfltvalue,
+            psetivalue,
+            pttisfloat,
+            pttisinteger,
+            setbfvalue,
+            setbtvalue,
+            setfltvalue,
+            setivalue,
+            setnilvalue,
+            tointeger,
+            tointegerns,
+            tonumber,
+            tonumberns,
+            ttisfloat,
+            ttisinteger,
+            ttisstring,
         },
     },
 };
@@ -153,7 +169,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := K[extra_arg]; pc++
                     let a = instr.get_a() as usize;
 
-                    if unlikely(pc >= code.len()) {
+                    if pc >= code.len() {
                         lua_state.set_frame_pc(frame_idx, pc as u32);
                         return Err(lua_state.error("LOADKX: missing EXTRAARG".to_string()));
                     }
@@ -161,13 +177,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let extra = code[pc];
                     pc += 1; // Consume EXTRAARG
 
-                    if unlikely(extra.get_opcode() != OpCode::ExtraArg) {
+                    if extra.get_opcode() != OpCode::ExtraArg {
                         lua_state.set_frame_pc(frame_idx, pc as u32);
                         return Err(lua_state.error("LOADKX: expected EXTRAARG".to_string()));
                     }
 
                     let ax = extra.get_ax() as usize;
-                    if unlikely(ax >= constants.len()) {
+                    if ax >= constants.len() {
                         lua_state.set_frame_pc(frame_idx, pc as u32);
                         return Err(
                             lua_state.error(format!("LOADKX: invalid constant index {}", ax))
@@ -358,7 +374,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
                         let i2 = ivalue(v2);
-                        if likely(i2 != 0) {
+                        if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], i1.div_euclid(i2));
                         }
@@ -384,7 +400,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
                         let i2 = ivalue(v2);
-                        if likely(i2 != 0) {
+                        if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], i1.rem_euclid(i2));
                         } else {
@@ -528,7 +544,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if ttisinteger(v1) && tointeger(v2, &mut i2) {
                         let i1 = ivalue(v1);
-                        if likely(i2 != 0) {
+                        if i2 != 0 {
                             pc += 1;
                             let result = i1 - (i1 / i2) * i2;
                             setivalue(&mut stack[base + a], result);
@@ -591,7 +607,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if ttisinteger(v1) && tointeger(v2, &mut i2) {
                         let i1 = ivalue(v1);
-                        if likely(i2 != 0) {
+                        if i2 != 0 {
                             pc += 1;
                             let result = if (i1 ^ i2) >= 0 {
                                 i1 / i2
@@ -604,7 +620,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            if likely(n2 != 0.0) {
+                            if n2 != 0.0 {
                                 pc += 1;
                                 setfltvalue(&mut stack[base + a], (n1 / n2).floor());
                             }
@@ -1152,7 +1168,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
-                    
+
                     save_pc!();
                     match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {

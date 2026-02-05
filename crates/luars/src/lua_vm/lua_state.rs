@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use branches::unlikely;
-
 use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
@@ -167,7 +165,7 @@ impl LuaState {
         nresults: i32,
     ) -> LuaResult<()> {
         // Fast path: check stack depth (branch predictor friendly - usually succeeds)
-        if unlikely(self.call_depth >= self.safe_option.max_call_depth) {
+        if self.call_depth >= self.safe_option.max_call_depth {
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -195,7 +193,7 @@ impl LuaState {
                     nextraargs,
                 )
             } else if func.is_c_callable() {
-                if unlikely(self.c_call_depth >= self.safe_option.max_call_depth) {
+                if self.c_call_depth >= self.safe_option.max_call_depth {
                     return Err(self.error(format!(
                         "C stack overflow (C call depth: {})",
                         self.c_call_depth
@@ -263,25 +261,19 @@ impl LuaState {
     }
 
     /// Pop call frame (equivalent to Lua's luaD_poscall)
-    /// OPTIMIZED: Only decrements depth, never releases memory (Lua-style)
     #[inline]
-    pub(crate) fn pop_frame(&mut self) -> Option<CallInfo> {
+    pub(crate) fn pop_frame(&mut self) {
         if self.call_depth > 0 {
             self.call_depth -= 1;
-            let frame = self.call_stack.get(self.call_depth).cloned();
+            let is_c = self
+                .call_stack
+                .get(self.call_depth)
+                .map(|f| f.is_c())
+                .unwrap_or(false);
 
-            // 如果是C函数帧，减少C调用深度
-            if let Some(ref f) = frame {
-                if f.is_c() {
-                    if self.c_call_depth > 0 {
-                        self.c_call_depth -= 1;
-                    }
-                }
+            if is_c && self.c_call_depth > 0 {
+                self.c_call_depth -= 1;
             }
-
-            frame
-        } else {
-            None
         }
     }
 
