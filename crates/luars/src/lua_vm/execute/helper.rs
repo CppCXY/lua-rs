@@ -186,15 +186,6 @@ pub fn setbfvalue(v: &mut LuaValue) {
     *v = LuaValue::boolean(false);
 }
 
-/// setbtvalue - 设置true
-#[inline(always)]
-#[allow(unused)]
-pub unsafe fn psetbtvalue(v: *mut LuaValue) {
-    unsafe {
-        *v = LuaValue::boolean(true);
-    }
-}
-
 /// setbtvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setbtvalue(v: &mut LuaValue) {

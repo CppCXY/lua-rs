@@ -177,7 +177,7 @@ impl LuaState {
         // This single call replaces multiple is_c_function/as_lua_function checks
 
         // Determine function type and extract metadata in one pass
-        let (is_c_function, maxstacksize, numparams, nextraargs) =
+        let (call_status, maxstacksize, numparams, nextraargs) =
             if let Some(func_obj) = func.as_lua_function() {
                 let chunk = func_obj.chunk();
                 // Lua function with chunk
@@ -187,26 +187,27 @@ impl LuaState {
                 } else {
                     0
                 };
-                (false, chunk.max_stack_size as usize, numparams, nextraargs)
+                (
+                    CIST_LUA,
+                    chunk.max_stack_size as usize,
+                    numparams,
+                    nextraargs,
+                )
             } else if func.is_c_callable() {
+                if unlikely(self.c_call_depth >= self.safe_option.max_call_depth) {
+                    return Err(self.error(format!(
+                        "C stack overflow (C call depth: {})",
+                        self.c_call_depth
+                    )));
+                }
+                self.c_call_depth += 1;
                 // Light C function
-                (true, nparams, nparams, 0)
+                (CIST_C, nparams, nparams, 0)
             } else {
                 // Not callable - this should be prevented by caller
                 debug_assert!(false, "push_frame called with non-callable value");
                 return Err(self.error(format!("attempt to call a {} value", func.type_name())));
             };
-
-        // Check C call depth if needed
-        if is_c_function {
-            if unlikely(self.c_call_depth >= self.safe_option.max_call_depth) {
-                return Err(self.error(format!(
-                    "C stack overflow (C call depth: {})",
-                    self.c_call_depth
-                )));
-            }
-            self.c_call_depth += 1;
-        }
 
         // Fill missing parameters with nil (optimized batch operation)
         if nparams < numparams {
@@ -227,20 +228,21 @@ impl LuaState {
             }
         }
 
-        let call_status = if is_c_function { CIST_C } else { CIST_LUA };
         let frame_top = base + maxstacksize;
 
         // Fast path: reuse existing CallInfo slot (most common case)
         if self.call_depth < self.call_stack.len() {
-            let frame = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
-            frame.func = func;
-            frame.base = base;
-            frame.func_offset = 1;
-            frame.top = frame_top;
-            frame.pc = 0;
-            frame.nresults = nresults;
-            frame.call_status = call_status;
-            frame.nextraargs = nextraargs;
+            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            *ci = CallInfo {
+                func,
+                base,
+                func_offset: 1,
+                top: frame_top,
+                pc: 0,
+                nresults,
+                call_status,
+                nextraargs,
+            };
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
             self.call_stack.push(CallInfo {
