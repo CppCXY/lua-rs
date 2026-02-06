@@ -229,6 +229,13 @@ impl LuaState {
 
         let frame_top = base + maxstacksize;
 
+        // Ensure physical stack has EXTRA_STACK (5) slots above frame_top
+        // for metamethod arguments (matching Lua 5.5's EXTRA_STACK guarantee)
+        let needed_physical = frame_top + 5;
+        if needed_physical > self.stack.len() {
+            self.resize(needed_physical)?;
+        }
+
         // Fast path: reuse existing CallInfo slot (most common case)
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
@@ -295,19 +302,19 @@ impl LuaState {
             self.resize(new_top)?;
         }
         
-        // Clear dead stack slots when shrinking (to prevent GC from seeing stale references)
-        // This matches Lua 5.4's behavior: set values beyond new_top to nil
-        if new_top < self.stack_top {
-            for i in new_top..self.stack_top {
-                if i < self.stack.len() {
-                    self.stack[i] = LuaValue::nil();
-                }
-            }
-        }
-        
+        // Like Lua 5.5: just update L->top.p pointer, no nil clearing.
+        // GC only scans up to stack_top, so stale values beyond are harmless.
         self.stack_top = new_top;
 
         Ok(())
+    }
+
+    /// Set logical stack top without any checks (fastest path).
+    /// Caller must ensure physical stack is already large enough.
+    /// Equivalent to Lua 5.5's `L->top.p = L->stack + new_top`.
+    #[inline(always)]
+    pub fn set_top_raw(&mut self, new_top: usize) {
+        self.stack_top = new_top;
     }
     
     /// Get stack value at absolute index
@@ -915,13 +922,8 @@ impl LuaState {
         self.stack[current_top] = value;
 
         // Increment logical top (L->top.p++)
-        let new_top = current_top + 1;
-        self.stack_top = new_top;
-
-        // Update current frame's top limit (CallInfo.top)
-        if let Some(frame) = self.current_frame_mut() {
-            frame.top = new_top;
-        }
+        // Do NOT modify frame.top (ci->top) — it's immutable after push_frame.
+        self.stack_top = current_top + 1;
 
         Ok(())
     }

@@ -99,8 +99,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues();
-        // Pre-grow stack
-        let needed_size = base + chunk.max_stack_size;
+        // Pre-grow stack: base + max_stack_size + EXTRA_STACK (5 slots for metamethod args)
+        // Matches Lua 5.5: luaD_checkstack(L, fsize) ensures EXTRA_STACK above ci->top
+        let needed_size = base + chunk.max_stack_size + 5;
         lua_state.grow_stack(needed_size)?;
 
         // Cache pointers

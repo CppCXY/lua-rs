@@ -317,18 +317,26 @@ pub fn call_tm_res(
     arg1: LuaValue,
     arg2: LuaValue,
 ) -> LuaResult<LuaValue> {
-    //  Port of Lua 5.5's Protect macro's savestate(L,ci)
-    // Before pushing arguments, set L->top.p = ci->top.p
-    // This ensures func_pos starts at the correct position
+    // savestate: L->top.p = ci->top.p (if not already done by caller)
     if let Some(frame) = lua_state.current_frame() {
-        lua_state.set_top(frame.top)?;
+        let ci_top = frame.top;
+        if lua_state.get_top() != ci_top {
+            lua_state.set_top_raw(ci_top);
+        }
     }
 
     let func_pos = lua_state.get_top();
-    // Push function and arguments
-    lua_state.push_value(metamethod)?;
-    lua_state.push_value(arg1)?;
-    lua_state.push_value(arg2)?;
+
+    // Direct stack write — like Lua 5.5's setobj2s, no bounds checking.
+    // The EXTRA_STACK (5 slots) guarantees space above ci->top.
+    {
+        let stack = lua_state.stack_mut();
+        stack[func_pos] = metamethod;     // push function
+        stack[func_pos + 1] = arg1;       // 1st argument
+        stack[func_pos + 2] = arg2;       // 2nd argument
+    }
+    // L->top.p += 3
+    lua_state.set_top_raw(func_pos + 3);
 
     // Call the metamethod with nresults=1
     if metamethod.is_cfunction() {
@@ -343,25 +351,12 @@ pub fn call_tm_res(
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
 
-    //  Lua 5.5's behavior after luaD_call with nresults=1:
-    // - Return value is at position 'func' (replaces the function)
-    // - L->top.p = func + 1 (points after the return value)
-    // - setobjs2s(L, res, --L->top.p) does:
-    //   1. Decrement L->top.p to 'func'
-    //   2. Copy value from 'func' to 'res'
-    // After this, L->top.p = func (back to where it was before push)
-    let top = lua_state.get_top();
-    let result = if top > func_pos {
-        // Get return value (should be at func_pos after call returns)
-        let result_val = lua_state.stack_get(func_pos).unwrap_or(LuaValue::nil());
-        // Reset top to func_pos (matching Lua 5.5's --L->top.p behavior)
-        lua_state.set_top(func_pos)?;
-        result_val
-    } else {
-        LuaValue::nil()
-    };
+    // Lua 5.5: setobjs2s(L, res, --L->top.p)
+    // Return value is at func_pos after call returns, then L->top.p = func_pos
+    let result_val = lua_state.stack_mut()[func_pos];
+    lua_state.set_top_raw(func_pos);
 
-    Ok(result)
+    Ok(result_val)
 }
 
 /// Port of Lua 5.5's luaT_callTM from ltm.c:103
@@ -389,20 +384,26 @@ pub fn call_tm(
     arg2: LuaValue,
     arg3: LuaValue,
 ) -> LuaResult<()> {
-    //  Port of Lua 5.5's Protect macro's savestate(L,ci)
-    // Before pushing arguments, set L->top.p = ci->top.p
-    // This ensures func_pos starts at the correct position
+    // savestate: L->top.p = ci->top.p
     if let Some(frame) = lua_state.current_frame() {
-        lua_state.set_top(frame.top)?;
+        let ci_top = frame.top;
+        if lua_state.get_top() != ci_top {
+            lua_state.set_top_raw(ci_top);
+        }
     }
 
     let func_pos = lua_state.get_top();
 
-    // Push function and 3 arguments
-    lua_state.push_value(metamethod)?;
-    lua_state.push_value(arg1)?;
-    lua_state.push_value(arg2)?;
-    lua_state.push_value(arg3)?;
+    // Direct stack write — like Lua 5.5's setobj2s
+    {
+        let stack = lua_state.stack_mut();
+        stack[func_pos] = metamethod;     // push function
+        stack[func_pos + 1] = arg1;       // 1st argument
+        stack[func_pos + 2] = arg2;       // 2nd argument
+        stack[func_pos + 3] = arg3;       // 3rd argument
+    }
+    // L->top.p = func + 4
+    lua_state.set_top_raw(func_pos + 4);
 
     // Call with 0 results (nresults=0)
     if metamethod.is_cfunction() {
