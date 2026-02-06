@@ -505,13 +505,10 @@ fn call_c_function_tailcall(
     // Because the next RETURN instruction will return from R[A] where A is from TAILCALL
     move_results(lua_state, func_idx, first_result, n, -1)?;
 
-    // CRITICAL FIX: Update frame top so next RETURN instruction knows the correct top
-    // After moving results to func_idx, the new top should be func_idx + n
+    // Update stack_top to cover all results
+    // Do NOT modify frame.top (ci->top) - it's immutable after push_frame
     let new_top = func_idx + n;
     lua_state.set_top(new_top)?;
-    if let Some(frame) = lua_state.current_frame_mut() {
-        frame.top = new_top;
-    }
 
     Ok(())
 }

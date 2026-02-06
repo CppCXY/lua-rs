@@ -34,11 +34,7 @@ pub fn exec_gettable(
     let b = instr.get_b() as usize;
     let c = instr.get_c() as usize;
 
-    // Update L->top.p before potential metamethod call
-    // Do NOT modify frame.top (ci->top) - it's immutable
-    let write_pos = base + a;
-    lua_state.set_top(write_pos + 1)?;
-
+    // Read operands FIRST before any stack manipulation
     let rb = lua_state.stack_mut()[base + b];
     let rc = lua_state.stack_mut()[base + c];
 
@@ -57,9 +53,11 @@ pub fn exec_gettable(
             direct_result
         } else {
             // Key not found in table, try __index metamethod
+            // savestate: L->top = ci->top before metamethod call
+            let call_info_top = lua_state.get_call_info(frame_idx).top;
+            lua_state.set_top(call_info_top)?;
             lua_state.set_frame_pc(frame_idx, *pc as u32);
             let result = helper::lookup_from_metatable(lua_state, &rb, &rc);
-            // Restore base after potential frame change
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {
                 return Err(lua_state.error("base changed in GETTABLE".to_string()));
@@ -67,10 +65,12 @@ pub fn exec_gettable(
             result
         }
     } else {
-        // Not a table, try __index metamethod with Protect pattern
+        // Not a table, try __index metamethod
+        // savestate: L->top = ci->top before metamethod call
+        let call_info_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top(call_info_top)?;
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         let result = helper::lookup_from_metatable(lua_state, &rb, &rc);
-        // Check base consistency
         let new_base = lua_state.get_frame_base(frame_idx);
         if new_base != base {
             return Err(lua_state.error("base changed in GETTABLE".to_string()));
@@ -169,6 +169,9 @@ pub fn exec_geti(
             direct_result
         } else {
             // Key not found, try __index metamethod
+            // savestate: L->top = ci->top before metamethod call
+            let call_info_top = lua_state.get_call_info(frame_idx).top;
+            lua_state.set_top(call_info_top)?;
             let key = LuaValue::integer(c as i64);
             lua_state.set_frame_pc(frame_idx, *pc as u32);
             let result = helper::lookup_from_metatable(lua_state, &rb, &key);
@@ -180,6 +183,9 @@ pub fn exec_geti(
         }
     } else {
         // Not a table, try __index metamethod
+        // savestate: L->top = ci->top before metamethod call
+        let call_info_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top(call_info_top)?;
         let key = LuaValue::integer(c as i64);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         let result = helper::lookup_from_metatable(lua_state, &rb, &key);
@@ -189,14 +195,6 @@ pub fn exec_geti(
         }
         result
     };
-
-    // Update frame.top FIRST if we're writing beyond current top
-    let write_pos = base + a;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if write_pos >= call_info.top {
-        call_info.top = write_pos + 1;
-        lua_state.set_top(write_pos + 1)?;
-    }
 
     let stack = lua_state.stack_mut();
     stack[base + a] = result.unwrap_or(LuaValue::nil());
@@ -249,6 +247,8 @@ pub fn exec_seti(
             let key = LuaValue::integer(b as i64);
             lua_state.set_frame_pc(frame_idx, *pc as u32);
             helper::finishset(lua_state, &ra, &key, value)?;
+            // Restore top after metamethod call
+            lua_state.set_top(call_info_top)?;
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {
                 return Err(lua_state.error("base changed in SETI".to_string()));
@@ -259,6 +259,8 @@ pub fn exec_seti(
         let key = LuaValue::integer(b as i64);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         helper::finishset(lua_state, &ra, &key, value)?;
+        // Restore top after metamethod call
+        lua_state.set_top(call_info_top)?;
         let new_base = lua_state.get_frame_base(frame_idx);
         if new_base != base {
             return Err(lua_state.error("base changed in SETI".to_string()));
@@ -282,14 +284,6 @@ pub fn exec_getfield(
     let b = instr.get_b() as usize;
     let c = instr.get_c() as usize;
 
-    //  Update frame.top before potential metamethod call
-    let write_pos = base + a;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if write_pos + 1 > call_info.top {
-        call_info.top = write_pos + 1;
-        lua_state.set_top(write_pos + 1)?;
-    }
-
     if c >= constants.len() {
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         return Err(lua_state.error(format!("GETFIELD: invalid constant index {}", c)));
@@ -307,6 +301,9 @@ pub fn exec_getfield(
             direct_result
         } else {
             // Key not found, try __index metamethod
+            // savestate: L->top = ci->top before metamethod call
+            let call_info_top = lua_state.get_call_info(frame_idx).top;
+            lua_state.set_top(call_info_top)?;
             lua_state.set_frame_pc(frame_idx, *pc as u32);
             let result = helper::lookup_from_metatable(lua_state, &rb, key);
             let new_base = lua_state.get_frame_base(frame_idx);
@@ -317,6 +314,9 @@ pub fn exec_getfield(
         }
     } else {
         // Not a table, try metatable lookup
+        // savestate: L->top = ci->top before metamethod call
+        let call_info_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top(call_info_top)?;
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         let result = helper::lookup_from_metatable(lua_state, &rb, key);
         let new_base = lua_state.get_frame_base(frame_idx);
@@ -376,9 +376,18 @@ pub fn exec_setfield(
         }
     }
 
+    // savestate: L->top = ci->top before metamethod call
+    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    if lua_state.get_top() < call_info_top {
+        lua_state.set_top(call_info_top)?;
+    }
+
     // Slow path: has __newindex or not a table
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     helper::finishset(lua_state, &ra, &key, value)?;
+
+    // Restore top after metamethod call
+    lua_state.set_top(call_info_top)?;
 
     let new_base = lua_state.get_frame_base(frame_idx);
     if new_base != base {
@@ -407,15 +416,6 @@ pub fn exec_self(
         return Err(lua_state.error(format!("SELF: invalid constant index {}", c)));
     }
 
-    //  Update frame.top to cover R[A+1] (the object) and R[A] (the method)
-    // We write to A+1 and A. So we need top >= base + a + 2.
-    let write_top = base + a + 2;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    if write_top > call_info.top {
-        call_info.top = write_top;
-        lua_state.set_top(write_top)?;
-    }
-
     let stack = lua_state.stack_mut();
     let rb = stack[base + b];
 
@@ -437,6 +437,9 @@ pub fn exec_self(
         stack[base + a] = val;
     } else {
         // Key not found in table OR not a table: try __index metamethod
+        // savestate: L->top = ci->top before metamethod call
+        let call_info_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top(call_info_top)?;
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         let result = helper::lookup_from_metatable(lua_state, &rb, key);
         let new_base = lua_state.get_frame_base(frame_idx);
