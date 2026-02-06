@@ -1854,59 +1854,61 @@ impl GC {
             self.grayagain.push(thread_ptr.into());
         }
 
-        let state = &gc_thread.data;
-        
-        // Mark stack values - traverse only the active ranges in call frames
-        // Following Lua 5.5's traversestack: mark from base to top for each CallInfo
-        // This avoids marking dead values in "hidden argument" gaps between frames
-        let num_frames = state.call_depth();
-        
-        if num_frames > 0 {
-            for frame_idx in 0..num_frames {
-                let frame = state.get_call_info(frame_idx);
-                // Mark values from frame.base to current top
-                    // For the active frame, use actual stack_top instead of frame.top
-                    let frame_end = if frame_idx == num_frames - 1 {
-                        // Active frame: use current stack top
-                        state.get_top()
-                    } else {
-                        // Inactive frame: use frame.top as upper limit
-                        frame.top.min(state.stack().len())
-                    };
-                    
-                    let frame_start = frame.base.min(frame_end);
-                    
-                    for i in frame_start..frame_end {
-                        if let Some(value) = state.stack().get(i) {
-                            self.mark_value(l, value);
+        {
+            let state = &gc_thread.data;
+            
+            // Mark stack values - traverse only the active ranges in call frames
+            // Following Lua 5.5's traversestack: mark from base to top for each CallInfo
+            // This avoids marking dead values in "hidden argument" gaps between frames
+            let num_frames = state.call_depth();
+            
+            if num_frames > 0 {
+                for frame_idx in 0..num_frames {
+                    let frame = state.get_call_info(frame_idx);
+                    // Mark values from frame.base to current top
+                        // For the active frame, use actual stack_top instead of frame.top
+                        let frame_end = if frame_idx == num_frames - 1 {
+                            // Active frame: use current stack top
+                            state.get_top()
+                        } else {
+                            // Inactive frame: use frame.top as upper limit
+                            frame.top.min(state.stack().len())
+                        };
+                        
+                        let frame_start = frame.base.min(frame_end);
+                        
+                        for i in frame_start..frame_end {
+                            if let Some(value) = state.stack().get(i) {
+                                self.mark_value(l, value);
+                                count += 1;
+                            }
+                        }
+                        
+                        // Also mark the function itself (at base - func_offset)
+                        let func_pos = if frame.base >= frame.func_offset {
+                            frame.base - frame.func_offset
+                        } else {
+                            0
+                        };
+                        if let Some(func) = state.stack().get(func_pos) {
+                            self.mark_value(l, func);
                             count += 1;
                         }
-                    }
-                    
-                    // Also mark the function itself (at base - func_offset)
-                    let func_pos = if frame.base >= frame.func_offset {
-                        frame.base - frame.func_offset
-                    } else {
-                        0
-                    };
-                    if let Some(func) = state.stack().get(func_pos) {
-                        self.mark_value(l, func);
+                }
+            } else {
+                // No frames: mark everything from 0 to top (main thread init state)
+                for i in 0..state.get_top() {
+                    if let Some(value) = state.stack().get(i) {
+                        self.mark_value(l, value);
                         count += 1;
                     }
-            }
-        } else {
-            // No frames: mark everything from 0 to top (main thread init state)
-            for i in 0..state.get_top() {
-                if let Some(value) = state.stack().get(i) {
-                    self.mark_value(l, value);
-                    count += 1;
                 }
             }
-        }
 
-        for open_upval_ptr in state.open_upvalues() {
-            self.mark_object(l, open_upval_ptr.clone().into());
-        }
+            for open_upval_ptr in state.open_upvalues() {
+                self.mark_object(l, open_upval_ptr.clone().into());
+            }
+        } // Drop immutable borrow of gc_thread.data
 
         if self.gc_state == GcState::Atomic {
             if !self.gc_emergency {
@@ -1914,14 +1916,25 @@ impl GC {
                 // TODO: implement stack shrinking if needed
             }
 
+            // Lua 5.5 lgc.c traversethread atomic phase:
             // for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
             //     setnilvalue(s2v(o));  /* clear dead stack slice */
-            //     /* 'remarkupvals' may have removed thread from 'twups' list */
-            // if (!isintwups(th) && th->openupval != NULL) {
-            //     th->twups = g->twups;  /* link it back to the list */
-            //     g->twups = th;
-            // }
+            // This is CRITICAL for GC safety: clears stale/dead values above
+            // the current stack top so that future set_top growth won't expose
+            // dangling references to the GC marker.
+            let state = &mut gc_thread.data;
+            let stack_top = state.get_top();
+            let stack_len = state.stack_len();
+            let stack = state.stack_mut();
+            for i in stack_top..stack_len {
+                stack[i] = LuaValue::nil();
+            }
 
+            if !self.is_in_twups(thread_ptr) && !state.open_upvalues().is_empty() {
+                self.twups.push(thread_ptr);
+            }
+        } else {
+            let state = &gc_thread.data;
             if !self.is_in_twups(thread_ptr) && !state.open_upvalues().is_empty() {
                 self.twups.push(thread_ptr);
             }

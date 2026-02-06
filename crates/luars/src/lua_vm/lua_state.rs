@@ -293,17 +293,15 @@ impl LuaState {
     }
 
     /// Set logical stack top (L->top.p = L->stack + new_top in Lua)
-    /// This only updates the logical pointer, does NOT truncate the physical stack
-    /// Old values remain in stack array but are considered "garbage"
+    /// This is an internal VM operation — just moves the pointer.
+    /// GC safety for stale slots above top is handled by the GC atomic phase
+    /// (traverse_thread clears dead stack slices), matching Lua 5.5's design.
     #[inline(always)]
     pub fn set_top(&mut self, new_top: usize) -> LuaResult<()> {
         // Ensure physical stack is large enough
         if new_top > self.stack.len() {
             self.resize(new_top)?;
         }
-        
-        // Like Lua 5.5: just update L->top.p pointer, no nil clearing.
-        // GC only scans up to stack_top, so stale values beyond are harmless.
         self.stack_top = new_top;
 
         Ok(())
@@ -316,7 +314,7 @@ impl LuaState {
     pub fn set_top_raw(&mut self, new_top: usize) {
         self.stack_top = new_top;
     }
-    
+
     /// Get stack value at absolute index
     #[inline(always)]
     pub fn stack_get(&self, index: usize) -> Option<LuaValue> {
@@ -348,16 +346,21 @@ impl LuaState {
             ));
             return Err(LuaError::StackOverflow);
         }
+        let capacity = self.stack.capacity();
         self.stack.resize(new_size, LuaValue::nil());
-        for upval_ptr in &self.open_upvalues_list {
-            if let LuaUpvalue::Open {
-                stack_index,
-                stack_ptr,
-            } = &mut upval_ptr.as_mut_ref().data
-            {
-                // Update cached pointer to new stack location
-                if *stack_index < self.stack.len() {
-                    stack_ptr.ptr = (&self.stack[*stack_index]) as *const LuaValue as *mut LuaValue;
+        if self.stack.capacity() > capacity {
+            // If the vector had to reallocate, we need to update all open upvalue pointers
+            for upval_ptr in &self.open_upvalues_list {
+                if let LuaUpvalue::Open {
+                    stack_index,
+                    stack_ptr,
+                } = &mut upval_ptr.as_mut_ref().data
+                {
+                    // Update cached pointer to new stack location
+                    if *stack_index < self.stack.len() {
+                        stack_ptr.ptr =
+                            (&self.stack[*stack_index]) as *const LuaValue as *mut LuaValue;
+                    }
                 }
             }
         }
