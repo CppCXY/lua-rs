@@ -414,6 +414,23 @@ impl GC {
     }
 
     /// Change to incremental mode (like minor2inc in Lua 5.5)
+    ///
+    /// Port of Lua 5.5 lgc.c minor2inc:
+    /// ```c
+    /// static void minor2inc (lua_State *L, global_State *g, lu_byte kind) {
+    ///   g->GCmajorminor = g->GCmarked;
+    ///   g->gckind = kind;
+    ///   g->reallyold = g->old1 = g->survival = NULL;
+    ///   g->finobjrold = g->finobjold1 = g->finobjsur = NULL;
+    ///   entersweep(L);
+    ///   luaE_setdebt(g, applygcparam(g, STEPSIZE, 100));
+    /// }
+    /// ```
+    ///
+    /// In Lua 5.5, all objects are in a single linked list (allgc) with pointer
+    /// markers for generation boundaries. Setting those markers to NULL removes
+    /// the boundaries. In our implementation, we use separate GcLists per
+    /// generation, so we must merge them back into allgc.
     pub fn change_to_incremental_mode(&mut self, l: &mut LuaState) {
         if self.gc_kind == GcKind::Inc {
             return; // Already in incremental mode
@@ -425,12 +442,89 @@ impl GC {
         // Switch mode
         self.gc_kind = GcKind::Inc;
 
+        // Merge all generation lists into allgc
+        // (equivalent to Lua 5.5's clearing of survival/old1/reallyold pointers)
+        let survival_objects = self.survival.take_all();
+        self.allgc.add_all(survival_objects);
+
+        let old1_objects = self.old1.take_all();
+        self.allgc.add_all(old1_objects);
+
+        let old_objects = self.old.take_all();
+        self.allgc.add_all(old_objects);
+
         // Enter sweep phase (like Lua 5.5's entersweep)
         self.enter_sweep(l);
 
         // Set debt for next step
         let stepsize = self.apply_param(STEPSIZE, 100);
         self.set_debt(stepsize);
+    }
+
+    /// Enter generational mode from incremental mode.
+    ///
+    /// Port of Lua 5.5 lgc.c entergen:
+    /// ```c
+    /// static void entergen (lua_State *L, global_State *g) {
+    ///   luaC_runtilstate(L, GCSpause, 1);
+    ///   luaC_runtilstate(L, GCSpropagate, 1);
+    ///   atomic(L);
+    ///   atomic2gen(L, g);
+    ///   setminordebt(g);
+    /// }
+    /// ```
+    pub fn enter_gen(&mut self, l: &mut LuaState) {
+        // Must be in incremental mode (Lua 5.5 asserts gckind == KGC_INC)
+        debug_assert!(self.gc_kind == GcKind::Inc);
+
+        // Complete any in-progress cycle
+        self.run_until_state(l, GcState::Pause);
+
+        // Start a fresh cycle: Pause → restart_collection → Propagate
+        self.run_until_state(l, GcState::Propagate);
+
+        // Run atomic phase (marks all, propagates, converges ephemerons, etc.)
+        self.atomic(l);
+
+        // Transition to generational mode: sweep all to old, set up gen structures
+        self.atomic2gen(l);
+
+        // Set debt for next minor collection
+        self.set_minor_debt();
+    }
+
+    /// Change GC mode (like luaC_changemode in Lua 5.5)
+    ///
+    /// Port of Lua 5.5 lgc.c:
+    /// ```c
+    /// void luaC_changemode (lua_State *L, int newmode) {
+    ///   global_State *g = G(L);
+    ///   if (g->gckind == KGC_GENMAJOR)
+    ///     g->gckind = KGC_INC;
+    ///   if (newmode != g->gckind) {
+    ///     if (newmode == KGC_INC)
+    ///       minor2inc(L, g, KGC_INC);
+    ///     else {
+    ///       lua_assert(newmode == KGC_GENMINOR);
+    ///       entergen(L, g);
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    pub fn change_mode(&mut self, l: &mut LuaState, new_mode: GcKind) {
+        // GenMajor is really incremental under the hood
+        if self.gc_kind == GcKind::GenMajor {
+            self.gc_kind = GcKind::Inc;
+        }
+
+        if new_mode == GcKind::Inc {
+            self.change_to_incremental_mode(l);
+        } else {
+            debug_assert!(new_mode == GcKind::GenMinor);
+            if self.gc_kind != GcKind::GenMinor {
+                self.enter_gen(l);
+            }
+        }
     }
 
     pub fn trace_object(&mut self, gc_object_owner: GcObjectOwner) -> LuaResult<()> {
@@ -782,20 +876,42 @@ impl GC {
     fn converge_ephemerons(&mut self, l: &mut LuaState) {
         let mut changed;
         let mut dir = false;
+        let mut pass = 0;
 
         loop {
             let ephemeron_list = std::mem::take(&mut self.ephemeron);
             self.ephemeron.clear();
             changed = false;
+            pass += 1;
+
+            let num_tables = ephemeron_list.len();
+            let mut total_alive_keys = 0;
+            let mut total_dead_keys = 0;
 
             for table_ptr in ephemeron_list {
                 table_ptr.as_mut_ref().header.make_black();
+
+                // Count alive vs dead keys for debugging
+                let entries = table_ptr.as_ref().data.iter_all();
+                for (k, _v) in &entries {
+                    if let Some(key_ptr) = k.as_gc_ptr() {
+                        if self.is_white(key_ptr) {
+                            total_dead_keys += 1;
+                        } else {
+                            total_alive_keys += 1;
+                        }
+                    }
+                }
 
                 let marked = self.traverse_ephemeron_atomic(l, table_ptr, dir);
                 if marked {
                     self.propagate_all(l);
                     changed = true;
                 }
+            }
+
+            if num_tables > 0 {
+                eprintln!("[converge_ephemerons] pass {pass}: {num_tables} tables, changed={changed}, ephemeron_after={}, alive_keys={total_alive_keys}, dead_keys={total_dead_keys}", self.ephemeron.len());
             }
 
             dir = !dir;
@@ -812,9 +928,6 @@ impl GC {
         table_ptr: TablePtr,
         inv: bool,
     ) -> bool {
-        // CRITICAL FIX: Collect entries first to avoid borrow issues
-        // Must use iter_all here because we need to reverse for convergence
-        // But this is in atomic phase where GC should not be triggered
         let entries = table_ptr.as_ref().data.iter_all();
 
         let mut marked_any = false;
@@ -826,7 +939,12 @@ impl GC {
             entry_list.reverse();
         }
 
-        for (k, v) in entry_list {
+        let mut alive_nonwhite_val = 0;
+        let mut alive_white_val = 0;
+        let mut dead_white_val = 0;
+        let mut dead_nonwhite_val = 0;
+
+        for (k, v) in &entry_list {
             let key_ptr = k.as_gc_ptr();
             let val_ptr = v.as_gc_ptr();
 
@@ -837,27 +955,23 @@ impl GC {
                 has_white_keys = true;
                 if val_is_white {
                     has_white_white = true;
+                    dead_white_val += 1;
+                } else {
+                    dead_nonwhite_val += 1;
                 }
             } else if val_is_white {
                 self.really_mark_object(l, val_ptr.unwrap());
                 marked_any = true;
+                alive_white_val += 1;
+            } else {
+                alive_nonwhite_val += 1;
             }
         }
 
-        // Port of Lua 5.5 logic:
-        // - If has white->white, keep in ephemeron for another convergence pass
-        // - If only has white keys (no white->white), move to allweak for later clearbykeys
-        // - If no white keys at all, don't add anywhere (table is clean)
-        //
-        // BUT WAIT: In Lua 5.5, ephemeron tables stay in g->ephemeron until clearbykeys!
-        // Looking at lgc.c more carefully:
-        //   - convergeephemerons removes from g->ephemeron temporarily
-        //   - traverseephemeron(g, h, 1) with atomic=1 calls linkgclist(h, g->allweak) if has white keys
-        //   - Then clearbykeys processes BOTH g->ephemeron and g->allweak
-        //
-        // So the logic is:
-        // - white->white: back to ephemeron (need more convergence)
-        // - white keys but converged: to allweak (ready for clearing)
+        if entry_list.len() > 5 && !marked_any && has_white_keys {
+            eprintln!("[traverse_ephemeron_atomic] STALL: {} entries, alive_nonwhite={alive_nonwhite_val}, alive_white={alive_white_val}, dead_white={dead_white_val}, dead_nonwhite={dead_nonwhite_val}", entry_list.len());
+        }
+
         if has_white_white {
             self.ephemeron.push(table_ptr);
         } else if has_white_keys {
@@ -870,21 +984,27 @@ impl GC {
     /// Port of Lua 5.5's clearbykeys
     /// Clear entries with unmarked keys from ephemeron and fully weak tables
     fn clear_by_keys(&mut self, l: &mut LuaState) {
+        let mut total_cleared = 0;
         // Clear ephemeron tables
         let ephemeron_list = self.ephemeron.clone();
+        let eph_count = ephemeron_list.len();
         for table_ptr in ephemeron_list {
-            self.clear_table_by_keys(l, table_ptr);
+            total_cleared += self.clear_table_by_keys(l, table_ptr);
         }
 
         // Clear fully weak tables
         let allweak_list = self.allweak.clone();
+        let aw_count = allweak_list.len();
         for table_ptr in allweak_list {
-            self.clear_table_by_keys(l, table_ptr);
+            total_cleared += self.clear_table_by_keys(l, table_ptr);
+        }
+        if total_cleared > 0 {
+            eprintln!("[clear_by_keys] cleared {total_cleared} entries from {eph_count} ephemeron + {aw_count} allweak tables");
         }
     }
 
     /// Clear entries with unmarked keys from a single table
-    fn clear_table_by_keys(&mut self, l: &mut LuaState, table_ptr: TablePtr) {
+    fn clear_table_by_keys(&mut self, l: &mut LuaState, table_ptr: TablePtr) -> usize {
         // CRITICAL FIX: Collect all keys first to avoid holding reference during is_cleared()
         // This prevents use-after-free and borrowing issues
         let entries = table_ptr.as_ref().data.iter_keys();
@@ -894,16 +1014,22 @@ impl GC {
         for key in entries {
             if let Some(key_ptr) = key.as_gc_ptr() {
                 if self.is_cleared(l, key_ptr) {
+                    if let Some(h) = key_ptr.header() {
+                        eprintln!("[clear_table_by_keys] clearing key {:?} marked=0x{:02x} age={} white={} black={} gray={}", 
+                            key_ptr.kind(), h.marked, h.age(), h.is_white(), h.is_black(), h.is_gray());
+                    }
                     keys_to_remove.push(key);
                 }
             }
         }
 
+        let count = keys_to_remove.len();
         // Remove entries with dead keys
         let table = &mut table_ptr.as_mut_ref().data;
         for key in keys_to_remove {
             table.raw_set(&key, LuaValue::nil());
         }
+        count
     }
 
     /// Port of Lua 5.5's clearbyvalues
@@ -1284,42 +1410,63 @@ impl GC {
                 if let Some(header) = gc_ptr.header() {
                     match header.age() {
                         G_NEW => {
-                            self.allgc.remove(gc_ptr);
+                            let obj = self.allgc.remove(gc_ptr);
+                            self.total_bytes -= obj.size() as isize;
+                            drop(obj);
                         }
                         G_SURVIVAL => {
-                            self.survival.remove(gc_ptr);
+                            let obj = self.survival.remove(gc_ptr);
+                            self.total_bytes -= obj.size() as isize;
+                            drop(obj);
                         }
                         G_OLD1 => {
-                            self.old1.remove(gc_ptr);
+                            let obj = self.old1.remove(gc_ptr);
+                            self.total_bytes -= obj.size() as isize;
+                            drop(obj);
                         }
                         _ => {
-                            self.old.remove(gc_ptr);
+                            let obj = self.old.remove(gc_ptr);
+                            self.total_bytes -= obj.size() as isize;
+                            drop(obj);
                         }
                     }
                 } else {
                     // Fallback: try each list
-                    if self.allgc.contains(gc_ptr) {
-                        self.allgc.remove(gc_ptr);
+                    let obj = if self.allgc.contains(gc_ptr) {
+                        self.allgc.remove(gc_ptr)
                     } else if self.survival.contains(gc_ptr) {
-                        self.survival.remove(gc_ptr);
+                        self.survival.remove(gc_ptr)
                     } else if self.old1.contains(gc_ptr) {
-                        self.old1.remove(gc_ptr);
+                        self.old1.remove(gc_ptr)
                     } else if self.old.contains(gc_ptr) {
-                        self.old.remove(gc_ptr);
-                    }
+                        self.old.remove(gc_ptr)
+                    } else {
+                        continue;
+                    };
+                    self.total_bytes -= obj.size() as isize;
+                    drop(obj);
                 }
             }
         }
+
+        // Move all surviving objects from allgc/survival/old1 into old list
+        // (In Lua 5.5: g->reallyold = g->old1 = g->survival = g->allgc;
+        //  All pointers merge into one list since everything is now G_OLD)
+        let allgc_survivors = self.allgc.take_all();
+        self.old.add_all(allgc_survivors);
+        let survival_survivors = self.survival.take_all();
+        self.old.add_all(survival_survivors);
+        let old1_survivors = self.old1.take_all();
+        self.old.add_all(old1_survivors);
 
         self.gc_kind = GcKind::GenMinor;
         self.gc_majorminor = self.gc_marked;
         self.gc_marked = 0;
 
-        // After sweep2old, all objects are G_OLD and moved to old list
-        // allgc, survival and old1 should be empty
+        // After sweep2old + move, allgc, survival and old1 should be empty
         debug_assert!(
             self.allgc.is_empty() && self.survival.is_empty() && self.old1.is_empty(),
-            "allgc, survival and old1 should be empty after sweep2old in atomic2gen"
+            "allgc, survival and old1 should be empty after atomic2gen"
         );
 
         self.finish_gen_cycle(l);
@@ -1461,6 +1608,10 @@ impl GC {
     /// OPTIMIZATION: OLD1 objects are now in a separate 'old1' list.
     /// We only iterate the old1 list (small) instead of the entire old list.
     /// After processing, objects are moved from old1 to old.
+    ///
+    /// NOTE: Objects in old1 may not all have G_OLD1 age - barrier_back can
+    /// change an OLD1 object to TOUCHED1 while it's still in the old1 list.
+    /// In Lua 5.5, markold simply skips non-OLD1 objects. We do the same.
     fn mark_old(&mut self, l: &mut LuaState) {
         // Process OLD1 objects: mark them and move to old list
         // Take all objects from old1 - they will be moved to old after processing
@@ -1470,15 +1621,16 @@ impl GC {
         for gc_owner in old1_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
             if let Some(header) = gc_ptr.header_mut() {
-                debug_assert!(
-                    header.age() == G_OLD1,
-                    "old1 list should only contain G_OLD1 objects"
-                );
-                debug_assert!(!header.is_white(), "OLD1 object should not be white");
-                header.set_age(G_OLD);
-                if header.is_black() {
-                    self.really_mark_object(l, gc_ptr);
+                if header.age() == G_OLD1 {
+                    // OLD1 → OLD, and re-mark if black
+                    debug_assert!(!header.is_white(), "OLD1 object should not be white");
+                    header.set_age(G_OLD);
+                    if header.is_black() {
+                        self.really_mark_object(l, gc_ptr);
+                    }
                 }
+                // else: age was changed (e.g., to TOUCHED1 by barrier_back),
+                // just move to old list - it will be handled by correctgraylists
             }
             to_old.push(gc_owner);
         }
@@ -1491,7 +1643,6 @@ impl GC {
         for gc_ptr in finobj_list {
             if let Some(header) = gc_ptr.header_mut() {
                 if header.age() == G_OLD1 {
-                    debug_assert!(!header.is_white(), "OLD1 finobj should not be white");
                     header.set_age(G_OLD);
                     if header.is_black() {
                         self.really_mark_object(l, gc_ptr);
@@ -1505,7 +1656,6 @@ impl GC {
         for gc_ptr in tobefnz_list {
             if let Some(header) = gc_ptr.header_mut() {
                 if header.age() == G_OLD1 {
-                    debug_assert!(!header.is_white(), "OLD1 tobefnz should not be white");
                     header.set_age(G_OLD);
                     if header.is_black() {
                         self.really_mark_object(l, gc_ptr);
@@ -1864,6 +2014,31 @@ impl GC {
             //
             let top = state.get_top();
             let stack = state.stack();
+            let num_tables_on_stack = stack[..top].iter().filter(|v| v.is_table()).count();
+            if self.ephemeron.len() + self.allweak.len() > 5 || (self.gc_state == GcState::Atomic && self.allgc.len() > 500) {
+                // Check if any ephemeron key is on the stack
+                let eph_key_on_stack = if !self.ephemeron.is_empty() {
+                    let mut found = 0;
+                    for eph_table in &self.ephemeron {
+                        let entries = eph_table.as_ref().data.iter_keys();
+                        for key in &entries {
+                            if let Some(key_ptr) = key.as_gc_ptr() {
+                                for i in 0..top {
+                                    if let Some(stack_ptr) = stack[i].as_gc_ptr() {
+                                        if stack_ptr == key_ptr {
+                                            found += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    found
+                } else {
+                    0
+                };
+                eprintln!("[traverse_thread] top={}, stack_len={}, call_depth={}, tables_on_stack={num_tables_on_stack}, eph_keys_on_stack={eph_key_on_stack}, gc_state={:?}", top, stack.len(), state.call_depth(), self.gc_state);
+            }
             for i in 0..top {
                 self.mark_value(l, &stack[i]);
                 count += 1;
@@ -1979,6 +2154,9 @@ impl GC {
     /// Port of Lua 5.5's atomic function from lgc.c
     fn atomic(&mut self, l: &mut LuaState) {
         self.gc_state = GcState::Atomic;
+        eprintln!("[atomic] starting, gc_kind={:?}, allgc={}, survival={}, old1={}, old={}, grayagain={}, ephemeron={}, weak={}, allweak={}",
+            self.gc_kind, self.allgc.len(), self.survival.len(), self.old1.len(), self.old.len(),
+            self.grayagain.len(), self.ephemeron.len(), self.weak.len(), self.allweak.len());
 
         // Mark main thread (running thread)
         let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
@@ -2004,6 +2182,7 @@ impl GC {
         self.propagate_all(l);
 
         self.converge_ephemerons(l);
+        eprintln!("[atomic] FIRST converge done, ephemeron={}, allweak={}", self.ephemeron.len(), self.allweak.len());
 
         /* at this point, all strongly accessible objects are marked. */
         /* Clear values from weak tables, before checking finalizers */
@@ -2021,7 +2200,9 @@ impl GC {
         /* remark, to propagate 'resurrection' */
         self.propagate_all(l);
 
+        eprintln!("[atomic] before SECOND converge, ephemeron={}, allweak={}, gray={}", self.ephemeron.len(), self.allweak.len(), self.gray.len());
         self.converge_ephemerons(l);
+        eprintln!("[atomic] SECOND converge done, ephemeron={}, allweak={}", self.ephemeron.len(), self.allweak.len());
 
         // Save allweak list BEFORE clear_by_keys (which will empty it)
         let allweak_before_clear_keys = self.allweak.clone();
@@ -2726,6 +2907,8 @@ impl GC {
 
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
+        eprintln!("[young_collection] starting minor collection #{}, allgc={}, survival={}, old1={}, old={}", 
+            self.stats.minor_collections, self.allgc.len(), self.survival.len(), self.old1.len(), self.old.len());
 
         //  Set gc_stopem to prevent recursive GC during collection
         // This matches Lua 5.5's behavior where GC steps check gc_stopem

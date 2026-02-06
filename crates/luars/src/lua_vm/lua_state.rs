@@ -265,6 +265,19 @@ impl LuaState {
         }
 
         self.call_depth += 1;
+
+        // Match Lua 5.5's luaD_precall: L->top.p = ci->top.p
+        // For Lua functions, set stack_top to frame_top so the GC's
+        // traverse_thread scans the full frame extent. Without this,
+        // stack_top stays at the CALL instruction's ra+b, which can be
+        // BELOW caller-frame locals that are still live — causing the GC
+        // to miss marking those objects.
+        if call_status & CIST_LUA != 0 {
+            if frame_top > self.stack_top {
+                self.stack_top = frame_top;
+            }
+        }
+
         Ok(())
     }
 

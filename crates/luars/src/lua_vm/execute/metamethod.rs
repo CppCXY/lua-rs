@@ -331,9 +331,9 @@ pub fn call_tm_res(
     // The EXTRA_STACK (5 slots) guarantees space above ci->top.
     {
         let stack = lua_state.stack_mut();
-        stack[func_pos] = metamethod;     // push function
-        stack[func_pos + 1] = arg1;       // 1st argument
-        stack[func_pos + 2] = arg2;       // 2nd argument
+        stack[func_pos] = metamethod; // push function
+        stack[func_pos + 1] = arg1; // 1st argument
+        stack[func_pos + 2] = arg2; // 2nd argument
     }
     // L->top.p += 3
     lua_state.set_top_raw(func_pos + 3);
@@ -397,10 +397,10 @@ pub fn call_tm(
     // Direct stack write — like Lua 5.5's setobj2s
     {
         let stack = lua_state.stack_mut();
-        stack[func_pos] = metamethod;     // push function
-        stack[func_pos + 1] = arg1;       // 1st argument
-        stack[func_pos + 2] = arg2;       // 2nd argument
-        stack[func_pos + 3] = arg3;       // 3rd argument
+        stack[func_pos] = metamethod; // push function
+        stack[func_pos + 1] = arg1; // 1st argument
+        stack[func_pos + 2] = arg2; // 2nd argument
+        stack[func_pos + 3] = arg3; // 3rd argument
     }
     // L->top.p = func + 4
     lua_state.set_top_raw(func_pos + 4);

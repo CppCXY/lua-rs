@@ -616,10 +616,17 @@ impl LuaVM {
     }
 
     /// Full GC cycle for generational mode (like fullgen in Lua 5.5)
+    ///
+    /// Port of Lua 5.5 lgc.c:
+    /// ```c
+    /// static void fullgen (lua_State *L, global_State *g) {
+    ///   minor2inc(L, g, KGC_INC);
+    ///   entergen(L, g);
+    /// }
+    /// ```
     fn full_gen(&mut self, l: &mut LuaState) {
-        // NOTE: mark_open_upvalues should NOT be called here!
-        // In Lua 5.5, remarkupvals is called DURING the atomic phase.
-        self.gc.full_generation(l);
+        self.gc.change_to_incremental_mode(l);
+        self.gc.enter_gen(l);
     }
 
     /// Get GC statistics

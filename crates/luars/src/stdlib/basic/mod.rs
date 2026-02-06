@@ -670,24 +670,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "generational" => {
-            // LUA_GCGEN: Switch to generational mode
-            let vm = l.vm_mut();
-            let old_mode = match vm.gc.gc_kind {
-                GcKind::Inc => "incremental",
-                GcKind::GenMinor => "generational",
-                GcKind::GenMajor => "generational",
-            };
-
-            // Switch to generational mode
-            vm.gc.gc_kind = GcKind::GenMinor;
-
-            // Push previous mode name (must track if new)
-            let mode_value = l.create_string(old_mode)?;
-            l.push_value(mode_value)?;
-            Ok(1)
-        }
-        "incremental" => {
-            // LUA_GCINC: Switch to incremental mode
+            // LUA_GCGEN: Switch to generational mode (like luaC_changemode)
             let old_mode = match l.vm_mut().gc.gc_kind {
                 GcKind::Inc => "incremental",
                 GcKind::GenMinor => "generational",
@@ -696,8 +679,23 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             let vm_ptr = l.vm_ptr();
             let vm = unsafe { &mut *vm_ptr };
-            // Switch to incremental mode (like luaC_changemode in Lua 5.5)
-            vm.gc.change_to_incremental_mode(l);
+            vm.gc.change_mode(l, GcKind::GenMinor);
+
+            let mode_value = l.create_string(old_mode)?;
+            l.push_value(mode_value)?;
+            Ok(1)
+        }
+        "incremental" => {
+            // LUA_GCINC: Switch to incremental mode (like luaC_changemode)
+            let old_mode = match l.vm_mut().gc.gc_kind {
+                GcKind::Inc => "incremental",
+                GcKind::GenMinor => "generational",
+                GcKind::GenMajor => "generational",
+            };
+
+            let vm_ptr = l.vm_ptr();
+            let vm = unsafe { &mut *vm_ptr };
+            vm.gc.change_mode(l, GcKind::Inc);
 
             let mode_value = l.create_string(old_mode)?;
             l.push_value(mode_value)?;
