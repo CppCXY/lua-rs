@@ -1856,53 +1856,17 @@ impl GC {
 
         {
             let state = &gc_thread.data;
-            
-            // Mark stack values - traverse only the active ranges in call frames
-            // Following Lua 5.5's traversestack: mark from base to top for each CallInfo
-            // This avoids marking dead values in "hidden argument" gaps between frames
-            let num_frames = state.call_depth();
-            
-            if num_frames > 0 {
-                for frame_idx in 0..num_frames {
-                    let frame = state.get_call_info(frame_idx);
-                    // Mark values from frame.base to current top
-                        // For the active frame, use actual stack_top instead of frame.top
-                        let frame_end = if frame_idx == num_frames - 1 {
-                            // Active frame: use current stack top
-                            state.get_top()
-                        } else {
-                            // Inactive frame: use frame.top as upper limit
-                            frame.top.min(state.stack().len())
-                        };
-                        
-                        let frame_start = frame.base.min(frame_end);
-                        
-                        for i in frame_start..frame_end {
-                            if let Some(value) = state.stack().get(i) {
-                                self.mark_value(l, value);
-                                count += 1;
-                            }
-                        }
-                        
-                        // Also mark the function itself (at base - func_offset)
-                        let func_pos = if frame.base >= frame.func_offset {
-                            frame.base - frame.func_offset
-                        } else {
-                            0
-                        };
-                        if let Some(func) = state.stack().get(func_pos) {
-                            self.mark_value(l, func);
-                            count += 1;
-                        }
-                }
-            } else {
-                // No frames: mark everything from 0 to top (main thread init state)
-                for i in 0..state.get_top() {
-                    if let Some(value) = state.stack().get(i) {
-                        self.mark_value(l, value);
-                        count += 1;
-                    }
-                }
+
+            // Mark stack values: linear scan from stack[0] to stack[top)
+            // This matches Lua 5.5's traversethread exactly:
+            //   for (o = th->stack.p; o < th->top.p; o++)
+            //     markvalue(g, s2v(o));
+            //
+            let top = state.get_top();
+            let stack = state.stack();
+            for i in 0..top {
+                self.mark_value(l, &stack[i]);
+                count += 1;
             }
 
             for open_upval_ptr in state.open_upvalues() {
@@ -2579,41 +2543,6 @@ impl GC {
     ///   ...
     /// }
     /// ```
-    ///
-    /// Port of Lua 5.5's fullgen / youngcollection
-    ///
-    /// From lgc.c (Lua 5.5):
-    /// ```c
-    /// /*
-    /// ** Does a young collection. First, mark 'OLD1' objects. Then does the
-    /// ** atomic step. Then, check whether to continue in minor mode. If so,
-    /// ** sweep all lists and advance pointers. Finally, finish the collection.
-    /// */
-    /// static void youngcollection (lua_State *L, global_State *g) {
-    ///   l_mem addedold1 = 0;
-    ///   l_mem marked = g->GCmarked;
-    ///   GCObject **psurvival;
-    ///   GCObject *dummy;
-    ///   lua_assert(g->gcstate == GCSpropagate);
-    ///   if (g->firstold1) {
-    ///     markold(g, g->firstold1, g->reallyold);
-    ///     g->firstold1 = NULL;
-    ///   }
-    ///   markold(g, g->finobj, g->finobjrold);
-    ///   markold(g, g->tobefnz, NULL);
-    ///
-    ///   atomic(L);  /* will lose 'g->marked' */
-    ///   ...
-    /// }
-    /// ```
-    ///
-    /// NOTE: In generational mode, full collection does:
-    /// 1. restart_collection (marks roots, weak tables go to grayagain)
-    /// 2. propagate gray list
-    /// 3. Process grayagain list (THIS WAS MISSING!)
-    /// 4. propagate again
-    /// 5. converge ephemerons
-    /// 6. clear weak tables
     pub fn full_generation(&mut self, l: &mut LuaState) {
         // If we're in Pause state, we need to do the state transition ourselves
         if self.gc_state == GcState::Pause {
