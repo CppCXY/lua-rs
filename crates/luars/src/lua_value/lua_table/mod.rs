@@ -5,8 +5,15 @@ use super::lua_value::LuaValue;
 use crate::{LuaResult, TablePtr, lua_vm::LuaError};
 use native_table::NativeTable;
 
+/// Mask covering TM_INDEX through TM_EQ (bits 0-5) — matches Lua 5.5's maskflags
+const MASK_FLAGS: u8 = (1u8 << 6) - 1; // 0x3F
+
 pub struct LuaTable {
     meta: TablePtr,
+    /// Bit-flag cache for absent metamethods (fasttm).
+    /// Bit i set ⇒ TmKind(i) is known absent in this table (when used as a metatable).
+    /// Only bits 0..5 (Index..Eq) are cached, matching Lua 5.5's maskflags.
+    flags: u8,
     pub(crate) impl_table: NativeTable,
 }
 
@@ -15,8 +22,35 @@ impl LuaTable {
     pub fn new(asize: u32, hsize: u32) -> Self {
         Self {
             meta: TablePtr::null(),
+            flags: 0,
             impl_table: NativeTable::new(asize, hsize),
         }
+    }
+
+    /// Invalidate cached TM flags (called when new keys are inserted).
+    /// Matches Lua 5.5's `invalidateTMcache(t)`: `t->flags &= ~maskflags`
+    #[inline(always)]
+    pub(crate) fn invalidate_tm_cache(&mut self) {
+        self.flags &= !MASK_FLAGS;
+    }
+
+    /// fasttm: Check if TmKind `tm` is known absent from this table.
+    /// Returns true if the metamethod is definitely NOT present (skip hash lookup).
+    #[inline(always)]
+    pub(crate) fn no_tm(&self, tm: u8) -> bool {
+        self.flags & (1u8 << tm) != 0
+    }
+
+    /// Cache that TmKind `tm` is absent from this table.
+    #[inline(always)]
+    pub(crate) fn set_tm_absent(&mut self, tm: u8) {
+        self.flags |= 1u8 << tm;
+    }
+
+    /// Get the raw metatable pointer (avoids LuaValue allocation for fasttm checks)
+    #[inline(always)]
+    pub(crate) fn meta_ptr(&self) -> TablePtr {
+        self.meta
     }
 
     #[inline(always)]
@@ -75,7 +109,13 @@ impl LuaTable {
     /// return true if new key inserted, false if updated existing key
     #[inline(always)]
     pub(crate) fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
-        self.impl_table.raw_set(key, value)
+        let new_key = self.impl_table.raw_set(key, value);
+        if new_key {
+            // New key inserted — invalidate TM cache (this table might be a metatable)
+            // Matches Lua 5.5: invalidateTMcache(t) in luaH_finishset
+            self.invalidate_tm_cache();
+        }
+        new_key
     }
 
     pub fn next(&self, input_key: &LuaValue) -> Option<(LuaValue, LuaValue)> {

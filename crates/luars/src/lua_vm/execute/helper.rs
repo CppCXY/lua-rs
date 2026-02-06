@@ -283,33 +283,57 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
 
 /// Lookup value from object's metatable __index
 /// Returns Some(value) if found, None if not found or no metatable
+///
+/// Optimized hot path: inline fasttm check for __index to avoid function call overhead.
+/// Matches Lua 5.5's luaV_finishget pattern.
 pub fn lookup_from_metatable(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
 ) -> Option<LuaValue> {
-    // Port of luaV_finishget from lvm.c:291
     const MAXTAGLOOP: usize = 2000;
+    const TM_INDEX_BIT: u8 = TmKind::Index as u8; // = 0
 
     let mut t = *obj;
 
     for _ in 0..MAXTAGLOOP {
-        // Get __index metamethod
-        let tm = get_metamethod_event(lua_state, &t, TmKind::Index)?;
+        // Inline fasttm for __index on tables (hot path optimization)
+        let tm = if let Some(table) = t.as_table_mut() {
+            let meta = table.meta_ptr();
+            if meta.is_null() {
+                return None; // No metatable → no __index
+            }
+            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+            // fasttm: check cached bit
+            if mt.no_tm(TM_INDEX_BIT) {
+                return None; // __index known absent
+            }
+            // Slow path: hash lookup
+            let vm = lua_state.vm_mut();
+            let event_key = vm.const_strings.get_tm_value(TmKind::Index);
+            match mt.raw_get(&event_key) {
+                Some(v) => v,
+                None => {
+                    mt.set_tm_absent(TM_INDEX_BIT); // Cache absence
+                    return None;
+                }
+            }
+        } else {
+            // Non-table (string, userdata): fall back to general path
+            get_metamethod_event(lua_state, &t, TmKind::Index)?
+        };
 
         // If __index is a function, call it using call_tm_res
         if tm.is_function() {
-            // Use call_tm_res which correctly handles stack and Protect pattern
             match execute::metamethod::call_tm_res(lua_state, tm, t, *key) {
                 Ok(result) => return Some(result),
                 Err(_) => return None,
             }
         }
 
-        // __index is a table, try to access tm[key]
+        // __index is a table, try to access tm[key] directly
         t = tm;
 
-        // Try direct table access first (fast path)
         if let Some(table) = t.as_table() {
             if let Some(value) = table.raw_get(key) {
                 return Some(value);
@@ -323,22 +347,35 @@ pub fn lookup_from_metatable(
     None
 }
 
-/// Get a metamethod from a metatable value
+/// Get a metamethod from a metatable value — implements Lua 5.5's fasttm/luaT_gettm pattern.
+/// For TmKind <= Eq (first 6 metamethods), uses bit-flag cache to skip hash lookups
+/// when the metamethod is known absent.
+#[inline(always)]
 fn get_metamethod_from_metatable(
     lua_state: &mut LuaState,
     metatable: LuaValue,
     tm_kind: TmKind,
 ) -> Option<LuaValue> {
-    // OLD optimization: resolve key once
-    // const KEY_CACHE: &str = event;
-    // let event_key = vm.object_pool.get_tm_value_by_str(event);
+    if let Some(mt) = metatable.as_table_mut() {
+        let tm_idx = tm_kind as u8;
 
-    // NEW Optimization: Use direct pointer access if possible
-    if let Some(mt) = metatable.as_table() {
+        // fasttm: for cacheable TMs (Index..Eq), check bit-flag first
+        if tm_idx <= TmKind::Eq as u8 {
+            if mt.no_tm(tm_idx) {
+                return None; // Known absent — skip hash lookup entirely
+            }
+        }
+
         let vm = lua_state.vm_mut();
         let event_key = vm.const_strings.get_tm_value(tm_kind);
+        let result = mt.raw_get(&event_key);
 
-        return mt.raw_get(&event_key);
+        if result.is_none() && tm_idx <= TmKind::Eq as u8 {
+            // Cache that this TM is absent (luaT_gettm pattern)
+            mt.set_tm_absent(tm_idx);
+        }
+
+        return result;
     }
 
     None
@@ -393,46 +430,48 @@ pub fn finishset(
     value: LuaValue,
 ) -> LuaResult<bool> {
     const MAXTAGLOOP: usize = 2000;
+    const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8; // = 1
 
     let mut t = *obj;
 
     for _ in 0..MAXTAGLOOP {
-        // Check if t is a table
-        if let Some(table) = t.as_table() {
-            // Get metatable
-            let metatable = table.get_metatable();
-
-            // Try to get __newindex metamethod
-            let tm_val = if let Some(metatable) = metatable {
-                get_metamethod_from_metatable(lua_state, metatable, TmKind::NewIndex)
-            } else {
+        // Check if t is a table — use inline fasttm for __newindex
+        if let Some(table) = t.as_table_mut() {
+            let meta = table.meta_ptr();
+            let tm_val = if meta.is_null() {
                 None
+            } else {
+                let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                // fasttm: check cached bit for __newindex
+                if mt.no_tm(TM_NEWINDEX_BIT) {
+                    None
+                } else {
+                    let vm = lua_state.vm_mut();
+                    let event_key = vm.const_strings.get_tm_value(TmKind::NewIndex);
+                    let result = mt.raw_get(&event_key);
+                    if result.is_none() {
+                        mt.set_tm_absent(TM_NEWINDEX_BIT);
+                    }
+                    result
+                }
             };
 
             if tm_val.is_none() {
                 // No metamethod - set directly
-                if t.is_table() {
-                    lua_state.raw_set(&t, *key, value);
-                    return Ok(true);
-                }
+                lua_state.raw_set(&t, *key, value);
+                return Ok(true);
             }
 
             // Found metamethod - check if it's a function
             if let Some(tm) = tm_val {
                 if tm.is_function() {
-                    // Call metamethod: luaT_callTM(L, tm, t, key, val)
                     use crate::lua_vm::execute;
-
-                    // Call luaT_callTM with 3 arguments, no return value
                     execute::metamethod::call_tm(lua_state, tm, t, *key, value)?;
-
                     return Ok(true);
                 }
 
                 // Metamethod is a table - repeat assignment over 'tm'
-                // t = tm; then try luaV_fastset again
                 t = tm;
-                // Continue loop to try setting t[key] = value
                 continue;
             }
         } else {
