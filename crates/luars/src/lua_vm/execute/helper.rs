@@ -22,42 +22,11 @@ pub fn buildhiddenargs(
     let call_info = lua_state.get_call_info(frame_idx);
     let old_base = call_info.base;
     let func_pos = if old_base > 0 { old_base - 1 } else { 0 };
-    let stack_top = lua_state.get_top();
 
-    let stack = lua_state.stack_mut();
-    let mut top = stack_top;
-
-    // Step 1: Copy function to top (after all arguments)
-    // setobjs2s(L, L->top.p++, ci->func.p);
-    let func_src = stack[func_pos];
-    stack[top] = func_src;
-    top += 1;
-
-    // Step 2: Copy fixed parameters to after copied function
-    // for (i = 1; i <= nfixparams; i++)
-    for i in 0..nfixparams {
-        let src = stack[func_pos + 1 + i];
-        stack[top] = src;
-        top += 1;
-        // Erase original parameter with nil (for GC)
-        unsafe {
-            psetnilvalue(&mut stack[func_pos + 1 + i] as *mut LuaValue);
-        }
-    }
-
-    // Step 3: Update ci->func.p and ci->top.p
-    // ci->func.p += totalargs + 1;
-    // ci->top.p += totalargs + 1;
+    // The new function position is right after all the original arguments.
+    // This way the extra (vararg) arguments are "hidden" between the old and new func positions.
     let new_func_pos = func_pos + totalargs + 1;
     let new_base = new_func_pos + 1;
-
-    let new_call_info_top = {
-        let call_info = lua_state.get_call_info_mut(frame_idx);
-        call_info.base = new_base;
-        call_info.top += totalargs + 1;
-        call_info.func_offset = new_base - func_pos; // Distance from new_base to original func
-        call_info.top
-    };
 
     // Ensure enough stack space for new base + registers
     let new_needed_size = new_base + chunk.max_stack_size;
@@ -65,8 +34,30 @@ pub fn buildhiddenargs(
         lua_state.grow_stack(new_needed_size - lua_state.stack_len())?;
     }
 
+    let stack = lua_state.stack_mut();
+
+    // Step 1: Copy function to new_func_pos
+    stack[new_func_pos] = stack[func_pos];
+
+    // Step 2: Copy fixed parameters to after new function position
+    for i in 0..nfixparams {
+        stack[new_base + i] = stack[func_pos + 1 + i];
+        // Erase original parameter with nil (for GC)
+        unsafe {
+            psetnilvalue(&mut stack[func_pos + 1 + i] as *mut LuaValue);
+        }
+    }
+
+    // Step 3: Update ci->func.p and ci->top.p
+    {
+        let call_info = lua_state.get_call_info_mut(frame_idx);
+        call_info.base = new_base;
+        call_info.top = new_base + chunk.max_stack_size;
+        call_info.func_offset = new_base - func_pos; // Distance from new_base to original func
+    }
+
     // Update lua_state.top to match call_info.top
-    // This ensures that subsequent set_top calls preserve our data
+    let new_call_info_top = new_base + chunk.max_stack_size;
     lua_state.set_top(new_call_info_top)?;
 
     Ok(new_base)

@@ -876,42 +876,21 @@ impl GC {
     fn converge_ephemerons(&mut self, l: &mut LuaState) {
         let mut changed;
         let mut dir = false;
-        let mut pass = 0;
 
         loop {
             let ephemeron_list = std::mem::take(&mut self.ephemeron);
             self.ephemeron.clear();
             changed = false;
-            pass += 1;
-
-            let num_tables = ephemeron_list.len();
-            let mut total_alive_keys = 0;
-            let mut total_dead_keys = 0;
 
             for table_ptr in ephemeron_list {
                 table_ptr.as_mut_ref().header.make_black();
 
-                // Count alive vs dead keys for debugging
-                let entries = table_ptr.as_ref().data.iter_all();
-                for (k, _v) in &entries {
-                    if let Some(key_ptr) = k.as_gc_ptr() {
-                        if self.is_white(key_ptr) {
-                            total_dead_keys += 1;
-                        } else {
-                            total_alive_keys += 1;
-                        }
-                    }
-                }
-
+                // Use traverse_ephemeron_atomic for convergence
                 let marked = self.traverse_ephemeron_atomic(l, table_ptr, dir);
                 if marked {
                     self.propagate_all(l);
                     changed = true;
                 }
-            }
-
-            if num_tables > 0 {
-                eprintln!("[converge_ephemerons] pass {pass}: {num_tables} tables, changed={changed}, ephemeron_after={}, alive_keys={total_alive_keys}, dead_keys={total_dead_keys}", self.ephemeron.len());
             }
 
             dir = !dir;
@@ -939,11 +918,6 @@ impl GC {
             entry_list.reverse();
         }
 
-        let mut alive_nonwhite_val = 0;
-        let mut alive_white_val = 0;
-        let mut dead_white_val = 0;
-        let mut dead_nonwhite_val = 0;
-
         for (k, v) in &entry_list {
             let key_ptr = k.as_gc_ptr();
             let val_ptr = v.as_gc_ptr();
@@ -955,21 +929,11 @@ impl GC {
                 has_white_keys = true;
                 if val_is_white {
                     has_white_white = true;
-                    dead_white_val += 1;
-                } else {
-                    dead_nonwhite_val += 1;
                 }
             } else if val_is_white {
                 self.really_mark_object(l, val_ptr.unwrap());
                 marked_any = true;
-                alive_white_val += 1;
-            } else {
-                alive_nonwhite_val += 1;
             }
-        }
-
-        if entry_list.len() > 5 && !marked_any && has_white_keys {
-            eprintln!("[traverse_ephemeron_atomic] STALL: {} entries, alive_nonwhite={alive_nonwhite_val}, alive_white={alive_white_val}, dead_white={dead_white_val}, dead_nonwhite={dead_nonwhite_val}", entry_list.len());
         }
 
         if has_white_white {
@@ -984,22 +948,16 @@ impl GC {
     /// Port of Lua 5.5's clearbykeys
     /// Clear entries with unmarked keys from ephemeron and fully weak tables
     fn clear_by_keys(&mut self, l: &mut LuaState) {
-        let mut total_cleared = 0;
         // Clear ephemeron tables
         let ephemeron_list = self.ephemeron.clone();
-        let eph_count = ephemeron_list.len();
         for table_ptr in ephemeron_list {
-            total_cleared += self.clear_table_by_keys(l, table_ptr);
+            self.clear_table_by_keys(l, table_ptr);
         }
 
         // Clear fully weak tables
         let allweak_list = self.allweak.clone();
-        let aw_count = allweak_list.len();
         for table_ptr in allweak_list {
-            total_cleared += self.clear_table_by_keys(l, table_ptr);
-        }
-        if total_cleared > 0 {
-            eprintln!("[clear_by_keys] cleared {total_cleared} entries from {eph_count} ephemeron + {aw_count} allweak tables");
+            self.clear_table_by_keys(l, table_ptr);
         }
     }
 
@@ -1014,10 +972,6 @@ impl GC {
         for key in entries {
             if let Some(key_ptr) = key.as_gc_ptr() {
                 if self.is_cleared(l, key_ptr) {
-                    if let Some(h) = key_ptr.header() {
-                        eprintln!("[clear_table_by_keys] clearing key {:?} marked=0x{:02x} age={} white={} black={} gray={}", 
-                            key_ptr.kind(), h.marked, h.age(), h.is_white(), h.is_black(), h.is_gray());
-                    }
                     keys_to_remove.push(key);
                 }
             }
@@ -2012,33 +1966,12 @@ impl GC {
             //   for (o = th->stack.p; o < th->top.p; o++)
             //     markvalue(g, s2v(o));
             //
+            // Note: stack_top can be temporarily lowered by instructions like
+            // NEWTABLE. Objects in [stack_top, frame_top) are NOT marked, which
+            // is correct — they are dead registers that will be overwritten
+            // before being read.
             let top = state.get_top();
             let stack = state.stack();
-            let num_tables_on_stack = stack[..top].iter().filter(|v| v.is_table()).count();
-            if self.ephemeron.len() + self.allweak.len() > 5 || (self.gc_state == GcState::Atomic && self.allgc.len() > 500) {
-                // Check if any ephemeron key is on the stack
-                let eph_key_on_stack = if !self.ephemeron.is_empty() {
-                    let mut found = 0;
-                    for eph_table in &self.ephemeron {
-                        let entries = eph_table.as_ref().data.iter_keys();
-                        for key in &entries {
-                            if let Some(key_ptr) = key.as_gc_ptr() {
-                                for i in 0..top {
-                                    if let Some(stack_ptr) = stack[i].as_gc_ptr() {
-                                        if stack_ptr == key_ptr {
-                                            found += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    found
-                } else {
-                    0
-                };
-                eprintln!("[traverse_thread] top={}, stack_len={}, call_depth={}, tables_on_stack={num_tables_on_stack}, eph_keys_on_stack={eph_key_on_stack}, gc_state={:?}", top, stack.len(), state.call_depth(), self.gc_state);
-            }
             for i in 0..top {
                 self.mark_value(l, &stack[i]);
                 count += 1;
@@ -2058,18 +1991,19 @@ impl GC {
             // Lua 5.5 lgc.c traversethread atomic phase:
             // for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
             //     setnilvalue(s2v(o));  /* clear dead stack slice */
-            // This is CRITICAL for GC safety: clears stale/dead values above
-            // the current stack top so that future set_top growth won't expose
-            // dangling references to the GC marker.
-            let state = &mut gc_thread.data;
-            let stack_top = state.get_top();
-            let stack_len = state.stack_len();
-            let stack = state.stack_mut();
-            for i in stack_top..stack_len {
-                stack[i] = LuaValue::nil();
+            // This clears stale/dead values above the current stack top so that
+            // future set_top growth won't expose dangling references.
+            {
+                let state = &mut gc_thread.data;
+                let stack_top = state.get_top();
+                let stack_len = state.stack_len();
+                let stack = state.stack_mut();
+                for i in stack_top..stack_len {
+                    stack[i] = LuaValue::nil();
+                }
             }
 
-            if !self.is_in_twups(thread_ptr) && !state.open_upvalues().is_empty() {
+            if !self.is_in_twups(thread_ptr) && !gc_thread.data.open_upvalues().is_empty() {
                 self.twups.push(thread_ptr);
             }
         } else {
@@ -2154,9 +2088,6 @@ impl GC {
     /// Port of Lua 5.5's atomic function from lgc.c
     fn atomic(&mut self, l: &mut LuaState) {
         self.gc_state = GcState::Atomic;
-        eprintln!("[atomic] starting, gc_kind={:?}, allgc={}, survival={}, old1={}, old={}, grayagain={}, ephemeron={}, weak={}, allweak={}",
-            self.gc_kind, self.allgc.len(), self.survival.len(), self.old1.len(), self.old.len(),
-            self.grayagain.len(), self.ephemeron.len(), self.weak.len(), self.allweak.len());
 
         // Mark main thread (running thread)
         let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
@@ -2182,7 +2113,6 @@ impl GC {
         self.propagate_all(l);
 
         self.converge_ephemerons(l);
-        eprintln!("[atomic] FIRST converge done, ephemeron={}, allweak={}", self.ephemeron.len(), self.allweak.len());
 
         /* at this point, all strongly accessible objects are marked. */
         /* Clear values from weak tables, before checking finalizers */
@@ -2200,9 +2130,7 @@ impl GC {
         /* remark, to propagate 'resurrection' */
         self.propagate_all(l);
 
-        eprintln!("[atomic] before SECOND converge, ephemeron={}, allweak={}, gray={}", self.ephemeron.len(), self.allweak.len(), self.gray.len());
         self.converge_ephemerons(l);
-        eprintln!("[atomic] SECOND converge done, ephemeron={}, allweak={}", self.ephemeron.len(), self.allweak.len());
 
         // Save allweak list BEFORE clear_by_keys (which will empty it)
         let allweak_before_clear_keys = self.allweak.clone();
@@ -2907,8 +2835,6 @@ impl GC {
 
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
-        eprintln!("[young_collection] starting minor collection #{}, allgc={}, survival={}, old1={}, old={}", 
-            self.stats.minor_collections, self.allgc.len(), self.survival.len(), self.old1.len(), self.old.len());
 
         //  Set gc_stopem to prevent recursive GC during collection
         // This matches Lua 5.5's behavior where GC steps check gc_stopem

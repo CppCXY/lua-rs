@@ -151,28 +151,16 @@ pub fn exec_varargprep(
     chunk: &Chunk,
     base: &mut usize,
 ) -> LuaResult<()> {
-    // Calculate total arguments and extra arguments
+    // Use the nextraargs already computed correctly by push_frame,
+    // which knows the actual argument count from the CALL instruction.
+    // We must NOT recalculate from stack_top because push_frame inflates
+    // stack_top to frame_top (base + maxstacksize) for GC safety,
+    // which would give a wrong totalargs.
     let call_info = lua_state.get_call_info(frame_idx);
+    let nextra = call_info.nextraargs as usize;
     let func_pos = call_info.base - 1;
-    let stack_top = lua_state.get_top();
-
-    // Total arguments = stack_top - func_pos - 1 (exclude function itself)
-    let totalargs = if stack_top > func_pos {
-        stack_top - func_pos - 1
-    } else {
-        0
-    };
-
     let nfixparams = chunk.param_count;
-    let nextra = if totalargs > nfixparams {
-        totalargs - nfixparams
-    } else {
-        0
-    };
-
-    // Store nextra in CallInfo for later use by VARARG/GETVARG
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    call_info.nextraargs = nextra as i32;
+    let totalargs = nfixparams + nextra;
 
     // Handle Lua 5.5 named varargs (requires table)
     if chunk.needs_vararg_table {
