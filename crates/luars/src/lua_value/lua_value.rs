@@ -709,6 +709,15 @@ impl LuaValue {
         }
     }
 
+    /// Unsafe version that skips the type tag check.
+    /// Caller MUST ensure `self.is_lua_function()` is true.
+    #[inline(always)]
+    pub unsafe fn as_lua_function_unchecked(&self) -> &LuaFunction {
+        debug_assert!(self.ttisluafunction());
+        let func = unsafe { &*(self.value.ptr as *const GcFunction) };
+        &func.data
+    }
+
     #[inline(always)]
     pub fn as_lua_function_mut(&self) -> Option<&mut LuaFunction> {
         if self.ttisluafunction() {

@@ -281,18 +281,97 @@ impl LuaState {
         Ok(())
     }
 
+    /// Push a Lua function call frame (specialized fast path).
+    /// Caller MUST already know `func` is a Lua function and provide the chunk metadata.
+    /// Skips the function-type dispatch entirely.
+    #[inline(always)]
+    pub(crate) fn push_lua_frame(
+        &mut self,
+        func: &LuaValue,
+        base: usize,
+        nparams: usize,
+        nresults: i32,
+        param_count: usize,
+        max_stack_size: usize,
+    ) -> LuaResult<()> {
+        // Check stack depth
+        if self.call_depth >= self.safe_option.max_call_depth {
+            return Err(self.error(format!(
+                "stack overflow (Lua stack depth: {})",
+                self.call_depth
+            )));
+        }
+
+        let nextraargs = if nparams > param_count {
+            (nparams - param_count) as i32
+        } else {
+            0
+        };
+
+        // Fill missing parameters with nil
+        if nparams < param_count {
+            let start = base + nparams;
+            let end = base + param_count;
+            if self.stack.len() < end {
+                self.stack.resize(end, LuaValue::nil());
+            } else {
+                self.stack[start..end].fill(LuaValue::nil());
+            }
+            if self.stack_top < end {
+                self.stack_top = end;
+            }
+        }
+
+        let frame_top = base + max_stack_size;
+        let needed_physical = frame_top + 5;
+        if needed_physical > self.stack.len() {
+            self.resize(needed_physical)?;
+        }
+
+        // Reuse existing CallInfo slot or allocate
+        if self.call_depth < self.call_stack.len() {
+            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            *ci = CallInfo {
+                func: *func,
+                base,
+                func_offset: 1,
+                top: frame_top,
+                pc: 0,
+                nresults,
+                call_status: CIST_LUA,
+                nextraargs,
+            };
+        } else {
+            self.call_stack.push(CallInfo {
+                func: *func,
+                base,
+                func_offset: 1,
+                top: frame_top,
+                pc: 0,
+                nresults,
+                call_status: CIST_LUA,
+                nextraargs,
+            });
+        }
+
+        self.call_depth += 1;
+
+        // Set stack_top to frame_top for GC safety
+        if frame_top > self.stack_top {
+            self.stack_top = frame_top;
+        }
+
+        Ok(())
+    }
+
     /// Pop call frame (equivalent to Lua's luaD_poscall)
-    #[inline]
+    #[inline(always)]
     pub(crate) fn pop_frame(&mut self) {
         if self.call_depth > 0 {
             self.call_depth -= 1;
-            let is_c = self
-                .call_stack
-                .get(self.call_depth)
-                .map(|f| f.is_c())
-                .unwrap_or(false);
-
-            if is_c && self.c_call_depth > 0 {
+            // Use call_status bit check instead of Option chain
+            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth) };
+            if ci.call_status & CIST_C != 0 && self.c_call_depth > 0 {
                 self.c_call_depth -= 1;
             }
         }
@@ -690,7 +769,7 @@ impl LuaState {
     /// Get frame base by index
     #[inline(always)]
     pub fn get_frame_base(&self, frame_idx: usize) -> usize {
-        self.call_stack.get(frame_idx).map(|f| f.base).unwrap_or(0)
+        unsafe { self.call_stack.get_unchecked(frame_idx).base }
     }
 
     /// Get frame PC by index
@@ -735,9 +814,7 @@ impl LuaState {
     /// Set frame PC by index
     #[inline(always)]
     pub fn set_frame_pc(&mut self, frame_idx: usize, pc: u32) {
-        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-            frame.pc = pc;
-        }
+        unsafe { self.call_stack.get_unchecked_mut(frame_idx).pc = pc };
     }
 
     /// Set frame top by index (for tail calls)
@@ -793,24 +870,25 @@ impl LuaState {
 
     // ===== Call Frame Management =====
 
-    /// Get current CallInfo by index
+    /// Get current CallInfo by index (unchecked — caller must ensure idx < call_depth)
     #[inline(always)]
     pub fn get_call_info(&self, idx: usize) -> &CallInfo {
-        &self.call_stack[idx]
+        debug_assert!(idx < self.call_stack.len());
+        unsafe { self.call_stack.get_unchecked(idx) }
     }
 
-    /// Get mutable CallInfo by index
+    /// Get mutable CallInfo by index (unchecked — caller must ensure idx < call_depth)
     #[inline(always)]
     pub fn get_call_info_mut(&mut self, idx: usize) -> &mut CallInfo {
-        &mut self.call_stack[idx]
+        debug_assert!(idx < self.call_stack.len());
+        unsafe { self.call_stack.get_unchecked_mut(idx) }
     }
 
-    /// Pop the current call frame
-    #[inline]
+    /// Pop the current call frame (Lua callers only — does NOT adjust c_call_depth)
+    #[inline(always)]
     pub fn pop_call_frame(&mut self) {
-        if self.call_depth > 0 {
-            self.call_depth -= 1;
-        }
+        debug_assert!(self.call_depth > 0);
+        self.call_depth -= 1;
     }
 
     /// Get return values from stack

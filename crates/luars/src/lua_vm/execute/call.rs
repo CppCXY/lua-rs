@@ -41,7 +41,8 @@ pub fn handle_call(
             0
         }
     } else {
-        lua_state.set_top(func_idx + b)?;
+        // Fixed arg count — stack was already grown, just move the top pointer
+        lua_state.set_top_raw(func_idx + b);
         b - 1
     };
 
@@ -51,26 +52,25 @@ pub fn handle_call(
         (c - 1) as i32
     };
 
-    // Get function to call
-    let func = lua_state
-        .stack_get(func_idx)
-        .ok_or_else(|| lua_state.error("CALL: function not found".to_string()))?;
+    // Get function to call (hot path — no bounds check, already validated by grow_stack)
+    let func = lua_state.stack_mut()[func_idx];
 
-    // Check if it's a GC function (Lua or C)
+    // Check if it's a Lua function (most common hot path)
     if func.is_lua_function() {
-        // Lua function call: push new frame
+        // Extract chunk metadata once, pass to push_lua_frame to avoid redundant as_lua_function()
+        let lua_func = unsafe { func.as_lua_function_unchecked() };
+        let chunk = lua_func.chunk();
+        let param_count = chunk.param_count;
+        let max_stack_size = chunk.max_stack_size as usize;
+
         let new_base = func_idx + 1;
-        lua_state.push_frame(&func, new_base, nargs, nresults)?;
+        lua_state.push_lua_frame(&func, new_base, nargs, nresults, param_count, max_stack_size)?;
 
         // Update call_status with __call count if status is non-zero
         if status != 0 {
             let frame_idx = lua_state.call_depth() - 1;
-            let current_status = lua_state
-                .get_frame(frame_idx)
-                .map(|f| f.call_status)
-                .unwrap_or(0);
-            let new_status = current_status | status;
-            lua_state.set_frame_call_status(frame_idx, new_status);
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.call_status |= status;
         }
 
         Ok(FrameAction::Call)

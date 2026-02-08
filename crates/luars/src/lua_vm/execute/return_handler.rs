@@ -69,10 +69,6 @@ pub fn handle_return(
         call_info.nresults as usize
     };
 
-    // Save callee frame's extent (ci->top) before popping, so we can
-    // clear stale references in the vacated region after the return.
-    let callee_top = call_info.top;
-
     // Copy results from R[A]..R[A+nres-1] to func_pos..func_pos+nres-1
     let stack = lua_state.stack_mut();
     for i in 0..nres {
@@ -90,22 +86,11 @@ pub fn handle_return(
 
     let new_top = func_pos + nres;
 
-    // Clear stale references in the vacated callee stack region.
-    // After a function call, slots [new_top..callee_top) may still hold
-    // references to objects (function, arguments, temporaries). These
-    // "ghost" references can keep objects alive across GC cycles,
-    // preventing __gc finalizers from firing.
-    let clear_end = callee_top.min(lua_state.stack_len());
-    let stack = lua_state.stack_mut();
-    for i in new_top..clear_end {
-        stack[i] = LuaValue::nil();
-    }
-
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Update logical stack top
-    lua_state.set_top(new_top)?;
+    // Update logical stack top (no resize check needed — returning to caller's frame)
+    lua_state.set_top_raw(new_top);
 
     Ok(())
 }
@@ -124,24 +109,18 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
         call_info.nresults as usize
     };
 
-    // Save callee frame extent before popping
-    let callee_top = call_info.top;
-
     let new_top = func_pos + wanted_results;
-    let stack_len = lua_state.stack_len();
-    let clear_end = callee_top.min(stack_len);
 
-    // Fill with nil if caller expects results + clear stale references
-    let stack = lua_state.stack_mut();
-    for i in 0..wanted_results {
-        stack[func_pos + i] = LuaValue::nil();
-    }
-    for i in new_top..clear_end {
-        stack[i] = LuaValue::nil();
+    // Fill with nil if caller expects results
+    if wanted_results > 0 {
+        let stack = lua_state.stack_mut();
+        for i in 0..wanted_results {
+            stack[func_pos + i] = LuaValue::nil();
+        }
     }
 
     lua_state.pop_call_frame();
-    lua_state.set_top(new_top)?;
+    lua_state.set_top_raw(new_top);
     Ok(())
 }
 
@@ -158,41 +137,28 @@ pub fn handle_return1(
     // Get call info first
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = call_info.base - call_info.func_offset;
-    let wanted_results = if call_info.nresults < 0 {
-        1 // LUA_MULTRET for return1 means 1
-    } else {
-        call_info.nresults as usize
-    };
+    let nresults = call_info.nresults;
 
-    // Save callee frame extent before popping
-    let callee_top = call_info.top;
-
-    let stack_len = lua_state.stack_len();
     let stack = lua_state.stack_mut();
+    let return_val = stack[base + a];
 
-    let new_top = if wanted_results == 0 {
+    let new_top = if nresults == 0 {
         func_pos
-    } else {
-        // Place the single return value
-        let return_val = stack[base + a];
+    } else if nresults == 1 || nresults == -1 {
+        // Most common: caller wants exactly 1 result (or MULTRET with 1 value)
         stack[func_pos] = return_val;
-
-        if wanted_results > 1 {
-            // Fill remaining with nil
-            for i in 1..wanted_results {
-                stack[func_pos + i] = LuaValue::nil();
-            }
+        func_pos + 1
+    } else {
+        // Caller wants N > 1 results — place first + fill rest with nil
+        stack[func_pos] = return_val;
+        let wanted = nresults as usize;
+        for i in 1..wanted {
+            stack[func_pos + i] = LuaValue::nil();
         }
-        func_pos + wanted_results
+        func_pos + wanted
     };
-
-    // Clear stale references in the vacated callee stack region
-    let clear_end = callee_top.min(stack_len);
-    for i in new_top..clear_end {
-        stack[i] = LuaValue::nil();
-    }
 
     lua_state.pop_call_frame();
-    lua_state.set_top(new_top)?;
+    lua_state.set_top_raw(new_top);
     Ok(())
 }

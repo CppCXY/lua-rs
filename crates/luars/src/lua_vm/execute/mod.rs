@@ -87,27 +87,21 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         let frame_idx = current_depth - 1;
         // ===== LOAD FRAME CONTEXT =====
-        let Some(ci) = lua_state.get_frame(frame_idx) else {
-            return Err(lua_state.error(format!("No function found for frame {}", frame_idx)));
-        };
+        // Safety: frame_idx < call_depth (guaranteed by check above)
+        let ci = lua_state.get_call_info(frame_idx);
         let func_value = ci.func;
         let mut pc = ci.pc as usize;
         let mut base = ci.base;
 
-        let Some(lua_func) = func_value.as_lua_function() else {
-            return Err(lua_state.error(format!(
-                "Current frame is not a Lua function: got {} value at frame {}",
-                ci.func.type_name(),
-                frame_idx
-            )));
-        };
+        // Safety: only Lua frames enter the dispatch loop; C frames are
+        // handled inline and never reach 'startfunc.
+        let lua_func = unsafe { func_value.as_lua_function_unchecked() };
 
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues();
-        // Pre-grow stack: base + max_stack_size + EXTRA_STACK (5 slots for metamethod args)
-        // Matches Lua 5.5: luaD_checkstack(L, fsize) ensures EXTRA_STACK above ci->top
-        let needed_size = base + chunk.max_stack_size + 5;
-        lua_state.grow_stack(needed_size)?;
+        // Stack already grown by push_lua_frame — no need for grow_stack here.
+        // Only the very first entry (top-level chunk) needs this check.
+        debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + 5);
 
         // Cache pointers
         let constants = &chunk.constants;
