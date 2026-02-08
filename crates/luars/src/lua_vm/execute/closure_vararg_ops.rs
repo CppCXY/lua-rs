@@ -22,7 +22,7 @@ use super::{
 };
 
 /// CLOSURE: R[A] := closure(KPROTO[Bx])
-#[inline(always)]
+#[inline]
 pub fn exec_closure(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -40,7 +40,6 @@ pub fn exec_closure(
 }
 
 /// VARARG: R[A], ..., R[A+C-2] = varargs
-#[inline(always)]
 pub fn exec_vararg(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -144,7 +143,6 @@ pub fn exec_vararg(
 }
 
 /// VARARGPREP: Adjust varargs (prepare vararg function)
-#[inline(always)]
 pub fn exec_varargprep(
     lua_state: &mut LuaState,
     frame_idx: usize,
@@ -232,7 +230,7 @@ pub fn exec_varargprep(
 }
 
 /// SETLIST: R[A][vC+i] := R[A+i], 1 <= i <= vB
-#[inline(always)]
+#[inline]
 pub fn exec_setlist(
     lua_state: &mut LuaState,
     instr: Instruction,

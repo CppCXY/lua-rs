@@ -21,7 +21,7 @@ use super::{
 };
 
 /// EQ: if ((R[A] == R[B]) ~= k) then pc++
-#[inline(always)]
+#[inline]
 pub fn exec_eq(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -55,7 +55,7 @@ pub fn exec_eq(
 }
 
 /// LT: if ((R[A] < R[B]) ~= k) then pc++
-#[inline(always)]
+#[inline]
 pub fn exec_lt(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -181,7 +181,7 @@ pub fn exec_eqi(
 }
 
 /// LTI: if ((R[A] < sB) ~= k) then pc++
-#[inline(always)]
+#[inline]
 pub fn exec_lti(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -230,7 +230,7 @@ pub fn exec_lti(
 }
 
 /// LEI: if ((R[A] <= sB) ~= k) then pc++
-#[inline(always)]
+#[inline]
 pub fn exec_lei(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -277,7 +277,7 @@ pub fn exec_lei(
 }
 
 /// GTI: if ((R[A] > sB) ~= k) then pc++
-#[inline(always)]
+#[inline]
 pub fn exec_gti(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -325,7 +325,7 @@ pub fn exec_gti(
 }
 
 /// GEI: if ((R[A] >= sB) ~= k) then pc++
-#[inline(always)]
+#[inline]
 pub fn exec_gei(
     lua_state: &mut LuaState,
     instr: Instruction,

@@ -284,7 +284,7 @@ impl LuaState {
     /// Push a Lua function call frame (specialized fast path).
     /// Caller MUST already know `func` is a Lua function and provide the chunk metadata.
     /// Skips the function-type dispatch entirely.
-    #[inline(always)]
+    #[inline]
     pub(crate) fn push_lua_frame(
         &mut self,
         func: &LuaValue,
@@ -499,7 +499,8 @@ impl LuaState {
     }
 
     /// Set error message (without traceback - will be added later by top-level handler)
-    #[inline(always)]
+    #[cold]
+    #[inline(never)]
     pub fn error(&mut self, msg: String) -> LuaError {
         // Try to get current source location for the error
         let mut location = String::new();
@@ -826,7 +827,7 @@ impl LuaState {
     }
 
     /// Set frame function by index (for tail calls)
-    #[inline(always)]
+    #[inline]
     pub fn set_frame_func(&mut self, frame_idx: usize, func: LuaValue) {
         // Validate that func is callable before setting it
         let is_callable =
@@ -1687,7 +1688,7 @@ impl LuaState {
         vm.gc.barrier_back(gc_ptr);
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn check_gc(&mut self) -> LuaResult<bool> {
         let vm = unsafe { &mut *self.vm };
         if vm.gc.gc_debt > 0 {

@@ -25,7 +25,7 @@ use crate::{
 /// Returns N values from R[A] to R[A+B-2]
 ///
 /// Based on lvm.c:1763-1783
-#[inline(always)]
+#[inline]
 pub fn handle_return(
     lua_state: &mut LuaState,
     base: usize,
