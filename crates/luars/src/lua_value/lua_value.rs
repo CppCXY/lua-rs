@@ -948,11 +948,14 @@ impl PartialEq for LuaValue {
 
         // Fast path: same type tag and same value bits
         if tt == other_tt {
-            // For all types except float-to-int comparison:
+            // For all types except float:
             // - nil/boolean: value.i is 0/1, direct compare works
             // - integer: direct i64 compare
             // - string/table/function/etc: pointer compare (interned strings have same pointer)
-            // - float: bit-exact compare (NaN != NaN is correct for Lua)
+            // Float must use f64 compare so that NaN != NaN (IEEE 754)
+            if tt == LUA_VNUMFLT {
+                return unsafe { self.value.n == other.value.n };
+            }
             if unsafe { self.value.i == other.value.i } {
                 return true;
             }

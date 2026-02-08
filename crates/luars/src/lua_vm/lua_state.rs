@@ -363,22 +363,28 @@ impl LuaState {
         self.stack.resize(new_size, LuaValue::nil());
         if self.stack.capacity() > capacity {
             // If the vector had to reallocate, we need to update all open upvalue pointers
-            for upval_ptr in &self.open_upvalues_list {
-                if let LuaUpvalue::Open {
-                    stack_index,
-                    stack_ptr,
-                } = &mut upval_ptr.as_mut_ref().data
-                {
-                    // Update cached pointer to new stack location
-                    if *stack_index < self.stack.len() {
-                        stack_ptr.ptr =
-                            (&self.stack[*stack_index]) as *const LuaValue as *mut LuaValue;
-                    }
-                }
-            }
+            self.fix_open_upvalue_pointers();
         }
 
         Ok(())
+    }
+
+    /// Fix all open upvalue cached pointers after a Vec reallocation.
+    /// Must be called whenever the stack Vec's internal buffer moves
+    /// (e.g., after Vec::push triggers a reallocation).
+    pub fn fix_open_upvalue_pointers(&mut self) {
+        for upval_ptr in &self.open_upvalues_list {
+            if let LuaUpvalue::Open {
+                stack_index,
+                stack_ptr,
+            } = &mut upval_ptr.as_mut_ref().data
+            {
+                if *stack_index < self.stack.len() {
+                    stack_ptr.ptr =
+                        (&self.stack[*stack_index]) as *const LuaValue as *mut LuaValue;
+                }
+            }
+        }
     }
 
     /// Get register relative to current frame base
@@ -1048,9 +1054,17 @@ impl LuaState {
         let func_idx = self.stack.len();
 
         // Push function and args to stack
+        // Track capacity to detect Vec reallocation.
+        let old_capacity = self.stack.capacity();
         self.stack.push(func);
         for arg in args {
             self.stack.push(arg);
+        }
+        // If Vec reallocated, fix all open upvalue cached pointers.
+        // This is critical: open upvalues cache raw pointers into the Vec buffer.
+        // Vec::push can reallocate the buffer, leaving those pointers dangling.
+        if self.stack.capacity() != old_capacity {
+            self.fix_open_upvalue_pointers();
         }
         let arg_count = self.stack.len() - func_idx - 1;
 
@@ -1479,8 +1493,13 @@ impl LuaState {
             let func = self.stack[0];
 
             // Push arguments
+            let old_capacity = self.stack.capacity();
             for arg in args {
                 self.stack.push(arg);
+            }
+            // Fix open upvalue pointers if Vec was reallocated
+            if self.stack.capacity() != old_capacity {
+                self.fix_open_upvalue_pointers();
             }
 
             // Create initial frame, expecting all return values

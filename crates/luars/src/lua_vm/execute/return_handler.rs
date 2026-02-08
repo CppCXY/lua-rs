@@ -69,6 +69,10 @@ pub fn handle_return(
         call_info.nresults as usize
     };
 
+    // Save callee frame's extent (ci->top) before popping, so we can
+    // clear stale references in the vacated region after the return.
+    let callee_top = call_info.top;
+
     // Copy results from R[A]..R[A+nres-1] to func_pos..func_pos+nres-1
     let stack = lua_state.stack_mut();
     for i in 0..nres {
@@ -76,24 +80,31 @@ pub fn handle_return(
         stack[func_pos + i] = src_val;
     }
 
-    // Adjust top to point after the last result
-    lua_state.set_top(func_pos + nres)?;
-
     // Fill with nil if caller wants more results than we have
     if wanted_results > nres {
         for i in nres..wanted_results {
-            lua_state.stack_set(func_pos + i, LuaValue::nil())?;
+            stack[func_pos + i] = LuaValue::nil();
         }
-        lua_state.set_top(func_pos + wanted_results)?;
         nres = wanted_results;
+    }
+
+    let new_top = func_pos + nres;
+
+    // Clear stale references in the vacated callee stack region.
+    // After a function call, slots [new_top..callee_top) may still hold
+    // references to objects (function, arguments, temporaries). These
+    // "ghost" references can keep objects alive across GC cycles,
+    // preventing __gc finalizers from firing.
+    let clear_end = callee_top.min(lua_state.stack_len());
+    let stack = lua_state.stack_mut();
+    for i in new_top..clear_end {
+        stack[i] = LuaValue::nil();
     }
 
     // Pop current call frame
     lua_state.pop_call_frame();
 
-    // Update logical stack top (L->top.p)
-    // Do NOT modify caller frame's top limit (ci->top), only L->top.p
-    let new_top = func_pos + nres;
+    // Update logical stack top
     lua_state.set_top(new_top)?;
 
     Ok(())
@@ -113,21 +124,24 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
         call_info.nresults as usize
     };
 
-    // OPTIMIZATION: Most common case - caller doesn't want results
-    if wanted_results == 0 {
-        lua_state.pop_call_frame();
-        lua_state.set_top(func_pos)?;
-        return Ok(());
-    }
+    // Save callee frame extent before popping
+    let callee_top = call_info.top;
 
-    // Slow path: Fill with nil if caller expects results
+    let new_top = func_pos + wanted_results;
+    let stack_len = lua_state.stack_len();
+    let clear_end = callee_top.min(stack_len);
+
+    // Fill with nil if caller expects results + clear stale references
     let stack = lua_state.stack_mut();
     for i in 0..wanted_results {
         stack[func_pos + i] = LuaValue::nil();
     }
+    for i in new_top..clear_end {
+        stack[i] = LuaValue::nil();
+    }
 
     lua_state.pop_call_frame();
-    lua_state.set_top(func_pos + wanted_results)?;
+    lua_state.set_top(new_top)?;
     Ok(())
 }
 
@@ -150,37 +164,35 @@ pub fn handle_return1(
         call_info.nresults as usize
     };
 
-    // OPTIMIZATION: Direct stack access for common case
+    // Save callee frame extent before popping
+    let callee_top = call_info.top;
+
+    let stack_len = lua_state.stack_len();
     let stack = lua_state.stack_mut();
 
-    if wanted_results == 1 {
-        // Most common: caller wants exactly 1 result
+    let new_top = if wanted_results == 0 {
+        func_pos
+    } else {
+        // Place the single return value
         let return_val = stack[base + a];
         stack[func_pos] = return_val;
 
-        // Pop frame and set top inline
-        lua_state.pop_call_frame();
-        lua_state.set_top(func_pos + 1)?;
-        return Ok(());
-    }
+        if wanted_results > 1 {
+            // Fill remaining with nil
+            for i in 1..wanted_results {
+                stack[func_pos + i] = LuaValue::nil();
+            }
+        }
+        func_pos + wanted_results
+    };
 
-    if wanted_results == 0 {
-        // Caller doesn't want any results
-        lua_state.pop_call_frame();
-        lua_state.set_top(func_pos)?;
-        return Ok(());
-    }
-
-    // Slow path: caller wants multiple results from single return
-    let return_val = stack[base + a];
-    stack[func_pos] = return_val;
-
-    // Fill remaining with nil
-    for i in 1..wanted_results {
-        stack[func_pos + i] = LuaValue::nil();
+    // Clear stale references in the vacated callee stack region
+    let clear_end = callee_top.min(stack_len);
+    for i in new_top..clear_end {
+        stack[i] = LuaValue::nil();
     }
 
     lua_state.pop_call_frame();
-    lua_state.set_top(func_pos + wanted_results)?;
+    lua_state.set_top(new_top)?;
     Ok(())
 }

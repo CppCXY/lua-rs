@@ -438,17 +438,12 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
 
 /// setmetatable(table, metatable) - Set metatable
 fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
-    #[cfg(debug_assertions)]
-    eprintln!("[lua_setmetatable] CALLED");
     let table = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'setmetatable' (value expected)".to_string()))?;
     let metatable = l
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'setmetatable' (value expected)".to_string()))?;
-
-    #[cfg(debug_assertions)]
-    eprintln!("[lua_setmetatable] table kind={:?} mt kind={:?}", table.kind(), metatable.kind());
 
     if let Some(table_ref) = table.as_table_mut() {
         match metatable.kind() {
@@ -467,18 +462,8 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Lua 5.5: luaC_checkfinalizer - register object if __gc is present
-    #[cfg(debug_assertions)]
-    {
-        let table_raw = table.as_table_ptr().map(|t| t.as_ref() as *const _ as usize).unwrap_or(0);
-        eprintln!("[lua_setmetatable] about to check_finalizer, table ptr=0x{table_raw:x}");
-    }
     l.vm_mut().gc.check_finalizer(&table);
     // Return the original table
-    #[cfg(debug_assertions)]
-    {
-        let table_raw = table.as_table_ptr().map(|t| t.as_ref() as *const _ as usize).unwrap_or(0);
-        eprintln!("[lua_setmetatable] about to push_value table ptr=0x{table_raw:x}");
-    }
     l.push_value(table)?;
     Ok(1)
 }

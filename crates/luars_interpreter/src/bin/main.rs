@@ -275,12 +275,34 @@ fn run_repl(vm: &mut LuaVM) {
 }
 
 fn main() {
+    // Spawn a thread with a larger stack to handle deep pcall/lua_execute recursion.
+    // Each pcall calls lua_execute recursively, and lua_execute has a large stack frame.
+    // With max_call_depth=256, we need ~16MB to avoid native stack overflow.
+    let stack_size = 16 * 1024 * 1024; // 16 MB
+    let builder = std::thread::Builder::new()
+        .name("lua-main".into())
+        .stack_size(stack_size);
+
+    let handler = builder
+        .spawn(lua_main)
+        .expect("Failed to spawn lua-main thread");
+
+    match handler.join() {
+        Ok(code) => std::process::exit(code),
+        Err(_) => {
+            eprintln!("lua: internal error (thread panicked)");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn lua_main() -> i32 {
     let opts = match parse_args() {
         Ok(opts) => opts,
         Err(e) => {
             eprintln!("lua: {}", e);
             print_usage();
-            std::process::exit(1);
+            return 1;
         }
     };
 
@@ -288,7 +310,7 @@ fn main() {
     if opts.show_version {
         print_version();
         if opts.execute_strings.is_empty() && opts.script_file.is_none() && !opts.read_stdin {
-            return;
+            return 0;
         }
     }
 
@@ -311,7 +333,7 @@ fn main() {
     for module in &opts.require_modules {
         if let Err(e) = require_module(&mut vm, module) {
             eprintln!("lua: {}", e);
-            std::process::exit(1);
+            return 1;
         }
     }
 
@@ -323,12 +345,12 @@ fn main() {
                     let error_msg = vm.get_error_message(e);
                     let traceback = vm.generate_traceback(&error_msg);
                     eprintln!("lua: Runtime Error: {}", traceback);
-                    std::process::exit(1);
+                    return 1;
                 }
             }
             Err(e) => {
                 eprintln!("lua: {}", e);
-                std::process::exit(1);
+                return 1;
             }
         }
     }
@@ -337,14 +359,14 @@ fn main() {
     if let Some(filename) = &opts.script_file {
         if let Err(e) = execute_file(&mut vm, filename) {
             eprintln!("lua: {}", e);
-            std::process::exit(1);
+            return 1;
         }
         // for ai debug
         eprintln!("");
     } else if opts.read_stdin {
         if let Err(e) = execute_stdin(&mut vm) {
             eprintln!("lua: {}", e);
-            std::process::exit(1);
+            return 1;
         }
         // for ai debug
         eprintln!("");
@@ -356,4 +378,6 @@ fn main() {
     {
         run_repl(&mut vm);
     }
+
+    0
 }

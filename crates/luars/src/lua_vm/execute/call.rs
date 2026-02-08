@@ -231,6 +231,9 @@ pub fn call_c_function(
         call_base
     };
 
+    // Save the callee frame's top extent for stale reference clearing
+    let callee_extent = stack_top;
+
     // Pop the frame BEFORE moving results
     lua_state.pop_frame();
 
@@ -249,21 +252,23 @@ pub fn call_c_function(
 
     let new_top = func_idx + final_nresults;
 
-    // Port of Lua 5.5's post-call top adjustment (luaV_adjusttop / OP_CALL):
-    //   if (nresults == LUA_MULTRET && L->ci->top.p < L->top.p)
-    //     L->ci->top.p = L->top.p;
-    //   L->top.p = L->ci->top.p;
-    //
-    // MUST restore the caller's frame top before check_gc() so that
-    // traverse_thread() during an atomic GC phase sees ALL caller locals.
-    // Without this, stack_top = func_idx + nresults can be far below the
-    // caller's frame extent, hiding live local variables from the GC and
-    // causing premature finalization of __gc objects.
+    // Clear stale references left by the C function call.
+    // Slots [new_top..callee_extent) may still hold references to the
+    // C function, its arguments, and any temporaries. These "ghost"
+    // references can keep GC objects alive and prevent __gc finalizers.
+    {
+        let clear_end = callee_extent.min(lua_state.stack_len());
+        let stack = lua_state.stack_mut();
+        for i in new_top..clear_end {
+            stack[i] = LuaValue::nil();
+        }
+    }
+
+    // Restore caller's frame top for proper GC scanning
     if lua_state.call_depth() > 0 {
         let ci_idx = lua_state.call_depth() - 1;
         let ci_top = lua_state.get_call_info(ci_idx).top;
         if nresults == -1 && ci_top < new_top {
-            // MULTRET: adjust ci->top to include all results
             lua_state.get_call_info_mut(ci_idx).top = new_top;
         }
         let frame_top = lua_state.get_call_info(ci_idx).top;
