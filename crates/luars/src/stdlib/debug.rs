@@ -656,18 +656,7 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
 
             // Set the upvalue value (similar to SETUPVAL instruction)
             let upval_ref = upvalue_ptr.as_mut_ref();
-            match &mut upval_ref.data {
-                crate::lua_value::LuaUpvalue::Open { stack_ptr, .. } => {
-                    // Open upvalue: write to stack location
-                    unsafe {
-                        *stack_ptr.ptr = value;
-                    }
-                }
-                crate::lua_value::LuaUpvalue::Closed(_) => {
-                    // Closed upvalue: update heap storage
-                    upval_ref.data.close(value);
-                }
-            }
+            upval_ref.data.set_value(value);
 
             // GC barrier if needed
             if value.is_collectable() {

@@ -15,7 +15,7 @@ pub use lua_value::{LuaValue, LuaValueKind};
 // Re-export type tag constants for VM execution
 pub use lua_value::{
     LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT,
-    LUA_VNUMINT, LUA_VTRUE,
+    LUA_VNUMINT, LUA_VTABLE, LUA_VTRUE,
 };
 
 use crate::lua_vm::CFunction;
@@ -78,10 +78,30 @@ impl LuaUpvalue {
     }
 
     /// Get the value (requires register_stack if open)
+    #[inline(always)]
     pub fn get_value(&self) -> LuaValue {
         match self {
             LuaUpvalue::Open { stack_ptr, .. } => unsafe { *stack_ptr.ptr },
-            LuaUpvalue::Closed(val) => val.clone(),
+            LuaUpvalue::Closed(val) => *val,
+        }
+    }
+
+    /// Get reference to the value (avoids 16-byte copy)
+    /// For Open: returns reference to stack slot. For Closed: returns reference to stored value.
+    #[inline(always)]
+    pub fn get_value_ref(&self) -> &LuaValue {
+        match self {
+            LuaUpvalue::Open { stack_ptr, .. } => unsafe { &*stack_ptr.ptr },
+            LuaUpvalue::Closed(val) => val,
+        }
+    }
+
+    /// Set value directly — for Open: writes to stack slot, for Closed: updates stored value
+    #[inline(always)]
+    pub fn set_value(&mut self, val: LuaValue) {
+        match self {
+            LuaUpvalue::Open { stack_ptr, .. } => unsafe { *stack_ptr.ptr = val },
+            LuaUpvalue::Closed(v) => *v = val,
         }
     }
 

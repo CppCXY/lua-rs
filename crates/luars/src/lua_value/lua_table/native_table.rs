@@ -105,7 +105,7 @@ impl NativeTable {
     /// Get hash size (number of nodes)
     #[inline(always)]
     fn sizenode(&self) -> usize {
-        if self.node.is_null() || self.node == &DUMMY_NODE as *const Node as *mut Node {
+        if self.node.is_null() {
             0
         } else {
             1usize << self.lsizenode
@@ -114,7 +114,88 @@ impl NativeTable {
 
     #[inline(always)]
     fn is_dummy(&self) -> bool {
-        self.node.is_null() || self.node == &DUMMY_NODE as *const Node as *mut Node
+        self.node.is_null()
+    }
+
+    /// Check if hash part is non-empty (cheaper than sizenode() > 0)
+    #[inline(always)]
+    pub fn has_hash(&self) -> bool {
+        !self.node.is_null()
+    }
+
+    /// Get main position WITHOUT checking for empty hash (caller must guarantee has_hash())
+    /// Uses general hash_value which handles all key types.
+    #[inline(always)]
+    fn mainposition_fast(&self, key: &LuaValue) -> *mut Node {
+        let hash = key.hash_value();
+        let mask = (1usize << self.lsizenode) - 1;
+        unsafe { self.node.add((hash as usize) & mask) }
+    }
+
+    /// Get main position for string keys only — skips type check in hash computation.
+    /// SAFETY: caller must guarantee key is a string AND hash is non-empty.
+    #[inline(always)]
+    fn mainposition_string(&self, key: &LuaValue) -> *mut Node {
+        let hash = unsafe { key.hash_string_unchecked() };
+        let mask = (1usize << self.lsizenode) - 1;
+        unsafe { self.node.add((hash as usize) & mask) }
+    }
+
+    /// Fast short string lookup — assumes hash is non-empty and key is short string.
+    /// Caller must guarantee both conditions.
+    #[inline(always)]
+    pub fn get_shortstr_unchecked(&self, key: &LuaValue) -> Option<LuaValue> {
+        let mut node = self.mainposition_string(key);
+        let key_ptr = unsafe { key.value.i };
+
+        unsafe {
+            // Unroll first iteration (most common case: found in main position)
+            if (*node).key.is_string() && (*node).key.value.i == key_ptr {
+                let val = (*node).value;
+                return if val.is_nil() { None } else { Some(val) };
+            }
+
+            let mut next = (*node).next;
+            while next != 0 {
+                node = node.offset(next as isize);
+                if (*node).key.is_string() && (*node).key.value.i == key_ptr {
+                    let val = (*node).value;
+                    return if val.is_nil() { None } else { Some(val) };
+                }
+                next = (*node).next;
+            }
+            None
+        }
+    }
+
+    /// Fast short string SET — assumes hash is non-empty and key is short string.
+    /// Only updates existing keys (returns false if key not found).
+    /// Caller must guarantee hash is non-empty.
+    #[inline(always)]
+    pub fn set_shortstr_unchecked(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+        let mp = self.mainposition_string(key);
+        let key_ptr = unsafe { key.value.i };
+
+        unsafe {
+            // Check main position first
+            if (*mp).key.is_string() && (*mp).key.value.i == key_ptr {
+                (*mp).value = value;
+                return true;
+            }
+
+            // Walk collision chain
+            let mut node = mp;
+            let mut next = (*node).next;
+            while next != 0 {
+                node = node.offset(next as isize);
+                if (*node).key.is_string() && (*node).key.value.i == key_ptr {
+                    (*node).value = value;
+                    return true;
+                }
+                next = (*node).next;
+            }
+        }
+        false
     }
 
     /// Get pointer to tag for array index k (0-based C index)
@@ -480,7 +561,7 @@ impl NativeTable {
     /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
     #[inline(always)]
     pub fn fast_getfield(&self, key: &LuaValue) -> Option<LuaValue> {
-        if self.sizenode() == 0 {
+        if self.node.is_null() {
             return None;
         }
 
@@ -502,13 +583,13 @@ impl NativeTable {
             return false;
         }
 
-        if self.sizenode() == 0 {
+        if self.node.is_null() {
             // Need to allocate - can't do in fast path
             return false;
         }
 
         // Try to find existing key or free slot in main position
-        let mp = self.mainposition(key);
+        let mp = self.mainposition_string(key);
         let key_ptr = unsafe { key.value.i };
 
         unsafe {
@@ -548,7 +629,7 @@ impl NativeTable {
     /// Get value from hash part - CRITICAL HOT PATH
     #[inline(always)]
     fn get_from_hash(&self, key: &LuaValue) -> Option<LuaValue> {
-        if self.sizenode() == 0 {
+        if self.node.is_null() {
             return None;
         }
 
@@ -559,7 +640,7 @@ impl NativeTable {
         }
 
         // General case (includes long strings)
-        let mut node = self.mainposition(key);
+        let mut node = self.mainposition_fast(key);
 
         loop {
             unsafe {
@@ -582,7 +663,7 @@ impl NativeTable {
     /// OPTIMIZED: Reduced branches in hot loop
     #[inline(always)]
     fn get_shortstr_fast(&self, key: &LuaValue) -> Option<LuaValue> {
-        let mut node = self.mainposition(key);
+        let mut node = self.mainposition_string(key);
         let key_ptr = unsafe { key.value.i };
 
         unsafe {

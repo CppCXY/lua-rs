@@ -938,6 +938,13 @@ impl LuaValue {
         // For other types, use pointer or value bits
         unsafe { self.value.i as u64 }
     }
+
+    /// Get hash value for a string value (avoids type check).
+    /// SAFETY: caller must guarantee self is a string (short or long).
+    #[inline(always)]
+    pub unsafe fn hash_string_unchecked(&self) -> u64 {
+        unsafe { (*(self.value.ptr as *const GcString)).data.hash }
+    }
 }
 
 /// Check if a float value exactly equals an integer value.
