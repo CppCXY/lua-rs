@@ -26,89 +26,114 @@ pub struct LuaValuePtr {
     pub ptr: *mut LuaValue,
 }
 
-/// Lua function
-/// Runtime upvalue - can be open (pointing to stack) or closed (owns value)
-/// This matches Lua's UpVal implementation
-pub enum LuaUpvalue {
-    Open {
-        stack_index: usize,     // Absolute index in register_stack
-        stack_ptr: LuaValuePtr, // Cached pointer for fast access
-    },
-    Closed(LuaValue), // Value moved to heap after frame exits
+/// Runtime upvalue — pointer-based design matching C Lua's UpVal.
+///
+/// Like C Lua, `v` always points to the current value:
+/// - **Open**: `v` points to the stack slot in `register_stack`
+/// - **Closed**: `v` points to `self.closed_value`
+///
+/// This eliminates the match branch on every `get_value()`/`set_value()` call,
+/// replacing it with a single pointer dereference (zero branching).
+pub struct LuaUpvalue {
+    /// Always-valid pointer to the upvalue's current value.
+    /// Open → stack slot, Closed → &self.closed_value
+    v: *mut LuaValue,
+    /// Storage for the closed value. When closed, `v` points here.
+    closed_value: LuaValue,
+    /// Stack index (only meaningful when open)
+    stack_index: usize,
 }
 
 impl LuaUpvalue {
-    /// Create an open upvalue pointing to a stack location (absolute index)
+    /// Create an open upvalue pointing to a stack location (absolute index).
+    /// `stack_ptr` must remain valid until the upvalue is closed or the pointer is updated.
+    #[inline(always)]
     pub fn new_open(stack_index: usize, stack_ptr: LuaValuePtr) -> Self {
-        LuaUpvalue::Open {
+        LuaUpvalue {
+            v: stack_ptr.ptr,
+            closed_value: LuaValue::nil(),
             stack_index,
-            stack_ptr,
         }
     }
 
-    /// Create a closed upvalue with an owned value
+    /// Create a closed upvalue with an owned value.
+    /// **IMPORTANT**: `v` is initially null. You MUST call `fix_closed_ptr()` after
+    /// the struct is placed at its final heap location (Box/Gc allocation).
+    #[inline(always)]
     pub fn new_closed(value: LuaValue) -> Self {
-        LuaUpvalue::Closed(value)
+        LuaUpvalue {
+            v: std::ptr::null_mut(),
+            closed_value: value,
+            stack_index: 0,
+        }
     }
 
-    /// Check if this upvalue is open
+    /// Fix up the `v` pointer for a newly-created closed upvalue.
+    /// Must be called once after the struct is heap-allocated (won't move again).
+    /// No-op for open upvalues (where v is already a valid stack pointer).
+    #[inline(always)]
+    pub fn fix_closed_ptr(&mut self) {
+        if self.v.is_null() {
+            self.v = &mut self.closed_value as *mut LuaValue;
+        }
+    }
+
+    /// Check if this upvalue is open (like C Lua's `upisopen` macro).
+    /// Open ⟺ `v` does NOT point to our own `closed_value` field.
+    #[inline(always)]
     pub fn is_open(&self) -> bool {
-        matches!(self, LuaUpvalue::Open { .. })
+        self.v != &self.closed_value as *const LuaValue as *mut LuaValue
     }
 
-    /// Get the stack index if open (for comparison during close)
-    pub fn get_stack_index(&self) -> Option<usize> {
-        match self {
-            LuaUpvalue::Open { stack_index, .. } => Some(*stack_index),
-            _ => None,
-        }
+    /// Get the stack index (only meaningful when open).
+    #[inline(always)]
+    pub fn get_stack_index(&self) -> usize {
+        self.stack_index
     }
 
-    /// Close this upvalue (move value from stack to heap)
+    /// Close this upvalue — copy value from stack into owned storage,
+    /// then redirect `v` to point to `self.closed_value`.
+    #[inline(always)]
     pub fn close(&mut self, stack_value: LuaValue) {
-        match self {
-            LuaUpvalue::Open { .. } => {
-                // Replace with closed variant
-                *self = LuaUpvalue::Closed(stack_value);
-            }
-            LuaUpvalue::Closed(_) => {
-                *self = LuaUpvalue::Closed(stack_value);
-            }
-        }
+        self.closed_value = stack_value;
+        self.v = &mut self.closed_value as *mut LuaValue;
     }
 
-    /// Get the value (requires register_stack if open)
+    /// Update the cached stack pointer (called after stack reallocation).
+    #[inline(always)]
+    pub fn update_stack_ptr(&mut self, ptr: *mut LuaValue) {
+        self.v = ptr;
+    }
+
+    /// Get the raw v pointer (for caching in the execute loop).
+    #[inline(always)]
+    pub fn get_v_ptr(&self) -> *mut LuaValue {
+        self.v
+    }
+
+    /// Get the value with **zero branching** — single pointer dereference.
     #[inline(always)]
     pub fn get_value(&self) -> LuaValue {
-        match self {
-            LuaUpvalue::Open { stack_ptr, .. } => unsafe { *stack_ptr.ptr },
-            LuaUpvalue::Closed(val) => *val,
-        }
+        unsafe { *self.v }
     }
 
-    /// Get reference to the value (avoids 16-byte copy)
-    /// For Open: returns reference to stack slot. For Closed: returns reference to stored value.
+    /// Get reference to the value with **zero branching**.
     #[inline(always)]
     pub fn get_value_ref(&self) -> &LuaValue {
-        match self {
-            LuaUpvalue::Open { stack_ptr, .. } => unsafe { &*stack_ptr.ptr },
-            LuaUpvalue::Closed(val) => val,
-        }
+        unsafe { &*self.v }
     }
 
-    /// Set value directly — for Open: writes to stack slot, for Closed: updates stored value
+    /// Set the value with **zero branching** — single pointer write.
     #[inline(always)]
     pub fn set_value(&mut self, val: LuaValue) {
-        match self {
-            LuaUpvalue::Open { stack_ptr, .. } => unsafe { *stack_ptr.ptr = val },
-            LuaUpvalue::Closed(v) => *v = val,
-        }
+        unsafe { *self.v = val }
     }
 
     pub fn get_closed_value(&self) -> Option<&LuaValue> {
-        match self {
-            LuaUpvalue::Closed(val) => Some(val),
-            _ => None,
+        if !self.is_open() {
+            Some(&self.closed_value)
+        } else {
+            None
         }
     }
 }

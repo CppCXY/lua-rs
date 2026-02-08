@@ -21,19 +21,6 @@ struct Node {
     next: i32,
 }
 
-/// Dummy node for empty hash tables
-const DUMMY_NODE: Node = Node {
-    value: LuaValue {
-        value: Value { i: 0 },
-        tt: LUA_VNIL,
-    },
-    key: LuaValue {
-        value: Value { i: 0 },
-        tt: LUA_VNIL,
-    },
-    next: 0,
-};
-
 /// Native Lua table implementation - mimics Lua 5.5's Table struct
 ///
 /// Array layout (Lua 5.5 optimization):

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::lua_value::{LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
+use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
@@ -374,15 +374,14 @@ impl LuaState {
     /// (e.g., after Vec::push triggers a reallocation).
     pub fn fix_open_upvalue_pointers(&mut self) {
         for upval_ptr in &self.open_upvalues_list {
-            if let LuaUpvalue::Open {
-                stack_index,
-                stack_ptr,
-            } = &mut upval_ptr.as_mut_ref().data
-            {
-                if *stack_index < self.stack.len() {
-                    stack_ptr.ptr =
-                        (&self.stack[*stack_index]) as *const LuaValue as *mut LuaValue;
-                }
+            let data = &mut upval_ptr.as_mut_ref().data;
+            // All entries in open_upvalues_list must be open
+            debug_assert!(data.is_open());
+            let stack_index = data.get_stack_index();
+            if stack_index < self.stack.len() {
+                data.update_stack_ptr(
+                    (&self.stack[stack_index]) as *const LuaValue as *mut LuaValue,
+                );
             }
         }
     }
@@ -547,14 +546,9 @@ impl LuaState {
 
         while count < len {
             let upval_ptr = self.open_upvalues_list[count];
-            // Check if this upvalue points to a stack index >= level
-            let should_close = match upval_ptr.as_ref().data.get_stack_index() {
-                Some(stack_idx) => stack_idx >= level,
-                None => true, // Already closed (stale state), remove it
-            };
-
-            if !should_close {
-                // Since list is sorted descending, if this one is < level, the rest are too.
+            let data = &upval_ptr.as_ref().data;
+            // All entries in open_upvalues_list should be open
+            if !data.is_open() || data.get_stack_index() < level {
                 break;
             }
             count += 1;
@@ -566,21 +560,21 @@ impl LuaState {
 
             // Perform the close operation for each
             for upval_ptr in to_close {
-                // 1. Identify stack index (must check before closing as closing removes it)
-                let stack_idx_opt = upval_ptr.as_ref().data.get_stack_index();
+                let data = &upval_ptr.as_ref().data;
+                if data.is_open() {
+                    let stack_idx = data.get_stack_index();
 
-                if let Some(stack_idx) = stack_idx_opt {
-                    // 2. Remove from map (maintain consistency)
+                    // Remove from map (maintain consistency)
                     self.open_upvalues_map.remove(&stack_idx);
 
-                    // 3. Capture value from stack
+                    // Capture value from stack
                     let value = self
                         .stack
                         .get(stack_idx)
                         .copied()
                         .unwrap_or(LuaValue::nil());
 
-                    // 4. Close the upvalue (move value to heap)
+                    // Close the upvalue (move value to heap)
                     upval_ptr.as_mut_ref().data.close(value);
                     let gc_ptr = GcObjectPtr::Upvalue(upval_ptr);
 
@@ -625,8 +619,7 @@ impl LuaState {
         let insert_pos = {
             self.open_upvalues_list
                 .iter()
-                .filter_map(|&ptr| ptr.as_ref().data.get_stack_index())
-                .position(|idx| idx < stack_index)
+                .position(|&ptr| ptr.as_ref().data.get_stack_index() < stack_index)
                 .unwrap_or(self.open_upvalues_list.len())
         };
 
@@ -663,11 +656,10 @@ impl LuaState {
             for upval_ptr in &self.open_upvalues_list {
                 let upval = &mut upval_ptr.as_mut_ref().data;
                 if upval.is_open() {
-                    if let Some(stack_idx) = upval.get_stack_index() {
-                        if stack_idx >= new_len {
-                            // Invalidate upvalue pointing to truncated stack
-                            upval.close(self.stack[stack_idx]);
-                        }
+                    let stack_idx = upval.get_stack_index();
+                    if stack_idx >= new_len {
+                        // Invalidate upvalue pointing to truncated stack
+                        upval.close(self.stack[stack_idx]);
                     }
                 }
             }

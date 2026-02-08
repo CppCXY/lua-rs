@@ -387,14 +387,17 @@ impl<T: HasGcHeader> GcPtr<T> {
         }
     }
 
+    #[inline(always)]
     pub fn as_ptr(&self) -> *const T {
         self.ptr as *const T
     }
 
+    #[inline(always)]
     pub fn as_mut_ptr(&self) -> *mut T {
         self.ptr as *mut T
     }
 
+    #[inline(always)]
     pub fn as_mut_ref(&self) -> &mut T {
         if cfg!(debug_assertions) {
             let ref_ = unsafe { &mut *(self.as_mut_ptr()) };
@@ -408,6 +411,7 @@ impl<T: HasGcHeader> GcPtr<T> {
         }
     }
 
+    #[inline(always)]
     pub fn as_ref(&self) -> &T {
         if cfg!(debug_assertions) {
             let ref_ = unsafe { &*(self.as_ptr()) };

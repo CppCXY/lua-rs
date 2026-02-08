@@ -225,7 +225,12 @@ impl ObjectAllocator {
     pub fn create_upvalue(&mut self, gc: &mut GC, upvalue: LuaUpvalue) -> LuaResult<UpvaluePtr> {
         let current_white = gc.current_white;
         let size = 64;
-        let gc_uv = GcObjectOwner::Upvalue(Box::new(GcUpvalue::new(upvalue, current_white, size)));
+        let mut boxed = Box::new(GcUpvalue::new(upvalue, current_white, size));
+        // Fix up closed upvalue's v pointer to its own closed_value field.
+        // Must happen after boxing so the heap address is stable.
+        // No-op for open upvalues (v already points to valid stack slot).
+        boxed.data.fix_closed_ptr();
+        let gc_uv = GcObjectOwner::Upvalue(boxed);
         let ptr = gc_uv.as_upvalue_ptr().unwrap();
         gc.trace_object(gc_uv)?;
         Ok(ptr)
