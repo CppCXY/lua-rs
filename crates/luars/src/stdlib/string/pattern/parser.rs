@@ -9,6 +9,8 @@ pub enum Pattern {
     Dot,
     /// Character class (%a, %d, etc.)
     Class(CharClass),
+    /// Inverted character class (%A, %D, etc.)
+    InvertedClass(CharClass),
     /// Character set ([abc], [^abc])
     Set { chars: Vec<char>, negated: bool },
     /// Sequence of patterns
@@ -156,10 +158,21 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
                     }
                     // Uppercase inverts the class
                     'A' | 'C' | 'D' | 'G' | 'L' | 'P' | 'S' | 'U' | 'W' | 'X' | 'Z' => {
-                        return Err(format!(
-                            "inverted character class %{} not yet supported",
-                            next
-                        ));
+                        let class = match next {
+                            'A' => CharClass::Letter,
+                            'C' => CharClass::Control,
+                            'D' => CharClass::Digit,
+                            'G' => CharClass::Graph,
+                            'L' => CharClass::Lower,
+                            'P' => CharClass::Punct,
+                            'S' => CharClass::Space,
+                            'U' => CharClass::Upper,
+                            'W' => CharClass::AlphaNum,
+                            'X' => CharClass::Hex,
+                            'Z' => CharClass::Any,
+                            _ => unreachable!(),
+                        };
+                        seq.push(Pattern::InvertedClass(class));
                     }
                     // Any other character is literal
                     _ => seq.push(Pattern::Char(next)),

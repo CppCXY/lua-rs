@@ -1726,6 +1726,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         if ttisinteger(ra) && ttisinteger(rb) {
                             ivalue(ra) <= ivalue(rb)
+                        } else if ttisinteger(ra) && ttisfloat(rb) {
+                            helper::int_le_float(ivalue(ra), fltvalue(rb))
+                        } else if ttisfloat(ra) && ttisinteger(rb) {
+                            helper::float_le_int(fltvalue(ra), ivalue(rb))
+                        } else if ttisfloat(ra) && ttisfloat(rb) {
+                            fltvalue(ra) <= fltvalue(rb)
                         } else if (ttisinteger(ra) || ttisfloat(ra))
                             && (ttisinteger(rb) || ttisfloat(rb))
                         {

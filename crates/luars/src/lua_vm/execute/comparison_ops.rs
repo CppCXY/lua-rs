@@ -15,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    helper::{fltvalue, ivalue, tonumberns, ttisfloat, ttisinteger, ttisstring},
+    helper::{fltvalue, ivalue, tonumberns, ttisfloat, ttisinteger, ttisstring,
+             int_lt_float, float_lt_int},
     metamethod::{self, TmKind},
 };
 
@@ -73,6 +74,12 @@ pub fn exec_lt(
 
         if ttisinteger(ra) && ttisinteger(rb) {
             ivalue(ra) < ivalue(rb)
+        } else if ttisinteger(ra) && ttisfloat(rb) {
+            int_lt_float(ivalue(ra), fltvalue(rb))
+        } else if ttisfloat(ra) && ttisinteger(rb) {
+            float_lt_int(fltvalue(ra), ivalue(rb))
+        } else if ttisfloat(ra) && ttisfloat(rb) {
+            fltvalue(ra) < fltvalue(rb)
         } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
             let mut na = 0.0;
             let mut nb = 0.0;
@@ -196,7 +203,13 @@ pub fn exec_lti(
     } else {
         // Metamethod fallback: R[A] < im => try_comp_tm(R[A], im, Lt)
         let va = *ra;
-        let vb = LuaValue::integer(im as i64);
+        // Check isfloat flag in C field to preserve original type
+        let isf = instr.get_c() != 0;
+        let vb = if isf {
+            LuaValue::float(im as f64)
+        } else {
+            LuaValue::integer(im as i64)
+        };
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
             Some(result) => result,
@@ -238,7 +251,12 @@ pub fn exec_lei(
         fltvalue(ra) <= (im as f64)
     } else {
         let va = *ra;
-        let vb = LuaValue::integer(im as i64);
+        let isf = instr.get_c() != 0;
+        let vb = if isf {
+            LuaValue::float(im as f64)
+        } else {
+            LuaValue::integer(im as i64)
+        };
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
             Some(result) => result,
@@ -280,7 +298,12 @@ pub fn exec_gti(
         fltvalue(ra) > (im as f64)
     } else {
         // R[A] > im is equivalent to im < R[A]
-        let va = LuaValue::integer(im as i64);
+        let isf = instr.get_c() != 0;
+        let va = if isf {
+            LuaValue::float(im as f64)
+        } else {
+            LuaValue::integer(im as i64)
+        };
         let vb = *ra;
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
@@ -323,7 +346,12 @@ pub fn exec_gei(
         fltvalue(ra) >= (im as f64)
     } else {
         // R[A] >= im is equivalent to im <= R[A]
-        let va = LuaValue::integer(im as i64);
+        let isf = instr.get_c() != 0;
+        let va = if isf {
+            LuaValue::float(im as f64)
+        } else {
+            LuaValue::integer(im as i64)
+        };
         let vb = *ra;
         lua_state.set_frame_pc(frame_idx, *pc as u32);
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {

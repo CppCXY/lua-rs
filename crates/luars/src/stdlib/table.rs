@@ -355,8 +355,15 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(0);
     }
 
+    // Check for excessive range (Lua 5.5: "too many results to unpack")
+    let count = (j as u64).wrapping_sub(i as u64).wrapping_add(1);
+    if count > 1_000_000 {
+        return Err(l.error("too many results to unpack".to_string()));
+    }
+    let count = count as usize;
+
     // Collect all values
-    let mut values = Vec::new();
+    let mut values = Vec::with_capacity(count);
     for idx in i..=j {
         values.push(table_ref.raw_geti(idx).unwrap_or(LuaValue::nil()));
     }

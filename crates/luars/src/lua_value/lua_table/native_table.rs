@@ -889,9 +889,18 @@ impl NativeTable {
 
         // Check if key is in array part (lua5.5's keyinarray)
         // For integer keys in [1..asize], return the index directly
+        // BUT only if the key actually exists in the array (non-nil/non-empty)
         if let Some(i) = key.as_integer() {
             if i >= 1 && i <= self.asize as i64 {
-                return Some(i as u32);
+                // Verify the key is actually present in the array
+                unsafe {
+                    let k = (i - 1) as usize;
+                    let tag = *self.get_arr_tag(k);
+                    if tag != LUA_VNIL && tag != LUA_VEMPTY {
+                        return Some(i as u32);
+                    }
+                }
+                // Key is in array range but not in array -- fall through to hash
             }
         }
 

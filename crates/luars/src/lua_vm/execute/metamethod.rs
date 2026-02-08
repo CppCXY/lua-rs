@@ -386,7 +386,10 @@ fn try_to_integer(v: &LuaValue) -> Option<i64> {
     }
     if let Some(f) = v.as_number() {
         if f == f.floor() && f.is_finite() {
-            return Some(f as i64);
+            // Check f is within i64 range before casting
+            if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+                return Some(f as i64);
+            }
         }
         return None;
     }
@@ -397,7 +400,9 @@ fn try_to_integer(v: &LuaValue) -> Option<i64> {
         }
         if let Some(f) = parsed.as_number() {
             if f == f.floor() && f.is_finite() {
-                return Some(f as i64);
+                if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+                    return Some(f as i64);
+                }
             }
         }
     }

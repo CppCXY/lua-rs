@@ -15,7 +15,8 @@ pub struct MatchInfo {
 pub fn find_all_matches(text: &str, pattern: &Pattern, max: Option<usize>) -> Vec<MatchInfo> {
     let mut matches = Vec::new();
     let mut pos = 0;
-    let text_chars: Vec<char> = text.chars().collect();
+    // Lua operates on bytes, not Unicode codepoints
+    let text_chars: Vec<char> = text.bytes().map(|b| b as char).collect();
     let mut last_was_nonempty = false;
 
     while pos <= text_chars.len() {
@@ -35,13 +36,10 @@ pub fn find_all_matches(text: &str, pattern: &Pattern, max: Option<usize>) -> Ve
                 continue;
             }
 
-            // Calculate byte offsets
-            let start_bytes: usize = text_chars[..pos].iter().map(|c| c.len_utf8()).sum();
-            let end_bytes: usize = text_chars[..end_pos].iter().map(|c| c.len_utf8()).sum();
-
+            // Positions are already byte offsets
             matches.push(MatchInfo {
-                start: start_bytes,
-                end: end_bytes,
+                start: pos,
+                end: end_pos,
                 captures,
             });
 
@@ -69,9 +67,9 @@ pub fn find_all_matches(text: &str, pattern: &Pattern, max: Option<usize>) -> Ve
 }
 
 /// Find pattern in string, returns (start, end, captures)
-/// Positions are char indices (not byte indices)
+/// Positions are byte indices (Lua operates on bytes)
 pub fn find(text: &str, pattern: &Pattern, init: usize) -> Option<(usize, usize, Vec<String>)> {
-    let text_chars: Vec<char> = text.chars().collect();
+    let text_chars: Vec<char> = text.bytes().map(|b| b as char).collect();
 
     // Try matching from each position
     for start_pos in init..=text_chars.len() {
@@ -85,7 +83,7 @@ pub fn find(text: &str, pattern: &Pattern, init: usize) -> Option<(usize, usize,
 
 /// Match pattern against string, returns (end_pos, captures) on success
 pub fn match_pattern(text: &str, pattern: &Pattern) -> Option<(usize, Vec<String>)> {
-    let text_chars: Vec<char> = text.chars().collect();
+    let text_chars: Vec<char> = text.bytes().map(|b| b as char).collect();
     try_match(pattern, &text_chars, 0)
 }
 
@@ -100,10 +98,11 @@ pub fn gsub(
     replacement: &str,
     max: Option<usize>,
 ) -> Result<(String, usize), String> {
-    let mut result = String::new();
+    let mut result: Vec<u8> = Vec::new();
     let mut count = 0;
     let mut pos = 0;
-    let text_chars: Vec<char> = text.chars().collect();
+    let text_bytes = text.as_bytes();
+    let text_chars: Vec<char> = text.bytes().map(|b| b as char).collect();
     let mut last_was_nonempty = false; // Track if last match was non-empty
 
     // Fast path: if replacement doesn't contain %, no substitution needed
@@ -114,7 +113,7 @@ pub fn gsub(
         if let Some(max_count) = max {
             if count >= max_count {
                 // Reached max replacements, copy rest
-                result.extend(&text_chars[pos..]);
+                result.extend_from_slice(&text_bytes[pos..]);
                 break;
             }
         }
@@ -122,9 +121,9 @@ pub fn gsub(
         if let Some((end_pos, captures)) = try_match(pattern, &text_chars, pos) {
             // Skip empty match right after non-empty match
             if end_pos == pos && last_was_nonempty {
-                // Copy character and continue
+                // Copy byte and continue
                 if pos < text_chars.len() {
-                    result.push(text_chars[pos]);
+                    result.push(text_bytes[pos]);
                 }
                 pos += 1;
                 last_was_nonempty = false;
@@ -136,19 +135,22 @@ pub fn gsub(
 
             if needs_substitution {
                 // Build replacement with capture substitution
-                let matched_text: String = text_chars[pos..end_pos].iter().collect();
+                let matched_text: String = {
+                    let bytes = &text_bytes[pos..end_pos];
+                    unsafe { String::from_utf8_unchecked(bytes.to_vec()) }
+                };
                 let replaced = substitute_captures(replacement, &matched_text, &captures)?;
-                result.push_str(&replaced);
+                result.extend_from_slice(replaced.as_bytes());
             } else {
                 // Fast path: no % in replacement, just copy it
-                result.push_str(replacement);
+                result.extend_from_slice(replacement.as_bytes());
             }
 
             // Handle empty vs non-empty match
             if end_pos == pos {
-                // Empty match: copy character and advance
+                // Empty match: copy byte and advance
                 if pos < text_chars.len() {
-                    result.push(text_chars[pos]);
+                    result.push(text_bytes[pos]);
                 }
                 pos += 1;
                 last_was_nonempty = false;
@@ -158,16 +160,16 @@ pub fn gsub(
                 last_was_nonempty = true;
             }
         } else {
-            // No match, copy character if within bounds
+            // No match, copy byte if within bounds
             if pos < text_chars.len() {
-                result.push(text_chars[pos]);
+                result.push(text_bytes[pos]);
             }
             pos += 1;
             last_was_nonempty = false;
         }
     }
 
-    Ok((result, count))
+    Ok((unsafe { String::from_utf8_unchecked(result) }, count))
 }
 
 /// Substitute %0-%9 and %% in replacement string
@@ -253,6 +255,13 @@ fn match_impl(
         }
         Pattern::Class(class) => {
             if pos < text.len() && class.matches(text[pos]) {
+                Some(pos + 1)
+            } else {
+                None
+            }
+        }
+        Pattern::InvertedClass(class) => {
+            if pos < text.len() && !class.matches(text[pos]) {
                 Some(pos + 1)
             } else {
                 None
@@ -536,7 +545,11 @@ fn match_impl(
         Pattern::Capture(inner) => {
             let start = pos;
             let end = match_impl(inner, text, pos, captures)?;
-            let captured: String = text[start..end].iter().collect();
+            // Convert byte-as-char back to raw bytes for capture string
+            let captured = {
+                let bytes: Vec<u8> = text[start..end].iter().map(|&c| c as u8).collect();
+                unsafe { String::from_utf8_unchecked(bytes) }
+            };
             captures.push(captured);
             Some(end)
         }
