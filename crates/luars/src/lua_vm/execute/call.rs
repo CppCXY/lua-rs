@@ -249,10 +249,28 @@ pub fn call_c_function(
 
     let new_top = func_idx + final_nresults;
 
-    // Set logical stack top (L->top.p) - does NOT truncate physical stack
-    // This is  old values remain in stack array but are "hidden"
-    // This preserves caller's local variables which live below this top
-    lua_state.set_top(new_top)?;
+    // Port of Lua 5.5's post-call top adjustment (luaV_adjusttop / OP_CALL):
+    //   if (nresults == LUA_MULTRET && L->ci->top.p < L->top.p)
+    //     L->ci->top.p = L->top.p;
+    //   L->top.p = L->ci->top.p;
+    //
+    // MUST restore the caller's frame top before check_gc() so that
+    // traverse_thread() during an atomic GC phase sees ALL caller locals.
+    // Without this, stack_top = func_idx + nresults can be far below the
+    // caller's frame extent, hiding live local variables from the GC and
+    // causing premature finalization of __gc objects.
+    if lua_state.call_depth() > 0 {
+        let ci_idx = lua_state.call_depth() - 1;
+        let ci_top = lua_state.get_call_info(ci_idx).top;
+        if nresults == -1 && ci_top < new_top {
+            // MULTRET: adjust ci->top to include all results
+            lua_state.get_call_info_mut(ci_idx).top = new_top;
+        }
+        let frame_top = lua_state.get_call_info(ci_idx).top;
+        lua_state.set_top(frame_top)?;
+    } else {
+        lua_state.set_top(new_top)?;
+    }
 
     lua_state.check_gc()?;
 

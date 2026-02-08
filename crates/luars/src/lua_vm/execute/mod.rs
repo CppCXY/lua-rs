@@ -879,8 +879,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Handle return
                     return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
 
-                    lua_state.check_gc()?;
-                    // Return pops frame, continue to 'startfunc to load caller's context
+                    // Note: C Lua does NOT call checkGC in OP_RETURN.
+                    // Calling check_gc here is dangerous because after return,
+                    // top = func_pos + nres (very low), and if GC reaches atomic
+                    // phase, traverse_thread scans only [0..top), missing the
+                    // caller's live local variables above top.
                     continue 'startfunc;
                 }
                 OpCode::Return0 => {
@@ -888,8 +891,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     save_pc!();
                     return_handler::handle_return0(lua_state, frame_idx)?;
 
-                    lua_state.check_gc()?;
-                    // Return pops frame, continue to 'startfunc
+                    // No check_gc here - see OP_RETURN comment above
                     continue 'startfunc;
                 }
                 OpCode::Return1 => {
@@ -898,8 +900,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     save_pc!();
                     return_handler::handle_return1(lua_state, base, frame_idx, a)?;
 
-                    lua_state.check_gc()?;
-                    // Return pops frame, continue to 'startfunc
+                    // No check_gc here - see OP_RETURN comment above
                     continue 'startfunc;
                 }
                 OpCode::GetUpval => {
@@ -1024,6 +1025,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     save_pc!();
                     lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
+                    
+                    // Restore stack_top to the current frame's top to ensure subsequent
+                    // instructions (like SETTABLE or LOADI) don't operate on "dead" stack slots 
+                    // if they trigger GC. This matches Lua's behavior where the stack top 
+                    // is maintained high (ci->top) during function execution.
+                    let frame_top = lua_state.get_call_info(frame_idx).top;
+                    lua_state.set_top(frame_top)?;
                 }
                 OpCode::GetTable => {
                     table_ops::exec_gettable(lua_state, instr, base, frame_idx, &mut pc)?;
@@ -1721,6 +1729,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     save_pc!();
                     lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
+
+                    // Restore frame top so subsequent instructions and GC see all locals
+                    let frame_top = lua_state.get_call_info(frame_idx).top;
+                    lua_state.set_top(frame_top)?;
                 }
 
                 // ============================================================
@@ -1891,6 +1903,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     save_pc!();
                     lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
+
+                    // Restore frame top so subsequent instructions and GC see all locals
+                    let frame_top = lua_state.get_call_info(frame_idx).top;
+                    lua_state.set_top(frame_top)?;
                 }
 
                 OpCode::Vararg => {

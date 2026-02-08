@@ -344,6 +344,12 @@ pub struct GC {
     gc_error_msg: Option<String>,
 
     gc_memory_check: bool,
+
+    /// In debug mode, released objects are kept here instead of being dropped,
+    /// so that use-after-free can be detected via the `released` flag on GcHeader
+    /// instead of causing undefined behavior from accessing freed memory.
+    #[cfg(debug_assertions)]
+    released_objects: Vec<GcObjectOwner>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -395,6 +401,8 @@ impl GC {
             tmp_max_memory_limit: None,
             gc_error_msg: None,
             gc_memory_check: true,
+            #[cfg(debug_assertions)]
+            released_objects: Vec::new(),
         };
 
         gc.gc_params[PAUSE] = code_param(DEFAULT_PAUSE as u32);
@@ -640,6 +648,41 @@ impl GC {
         self.total_bytes - self.gc_debt
     }
 
+    /// Release a GC object. In debug mode, the object is moved to a released list
+    /// instead of being dropped, so that any use-after-free will trigger a
+    /// deterministic assertion ("Accessing released GC object") instead of UB.
+    /// In release mode, the object is simply dropped.
+    #[inline]
+    fn release_object(&mut self, mut obj: GcObjectOwner) {
+        #[cfg(debug_assertions)]
+        {
+            obj.header_mut_unchecked().mark_released();
+            self.released_objects.push(obj);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            drop(obj);
+        }
+    }
+
+    /// Static version of release_object for use in closures that can't borrow `self`.
+    /// Takes the released_objects vec directly.
+    #[inline]
+    fn release_object_static(
+        #[cfg(debug_assertions)] released: &mut Vec<GcObjectOwner>,
+        mut obj: GcObjectOwner,
+    ) {
+        #[cfg(debug_assertions)]
+        {
+            obj.header_mut_unchecked().mark_released();
+            released.push(obj);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            drop(obj);
+        }
+    }
+
     // Debug accessors for list lengths
     pub fn allgc_len(&self) -> usize {
         self.allgc.len()
@@ -781,13 +824,24 @@ impl GC {
             }
         };
 
+        #[cfg(debug_assertions)]
+        eprintln!("[GC needs_finalization] has_metatable={}", metatable.is_some());
+
         if let Some(metatable) = metatable {
             let gc_key = self.tm_gc;
+            #[cfg(debug_assertions)]
+            eprintln!("[GC needs_finalization] gc_key kind={:?} is_nil={}", gc_key.kind(), gc_key.is_nil());
             if let Some(mt_table) = metatable.as_table() {
-                if let Some(gc_field) = mt_table.raw_get(&gc_key) {
+                let gc_field = mt_table.raw_get(&gc_key);
+                #[cfg(debug_assertions)]
+                eprintln!("[GC needs_finalization] raw_get result: {:?}", gc_field.map(|v| v.kind()));
+                if let Some(gc_field) = gc_field {
                     let result = !gc_field.is_nil();
                     return result;
                 }
+            } else {
+                #[cfg(debug_assertions)]
+                eprintln!("[GC needs_finalization] metatable is not a table! kind={:?}", metatable.kind());
             }
         }
 
@@ -801,6 +855,8 @@ impl GC {
     /// and later, during atomic, moving unreachable ones into `tobefnz`.
     pub fn check_finalizer(&mut self, value: &LuaValue) {
         let Some(gc_ptr) = value.as_gc_ptr() else {
+            #[cfg(debug_assertions)]
+            eprintln!("[GC check_finalizer] no gc_ptr for value");
             return;
         };
 
@@ -810,18 +866,32 @@ impl GC {
         }
 
         let Some(header) = gc_ptr.header_mut() else {
+            #[cfg(debug_assertions)]
+            eprintln!("[GC check_finalizer] no header!");
             return;
         };
 
         if header.to_finalize() {
+            #[cfg(debug_assertions)]
+            eprintln!("[GC check_finalizer] already finalized, skip.");
             return;
         };
 
-        if self.needs_finalization(gc_ptr) {
+        let needs = self.needs_finalization(gc_ptr);
+        #[cfg(debug_assertions)]
+        eprintln!("[GC check_finalizer] needs_finalization={needs} gc_state={:?}", self.gc_state);
+
+        if needs {
             header.set_finalized();
-            //  Add to finobj list so it will be tracked by GC
-            // This is required for generational GC to properly handle finalizers
             self.finobj.push(gc_ptr);
+            #[cfg(debug_assertions)]
+            {
+                let raw_ptr = match gc_ptr {
+                    GcObjectPtr::Table(t) => t.as_ref() as *const _ as usize,
+                    _ => 0,
+                };
+                eprintln!("[GC check_finalizer] ADDED to finobj! finobj_len={} ptr=0x{raw_ptr:x}", self.finobj.len());
+            }
         }
     }
 
@@ -1068,6 +1138,16 @@ impl GC {
             return;
         }
 
+        // BUG FIX: Prevent GC reentrancy during finalization or single_step.
+        // In Lua 5.5, gcrunning(g) checks (g->gcstp == 0), which includes GCSTPGC.
+        // Without this check, check_gc() during a finalizer's pcall can trigger
+        // recursive GC steps → recursive young_collection → stack overflow or
+        // state corruption → hangs and use-after-free.
+        if self.gc_stopem {
+            self.set_debt(20000);
+            return;
+        }
+
         // Dispatch based on GC mode (like Lua 5.5 luaC_step)
         match self.gc_kind {
             GcKind::Inc | GcKind::GenMajor => self.inc_step(l),
@@ -1158,6 +1238,17 @@ impl GC {
     /// Single GC step (like singlestep in Lua 5.5)
     fn single_step(&mut self, l: &mut LuaState, fast: bool) -> StepResult {
         self.gc_stopem = true;
+
+        #[cfg(debug_assertions)]
+        {
+            static STEP_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let count = STEP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Only log when finobj or tobefnz is non-empty, or at key transitions
+            if self.finobj.len() > 0 || self.tobefnz.len() > 0 {
+                eprintln!("[GC step #{count}] state={:?} finobj={} tobefnz={}",
+                    self.gc_state, self.finobj.len(), self.tobefnz.len());
+            }
+        }
 
         let result = match self.gc_state {
             GcState::Pause => {
@@ -1366,22 +1457,22 @@ impl GC {
                         G_NEW => {
                             let obj = self.allgc.remove(gc_ptr);
                             self.total_bytes -= obj.size() as isize;
-                            drop(obj);
+                            self.release_object(obj);
                         }
                         G_SURVIVAL => {
                             let obj = self.survival.remove(gc_ptr);
                             self.total_bytes -= obj.size() as isize;
-                            drop(obj);
+                            self.release_object(obj);
                         }
                         G_OLD1 => {
                             let obj = self.old1.remove(gc_ptr);
                             self.total_bytes -= obj.size() as isize;
-                            drop(obj);
+                            self.release_object(obj);
                         }
                         _ => {
                             let obj = self.old.remove(gc_ptr);
                             self.total_bytes -= obj.size() as isize;
-                            drop(obj);
+                            self.release_object(obj);
                         }
                     }
                 } else {
@@ -1398,7 +1489,7 @@ impl GC {
                         continue;
                     };
                     self.total_bytes -= obj.size() as isize;
-                    drop(obj);
+                    self.release_object(obj);
                 }
             }
         }
@@ -1961,17 +2052,9 @@ impl GC {
         {
             let state = &gc_thread.data;
 
-            // Mark stack values: linear scan from stack[0] to stack[top)
-            // This matches Lua 5.5's traversethread exactly:
-            //   for (o = th->stack.p; o < th->top.p; o++)
-            //     markvalue(g, s2v(o));
-            //
-            // Note: stack_top can be temporarily lowered by instructions like
-            // NEWTABLE. Objects in [stack_top, frame_top) are NOT marked, which
-            // is correct — they are dead registers that will be overwritten
-            // before being read.
             let top = state.get_top();
             let stack = state.stack();
+
             for i in 0..top {
                 self.mark_value(l, &stack[i]);
                 count += 1;
@@ -2116,9 +2199,6 @@ impl GC {
 
         /* at this point, all strongly accessible objects are marked. */
         /* Clear values from weak tables, before checking finalizers */
-        let origweak = self.weak.iter().cloned().collect::<HashSet<_>>();
-        let origall = self.allweak.iter().cloned().collect::<HashSet<_>>();
-
         self.clear_by_values(l);
 
         /* separate objects to be finalized */
@@ -2132,12 +2212,11 @@ impl GC {
 
         self.converge_ephemerons(l);
 
-        // Save allweak list BEFORE clear_by_keys (which will empty it)
-        let allweak_before_clear_keys = self.allweak.clone();
-
         self.clear_by_keys(l);
 
-        self.clear_by_values_range(l, &origweak, &origall, &allweak_before_clear_keys);
+        // Clear values again (for resurrected weak tables)
+        // Lua 5.5 iterates 'weak' and 'allweak' lists again here
+        self.clear_by_values(l);
 
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
 
@@ -2282,13 +2361,28 @@ impl GC {
                     if let Some(header) = gc_ptr.header() {
                         // 检查是否是死对象（other white）
                         if header.is_dead(other_white) {
-                            if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                                Self::remove_dead_string_from_intern(l, str_ptr);
-                            }
+                            // BUG FIX: Check FINALIZEDBIT - objects with finalizers must
+                            // go to tobefnz, not be freed, to avoid dangling finobj pointers
+                            if header.to_finalize() {
+                                self.tobefnz.push(gc_ptr);
+                                if let Some(header_mut) = gc_ptr.header_mut() {
+                                    header_mut.make_white(self.current_white);
+                                    header_mut.set_age(G_NEW);
+                                }
+                                *index += 1;
+                            } else {
+                                if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                                    Self::remove_dead_string_from_intern(l, str_ptr);
+                                }
 
-                            let obj = self.allgc.remove(gc_ptr);
-                            self.total_bytes -= obj.size() as isize;
-                            drop(obj);
+                                let obj = self.allgc.remove(gc_ptr);
+                                self.total_bytes -= obj.size() as isize;
+                                GC::release_object_static(
+                                    #[cfg(debug_assertions)]
+                                    &mut self.released_objects,
+                                    obj,
+                                );
+                            }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW
                             if let Some(header_mut) = gc_ptr.header_mut() {
@@ -2317,13 +2411,27 @@ impl GC {
 
                     if let Some(header) = gc_ptr.header() {
                         if header.is_dead(other_white) {
-                            if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                                Self::remove_dead_string_from_intern(l, str_ptr);
-                            }
+                            // BUG FIX: Check FINALIZEDBIT (same as AllGc phase)
+                            if header.to_finalize() {
+                                self.tobefnz.push(gc_ptr);
+                                if let Some(header_mut) = gc_ptr.header_mut() {
+                                    header_mut.make_white(self.current_white);
+                                    header_mut.set_age(G_NEW);
+                                }
+                                *index += 1;
+                            } else {
+                                if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                                    Self::remove_dead_string_from_intern(l, str_ptr);
+                                }
 
-                            let obj = self.survival.remove(gc_ptr);
-                            self.total_bytes -= obj.size() as isize;
-                            drop(obj);
+                                let obj = self.survival.remove(gc_ptr);
+                                self.total_bytes -= obj.size() as isize;
+                                GC::release_object_static(
+                                    #[cfg(debug_assertions)]
+                                    &mut self.released_objects,
+                                    obj,
+                                );
+                            }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW，移回 allgc
                             if let Some(header_mut) = gc_ptr.header_mut() {
@@ -2352,13 +2460,27 @@ impl GC {
 
                     if let Some(header) = gc_ptr.header() {
                         if header.is_dead(other_white) {
-                            if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                                Self::remove_dead_string_from_intern(l, str_ptr);
-                            }
+                            // BUG FIX: Check FINALIZEDBIT (same as AllGc phase)
+                            if header.to_finalize() {
+                                self.tobefnz.push(gc_ptr);
+                                if let Some(header_mut) = gc_ptr.header_mut() {
+                                    header_mut.make_white(self.current_white);
+                                    header_mut.set_age(G_NEW);
+                                }
+                                *index += 1;
+                            } else {
+                                if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                                    Self::remove_dead_string_from_intern(l, str_ptr);
+                                }
 
-                            let obj = self.old.remove(gc_ptr);
-                            self.total_bytes -= obj.size() as isize;
-                            drop(obj);
+                                let obj = self.old.remove(gc_ptr);
+                                self.total_bytes -= obj.size() as isize;
+                                GC::release_object_static(
+                                    #[cfg(debug_assertions)]
+                                    &mut self.released_objects,
+                                    obj,
+                                );
+                            }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW，移回 allgc
                             if let Some(header_mut) = gc_ptr.header_mut() {
@@ -2391,6 +2513,8 @@ impl GC {
                     if let Some(header) = gc_ptr.header() {
                         if header.is_dead(other_white) {
                             // 死对象且有终结器：移到 tobefnz
+                            #[cfg(debug_assertions)]
+                            eprintln!("[GC finobj REMOVE] sweep_list FinObj: dead obj moved to tobefnz. finobj={}", self.finobj.len()-1);
                             self.tobefnz.push(gc_ptr);
                             self.finobj.swap_remove(*index);
                             // 不增加 index（因为 swap_remove）
@@ -2697,98 +2821,85 @@ impl GC {
     /// Dead objects are freed, survivors become G_OLD (no promotion chain)
     fn sweep_full_gen(&mut self, l: &mut LuaState) {
         let other_white = 1 - self.current_white;
+        let current_white = self.current_white;
 
-        // Process allgc
-        let allgc_objects = self.allgc.take_all();
-        let mut allgc_survivors: Vec<GcObjectOwner> = Vec::new();
+        // Helper: sweep a list, freeing dead objects (respecting FINALIZEDBIT)
+        // and keeping survivors as G_OLD
+        let sweep_full_list = |list: &mut GcList,
+                                    total_bytes: &mut isize,
+                                    tobefnz: &mut Vec<GcObjectPtr>,
+                                    #[cfg(debug_assertions)] released: &mut Vec<GcObjectOwner>,
+                                    l: &mut LuaState|
+         -> Vec<GcObjectOwner> {
+            let objects = list.take_all();
+            let mut survivors: Vec<GcObjectOwner> = Vec::new();
 
-        for mut gc_owner in allgc_objects {
-            let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else {
-                continue;
-            };
+            for mut gc_owner in objects {
+                let gc_ptr = gc_owner.as_gc_ptr();
+                let Some(header) = gc_ptr.header() else {
+                    continue;
+                };
 
-            if header.is_dead(other_white) {
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    GC::remove_dead_string_from_intern(l, str_ptr);
+                if header.is_dead(other_white) {
+                    // BUG FIX: Check FINALIZEDBIT before freeing
+                    if header.to_finalize() {
+                        gc_owner.header_mut().set_age(G_OLD);
+                        gc_owner.header_mut().make_white(current_white);
+                        tobefnz.push(gc_ptr);
+                        survivors.push(gc_owner);
+                    } else {
+                        if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                            GC::remove_dead_string_from_intern(l, str_ptr);
+                        }
+                        *total_bytes -= gc_owner.size() as isize;
+                        GC::release_object_static(
+                            #[cfg(debug_assertions)]
+                            released,
+                            gc_owner,
+                        );
+                    }
+                } else {
+                    gc_owner.header_mut().set_age(G_OLD);
+                    gc_owner.header_mut().make_white(current_white);
+                    survivors.push(gc_owner);
                 }
-                self.total_bytes -= gc_owner.size() as isize;
-                drop(gc_owner);
-            } else {
-                gc_owner.header_mut().set_age(G_OLD);
-                gc_owner.header_mut().make_white(self.current_white);
-                allgc_survivors.push(gc_owner);
             }
-        }
 
-        // Process survival
-        let survival_objects = self.survival.take_all();
-        let mut survival_survivors: Vec<GcObjectOwner> = Vec::new();
+            survivors
+        };
 
-        for mut gc_owner in survival_objects {
-            let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else {
-                continue;
-            };
-
-            if header.is_dead(other_white) {
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    GC::remove_dead_string_from_intern(l, str_ptr);
-                }
-                self.total_bytes -= gc_owner.size() as isize;
-                drop(gc_owner);
-            } else {
-                gc_owner.header_mut().set_age(G_OLD);
-                gc_owner.header_mut().make_white(self.current_white);
-                survival_survivors.push(gc_owner);
-            }
-        }
-
-        // Process old
-        let old_objects = self.old.take_all();
-        let mut old_survivors: Vec<GcObjectOwner> = Vec::new();
-
-        for mut gc_owner in old_objects {
-            let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else {
-                continue;
-            };
-
-            if header.is_dead(other_white) {
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    GC::remove_dead_string_from_intern(l, str_ptr);
-                }
-                self.total_bytes -= gc_owner.size() as isize;
-                drop(gc_owner);
-            } else {
-                gc_owner.header_mut().set_age(G_OLD);
-                gc_owner.header_mut().make_white(self.current_white);
-                old_survivors.push(gc_owner);
-            }
-        }
-
-        // Process old1 (G_OLD1 objects waiting for next young collection)
-        let old1_objects = self.old1.take_all();
-        let mut old1_survivors: Vec<GcObjectOwner> = Vec::new();
-
-        for mut gc_owner in old1_objects {
-            let gc_ptr = gc_owner.as_gc_ptr();
-            let Some(header) = gc_ptr.header() else {
-                continue;
-            };
-
-            if header.is_dead(other_white) {
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    GC::remove_dead_string_from_intern(l, str_ptr);
-                }
-                self.total_bytes -= gc_owner.size() as isize;
-                drop(gc_owner);
-            } else {
-                gc_owner.header_mut().set_age(G_OLD);
-                gc_owner.header_mut().make_white(self.current_white);
-                old1_survivors.push(gc_owner);
-            }
-        }
+        let allgc_survivors = sweep_full_list(
+            &mut self.allgc,
+            &mut self.total_bytes,
+            &mut self.tobefnz,
+            #[cfg(debug_assertions)]
+            &mut self.released_objects,
+            l,
+        );
+        let survival_survivors = sweep_full_list(
+            &mut self.survival,
+            &mut self.total_bytes,
+            &mut self.tobefnz,
+            #[cfg(debug_assertions)]
+            &mut self.released_objects,
+            l,
+        );
+        let old_survivors = sweep_full_list(
+            &mut self.old,
+            &mut self.total_bytes,
+            &mut self.tobefnz,
+            #[cfg(debug_assertions)]
+            &mut self.released_objects,
+            l,
+        );
+        let old1_survivors = sweep_full_list(
+            &mut self.old1,
+            &mut self.total_bytes,
+            &mut self.tobefnz,
+            #[cfg(debug_assertions)]
+            &mut self.released_objects,
+            l,
+        );
 
         // All survivors go to old list
         self.old.add_all(allgc_survivors);
@@ -2907,12 +3018,24 @@ impl GC {
             };
 
             if header.is_dead(other_white) {
-                // Dead object: free it
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    Self::remove_dead_string_from_intern(l, str_ptr);
+                // BUG FIX: Check FINALIZEDBIT before freeing.
+                // Objects with finalizers are tracked in both generation lists AND finobj.
+                // If we free them here, finobj will have dangling pointers → use-after-free.
+                // Instead, move them to tobefnz for later finalization (like Lua 5.5).
+                if header.to_finalize() {
+                    // Has finalizer: keep alive for finalization
+                    gc_owner.header_mut().make_white(self.current_white);
+                    gc_owner.header_mut().set_age(G_SURVIVAL);
+                    self.tobefnz.push(gc_ptr);
+                    new_survival.push(gc_owner);
+                } else {
+                    // No finalizer: safe to free
+                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    }
+                    self.total_bytes -= gc_owner.size() as isize;
+                    self.release_object(gc_owner);
                 }
-                self.total_bytes -= gc_owner.size() as isize;
-                drop(gc_owner);
             } else {
                 // Alive: promote to G_SURVIVAL and make white
                 gc_owner.header_mut().set_age(G_SURVIVAL);
@@ -2934,12 +3057,22 @@ impl GC {
             };
 
             if header.is_dead(other_white) {
-                // Dead object: free it
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    Self::remove_dead_string_from_intern(l, str_ptr);
+                // BUG FIX: Check FINALIZEDBIT before freeing (same as Phase 1)
+                if header.to_finalize() {
+                    gc_owner.header_mut().make_white(self.current_white);
+                    gc_owner.header_mut().set_age(G_OLD1);
+                    self.tobefnz.push(gc_ptr);
+                    let size = gc_owner.header().size as isize;
+                    added_old1 += size;
+                    new_old1.push(gc_owner);
+                } else {
+                    // No finalizer: safe to free
+                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
+                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    }
+                    self.total_bytes -= gc_owner.size() as isize;
+                    self.release_object(gc_owner);
                 }
-                self.total_bytes -= gc_owner.size() as isize;
-                drop(gc_owner);
             } else {
                 // Alive: promote to G_OLD1 and KEEP COLOR (don't make white)
                 let size = header.size as isize;
@@ -2978,6 +3111,8 @@ impl GC {
                 if age == G_NEW {
                     if header.is_dead(other_white) {
                         // Dead with finalizer: move to tobefnz
+                        #[cfg(debug_assertions)]
+                        eprintln!("[GC finobj REMOVE] sweep_full_gen G_NEW: dead obj. finobj={}", self.finobj.len()-1);
                         self.tobefnz.push(gc_ptr);
                         self.finobj.swap_remove(i);
                         continue;
@@ -2991,6 +3126,8 @@ impl GC {
                 } else if age == G_SURVIVAL || age == G_OLD0 {
                     if header.is_dead(other_white) {
                         // Dead: move to tobefnz
+                        #[cfg(debug_assertions)]
+                        eprintln!("[GC finobj REMOVE] sweep_full_gen G_SURV/OLD0: dead obj. finobj={}", self.finobj.len()-1);
                         self.tobefnz.push(gc_ptr);
                         self.finobj.swap_remove(i);
                         continue;
@@ -3330,6 +3467,8 @@ impl GC {
         // TODO: Set L->ci->callstatus |= CIST_FIN (requires VM support)
 
         // Call __gc(obj) using pcall to handle errors safely
+        #[cfg(debug_assertions)]
+        eprintln!("[GC call_one_finalizer] calling __gc, tobefnz remaining={}", self.tobefnz.len());
         let result = l.pcall(gc_method, vec![obj_value]);
 
         // TODO: Clear CIST_FIN flag
@@ -3343,7 +3482,10 @@ impl GC {
         // Lua 5.5: luaE_warnerror(L, "__gc");
         if result.is_err() {
             let msg = l.get_error_msg(LuaError::RuntimeError);
-            eprintln!("Error in __gc metamethod: {}", msg);
+            eprintln!("[GC call_one_finalizer] ERROR in __gc: {}", msg);
+        } else {
+            #[cfg(debug_assertions)]
+            eprintln!("[GC call_one_finalizer] __gc completed successfully");
         }
     }
 
@@ -3376,6 +3518,9 @@ impl GC {
     // }
     fn separate_to_be_finalized(&mut self, all: bool) {
         let mut i = 0;
+        let mut moved = 0;
+        #[cfg(debug_assertions)]
+        eprintln!("[GC separate_to_be_finalized] finobj len={}, all={all}", self.finobj.len());
         while i < self.finobj.len() {
             let gc_ptr = self.finobj[i];
 
@@ -3384,14 +3529,29 @@ impl GC {
                 .map(|header| header.is_white())
                 .unwrap_or(false);
 
+            #[cfg(debug_assertions)]
+            {
+                let header = gc_ptr.header();
+                let is_black = header.map(|h| h.is_black()).unwrap_or(false);
+                let is_gray = header.map(|h| h.is_gray()).unwrap_or(false);
+                let marked = header.map(|h| h.marked).unwrap_or(0);
+                eprintln!("[GC separate_to_be_finalized]   item {i}: is_white={is_white} is_black={is_black} is_gray={is_gray} marked=0b{marked:08b}");
+            }
+
             if is_white || all {
                 // Remove from finobj
                 self.finobj.swap_remove(i);
                 // Add to tobefnz
                 self.tobefnz.push(gc_ptr);
+                moved += 1;
             } else {
                 i += 1; // Only increment if not removed
             }
+        }
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[GC separate_to_be_finalized] moved={moved} remaining_finobj={} tobefnz={}",
+                self.finobj.len(), self.tobefnz.len());
         }
     }
 
