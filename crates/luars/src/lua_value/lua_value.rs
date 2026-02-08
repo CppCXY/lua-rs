@@ -940,6 +940,18 @@ impl LuaValue {
     }
 }
 
+/// Check if a float value exactly equals an integer value.
+/// Returns false if the float can't precisely represent the integer.
+#[inline(always)]
+fn lua_float_eq_int(f: f64, i: i64) -> bool {
+    if !f.is_finite() { return false; }
+    // Check if float is integral and round-trips through i64
+    if f != f.floor() { return false; }
+    // Check range (i64::MIN is exactly representable as f64, i64::MAX is not)
+    if f < i64::MIN as f64 || f >= (i64::MAX as f64) + 1.0 { return false; }
+    (f as i64) == i
+}
+
 impl PartialEq for LuaValue {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
@@ -974,9 +986,14 @@ impl PartialEq for LuaValue {
                 _ => false,
             };
         } else if tt == LUA_VNUMINT && other_tt == LUA_VNUMFLT {
-            return self.ivalue() as f64 == other.fltvalue();
+            let f = other.fltvalue();
+            let i = self.ivalue();
+            // Only equal if float exactly represents this integer
+            return lua_float_eq_int(f, i);
         } else if tt == LUA_VNUMFLT && other_tt == LUA_VNUMINT {
-            return self.fltvalue() == other.ivalue() as f64;
+            let f = self.fltvalue();
+            let i = other.ivalue();
+            return lua_float_eq_int(f, i);
         } else if (tt == LUA_VSHRSTR || tt == LUA_VLNGSTR) && other_tt == LUA_VBINARY {
             // Compare string with binary - compare bytes
             let str_bytes = if tt == LUA_VSHRSTR {

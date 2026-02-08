@@ -1,8 +1,9 @@
 use crate::lua_value::LuaValue;
 use crate::lua_vm::execute::call::{self, call_c_function};
-use crate::lua_vm::execute::helper::get_binop_metamethod;
+use crate::lua_vm::execute::helper::{get_binop_metamethod, tonumberns, lua_shiftl};
 use crate::lua_vm::execute::lua_execute;
 use crate::lua_vm::opcode::Instruction;
+use crate::stdlib::basic::parse_number::parse_lua_number;
 /// Metamethod operations
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
@@ -17,6 +18,22 @@ pub fn try_unary_tm(
     result_pos: usize,
     tm_kind: TmKind,
 ) -> LuaResult<()> {
+    // String coercion for arithmetic unary ops (Unm: -"10" == -10.0)
+    if tm_kind == TmKind::Unm {
+        let mut n = 0f64;
+        if tonumberns(&operand, &mut n) {
+            let stack = lua_state.stack_mut();
+            stack[result_pos] = LuaValue::float(-n);
+            return Ok(());
+        }
+    } else if tm_kind == TmKind::Bnot {
+        if let Some(i) = try_to_integer(&operand) {
+            let stack = lua_state.stack_mut();
+            stack[result_pos] = LuaValue::integer(!i);
+            return Ok(());
+        }
+    }
+
     // Try to get metamethod from operand
     let metamethod = get_metamethod_event(lua_state, &operand, tm_kind);
     if let Some(mm) = metamethod {
@@ -269,6 +286,21 @@ fn try_bin_tm(
     p2: LuaValue,
     tm_kind: TmKind,
 ) -> LuaResult<LuaValue> {
+    // Before metamethod lookup, try string-to-number coercion for arithmetic ops
+    // (Lua 5.5: luaT_trybinassocTM does this before falling back to metamethods)
+    if is_arithmetic_tm(tm_kind) {
+        let mut n1 = 0f64;
+        let mut n2 = 0f64;
+        if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
+            return Ok(LuaValue::float(arith_op(n1, n2, tm_kind)));
+        }
+    } else if is_bitwise_tm(tm_kind) {
+        // For bitwise ops, try string-to-integer coercion
+        if let (Some(i1), Some(i2)) = (try_to_integer(&p1), try_to_integer(&p2)) {
+            return Ok(LuaValue::integer(bitwise_op(i1, i2, tm_kind)));
+        }
+    }
+
     // Try to get metamethod from p1, then p2
     let metamethod = get_binop_metamethod(lua_state, &p1, &p2, tm_kind);
     if let Some(mm) = metamethod {
@@ -287,6 +319,89 @@ fn try_bin_tm(
         };
         Err(lua_state.error(msg.to_string()))
     }
+}
+
+#[inline]
+fn is_arithmetic_tm(tm: TmKind) -> bool {
+    matches!(
+        tm,
+        TmKind::Add
+            | TmKind::Sub
+            | TmKind::Mul
+            | TmKind::Div
+            | TmKind::Mod
+            | TmKind::Pow
+            | TmKind::IDiv
+            | TmKind::Unm
+    )
+}
+
+#[inline]
+fn is_bitwise_tm(tm: TmKind) -> bool {
+    matches!(
+        tm,
+        TmKind::Band | TmKind::Bor | TmKind::Bxor | TmKind::Shl | TmKind::Shr | TmKind::Bnot
+    )
+}
+
+#[inline]
+fn arith_op(n1: f64, n2: f64, tm: TmKind) -> f64 {
+    match tm {
+        TmKind::Add => n1 + n2,
+        TmKind::Sub => n1 - n2,
+        TmKind::Mul => n1 * n2,
+        TmKind::Div => n1 / n2,
+        TmKind::Pow => n1.powf(n2),
+        TmKind::IDiv => {
+            let d = (n1 / n2).floor();
+            d
+        }
+        TmKind::Mod => {
+            // Lua mod: a - floor(a/b)*b
+            let d = (n1 / n2).floor();
+            n1 - d * n2
+        }
+        TmKind::Unm => -n1,
+        _ => 0.0,
+    }
+}
+
+#[inline]
+fn bitwise_op(i1: i64, i2: i64, tm: TmKind) -> i64 {
+    match tm {
+        TmKind::Band => i1 & i2,
+        TmKind::Bor => i1 | i2,
+        TmKind::Bxor => i1 ^ i2,
+        TmKind::Shl => lua_shiftl(i1, i2),
+        TmKind::Shr => lua_shiftl(i1, i2.wrapping_neg()),
+        TmKind::Bnot => !i1,
+        _ => 0,
+    }
+}
+
+/// Try to convert a LuaValue to integer (for bitwise string coercion)
+fn try_to_integer(v: &LuaValue) -> Option<i64> {
+    if let Some(i) = v.as_integer() {
+        return Some(i);
+    }
+    if let Some(f) = v.as_number() {
+        if f == f.floor() && f.is_finite() {
+            return Some(f as i64);
+        }
+        return None;
+    }
+    if let Some(s) = v.as_str() {
+        let parsed = parse_lua_number(s);
+        if let Some(i) = parsed.as_integer() {
+            return Some(i);
+        }
+        if let Some(f) = parsed.as_number() {
+            if f == f.floor() && f.is_finite() {
+                return Some(f as i64);
+            }
+        }
+    }
+    None
 }
 
 /// Call a metamethod with two arguments

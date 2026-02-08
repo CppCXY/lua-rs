@@ -57,6 +57,10 @@ use crate::{
             ttisfloat,
             ttisinteger,
             ttisstring,
+            lua_shiftl,
+            lua_shiftr,
+            lua_idiv,
+            lua_imod,
         },
     },
 };
@@ -377,7 +381,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let i2 = ivalue(v2);
                         if i2 != 0 {
                             pc += 1;
-                            setivalue(&mut stack[base + a], i1.div_euclid(i2));
+                            setivalue(&mut stack[base + a], lua_idiv(i1, i2));
                         }
                     } else {
                         let mut n1 = 0.0;
@@ -403,7 +407,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let i2 = ivalue(v2);
                         if i2 != 0 {
                             pc += 1;
-                            setivalue(&mut stack[base + a], i1.rem_euclid(i2));
+                            setivalue(&mut stack[base + a], lua_imod(i1, i2));
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
@@ -547,8 +551,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let i1 = ivalue(v1);
                         if i2 != 0 {
                             pc += 1;
-                            let result = i1 - (i1 / i2) * i2;
-                            setivalue(&mut stack[base + a], result);
+                            setivalue(&mut stack[base + a], lua_imod(i1, i2));
                         }
                     } else {
                         let mut n1 = 0.0;
@@ -610,12 +613,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let i1 = ivalue(v1);
                         if i2 != 0 {
                             pc += 1;
-                            let result = if (i1 ^ i2) >= 0 {
-                                i1 / i2
-                            } else {
-                                (i1 / i2) - if i1 % i2 != 0 { 1 } else { 0 }
-                            };
-                            setivalue(&mut stack[base + a], result);
+                            setivalue(&mut stack[base + a], lua_idiv(i1, i2));
                         }
                     } else {
                         let mut n1 = 0.0;
@@ -744,9 +742,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
                         pc += 1;
-                        // Lua wraps shift amount to 0-63
-                        let shift = (i2 & 63) as u32;
-                        setivalue(&mut stack[base + a], i1.wrapping_shl(shift));
+                        setivalue(&mut stack[base + a], lua_shiftl(i1, i2));
                     }
                 }
                 OpCode::Shr => {
@@ -763,9 +759,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
                         pc += 1;
-                        // Lua wraps shift amount to 0-63
-                        let shift = (i2 & 63) as u32;
-                        setivalue(&mut stack[base + a], (i1 as u64).wrapping_shr(shift) as i64);
+                        setivalue(&mut stack[base + a], lua_shiftr(i1, i2));
                     }
                 }
                 OpCode::BNot => {
@@ -805,24 +799,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if tointegerns(rb, &mut ib) {
                         pc += 1;
                         // luaV_shiftl(ic, ib): shift ic left by ib
-                        let result = if ib >= 0 {
-                            if ib >= 64 { 0 } else { (ic as i64) << ib }
-                        } else {
-                            // negative shift = right shift
-                            let shift = -ib;
-                            if shift >= 64 {
-                                if ic < 0 { -1 } else { 0 }
-                            } else {
-                                (ic as i64) >> shift
-                            }
-                        };
-                        setivalue(&mut stack[base + a], result);
+                        setivalue(&mut stack[base + a], lua_shiftl(ic as i64, ib));
                     }
                     // else: metamethod
                 }
                 OpCode::ShrI => {
                     // R[A] := R[B] >> sC
-                    // Arithmetic right shift
+                    // Logical right shift (Lua 5.5: luaV_shiftr)
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let ic = instr.get_sc(); // shift amount
@@ -833,24 +816,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut ib = 0i64;
                     if tointegerns(rb, &mut ib) {
                         pc += 1;
-                        // luaV_shiftl(ib, -ic): shift ib left by -ic (i.e., right by ic)
-                        let shift_amount = -ic;
-                        let result = if shift_amount >= 0 {
-                            if shift_amount >= 64 {
-                                0
-                            } else {
-                                ib << shift_amount
-                            }
-                        } else {
-                            // right shift
-                            let shift = -shift_amount;
-                            if shift >= 64 {
-                                if ib < 0 { -1 } else { 0 }
-                            } else {
-                                ib >> shift
-                            }
-                        };
-                        setivalue(&mut stack[base + a], result);
+                        // luaV_shiftr(ib, ic) = luaV_shiftl(ib, -ic)
+                        setivalue(&mut stack[base + a], lua_shiftr(ib, ic as i64));
                     }
                     // else: metamethod
                 }
@@ -1813,19 +1780,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::LtI => {
-                    comparison_ops::exec_lti(lua_state, instr, base, &mut pc)?;
+                    comparison_ops::exec_lti(lua_state, instr, base, frame_idx, &mut pc)?;
                 }
 
                 OpCode::LeI => {
-                    comparison_ops::exec_lei(lua_state, instr, base, &mut pc)?;
+                    comparison_ops::exec_lei(lua_state, instr, base, frame_idx, &mut pc)?;
                 }
 
                 OpCode::GtI => {
-                    comparison_ops::exec_gti(lua_state, instr, base, &mut pc)?;
+                    comparison_ops::exec_gti(lua_state, instr, base, frame_idx, &mut pc)?;
                 }
 
                 OpCode::GeI => {
-                    comparison_ops::exec_gei(lua_state, instr, base, &mut pc)?;
+                    comparison_ops::exec_gei(lua_state, instr, base, frame_idx, &mut pc)?;
                 }
 
                 // ============================================================

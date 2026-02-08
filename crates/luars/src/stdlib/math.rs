@@ -266,9 +266,14 @@ fn math_modf(l: &mut LuaState) -> LuaResult<usize> {
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'modf' (number expected)".to_string()))?;
     let int_part = x.trunc();
-    let frac_part = x - int_part;
+    let frac_part = if x.is_infinite() { 0.0 } else { x - int_part };
 
-    l.push_value(LuaValue::float(int_part))?;
+    // Return integer part as integer if it fits
+    if !x.is_nan() && !x.is_infinite() && int_part >= i64::MIN as f64 && int_part <= i64::MAX as f64 {
+        l.push_value(LuaValue::integer(int_part as i64))?;
+    } else {
+        l.push_value(LuaValue::float(int_part))?;
+    }
     l.push_value(LuaValue::float(frac_part))?;
     Ok(2)
 }

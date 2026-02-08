@@ -28,25 +28,34 @@ fn table_create(l: &mut LuaState) -> LuaResult<usize> {
     // Validate arguments
     if narray < 0 {
         return Err(
-            l.error("bad argument #1 to 'create' (array size must be non-negative)".to_string())
+            l.error("bad argument #1 to 'create' (out of range)".to_string())
         );
     }
     if nhash < 0 {
         return Err(
-            l.error("bad argument #2 to 'create' (hash size must be non-negative)".to_string())
+            l.error("bad argument #2 to 'create' (out of range)".to_string())
         );
     }
 
     // Check for overflow (INT_MAX in Lua is i32::MAX)
     if narray > i32::MAX as i64 {
-        return Err(l.error("bad argument #1 to 'create' (array size too large)".to_string()));
+        return Err(l.error("bad argument #1 to 'create' (out of range)".to_string()));
     }
     if nhash > i32::MAX as i64 {
-        return Err(l.error("bad argument #2 to 'create' (hash size too large)".to_string()));
+        return Err(l.error("bad argument #2 to 'create' (out of range)".to_string()));
     }
 
+    // Limit to reasonable sizes to avoid allocation panics
+    let max_safe = 1 << 24; // ~16M elements
+    let na = std::cmp::min(narray as usize, max_safe);
+    let nh = if nhash as usize > max_safe {
+        return Err(l.error("table overflow".to_string()));
+    } else {
+        nhash as usize
+    };
+
     // Create table with pre-allocated sizes
-    let table = l.create_table(narray as usize, nhash as usize)?;
+    let table = l.create_table(na, nh)?;
     l.push_value(table)?;
     Ok(1)
 }
@@ -119,6 +128,16 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(value) = table.raw_geti(idx) {
             if let Some(s) = value.as_str() {
                 parts.push(s.to_string());
+            } else if let Some(i) = value.as_integer() {
+                parts.push(format!("{}", i));
+            } else if let Some(f) = value.as_number() {
+                // Use Lua-style float formatting
+                if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
+                    parts.push(format!("{:.1}", f));
+                } else {
+                    // Rust doesn't have %g; use Display which approximates it
+                    parts.push(format!("{}", f));
+                }
             } else {
                 let msg = format!("bad value at index {} in 'concat' (string expected)", idx);
                 return Err(l.error(msg));

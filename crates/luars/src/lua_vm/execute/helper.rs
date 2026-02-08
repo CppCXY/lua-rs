@@ -2,6 +2,7 @@ use crate::{
     Chunk, LuaResult, LuaValue,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
     lua_vm::{LuaState, TmKind, execute},
+    stdlib::basic::parse_number::parse_lua_number,
 };
 
 /// Build hidden arguments for vararg functions
@@ -197,6 +198,57 @@ pub fn setnilvalue(v: &mut LuaValue) {
     *v = LuaValue::nil();
 }
 
+/// luaV_shiftl - Shift integer x left by y positions.
+/// If y is negative, shifts right (LOGICAL/unsigned shift).
+/// Matches Lua 5.5's luaV_shiftl from lvm.c.
+#[inline(always)]
+pub fn lua_shiftl(x: i64, y: i64) -> i64 {
+    if y < 0 {
+        // Right shift (logical/unsigned)
+        if y <= -64 {
+            0
+        } else {
+            ((x as u64) >> ((-y) as u32)) as i64
+        }
+    } else {
+        // Left shift
+        if y >= 64 {
+            0
+        } else {
+            ((x as u64) << (y as u32)) as i64
+        }
+    }
+}
+
+/// luaV_shiftr - Shift integer x right by y positions.
+/// luaV_shiftr(x, y) = luaV_shiftl(x, -y)
+#[inline(always)]
+pub fn lua_shiftr(x: i64, y: i64) -> i64 {
+    lua_shiftl(x, y.wrapping_neg())
+}
+
+/// Lua floor division for integers: a // b
+/// Equivalent to luaV_idiv in Lua 5.5
+#[inline(always)]
+pub fn lua_idiv(a: i64, b: i64) -> i64 {
+    // Handle overflow case: MIN_INT / -1 would overflow, wrapping gives MIN_INT (floor division same result)
+    if b == -1 { return a.wrapping_neg(); }
+    let q = a / b;
+    // If the signs of a and b differ and there is a remainder,
+    // subtract 1 to achieve floor division (toward -infinity)
+    if (a ^ b) < 0 && a % b != 0 { q - 1 } else { q }
+}
+
+/// Lua modulo for integers: a % b
+/// Equivalent to luaV_mod in Lua 5.5: m = a % b; if m != 0 && (m ^ b) < 0 then m += b
+#[inline(always)]
+pub fn lua_imod(a: i64, b: i64) -> i64 {
+    // Handle overflow case: MIN_INT % -1 = 0
+    if b == -1 { return 0; }
+    let m = a % b;
+    if m != 0 && (m ^ b) < 0 { m + b } else { m }
+}
+
 // ============ 类型转换辅助函数 ============
 
 /// tointegerns - 尝试转换为整数 (不抛出错误)
@@ -220,6 +272,7 @@ pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
 }
 
 /// tonumberns - 尝试转换为浮点数 (不抛出错误)
+/// Supports string-to-number coercion per Lua 5.5 spec
 #[inline(always)]
 pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
     unsafe {
@@ -230,6 +283,19 @@ pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
             *out = pivalue(v) as f64;
             true
         } else {
+            // String coercion: try to convert string to number
+            let val = &*v;
+            if let Some(s) = val.as_str() {
+                let parsed = parse_lua_number(s);
+                if let Some(n) = parsed.as_number() {
+                    *out = n;
+                    return true;
+                }
+                if let Some(i) = parsed.as_integer() {
+                    *out = i as f64;
+                    return true;
+                }
+            }
             false
         }
     }
@@ -242,6 +308,7 @@ pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
 }
 
 /// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
+/// Supports string-to-number coercion per Lua 5.5 spec
 #[inline(always)]
 pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
     if v.tt() == LUA_VNUMFLT {
@@ -254,6 +321,17 @@ pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
             *out = v.value.i as f64;
         }
         true
+    } else if let Some(s) = v.as_str() {
+        let parsed = parse_lua_number(s);
+        if let Some(n) = parsed.as_number() {
+            *out = n;
+            return true;
+        }
+        if let Some(i) = parsed.as_integer() {
+            *out = i as f64;
+            return true;
+        }
+        false
     } else {
         false
     }
@@ -453,7 +531,16 @@ pub fn finishset(
                 return Ok(true);
             }
 
-            // Found metamethod - check if it's a function
+            // Check if key already exists in the table.
+            // If it does, do a raw set regardless of __newindex.
+            if let Some(existing) = table.raw_get(key) {
+                if !existing.is_nil() {
+                    lua_state.raw_set(&t, *key, value);
+                    return Ok(true);
+                }
+            }
+
+            // Key does not exist - call __newindex metamethod
             if let Some(tm) = tm_val {
                 if tm.is_function() {
                     use crate::lua_vm::execute;

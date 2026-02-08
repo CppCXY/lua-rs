@@ -1503,6 +1503,16 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
     }
 }
 
+/// Lua shift left for constant folding - matches luaV_shiftl behavior
+#[inline]
+fn fold_shiftl(x: i64, y: i64) -> i64 {
+    if y < 0 {
+        if y <= -64 { 0 } else { ((x as u64) >> ((-y) as u32)) as i64 }
+    } else {
+        if y >= 64 { 0 } else { ((x as u64) << (y as u32)) as i64 }
+    }
+}
+
 // Try to constant-fold a binary operation
 // Port of constfolding from lcode.c:1337-1356
 // Mimics luaO_rawarith: if both operands are INTEGER type, result is INTEGER; otherwise FLOAT
@@ -1603,46 +1613,9 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
             }
 
             e1.kind = VKINT;
-            // Port of luaV_shiftl from lvm.c:780-793
-            // Lua uses unsigned shift (logical shift, not arithmetic)
-            let u1 = i1 as u64;
-            e1.u = ExpUnion::IVal(match op {
-                OpShl => {
-                    if i2 < 0 {
-                        // Shift right with negative y
-                        let shift_amount = -i2;
-                        if shift_amount >= 64 {
-                            0
-                        } else {
-                            (u1 >> shift_amount) as i64
-                        }
-                    } else {
-                        // Shift left with positive y
-                        if i2 >= 64 { 0 } else { (u1 << i2) as i64 }
-                    }
-                }
-                OpShr => {
-                    // luaV_shiftr(x,y) = luaV_shiftl(x, -y)
-                    let neg_i2 = -i2;
-                    if neg_i2 < 0 {
-                        // Shift right
-                        let shift_amount = -neg_i2;
-                        if shift_amount >= 64 {
-                            0
-                        } else {
-                            (u1 >> shift_amount) as i64
-                        }
-                    } else {
-                        // Shift left
-                        if neg_i2 >= 64 {
-                            0
-                        } else {
-                            (u1 << neg_i2) as i64
-                        }
-                    }
-                }
-                _ => unreachable!(),
-            });
+            // Use lua_shiftl for both: shl(x,y) = shiftl(x,y), shr(x,y) = shiftl(x,-y)
+            let shift_y = if op == OpShr { i2.wrapping_neg() } else { i2 };
+            e1.u = ExpUnion::IVal(fold_shiftl(i1, shift_y));
             return true;
         }
         _ => {}
@@ -1675,15 +1648,30 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
                     OpAdd => i1.checked_add(i2),
                     OpSub => i1.checked_sub(i2),
                     OpMul => i1.checked_mul(i2),
-                    OpIDiv => i1.checked_div(i2),
+                    OpIDiv => {
+                        // Lua floor division: a // b = floor(a/b)
+                        if i2 == -1 {
+                            i1.checked_neg() // handles MIN_INT overflow
+                        } else {
+                            let q = i1 / i2;
+                            if (i1 ^ i2) < 0 && i1 % i2 != 0 {
+                                Some(q - 1)
+                            } else {
+                                Some(q)
+                            }
+                        }
+                    }
                     OpMod => {
-                        // Use Lua's modulo definition: a % b = a - floor(a/b) * b
-                        // NOT Rust's rem_euclid which differs for negative divisors
-                        let quot = (i1 as f64) / (i2 as f64);
-                        let floor_quot = quot.floor() as i64;
-                        match floor_quot.checked_mul(i2) {
-                            Some(prod) => i1.checked_sub(prod),
-                            None => None,
+                        // Lua modulo: m = a % b; if m != 0 && (m ^ b) < 0 then m += b
+                        if i2 == -1 {
+                            Some(0) // MIN_INT % -1 = 0, any x % -1 = 0
+                        } else {
+                            let m = i1 % i2;
+                            if m != 0 && (m ^ i2) < 0 {
+                                Some(m + i2)
+                            } else {
+                                Some(m)
+                            }
                         }
                     }
                     _ => unreachable!(),

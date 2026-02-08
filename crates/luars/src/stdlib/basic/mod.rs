@@ -2,7 +2,7 @@
 // Implements: print, type, assert, error, tonumber, tostring,
 // select, ipairs, pairs, next, pcall, xpcall, getmetatable, setmetatable,
 // rawget, rawset, rawlen, rawequal, collectgarbage, dofile, loadfile, load
-mod parse_number;
+pub mod parse_number;
 mod require;
 
 use std::rc::Rc;
@@ -110,15 +110,25 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
 
 /// error(message) - Raise an error
 fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
-    let arg = match l.get_arg(1) {
-        Some(v) => v,
-        None => {
-            return Err(l.error("bad argument #1 to 'error' (value expected)".to_string()));
-        }
-    };
-    let message = l.to_string(&arg)?;
+    let arg = l.get_arg(1).unwrap_or(LuaValue::nil());
 
-    Err(l.error(message))
+    // error() with nil or no argument: Lua 5.5 raises nil as the error object
+    // The error message becomes "<no error object>" when formatted
+    if arg.is_nil() {
+        return Err(l.error("<no error object>".to_string()));
+    }
+
+    let level = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
+
+    if arg.is_string() && level > 0 {
+        // Add position info to string error message
+        let message = l.to_string(&arg)?;
+        Err(l.error(message))
+    } else {
+        // Non-string error object or level 0: raise as-is
+        let message = l.to_string(&arg)?;
+        Err(l.error(message))
+    }
 }
 
 /// tonumber(e [, base]) - Convert to number
@@ -431,8 +441,25 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'getmetatable' (value expected)".to_string()))?;
 
-    let v = get_metatable(l, &value).unwrap_or(LuaValue::nil());
-    l.push_value(v)?;
+    let mt = get_metatable(l, &value);
+    match mt {
+        Some(mt_val) => {
+            // Check for __metatable field - if present, return that instead
+            if let Some(table) = mt_val.as_table() {
+                let key = l.create_string("__metatable")?;
+                if let Some(mm) = table.raw_get(&key) {
+                    if !mm.is_nil() {
+                        l.push_value(mm)?;
+                        return Ok(1);
+                    }
+                }
+            }
+            l.push_value(mt_val)?;
+        }
+        None => {
+            l.push_value(LuaValue::nil())?;
+        }
+    }
     Ok(1)
 }
 
@@ -446,6 +473,19 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #2 to 'setmetatable' (value expected)".to_string()))?;
 
     if let Some(table_ref) = table.as_table_mut() {
+        // Check for __metatable protection on existing metatable
+        if let Some(existing_mt) = table_ref.get_metatable() {
+            if let Some(mt_table) = existing_mt.as_table() {
+                let key = l.create_string("__metatable")?;
+                let has_protection = mt_table.raw_get(&key).map_or(false, |v| !v.is_nil());
+                if has_protection {
+                    return Err(l.error(
+                        "cannot change a protected metatable".to_string(),
+                    ));
+                }
+            }
+        }
+
         match metatable.kind() {
             LuaValueKind::Nil => {
                 table_ref.set_metatable(None);

@@ -179,6 +179,7 @@ pub fn exec_lti(
     lua_state: &mut LuaState,
     instr: Instruction,
     base: usize,
+    frame_idx: usize,
     pc: &mut usize,
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
@@ -193,7 +194,20 @@ pub fn exec_lti(
     } else if ttisfloat(ra) {
         fltvalue(ra) < (im as f64)
     } else {
-        false
+        // Metamethod fallback: R[A] < im => try_comp_tm(R[A], im, Lt)
+        let va = *ra;
+        let vb = LuaValue::integer(im as i64);
+        lua_state.set_frame_pc(frame_idx, *pc as u32);
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
+            Some(result) => result,
+            None => {
+                return Err(lua_state.error(format!(
+                    "attempt to compare {} with {}",
+                    va.type_name(),
+                    "number"
+                )));
+            }
+        }
     };
 
     if cond != k {
@@ -208,6 +222,7 @@ pub fn exec_lei(
     lua_state: &mut LuaState,
     instr: Instruction,
     base: usize,
+    frame_idx: usize,
     pc: &mut usize,
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
@@ -222,7 +237,19 @@ pub fn exec_lei(
     } else if ttisfloat(ra) {
         fltvalue(ra) <= (im as f64)
     } else {
-        false
+        let va = *ra;
+        let vb = LuaValue::integer(im as i64);
+        lua_state.set_frame_pc(frame_idx, *pc as u32);
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
+            Some(result) => result,
+            None => {
+                return Err(lua_state.error(format!(
+                    "attempt to compare {} with {}",
+                    va.type_name(),
+                    "number"
+                )));
+            }
+        }
     };
 
     if cond != k {
@@ -237,6 +264,7 @@ pub fn exec_gti(
     lua_state: &mut LuaState,
     instr: Instruction,
     base: usize,
+    frame_idx: usize,
     pc: &mut usize,
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
@@ -251,7 +279,20 @@ pub fn exec_gti(
     } else if ttisfloat(ra) {
         fltvalue(ra) > (im as f64)
     } else {
-        false
+        // R[A] > im is equivalent to im < R[A]
+        let va = LuaValue::integer(im as i64);
+        let vb = *ra;
+        lua_state.set_frame_pc(frame_idx, *pc as u32);
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
+            Some(result) => result,
+            None => {
+                return Err(lua_state.error(format!(
+                    "attempt to compare {} with {}",
+                    vb.type_name(),
+                    "number"
+                )));
+            }
+        }
     };
 
     if cond != k {
@@ -266,6 +307,7 @@ pub fn exec_gei(
     lua_state: &mut LuaState,
     instr: Instruction,
     base: usize,
+    frame_idx: usize,
     pc: &mut usize,
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
@@ -280,7 +322,20 @@ pub fn exec_gei(
     } else if ttisfloat(ra) {
         fltvalue(ra) >= (im as f64)
     } else {
-        false
+        // R[A] >= im is equivalent to im <= R[A]
+        let va = LuaValue::integer(im as i64);
+        let vb = *ra;
+        lua_state.set_frame_pc(frame_idx, *pc as u32);
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
+            Some(result) => result,
+            None => {
+                return Err(lua_state.error(format!(
+                    "attempt to compare {} with {}",
+                    vb.type_name(),
+                    "number"
+                )));
+            }
+        }
     };
 
     if cond != k {

@@ -267,12 +267,19 @@ pub fn call_c_function(
     // Restore caller's frame top for proper GC scanning
     if lua_state.call_depth() > 0 {
         let ci_idx = lua_state.call_depth() - 1;
-        let ci_top = lua_state.get_call_info(ci_idx).top;
-        if nresults == -1 && ci_top < new_top {
-            lua_state.get_call_info_mut(ci_idx).top = new_top;
+        if nresults == -1 {
+            // MULTRET: stack_top must be exactly after the results so that
+            // the next OP_CALL with B=0 (varargs) counts them correctly.
+            // Update ci.top only if needed for GC scanning extent.
+            let ci_top = lua_state.get_call_info(ci_idx).top;
+            if ci_top < new_top {
+                lua_state.get_call_info_mut(ci_idx).top = new_top;
+            }
+            lua_state.set_top(new_top)?;
+        } else {
+            let frame_top = lua_state.get_call_info(ci_idx).top;
+            lua_state.set_top(frame_top)?;
         }
-        let frame_top = lua_state.get_call_info(ci_idx).top;
-        lua_state.set_top(frame_top)?;
     } else {
         lua_state.set_top(new_top)?;
     }

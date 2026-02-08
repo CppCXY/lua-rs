@@ -431,6 +431,57 @@ fn match_impl(
                     }
                 }
 
+                // Check for ZeroOrOne outside the i+1 guard too
+                if let Pattern::Repeat {
+                    mode: RepeatMode::ZeroOrOne,
+                    pattern: inner,
+                } = &patterns[i]
+                {
+                    let rest_patterns = &patterns[i + 1..];
+                    let saved_captures_len = captures.len();
+
+                    // Greedy: try matching one first
+                    if let Some(one_pos) = match_impl(inner, text, pos, captures) {
+                        // Try matching rest from one_pos
+                        let mut test_pos = one_pos;
+                        let mut success = true;
+                        for pat in rest_patterns {
+                            match match_impl(pat, text, test_pos, captures) {
+                                Some(new_pos) => test_pos = new_pos,
+                                None => {
+                                    success = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if success {
+                            return Some(test_pos);
+                        }
+                        captures.truncate(saved_captures_len);
+                    }
+
+                    // Try matching zero (skip)
+                    {
+                        let mut test_pos = pos;
+                        let mut success = true;
+                        for pat in rest_patterns {
+                            match match_impl(pat, text, test_pos, captures) {
+                                Some(new_pos) => test_pos = new_pos,
+                                None => {
+                                    success = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if success {
+                            return Some(test_pos);
+                        }
+                        captures.truncate(saved_captures_len);
+                    }
+
+                    return None;
+                }
+
                 // Normal matching for this pattern
                 match match_impl(&patterns[i], text, pos, captures) {
                     Some(new_pos) => pos = new_pos,
