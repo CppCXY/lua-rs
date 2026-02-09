@@ -1695,28 +1695,18 @@ impl LuaState {
             return Ok(false);
         }
 
-        // C Lua's checkGC macro temporarily sets L->top to a low value
-        // (e.g., ra + 1 in OP_NEWTABLE) before calling the GC step.
-        // If the GC completes a full cycle (including atomic) during this
-        // single step, traverse_thread scans only [0..top) and misses live
-        // locals above top. To fix this, we temporarily raise top to the
-        // current frame's ci->top (= base + maxstacksize), which covers
-        // all registers used by the function. After GC, we restore top.
-        let saved_top = self.get_top();
-        let call_depth = self.call_depth();
-        if call_depth > 0 {
-            let ci_top = self.get_call_info(call_depth - 1).top;
-            if ci_top > saved_top {
-                self.set_top(ci_top)?;
-            }
-        }
-
+        // Run GC step with the current top. Do NOT raise top to ci_top.
+        //
+        // In C Lua 5.5, the checkGC macro works with whatever top is set by
+        // the caller. Opcodes like OP_NEWTABLE temporarily LOWER top to ra+1
+        // before checkGC, which intentionally excludes stale registers from
+        // the GC's stack scan. Raising top to ci_top would scan stale
+        // registers that may hold dead values, keeping them alive and
+        // breaking weak table clearing.
+        //
+        // traverse_thread in the atomic phase clears slots [top..stack_last]
+        // to nil, which handles any stale references above top.
         let work = vm.check_gc(self);
-
-        // Restore original top
-        if self.get_top() != saved_top {
-            self.set_top(saved_top)?;
-        }
 
         Ok(work)
     }

@@ -12,7 +12,7 @@ pub enum Pattern {
     /// Inverted character class (%A, %D, etc.)
     InvertedClass(CharClass),
     /// Character set ([abc], [^abc])
-    Set { chars: Vec<char>, negated: bool },
+    Set { items: Vec<SetItem>, negated: bool },
     /// Sequence of patterns
     Seq(Vec<Pattern>),
     /// Repetition (*, +, -, ?)
@@ -26,6 +26,26 @@ pub enum Pattern {
     Anchor(AnchorType),
     /// Balanced match (%bxy)
     Balanced { open: char, close: char },
+}
+
+/// An item inside a character set [...]
+#[derive(Debug, Clone)]
+pub enum SetItem {
+    Char(char),
+    Range(char, char),
+    Class(CharClass),
+    InvertedClass(CharClass),
+}
+
+impl SetItem {
+    pub fn matches(&self, c: char) -> bool {
+        match self {
+            SetItem::Char(ch) => c == *ch,
+            SetItem::Range(start, end) => c >= *start && c <= *end,
+            SetItem::Class(class) => class.matches(c),
+            SetItem::InvertedClass(class) => !class.matches(c),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,26 +275,52 @@ fn parse_set(chars: &[char], start: usize) -> Result<(Pattern, usize), String> {
         pos += 1;
     }
 
-    let mut set_chars = Vec::new();
+    // Handle ']' as first char in set (literal ']')
+    let mut items = Vec::new();
+    if pos < chars.len() && chars[pos] == ']' {
+        items.push(SetItem::Char(']'));
+        pos += 1;
+    }
 
     while pos < chars.len() && chars[pos] != ']' {
         let c = chars[pos];
         if c == '%' && pos + 1 < chars.len() {
-            // Escape in set
             pos += 1;
-            set_chars.push(chars[pos]);
+            let next = chars[pos];
+            // Check if it's a character class
+            match next {
+                'a' => items.push(SetItem::Class(CharClass::Letter)),
+                'c' => items.push(SetItem::Class(CharClass::Control)),
+                'd' => items.push(SetItem::Class(CharClass::Digit)),
+                'g' => items.push(SetItem::Class(CharClass::Graph)),
+                'l' => items.push(SetItem::Class(CharClass::Lower)),
+                'p' => items.push(SetItem::Class(CharClass::Punct)),
+                's' => items.push(SetItem::Class(CharClass::Space)),
+                'u' => items.push(SetItem::Class(CharClass::Upper)),
+                'w' => items.push(SetItem::Class(CharClass::AlphaNum)),
+                'x' => items.push(SetItem::Class(CharClass::Hex)),
+                'z' => items.push(SetItem::Class(CharClass::Any)),
+                'A' => items.push(SetItem::InvertedClass(CharClass::Letter)),
+                'C' => items.push(SetItem::InvertedClass(CharClass::Control)),
+                'D' => items.push(SetItem::InvertedClass(CharClass::Digit)),
+                'G' => items.push(SetItem::InvertedClass(CharClass::Graph)),
+                'L' => items.push(SetItem::InvertedClass(CharClass::Lower)),
+                'P' => items.push(SetItem::InvertedClass(CharClass::Punct)),
+                'S' => items.push(SetItem::InvertedClass(CharClass::Space)),
+                'U' => items.push(SetItem::InvertedClass(CharClass::Upper)),
+                'W' => items.push(SetItem::InvertedClass(CharClass::AlphaNum)),
+                'X' => items.push(SetItem::InvertedClass(CharClass::Hex)),
+                'Z' => items.push(SetItem::InvertedClass(CharClass::Any)),
+                _ => items.push(SetItem::Char(next)), // literal escaped char
+            }
         } else if pos + 2 < chars.len() && chars[pos + 1] == '-' && chars[pos + 2] != ']' {
             // Range: a-z
             let start_char = c;
             let end_char = chars[pos + 2];
-            for ch in (start_char as u32)..=(end_char as u32) {
-                if let Some(ch) = char::from_u32(ch) {
-                    set_chars.push(ch);
-                }
-            }
+            items.push(SetItem::Range(start_char, end_char));
             pos += 2;
         } else {
-            set_chars.push(c);
+            items.push(SetItem::Char(c));
         }
         pos += 1;
     }
@@ -285,7 +331,7 @@ fn parse_set(chars: &[char], start: usize) -> Result<(Pattern, usize), String> {
 
     Ok((
         Pattern::Set {
-            chars: set_chars,
+            items,
             negated,
         },
         pos + 1, // Skip ']'

@@ -284,7 +284,12 @@ pub fn call_c_function(
         lua_state.set_top(new_top)?;
     }
 
-    lua_state.check_gc()?;
+    // NOTE: No check_gc() here. In C Lua 5.5, there is no checkGC after a C
+    // function call returns. GC checks happen inside the C function itself
+    // (e.g., collectgarbage) or at the next opcode that has an inline checkGC
+    // (e.g., OP_NEWTABLE). Running check_gc here with top = frame_top would
+    // cause traverse_thread to scan stale registers above new_top, keeping
+    // dead objects alive and breaking weak table clearing.
 
     Ok(())
 }

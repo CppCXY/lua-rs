@@ -126,8 +126,10 @@ pub fn exec_settable(
     if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
             // Fast path: no metatable, directly set
+            // NOTE: No check_gc() here - matches C Lua 5.5's OP_SETTABLE which
+            // does NOT have checkGC. Running GC here would scan the stack and
+            // mark the value register alive, preventing weak table clearing.
             lua_state.raw_set(&ra, rb, val);
-            lua_state.check_gc()?;
             return Ok(());
         }
     }
@@ -252,8 +254,10 @@ pub fn exec_seti(
     if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
             // Fast path: no __newindex, directly set
+            // NOTE: No check_gc() here - matches C Lua 5.5's OP_SETI which
+            // does NOT have checkGC. Running GC here would scan the stack and
+            // mark the value register alive, preventing weak table clearing.
             lua_state.raw_seti(&ra, b as i64, value);
-            lua_state.check_gc()?;
         } else {
             // Slow path: has __newindex metamethod
             let key = LuaValue::integer(b as i64);
@@ -382,8 +386,10 @@ pub fn exec_setfield(
     if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
             // Fast path: no __newindex metamethod, directly set
+            // NOTE: No check_gc() here - matches C Lua 5.5's OP_SETFIELD which
+            // does NOT have checkGC. Running GC here would scan the stack and
+            // mark the value register alive, preventing weak table clearing.
             lua_state.raw_set(&ra, key, value);
-            lua_state.check_gc()?;
             return Ok(());
         }
     }
