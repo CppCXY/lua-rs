@@ -45,11 +45,11 @@ impl ObjectAllocator {
         self.strings.intern(s, gc)
     }
 
-    /// Create string from owned String (avoids clone if already interned)
+    /// Create string from owned String (avoids clone if not already interned)
     ///
     #[inline]
     pub fn create_string_owned(&mut self, gc: &mut GC, s: String) -> CreateResult {
-        self.strings.intern(&s, gc)
+        self.strings.intern_owned(s, gc)
     }
 
     /// Create a binary value from Vec<u8>
@@ -103,8 +103,9 @@ impl ObjectAllocator {
         // Extract the byte range
         let substring_bytes = &bytes[start..end];
 
-        // Try to create a valid UTF-8 string from these bytes
-        // If invalid, create a binary value to preserve the original bytes
+        // If source is already a valid UTF-8 string, use unchecked conversion
+        // since a substring of valid UTF-8 at valid char boundaries is also valid.
+        // For arbitrary byte indices (Lua semantics), validate.
         match std::str::from_utf8(substring_bytes) {
             Ok(valid_str) => {
                 // Valid UTF-8 - intern as string

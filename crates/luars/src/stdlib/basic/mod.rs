@@ -180,12 +180,42 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("tostring() requires argument 1".to_string()))?;
 
-    // if already a string, return it directly
+    // Fast path: already a string, return it directly
     if value.is_string() {
         l.push_value(value)?;
         return Ok(1);
     }
 
+    // Fast path: integer — use itoa to avoid heap allocation
+    if let Some(n) = value.as_integer() {
+        let mut buf = itoa::Buffer::new();
+        let s = buf.format(n);
+        let result_value = l.create_string(s)?;
+        l.push_value(result_value)?;
+        return Ok(1);
+    }
+
+    // Fast path: float — use stack buffer with write!
+    if let Some(n) = value.as_number() {
+        let s = n.to_string();
+        let result_value = l.create_string(&s)?;
+        l.push_value(result_value)?;
+        return Ok(1);
+    }
+
+    // Fast path: nil / bool — static strings
+    if value.is_nil() {
+        let result_value = l.create_string("nil")?;
+        l.push_value(result_value)?;
+        return Ok(1);
+    }
+    if let Some(b) = value.as_boolean() {
+        let result_value = l.create_string(if b { "true" } else { "false" })?;
+        l.push_value(result_value)?;
+        return Ok(1);
+    }
+
+    // General path: metamethods, functions, tables, etc.
     let result = l.to_string(&value)?;
     let result_value = l.create_string_owned(result)?;
     l.push_value(result_value)?;

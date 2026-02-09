@@ -1672,15 +1672,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    let new_top = base + a + 1;
                     // GC check after concatenation (like Lua 5.5 OP_CONCAT)
                     save_pc!();
-                    lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
 
-                    // Restore frame top so subsequent instructions and GC see all locals
+                    // Restore frame top (concat may have consumed extra stack slots)
                     let frame_top = lua_state.get_call_info(frame_idx).top;
-                    lua_state.set_top(frame_top)?;
+                    lua_state.set_top_raw(frame_top);
                 }
 
                 // ============================================================
