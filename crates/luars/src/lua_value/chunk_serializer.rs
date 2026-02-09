@@ -591,7 +591,7 @@ fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), S
         buf.push(TAG_NIL);
     } else if let Some(b) = value.as_boolean() {
         buf.push(if b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE });
-    } else if let Some(i) = value.as_integer() {
+    } else if let Some(i) = value.as_integer_strict() {
         buf.push(TAG_INTEGER);
         write_i64(buf, i);
     } else if let Some(f) = value.as_float() {
@@ -621,7 +621,7 @@ fn write_constant_with_dedup(
         buf.push(TAG_NIL);
     } else if let Some(b) = value.as_boolean() {
         buf.push(if b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE });
-    } else if let Some(i) = value.as_integer() {
+    } else if let Some(i) = value.as_integer_strict() {
         buf.push(TAG_INTEGER);
         write_i64(buf, i);
     } else if let Some(f) = value.as_float() {
@@ -680,7 +680,7 @@ fn write_constant_no_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), Str
         buf.push(TAG_NIL);
     } else if let Some(b) = value.as_boolean() {
         buf.push(if b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE });
-    } else if let Some(i) = value.as_integer() {
+    } else if let Some(i) = value.as_integer_strict() {
         buf.push(TAG_INTEGER);
         write_i64(buf, i);
     } else if let Some(f) = value.as_float() {
