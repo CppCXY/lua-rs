@@ -373,13 +373,40 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
         // lparser.c:529-531: check if it's a const global (in collective declaration scope)
         if info != -1 {
-            // info >= 0 means we're in scope of a collective declaration
+            // info is an absolute index (first_local + i) into the conceptual shared actvar array
+            // We need to find the right FuncState that owns this actvar entry
             let abs_idx = info as usize;
-            if let Some(vd) = fs.actvar.get(abs_idx) {
-                if vd.kind == VarKind::GDKCONST {
-                    // lparser.c:530: var->u.ind.ro = 1; /* mark variable as read-only */
-                    v.u.ind_mut().ro = true;
+            let mut is_const = false;
+
+            // Check current FuncState
+            if abs_idx >= fs.first_local && abs_idx < fs.first_local + fs.actvar.len() {
+                let local_idx = abs_idx - fs.first_local;
+                if let Some(vd) = fs.actvar.get(local_idx) {
+                    if vd.kind == VarKind::GDKCONST {
+                        is_const = true;
+                    }
                 }
+            } else {
+                // Walk up parent FuncStates to find the right one
+                let mut parent = fs.prev.as_ref().map(|p| *p as *const FuncState);
+                while let Some(p) = parent {
+                    let pfs = unsafe { &*p };
+                    if abs_idx >= pfs.first_local && abs_idx < pfs.first_local + pfs.actvar.len() {
+                        let local_idx = abs_idx - pfs.first_local;
+                        if let Some(vd) = pfs.actvar.get(local_idx) {
+                            if vd.kind == VarKind::GDKCONST {
+                                is_const = true;
+                            }
+                        }
+                        break;
+                    }
+                    parent = pfs.prev.as_ref().map(|p| *p as *const FuncState);
+                }
+            }
+
+            if is_const {
+                // lparser.c:530: var->u.ind.ro = 1; /* mark variable as read-only */
+                v.u.ind_mut().ro = true;
             }
         }
     }

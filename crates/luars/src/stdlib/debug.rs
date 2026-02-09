@@ -2,8 +2,312 @@
 // Implements: traceback, getinfo, getlocal, getmetatable, getupvalue, etc.
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::LuaValue;
+use crate::lua_value::{Chunk, LuaValue};
 use crate::lua_vm::{LuaResult, LuaState, get_metatable};
+use crate::lua_vm::opcode::OpCode;
+use crate::Instruction;
+
+// ============================================================================
+// Function name resolution (mirrors Lua 5.5 ldebug.c)
+// ============================================================================
+
+/// Get the name of the Nth active local variable at the given PC.
+/// Mirrors Lua 5.5's luaF_getlocalname.
+/// local_number is 1-based.
+fn getlocalname(chunk: &Chunk, local_number: usize, pc: usize) -> Option<&str> {
+    let mut n = local_number;
+    for locvar in &chunk.locals {
+        if (locvar.startpc as usize) > pc {
+            break;
+        }
+        if pc < locvar.endpc as usize {
+            n -= 1;
+            if n == 0 {
+                return Some(&locvar.name);
+            }
+        }
+    }
+    None
+}
+
+/// Whether the opcode writes to register A (testAMode)
+fn test_a_mode(op: OpCode) -> bool {
+    matches!(op,
+        OpCode::Move | OpCode::LoadI | OpCode::LoadF | OpCode::LoadK | OpCode::LoadKX |
+        OpCode::LoadFalse | OpCode::LFalseSkip | OpCode::LoadTrue | OpCode::LoadNil |
+        OpCode::GetUpval | OpCode::GetTabUp | OpCode::GetTable | OpCode::GetI | OpCode::GetField |
+        OpCode::NewTable | OpCode::Self_ |
+        OpCode::AddI | OpCode::AddK | OpCode::SubK | OpCode::MulK | OpCode::ModK |
+        OpCode::PowK | OpCode::DivK | OpCode::IDivK |
+        OpCode::BAndK | OpCode::BOrK | OpCode::BXorK |
+        OpCode::ShlI | OpCode::ShrI |
+        OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Mod | OpCode::Pow |
+        OpCode::Div | OpCode::IDiv |
+        OpCode::BAnd | OpCode::BOr | OpCode::BXor | OpCode::Shl | OpCode::Shr |
+        OpCode::Unm | OpCode::BNot | OpCode::Not | OpCode::Len | OpCode::Concat |
+        OpCode::TestSet |
+        OpCode::Call | OpCode::TailCall |
+        OpCode::ForLoop | OpCode::ForPrep | OpCode::TForLoop |
+        OpCode::Closure | OpCode::Vararg | OpCode::GetVarg | OpCode::VarargPrep
+    )
+}
+
+/// Whether the opcode is a metamethod instruction (OP_MMBIN*)
+fn test_mm_mode(op: OpCode) -> bool {
+    matches!(op, OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK)
+}
+
+/// Get the upvalue name from chunk
+fn upvalname(chunk: &Chunk, uv: usize) -> String {
+    if uv < chunk.upvalue_descs.len() {
+        chunk.upvalue_descs[uv].name.clone()
+    } else {
+        "?".to_string()
+    }
+}
+
+/// Get a constant name (if it's a string)
+fn kname(chunk: &Chunk, index: usize) -> Option<String> {
+    if index < chunk.constants.len() {
+        if let Some(s) = chunk.constants[index].as_str() {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+/// Find the last instruction before lastpc that sets register reg.
+/// Returns -1 if not found.
+/// Mirrors Lua 5.5's findsetreg.
+fn findsetreg(chunk: &Chunk, lastpc: usize, reg: u32) -> i32 {
+    let mut setreg: i32 = -1;
+    let mut jmptarget: usize = 0;
+
+    // If the instruction at lastpc is an MM-mode instruction, back up one
+    let lastpc = if lastpc < chunk.code.len() && test_mm_mode(chunk.code[lastpc].get_opcode()) {
+        lastpc.saturating_sub(1)
+    } else {
+        lastpc
+    };
+
+    for pc in 0..lastpc {
+        let i = chunk.code[pc];
+        let op = i.get_opcode();
+        let a = i.get_a();
+
+        let change = match op {
+            OpCode::LoadNil => reg >= a && reg <= a + i.get_b(),
+            OpCode::TForCall => reg >= a + 2,
+            OpCode::Call | OpCode::TailCall => reg >= a,
+            OpCode::Jmp => {
+                let b = i.get_sj();
+                let dest = (pc as i32 + 1 + b) as usize;
+                if dest <= lastpc && dest > jmptarget {
+                    jmptarget = dest;
+                }
+                false
+            }
+            _ => test_a_mode(op) && reg == a,
+        };
+
+        if change {
+            // filterpc: if inside a jump target region, discard
+            setreg = if pc < jmptarget { -1 } else { pc as i32 };
+        }
+    }
+    setreg
+}
+
+/// Basic object name resolution.
+/// Returns (kind, name) or None.
+/// Mirrors Lua 5.5's basicgetobjname.
+fn basicgetobjname(chunk: &Chunk, pc: &mut i32, reg: u32) -> Option<(&'static str, String)> {
+    let pc_val = *pc as usize;
+
+    // First try: is reg a local variable at this PC?
+    if let Some(name) = getlocalname(chunk, (reg + 1) as usize, pc_val) {
+        return Some(("local", name.to_string()));
+    }
+
+    // Symbolic execution: find the instruction that set this register
+    let setreg_pc = findsetreg(chunk, pc_val, reg);
+    *pc = setreg_pc;
+
+    if setreg_pc >= 0 {
+        let i = chunk.code[setreg_pc as usize];
+        let op = i.get_opcode();
+
+        match op {
+            OpCode::Move => {
+                let b = i.get_b();
+                if b < i.get_a() {
+                    return basicgetobjname(chunk, pc, b);
+                }
+            }
+            OpCode::GetUpval => {
+                let b = i.get_b() as usize;
+                let name = upvalname(chunk, b);
+                return Some(("upvalue", name));
+            }
+            OpCode::LoadK => {
+                let bx = i.get_bx() as usize;
+                if let Some(name) = kname(chunk, bx) {
+                    return Some(("constant", name));
+                }
+            }
+            OpCode::LoadKX => {
+                if (setreg_pc as usize + 1) < chunk.code.len() {
+                    let ax = chunk.code[setreg_pc as usize + 1].get_ax() as usize;
+                    if let Some(name) = kname(chunk, ax) {
+                        return Some(("constant", name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Get a register name for rname helper
+fn rname(chunk: &Chunk, pc: usize, c: u32) -> String {
+    let mut ppc = pc as i32;
+    if let Some((kind, name)) = basicgetobjname(chunk, &mut ppc, c) {
+        if kind == "constant" {
+            return name;
+        }
+    }
+    "?".to_string()
+}
+
+/// Check if the table operand names _ENV (making it a "global")
+fn is_env(chunk: &Chunk, pc: usize, i: Instruction, isup: bool) -> &'static str {
+    let t = i.get_b();
+    let name = if isup {
+        Some(upvalname(chunk, t as usize))
+    } else {
+        let mut ppc = pc as i32;
+        match basicgetobjname(chunk, &mut ppc, t) {
+            Some(("local", name)) | Some(("upvalue", name)) => Some(name),
+            _ => None,
+        }
+    };
+    match name {
+        Some(ref n) if n == "_ENV" => "global",
+        _ => "field",
+    }
+}
+
+/// Extended object name resolution (handles table accesses).
+/// Mirrors Lua 5.5's getobjname.
+fn getobjname(chunk: &Chunk, lastpc: usize, reg: u32) -> Option<(&'static str, String)> {
+    let mut pc = lastpc as i32;
+    if let Some(result) = basicgetobjname(chunk, &mut pc, reg) {
+        return Some(result);
+    }
+    if pc >= 0 {
+        let i = chunk.code[pc as usize];
+        match i.get_opcode() {
+            OpCode::GetTabUp => {
+                let k = i.get_c() as usize;
+                let name = kname(chunk, k).unwrap_or_else(|| "?".to_string());
+                let kind = is_env(chunk, pc as usize, i, true);
+                return Some((kind, name));
+            }
+            OpCode::GetTable => {
+                let k = i.get_c();
+                let name = rname(chunk, pc as usize, k);
+                let kind = is_env(chunk, pc as usize, i, false);
+                return Some((kind, name));
+            }
+            OpCode::GetI => {
+                return Some(("field", "integer index".to_string()));
+            }
+            OpCode::GetField => {
+                let k = i.get_c() as usize;
+                let name = kname(chunk, k).unwrap_or_else(|| "?".to_string());
+                let kind = is_env(chunk, pc as usize, i, false);
+                return Some((kind, name));
+            }
+            OpCode::Self_ => {
+                let k = i.get_c() as usize;
+                let name = kname(chunk, k).unwrap_or_else(|| "?".to_string());
+                return Some(("method", name));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Determine function name from bytecode at the calling instruction.
+/// Mirrors Lua 5.5's funcnamefromcode.
+fn funcnamefromcode(chunk: &Chunk, pc: usize) -> Option<(&'static str, String)> {
+    if pc >= chunk.code.len() {
+        return None;
+    }
+    let i = chunk.code[pc];
+    match i.get_opcode() {
+        OpCode::Call | OpCode::TailCall => {
+            getobjname(chunk, pc, i.get_a())
+        }
+        OpCode::TForCall => {
+            Some(("for iterator", "for iterator".to_string()))
+        }
+        // Metamethod-triggering instructions
+        OpCode::Self_ | OpCode::GetTabUp | OpCode::GetTable | OpCode::GetI | OpCode::GetField => {
+            Some(("metamethod", "index".to_string()))
+        }
+        OpCode::SetTabUp | OpCode::SetTable | OpCode::SetI | OpCode::SetField => {
+            Some(("metamethod", "newindex".to_string()))
+        }
+        OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
+            use crate::lua_vm::TmKind;
+            if let Some(tm) = TmKind::from_u8(i.get_c() as u8) {
+                let name: &str = tm.name();
+                Some(("metamethod", name[2..].to_string()))
+            } else {
+                None
+            }
+        }
+        OpCode::Unm => Some(("metamethod", "unm".to_string())),
+        OpCode::BNot => Some(("metamethod", "bnot".to_string())),
+        OpCode::Len => Some(("metamethod", "len".to_string())),
+        OpCode::Concat => Some(("metamethod", "concat".to_string())),
+        OpCode::Eq => Some(("metamethod", "eq".to_string())),
+        OpCode::Lt | OpCode::LtI | OpCode::GtI => Some(("metamethod", "lt".to_string())),
+        OpCode::Le | OpCode::LeI | OpCode::GeI => Some(("metamethod", "le".to_string())),
+        OpCode::Close | OpCode::Return => Some(("metamethod", "close".to_string())),
+        _ => None,
+    }
+}
+
+/// Get function name by looking at the calling frame.
+/// Mirrors Lua 5.5's getfuncname.
+/// ci_frame_idx is the frame index of the TARGET function.
+fn getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static str, String)> {
+    if ci_frame_idx == 0 {
+        return None; // No caller frame
+    }
+    let ci = l.get_frame(ci_frame_idx)?;
+    // If tail call, cannot find name
+    if ci.is_tail() {
+        return None;
+    }
+    let prev_idx = ci_frame_idx - 1;
+    let prev = l.get_frame(prev_idx)?;
+    if !prev.is_lua() {
+        return None; // Caller is not a Lua function
+    }
+    // Get caller's chunk
+    let prev_func = l.get_frame_func(prev_idx)?;
+    let lua_func = prev_func.as_lua_function()?;
+    let chunk = lua_func.chunk();
+    // prev.pc points to the instruction AFTER the call (due to pc += 1 in fetch).
+    // So the call instruction is at pc - 1.
+    let pc = prev.pc.saturating_sub(1) as usize;
+    funcnamefromcode(chunk, pc)
+}
 
 pub fn create_debug_lib() -> LibraryModule {
     crate::lib_module!("debug", {
@@ -274,13 +578,23 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         if what_str.contains('n') {
-            // Name info (not implemented, use defaults)
+            // Name resolution: look at the calling frame's bytecode
+            let (name_val, namewhat_val) = if let Some(level) = arg1.as_integer() {
+                let call_depth = l.call_depth();
+                let frame_idx = call_depth - 1 - (level as usize);
+                if let Some((namewhat, name)) = getfuncname(l, frame_idx) {
+                    (l.create_string(&name)?.into(), l.create_string(namewhat)?)
+                } else {
+                    (LuaValue::nil(), l.create_string("")?)
+                }
+            } else {
+                (LuaValue::nil(), l.create_string("")?)
+            };
+
             let name_key = l.create_string("name")?;
-            let name_val = LuaValue::nil();
             l.raw_set(&info_table, name_key, name_val);
 
             let namewhat_key = l.create_string("namewhat")?;
-            let namewhat_val = l.create_string("")?;
             l.raw_set(&info_table, namewhat_key, namewhat_val);
         }
 
@@ -344,12 +658,23 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         if what_str.contains('n') {
+            // Name resolution for C functions: look at calling frame
+            let (name_val, namewhat_val) = if let Some(level) = arg1.as_integer() {
+                let call_depth = l.call_depth();
+                let frame_idx = call_depth - 1 - (level as usize);
+                if let Some((namewhat, name)) = getfuncname(l, frame_idx) {
+                    (l.create_string(&name)?.into(), l.create_string(namewhat)?)
+                } else {
+                    (LuaValue::nil(), l.create_string("")?)
+                }
+            } else {
+                (LuaValue::nil(), l.create_string("")?)
+            };
+
             let name_key = l.create_string("name")?;
-            let name_val = LuaValue::nil();
             l.raw_set(&info_table, name_key, name_val);
 
             let namewhat_key = l.create_string("namewhat")?;
-            let namewhat_val = l.create_string("")?;
             l.raw_set(&info_table, namewhat_key, namewhat_val);
         }
 
@@ -493,7 +818,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
         let chunk = lua_func.chunk();
         // Get local variable name from chunk
         if local_index > 0 && local_index <= chunk.locals.len() {
-            let name = &chunk.locals[local_index - 1];
+            let name = &chunk.locals[local_index - 1].name;
 
             // Get the value from the stack
             // The local variables are at base + (local_index - 1)
@@ -553,7 +878,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
         let chunk = lua_func.chunk();
         // Get local variable name from chunk
         if local_index > 0 && local_index <= chunk.locals.len() {
-            let name = &chunk.locals[local_index - 1];
+            let name = &chunk.locals[local_index - 1].name;
 
             // Set the value on the stack
             let base = l.get_frame_base(level);

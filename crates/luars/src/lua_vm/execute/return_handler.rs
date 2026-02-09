@@ -45,9 +45,18 @@ pub fn handle_return(
         b - 1
     };
 
-    // Close upvalues if k flag is set
+    // Close upvalues and TBC variables if k flag is set
     if k {
-        lua_state.close_upvalues(base);
+        // Like Lua 5.5 lvm.c:1772-1774: Set top to protect return values
+        // L->top.p = ra + nres;  /* save return values in correct positions */
+        let ra_pos = base + a;
+        lua_state.set_top_raw(ra_pos + nres);
+        // Also update frame.top so close methods don't overwrite return values
+        {
+            let frame = lua_state.get_call_info_mut(frame_idx);
+            frame.top = ra_pos + nres;
+        }
+        lua_state.close_all(base)?;
     }
 
     // Adjust for vararg functions (nparams1 = C)

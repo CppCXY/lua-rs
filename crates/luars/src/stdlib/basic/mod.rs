@@ -115,19 +115,25 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
     // error() with nil or no argument: Lua 5.5 raises nil as the error object
     // The error message becomes "<no error object>" when formatted
     if arg.is_nil() {
-        return Err(l.error("<no error object>".to_string()));
+        return Err(l.error_with_object("<no error object>".to_string(), LuaValue::nil()));
     }
 
     let level = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
 
     if arg.is_string() && level > 0 {
         // Add position info to string error message
+        // The error object becomes the prefixed string
         let message = l.to_string(&arg)?;
-        Err(l.error(message))
+        let err = l.error(message);
+        // For string errors with position info, the error object IS the formatted string
+        let formatted_msg = l.error_msg.clone();
+        l.error_object = l.create_string(&formatted_msg)?.into();
+        Err(err)
     } else {
         // Non-string error object or level 0: raise as-is
+        // Preserve the original error value
         let message = l.to_string(&arg)?;
-        Err(l.error(message))
+        Err(l.error_with_object(message, arg))
     }
 }
 

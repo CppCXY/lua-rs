@@ -203,12 +203,20 @@ pub struct UpvalueDesc {
     pub index: u32,     // index in parent's register or upvalue array
 }
 
+/// Local variable debug info (mirrors Lua 5.5's LocVar)
+#[derive(Debug, Clone)]
+pub struct LocVar {
+    pub name: String,    // variable name
+    pub startpc: u32,    // first point where variable is active
+    pub endpc: u32,      // first point where variable is dead
+}
+
 /// Compiled chunk (bytecode + metadata)
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub code: Vec<Instruction>,
     pub constants: Vec<LuaValue>,
-    pub locals: Vec<String>,
+    pub locals: Vec<LocVar>,
     pub upvalue_count: usize,
     pub param_count: usize,
     pub is_vararg: bool,          // Whether function uses ... (varargs)

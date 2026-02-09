@@ -167,6 +167,7 @@ pub struct VarDesc {
     pub kind: VarKind,                 // variable kind
     pub ridx: i16,                     // register holding the variable
     pub vidx: u16,                     // compiler index
+    pub pidx: usize,                   // index into chunk.locals (LocVar debug info)
     pub const_value: Option<LuaValue>, // constant value for compile-time constants
 }
 
@@ -288,6 +289,7 @@ impl<'a> FuncState<'a> {
             kind,
             ridx,
             vidx,
+            pidx: 0, // Will be set in adjust_local_vars
             const_value: None, // Initially no const value
         });
         vidx
@@ -303,13 +305,20 @@ impl<'a> FuncState<'a> {
         // Variables have already been added to actvar by new_localvar
         // This function assigns register indices to them and marks them as active
         let mut reglevel = self.reglevel(self.nactvar);
+        let startpc = self.chunk.code.len() as u32;
         for _ in 0..nvars {
             let vidx = self.nactvar;
             if let Some(var) = self.actvar.get_mut(vidx as usize) {
                 var.ridx = reglevel as i16;
                 reglevel += 1;
-                // Add variable name to chunk's locals for debugging
-                self.chunk.locals.push(var.name.clone());
+                // Add variable debug info (LocVar) to chunk
+                let pidx = self.chunk.locals.len();
+                var.pidx = pidx;
+                self.chunk.locals.push(crate::lua_value::LocVar {
+                    name: var.name.clone(),
+                    startpc,
+                    endpc: 0, // Will be set in remove_vars
+                });
             }
             self.nactvar += 1;
         }
@@ -340,8 +349,16 @@ impl<'a> FuncState<'a> {
 
     // Port of removevars from lparser.c
     pub fn remove_vars(&mut self, tolevel: u8) {
+        let endpc = self.chunk.code.len() as u32;
         while self.nactvar > tolevel {
             self.nactvar -= 1;
+            // Set endpc for the LocVar debug entry
+            if let Some(var) = self.actvar.get(self.nactvar as usize) {
+                let pidx = var.pidx;
+                if pidx < self.chunk.locals.len() {
+                    self.chunk.locals[pidx].endpc = endpc;
+                }
+            }
         }
         // Truncate actvar to remove local variables
         // Note: This is different from Lua 5.5 which keeps removed variables in dyd->actvar

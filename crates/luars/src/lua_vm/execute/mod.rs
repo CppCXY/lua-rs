@@ -67,6 +67,7 @@ use crate::{
 };
 pub use helper::{get_metamethod_event, get_metatable};
 pub use metamethod::TmKind;
+// pub use metamethod::call_tm;
 
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
@@ -888,21 +889,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::Close => {
-                    // Close all upvalues >= R[A]
+                    // Close all upvalues and TBC variables >= R[A]
                     let a = instr.get_a() as usize;
                     let close_from = base + a;
 
-                    // Close upvalues at or above this level
-                    lua_state.close_upvalues(close_from);
+                    // Close upvalues and call __close on TBC variables
+                    lua_state.close_all(close_from)?;
                 }
                 OpCode::Tbc => {
                     // Mark variable as to-be-closed
-                    let _a = instr.get_a() as usize;
-
-                    // TODO: Implement to-be-closed variables
-                    // This is for the <close> attribute in Lua 5.4+
-                    // Needs tracking in stack/upvalue system
-                    // For now, this is a no-op
+                    let a = instr.get_a() as usize;
+                    let stack_idx = base + a;
+                    lua_state.mark_tbc(stack_idx)?;
                 }
                 OpCode::NewTable => {
                     // R[A] := {} (new table)
@@ -1354,8 +1352,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     stack[ra + 3] = stack[ra + 2]; // control -> closing position
                     stack[ra + 2] = temp; // closing -> control position
 
-                    // TODO: Mark ra+2 as to-be-closed if not nil
-                    // For now, skip TBC handling
+                    // Mark ra+2 as to-be-closed if not nil
+                    // (matches luaF_newtbcupval in Lua 5.5)
+                    lua_state.mark_tbc(ra + 2)?;
 
                     // Jump to loop end (+ Bx)
                     pc += bx;
@@ -1406,18 +1405,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::TForLoop => {
                     // Generic for loop test
-                    // If ra+3 != nil then ra+2 = ra+3 and jump back
+                    // If ra+3 (control variable) != nil then continue loop (jump back)
+                    // After TForPrep swap: ra+2=closing(TBC), ra+3=control
+                    // TFORCALL places first result at ra+3, automatically updating control
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
 
                     let stack = lua_state.stack_mut();
                     let ra = base + a;
 
-                    // Check if ra+3 (new control value) is not nil
+                    // Check if ra+3 (control value from iterator) is not nil
                     if !stack[ra + 3].is_nil() {
-                        // Continue loop: update control variable and jump back
-                        stack[ra + 2] = stack[ra + 3];
-
+                        // Continue loop: jump back
+                        // Note: do NOT copy ra+3 to ra+2 — ra+2 holds the TBC variable
                         if bx > pc {
                             lua_state.set_frame_pc(frame_idx, pc as u32);
                             return Err(lua_state.error("TFORLOOP: invalid jump".to_string()));
@@ -1870,20 +1870,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::GetVarg => {
                     // R[A] := varargs[R[C]]
                     // Based on lvm.c:1943 and ltm.c:292 luaT_getvararg
-                    // This is for accessing individual vararg elements or the count
+                    // Hidden varargs are stored BEFORE ci->func.p (base - 1)
+                    // Layout: [hidden_args...] [func] [fixed_params...] [registers...]
+                    //         ^func_pos-nextra  ^func_pos=base-1  ^base
                     let a = instr.get_a() as usize;
-                    let _b = instr.get_b() as usize; // unused in Lua 5.5
+                    let _b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
                     // Get nextraargs from CallInfo
                     let call_info = lua_state.get_call_info(frame_idx);
                     let nextra = call_info.nextraargs as usize;
-                    let func_obj = call_info
-                        .func
-                        .as_lua_function()
-                        .ok_or(LuaError::RuntimeError)?;
-                    // Get param_count from the function's chunk
-                    let param_count = func_obj.chunk().param_count;
 
                     let stack = lua_state.stack_mut();
                     let ra_idx = base + a;
@@ -1892,32 +1888,25 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Check if R[C] is string "n" (get vararg count)
                     if let Some(s) = rc.as_str() {
                         if s == "n" {
-                            // Return vararg count
                             let stack = lua_state.stack_mut();
                             setivalue(&mut stack[ra_idx], nextra as i64);
-                            pc += 1;
-                            continue;
-                        }
-                    }
-
-                    // Check if R[C] is an integer (vararg index, 1-based)
-                    if ttisinteger(&rc) {
-                        let index = ivalue(&rc);
-
-                        // Check if index is valid (1 <= index <= nextraargs)
-                        let stack = lua_state.stack_mut();
-                        if nextra > 0 && index >= 1 && (index as usize) <= nextra {
-                            // Get value from varargs
-                            // varargs are stored after fixed parameters at base + param_count
-                            let vararg_start = base + param_count;
-                            let src_val = stack[vararg_start + (index as usize) - 1];
-                            stack[ra_idx] = src_val;
                         } else {
-                            // Out of bounds or no varargs: return nil
+                            let stack = lua_state.stack_mut();
+                            setnilvalue(&mut stack[ra_idx]);
+                        }
+                    } else if ttisinteger(&rc) {
+                        let n = ivalue(&rc);
+
+                        let stack = lua_state.stack_mut();
+                        if nextra > 0 && n >= 1 && (n as usize) <= nextra {
+                            // func_pos = base - 1
+                            // slot = func_pos - nextra + n - 1
+                            let slot = (base - 1) - nextra + (n as usize) - 1;
+                            stack[ra_idx] = stack[slot];
+                        } else {
                             setnilvalue(&mut stack[ra_idx]);
                         }
                     } else {
-                        // Not integer or "n": return nil
                         let stack = lua_state.stack_mut();
                         setnilvalue(&mut stack[ra_idx]);
                     }

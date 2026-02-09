@@ -1712,10 +1712,18 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
         }
         ExpKind::VINDEXUP | ExpKind::VINDEXSTR | ExpKind::VINDEXED => {
             // Check if indexed access is to a read-only table field
-            // For now, we don't support the `ro` flag completely
-            // Just check if the flag is set
             if e.u.ind().ro {
-                Some("<readonly field>".to_string())
+                // Try to get the actual variable name from the constant table
+                let keystr_idx = e.u.ind().keystr;
+                if keystr_idx >= 0 && (keystr_idx as usize) < fs.chunk.constants.len() {
+                    if let Some(name) = fs.chunk.constants[keystr_idx as usize].as_str() {
+                        Some(name.to_string())
+                    } else {
+                        Some("<readonly field>".to_string())
+                    }
+                } else {
+                    Some("<readonly field>".to_string())
+                }
             } else {
                 None
             }

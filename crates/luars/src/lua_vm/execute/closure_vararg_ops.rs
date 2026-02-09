@@ -224,6 +224,12 @@ pub fn exec_varargprep(
 
         let new_base = buildhiddenargs(lua_state, frame_idx, chunk, totalargs, nfixparams, nextra)?;
         *base = new_base;
+
+        // Lua 5.5: set vararg parameter register to nil (ltm.c:288)
+        // The named vararg param (e.g., 't' in '...t') is at register nfixparams
+        // It should be nil when using hidden args mode (GETVARG accesses hidden area directly)
+        let stack = lua_state.stack_mut();
+        setnilvalue(&mut stack[new_base + nfixparams]);
     }
 
     Ok(())

@@ -1,7 +1,7 @@
 // Chunk serializer/deserializer for string.dump/load
 // Custom binary format for lua-rs bytecode
 
-use super::{Chunk, LuaValue, UpvalueDesc};
+use super::{Chunk, LocVar, LuaValue, UpvalueDesc};
 use crate::Instruction;
 use crate::gc::ObjectAllocator;
 use crate::lua_vm::LuaVM;
@@ -213,7 +213,7 @@ fn write_chunk(
 
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
-            write_string(buf, local);
+            write_string(buf, &local.name);
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -280,7 +280,7 @@ fn write_chunk_with_dedup(
 
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
-            write_string_with_dedup(buf, local, string_table)?; // Use dedup for local names
+            write_string_with_dedup(buf, &local.name, string_table)?; // Use dedup for local names
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -346,7 +346,7 @@ fn write_chunk_no_pool_with_dedup(
 
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
-            write_string_with_dedup(buf, local, string_table)?;
+            write_string_with_dedup(buf, &local.name, string_table)?;
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -406,7 +406,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
 
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
-            write_string(buf, local);
+            write_string(buf, &local.name);
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -467,7 +467,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(read_string(cursor)?);
+        locals.push(LocVar { name: read_string(cursor)?, startpc: 0, endpc: 0 });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -546,7 +546,7 @@ fn read_chunk_with_dedup(
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(read_string_with_dedup(cursor, string_table)?);
+        locals.push(LocVar { name: read_string_with_dedup(cursor, string_table)?, startpc: 0, endpc: 0 });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -787,7 +787,7 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(read_string(cursor)?);
+        locals.push(LocVar { name: read_string(cursor)?, startpc: 0, endpc: 0 });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -886,7 +886,7 @@ fn read_chunk_with_vm_dedup(
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(read_string_with_dedup(cursor, string_table)?);
+        locals.push(LocVar { name: read_string_with_dedup(cursor, string_table)?, startpc: 0, endpc: 0 });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -998,7 +998,7 @@ fn read_chunk_with_strings(
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(read_string(cursor)?);
+        locals.push(LocVar { name: read_string(cursor)?, startpc: 0, endpc: 0 });
     }
 
     let line_len = read_u32(cursor)? as usize;

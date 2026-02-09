@@ -19,7 +19,7 @@ pub use parse_literal::*;
 use crate::LuaVM;
 pub use crate::compiler::parser::LuaLanguageLevel;
 use crate::compiler::parser::{LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig};
-use crate::lua_value::Chunk;
+use crate::lua_value::{Chunk, UpvalueDesc};
 use crate::lua_vm::OpCode;
 
 // Structures are now in separate files (func_state.rs, expression.rs)
@@ -130,7 +130,14 @@ pub fn compile_code_with_name(
     // Set vararg flag on chunk
     fs.chunk.is_vararg = fs.is_vararg;
 
-    // Set upvalue count
+    // Set upvalue descriptors for main chunk (same as child functions in expr_parser.rs)
+    for upval in &fs.upvalues {
+        fs.chunk.upvalue_descs.push(UpvalueDesc {
+            name: upval.name.clone(),
+            is_local: upval.in_stack,
+            index: upval.idx as u32,
+        });
+    }
     fs.chunk.upvalue_count = fs.upvalues.len();
 
     // Set source name and line info for main chunk
