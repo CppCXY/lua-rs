@@ -17,10 +17,10 @@ pub fn create_utf8_lib() -> LibraryModule {
 
     // Add charpattern constant
     module = module.with_value("charpattern", |vm| {
-        // UTF-8 character pattern for pattern matching
-        // This pattern matches any valid UTF-8 character sequence
-        let pattern = "[\\x00-\\x7F\\xC2-\\xF4][\\x80-\\xBF]*";
-        vm.create_string(&pattern)
+        // With our UTF-8 char-based pattern matching, each character is a
+        // Unicode codepoint, so '.' already matches any single character.
+        // This is the correct equivalent of Lua's byte-based charpattern.
+        vm.create_string(".")
     });
 
     module

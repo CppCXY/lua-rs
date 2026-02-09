@@ -20,7 +20,7 @@
 pub mod call;
 mod closure_handler;
 mod concat;
-mod helper;
+pub(crate) mod helper;
 mod metamethod;
 mod return_handler;
 

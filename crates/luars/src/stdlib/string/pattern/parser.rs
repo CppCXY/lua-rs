@@ -20,12 +20,20 @@ pub enum Pattern {
         pattern: Box<Pattern>,
         mode: RepeatMode,
     },
-    /// Capture group
-    Capture(Box<Pattern>),
+    /// Position capture () - captures current position as a number
+    PositionCapture,
+    /// Capture start marker (emitted by parser, tracks capture boundaries in flat Seq)
+    CaptureStart,
+    /// Capture end marker
+    CaptureEnd,
     /// Anchor (^, $)
     Anchor(AnchorType),
     /// Balanced match (%bxy)
     Balanced { open: char, close: char },
+    /// Backreference (%1-%9)
+    Backref(usize),
+    /// Frontier pattern (%f[set]) - matches empty string at transition boundary
+    Frontier { items: Vec<SetItem>, negated: bool },
 }
 
 /// An item inside a character set [...]
@@ -119,11 +127,13 @@ impl Pattern {
 /// Parse a Lua pattern string
 pub fn parse_pattern(pattern: &str) -> Result<Pattern, String> {
     let chars: Vec<char> = pattern.chars().collect();
-    let (pat, _) = parse_seq(&chars, 0, false)?;
+    let mut total_captures: usize = 0;
+    let mut open_captures: Vec<usize> = Vec::new();
+    let (pat, _) = parse_seq(&chars, 0, false, &mut total_captures, &mut open_captures)?;
     Ok(pat)
 }
 
-fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Pattern, usize), String> {
+fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool, total_captures: &mut usize, open_captures: &mut Vec<usize>) -> Result<(Pattern, usize), String> {
     let mut seq = Vec::new();
 
     while pos < chars.len() {
@@ -133,6 +143,10 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
             ')' if in_capture => {
                 // End of capture group
                 break;
+            }
+            ')' => {
+                // Unmatched closing parenthesis
+                return Err("invalid pattern capture".to_string());
             }
             '^' if pos == 0 && seq.is_empty() => {
                 seq.push(Pattern::Anchor(AnchorType::Start));
@@ -150,7 +164,7 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
                 // Escape sequence or character class
                 pos += 1;
                 if pos >= chars.len() {
-                    return Err("incomplete escape at end of pattern".to_string());
+                    return Err("malformed pattern (ends with '%%')".to_string());
                 }
                 let next = chars[pos];
                 match next {
@@ -169,12 +183,28 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
                         // Balanced match %bxy
                         pos += 1;
                         if pos + 1 >= chars.len() {
-                            return Err("incomplete %b pattern".to_string());
+                            return Err("malformed pattern (missing arguments to '%%b')".to_string());
                         }
                         let open = chars[pos];
                         let close = chars[pos + 1];
                         seq.push(Pattern::Balanced { open, close });
                         pos += 1;
+                    }
+                    'f' => {
+                        // Frontier pattern %f[set]
+                        pos += 1;
+                        if pos >= chars.len() || chars[pos] != '[' {
+                            return Err("missing '[' after '%f' in pattern".to_string());
+                        }
+                        let (set, new_pos) = parse_set(chars, pos)?;
+                        match set {
+                            Pattern::Set { items, negated } => {
+                                seq.push(Pattern::Frontier { items, negated });
+                            }
+                            _ => return Err("invalid set after '%f'".to_string()),
+                        }
+                        pos = new_pos;
+                        continue; // pos already advanced by parse_set
                     }
                     // Uppercase inverts the class
                     'A' | 'C' | 'D' | 'G' | 'L' | 'P' | 'S' | 'U' | 'W' | 'X' | 'Z' => {
@@ -195,6 +225,13 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
                         seq.push(Pattern::InvertedClass(class));
                     }
                     // Any other character is literal
+                    c if c.is_ascii_digit() => {
+                        let n = (c as u8 - b'0') as usize;
+                        if n == 0 || n > *total_captures || open_captures.contains(&n) {
+                            return Err(format!("invalid capture index %{}", n));
+                        }
+                        seq.push(Pattern::Backref(n));
+                    }
                     _ => seq.push(Pattern::Char(next)),
                 }
                 pos += 1;
@@ -206,10 +243,31 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
                 pos = new_pos;
             }
             '(' => {
-                // Capture group
-                let (inner, new_pos) = parse_seq(chars, pos + 1, true)?;
-                seq.push(Pattern::Capture(Box::new(inner)));
-                pos = new_pos + 1; // Skip closing )
+                // Check for position capture ()
+                if pos + 1 < chars.len() && chars[pos + 1] == ')' {
+                    *total_captures += 1;
+                    seq.push(Pattern::PositionCapture);
+                    pos += 2; // Skip both ( and )
+                } else {
+                    // Capture group — emit CaptureStart, inner patterns, CaptureEnd
+                    *total_captures += 1;
+                    let capture_idx = *total_captures;
+                    open_captures.push(capture_idx);
+                    let (inner, new_pos) = parse_seq(chars, pos + 1, true, total_captures, open_captures)?;
+                    open_captures.pop();
+                    seq.push(Pattern::CaptureStart);
+                    // Flatten inner Seq patterns into the current sequence
+                    match inner {
+                        Pattern::Seq(inner_pats) => {
+                            for p in inner_pats {
+                                seq.push(p);
+                            }
+                        }
+                        other => seq.push(other),
+                    }
+                    seq.push(Pattern::CaptureEnd);
+                    pos = new_pos + 1; // Skip closing )
+                }
             }
             '*' | '+' | '?' | '-' => {
                 // In standard Lua, quantifiers only apply after a quantifiable
@@ -257,6 +315,11 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
         }
     }
 
+    // If we're inside a capture and didn't find closing ')', it's malformed
+    if in_capture && (pos >= chars.len() || chars[pos] != ')') {
+        return Err("malformed pattern (unfinished capture)".to_string());
+    }
+
     if seq.len() == 1 {
         Ok((seq.into_iter().next().unwrap(), pos))
     } else {
@@ -267,7 +330,7 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
 fn parse_set(chars: &[char], start: usize) -> Result<(Pattern, usize), String> {
     let mut pos = start + 1; // Skip '['
     if pos >= chars.len() {
-        return Err("incomplete character set".to_string());
+        return Err("malformed pattern (missing ']')".to_string());
     }
 
     let negated = chars[pos] == '^';
@@ -326,7 +389,7 @@ fn parse_set(chars: &[char], start: usize) -> Result<(Pattern, usize), String> {
     }
 
     if pos >= chars.len() {
-        return Err("unclosed character set".to_string());
+        return Err("malformed pattern (missing ']')".to_string());
     }
 
     Ok((

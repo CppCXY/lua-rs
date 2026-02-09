@@ -1077,9 +1077,19 @@ impl LuaState {
 
     // ===== Table Operations =====
 
-    /// Get value from table
+    /// Get value from table (raw, no metamethods)
     pub fn raw_get(&mut self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
         self.vm_mut().raw_get(table, key)
+    }
+
+    /// Get value from table with __index metamethod support
+    pub fn table_get(&mut self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+        // First try raw access
+        if let Some(val) = self.vm_mut().raw_get(table, key) {
+            return Some(val);
+        }
+        // If not found, try __index metamethod
+        execute::helper::lookup_from_metatable(self, table, key)
     }
 
     /// Set value in table
@@ -1122,6 +1132,7 @@ impl LuaState {
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save state for cleanup
         let initial_depth = self.call_depth();
+        let saved_stack_top = self.stack_top;
         let func_idx = self.stack.len();
 
         // Push function and args to stack
@@ -1139,6 +1150,11 @@ impl LuaState {
         }
         let arg_count = self.stack.len() - func_idx - 1;
 
+        // Sync logical stack top with physical stack after Vec::push
+        // This is critical: push_value writes to stack_top, so it must
+        // be consistent with the actual stack contents.
+        self.stack_top = self.stack.len();
+
         // Resolve __call chain if needed
 
         let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
@@ -1147,6 +1163,7 @@ impl LuaState {
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
                 self.stack.truncate(func_idx);
+                self.stack_top = saved_stack_top;
                 return Ok((false, vec![err_str]));
             }
         };
@@ -1163,6 +1180,7 @@ impl LuaState {
             let base = func_idx + 1;
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack.truncate(func_idx);
+                self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
@@ -1193,15 +1211,15 @@ impl LuaState {
 
             match result {
                 Ok(nresults) => {
-                    // Success - collect results
+                    // Success - collect results from stack_top (where push_value writes)
                     let mut results = Vec::new();
-                    let result_start = if self.stack.len() >= nresults {
-                        self.stack.len() - nresults
+                    let result_start = if self.stack_top >= nresults {
+                        self.stack_top - nresults
                     } else {
                         0
                     };
 
-                    for i in result_start..self.stack.len() {
+                    for i in result_start..self.stack_top {
                         if let Some(val) = self.stack_get(i) {
                             results.push(val);
                         }
@@ -1209,6 +1227,7 @@ impl LuaState {
 
                     // Clean up stack
                     self.stack.truncate(func_idx);
+                    self.stack_top = saved_stack_top;
 
                     Ok((true, results))
                 }
@@ -1217,6 +1236,7 @@ impl LuaState {
                     let error_msg = self.get_error_msg(e);
                     let err_str = self.create_string(&error_msg)?;
                     self.stack.truncate(func_idx);
+                    self.stack_top = saved_stack_top;
                     Ok((false, vec![err_str]))
                 }
             }
@@ -1226,6 +1246,7 @@ impl LuaState {
             // pcall expects all return values
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack.truncate(func_idx);
+                self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
@@ -1237,8 +1258,10 @@ impl LuaState {
             match result {
                 Ok(()) => {
                     // Success - collect return values from stack
+                    // Use stack_top (not stack.len()) because RETURN opcodes
+                    // set stack_top to reflect actual return values
                     let mut results = Vec::new();
-                    for i in func_idx..self.stack.len() {
+                    for i in func_idx..self.stack_top {
                         if let Some(val) = self.stack_get(i) {
                             results.push(val);
                         }
@@ -1252,6 +1275,7 @@ impl LuaState {
 
                     // Clean up stack
                     self.stack.truncate(func_idx);
+                    self.stack_top = saved_stack_top;
 
                     Ok((true, results))
                 }
@@ -1278,6 +1302,7 @@ impl LuaState {
 
                     // Clean up stack
                     self.stack.truncate(func_idx);
+                    self.stack_top = saved_stack_top;
 
                     Ok((false, vec![err_str]))
                 }
