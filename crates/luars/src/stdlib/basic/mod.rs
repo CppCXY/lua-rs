@@ -673,8 +673,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // l_mem n = cast(l_mem, va_arg(argp, size_t));
             // if (n <= 0) n = g->GCdebt;
             let gc = &l.vm_mut().gc;
-            let stepsize = gc.apply_param(STEPSIZE, 100);
-            let n = if n_arg <= 0 { stepsize } else { n_arg as isize };
+            let n = if n_arg <= 0 { gc.gc_debt } else { n_arg as isize };
 
             // int work = 0;
             let mut work = false;
