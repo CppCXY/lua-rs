@@ -308,39 +308,28 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
 /// Iterator function for ipairs - Optimized for performance
 #[inline]
 fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
-    let table_val = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("ipairs iterator: missing table".to_string()))?;
-    let index_val = l
-        .get_arg(2)
-        .ok_or_else(|| l.error("ipairs iterator: missing index".to_string()))?;
-
-    let next_index_opt = index_val.as_integer();
-    let value_opt = if let Some(table) = table_val.as_table() {
-        if let Some(index) = next_index_opt {
-            let next_index = index + 1;
-            // Get value and next index before any stack operations
-            table.raw_geti(next_index).map(|v| (next_index, v))
-        } else {
-            None
-        }
-    } else {
-        None
+    // SAFETY: ipairs always provides (table, index) as args 1 and 2.
+    // push_c_frame guarantees EXTRA_STACK (5) slots above frame_top.
+    let (table_val, index_val) = unsafe {
+        (l.get_arg_unchecked(1), l.get_arg_unchecked(2))
     };
 
-    // Now safely push values without holding any references
-    if let Some((next_index, value)) = value_opt {
-        // Return (next_index, value)
-        l.push_value(LuaValue::integer(next_index))?;
-        l.push_value(value)?;
-        return Ok(2);
-    } else if next_index_opt.is_some() {
-        // Reached end of array - return nil
-        l.push_value(LuaValue::nil())?;
-        return Ok(1);
+    if let Some(table) = table_val.as_table() {
+        if let Some(index) = index_val.as_integer() {
+            let next_index = index + 1;
+            if let Some(value) = table.raw_geti(next_index) {
+                unsafe {
+                    l.push_value_unchecked(LuaValue::integer(next_index));
+                    l.push_value_unchecked(value);
+                }
+                return Ok(2);
+            } else {
+                unsafe { l.push_value_unchecked(LuaValue::nil()); }
+                return Ok(1);
+            }
+        }
     }
 
-    // Slow path with error
     Err(l.error("ipairs iterator: invalid table or index".to_string()))
 }
 
@@ -366,13 +355,11 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 /// next(table [, index]) - Return next key-value pair
 /// Port of Lua 5.5's luaB_next using luaH_next
 fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
-    // next(table [, index])
-    // Returns the next index-value pair in the table
-    let table_val = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
-
-    let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
+    // SAFETY: pairs always provides (table, key) as args 1-2.
+    // push_c_frame guarantees EXTRA_STACK slots.
+    let (table_val, index_val) = unsafe {
+        (l.get_arg_unchecked(1), l.get_arg_unchecked(2))
+    };
 
     let result = {
         let table = table_val
@@ -381,13 +368,14 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
         table.next(&index_val)
     };
 
-    // Now safely push values without holding any table references
     if let Some((k, v)) = result {
-        l.push_value(k)?;
-        l.push_value(v)?;
+        unsafe {
+            l.push_value_unchecked(k);
+            l.push_value_unchecked(v);
+        }
         Ok(2)
     } else {
-        l.push_value(LuaValue::nil())?;
+        unsafe { l.push_value_unchecked(LuaValue::nil()); }
         Ok(1)
     }
 }

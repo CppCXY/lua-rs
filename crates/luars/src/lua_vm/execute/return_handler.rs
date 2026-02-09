@@ -80,17 +80,18 @@ pub fn handle_return(
 
     // Copy results from R[A]..R[A+nres-1] to func_pos..func_pos+nres-1
     let stack = lua_state.stack_mut();
-    for i in 0..nres {
-        let src_val = stack[base + a + i];
-        stack[func_pos + i] = src_val;
-    }
-
-    // Fill with nil if caller wants more results than we have
-    if wanted_results > nres {
-        for i in nres..wanted_results {
-            stack[func_pos + i] = LuaValue::nil();
+    unsafe {
+        for i in 0..nres {
+            *stack.get_unchecked_mut(func_pos + i) = *stack.get_unchecked(base + a + i);
         }
-        nres = wanted_results;
+
+        // Fill with nil if caller wants more results than we have
+        if wanted_results > nres {
+            for i in nres..wanted_results {
+                *stack.get_unchecked_mut(func_pos + i) = LuaValue::nil();
+            }
+            nres = wanted_results;
+        }
     }
 
     let new_top = func_pos + nres;
@@ -123,8 +124,10 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
     // Fill with nil if caller expects results
     if wanted_results > 0 {
         let stack = lua_state.stack_mut();
-        for i in 0..wanted_results {
-            stack[func_pos + i] = LuaValue::nil();
+        unsafe {
+            for i in 0..wanted_results {
+                *stack.get_unchecked_mut(func_pos + i) = LuaValue::nil();
+            }
         }
     }
 
@@ -149,22 +152,24 @@ pub fn handle_return1(
     let nresults = call_info.nresults;
 
     let stack = lua_state.stack_mut();
-    let return_val = stack[base + a];
+    let return_val = unsafe { *stack.get_unchecked(base + a) };
 
     let new_top = if nresults == 0 {
         func_pos
     } else if nresults == 1 || nresults == -1 {
         // Most common: caller wants exactly 1 result (or MULTRET with 1 value)
-        stack[func_pos] = return_val;
+        unsafe { *stack.get_unchecked_mut(func_pos) = return_val; }
         func_pos + 1
     } else {
         // Caller wants N > 1 results — place first + fill rest with nil
-        stack[func_pos] = return_val;
-        let wanted = nresults as usize;
-        for i in 1..wanted {
-            stack[func_pos + i] = LuaValue::nil();
+        unsafe {
+            *stack.get_unchecked_mut(func_pos) = return_val;
+            let wanted = nresults as usize;
+            for i in 1..wanted {
+                *stack.get_unchecked_mut(func_pos + i) = LuaValue::nil();
+            }
+            func_pos + wanted
         }
-        func_pos + wanted
     };
 
     lua_state.pop_call_frame();

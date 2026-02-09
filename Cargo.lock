@@ -168,6 +168,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "chrono",
+ "itoa",
  "rand",
  "serde",
  "serde_json",

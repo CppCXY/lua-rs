@@ -147,6 +147,21 @@ pub fn setivalue(v: &mut LuaValue, i: i64) {
     *v = LuaValue::integer(i);
 }
 
+/// chgivalue - change integer value without writing tag (matching C Lua's chgivalue)
+/// Only writes 8 bytes (Value) instead of 16 bytes (full LuaValue).
+/// Caller MUST ensure tt is already LUA_VNUMINT.
+#[inline(always)]
+pub fn chgivalue(v: &mut LuaValue, i: i64) {
+    v.value.i = i;
+}
+
+/// chgfltvalue - change float value without writing tag
+/// Only writes 8 bytes. Caller MUST ensure tt is already LUA_VNUMFLT.
+#[inline(always)]
+pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
+    v.value.n = n;
+}
+
 /// setfltvalue - 设置浮点值  
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
 #[allow(unused)]

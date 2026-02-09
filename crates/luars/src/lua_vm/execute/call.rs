@@ -187,109 +187,188 @@ pub fn call_c_function(
     nargs: usize,
     nresults: i32,
 ) -> LuaResult<()> {
-    // Get the function
-    let func = lua_state
-        .stack_get(func_idx)
-        .ok_or_else(|| lua_state.error("C function not found".to_string()))?;
+    // Get the function (already validated as c_callable by caller)
+    let func = lua_state.stack_mut()[func_idx];
 
     // Get the C function pointer - handle both light C functions and GC C functions
     let c_func: CFunction = if let Some(c_func) = func.as_cfunction() {
-        // Light C function - extract directly from value
         c_func
-    } else if let Some(cclsoure) = func.as_cclosure() {
-        // GC function - need to get from object pool
-        cclsoure.func()
+    } else if let Some(cclosure) = func.as_cclosure() {
+        cclosure.func()
     } else {
         return Err(lua_state.error("Not a callable value".to_string()));
     };
 
     let call_base = func_idx + 1;
 
-    // Push temporary frame for C function with nresults
-    lua_state.push_frame(&func, call_base, nargs, nresults)?;
+    // Use lean push_c_frame (skips type dispatch)
+    lua_state.push_c_frame(&func, call_base, nargs, nresults)?;
 
     // Call the C function (it returns number of results)
-    let result = c_func(lua_state);
-
-    // Now handle the result
-    let n = match result {
+    let n = match c_func(lua_state) {
         Ok(n) => n,
         Err(LuaError::Yield) => {
-            // Special case: C function yielded
-            // Keep the frame on stack so resume can continue
             return Err(LuaError::Yield);
         }
         Err(e) => return Err(e),
     };
 
-    // Get logical stack top BEFORE popping frame (L->top.p in Lua)
-    // C function pushes results, so first result is at top - n
+    // Results positions
     let stack_top = lua_state.get_top();
-    let first_result = if stack_top >= n {
-        stack_top - n
-    } else {
-        call_base
-    };
-
-    // Save the callee frame's top extent for stale reference clearing
+    let first_result = if stack_top >= n { stack_top - n } else { call_base };
     let callee_extent = stack_top;
 
-    // Pop the frame BEFORE moving results
-    lua_state.pop_frame();
+    // Pop frame (lean path, no call_status bit check)
+    lua_state.pop_c_frame();
 
-    // Move results from first_result to func_idx (Lua's moveresults)
-    // Implements Lua's moveresults logic from ldo.c
-    move_results(lua_state, func_idx, first_result, n, nresults)?;
-
-    // Update caller frame's top to reflect the actual number of results
-    // This is crucial for nested calls - the outer call needs to know
-    // where the returned values end
-    let final_nresults = if nresults == -1 {
-        n // MULTRET: all results
-    } else {
-        nresults as usize // Fixed number (may be 0)
-    };
-
-    let new_top = func_idx + final_nresults;
-
-    // Clear stale references left by the C function call.
-    // Slots [new_top..callee_extent) may still hold references to the
-    // C function, its arguments, and any temporaries. These "ghost"
-    // references can keep GC objects alive and prevent __gc finalizers.
-    {
-        let clear_end = callee_extent.min(lua_state.stack_len());
+    // Move results using unsafe fast path
+    unsafe {
         let stack = lua_state.stack_mut();
-        for i in new_top..clear_end {
-            stack[i] = LuaValue::nil();
+        match nresults {
+            0 => { /* nothing to move */ }
+            1 => {
+                *stack.get_unchecked_mut(func_idx) = if n > 0 {
+                    *stack.get_unchecked(first_result)
+                } else {
+                    LuaValue::nil()
+                };
+            }
+            _ if nresults > 0 => {
+                let wanted = nresults as usize;
+                let copy_count = n.min(wanted);
+                for i in 0..copy_count {
+                    *stack.get_unchecked_mut(func_idx + i) =
+                        *stack.get_unchecked(first_result + i);
+                }
+                for i in copy_count..wanted {
+                    *stack.get_unchecked_mut(func_idx + i) = LuaValue::nil();
+                }
+            }
+            _ => {
+                // MULTRET (-1)
+                for i in 0..n {
+                    *stack.get_unchecked_mut(func_idx + i) =
+                        *stack.get_unchecked(first_result + i);
+                }
+            }
         }
     }
 
-    // Restore caller's frame top for proper GC scanning
+    let final_nresults = if nresults == -1 { n } else { nresults as usize };
+    let new_top = func_idx + final_nresults;
+
+    // Clear stale references (only if there's a significant range to clear)
+    // For small calls (ipairs_next returning 2 values), callee_extent - new_top
+    // is typically small. We keep this for GC correctness.
+    {
+        let clear_end = callee_extent.min(lua_state.stack_len());
+        if clear_end > new_top {
+            let stack = lua_state.stack_mut();
+            for i in new_top..clear_end {
+                stack[i] = LuaValue::nil();
+            }
+        }
+    }
+
+    // Restore caller frame top
     if lua_state.call_depth() > 0 {
         let ci_idx = lua_state.call_depth() - 1;
         if nresults == -1 {
-            // MULTRET: stack_top must be exactly after the results so that
-            // the next OP_CALL with B=0 (varargs) counts them correctly.
-            // Update ci.top only if needed for GC scanning extent.
             let ci_top = lua_state.get_call_info(ci_idx).top;
             if ci_top < new_top {
                 lua_state.get_call_info_mut(ci_idx).top = new_top;
             }
-            lua_state.set_top(new_top)?;
+            lua_state.set_top_raw(new_top);
         } else {
             let frame_top = lua_state.get_call_info(ci_idx).top;
-            lua_state.set_top(frame_top)?;
+            lua_state.set_top_raw(frame_top);
         }
     } else {
-        lua_state.set_top(new_top)?;
+        lua_state.set_top_raw(new_top);
     }
 
-    // NOTE: No check_gc() here. In C Lua 5.5, there is no checkGC after a C
-    // function call returns. GC checks happen inside the C function itself
-    // (e.g., collectgarbage) or at the next opcode that has an inline checkGC
-    // (e.g., OP_NEWTABLE). Running check_gc here with top = frame_top would
-    // cause traverse_thread to scan stale registers above new_top, keeping
-    // dead objects alive and breaking weak table clearing.
+    Ok(())
+}
+
+/// Fast path for calling a known C function, e.g. from TForCall.
+/// Caller already extracted the CFunction pointer, so we skip all type
+/// dispatch. Uses `push_c_frame` / `pop_c_frame` (no call_status bit check)
+/// and unsafe move_results with no per-element bounds checking.
+#[inline(always)]
+pub fn call_c_function_fast(
+    lua_state: &mut LuaState,
+    func: &LuaValue,
+    c_func: CFunction,
+    func_idx: usize,
+    nargs: usize,
+    nresults: i32,
+) -> LuaResult<()> {
+    let call_base = func_idx + 1;
+
+    // Lean frame push — no type dispatch
+    lua_state.push_c_frame(func, call_base, nargs, nresults)?;
+
+    // Call the C function  
+    let n = match c_func(lua_state) {
+        Ok(n) => n,
+        Err(LuaError::Yield) => return Err(LuaError::Yield),
+        Err(e) => return Err(e),
+    };
+
+    // Results positions 
+    let stack_top = lua_state.get_top();
+    let first_result = if stack_top >= n { stack_top - n } else { call_base };
+
+    // Pop frame — no call_status bit check
+    lua_state.pop_c_frame();
+
+    // Fast unsafe move_results for small fixed result counts
+    unsafe {
+        let stack = lua_state.stack_mut();
+        match nresults {
+            0 => { /* nothing to move */ }
+            1 => {
+                *stack.get_unchecked_mut(func_idx) = if n > 0 {
+                    *stack.get_unchecked(first_result)
+                } else {
+                    LuaValue::nil()
+                };
+            }
+            _ => {
+                // General case (e.g. TForCall with c results)
+                let wanted = if nresults < 0 { n } else { nresults as usize };
+                let copy_count = n.min(wanted);
+                for i in 0..copy_count {
+                    *stack.get_unchecked_mut(func_idx + i) =
+                        *stack.get_unchecked(first_result + i);
+                }
+                // Pad with nil if n < wanted
+                for i in copy_count..wanted {
+                    *stack.get_unchecked_mut(func_idx + i) = LuaValue::nil();
+                }
+            }
+        }
+    }
+
+    // Restore caller frame top  
+    let final_n = if nresults == -1 { n } else { nresults as usize };
+    let new_top = func_idx + final_n;
+
+    if lua_state.call_depth() > 0 {
+        let ci_idx = lua_state.call_depth() - 1;
+        if nresults == -1 {
+            let ci_top = lua_state.get_call_info(ci_idx).top;
+            if ci_top < new_top {
+                lua_state.get_call_info_mut(ci_idx).top = new_top;
+            }
+            lua_state.set_top_raw(new_top);
+        } else {
+            let frame_top = lua_state.get_call_info(ci_idx).top;
+            lua_state.set_top_raw(frame_top);
+        }
+    } else {
+        lua_state.set_top_raw(new_top);
+    }
 
     Ok(())
 }
@@ -502,9 +581,7 @@ fn call_c_function_tailcall(
     _base: usize,
 ) -> LuaResult<()> {
     // Get the function
-    let func = lua_state
-        .stack_get(func_idx)
-        .ok_or_else(|| lua_state.error("C function not found".to_string()))?;
+    let func = lua_state.stack_mut()[func_idx];
 
     // Get the C function pointer
     let c_func: CFunction = if let Some(c_func) = func.as_cfunction() {
@@ -517,33 +594,30 @@ fn call_c_function_tailcall(
 
     let call_base = func_idx + 1;
 
-    // Push temporary frame for C function
-    // Tail call inherits caller's nresults (-1 for multi-return)
-    lua_state.push_frame(&func, call_base, nargs, -1)?;
+    // Use lean push_c_frame
+    lua_state.push_c_frame(&func, call_base, nargs, -1)?;
 
     // Call the C function
     let n = c_func(lua_state)?;
 
     // Get the position of results BEFORE popping frame
-    // C function pushes results to stack, so they are at stack_top - n
     let stack_top = lua_state.get_top();
-    let first_result = if stack_top >= n {
-        stack_top - n
-    } else {
-        call_base
-    };
+    let first_result = if stack_top >= n { stack_top - n } else { call_base };
 
-    // Pop the frame
-    lua_state.pop_frame();
+    // Pop the frame (lean path)
+    lua_state.pop_c_frame();
 
-    // For tail call, move results to func_idx (not base)
-    // Because the next RETURN instruction will return from R[A] where A is from TAILCALL
-    move_results(lua_state, func_idx, first_result, n, -1)?;
+    // For tail call, move results to func_idx
+    unsafe {
+        let stack = lua_state.stack_mut();
+        for i in 0..n {
+            *stack.get_unchecked_mut(func_idx + i) =
+                *stack.get_unchecked(first_result + i);
+        }
+    }
 
-    // Update stack_top to cover all results
-    // Do NOT modify frame.top (ci->top) - it's immutable after push_frame
     let new_top = func_idx + n;
-    lua_state.set_top(new_top)?;
+    lua_state.set_top_raw(new_top);
 
     Ok(())
 }

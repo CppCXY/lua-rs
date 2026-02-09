@@ -375,6 +375,71 @@ impl LuaState {
         Ok(())
     }
 
+    /// Push a C function call frame (specialized fast path).
+    /// Caller MUST already know `func` is a C function / cclosure.
+    /// Skips the function-type dispatch entirely; mirrors `push_lua_frame`.
+    #[inline(always)]
+    pub(crate) fn push_c_frame(
+        &mut self,
+        func: &LuaValue,
+        base: usize,
+        nargs: usize,
+        nresults: i32,
+    ) -> LuaResult<()> {
+        // Check stack depth
+        if self.call_depth >= self.safe_option.max_call_depth {
+            return Err(self.error(format!(
+                "stack overflow (Lua stack depth: {})",
+                self.call_depth
+            )));
+        }
+        if self.c_call_depth >= self.safe_option.max_call_depth {
+            return Err(self.error(format!(
+                "C stack overflow (C call depth: {})",
+                self.c_call_depth
+            )));
+        }
+        self.c_call_depth += 1;
+
+        // For C functions: maxstacksize = nargs, numparams = nargs (no nil filling needed)
+        let frame_top = base + nargs;
+
+        // Ensure physical stack has EXTRA_STACK (5) slots above frame_top
+        let needed_physical = frame_top + 5;
+        if needed_physical > self.stack.len() {
+            self.resize(needed_physical)?;
+        }
+
+        // Reuse existing CallInfo slot or allocate
+        if self.call_depth < self.call_stack.len() {
+            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            *ci = CallInfo {
+                func: *func,
+                base,
+                func_offset: 1,
+                top: frame_top,
+                pc: 0,
+                nresults,
+                call_status: CIST_C,
+                nextraargs: 0,
+            };
+        } else {
+            self.call_stack.push(CallInfo {
+                func: *func,
+                base,
+                func_offset: 1,
+                top: frame_top,
+                pc: 0,
+                nresults,
+                call_status: CIST_C,
+                nextraargs: 0,
+            });
+        }
+
+        self.call_depth += 1;
+        Ok(())
+    }
+
     /// Pop call frame (equivalent to Lua's luaD_poscall)
     #[inline(always)]
     pub(crate) fn pop_frame(&mut self) {
@@ -385,6 +450,17 @@ impl LuaState {
             if ci.call_status & CIST_C != 0 && self.c_call_depth > 0 {
                 self.c_call_depth -= 1;
             }
+        }
+    }
+
+    /// Pop a C call frame (specialized fast path, skips call_status bit check).
+    /// Caller MUST know the current frame is a C frame.
+    #[inline(always)]
+    pub(crate) fn pop_c_frame(&mut self) {
+        debug_assert!(self.call_depth > 0);
+        self.call_depth -= 1;
+        if self.c_call_depth > 0 {
+            self.c_call_depth -= 1;
         }
     }
 
@@ -1200,6 +1276,17 @@ impl LuaState {
         }
     }
 
+    /// Get a specific argument without bounds checking (1-based index).
+    /// SAFETY: Caller MUST ensure index >= 1, call_depth > 0,
+    /// and `base + index - 1 < stack.len()`.
+    #[inline(always)]
+    pub unsafe fn get_arg_unchecked(&self, index: usize) -> LuaValue {
+        unsafe {
+            let frame = self.call_stack.get_unchecked(self.call_depth - 1);
+            *self.stack.get_unchecked(frame.base + index - 1)
+        }
+    }
+
     /// Get the number of arguments for the current function call
     pub fn arg_count(&self) -> usize {
         if self.call_depth == 0 {
@@ -1248,6 +1335,18 @@ impl LuaState {
         self.stack_top = current_top + 1;
 
         Ok(())
+    }
+
+    /// Push a value to the stack without capacity/overflow checking.
+    /// SAFETY: Caller MUST ensure physical stack has room (guaranteed by EXTRA_STACK
+    /// after push_c_frame) and stack_top < max_stack_size.
+    #[inline(always)]
+    pub unsafe fn push_value_unchecked(&mut self, value: LuaValue) {
+        unsafe {
+            let top = self.stack_top;
+            *self.stack.get_unchecked_mut(top) = value;
+            self.stack_top = top + 1;
+        }
     }
 
     // ===== Object Creation =====
