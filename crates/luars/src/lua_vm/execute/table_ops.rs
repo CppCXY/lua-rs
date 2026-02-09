@@ -100,6 +100,18 @@ pub fn exec_settable(
     let stack = lua_state.stack();
     let ra = stack[base + a];
     let rb = stack[base + b];
+
+    // Check for nil key - "table index is nil"
+    if rb.is_nil() {
+        lua_state.set_frame_pc(frame_idx, *pc as u32);
+        return Err(lua_state.error("table index is nil".to_string()));
+    }
+    // Check for NaN key - "table index is NaN"
+    if rb.ttisfloat() && rb.fltvalue().is_nan() {
+        lua_state.set_frame_pc(frame_idx, *pc as u32);
+        return Err(lua_state.error("table index is NaN".to_string()));
+    }
+
     let val = if k {
         if c >= constants.len() {
             lua_state.set_frame_pc(frame_idx, *pc as u32);

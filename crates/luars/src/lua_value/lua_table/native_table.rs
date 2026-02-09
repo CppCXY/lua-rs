@@ -677,8 +677,23 @@ impl NativeTable {
     /// Generic get
     #[inline(always)]
     pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
+        // Normalize float keys to integer if they have no fractional part
+        // This ensures t[3.0] and t[3] refer to the same slot
+        // Only check actual float type (ttisfloat), not integers
+        let mut key = *key;
+        if key.ttisfloat() {
+            let f = key.fltvalue();
+            if f.fract() == 0.0 && f.is_finite() {
+                let i = f as i64;
+                if i as f64 == f {
+                    key = LuaValue::integer(i);
+                }
+            }
+        };
+
         // Try array part for integers
-        if let Some(i) = key.as_integer() {
+        if key.ttisinteger() {
+            let i = key.ivalue();
             unsafe {
                 if let Some(val) = self.read_array(i) {
                     return Some(val);
@@ -687,7 +702,7 @@ impl NativeTable {
         }
 
         // Hash part
-        self.get_from_hash(key)
+        self.get_from_hash(&key)
     }
 
     /// Set value in hash part
@@ -802,8 +817,23 @@ impl NativeTable {
     /// Port of lua5.5's newcheckedkey logic in luaH_set/luaH_setint
     /// CRITICAL INVARIANT: integer keys in [1..asize] must ONLY exist in array part!
     pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+        // Normalize float keys to integer if they have no fractional part
+        // This ensures t[3.0] and t[3] refer to the same slot
+        // Only check actual float type (ttisfloat), not integers
+        let mut key = *key;
+        if key.ttisfloat() {
+            let f = key.fltvalue();
+            if f.fract() == 0.0 && f.is_finite() {
+                let i = f as i64;
+                if i as f64 == f {
+                    key = LuaValue::integer(i);
+                }
+            }
+        };
+
         // Check if key is an integer in array range (lua5.5's keyinarray check)
-        if let Some(i) = key.as_integer() {
+        if key.ttisinteger() {
+            let i = key.ivalue();
             if i >= 1 && i <= self.asize as i64 {
                 // Key is in array range - set in array part ONLY
                 let was_nil = unsafe { self.read_array(i).is_none() };
@@ -830,8 +860,8 @@ impl NativeTable {
 
         // Not in array range - use hash part
         // lua5.5's insertkey/newcheckedkey logic
-        let key_exists = self.get_from_hash(key).is_some();
-        self.set_node(*key, value);
+        let key_exists = self.get_from_hash(&key).is_some();
+        self.set_node(key, value);
         !key_exists && !value.is_nil()
     }
 

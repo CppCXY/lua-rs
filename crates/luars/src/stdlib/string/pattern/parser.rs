@@ -192,22 +192,42 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool) -> Result<(Patter
                 pos = new_pos + 1; // Skip closing )
             }
             '*' | '+' | '?' | '-' => {
-                if seq.is_empty() {
-                    return Err(format!("unexpected repetition operator '{}'", c));
-                }
-                let mode = match c {
-                    '*' => RepeatMode::ZeroOrMore,
-                    '+' => RepeatMode::OneOrMore,
-                    '?' => RepeatMode::ZeroOrOne,
-                    '-' => RepeatMode::Lazy,
-                    _ => unreachable!(),
+                // In standard Lua, quantifiers only apply after a quantifiable
+                // pattern item (literal char, '.', '%x', '[set]').
+                // If seq is empty or the last element is not quantifiable,
+                // treat these as literal characters.
+                let can_quantify = if let Some(last) = seq.last() {
+                    matches!(
+                        last,
+                        Pattern::Char(_)
+                            | Pattern::Dot
+                            | Pattern::Class(_)
+                            | Pattern::InvertedClass(_)
+                            | Pattern::Set { .. }
+                    )
+                } else {
+                    false
                 };
-                let last = seq.pop().unwrap();
-                seq.push(Pattern::Repeat {
-                    pattern: Box::new(last),
-                    mode,
-                });
-                pos += 1;
+
+                if !can_quantify {
+                    // Treat as literal character
+                    seq.push(Pattern::Char(c));
+                    pos += 1;
+                } else {
+                    let mode = match c {
+                        '*' => RepeatMode::ZeroOrMore,
+                        '+' => RepeatMode::OneOrMore,
+                        '?' => RepeatMode::ZeroOrOne,
+                        '-' => RepeatMode::Lazy,
+                        _ => unreachable!(),
+                    };
+                    let last = seq.pop().unwrap();
+                    seq.push(Pattern::Repeat {
+                        pattern: Box::new(last),
+                        mode,
+                    });
+                    pos += 1;
+                }
             }
             _ => {
                 // Literal character

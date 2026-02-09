@@ -617,13 +617,8 @@ impl LuaValue {
             // Lua 5.4 semantics: floats with zero fraction are integers
             let f = self.fltvalue();
             if f.fract() == 0.0 && f.is_finite() {
-                const MIN_INT_F: f64 = i64::MIN as f64;
-                const MAX_INT_F: f64 = i64::MAX as f64;
-                if f >= MIN_INT_F && f <= MAX_INT_F {
-                    Some(f as i64)
-                } else {
-                    None
-                }
+                let i = f as i64;
+                if i as f64 == f { Some(f as i64) } else { None }
             } else {
                 None
             }
@@ -960,11 +955,17 @@ impl LuaValue {
 /// Returns false if the float can't precisely represent the integer.
 #[inline(always)]
 fn lua_float_eq_int(f: f64, i: i64) -> bool {
-    if !f.is_finite() { return false; }
+    if !f.is_finite() {
+        return false;
+    }
     // Check if float is integral and round-trips through i64
-    if f != f.floor() { return false; }
+    if f != f.floor() {
+        return false;
+    }
     // Check range (i64::MIN is exactly representable as f64, i64::MAX is not)
-    if f < i64::MIN as f64 || f >= (i64::MAX as f64) + 1.0 { return false; }
+    if f < i64::MIN as f64 || f >= (i64::MAX as f64) + 1.0 {
+        return false;
+    }
     (f as i64) == i
 }
 

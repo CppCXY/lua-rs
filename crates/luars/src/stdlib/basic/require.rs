@@ -1,7 +1,7 @@
 use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 
-/// require(modname) - Load a module  
-/// Simplified implementation - loads from package.preload or package.path
+/// require(modname) - Load a module
+/// Implementation following standard Lua 5.5 semantics (loadlib.c ll_require)
 pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     let modname_val = l
         .get_arg(1)
@@ -11,52 +11,45 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'require' (string expected)".to_string()));
     };
 
-    // Get package table
-    let package_table_value = l
-        .get_global("package")?
-        .ok_or_else(|| l.error("package table not found".to_string()))?;
+    // Get package.loaded from registry (like standard Lua's LUA_LOADED_TABLE)
+    // This ensures require works even if the global 'package' is reassigned
+    let vm = l.vm_mut();
+    let loaded_val = vm
+        .registry_get("_LOADED")?
+        .ok_or_else(|| vm.main_state().error("package.loaded not found".to_string()))?;
 
-    let Some(package_table) = package_table_value.as_table_mut() else {
-        return Err(l.error("package must be a table".to_string()));
-    };
-
-    // Get package.loaded
-    let loaded_key = l.create_string("loaded")?;
-    let loaded_val = package_table
-        .raw_get(&loaded_key)
-        .ok_or_else(|| l.error("package.loaded not found".to_string()))?;
+    // Get the original package table from registry for searchers
+    let package_table_value = vm
+        .registry_get("_PACKAGE")?
+        .ok_or_else(|| vm.main_state().error("package table not found".to_string()))?;
 
     let Some(loaded_table) = loaded_val.as_table_mut() else {
         return Err(l.error("package.loaded must be a table".to_string()));
     };
 
-    // Check if module is already loaded
+    // Check if module is already loaded (using lua_toboolean semantics)
+    // nil and false both mean "not loaded"
     let already_loaded = loaded_table
         .raw_get(&modname_val)
         .unwrap_or(LuaValue::nil());
 
-    // If module is already loaded and not nil/false, return it
-    if !already_loaded.is_nil() {
-        if let Some(b) = already_loaded.as_boolean() {
-            if !b {
-                // false means loading, prevent recursive require
-                return Err(l.error(format!(
-                    "loop or previous error loading module '{}'",
-                    modname_str
-                )));
-            }
-        } else {
-            // Non-nil, non-false value means already loaded
-            l.push_value(already_loaded)?;
-            return Ok(1);
-        }
+    let is_loaded = match &already_loaded {
+        v if v.is_nil() => false,
+        v if v.as_boolean() == Some(false) => false,
+        _ => true,
+    };
+
+    if is_loaded {
+        // Package is already loaded, return it (only 1 value for cached)
+        l.push_value(already_loaded)?;
+        return Ok(1);
     }
 
-    // Mark module as being loaded to prevent recursion
-    l.raw_set(&loaded_val, modname_val, LuaValue::boolean(false));
-
-    // Get package.searchers
+    // Get package.searchers from the original package table (stored in registry)
     let searchers_key = l.create_string("searchers")?;
+    let Some(package_table) = package_table_value.as_table() else {
+        return Err(l.error("package must be a table".to_string()));
+    };
     let searchers_val = match package_table.raw_get(&searchers_key) {
         Some(v) => v,
         None => return Err(l.error("package.searchers not found".to_string())),
@@ -165,34 +158,41 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
             )));
         }
 
-        // Get the module result from loader
-        let module_result = if loader_result_count > 0 {
+        // Get the loader result
+        let loader_result = if loader_result_count > 0 {
             l.stack_get(loader_func_idx).unwrap_or(LuaValue::nil())
         } else {
             LuaValue::nil()
         };
 
-        // If loader returned nil, use true instead
-        let final_result = if module_result.is_nil() {
-            LuaValue::boolean(true)
+        // Standard Lua semantics (from loadlib.c):
+        // 1. If loader returned non-nil, set LOADED[name] = returned_value
+        if !loader_result.is_nil() {
+            l.raw_set(&loaded_val, modname_val, loader_result);
+        }
+
+        // 2. If LOADED[name] is still nil, set LOADED[name] = true
+        let current_loaded = loaded_val
+            .as_table()
+            .and_then(|t| t.raw_get(&modname_val))
+            .unwrap_or(LuaValue::nil());
+
+        let final_result = if current_loaded.is_nil() {
+            let val = LuaValue::boolean(true);
+            l.raw_set(&loaded_val, modname_val, val);
+            val
         } else {
-            module_result
+            current_loaded
         };
 
-        // Store in package.loaded
-        l.raw_set(&loaded_val, modname_val, final_result);
-
-        // Clean up stack and return result
+        // Clean up stack and return module result + loader_data
         l.set_top(loader_func_idx)?;
         l.push_value(final_result)?;
-        return Ok(1);
+        l.push_value(loader_data)?;
+        return Ok(2);
     }
 
     // No searcher found the module
-    // Clean up the false marker from package.loaded
-    loaded_table.raw_set(&modname_val, LuaValue::nil());
-    // donot need trace gc
-
     let error_msg = if error_messages.is_empty() {
         format!("module '{}' not found", modname_str)
     } else {

@@ -64,7 +64,23 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     l.raw_set(&package_table, config_key, config_value);
     l.raw_set(&package_table, searchers_key, searchers_table_value);
 
+    // Store loaded table and package table in registry for use by require
+    // This matches standard Lua's LUA_LOADED_TABLE ("_LOADED") and upvalue approach
+    let vm = l.vm_mut();
+    vm.registry_set("_LOADED", loaded_table)?;
+    vm.registry_set("_PRELOAD", preload_table)?;
+    // Store the original package table so require can find searchers
+    // even if the global 'package' is reassigned
+    vm.registry_set("_PACKAGE", package_table)?;
+
     Ok(())
+}
+
+// Helper to get the original package table from registry
+fn get_package_from_registry(l: &mut LuaState) -> LuaResult<LuaValue> {
+    let vm = l.vm_mut();
+    vm.registry_get("_PACKAGE")?
+        .ok_or_else(|| vm.main_state().error("package table not found".to_string()))
 }
 
 // Searcher 1: Check package.preload
@@ -73,29 +89,9 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("module name expected".to_string()))?;
 
-    // let Some(modname_id) = modname_val.as_string_id() else {
-    //     return Err(l.error("module name expected".to_string()));
-    // };
-
-    // let modname_str = {
-    //     let vm = l.vm_mut();
-    //     let Some(s) = vm.object_pool.get_string(modname_id) else {
-    //         return Err(l.error("module name expected".to_string()));
-    //     };
-    //     s.to_string()
-    // };
-
-    let package_table = l
-        .get_global("package")?
-        .ok_or_else(|| l.error("package table not found".to_string()))?;
-
-    let Some(package_table) = package_table.as_table() else {
-        return Err(l.error("Invalid package table".to_string()));
-    };
-
-    let preload_key = l.create_string("preload")?;
-    let preload_val = package_table
-        .raw_get(&preload_key)
+    // Get preload table from registry
+    let vm = l.vm_mut();
+    let preload_val = vm.registry_get("_PRELOAD")?
         .unwrap_or(LuaValue::nil());
 
     let Some(preload_table) = preload_val.as_table_mut() else {
@@ -131,9 +127,8 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("module name expected".to_string()));
     };
 
-    let package_val = l
-        .get_global("package")?
-        .ok_or_else(|| l.error("package table not found".to_string()))?;
+    // Get the original package table from registry to access package.path
+    let package_val = get_package_from_registry(l)?;
 
     let Some(package_table) = package_val.as_table() else {
         return Err(l.error("Invalid package table".to_string()));
@@ -148,8 +143,9 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("'package.path' must be a string".to_string()));
     };
 
-    // Search for the file
-    let result = search_path(&modname, &path_str, ".", "/")?;
+    // Search for the file, using platform directory separator
+    let dirsep = std::path::MAIN_SEPARATOR_STR;
+    let result = search_path(&modname, &path_str, ".", dirsep)?;
 
     match result {
         Some(filepath) => {
@@ -178,7 +174,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
 // Called as: loader(modname, filepath)
 fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     // First arg is modname, second arg is filepath (passed by searcher)
-    let _modname_val = l
+    let modname_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("module name expected".to_string()))?;
     let filepath_val = l
@@ -213,9 +209,12 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
 
     // Call the function to execute the module and get its return value
     // The module should return its exports (usually a table)
+    // Pass modname and filepath as arguments so the module can access them via ...
     l.push_value(func)?;
-    let func_idx = l.get_top() - 1;
-    let (success, result_count) = l.pcall_stack_based(func_idx, 0)?;
+    l.push_value(modname_val)?;
+    l.push_value(filepath_val.clone())?;
+    let func_idx = l.get_top() - 3;
+    let (success, result_count) = l.pcall_stack_based(func_idx, 2)?;
 
     if !success {
         // Module threw an error
@@ -252,9 +251,7 @@ fn searcher_c(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("module name expected".to_string()));
     };
 
-    let package_val = l
-        .get_global("package")?
-        .ok_or_else(|| l.error("package table not found".to_string()))?;
+    let package_val = get_package_from_registry(l)?;
 
     let Some(package_table) = package_val.as_table() else {
         return Err(l.error("Invalid package table".to_string()));
@@ -302,9 +299,7 @@ fn searcher_c_all_in_one(l: &mut LuaState) -> LuaResult<usize> {
     // e.g., for "a.b.c", we search for "a"
     let root_modname = modname.split('.').next().unwrap_or(modname);
 
-    let package_val = l
-        .get_global("package")?
-        .ok_or_else(|| l.error("package table not found".to_string()))?;
+    let package_val = get_package_from_registry(l)?;
 
     let Some(package_table) = package_val.as_table() else {
         return Err(l.error("Invalid package table".to_string()));
