@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
+use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA, CIST_RECST, CIST_YPCALL};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
@@ -791,11 +791,10 @@ impl LuaState {
         }
 
         if count > 0 {
-            // Batch remove all closed upvalues from the list (efficient O(M) shift via drain)
-            let to_close: Vec<UpvaluePtr> = self.open_upvalues_list.drain(0..count).collect();
-
-            // Perform the close operation for each
-            for upval_ptr in to_close {
+            // Process upvalues to close in-place, then drain.
+            // First pass: close each upvalue and remove from map.
+            for i in 0..count {
+                let upval_ptr = self.open_upvalues_list[i];
                 let data = &upval_ptr.as_ref().data;
                 if data.is_open() {
                     let stack_idx = data.get_stack_index();
@@ -816,8 +815,6 @@ impl LuaState {
 
                     if let Some(header) = gc_ptr.header_mut() {
                         if !header.is_white() {
-                            // nw2black(uv);  /* closed upvalues cannot be gray */
-                            // luaC_barrier(L, uv, slot);
                             header.make_black();
                             if let Some(value_gc_ptr) = value.as_gc_ptr() {
                                 self.gc_barrier(upval_ptr, value_gc_ptr);
@@ -826,6 +823,8 @@ impl LuaState {
                     }
                 }
             }
+            // Batch remove from front of list
+            self.open_upvalues_list.drain(0..count);
         }
     }
 
@@ -1550,7 +1549,8 @@ impl LuaState {
     }
 
     /// Create function closure
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> CreateResult {
+    #[inline]
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: UpvalueStore) -> CreateResult {
         self.vm_mut().create_function(chunk, upvalues)
     }
 

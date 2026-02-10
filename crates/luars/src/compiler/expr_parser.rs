@@ -968,6 +968,9 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     }
     child_chunk.upvalue_count = child_upvalues.len();
 
+    // Cache proto data size for GC (avoid per-closure recalculation)
+    child_chunk.compute_proto_data_size();
+
     // lparser.c:1005: Add child proto to parent (addprototype)
     let proto_idx = fs.chunk.child_protos.len();
     fs.chunk.child_protos.push(std::rc::Rc::new(child_chunk));

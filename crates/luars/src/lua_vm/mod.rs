@@ -11,7 +11,7 @@ mod safe_option;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::GC;
-use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
+use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 use crate::lua_vm::execute::lua_execute;
@@ -261,7 +261,7 @@ impl LuaVM {
         // Main chunk needs _ENV upvalue pointing to global table
         // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
         let env_upval = self.create_upvalue_closed(self.global)?;
-        let func = self.create_function(chunk, vec![env_upval])?;
+        let func = self.create_function(chunk, crate::lua_value::UpvalueStore::from_vec(vec![env_upval]))?;
         self.execute_function(func, vec![])
     }
 
@@ -522,7 +522,7 @@ impl LuaVM {
 
     /// Create a function in object pool
     #[inline(always)]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: Vec<UpvaluePtr>) -> CreateResult {
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: UpvalueStore) -> CreateResult {
         self.object_allocator
             .create_function(&mut self.gc, chunk, upvalues)
     }

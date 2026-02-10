@@ -1073,7 +1073,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            let func = l.create_function(Rc::new(chunk), upvalues)?;
+            let func = l.create_function(Rc::new(chunk), crate::lua_value::UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1118,7 +1118,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             let global = l.vm_mut().global.clone();
             let env_upvalue = l.create_upvalue_closed(global)?;
             let upvalues = vec![env_upvalue];
-            let func = l.create_function(std::rc::Rc::new(chunk), upvalues)?;
+            let func = l.create_function(std::rc::Rc::new(chunk), crate::lua_value::UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1170,7 +1170,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;
     let upvalues = vec![env_upvalue];
-    let func = l.create_function(std::rc::Rc::new(chunk), upvalues)?;
+    let func = l.create_function(std::rc::Rc::new(chunk), crate::lua_value::UpvalueStore::from_vec(upvalues))?;
 
     // Call the function with 0 arguments
     let (success, results) = l.pcall(func, vec![])?;

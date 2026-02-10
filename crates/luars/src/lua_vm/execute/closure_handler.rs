@@ -17,6 +17,7 @@
 
 use crate::{
     Chunk, UpvaluePtr,
+    lua_value::UpvalueStore,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
 
@@ -24,6 +25,7 @@ use crate::{
 /// Create a closure from prototype Bx and store in R[A]
 ///
 /// Based on lvm.c:1929-1934 and pushclosure (lvm.c:834-849)
+#[inline]
 pub fn handle_closure(
     lua_state: &mut LuaState,
     base: usize,
@@ -42,34 +44,52 @@ pub fn handle_closure(
     let upvalue_descs = &proto.upvalue_descs;
     let num_upvalues = upvalue_descs.len();
 
-    // Create upvalue array for the new closure
-    let mut new_upvalues = Vec::with_capacity(num_upvalues);
-
-    // Fill in upvalues according to descriptors
-    for desc in upvalue_descs {
-        let upval_ptr = if desc.is_local {
-            // Capture local variable from current stack frame
-            // desc.index is relative to base
-            let stack_index = base + desc.index as usize;
-
-            // Find or create open upvalue for this stack position
-            lua_state.find_or_create_upvalue(stack_index)?
-        } else {
-            // Inherit upvalue from parent closure
-            let parent_idx = desc.index as usize;
-            if parent_idx >= parent_upvalues.len() {
-                return Err(LuaError::RuntimeError);
+    // Build UpvalueStore directly — avoid heap allocation for 0-2 upvalues
+    let upvalue_store = match num_upvalues {
+        0 => UpvalueStore::Empty,
+        1 => {
+            let desc = &upvalue_descs[0];
+            let ptr = resolve_upvalue(lua_state, base, desc, parent_upvalues)?;
+            UpvalueStore::One(ptr)
+        }
+        2 => {
+            let p0 = resolve_upvalue(lua_state, base, &upvalue_descs[0], parent_upvalues)?;
+            let p1 = resolve_upvalue(lua_state, base, &upvalue_descs[1], parent_upvalues)?;
+            UpvalueStore::Two([p0, p1])
+        }
+        _ => {
+            let mut v = Vec::with_capacity(num_upvalues);
+            for desc in upvalue_descs {
+                v.push(resolve_upvalue(lua_state, base, desc, parent_upvalues)?);
             }
-            parent_upvalues[parent_idx]
-        };
+            UpvalueStore::Many(v.into_boxed_slice())
+        }
+    };
 
-        new_upvalues.push(upval_ptr);
-    }
-
-    // Create the function with the proto and upvalues
-    let closure_value = lua_state.create_function(proto, new_upvalues)?;
+    // Create the function with the proto and upvalues (no intermediate Vec)
+    let closure_value = lua_state.create_function(proto, upvalue_store)?;
 
     // Store in R[A]
     lua_state.stack_mut()[base + a] = closure_value;
     Ok(())
+}
+
+/// Resolve a single upvalue from its descriptor
+#[inline(always)]
+fn resolve_upvalue(
+    lua_state: &mut LuaState,
+    base: usize,
+    desc: &crate::lua_value::UpvalueDesc,
+    parent_upvalues: &[UpvaluePtr],
+) -> LuaResult<UpvaluePtr> {
+    if desc.is_local {
+        let stack_index = base + desc.index as usize;
+        lua_state.find_or_create_upvalue(stack_index)
+    } else {
+        let parent_idx = desc.index as usize;
+        if parent_idx >= parent_upvalues.len() {
+            return Err(LuaError::RuntimeError);
+        }
+        Ok(parent_upvalues[parent_idx])
+    }
 }

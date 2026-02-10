@@ -233,7 +233,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
     // STARTFUNC: Function context switching point (like Lua C's startfunc label)
     'startfunc: loop {
-        // Check if we've reached target depth
+        // Check if we've returned past target depth.
         let current_depth = lua_state.call_depth();
         if current_depth <= target_depth {
             return Ok(());
@@ -1039,12 +1039,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Handle return
                     return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
-
-                    // Note: C Lua does NOT call checkGC in OP_RETURN.
-                    // Calling check_gc here is dangerous because after return,
-                    // top = func_pos + nres (very low), and if GC reaches atomic
-                    // phase, traverse_thread scans only [0..top), missing the
-                    // caller's live local variables above top.
                     continue 'startfunc;
                 }
                 OpCode::Return0 => {

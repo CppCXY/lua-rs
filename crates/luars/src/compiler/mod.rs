@@ -145,5 +145,8 @@ pub fn compile_code_with_name(
     fs.chunk.linedefined = 0; // Main function starts at line 0
     fs.chunk.lastlinedefined = 0; // Main function ends at line 0 (convention)
 
+    // Cache proto data size for GC
+    fs.chunk.compute_proto_data_size();
+
     Ok(fs.chunk)
 }

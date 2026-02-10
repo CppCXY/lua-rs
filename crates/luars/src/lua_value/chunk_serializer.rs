@@ -496,7 +496,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         line_info.push(read_u32(cursor)?);
     }
 
-    Ok(Chunk {
+    let mut chunk = Chunk {
         code,
         constants,
         locals,
@@ -512,7 +512,10 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         line_info,
         linedefined: 0,
         lastlinedefined: 0,
-    })
+        proto_data_size: 0,
+    };
+    chunk.compute_proto_data_size();
+    Ok(chunk)
 }
 
 fn read_chunk_with_dedup(
@@ -583,7 +586,7 @@ fn read_chunk_with_dedup(
         line_info.push(read_u32(cursor)?);
     }
 
-    Ok(Chunk {
+    let mut chunk = Chunk {
         code,
         constants,
         locals,
@@ -599,7 +602,10 @@ fn read_chunk_with_dedup(
         line_info,
         linedefined: 0,
         lastlinedefined: 0,
-    })
+        proto_data_size: 0,
+    };
+    chunk.compute_proto_data_size();
+    Ok(chunk)
 }
 
 // Constant type tags (from Lua 5.5 lundump.h)
@@ -832,7 +838,7 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
         line_info.push(read_u32(cursor)?);
     }
 
-    Ok(Chunk {
+    let mut chunk = Chunk {
         code,
         constants,
         child_protos,
@@ -848,7 +854,10 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
         use_hidden_vararg: false,
         linedefined: 0,
         lastlinedefined: 0,
-    })
+        proto_data_size: 0,
+    };
+    chunk.compute_proto_data_size();
+    Ok(chunk)
 }
 
 #[allow(dead_code)]
@@ -939,7 +948,7 @@ fn read_chunk_with_vm_dedup(
         line_info.push(read_u32(cursor)?);
     }
 
-    Ok(Chunk {
+    let mut chunk = Chunk {
         code,
         constants,
         child_protos,
@@ -955,7 +964,10 @@ fn read_chunk_with_vm_dedup(
         use_hidden_vararg: false,
         linedefined: 0,
         lastlinedefined: 0,
-    })
+        proto_data_size: 0,
+    };
+    chunk.compute_proto_data_size();
+    Ok(chunk)
 }
 
 fn read_constant_with_vm_dedup(
@@ -1059,7 +1071,7 @@ fn read_chunk_with_strings(
         line_info.push(read_u32(cursor)?);
     }
 
-    Ok(Chunk {
+    let mut chunk = Chunk {
         code,
         constants,
         locals,
@@ -1075,7 +1087,10 @@ fn read_chunk_with_strings(
         line_info,
         linedefined: 0,
         lastlinedefined: 0,
-    })
+        proto_data_size: 0,
+    };
+    chunk.compute_proto_data_size();
+    Ok(chunk)
 }
 
 // Helper functions for binary I/O

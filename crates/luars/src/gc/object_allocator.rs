@@ -13,7 +13,8 @@ use crate::lua_value::{CClosureFunction, Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     GC, GcBinary, GcCClosure, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata,
-    Instruction, LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
+    LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
+    lua_value::UpvalueStore,
 };
 use std::rc::Rc;
 
@@ -174,20 +175,15 @@ impl ObjectAllocator {
         &mut self,
         gc: &mut GC,
         chunk: Rc<Chunk>,
-        upvalue_ptrs: Vec<UpvaluePtr>,
+        upvalue_store: UpvalueStore,
     ) -> CreateResult {
         let current_white = gc.current_white;
-        // Calculate size: base + upvalues + chunk data
-        // TODO: refine size calculation
-        let upval_size = upvalue_ptrs.len() * std::mem::size_of::<UpvaluePtr>();
-        let instr_size = chunk.code.len() * std::mem::size_of::<Instruction>();
-        let const_size = chunk.constants.len() * std::mem::size_of::<LuaValue>();
-        let child_size = chunk.child_protos.len() * std::mem::size_of::<Chunk>();
-        let line_size = chunk.line_info.len() * std::mem::size_of::<u32>();
-        let size = (upval_size + instr_size + const_size + child_size + line_size) as u32;
+        // Use cached proto data size + upvalue size
+        let upval_size = upvalue_store.len() * std::mem::size_of::<UpvaluePtr>();
+        let size = chunk.proto_data_size + upval_size as u32;
 
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
-            LuaFunction::new(chunk, upvalue_ptrs),
+            LuaFunction::new(chunk, upvalue_store),
             current_white,
             size,
         )));

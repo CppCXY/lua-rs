@@ -229,6 +229,7 @@ pub struct Chunk {
     pub line_info: Vec<u32>,          // Line number for each instruction (for debug)
     pub linedefined: usize,           // Line where function starts (0 for main)
     pub lastlinedefined: usize,       // Line where function ends (0 for main)
+    pub proto_data_size: u32,          // Cached size for GC (code+constants+children+lines)
 }
 
 impl Chunk {
@@ -249,7 +250,18 @@ impl Chunk {
             line_info: Vec::new(),
             linedefined: 0,
             lastlinedefined: 0,
+            proto_data_size: 0,
         }
+    }
+
+    /// Compute and cache proto_data_size. Call once after compilation is complete.
+    pub fn compute_proto_data_size(&mut self) {
+        use std::mem::size_of;
+        let instr_size = self.code.len() * size_of::<crate::lua_vm::Instruction>();
+        let const_size = self.constants.len() * size_of::<LuaValue>();
+        let child_size = self.child_protos.len() * size_of::<Self>();
+        let line_size = self.line_info.len() * size_of::<u32>();
+        self.proto_data_size = (instr_size + const_size + child_size + line_size) as u32;
     }
 }
 
@@ -285,16 +297,62 @@ impl PartialEq for LuaString {
     }
 }
 
+/// Inline storage for upvalue pointers — avoids heap allocation for 0-2 upvalues.
+/// Used as a temporary construction helper in handle_closure.
+/// Converted to Box<[UpvaluePtr]> for storage in LuaFunction (branchless deref).
+pub enum UpvalueStore {
+    Empty,
+    One(UpvaluePtr),
+    Two([UpvaluePtr; 2]),
+    Many(Box<[UpvaluePtr]>),
+}
+
+impl UpvalueStore {
+    #[inline(always)]
+    pub fn from_vec(v: Vec<UpvaluePtr>) -> Self {
+        match v.len() {
+            0 => UpvalueStore::Empty,
+            1 => UpvalueStore::One(v[0]),
+            2 => UpvalueStore::Two([v[0], v[1]]),
+            _ => UpvalueStore::Many(v.into_boxed_slice()),
+        }
+    }
+
+    /// Convert to Box<[UpvaluePtr]> for storage in LuaFunction.
+    /// 0 upvalues: no heap allocation (dangling pointer).
+    /// 1-2 upvalues: single small allocation (8-16 bytes).
+    /// 3+: already boxed, zero-cost move.
+    #[inline(always)]
+    pub fn into_boxed_slice(self) -> Box<[UpvaluePtr]> {
+        match self {
+            UpvalueStore::Empty => Box::new([]),
+            UpvalueStore::One(p) => Box::new([p]),
+            UpvalueStore::Two(ps) => Box::new(ps),
+            UpvalueStore::Many(v) => v,
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        match self {
+            UpvalueStore::Empty => 0,
+            UpvalueStore::One(_) => 1,
+            UpvalueStore::Two(_) => 2,
+            UpvalueStore::Many(v) => v.len(),
+        }
+    }
+}
+
 pub struct LuaFunction {
     chunk: Rc<Chunk>,
-    upvalue_ptrs: Vec<UpvaluePtr>,
+    upvalue_ptrs: Box<[UpvaluePtr]>,
 }
 
 impl LuaFunction {
-    pub fn new(chunk: Rc<Chunk>, upvalue_ptrs: Vec<UpvaluePtr>) -> Self {
+    pub fn new(chunk: Rc<Chunk>, upvalue_ptrs: UpvalueStore) -> Self {
         LuaFunction {
             chunk,
-            upvalue_ptrs,
+            upvalue_ptrs: upvalue_ptrs.into_boxed_slice(),
         }
     }
 
@@ -305,14 +363,15 @@ impl LuaFunction {
     }
 
     /// Get cached upvalues (direct pointers for fast access)
+    /// Box<[T]> deref is branchless — no match overhead
     #[inline(always)]
-    pub fn upvalues(&self) -> &Vec<UpvaluePtr> {
+    pub fn upvalues(&self) -> &[UpvaluePtr] {
         &self.upvalue_ptrs
     }
 
     /// Get mutable access to cached upvalues for updating pointers
     #[inline(always)]
-    pub fn upvalues_mut(&mut self) -> &mut Vec<UpvaluePtr> {
+    pub fn upvalues_mut(&mut self) -> &mut [UpvaluePtr] {
         &mut self.upvalue_ptrs
     }
 }
