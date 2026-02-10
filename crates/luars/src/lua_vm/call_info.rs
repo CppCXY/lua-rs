@@ -14,12 +14,15 @@ pub mod call_status {
     #[allow(unused)]
     /// Call is running a for loop
     pub const CIST_HOOKYIELD: u32 = 1 << 3;
-    #[allow(unused)]
-    /// Last hook yielded
+    /// Yieldable protected call (pcall body yielded)
     pub const CIST_YPCALL: u32 = 1 << 4;
     #[allow(unused)]
     /// Call is in error-protected mode (pcall/xpcall)
     pub const CIST_FRESH: u32 = 1 << 5;
+    /// Function is closing TBC variables during return
+    pub const CIST_CLSRET: u32 = 1 << 6;
+    /// Error recovery status saved across yield (precover)
+    pub const CIST_RECST: u32 = 1 << 7;
 
     /// Offset for __call metamethod count (bits 8-11)
     pub const CIST_CCMT: u32 = 8;
@@ -76,6 +79,10 @@ pub struct CallInfo {
     /// Number of extra arguments in vararg functions
     /// Equivalent to Lua's CallInfo.u.l.nextraargs
     pub nextraargs: i32,
+
+    /// Saved number of return values (used when CIST_CLSRET is set)
+    /// Equivalent to Lua 5.5's CallInfo.u2.nres
+    pub saved_nres: i32,
 }
 
 impl CallInfo {
@@ -90,6 +97,7 @@ impl CallInfo {
             nresults: -1,
             call_status: call_status::CIST_LUA,
             nextraargs: 0,
+            saved_nres: 0,
         }
     }
 
@@ -104,6 +112,7 @@ impl CallInfo {
             nresults: -1,
             call_status: call_status::CIST_C,
             nextraargs: 0,
+            saved_nres: 0,
         }
     }
 
@@ -143,6 +152,7 @@ impl Default for CallInfo {
             nresults: -1,
             call_status: 0,
             nextraargs: 0,
+            saved_nres: 0,
         }
     }
 }

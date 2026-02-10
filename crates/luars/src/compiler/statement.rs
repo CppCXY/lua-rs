@@ -1682,13 +1682,12 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
             }
         }
         ExpKind::VLOCAL | ExpKind::VVARGVAR => {
-            // Check if local variable is const or compile-time const
-            // Note: RDKTOCLOSE variables are NOT readonly!
+            // Check if local variable is const, compile-time const, or to-be-closed
             let vidx = e.u.var().vidx as u16;
             if let Some(var_desc) = fs.get_local_var_desc(vidx) {
-                // Only RDKCONST and RDKCTC are truly readonly
+                // RDKCONST, RDKCTC, and RDKTOCLOSE are all readonly
                 match var_desc.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC => Some(var_desc.name.clone()),
+                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE => Some(var_desc.name.clone()),
                     _ => None,
                 }
             } else {
@@ -1696,14 +1695,13 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
             }
         }
         ExpKind::VUPVAL => {
-            // Check if upvalue is const or compile-time const
-            // Note: RDKTOCLOSE upvalues are NOT readonly!
+            // Check if upvalue is const, compile-time const, or to-be-closed
             let upval_idx = e.u.info() as usize;
             if upval_idx < fs.upvalues.len() {
                 let upval = &fs.upvalues[upval_idx];
-                // Only RDKCONST and RDKCTC are truly readonly
+                // RDKCONST, RDKCTC, and RDKTOCLOSE are all readonly
                 match upval.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC => Some(upval.name.clone()),
+                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE => Some(upval.name.clone()),
                     _ => None,
                 }
             } else {

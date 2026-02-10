@@ -10,7 +10,7 @@ use crate::compiler::parser::{
     to_unary_operator,
 };
 use crate::compiler::statement::{self, mark_upval};
-use crate::compiler::{VarKind, binary_k, code, string_k};
+use crate::compiler::{VarDesc, VarKind, binary_k, code, string_k};
 use crate::lua_value::UpvalueDesc;
 use crate::lua_vm::OpCode;
 
@@ -479,16 +479,24 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
                 singlevaraux(prev, name, var, false);
 
                 // Port of lparser.c:451-453: don't create upvalue for compile-time constants
-                // If the variable is a compile-time constant (VCONST), convert it to value immediately
-                // This enables constant folding in nested functions
+                // If the variable is a compile-time constant (VCONST), create a shadow VarDesc
+                // in the current function so check_readonly can still detect it as const.
                 if var.kind == ExpKind::VCONST {
-                    // Convert VCONST to actual constant value (VKINT/VKFLT/etc)
-                    // Port of const2exp from lcode.c:693-720
                     let vidx = var.u.info() as usize;
                     if let Some(prev_var) = prev.actvar.get(vidx) {
-                        if let Some(value) = prev_var.const_value {
-                            code::const_to_exp(value, var);
-                        }
+                        // Create shadow entry in current function's actvar
+                        let shadow = VarDesc {
+                            name: prev_var.name.clone(),
+                            kind: VarKind::RDKCTC,
+                            ridx: -1,
+                            vidx: 0,
+                            pidx: 0,
+                            const_value: prev_var.const_value,
+                        };
+                        fs.actvar.push(shadow);
+                        let new_idx = fs.actvar.len() - 1;
+                        var.u = ExpUnion::Info(new_idx as i32);
+                        // var.kind stays as VCONST
                     }
                 } else if var.kind == ExpKind::VLOCAL
                     || var.kind == ExpKind::VUPVAL

@@ -18,13 +18,15 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{LuaResult, LuaState},
+    lua_vm::{LuaError, LuaResult, LuaState},
+    lua_vm::call_info::call_status::CIST_CLSRET,
 };
 
 /// Handle OP_RETURN instruction
 /// Returns N values from R[A] to R[A+B-2]
 ///
 /// Based on lvm.c:1763-1783
+/// Supports yield inside __close: saves nres and backs up PC (CIST_CLSRET).
 #[inline]
 pub fn handle_return(
     lua_state: &mut LuaState,
@@ -35,11 +37,19 @@ pub fn handle_return(
     _c: usize,
     k: bool,
 ) -> LuaResult<()> {
-    // n = number of results (B-1), if B=0 then return all values to top
-    let mut nres = if b == 0 {
+    let ra_pos = base + a;
+
+    // Check if we're resuming a yield during close (CIST_CLSRET)
+    let ci_status = lua_state.get_call_info(frame_idx).call_status;
+    let mut nres = if ci_status & CIST_CLSRET != 0 {
+        // Resuming after yield in __close: restore nres and top from saved state
+        let saved = lua_state.get_call_info(frame_idx).saved_nres as usize;
+        lua_state.set_top_raw(ra_pos + saved);
+        lua_state.get_call_info_mut(frame_idx).call_status &= !CIST_CLSRET;
+        saved
+    } else if b == 0 {
         // Return all values from R[A] to logical top (L->top.p)
         let top = lua_state.get_top();
-        let ra_pos = base + a;
         if top > ra_pos { top - ra_pos } else { 0 }
     } else {
         b - 1
@@ -48,15 +58,24 @@ pub fn handle_return(
     // Close upvalues and TBC variables if k flag is set
     if k {
         // Like Lua 5.5 lvm.c:1772-1774: Set top to protect return values
-        // L->top.p = ra + nres;  /* save return values in correct positions */
-        let ra_pos = base + a;
         lua_state.set_top_raw(ra_pos + nres);
         // Also update frame.top so close methods don't overwrite return values
         {
             let frame = lua_state.get_call_info_mut(frame_idx);
             frame.top = ra_pos + nres;
         }
-        lua_state.close_all(base)?;
+        match lua_state.close_all(base) {
+            Ok(()) => {}
+            Err(LuaError::Yield) => {
+                // __close method yielded — save state for re-execution
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.saved_nres = nres as i32;
+                ci.call_status |= CIST_CLSRET;
+                ci.pc -= 1; // back up PC to re-execute RETURN on resume
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     // Adjust for vararg functions (nparams1 = C)

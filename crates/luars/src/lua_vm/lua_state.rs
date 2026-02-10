@@ -259,6 +259,7 @@ impl LuaState {
                 nresults,
                 call_status,
                 nextraargs,
+                saved_nres: 0,
             };
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
@@ -271,6 +272,7 @@ impl LuaState {
                 nresults,
                 call_status,
                 nextraargs,
+                saved_nres: 0,
             };
             self.call_stack.push(ci);
         }
@@ -351,6 +353,7 @@ impl LuaState {
                 nresults,
                 call_status: CIST_LUA,
                 nextraargs,
+                saved_nres: 0,
             };
         } else {
             self.call_stack.push(CallInfo {
@@ -362,6 +365,7 @@ impl LuaState {
                 nresults,
                 call_status: CIST_LUA,
                 nextraargs,
+                saved_nres: 0,
             });
         }
 
@@ -422,6 +426,7 @@ impl LuaState {
                 nresults,
                 call_status: CIST_C,
                 nextraargs: 0,
+                saved_nres: 0,
             };
         } else {
             self.call_stack.push(CallInfo {
@@ -433,6 +438,7 @@ impl LuaState {
                 nresults,
                 call_status: CIST_C,
                 nextraargs: 0,
+                saved_nres: 0,
             });
         }
 
@@ -836,6 +842,9 @@ impl LuaState {
     /// For normal block exit (LUA_OK status), only 1 argument is passed
     /// If a __close method throws, subsequent closes get the error as 2nd arg
     /// (cascading error behavior from Lua 5.5)
+    /// If a __close method yields, we propagate the yield immediately.
+    /// The current TBC was already popped from tbc_list, so on resume
+    /// close_tbc can be called again to continue with remaining entries.
     pub fn close_tbc(&mut self, level: usize) -> LuaResult<()> {
         use crate::lua_vm::execute::TmKind;
         use crate::lua_vm::execute::get_metamethod_event;
@@ -866,18 +875,27 @@ impl LuaState {
                     self.call_close_method_normal(&close_fn, &value)
                 };
                 
-                if let Err(_) = result {
-                    // This __close threw an error — capture it as current error
-                    let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
-                    if !err_obj.is_nil() {
-                        current_error = Some(err_obj);
-                    } else {
-                        let msg = self.error_msg.clone();
-                        if let Ok(s) = self.create_string(&msg) {
-                            current_error = Some(s.into());
-                        }
+                match result {
+                    Ok(()) => {}
+                    Err(LuaError::Yield) => {
+                        // Close method yielded — propagate yield immediately.
+                        // The TBC entry was already popped, so on resume
+                        // close_tbc can continue with remaining entries.
+                        return Err(LuaError::Yield);
                     }
-                    self.clear_error();
+                    Err(_) => {
+                        // This __close threw an error — capture it as current error
+                        let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                        if !err_obj.is_nil() {
+                            current_error = Some(err_obj);
+                        } else {
+                            let msg = self.error_msg.clone();
+                            if let Ok(s) = self.create_string(&msg) {
+                                current_error = Some(s.into());
+                            }
+                        }
+                        self.clear_error();
+                    }
                 }
             } else {
                 // No __close metamethod on a non-nil/non-false TBC value
@@ -920,6 +938,7 @@ impl LuaState {
     /// Close all to-be-closed variables with error status
     /// Used when unwinding due to errors  
     /// Calls __close(obj, err) — 2 arguments, with cascading error handling
+    /// Yield propagation works the same as close_tbc.
     pub fn close_tbc_with_error(&mut self, level: usize, err: LuaValue) -> LuaResult<()> {
         use crate::lua_vm::execute::TmKind;
         use crate::lua_vm::execute::get_metamethod_event;
@@ -945,19 +964,26 @@ impl LuaState {
                 // Call __close(obj, err) with 2 arguments
                 let result = self.call_close_method_with_error(&close_fn, &value, current_error.clone());
                 
-                if let Err(_) = result {
-                    // This __close threw — capture as new current error
-                    had_close_error = true;
-                    let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
-                    if !err_obj.is_nil() {
-                        current_error = err_obj;
-                    } else {
-                        let msg = self.error_msg.clone();
-                        if let Ok(s) = self.create_string(&msg) {
-                            current_error = s.into();
-                        }
+                match result {
+                    Ok(()) => {}
+                    Err(LuaError::Yield) => {
+                        // Close method yielded — propagate yield
+                        return Err(LuaError::Yield);
                     }
-                    self.clear_error();
+                    Err(_) => {
+                        // This __close threw — capture as new current error
+                        had_close_error = true;
+                        let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                        if !err_obj.is_nil() {
+                            current_error = err_obj;
+                        } else {
+                            let msg = self.error_msg.clone();
+                            if let Ok(s) = self.create_string(&msg) {
+                                current_error = s.into();
+                            }
+                        }
+                        self.clear_error();
+                    }
                 }
             } else {
                 // No __close metamethod — treat as error
@@ -1018,11 +1044,17 @@ impl LuaState {
             Err(self.error(format!("attempt to call a {} value (metamethod 'close')", type_name)))
         };
 
-        if result.is_err() {
-            // Pop any frames pushed by the close method
-            while self.call_depth() > caller_depth {
-                self.pop_frame();
+        match &result {
+            Err(LuaError::Yield) => {
+                // Yield: do NOT pop frames — they stay for resume
             }
+            Err(_) => {
+                // Error: pop any frames pushed by the close method
+                while self.call_depth() > caller_depth {
+                    self.pop_frame();
+                }
+            }
+            Ok(()) => {}
         }
 
         result
@@ -1061,11 +1093,17 @@ impl LuaState {
             Err(self.error(format!("attempt to call a {} value (metamethod 'close')", type_name)))
         };
 
-        if result.is_err() {
-            // Pop any frames pushed by the close method
-            while self.call_depth() > caller_depth {
-                self.pop_frame();
+        match &result {
+            Err(LuaError::Yield) => {
+                // Yield: do NOT pop frames — they stay for resume
             }
+            Err(_) => {
+                // Error: pop any frames pushed by the close method
+                while self.call_depth() > caller_depth {
+                    self.pop_frame();
+                }
+            }
+            Ok(()) => {}
         }
 
         result
@@ -1823,7 +1861,20 @@ impl LuaState {
                 };
                 Ok((true, result_count))
             }
-            Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(LuaError::Yield) => {
+                // Mark pcall's own C frame with CIST_YPCALL so that
+                // finish_c_frame knows to wrap results with true on resume.
+                // pcall's C frame is at initial_depth - 1.
+                if initial_depth > 0 {
+                    use crate::lua_vm::call_info::call_status::CIST_YPCALL;
+                    let pcall_frame_idx = initial_depth - 1;
+                    if pcall_frame_idx < self.call_depth {
+                        let ci = self.get_call_info_mut(pcall_frame_idx);
+                        ci.call_status |= CIST_YPCALL;
+                    }
+                }
+                Err(LuaError::Yield)
+            }
             Err(e) => {
                 // Error - clean up and return error
                 // Lua 5.5 order: pop frames first, then close TBC
@@ -1847,7 +1898,29 @@ impl LuaState {
                 // Then close upvalues and TBC variables
                 if let Some(base) = frame_base {
                     self.close_upvalues(base);
-                    let _ = self.close_tbc_with_error(base, err_obj);
+                    let close_result = self.close_tbc_with_error(base, err_obj.clone());
+                    match close_result {
+                        Ok(()) => {} // continue to set up error result below
+                        Err(LuaError::Yield) => {
+                            // TBC close yielded during error recovery.
+                            // Save state: mark pcall's C frame with CIST_YPCALL + CIST_RECST
+                            // so finish_c_frame will handle error result on resume.
+                            use crate::lua_vm::call_info::call_status::{CIST_RECST, CIST_YPCALL};
+                            let pcall_ci_idx = initial_depth - 1;
+                            if pcall_ci_idx < self.call_depth {
+                                let ci = self.get_call_info_mut(pcall_ci_idx);
+                                ci.call_status |= CIST_YPCALL | CIST_RECST;
+                            }
+                            // Save error value (may have cascaded) for finish_c_frame
+                            let cascaded = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            self.error_object = if !cascaded.is_nil() { cascaded } else { err_obj };
+                            return Err(LuaError::Yield);
+                        }
+                        Err(_e2) => {
+                            // TBC close threw — use the new error
+                            // Fall through to set up error result below
+                        }
+                    }
                 }
 
                 // Check if close_tbc_with_error updated error_object (cascading)
@@ -2111,43 +2184,24 @@ impl LuaState {
                 execute::lua_execute(self, 0)
             };
 
-            match result {
-                Ok(()) => {
-                    // Coroutine completed - collect return values from stack[0..]
-                    let results = self.get_all_return_values(0);
-                    self.stack.clear();
-                    Ok((true, results))
-                }
-                Err(LuaError::Yield) => {
-                    // Coroutine yielded
-                    let yield_vals = self.take_yield();
-                    Ok((false, yield_vals))
-                }
-                Err(e) => Err(e),
-            }
+            self.handle_resume_result(result)
         } else {
             // Resuming after yield
             // The yield function's frame is still on the stack, we need to:
-            // 1. Close upvalues for the yield frame
-            // 2. Pop the yield frame
-            // 3. Place resume arguments as yield's return values
-            // 4. Continue execution from the caller's frame
+            // 1. Pop the yield frame
+            // 2. Place resume arguments as yield's return values
+            // 3. Continue execution from the caller's frame
+            // NOTE: Do NOT close upvalues or TBC variables on yield resume!
+            // Yield is not an exit — variables are still alive.
 
             // Get the yield frame info before popping
-            let (func_idx, frame_base, _nresults) = if let Some(frame) = self.current_frame() {
-                // func_idx is base - 1 (where the yield function was called)
-                let func_idx = if frame.base > 0 { frame.base - 1 } else { 0 };
-                let frame_base = frame.base;
-                let nresults = frame.nresults;
-                (func_idx, frame_base, nresults)
+            let func_idx = if let Some(frame) = self.current_frame() {
+                // func_idx is base - func_offset (where the yield function was called)
+                let func_idx = frame.base - frame.func_offset;
+                func_idx
             } else {
                 return Err(self.error("cannot resume: no frame".to_string()));
             };
-
-            //  Close upvalues and TBC variables before popping the frame
-            // This ensures open upvalues don't point to invalid stack indices
-            self.close_upvalues(frame_base);
-            let _ = self.close_tbc(frame_base);
 
             // Pop the yield frame
             self.pop_frame();
@@ -2159,32 +2213,193 @@ impl LuaState {
                 self.stack_set(func_idx + i, arg)?;
             }
 
-            // Update stack top and current frame's top
+            // Update stack top only (do NOT modify caller frame's top)
             let new_top = func_idx + actual_nresults;
-            self.set_top(new_top)?;
-
-            if let Some(frame) = self.current_frame_mut() {
-                frame.top = new_top;
-            }
+            self.set_top_raw(new_top);
 
             // Execute until yield or completion
             let result = execute::lua_execute(self, 0);
 
+            // Handle result with pcall error recovery (precover)
+            self.handle_resume_result(result)
+        }
+    }
+
+    /// Handle the result of lua_execute during resume.
+    /// Implements Lua 5.5's precover: when an error occurs, search the
+    /// call stack for a pcall frame (CIST_YPCALL), recover there, and
+    /// continue execution.
+    fn handle_resume_result(
+        &mut self,
+        initial_result: LuaResult<()>,
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        let mut result = initial_result;
+
+        loop {
             match result {
                 Ok(()) => {
                     // Coroutine completed
                     let results = self.get_all_return_values(0);
                     self.stack.clear();
-                    Ok((true, results))
+                    return Ok((true, results));
                 }
                 Err(LuaError::Yield) => {
                     // Coroutine yielded
                     let yield_vals = self.take_yield();
-                    Ok((false, yield_vals))
+                    return Ok((false, yield_vals));
                 }
-                Err(e) => Err(e),
+                Err(_e) => {
+                    // Error — try to find a pcall frame to recover
+                    let pcall_idx = self.find_pcall_recovery_frame();
+                    if pcall_idx.is_none() {
+                        // No recovery point — coroutine dies.
+                        // Close all TBC variables before dying
+                        // (equivalent to Lua 5.5's luaF_close in lua_resume).
+                        let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                        let error_val = if !err_obj.is_nil() {
+                            err_obj
+                        } else {
+                            LuaValue::nil()
+                        };
+
+                        // Pop all frames
+                        while self.call_depth() > 0 {
+                            self.pop_frame();
+                        }
+
+                        // Close all upvalues and TBC variables from level 0
+                        self.close_upvalues(0);
+                        let _ = self.close_tbc_with_error(0, error_val.clone());
+
+                        // Restore error state: if close cascaded, error_object
+                        // is already set by close_tbc_with_error. If not, restore
+                        // the original error value and msg.
+                        if self.error_object.is_nil() {
+                            self.error_object = error_val;
+                        } else {
+                            // Cascaded error — update error_msg to match
+                            self.error_msg = format!("{}", self.error_object);
+                        }
+
+                        return Err(_e);
+                    }
+                    let pcall_frame_idx = pcall_idx.unwrap();
+
+                    // Get pcall's info before cleanup
+                    let pcall_ci = self.get_call_info(pcall_frame_idx);
+                    let pcall_func_pos = pcall_ci.base - pcall_ci.func_offset;
+                    let pcall_nresults = pcall_ci.nresults;
+                    let close_level = pcall_ci.base; // close from body position
+
+                    // Get error object
+                    let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                    let error_val = if !err_obj.is_nil() {
+                        err_obj
+                    } else {
+                        let msg = self.error_msg.clone();
+                        self.create_string(&msg).map(|s| s.into()).unwrap_or(LuaValue::nil())
+                    };
+                    self.clear_error();
+
+                    // Pop frames down to pcall (exclusive — keep pcall's frame temporarily)
+                    while self.call_depth() > pcall_frame_idx + 1 {
+                        self.pop_frame();
+                    }
+
+                    // Close upvalues
+                    self.close_upvalues(close_level);
+
+                    // Close TBC with error (may yield or throw again)
+                    let close_result = self.close_tbc_with_error(close_level, error_val.clone());
+
+                    match close_result {
+                        Ok(()) => {
+                            // Get the final error (might be cascaded from TBC closes)
+                            let final_err = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            let result_err = if !final_err.is_nil() {
+                                final_err
+                            } else {
+                                error_val
+                            };
+                            self.clear_error();
+
+                            // Set up pcall error result: (false, error)
+                            self.stack_set(pcall_func_pos, LuaValue::boolean(false)).ok();
+                            self.stack_set(pcall_func_pos + 1, result_err).ok();
+                            let n = 2;
+
+                            // Pop pcall frame
+                            self.pop_frame();
+
+                            // Handle nresults like call_c_function post-processing
+                            let final_n = if pcall_nresults == -1 { n } else { pcall_nresults as usize };
+                            let new_top = pcall_func_pos + final_n;
+                            if pcall_nresults >= 0 {
+                                let wanted = pcall_nresults as usize;
+                                for i in n..wanted {
+                                    self.stack_set(pcall_func_pos + i, LuaValue::nil()).ok();
+                                }
+                            }
+                            self.set_top_raw(new_top);
+
+                            // Restore caller frame top
+                            if self.call_depth() > 0 {
+                                let ci_idx = self.call_depth() - 1;
+                                if pcall_nresults == -1 {
+                                    let ci_top = self.get_call_info(ci_idx).top;
+                                    if ci_top < new_top {
+                                        self.get_call_info_mut(ci_idx).top = new_top;
+                                    }
+                                } else {
+                                    let frame_top = self.get_call_info(ci_idx).top;
+                                    self.set_top_raw(frame_top);
+                                }
+                            }
+
+                            // Continue execution
+                            result = execute::lua_execute(self, 0);
+                            // Loop again to check for more errors/yields
+                        }
+                        Err(LuaError::Yield) => {
+                            // TBC close yielded during error recovery.
+                            // Save recovery state: mark pcall frame with CIST_RECST
+                            // and store the error value in error_object.
+                            // When the close method finishes, finish_c_frame will
+                            // detect CIST_RECST and set up (false, error) result.
+                            use crate::lua_vm::call_info::call_status::CIST_RECST;
+                            if pcall_frame_idx < self.call_depth() {
+                                let ci = self.get_call_info_mut(pcall_frame_idx);
+                                ci.call_status |= CIST_RECST;
+                            }
+                            // Store the error value for finish_c_frame to retrieve later
+                            self.error_object = error_val;
+
+                            // Return yield values normally
+                            let yield_vals = self.take_yield();
+                            return Ok((false, yield_vals));
+                        }
+                        Err(_e2) => {
+                            // TBC close threw again — try to recover with updated error
+                            result = Err(_e2);
+                            // Loop continues to find next pcall frame
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// Find a pcall C frame (CIST_YPCALL) on the call stack for error recovery.
+    /// Returns the frame index if found.
+    fn find_pcall_recovery_frame(&self) -> Option<usize> {
+        use crate::lua_vm::call_info::call_status::CIST_YPCALL;
+        for i in (0..self.call_depth()).rev() {
+            let ci = self.get_call_info(i);
+            if ci.call_status & CIST_YPCALL != 0 {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// Yield from current coroutine

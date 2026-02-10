@@ -3,7 +3,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaResult, LuaState};
+use crate::lua_vm::{LuaError, LuaResult, LuaState};
 
 pub fn create_coroutine_lib() -> LibraryModule {
     crate::lib_module!("coroutine", {
@@ -217,14 +217,22 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
             }
             Ok(results.len())
         }
-        Err(e) => {
-            // Error occurred - get the detailed error message from the thread
-            let error_msg = if let Some(thread) = thread_val.as_thread_mut() {
-                thread.get_error_msg(e)
-            } else {
-                String::new()
-            };
-            Err(l.error(error_msg))
+        Err(_e) => {
+            // Error occurred — propagate the error object from the child thread
+            // directly (like Lua 5.5's auxresume → lua_error).
+            if let Some(thread) = thread_val.as_thread_mut() {
+                // Get the error object from the child thread
+                let err_obj = std::mem::replace(&mut thread.error_object, LuaValue::nil());
+                if !err_obj.is_nil() {
+                    l.error_object = err_obj;
+                    let msg = std::mem::take(&mut thread.error_msg);
+                    l.error_msg = msg;
+                } else {
+                    let msg = std::mem::take(&mut thread.error_msg);
+                    l.error_msg = msg;
+                }
+            }
+            Err(LuaError::RuntimeError)
         }
     }
 }

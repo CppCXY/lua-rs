@@ -183,6 +183,7 @@ fn write_chunk(
     write_u32(buf, chunk.upvalue_count as u32);
     write_u32(buf, chunk.param_count as u32);
     buf.push(if chunk.is_vararg { 1 } else { 0 });
+    buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
 
     // Write upvalue descriptors
@@ -214,6 +215,8 @@ fn write_chunk(
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
             write_string(buf, &local.name);
+            write_u32(buf, local.startpc);
+            write_u32(buf, local.endpc);
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -248,6 +251,7 @@ fn write_chunk_with_dedup(
     write_u32(buf, chunk.upvalue_count as u32);
     write_u32(buf, chunk.param_count as u32);
     buf.push(if chunk.is_vararg { 1 } else { 0 });
+    buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
 
     // Write upvalue descriptors (with string dedup for names)
@@ -281,6 +285,8 @@ fn write_chunk_with_dedup(
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
             write_string_with_dedup(buf, &local.name, string_table)?; // Use dedup for local names
+            write_u32(buf, local.startpc);
+            write_u32(buf, local.endpc);
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -314,6 +320,7 @@ fn write_chunk_no_pool_with_dedup(
     write_u32(buf, chunk.upvalue_count as u32);
     write_u32(buf, chunk.param_count as u32);
     buf.push(if chunk.is_vararg { 1 } else { 0 });
+    buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
 
     // Write upvalue descriptors with deduplication
@@ -347,6 +354,8 @@ fn write_chunk_no_pool_with_dedup(
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
             write_string_with_dedup(buf, &local.name, string_table)?;
+            write_u32(buf, local.startpc);
+            write_u32(buf, local.endpc);
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -376,6 +385,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
     write_u32(buf, chunk.upvalue_count as u32);
     write_u32(buf, chunk.param_count as u32);
     buf.push(if chunk.is_vararg { 1 } else { 0 });
+    buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
 
     // Write upvalue descriptors
@@ -407,6 +417,8 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
         write_u32(buf, chunk.locals.len() as u32);
         for local in &chunk.locals {
             write_string(buf, &local.name);
+            write_u32(buf, local.startpc);
+            write_u32(buf, local.endpc);
         }
 
         write_u32(buf, chunk.line_info.len() as u32);
@@ -438,6 +450,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     let upvalue_count = read_u32(cursor)? as usize;
     let param_count = read_u32(cursor)? as usize;
     let is_vararg = read_u8(cursor)? != 0;
+    let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors
@@ -467,7 +480,10 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(LocVar { name: read_string(cursor)?, startpc: 0, endpc: 0 });
+        let name = read_string(cursor)?;
+        let startpc = read_u32(cursor)?;
+        let endpc = read_u32(cursor)?;
+        locals.push(LocVar { name, startpc, endpc });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -483,7 +499,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         upvalue_count,
         param_count,
         is_vararg,
-        needs_vararg_table: false,
+        needs_vararg_table,
         use_hidden_vararg: false,
         max_stack_size,
         child_protos,
@@ -517,6 +533,7 @@ fn read_chunk_with_dedup(
     let upvalue_count = read_u32(cursor)? as usize;
     let param_count = read_u32(cursor)? as usize;
     let is_vararg = read_u8(cursor)? != 0;
+    let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors with string deduplication
@@ -546,7 +563,10 @@ fn read_chunk_with_dedup(
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(LocVar { name: read_string_with_dedup(cursor, string_table)?, startpc: 0, endpc: 0 });
+        let name = read_string_with_dedup(cursor, string_table)?;
+        let startpc = read_u32(cursor)?;
+        let endpc = read_u32(cursor)?;
+        locals.push(LocVar { name, startpc, endpc });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -562,7 +582,7 @@ fn read_chunk_with_dedup(
         upvalue_count,
         param_count,
         is_vararg,
-        needs_vararg_table: false,
+        needs_vararg_table,
         use_hidden_vararg: false,
         max_stack_size,
         child_protos,
@@ -758,6 +778,7 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
     let upvalue_count = read_u32(cursor)? as usize;
     let param_count = read_u32(cursor)? as usize;
     let is_vararg = read_u8(cursor)? != 0;
+    let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors
@@ -787,7 +808,10 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(LocVar { name: read_string(cursor)?, startpc: 0, endpc: 0 });
+        let name = read_string(cursor)?;
+        let startpc = read_u32(cursor)?;
+        let endpc = read_u32(cursor)?;
+        locals.push(LocVar { name, startpc, endpc });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -808,7 +832,7 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
         source_name,
         locals,
         line_info,
-        needs_vararg_table: false,
+        needs_vararg_table,
         use_hidden_vararg: false,
         linedefined: 0,
         lastlinedefined: 0,
@@ -857,6 +881,7 @@ fn read_chunk_with_vm_dedup(
     let upvalue_count = read_u32(cursor)? as usize;
     let param_count = read_u32(cursor)? as usize;
     let is_vararg = read_u8(cursor)? != 0;
+    let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors with deduplication
@@ -886,7 +911,10 @@ fn read_chunk_with_vm_dedup(
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(LocVar { name: read_string_with_dedup(cursor, string_table)?, startpc: 0, endpc: 0 });
+        let name = read_string_with_dedup(cursor, string_table)?;
+        let startpc = read_u32(cursor)?;
+        let endpc = read_u32(cursor)?;
+        locals.push(LocVar { name, startpc, endpc });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -907,7 +935,7 @@ fn read_chunk_with_vm_dedup(
         source_name,
         locals,
         line_info,
-        needs_vararg_table: false,
+        needs_vararg_table,
         use_hidden_vararg: false,
         linedefined: 0,
         lastlinedefined: 0,
@@ -969,6 +997,7 @@ fn read_chunk_with_strings(
     let upvalue_count = read_u32(cursor)? as usize;
     let param_count = read_u32(cursor)? as usize;
     let is_vararg = read_u8(cursor)? != 0;
+    let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors
@@ -998,7 +1027,10 @@ fn read_chunk_with_strings(
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
     for _ in 0..locals_len {
-        locals.push(LocVar { name: read_string(cursor)?, startpc: 0, endpc: 0 });
+        let name = read_string(cursor)?;
+        let startpc = read_u32(cursor)?;
+        let endpc = read_u32(cursor)?;
+        locals.push(LocVar { name, startpc, endpc });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -1014,7 +1046,7 @@ fn read_chunk_with_strings(
         upvalue_count,
         param_count,
         is_vararg,
-        needs_vararg_table: false,
+        needs_vararg_table,
         use_hidden_vararg: false,
         max_stack_size,
         child_protos,
