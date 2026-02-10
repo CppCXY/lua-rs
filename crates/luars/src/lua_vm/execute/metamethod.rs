@@ -1,6 +1,6 @@
 use crate::lua_value::LuaValue;
 use crate::lua_vm::execute::call::{self, call_c_function};
-use crate::lua_vm::execute::helper::{get_binop_metamethod, lua_shiftl, tonumberns};
+use crate::lua_vm::execute::helper::{get_binop_metamethod, tonumberns};
 use crate::lua_vm::execute::lua_execute;
 use crate::lua_vm::opcode::Instruction;
 /// Metamethod operations
@@ -81,37 +81,29 @@ pub fn handle_mmbin(
     code: &[Instruction], // Code array to get previous instruction
     frame_idx: usize,     // Frame index for accessing current base
 ) -> LuaResult<()> {
-    // Get the original arithmetic instruction (pc-2)
-    if pc < 2 {
-        return Err(lua_state.error("MMBIN: invalid pc".to_string()));
-    }
+    // Get the original arithmetic instruction (pc-2) — unchecked since valid bytecode guarantees pc >= 2
+    let pi = unsafe { *code.get_unchecked(pc - 2) };
+    let result_reg = pi.get_a() as usize;
 
-    let pi = code[pc - 2]; // Previous instruction (the original arithmetic op)
-    let result_reg = pi.get_a() as usize; // RA(pi) - result register from original instruction
-
-    //  Get base from frame, not parameter (parameter may be stale)
+    // Get base from frame, not parameter (parameter may be stale)
     let base = lua_state.get_frame_base(frame_idx);
 
-    // Get operands
-    let v1 = lua_state
-        .stack_get(base + a)
-        .ok_or_else(|| lua_state.error("MMBIN: operand 1 not found".to_string()))?;
-    let v2 = lua_state
-        .stack_get(base + b)
-        .ok_or_else(|| lua_state.error("MMBIN: operand 2 not found".to_string()))?;
+    // Get operands — unchecked since stack was validated at frame push
+    let stack = lua_state.stack_mut();
+    let v1 = unsafe { *stack.get_unchecked(base + a) };
+    let v2 = unsafe { *stack.get_unchecked(base + b) };
 
-    // Get tag method
-    let tm = TmKind::from_u8(c as u8)
-        .ok_or_else(|| lua_state.error(format!("MMBIN: invalid tag method {}", c)))?;
+    // Get tag method — unchecked since compiler guarantees valid TmKind in MMBIN instruction
+    let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
 
     // Call metamethod (may change stack/base)
     let result = try_bin_tm(lua_state, v1, v2, tm)?;
 
-    //  Reload base after metamethod call as it may have changed
+    // Reload base after metamethod call as it may have changed
     let current_base = lua_state.get_frame_base(frame_idx);
 
-    // Store result
-    lua_state.stack_set(current_base + result_reg, result)?;
+    // Store result — unchecked
+    unsafe { *lua_state.stack_mut().get_unchecked_mut(current_base + result_reg) = result };
 
     Ok(())
 }
@@ -144,43 +136,33 @@ pub fn handle_mmbini(
     code: &[Instruction],
     frame_idx: usize, // Frame index for accessing current base
 ) -> LuaResult<()> {
-    // Get the original arithmetic instruction
-    if pc < 2 {
-        return Err(lua_state.error("MMBINI: invalid pc".to_string()));
-    }
-
-    let pi = code[pc - 2];
+    // Get the original arithmetic instruction — unchecked
+    let pi = unsafe { *code.get_unchecked(pc - 2) };
     let result_reg = pi.get_a() as usize;
 
-    //  Get base from frame, not parameter
     let base = lua_state.get_frame_base(frame_idx);
 
-    // Get operand
-    let v1 = lua_state
-        .stack_get(base + a)
-        .ok_or_else(|| lua_state.error("MMBINI: operand not found".to_string()))?;
+    // Get operand — unchecked
+    let v1 = unsafe { *lua_state.stack_mut().get_unchecked(base + a) };
 
     // Create integer value for immediate
     let v2 = LuaValue::integer(sb as i64);
 
-    // Get tag method
-    let tm = TmKind::from_u8(c as u8)
-        .ok_or_else(|| lua_state.error(format!("MMBINI: invalid tag method {}", c)))?;
+    // Get tag method — unchecked
+    let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
 
     // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
-        // flip: v2 op v1
         try_bin_tm(lua_state, v2, v1, tm)?
     } else {
-        // normal: v1 op v2
         try_bin_tm(lua_state, v1, v2, tm)?
     };
 
-    //  Reload base after metamethod call
+    // Reload base after metamethod call
     let current_base = lua_state.get_frame_base(frame_idx);
 
-    // Store result
-    lua_state.stack_set(current_base + result_reg, result)?;
+    // Store result — unchecked
+    unsafe { *lua_state.stack_mut().get_unchecked_mut(current_base + result_reg) = result };
 
     Ok(())
 }
@@ -214,46 +196,33 @@ pub fn handle_mmbink(
     constants: &[LuaValue],
     frame_idx: usize, // Frame index for accessing current base
 ) -> LuaResult<()> {
-    // Get the original arithmetic instruction
-    if pc < 2 {
-        return Err(lua_state.error("MMBINK: invalid pc".to_string()));
-    }
-
-    let pi = code[pc - 2];
+    // Get the original arithmetic instruction — unchecked
+    let pi = unsafe { *code.get_unchecked(pc - 2) };
     let result_reg = pi.get_a() as usize;
 
-    //  Get base from frame, not parameter
     let base = lua_state.get_frame_base(frame_idx);
 
-    // Get operand
-    let v1 = lua_state
-        .stack_get(base + a)
-        .ok_or_else(|| lua_state.error("MMBINK: operand not found".to_string()))?;
+    // Get operand — unchecked
+    let v1 = unsafe { *lua_state.stack_mut().get_unchecked(base + a) };
 
-    // Get constant
-    if b >= constants.len() {
-        return Err(lua_state.error(format!("MMBINK: invalid constant index {}", b)));
-    }
-    let v2 = constants[b];
+    // Get constant — unchecked
+    let v2 = unsafe { *constants.get_unchecked(b) };
 
-    // Get tag method
-    let tm = TmKind::from_u8(c as u8)
-        .ok_or_else(|| lua_state.error(format!("MMBINK: invalid tag method {}", c)))?;
+    // Get tag method — unchecked
+    let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
 
     // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
-        // flip: v2 op v1
         try_bin_tm(lua_state, v2, v1, tm)?
     } else {
-        // normal: v1 op v2
         try_bin_tm(lua_state, v1, v2, tm)?
     };
 
-    //  Reload base after metamethod call
+    // Reload base after metamethod call
     let current_base = lua_state.get_frame_base(frame_idx);
 
-    // Store result
-    lua_state.stack_set(current_base + result_reg, result)?;
+    // Store result — unchecked
+    unsafe { *lua_state.stack_mut().get_unchecked_mut(current_base + result_reg) = result };
 
     Ok(())
 }
@@ -286,20 +255,10 @@ fn try_bin_tm(
     p2: LuaValue,
     tm_kind: TmKind,
 ) -> LuaResult<LuaValue> {
-    // Before metamethod lookup, try string-to-number coercion for arithmetic ops
-    // (Lua 5.5: luaT_trybinassocTM does this before falling back to metamethods)
-    if is_arithmetic_tm(tm_kind) {
-        let mut n1 = 0f64;
-        let mut n2 = 0f64;
-        if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
-            return Ok(LuaValue::float(arith_op(n1, n2, tm_kind)));
-        }
-    } else if is_bitwise_tm(tm_kind) {
-        // For bitwise ops, try string-to-integer coercion
-        if let (Some(i1), Some(i2)) = (try_to_integer(&p1), try_to_integer(&p2)) {
-            return Ok(LuaValue::integer(bitwise_op(i1, i2, tm_kind)));
-        }
-    }
+    // NOTE: String-to-number coercion is NOT needed here.
+    // The original arithmetic/bitwise opcode (OP_ADD, OP_ADDI, etc.) already
+    // tried tonumberns/tointeger before falling through to MMBIN/MMBINI/MMBINK.
+    // If we reach here, coercion has already failed.
 
     // Try to get metamethod from p1, then p2
     let metamethod = get_binop_metamethod(lua_state, &p1, &p2, tm_kind);
@@ -318,64 +277,6 @@ fn try_bin_tm(
             _ => "attempt to perform arithmetic on non-number values",
         };
         Err(lua_state.error(msg.to_string()))
-    }
-}
-
-#[inline]
-fn is_arithmetic_tm(tm: TmKind) -> bool {
-    matches!(
-        tm,
-        TmKind::Add
-            | TmKind::Sub
-            | TmKind::Mul
-            | TmKind::Div
-            | TmKind::Mod
-            | TmKind::Pow
-            | TmKind::IDiv
-            | TmKind::Unm
-    )
-}
-
-#[inline]
-fn is_bitwise_tm(tm: TmKind) -> bool {
-    matches!(
-        tm,
-        TmKind::Band | TmKind::Bor | TmKind::Bxor | TmKind::Shl | TmKind::Shr | TmKind::Bnot
-    )
-}
-
-#[inline]
-fn arith_op(n1: f64, n2: f64, tm: TmKind) -> f64 {
-    match tm {
-        TmKind::Add => n1 + n2,
-        TmKind::Sub => n1 - n2,
-        TmKind::Mul => n1 * n2,
-        TmKind::Div => n1 / n2,
-        TmKind::Pow => n1.powf(n2),
-        TmKind::IDiv => {
-            let d = (n1 / n2).floor();
-            d
-        }
-        TmKind::Mod => {
-            // Lua mod: a - floor(a/b)*b
-            let d = (n1 / n2).floor();
-            n1 - d * n2
-        }
-        TmKind::Unm => -n1,
-        _ => 0.0,
-    }
-}
-
-#[inline]
-fn bitwise_op(i1: i64, i2: i64, tm: TmKind) -> i64 {
-    match tm {
-        TmKind::Band => i1 & i2,
-        TmKind::Bor => i1 | i2,
-        TmKind::Bxor => i1 ^ i2,
-        TmKind::Shl => lua_shiftl(i1, i2),
-        TmKind::Shr => lua_shiftl(i1, i2.wrapping_neg()),
-        TmKind::Bnot => !i1,
-        _ => 0,
     }
 }
 
@@ -437,7 +338,7 @@ pub fn call_tm_res(
     arg1: LuaValue,
     arg2: LuaValue,
 ) -> LuaResult<LuaValue> {
-    // savestate: L->top.p = ci->top.p (if not already done by caller)
+    // Sync top to ci_top — ensures metamethod args are pushed above current frame
     if let Some(frame) = lua_state.current_frame() {
         let ci_top = frame.top;
         if lua_state.get_top() != ci_top {
@@ -459,14 +360,21 @@ pub fn call_tm_res(
     lua_state.set_top_raw(func_pos + 3);
 
     // Call the metamethod with nresults=1
-    if metamethod.is_cfunction() {
-        call_c_function(lua_state, func_pos, 2, 1)?;
-    } else if metamethod.is_lua_function() {
+    // Check Lua function first (most common for metamethods)
+    if metamethod.is_lua_function() {
+        // Use specialized push_lua_frame — avoids redundant type dispatch in generic push_frame
+        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
+        let chunk = lua_func.chunk();
+        let param_count = chunk.param_count;
+        let max_stack_size = chunk.max_stack_size as usize;
+
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
 
-        lua_state.push_frame(&metamethod, new_base, 2, 1)?;
+        lua_state.push_lua_frame(&metamethod, new_base, 2, 1, param_count, max_stack_size)?;
         lua_execute(lua_state, caller_depth)?;
+    } else if metamethod.is_cfunction() {
+        call_c_function(lua_state, func_pos, 2, 1)?;
     } else {
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
@@ -526,14 +434,20 @@ pub fn call_tm(
     lua_state.set_top_raw(func_pos + 4);
 
     // Call with 0 results (nresults=0)
-    if metamethod.is_cfunction() {
-        call::call_c_function(lua_state, func_pos, 3, 0)?;
-    } else if metamethod.is_lua_function() {
+    if metamethod.is_lua_function() {
+        // Use specialized push_lua_frame
+        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
+        let chunk = lua_func.chunk();
+        let param_count = chunk.param_count;
+        let max_stack_size = chunk.max_stack_size as usize;
+
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
 
-        lua_state.push_frame(&metamethod, new_base, 3, 0)?;
+        lua_state.push_lua_frame(&metamethod, new_base, 3, 0, param_count, max_stack_size)?;
         lua_execute(lua_state, caller_depth)?;
+    } else if metamethod.is_cfunction() {
+        call::call_c_function(lua_state, func_pos, 3, 0)?;
     } else {
         return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
     }
@@ -659,35 +573,18 @@ pub enum TmKind {
 impl TmKind {
     /// Convert u8 to TmKind
     pub fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(TmKind::Index),
-            1 => Some(TmKind::NewIndex),
-            2 => Some(TmKind::Gc),
-            3 => Some(TmKind::Mode),
-            4 => Some(TmKind::Len),
-            5 => Some(TmKind::Eq),
-            6 => Some(TmKind::Add),
-            7 => Some(TmKind::Sub),
-            8 => Some(TmKind::Mul),
-            9 => Some(TmKind::Mod),
-            10 => Some(TmKind::Pow),
-            11 => Some(TmKind::Div),
-            12 => Some(TmKind::IDiv),
-            13 => Some(TmKind::Band),
-            14 => Some(TmKind::Bor),
-            15 => Some(TmKind::Bxor),
-            16 => Some(TmKind::Shl),
-            17 => Some(TmKind::Shr),
-            18 => Some(TmKind::Unm),
-            19 => Some(TmKind::Bnot),
-            20 => Some(TmKind::Lt),
-            21 => Some(TmKind::Le),
-            22 => Some(TmKind::Concat),
-            23 => Some(TmKind::Call),
-            24 => Some(TmKind::Close),
-            25 => Some(TmKind::ToString),
-            _ => None,
+        if value <= TmKind::ToString as u8 {
+            Some(unsafe { Self::from_u8_unchecked(value) })
+        } else {
+            None
         }
+    }
+
+    /// Convert u8 to TmKind without bounds checking.
+    /// SAFETY: caller must ensure value <= TmKind::ToString (25)
+    #[inline(always)]
+    pub unsafe fn from_u8_unchecked(value: u8) -> Self {
+        unsafe { std::mem::transmute(value) }
     }
 
     /// Get the metamethod name

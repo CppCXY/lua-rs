@@ -317,9 +317,11 @@ impl LuaState {
         // Pre-compute common values
         let frame_top = base + max_stack_size;
 
-        // Fast path for the common case: exact parameter match, stack already large enough,
-        // call_stack slot available for reuse. This handles 95%+ of calls.
-        if nparams == param_count
+        // Fast path for the common case: enough params (no nil filling needed),
+        // stack already large enough, call_stack slot available for reuse.
+        // Covers exact match AND extra args (common in metamethods like __len
+        // which receives 2 args but declares 1 param).
+        if nparams >= param_count
             && frame_top + 5 <= self.stack.len()
             && self.call_depth < self.call_stack.len()
         {
@@ -331,7 +333,7 @@ impl LuaState {
             ci.pc = 0;
             ci.nresults = nresults;
             ci.call_status = CIST_LUA;
-            ci.nextraargs = 0;
+            ci.nextraargs = (nparams - param_count) as i32;
 
             self.call_depth += 1;
 

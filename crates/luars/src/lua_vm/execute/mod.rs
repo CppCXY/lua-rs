@@ -1818,6 +1818,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Len => {
                     // R[A] := #R[B]
                     // Port of luaV_objlen from lvm.c:731-757
+                    // OPTIMIZED: Inline fasttm check for tables to avoid double metatable lookup
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
 
@@ -1832,29 +1833,34 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // Binary: get length directly
                         let len = bytes.len();
                         setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
-                    } else if let Some(table) = rb.as_table() {
-                        // Table: check for __len metamethod first
-                        let has_metatable = table.get_metatable().is_some();
-
-                        if has_metatable {
-                            // Try __len metamethod
-                            if let Some(mm) =
-                                helper::get_metamethod_event(lua_state, &rb, TmKind::Len)
-                            {
-                                // Call metamethod with Protect pattern
-                                save_pc!();
-                                let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
-                                restore_state!();
-                                lua_state.stack_mut()[base + a] = result;
+                    } else if let Some(table) = rb.as_table_mut() {
+                        // Table: inline fasttm check for __len
+                        // This avoids the double metatable lookup in get_metamethod_event
+                        let meta = table.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            const TM_LEN_BIT: u8 = TmKind::Len as u8;
+                            if !mt.no_tm(TM_LEN_BIT) {
+                                // fasttm says __len might exist — do hash lookup
+                                let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
+                                if let Some(mm) = mt.raw_get(&event_key) {
+                                    // Found __len metamethod — call it
+                                    save_pc!();
+                                    let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
+                                    restore_state!();
+                                    lua_state.stack_mut()[base + a] = result;
+                                } else {
+                                    // Not found — cache absence, use primitive length
+                                    mt.set_tm_absent(TM_LEN_BIT);
+                                    setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                                }
                             } else {
-                                // No metamethod, use primitive length
-                                let len = table.len();
-                                setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                                // fasttm: __len known absent — primitive length
+                                setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
                             }
                         } else {
-                            // No metatable, use primitive length
-                            let len = table.len();
-                            setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
+                            // No metatable — primitive length
+                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
                         }
                     } else {
                         // Other types: try __len metamethod

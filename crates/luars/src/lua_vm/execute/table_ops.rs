@@ -20,7 +20,6 @@ use crate::{
 use super::helper;
 
 /// GETTABLE: R[A] := R[B][R[C]]
-#[inline]
 pub fn exec_gettable(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -101,7 +100,6 @@ pub fn exec_gettable(
 }
 
 /// SETTABLE: R[A][R[B]] := RK(C)
-#[inline]
 pub fn exec_settable(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -187,7 +185,6 @@ pub fn exec_settable(
 }
 
 /// GETI: R[A] := R[B][C] (integer key)
-#[inline]
 pub fn exec_geti(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -261,7 +258,6 @@ pub fn exec_geti(
 }
 
 /// SETI: R[A][B] := RK(C) (integer key)
-#[inline]
 pub fn exec_seti(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -350,7 +346,6 @@ pub fn exec_seti(
 }
 
 /// GETFIELD: R[A] := R[B][K[C]:string]
-#[inline]
 pub fn exec_getfield(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -429,7 +424,6 @@ pub fn exec_getfield(
 }
 
 /// SETFIELD: R[A][K[B]:string] := RK(C)
-#[inline]
 pub fn exec_setfield(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -506,7 +500,6 @@ pub fn exec_setfield(
 }
 
 /// SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
-#[inline]
 pub fn exec_self(
     lua_state: &mut LuaState,
     instr: Instruction,

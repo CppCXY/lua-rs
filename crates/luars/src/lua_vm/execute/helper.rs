@@ -448,7 +448,7 @@ pub fn lookup_from_metatable(
 /// Get a metamethod from a metatable value — implements Lua 5.5's fasttm/luaT_gettm pattern.
 /// For TmKind <= Eq (first 6 metamethods), uses bit-flag cache to skip hash lookups
 /// when the metamethod is known absent.
-#[inline(always)]
+#[inline]
 fn get_metamethod_from_metatable(
     lua_state: &mut LuaState,
     metatable: LuaValue,
