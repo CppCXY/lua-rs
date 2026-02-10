@@ -370,7 +370,8 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
 }
 
 /// Lookup value from object's metatable __index
-/// Returns Some(value) if found, None if not found or no metatable
+/// Returns Ok(Some(value)) if found, Ok(None) if not found in table chain,
+/// or Err if attempting to index a non-table value without __index metamethod.
 ///
 /// Optimized hot path: inline fasttm check for __index to avoid function call overhead.
 /// Matches Lua 5.5's luaV_finishget pattern.
@@ -378,7 +379,7 @@ pub fn lookup_from_metatable(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
-) -> Option<LuaValue> {
+) -> LuaResult<Option<LuaValue>> {
     const MAXTAGLOOP: usize = 2000;
     const TM_INDEX_BIT: u8 = TmKind::Index as u8; // = 0
 
@@ -389,12 +390,12 @@ pub fn lookup_from_metatable(
         let tm = if let Some(table) = t.as_table_mut() {
             let meta = table.meta_ptr();
             if meta.is_null() {
-                return None; // No metatable → no __index
+                return Ok(None); // No metatable → no __index
             }
             let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
             // fasttm: check cached bit
             if mt.no_tm(TM_INDEX_BIT) {
-                return None; // __index known absent
+                return Ok(None); // __index known absent
             }
             // Slow path: hash lookup
             let vm = lua_state.vm_mut();
@@ -403,20 +404,29 @@ pub fn lookup_from_metatable(
                 Some(v) => v,
                 None => {
                     mt.set_tm_absent(TM_INDEX_BIT); // Cache absence
-                    return None;
+                    return Ok(None);
                 }
             }
         } else {
             // Non-table (string, userdata): fall back to general path
-            get_metamethod_event(lua_state, &t, TmKind::Index)?
+            match get_metamethod_event(lua_state, &t, TmKind::Index) {
+                Some(tm) => tm,
+                None => {
+                    // No __index metamethod on non-table value → error
+                    // Use typeerror for enhanced error message with varinfo
+                    return Err(crate::stdlib::debug::typeerror(
+                        lua_state,
+                        &t.type_name(),
+                        "index",
+                    ));
+                }
+            }
         };
 
         // If __index is a function, call it using call_tm_res
         if tm.is_function() {
-            match execute::metamethod::call_tm_res(lua_state, tm, t, *key) {
-                Ok(result) => return Some(result),
-                Err(_) => return None,
-            }
+            let result = execute::metamethod::call_tm_res(lua_state, tm, t, *key)?;
+            return Ok(Some(result));
         }
 
         // __index is a table, try to access tm[key] directly
@@ -424,7 +434,7 @@ pub fn lookup_from_metatable(
 
         if let Some(table) = t.as_table() {
             if let Some(value) = table.raw_get(key) {
-                return Some(value);
+                return Ok(Some(value));
             }
         }
 
@@ -432,7 +442,7 @@ pub fn lookup_from_metatable(
     }
 
     // Too many iterations - possible loop
-    None
+    Err(lua_state.error("'__index' chain too long; possible loop".to_string()))
 }
 
 /// Get a metamethod from a metatable value — implements Lua 5.5's fasttm/luaT_gettm pattern.
@@ -589,7 +599,11 @@ pub fn finishset(
             }
 
             // No metamethod found for non-table
-            return Err(lua_state.error(format!("attempt to index a {} value", t.type_name())));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &t.type_name(),
+                "index",
+            ));
         }
     }
 

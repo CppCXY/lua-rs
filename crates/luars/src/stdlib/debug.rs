@@ -5,7 +5,7 @@ use crate::Instruction;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{Chunk, LuaValue};
 use crate::lua_vm::opcode::OpCode;
-use crate::lua_vm::{LuaResult, LuaState, get_metatable};
+use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 
 // ============================================================================
 // Function name resolution (mirrors Lua 5.5 ldebug.c)
@@ -346,6 +346,99 @@ fn getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static str, Strin
     funcnamefromcode(chunk, pc)
 }
 
+// ============================================================================
+// Public API for error message generation (mirrors ldebug.c luaG_typeerror)
+// ============================================================================
+
+/// Generate variable info string like " (global 'X')" for error messages.
+/// Mirrors Lua 5.5's varinfo() from ldebug.c.
+/// Must be called AFTER save_pc so the current frame's PC is up to date.
+pub fn varinfo(l: &LuaState) -> String {
+    let ci_idx = l.call_depth().wrapping_sub(1);
+    let ci = match l.get_frame(ci_idx) {
+        Some(ci) => ci,
+        None => return String::new(),
+    };
+    if !ci.is_lua() {
+        return String::new();
+    }
+    let func = match l.get_frame_func(ci_idx) {
+        Some(f) => f,
+        None => return String::new(),
+    };
+    let lua_func = match func.as_lua_function() {
+        Some(f) => f,
+        None => return String::new(),
+    };
+    let chunk = lua_func.chunk();
+    // currentpc: saved pc points AFTER the current instruction (pc += 1 in fetch)
+    let currentpc = ci.pc.saturating_sub(1) as usize;
+
+    // Get the instruction at currentpc to determine which register holds the object
+    if currentpc >= chunk.code.len() {
+        return String::new();
+    }
+    let instr = chunk.code[currentpc];
+    let op = instr.get_opcode();
+
+    // Determine which register to look up based on the opcode
+    let reg = match op {
+        // GET* instructions: table is in register B
+        OpCode::GetTable | OpCode::GetI | OpCode::GetField | OpCode::Self_ => {
+            Some(instr.get_b())
+        }
+        // SET* instructions: table is in register A
+        OpCode::SetTable | OpCode::SetI | OpCode::SetField => {
+            Some(instr.get_a())
+        }
+        // GETTABUP: table is upvalue B, not a register — handle specially
+        OpCode::GetTabUp => {
+            // The key being accessed is K[C]
+            let c = instr.get_c() as usize;
+            let name = kname(chunk, c).unwrap_or_else(|| "?".to_string());
+            let kind = is_env(chunk, currentpc, instr, true);
+            return format!(" ({} '{}')", kind, name);
+        }
+        // SETTABUP: table is upvalue A, not a register — handle specially
+        OpCode::SetTabUp => {
+            let b = instr.get_b() as usize;
+            let name = kname(chunk, b).unwrap_or_else(|| "?".to_string());
+            // For SETTABUP, need to check if upvalue A is _ENV
+            // Reconstruct as upvalue check
+            let upval_idx = instr.get_a() as usize;
+            let upname = if upval_idx < chunk.upvalue_descs.len() {
+                chunk.upvalue_descs[upval_idx].name.clone()
+            } else {
+                "?".to_string()
+            };
+            let kind = if upname == "_ENV" { "global" } else { "field" };
+            return format!(" ({} '{}')", kind, name);
+        }
+        _ => None,
+    };
+
+    if let Some(reg) = reg {
+        if let Some((kind, name)) = getobjname(chunk, currentpc, reg) {
+            return format!(" ({} '{}')", kind, name);
+        }
+    }
+    String::new()
+}
+
+/// Generate a type error with variable info.
+/// Mirrors Lua 5.5's luaG_typeerror.
+/// `op` is typically "index" for table access errors.
+pub fn typeerror(l: &mut LuaState, val_typename: &str, op: &str) -> LuaError {
+    let info = varinfo(l);
+    l.error(format!("attempt to {} a {} value{}", op, val_typename, info))
+}
+
+/// Get the function name for a given frame index (public wrapper).
+/// Returns (kind, name) or None.
+pub fn pub_getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static str, String)> {
+    getfuncname(l, ci_frame_idx)
+}
+
 pub fn create_debug_lib() -> LibraryModule {
     crate::lib_module!("debug", {
         "traceback" => debug_traceback,
@@ -434,8 +527,6 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                     };
 
                     // Determine function name and type
-                    // For now, use simplified logic - full implementation would need
-                    // to search locals/upvalues of calling frame
                     let (name_what, func_name) = if chunk.linedefined == 0 {
                         // Main chunk (linedefined == 0 means top-level code)
                         ("main chunk", String::new())
@@ -443,9 +534,11 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                         // Also main chunk if at bottom of stack
                         ("main chunk", String::new())
                     } else {
-                        // TODO: Search for function name in calling frame's locals/upvalues
-                        // This requires inspecting the previous frame's locals and upvalues
-                        ("function", String::new())
+                        // Use getfuncname to resolve function name from calling frame
+                        match getfuncname(l, i) {
+                            Some((kind, name)) => (kind, name),
+                            None => ("function '?'", String::new()),
+                        }
                     };
 
                     if line > 0 {
@@ -471,9 +564,15 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                         }
                     }
                 } else if func.is_c_callable() {
-                    // C function - try to get name
-                    // In full implementation, would track C function names
-                    trace.push_str("\n\t[C]: in function");
+                    // C function - try to get name from calling frame
+                    match getfuncname(l, i) {
+                        Some((kind, name)) => {
+                            trace.push_str(&format!("\n\t[C]: in {} '{}'", kind, name));
+                        }
+                        None => {
+                            trace.push_str("\n\t[C]: in ?");
+                        }
+                    }
                 } else {
                     trace.push_str("\n\t?: in function");
                 }

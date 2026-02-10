@@ -723,7 +723,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
                 }
             };
 
-            let result_val = l.table_get(&repl_value, &key).unwrap_or(LuaValue::nil());
+            let result_val = l.table_get(&repl_value, &key)?.unwrap_or(LuaValue::nil());
 
             let replacement = if result_val.is_nil() || result_val == LuaValue::boolean(false) {
                 // nil or false means no replacement, use original match

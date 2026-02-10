@@ -629,11 +629,11 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
             // lcode.c:838-839: str2K(fs, e); FALLTHROUGH to VK
             str2k(fs, e);
             // Now fall through to VK case
-            code_abx(fs, OpCode::LoadK, reg as u32, e.u.info() as u32);
+            code_k(fs, reg as u32, e.u.info() as u32);
         }
         ExpKind::VK => {
             // lcode.c:841: luaK_codek(fs, reg, e->u.info);
-            code_abx(fs, OpCode::LoadK, reg as u32, e.u.info() as u32);
+            code_k(fs, reg as u32, e.u.info() as u32);
         }
         ExpKind::VKFLT => {
             // lcode.c:681-687: luaK_float(fs, reg, e->u.nval);
@@ -651,14 +651,14 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
                     // Use LOADF: encodes integer in sBx, loads as float at runtime
                     code_asbx(fs, OpCode::LoadF, reg as u32, int_val as i32);
                 } else {
-                    // Value too large, use LOADK
+                    // Value too large, use LOADK/LOADKX
                     let k_idx = number_k(fs, val);
-                    code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
+                    code_k(fs, reg as u32, k_idx as u32);
                 }
             } else {
-                // Float has fractional part, use LOADK
+                // Float has fractional part, use LOADK/LOADKX
                 let k_idx = number_k(fs, val);
-                code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
+                code_k(fs, reg as u32, k_idx as u32);
             }
         }
         ExpKind::VKINT => {
@@ -672,9 +672,9 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
             if ival >= min_sbx && ival <= max_sbx {
                 code_asbx(fs, OpCode::LoadI, reg as u32, ival as i32);
             } else {
-                // Value too large for LOADI, must use LOADK
+                // Value too large for LOADI, must use LOADK/LOADKX
                 let k_idx = integer_k(fs, ival);
-                code_abx(fs, OpCode::LoadK, reg as u32, k_idx as u32);
+                code_k(fs, reg as u32, k_idx as u32);
             }
         }
         ExpKind::VNONRELOC => {
@@ -2562,6 +2562,18 @@ pub fn settablesize(fs: &mut FuncState, pc: usize, ra: u8, asize: u32, hsize: u3
     // *(inst + 1) = CREATE_Ax(OP_EXTRAARG, extra);
     if pc + 1 < fs.chunk.code.len() {
         fs.chunk.code[pc + 1] = Instruction::create_ax(OpCode::ExtraArg, extra);
+    }
+}
+
+// Port of luaK_codek from lcode.c:424-432
+// Emits LOADK if constant index fits in Bx, otherwise LOADKX + EXTRAARG
+pub fn code_k(fs: &mut FuncState, reg: u32, k: u32) -> usize {
+    if k <= Instruction::MAX_BX {
+        code_abx(fs, OpCode::LoadK, reg, k)
+    } else {
+        let p = code_abx(fs, OpCode::LoadKX, reg, 0);
+        code_extraarg(fs, k);
+        p
     }
 }
 

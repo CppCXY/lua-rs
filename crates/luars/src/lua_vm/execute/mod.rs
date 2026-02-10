@@ -255,6 +255,29 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut pc = ci.pc as usize;
         let mut base = ci.base;
 
+        // === luaV_finishOp equivalent ===
+        // If a prior metamethod yielded, finish the interrupted operation.
+        // The TM's return value sits at stack[top-1]; copy it to R[dest].
+        let pending = lua_state.get_call_info(frame_idx).pending_finish_get;
+        if pending >= 0 {
+            // GET metamethod returned: copy result to destination register
+            let dest = base + pending as usize;
+            let top = lua_state.get_top();
+            if top > 0 {
+                let result = lua_state.stack_mut()[top - 1];
+                lua_state.stack_mut()[dest] = result;
+            }
+            // Restore top to the frame's proper value
+            let ci_top = lua_state.get_call_info(frame_idx).top;
+            lua_state.set_top_raw(ci_top);
+            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -1;
+        } else if pending == -2 {
+            // SET metamethod returned: just restore top (no result to copy)
+            let ci_top = lua_state.get_call_info(frame_idx).top;
+            lua_state.set_top_raw(ci_top);
+            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -1;
+        }
+
         let lua_func = unsafe { func_value.as_lua_function_unchecked() };
 
         let chunk = lua_func.chunk();
@@ -1726,10 +1749,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             lua_state.set_top(write_pos + 1)?;
                         }
                         save_pc!();
-                        let result = helper::lookup_from_metatable(lua_state, &table_value, key);
-                        restore_state!();
-                        let stack = lua_state.stack_mut();
-                        stack[base + a] = result.unwrap_or(LuaValue::nil());
+                        match helper::lookup_from_metatable(lua_state, &table_value, key) {
+                            Ok(result) => {
+                                restore_state!();
+                                let stack = lua_state.stack_mut();
+                                stack[base + a] = result.unwrap_or(LuaValue::nil());
+                            }
+                            Err(LuaError::Yield) => {
+                                // Metamethod yielded — save destination register
+                                // so we can finish the operation on resume.
+                                lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                                return Err(LuaError::Yield);
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
 
@@ -1763,10 +1796,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    // Slow path
+                    // Slow path: handle metamethods (__newindex)
                     let table_value = upval.get_value_ref().clone();
-                    if table_value.is_table() {
-                        lua_state.raw_set(&table_value, key, value);
+                    save_pc!();
+                    match helper::finishset(lua_state, &table_value, &key, value) {
+                        Ok(_) => {
+                            restore_state!();
+                        }
+                        Err(LuaError::Yield) => {
+                            // __newindex yielded — mark for top restoration on resume
+                            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -2;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
 

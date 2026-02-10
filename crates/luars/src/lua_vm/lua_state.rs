@@ -260,6 +260,7 @@ impl LuaState {
                 call_status,
                 nextraargs,
                 saved_nres: 0,
+                pending_finish_get: -1,
             };
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
@@ -273,6 +274,7 @@ impl LuaState {
                 call_status,
                 nextraargs,
                 saved_nres: 0,
+                pending_finish_get: -1,
             };
             self.call_stack.push(ci);
         }
@@ -354,6 +356,7 @@ impl LuaState {
                 call_status: CIST_LUA,
                 nextraargs,
                 saved_nres: 0,
+                pending_finish_get: -1,
             };
         } else {
             self.call_stack.push(CallInfo {
@@ -366,6 +369,7 @@ impl LuaState {
                 call_status: CIST_LUA,
                 nextraargs,
                 saved_nres: 0,
+                pending_finish_get: -1,
             });
         }
 
@@ -427,6 +431,7 @@ impl LuaState {
                 call_status: CIST_C,
                 nextraargs: 0,
                 saved_nres: 0,
+                pending_finish_get: -1,
             };
         } else {
             self.call_stack.push(CallInfo {
@@ -439,6 +444,7 @@ impl LuaState {
                 call_status: CIST_C,
                 nextraargs: 0,
                 saved_nres: 0,
+                pending_finish_get: -1,
             });
         }
 
@@ -1550,10 +1556,10 @@ impl LuaState {
     }
 
     /// Get value from table with __index metamethod support
-    pub fn table_get(&mut self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
+    pub fn table_get(&mut self, table: &LuaValue, key: &LuaValue) -> LuaResult<Option<LuaValue>> {
         // First try raw access
         if let Some(val) = self.vm_mut().raw_get(table, key) {
-            return Some(val);
+            return Ok(Some(val));
         }
         // If not found, try __index metamethod
         execute::helper::lookup_from_metatable(self, table, key)
@@ -2042,117 +2048,118 @@ impl LuaState {
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(e) => {
-                // Error occurred - call error handler
+                // Error occurred - call error handler WITH STACK INTACT
+                // so that debug.traceback can see the full call stack
+                // (mirrors CLua's luaG_errormsg which calls handler before longjmp)
 
-                // Get error object BEFORE closing TBC
+                // Get error object BEFORE any cleanup
                 let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
                 let error_msg_str = self.get_error_msg(e);
 
-                // Get frame_base before popping frames
+                // Prepare error value for the handler
+                let err_value = if !err_obj.is_nil() {
+                    err_obj.clone()
+                } else {
+                    self.create_string(&error_msg_str)?.into()
+                };
+
+                // Get frame_base for later cleanup (upvalues/TBC)
                 let frame_base = if self.call_depth() > initial_depth {
                     self.call_stack.get(initial_depth).map(|f| f.base)
                 } else {
                     None
                 };
 
-                // Pop frames FIRST (like Lua 5.5: L->ci = old_ci)
-                while self.call_depth() > initial_depth {
-                    self.pop_frame();
-                }
+                // Temporarily increase max_call_depth for error handler
+                // (like CLua's EXTRA_STACK — allows error handlers to run
+                // even after stack overflow)
+                let saved_max_depth = self.safe_option.max_call_depth;
+                self.safe_option.max_call_depth = saved_max_depth + 30;
 
-                // Then close upvalues and TBC
-                if let Some(base) = frame_base {
-                    self.close_upvalues(base);
-                    let _ = self.close_tbc_with_error(base, err_obj.clone());
-                }
+                // Call error handler with all error frames still on stack
+                let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
 
-                // Check if close_tbc_with_error updated error_object (cascading)
-                let cascaded_err = std::mem::replace(&mut self.error_object, LuaValue::nil());
-
-                // Set up error handler call
-                // Reset stack to [handler]
-                self.set_top(handler_idx + 1)?;
-
-                // Push error value as argument — use cascaded error if available
-                let err_value = if !cascaded_err.is_nil() {
-                    cascaded_err
-                } else if !err_obj.is_nil() {
-                    err_obj
-                } else {
-                    self.create_string(&error_msg_str)?.into()
-                };
+                // Push handler and error value ON TOP of current stack
+                // (above any error frames)
+                let current_top = self.stack_top;
+                self.push_value(handler)?;
+                let handler_func_idx = current_top;
                 self.push_value(err_value.clone())?;
 
-                // Get handler and create frame
-                let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
-                let handler_base = handler_idx + 1;
+                let handler_depth = self.call_depth();
 
-                if let Err(_) = self.push_frame(&handler, handler_base, 1, -1) {
-                    // Error handler setup failed
-                    self.set_top(handler_idx)?;
-                    let err_desc = if let Some(s) = err_value.as_str() {
-                        s.to_string()
+                let handler_result =
+                    if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                        execute::call::call_c_function(self, handler_func_idx, 1, -1)
                     } else {
-                        format!("{:?}", err_value)
+                        match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                            Ok(()) => execute::lua_execute(self, handler_depth),
+                            Err(handler_err) => Err(handler_err),
+                        }
                     };
-                    let final_err =
-                        self.create_string(&format!("error in error handling: {}", err_desc))?;
-                    return Ok((false, vec![final_err]));
-                }
 
-                // Execute error handler - distinguish C vs Lua handler
-                let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some() {
-                    // C function handler (e.g., debug.traceback)
-                    // pop the Lua frame we just pushed (push_frame pushes Lua frame)
-                    // and use call_c_function instead
-                    while self.call_depth() > initial_depth {
-                        self.pop_frame();
-                    }
-                    // Set up stack: [handler, err_value]
-                    self.set_top(handler_idx + 1)?;
-                    self.push_value(err_value.clone())?;
-                    execute::call::call_c_function(self, handler_idx, 1, -1)
-                } else {
-                    execute::lua_execute(self, initial_depth)
-                };
-
+                // Collect handler results
+                let mut results = Vec::new();
+                let handler_failed;
                 match handler_result {
                     Ok(()) => {
-                        // Error handler succeeded
-                        // Results start at handler_idx (replacing handler)
-                        // Stack top is at end of results
-                        let mut results = Vec::new();
-                        let top = self.stack_top;
-
-                        if top > handler_idx {
-                            for i in handler_idx..top {
+                        handler_failed = false;
+                        let result_top = self.stack_top;
+                        if result_top > handler_func_idx {
+                            for i in handler_func_idx..result_top {
                                 if let Some(val) = self.stack_get(i) {
                                     results.push(val);
                                 }
                             }
                         }
-
-                        if results.is_empty() {
-                            results.push(self.create_string(&error_msg_str)?);
-                        }
-
-                        self.set_top(handler_idx)?;
-                        Ok((false, results))
                     }
                     Err(_) => {
-                        // Error handler failed - clean up its frame
-                        while self.call_depth() > initial_depth {
-                            self.pop_frame();
-                        }
-
-                        self.set_top(handler_idx)?;
-                        let final_err = self.create_string(&format!(
-                            "error in error handling: {}",
-                            error_msg_str
-                        ))?;
-                        Ok((false, vec![final_err]))
+                        handler_failed = true;
+                        // Handler failed — will use "error in error handling" below
                     }
                 }
+
+                // Clean up any handler frames that remain
+                while self.call_depth() > handler_depth {
+                    self.pop_frame();
+                }
+
+                // Restore max_call_depth after error handler completes
+                self.safe_option.max_call_depth = saved_max_depth;
+
+                // NOW pop the error frames (after handler has seen them)
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+
+                // Close upvalues and TBC
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, err_obj);
+                }
+
+                // Check for cascading error from TBC
+                let cascaded_err = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                if !cascaded_err.is_nil() && results.is_empty() {
+                    if let Some(s) = cascaded_err.as_str() {
+                        results.push(self.create_string(s)?);
+                    } else {
+                        results.push(cascaded_err);
+                    }
+                }
+
+                if results.is_empty() {
+                    if handler_failed {
+                        results.push(
+                            self.create_string("error in error handling")?,
+                        );
+                    } else {
+                        results.push(self.create_string(&error_msg_str)?);
+                    }
+                }
+
+                self.set_top(handler_idx)?;
+                Ok((false, results))
             }
         }
     }

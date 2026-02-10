@@ -726,10 +726,26 @@ impl NativeTable {
     }
 
     fn set_node(&mut self, key: LuaValue, value: LuaValue) {
-        // If setting to nil, we should delete the key
+        // If setting to nil, find existing node and only clear value (keep key for next() iteration)
         if value.is_nil() {
-            self.delete_node(&key);
-            return;
+            if self.sizenode() == 0 {
+                return;
+            }
+            unsafe {
+                let mp = self.mainposition(&key);
+                let mut node = mp;
+                loop {
+                    if (*node).key == key {
+                        (*node).value = LuaValue::nil();
+                        return;
+                    }
+                    let next = (*node).next;
+                    if next == 0 {
+                        return; // Key not found, nothing to do
+                    }
+                    node = node.offset(next as isize);
+                }
+            }
         }
 
         if self.sizenode() == 0 {
@@ -783,34 +799,34 @@ impl NativeTable {
     }
 
     /// Delete a key from hash table
-    fn delete_node(&mut self, key: &LuaValue) {
-        if self.sizenode() == 0 {
-            return;
-        }
+    // fn delete_node(&mut self, key: &LuaValue) {
+    //     if self.sizenode() == 0 {
+    //         return;
+    //     }
 
-        unsafe {
-            let mp = self.mainposition(key);
-            let mut node = mp;
+    //     unsafe {
+    //         let mp = self.mainposition(key);
+    //         let mut node = mp;
 
-            // Find the node with this key
-            loop {
-                if (*node).key == *key {
-                    // Found it - mark as deleted by setting key to nil
-                    (*node).key = LuaValue::nil();
-                    (*node).value = LuaValue::nil();
-                    // Note: We keep the chain intact (next field) for iteration
-                    return;
-                }
+    //         // Find the node with this key
+    //         loop {
+    //             if (*node).key == *key {
+    //                 // Found it - mark as deleted by setting key to nil
+    //                 (*node).key = LuaValue::nil();
+    //                 (*node).value = LuaValue::nil();
+    //                 // Note: We keep the chain intact (next field) for iteration
+    //                 return;
+    //             }
 
-                let next = (*node).next;
-                if next == 0 {
-                    // Key not found
-                    return;
-                }
-                node = node.offset(next as isize);
-            }
-        }
-    }
+    //             let next = (*node).next;
+    //             if next == 0 {
+    //                 // Key not found
+    //                 return;
+    //             }
+    //             node = node.offset(next as isize);
+    //         }
+    //     }
+    // }
 
     /// Generic set - returns true if new key was inserted
     #[inline(always)]
@@ -1063,8 +1079,8 @@ impl NativeTable {
         while i < hash_size {
             unsafe {
                 let node = self.node.add(i as usize);
-                if !(*node).key.is_nil() {
-                    // Found a non-empty hash entry
+                if !(*node).key.is_nil() && !(*node).value.is_nil() {
+                    // Found a non-empty hash entry (key present and value not nil)
                     return Some(((*node).key, (*node).value));
                 }
             }
@@ -1093,7 +1109,7 @@ impl NativeTable {
         for i in 0..size {
             unsafe {
                 let node = self.node.add(i);
-                if !(*node).key.is_nil() {
+                if !(*node).key.is_nil() && !(*node).value.is_nil() {
                     f((*node).key, (*node).value);
                 }
             }

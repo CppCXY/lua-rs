@@ -83,6 +83,14 @@ pub struct CallInfo {
     /// Saved number of return values (used when CIST_CLSRET is set)
     /// Equivalent to Lua 5.5's CallInfo.u2.nres
     pub saved_nres: i32,
+
+    /// Pending metamethod GET result destination register (relative to base).
+    /// When >= 0, a GET metamethod (e.g. __index) yielded and we need to
+    /// finish the operation: copy the TM result to R[pending_finish_get]
+    /// and restore the stack top.
+    /// -1 = no pending operation (default).
+    /// -2 = pending SET operation (just restore top, no result to copy).
+    pub pending_finish_get: i32,
 }
 
 impl CallInfo {
@@ -98,6 +106,7 @@ impl CallInfo {
             call_status: call_status::CIST_LUA,
             nextraargs: 0,
             saved_nres: 0,
+            pending_finish_get: -1,
         }
     }
 
@@ -113,6 +122,7 @@ impl CallInfo {
             call_status: call_status::CIST_C,
             nextraargs: 0,
             saved_nres: 0,
+            pending_finish_get: -1,
         }
     }
 
@@ -153,6 +163,7 @@ impl Default for CallInfo {
             call_status: 0,
             nextraargs: 0,
             saved_nres: 0,
+            pending_finish_get: -1,
         }
     }
 }
