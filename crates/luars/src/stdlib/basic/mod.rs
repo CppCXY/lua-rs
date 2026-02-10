@@ -121,14 +121,57 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
     let level = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
 
     if arg.is_string() && level > 0 {
-        // Add position info to string error message
-        // The error object becomes the prefixed string
+        // Add position info to string error message (like luaL_where)
         let message = l.to_string(&arg)?;
-        let err = l.error(message);
-        // For string errors with position info, the error object IS the formatted string
-        let formatted_msg = l.error_msg.clone();
-        l.error_object = l.create_string(&formatted_msg)?.into();
-        Err(err)
+
+        // Find the Lua frame at 'level' up from the current frame
+        // Skip C frames when counting levels (like luaL_where)
+        let mut where_prefix = String::new();
+        let depth = l.call_depth();
+        let mut lvl = level as usize;
+        // Start from the frame BELOW the current one (skip the error() C frame itself)
+        if depth >= 2 {
+            let mut i = depth - 2;
+            loop {
+                if i < depth {
+                    let ci = l.get_call_info(i);
+                    if ci.is_lua() {
+                        lvl -= 1;
+                        if lvl == 0 {
+                            // Found the target frame
+                            if let Some(func_obj) = ci.func.as_lua_function() {
+                                let chunk = func_obj.chunk();
+                                let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                                let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                                    chunk.line_info[ci.pc as usize - 1] as usize
+                                } else if !chunk.line_info.is_empty() {
+                                    chunk.line_info[0] as usize
+                                } else {
+                                    0
+                                };
+                                if line > 0 {
+                                    where_prefix = format!("{}:{}: ", source, line);
+                                } else {
+                                    where_prefix = format!("{}: ", source);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+                if i == 0 { break; }
+                i -= 1;
+            }
+        }
+
+        let formatted_msg = format!("{}{}", where_prefix, message);
+        let err_str = l.create_string(&formatted_msg)?;
+        l.error_object = err_str.into();
+        // Set error_msg without adding another source prefix (we added it manually)
+        l.error_msg = formatted_msg;
+        Err(LuaError::RuntimeError)
     } else {
         // Non-string error object or level 0: raise as-is
         // Preserve the original error value

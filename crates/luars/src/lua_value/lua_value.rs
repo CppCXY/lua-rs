@@ -59,8 +59,6 @@ macro_rules! makevariant {
 pub const LUA_VNIL: u8 = makevariant!(LUA_TNIL, 0);
 pub const LUA_VEMPTY: u8 = makevariant!(LUA_TNIL, 1); // empty slot in table
 pub const LUA_VABSTKEY: u8 = makevariant!(LUA_TNIL, 2); // absent key in table
-#[allow(unused)]
-pub const LUA_VNOTABLE: u8 = makevariant!(LUA_TNIL, 3); // fast get non-table signal
 
 // Boolean variants
 pub const LUA_VFALSE: u8 = makevariant!(LUA_TBOOLEAN, 0);
@@ -80,22 +78,25 @@ pub const BIT_ISCOLLECTABLE: u8 = 1 << 6;
 pub const LUA_VSHRSTR: u8 = LUA_TSTRING | BIT_ISCOLLECTABLE; // 0x44 - short string (interned)
 pub const LUA_VLNGSTR: u8 = makevariant!(LUA_TSTRING, 1) | BIT_ISCOLLECTABLE; // 0x54 - long string (not interned)
 pub const LUA_VBINARY: u8 = makevariant!(LUA_TSTRING, 2) | BIT_ISCOLLECTABLE; // 0x64 - binary data
+
+// Table
 pub const LUA_VTABLE: u8 = LUA_TTABLE | BIT_ISCOLLECTABLE; // 0x45
 
-// Compatibility alias (short string is the default)
-pub const LUA_VFUNCTION: u8 = LUA_TFUNCTION | BIT_ISCOLLECTABLE; // 0x46
+// Function variants
+pub const LUA_VFUNCTION: u8 = makevariant!(LUA_TFUNCTION, 0) | BIT_ISCOLLECTABLE; // 0x46
 pub const LUA_CCLOSURE: u8 = makevariant!(LUA_TFUNCTION, 1) | BIT_ISCOLLECTABLE; // 0x56 - C closure
+pub const LUA_VLCF: u8 = makevariant!(LUA_TFUNCTION, 2); // 0x26 - light C function
+
+// userdata and thread
 pub const LUA_VUSERDATA: u8 = LUA_TUSERDATA | BIT_ISCOLLECTABLE; // 0x47
 pub const LUA_VTHREAD: u8 = LUA_TTHREAD | BIT_ISCOLLECTABLE; // 0x48
-
-// Light C function (NOT collectable - function pointer stored directly)
-pub const LUA_VLCF: u8 = 0x06; // makevariant(LUA_TFUNCTION, 0) - light C function
 
 #[inline(always)]
 pub const fn novariant(tt: u8) -> u8 {
     tt & 0x0F
 }
 
+#[allow(unused)]
 #[inline(always)]
 pub const fn withvariant(tt: u8) -> u8 {
     tt & 0x3F
@@ -318,167 +319,166 @@ impl LuaValue {
 
     // ============ Type checking (following Lua 5.5 macros) ============
 
-    /// rawtt(o) - raw type tag
-    #[inline(always)]
-    pub fn rawtt(&self) -> u8 {
-        self.tt()
-    }
-
     /// ttype(o) - type without variants (bits 0-3)
     #[inline(always)]
-    pub fn ttype(&self) -> u8 {
+    pub(crate) fn ttype(&self) -> u8 {
         novariant(self.tt())
     }
 
+    #[allow(unused)]
     /// ttypetag(o) - type tag with variants (bits 0-5)
     #[inline(always)]
-    pub fn ttypetag(&self) -> u8 {
+    pub(crate) fn ttypetag(&self) -> u8 {
         withvariant(self.tt())
     }
 
     /// checktag(o, t) - exact tag match
     #[inline(always)]
-    pub fn checktag(&self, t: u8) -> bool {
+    pub(crate) fn checktag(&self, t: u8) -> bool {
         self.tt() == t
     }
 
     /// checktype(o, t) - type match (ignoring variants)
     #[inline(always)]
-    pub fn checktype(&self, t: u8) -> bool {
+    pub(crate) fn checktype(&self, t: u8) -> bool {
         novariant(self.tt()) == t
     }
 
     /// iscollectable(o) - is this a GC object?
     #[inline(always)]
-    pub fn iscollectable(&self) -> bool {
+    pub(crate) fn iscollectable(&self) -> bool {
         (self.tt() & BIT_ISCOLLECTABLE) != 0
     }
 
     /// is_collectable - alias for Rust naming convention
     #[inline(always)]
-    pub fn is_collectable(&self) -> bool {
+    pub(crate) fn is_collectable(&self) -> bool {
         self.iscollectable()
     }
 
     // Specific type checks
     #[inline(always)]
-    pub fn ttisnil(&self) -> bool {
+    pub(crate) fn ttisnil(&self) -> bool {
         self.checktype(LUA_TNIL)
     }
 
+    #[allow(unused)]
     #[inline(always)]
-    pub fn ttisstrictnil(&self) -> bool {
+    pub(crate) fn ttisstrictnil(&self) -> bool {
         self.checktag(LUA_VNIL)
     }
 
+    #[allow(unused)]
     #[inline(always)]
-    pub fn ttisempty(&self) -> bool {
+    pub(crate) fn ttisempty(&self) -> bool {
         self.checktag(LUA_VEMPTY)
     }
 
+    #[allow(unused)]
     #[inline(always)]
-    pub fn isabstkey(&self) -> bool {
+    pub(crate) fn isabstkey(&self) -> bool {
         self.checktag(LUA_VABSTKEY)
     }
 
     #[inline(always)]
-    pub fn ttisboolean(&self) -> bool {
+    pub(crate) fn ttisboolean(&self) -> bool {
         self.checktype(LUA_TBOOLEAN)
     }
 
     #[inline(always)]
-    pub fn ttisfalse(&self) -> bool {
+    pub(crate) fn ttisfalse(&self) -> bool {
         self.checktag(LUA_VFALSE)
     }
 
+    #[allow(unused)]
     #[inline(always)]
-    pub fn ttistrue(&self) -> bool {
+    pub(crate) fn ttistrue(&self) -> bool {
         self.checktag(LUA_VTRUE)
     }
 
     #[inline(always)]
-    pub fn ttisnumber(&self) -> bool {
+    pub(crate) fn ttisnumber(&self) -> bool {
         self.checktype(LUA_TNUMBER)
     }
 
     #[inline(always)]
-    pub fn ttisinteger(&self) -> bool {
+    pub(crate) fn ttisinteger(&self) -> bool {
         self.checktag(LUA_VNUMINT)
     }
 
     #[inline(always)]
-    pub fn ttisfloat(&self) -> bool {
+    pub(crate) fn ttisfloat(&self) -> bool {
         self.checktag(LUA_VNUMFLT)
     }
 
     #[inline(always)]
-    pub fn ttisstring(&self) -> bool {
+    pub(crate) fn ttisstring(&self) -> bool {
         self.checktype(LUA_TSTRING)
     }
 
     #[inline(always)]
-    pub fn ttisbinary(&self) -> bool {
+    pub(crate) fn ttisbinary(&self) -> bool {
         self.checktag(LUA_VBINARY)
     }
 
     #[inline(always)]
-    pub fn ttistable(&self) -> bool {
+    pub(crate) fn ttistable(&self) -> bool {
         self.checktag(LUA_VTABLE)
     }
 
     #[inline(always)]
-    pub fn ttisfunction(&self) -> bool {
+    pub(crate) fn ttisfunction(&self) -> bool {
         self.checktype(LUA_TFUNCTION)
     }
 
     #[inline(always)]
-    pub fn ttisluafunction(&self) -> bool {
+    pub(crate) fn ttisluafunction(&self) -> bool {
         self.checktag(LUA_VFUNCTION)
     }
 
     #[inline(always)]
-    pub fn ttiscfunction(&self) -> bool {
+    pub(crate) fn ttiscfunction(&self) -> bool {
         self.checktag(LUA_VLCF)
     }
-
+    #[allow(unused)]
     #[inline(always)]
-    pub fn ttislightuserdata(&self) -> bool {
+    pub(crate) fn ttislightuserdata(&self) -> bool {
         self.checktag(LUA_VLIGHTUSERDATA)
     }
 
     #[inline(always)]
-    pub fn ttisfulluserdata(&self) -> bool {
+    pub(crate) fn ttisfulluserdata(&self) -> bool {
         self.checktag(LUA_VUSERDATA)
     }
 
     #[inline(always)]
-    pub fn ttisthread(&self) -> bool {
+    pub(crate) fn ttisthread(&self) -> bool {
         self.checktag(LUA_VTHREAD)
     }
 
     // ============ Value extraction ============
 
     #[inline(always)]
-    pub fn bvalue(&self) -> bool {
+    pub(crate) fn bvalue(&self) -> bool {
         debug_assert!(self.ttisboolean());
         self.tt() == LUA_VTRUE
     }
 
     #[inline(always)]
-    pub fn ivalue(&self) -> i64 {
+    pub(crate) fn ivalue(&self) -> i64 {
         debug_assert!(self.ttisinteger());
         unsafe { self.value.i }
     }
 
     #[inline(always)]
-    pub fn fltvalue(&self) -> f64 {
+    pub(crate) fn fltvalue(&self) -> f64 {
         debug_assert!(self.ttisfloat());
         unsafe { self.value.n }
     }
 
     /// nvalue - convert any number to f64
     #[inline(always)]
-    pub fn nvalue(&self) -> f64 {
+    pub(crate) fn nvalue(&self) -> f64 {
         debug_assert!(self.ttisnumber());
         if self.ttisinteger() {
             unsafe { self.value.i as f64 }
@@ -486,20 +486,21 @@ impl LuaValue {
             unsafe { self.value.n }
         }
     }
-
+    
+    #[allow(unused)]
     #[inline(always)]
-    pub fn pvalue(&self) -> *mut std::ffi::c_void {
+    pub(crate) fn pvalue(&self) -> *mut std::ffi::c_void {
         debug_assert!(self.ttislightuserdata());
         unsafe { self.value.p }
     }
 
     #[inline(always)]
-    pub fn fvalue(&self) -> CFunction {
+    pub(crate) fn fvalue(&self) -> CFunction {
         debug_assert!(self.ttiscfunction());
         unsafe { std::mem::transmute(self.value.f) }
     }
 
-    // ============ Compatibility layer with old API ============
+    // ============ pub API ============
 
     #[inline(always)]
     pub fn is_nil(&self) -> bool {

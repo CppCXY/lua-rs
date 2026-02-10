@@ -769,6 +769,36 @@ impl LuaState {
         }
     }
 
+    /// Get the name of a local variable at the given stack index
+    /// by looking at the current frame's locvars debug info
+    fn get_local_var_name(&self, stack_index: usize) -> Option<String> {
+        let ci = self.current_frame()?;
+        if !ci.is_lua() {
+            return None;
+        }
+        let func_obj = ci.func.as_lua_function()?;
+        let chunk = func_obj.chunk();
+        let reg = stack_index.checked_sub(ci.base)?;
+        // Use ci.pc (next instruction) as the PC for lookup,
+        // because at TBC instruction, the variable's startpc equals the TBC PC
+        // and ci.pc has already been incremented past it
+        let pc = ci.pc as usize;
+        // Walk locvars to find which variable occupies register 'reg' at 'pc'
+        let mut n = 0usize;
+        for locvar in &chunk.locals {
+            if (locvar.startpc as usize) > pc {
+                break;
+            }
+            if pc < locvar.endpc as usize {
+                if n == reg {
+                    return Some(locvar.name.clone());
+                }
+                n += 1;
+            }
+        }
+        None
+    }
+
     /// Mark a stack slot as to-be-closed (TBC)
     /// Called by OpCode::Tbc
     /// If the value is nil or false, it doesn't need to be closed
@@ -787,7 +817,14 @@ impl LuaState {
         let has_close = get_metamethod_event(self, &value, TmKind::Close).is_some();
         
         if !has_close {
-            return Err(self.error("variable got a non-closable value".to_string()));
+            // Try to get the variable name from locvars
+            let var_name = self.get_local_var_name(stack_index);
+            let msg = if let Some(name) = var_name {
+                format!("variable '{}' got a non-closable value", name)
+            } else {
+                "variable got a non-closable value".to_string()
+            };
+            return Err(self.error(msg));
         }
         
         self.tbc_list.push(stack_index);
@@ -842,6 +879,18 @@ impl LuaState {
                     }
                     self.clear_error();
                 }
+            } else {
+                // No __close metamethod on a non-nil/non-false TBC value
+                // This is an error (metamethod was removed after marking)
+                let var_name = self.get_local_var_name(tbc_idx);
+                let msg = if let Some(name) = var_name {
+                    format!("attempt to close non-closable variable '{}' (no metamethod 'close')", name)
+                } else {
+                    "attempt to close variable (no metamethod 'close')".to_string()
+                };
+                if let Ok(s) = self.create_string(&msg) {
+                    current_error = Some(s.into());
+                }
             }
         }
         
@@ -876,6 +925,7 @@ impl LuaState {
         use crate::lua_vm::execute::get_metamethod_event;
         
         let mut current_error = err;
+        let mut had_close_error = false;
         
         while let Some(&tbc_idx) = self.tbc_list.last() {
             if tbc_idx < level {
@@ -897,6 +947,7 @@ impl LuaState {
                 
                 if let Err(_) = result {
                     // This __close threw — capture as new current error
+                    had_close_error = true;
                     let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
                     if !err_obj.is_nil() {
                         current_error = err_obj;
@@ -908,24 +959,46 @@ impl LuaState {
                     }
                     self.clear_error();
                 }
+            } else {
+                // No __close metamethod — treat as error
+                had_close_error = true;
+                let var_name = self.get_local_var_name(tbc_idx);
+                let msg = if let Some(name) = var_name {
+                    format!("attempt to close non-closable variable '{}' (no metamethod 'close')", name)
+                } else {
+                    "attempt to close variable (no metamethod 'close')".to_string()
+                };
+                if let Ok(s) = self.create_string(&msg) {
+                    current_error = s.into();
+                }
             }
         }
+        
+        // Store the final cascaded error in error_object so pcall/xpcall can retrieve it
+        if had_close_error {
+            self.error_object = current_error;
+        }
+        
         Ok(())
     }
 
-    /// Call __close(obj) for normal block exit — 1 argument
+    /// Call __close(obj) for normal block exit — 1 argument only
+    /// Lua 5.5: normal close passes errobj=NULL, so callclosemethod only pushes self
     fn call_close_method_normal(&mut self, close_fn: &LuaValue, obj: &LuaValue) -> LuaResult<()> {
         use crate::lua_vm::execute::{call, lua_execute};
 
-        // savestate: L->top.p = ci->top.p
-        if let Some(frame) = self.current_frame() {
-            let ci_top = frame.top;
-            if self.get_top() != ci_top {
-                self.set_top_raw(ci_top);
-            }
+        let caller_depth = self.call_depth();
+
+        // Use current top directly (like Lua 5.5's callclosemethod)
+        // Do NOT restore ci->top here — during pcall cleanup, frames may already
+        // be popped and ci->top would be wrong
+        let func_pos = self.get_top();
+
+        // Ensure stack has space
+        if func_pos + 2 >= self.stack.len() {
+            let _ = self.grow_stack(func_pos + 3);
         }
 
-        let func_pos = self.get_top();
         {
             let stack = self.stack_mut();
             stack[func_pos] = *close_fn;       // function
@@ -933,31 +1006,41 @@ impl LuaState {
         }
         self.set_top_raw(func_pos + 2); // 2 values: function + 1 arg
 
-        if close_fn.is_cfunction() {
-            call::call_c_function(self, func_pos, 1, 0)?;
+        let result = if close_fn.is_cfunction() || close_fn.as_cclosure().is_some() {
+            call::call_c_function(self, func_pos, 1, 0)
         } else if close_fn.is_lua_function() {
             let new_base = func_pos + 1;
-            let caller_depth = self.call_depth();
             self.push_frame(close_fn, new_base, 1, 0)?;
-            lua_execute(self, caller_depth)?;
+            lua_execute(self, caller_depth)
+        } else {
+            // Non-callable close method (e.g., a number)
+            let type_name = close_fn.type_name();
+            Err(self.error(format!("attempt to call a {} value (metamethod 'close')", type_name)))
+        };
+
+        if result.is_err() {
+            // Pop any frames pushed by the close method
+            while self.call_depth() > caller_depth {
+                self.pop_frame();
+            }
         }
 
-        Ok(())
+        result
     }
 
     /// Call __close(obj, err) for error unwinding — 2 arguments
     fn call_close_method_with_error(&mut self, close_fn: &LuaValue, obj: &LuaValue, err: LuaValue) -> LuaResult<()> {
         use crate::lua_vm::execute::{call, lua_execute};
 
-        // savestate: L->top.p = ci->top.p
-        if let Some(frame) = self.current_frame() {
-            let ci_top = frame.top;
-            if self.get_top() != ci_top {
-                self.set_top_raw(ci_top);
-            }
-        }
+        let caller_depth = self.call_depth();
 
+        // Like Lua 5.5's callclosemethod: use current top directly, don't restore ci->top
+        // (after frame pops, ci->top may be lower than TBC variables on the stack)
         let func_pos = self.get_top();
+        // Ensure stack has room for function + 2 args
+        if func_pos + 3 > self.stack().len() {
+            let _ = self.grow_stack(3);
+        }
         {
             let stack = self.stack_mut();
             stack[func_pos] = *close_fn;       // function
@@ -966,16 +1049,26 @@ impl LuaState {
         }
         self.set_top_raw(func_pos + 3); // 3 values: function + 2 args
 
-        if close_fn.is_cfunction() {
-            call::call_c_function(self, func_pos, 2, 0)?;
+        let result = if close_fn.is_cfunction() || close_fn.as_cclosure().is_some() {
+            call::call_c_function(self, func_pos, 2, 0)
         } else if close_fn.is_lua_function() {
             let new_base = func_pos + 1;
-            let caller_depth = self.call_depth();
             self.push_frame(close_fn, new_base, 2, 0)?;
-            lua_execute(self, caller_depth)?;
+            lua_execute(self, caller_depth)
+        } else {
+            // Non-callable close method (e.g., a number)
+            let type_name = close_fn.type_name();
+            Err(self.error(format!("attempt to call a {} value (metamethod 'close')", type_name)))
+        };
+
+        if result.is_err() {
+            // Pop any frames pushed by the close method
+            while self.call_depth() > caller_depth {
+                self.pop_frame();
+            }
         }
 
-        Ok(())
+        result
     }
 
     /// Find or create an open upvalue for the given stack index
@@ -1615,31 +1708,41 @@ impl LuaState {
                 Err(LuaError::Yield) => Err(LuaError::Yield),
                 Err(e) => {
                     // Error occurred - clean up
+                    // Lua 5.5 order: L->ci = old_ci first, then closeprotected
+                    // This ensures debug.getinfo(2) inside __close sees pcall's caller
 
                     // Get error object BEFORE closing TBC (close may modify it)
                     let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                    let error_msg_str = self.get_error_msg(e);
 
-                    // Close upvalues and TBC variables
-                    if self.call_depth() > initial_depth {
-                        if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base)
-                        {
-                            self.close_upvalues(frame_base);
-                            // Pass error to TBC close methods
-                            let _ = self.close_tbc_with_error(frame_base, err_obj);
-                        }
-                    }
+                    // Get frame_base before popping frames
+                    let frame_base = if self.call_depth() > initial_depth {
+                        self.call_stack.get(initial_depth).map(|f| f.base)
+                    } else {
+                        None
+                    };
 
-                    // Pop frames
+                    // Pop frames FIRST (like Lua 5.5: L->ci = old_ci)
                     while self.call_depth() > initial_depth {
                         self.pop_frame();
                     }
 
-                    // Use preserved error object if available, otherwise create string
-                    let result_err = if !err_obj.is_nil() {
+                    // Then close upvalues and TBC variables
+                    if let Some(base) = frame_base {
+                        self.close_upvalues(base);
+                        // Pass error to TBC close methods
+                        // close_tbc_with_error may update error_object if __close cascades
+                        let _ = self.close_tbc_with_error(base, err_obj);
+                    }
+
+                    // Check if close_tbc_with_error updated error_object (from cascading __close errors)
+                    let cascaded_err = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                    let result_err = if !cascaded_err.is_nil() {
+                        cascaded_err
+                    } else if !err_obj.is_nil() {
                         err_obj
                     } else {
-                        let error_msg = self.get_error_msg(e);
-                        self.create_string(&error_msg)?.into()
+                        self.create_string(&error_msg_str)?.into()
                     };
 
                     // Clean up stack
@@ -1723,29 +1826,38 @@ impl LuaState {
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(e) => {
                 // Error - clean up and return error
+                // Lua 5.5 order: pop frames first, then close TBC
 
                 // Get error object BEFORE closing TBC
                 let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                let error_msg_str = self.get_error_msg(e);
 
-                // Close upvalues and TBC variables
-                if self.call_depth() > initial_depth {
-                    if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base) {
-                        self.close_upvalues(frame_base);
-                        let _ = self.close_tbc_with_error(frame_base, err_obj);
-                    }
-                }
+                // Get frame_base before popping frames
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
 
-                // Pop frames
+                // Pop frames FIRST (like Lua 5.5: L->ci = old_ci)
                 while self.call_depth() > initial_depth {
                     self.pop_frame();
                 }
 
-                // Use preserved error object if available
-                let result_err = if !err_obj.is_nil() {
+                // Then close upvalues and TBC variables
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, err_obj);
+                }
+
+                // Check if close_tbc_with_error updated error_object (cascading)
+                let cascaded_err = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                let result_err = if !cascaded_err.is_nil() {
+                    cascaded_err
+                } else if !err_obj.is_nil() {
                     err_obj
                 } else {
-                    let error_msg = self.get_error_msg(e);
-                    self.create_string(&error_msg)?.into()
+                    self.create_string(&error_msg_str)?.into()
                 };
 
                 // Set error at func_idx and update stack top
@@ -1851,24 +1963,35 @@ impl LuaState {
                 let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
                 let error_msg_str = self.get_error_msg(e);
 
-                // Clean up failed frames
-                if self.call_depth() > initial_depth {
-                    if let Some(frame_base) = self.call_stack.get(initial_depth).map(|f| f.base) {
-                        self.close_upvalues(frame_base);
-                        let _ = self.close_tbc_with_error(frame_base, err_obj.clone());
-                    }
-                }
+                // Get frame_base before popping frames
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
 
+                // Pop frames FIRST (like Lua 5.5: L->ci = old_ci)
                 while self.call_depth() > initial_depth {
                     self.pop_frame();
                 }
+
+                // Then close upvalues and TBC
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, err_obj.clone());
+                }
+
+                // Check if close_tbc_with_error updated error_object (cascading)
+                let cascaded_err = std::mem::replace(&mut self.error_object, LuaValue::nil());
 
                 // Set up error handler call
                 // Reset stack to [handler]
                 self.set_top(handler_idx + 1)?;
 
-                // Push error value as argument (use original error object)
-                let err_value = if !err_obj.is_nil() {
+                // Push error value as argument — use cascaded error if available
+                let err_value = if !cascaded_err.is_nil() {
+                    cascaded_err
+                } else if !err_obj.is_nil() {
                     err_obj
                 } else {
                     self.create_string(&error_msg_str)?.into()
@@ -1892,8 +2015,21 @@ impl LuaState {
                     return Ok((false, vec![final_err]));
                 }
 
-                // Execute error handler
-                let handler_result = execute::lua_execute(self, initial_depth);
+                // Execute error handler - distinguish C vs Lua handler
+                let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                    // C function handler (e.g., debug.traceback)
+                    // pop the Lua frame we just pushed (push_frame pushes Lua frame)
+                    // and use call_c_function instead
+                    while self.call_depth() > initial_depth {
+                        self.pop_frame();
+                    }
+                    // Set up stack: [handler, err_value]
+                    self.set_top(handler_idx + 1)?;
+                    self.push_value(err_value.clone())?;
+                    execute::call::call_c_function(self, handler_idx, 1, -1)
+                } else {
+                    execute::lua_execute(self, initial_depth)
+                };
 
                 match handler_result {
                     Ok(()) => {
