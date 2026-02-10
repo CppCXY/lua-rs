@@ -299,7 +299,7 @@ impl LuaState {
     /// Push a Lua function call frame (specialized fast path).
     /// Caller MUST already know `func` is a Lua function and provide the chunk metadata.
     /// Skips the function-type dispatch entirely.
-    #[inline]
+    #[inline(always)]
     pub(crate) fn push_lua_frame(
         &mut self,
         func: &LuaValue,
@@ -309,14 +309,67 @@ impl LuaState {
         param_count: usize,
         max_stack_size: usize,
     ) -> LuaResult<()> {
-        // Check stack depth
+        // Check stack depth (cold — almost never triggers)
         if self.call_depth >= self.safe_option.max_call_depth {
-            return Err(self.error(format!(
-                "stack overflow (Lua stack depth: {})",
-                self.call_depth
-            )));
+            return self.push_lua_frame_overflow();
         }
 
+        // Pre-compute common values
+        let frame_top = base + max_stack_size;
+
+        // Fast path for the common case: exact parameter match, stack already large enough,
+        // call_stack slot available for reuse. This handles 95%+ of calls.
+        if nparams == param_count
+            && frame_top + 5 <= self.stack.len()
+            && self.call_depth < self.call_stack.len()
+        {
+            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            ci.func = *func;
+            ci.base = base;
+            ci.func_offset = 1;
+            ci.top = frame_top;
+            ci.pc = 0;
+            ci.nresults = nresults;
+            ci.call_status = CIST_LUA;
+            ci.nextraargs = 0;
+
+            self.call_depth += 1;
+
+            // Set stack_top to frame_top for GC safety
+            if frame_top > self.stack_top {
+                self.stack_top = frame_top;
+            }
+
+            return Ok(());
+        }
+
+        // Slow path: handle extra args, nil filling, stack resize, new slot allocation
+        self.push_lua_frame_slow(func, base, nparams, nresults, param_count, max_stack_size, frame_top)
+    }
+
+    /// Stack overflow error for push_lua_frame (cold path)
+    #[cold]
+    #[inline(never)]
+    fn push_lua_frame_overflow(&mut self) -> LuaResult<()> {
+        Err(self.error(format!(
+            "stack overflow (Lua stack depth: {})",
+            self.call_depth
+        )))
+    }
+
+    /// Slow path for push_lua_frame — handles nil filling, resize, new slot allocation
+    #[cold]
+    #[inline(never)]
+    fn push_lua_frame_slow(
+        &mut self,
+        func: &LuaValue,
+        base: usize,
+        nparams: usize,
+        nresults: i32,
+        param_count: usize,
+        _max_stack_size: usize,
+        frame_top: usize,
+    ) -> LuaResult<()> {
         let nextraargs = if nparams > param_count {
             (nparams - param_count) as i32
         } else {
@@ -337,27 +390,22 @@ impl LuaState {
             }
         }
 
-        let frame_top = base + max_stack_size;
         let needed_physical = frame_top + 5;
         if needed_physical > self.stack.len() {
             self.resize(needed_physical)?;
         }
 
-        // Reuse existing CallInfo slot or allocate
+        // Reuse existing CallInfo slot or allocate new one
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
-            *ci = CallInfo {
-                func: *func,
-                base,
-                func_offset: 1,
-                top: frame_top,
-                pc: 0,
-                nresults,
-                call_status: CIST_LUA,
-                nextraargs,
-                saved_nres: 0,
-                pending_finish_get: -1,
-            };
+            ci.func = *func;
+            ci.base = base;
+            ci.func_offset = 1;
+            ci.top = frame_top;
+            ci.pc = 0;
+            ci.nresults = nresults;
+            ci.call_status = CIST_LUA;
+            ci.nextraargs = nextraargs;
         } else {
             self.call_stack.push(CallInfo {
                 func: *func,

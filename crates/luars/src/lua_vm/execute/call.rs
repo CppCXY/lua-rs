@@ -20,7 +20,7 @@ pub enum FrameAction {
 
 /// Handle CALL opcode - Lua style (push frame, don't recurse)
 /// R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
-#[inline]
+#[inline(always)]
 pub fn handle_call(
     lua_state: &mut LuaState,
     base: usize,
@@ -52,8 +52,8 @@ pub fn handle_call(
         (c - 1) as i32
     };
 
-    // Get function to call (hot path — no bounds check, already validated by grow_stack)
-    let func = lua_state.stack_mut()[func_idx];
+    // Get function to call — unchecked since stack was grown by push_lua_frame
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
 
     // Check if it's a Lua function (most common hot path)
     if func.is_lua_function() {

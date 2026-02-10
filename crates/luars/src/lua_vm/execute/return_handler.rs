@@ -127,8 +127,10 @@ pub fn handle_return(
 /// Handle OP_RETURN0 instruction (optimized for no return values)
 ///
 /// Based on lvm.c:1784-1800
+///
+/// This never fails — returns nothing (avoids Result overhead on hot path).
 #[inline(always)]
-pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
+pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) {
     // Get caller's expected results
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = call_info.base - call_info.func_offset;
@@ -152,19 +154,20 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<(
 
     lua_state.pop_call_frame();
     lua_state.set_top_raw(new_top);
-    Ok(())
 }
 
 /// Handle OP_RETURN1 instruction (optimized for single return value)
 ///
 /// Based on lvm.c:1801-1827
+///
+/// This never fails — returns nothing (avoids Result overhead on hot path).
 #[inline(always)]
 pub fn handle_return1(
     lua_state: &mut LuaState,
     base: usize,
     frame_idx: usize,
     a: usize,
-) -> LuaResult<()> {
+) {
     // Get call info first
     let call_info = lua_state.get_call_info(frame_idx);
     let func_pos = call_info.base - call_info.func_offset;
@@ -195,5 +198,4 @@ pub fn handle_return1(
 
     lua_state.pop_call_frame();
     lua_state.set_top_raw(new_top);
-    Ok(())
 }

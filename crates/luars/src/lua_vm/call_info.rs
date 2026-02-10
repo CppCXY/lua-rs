@@ -24,9 +24,14 @@ pub mod call_status {
     /// Error recovery status saved across yield (precover)
     pub const CIST_RECST: u32 = 1 << 7;
 
-    /// Offset for __call metamethod count (bits 8-11)
-    pub const CIST_CCMT: u32 = 8;
-    /// Mask for __call metamethod count (0xf at bits 8-11 = 0x0F00)
+    /// Pending metamethod finish operation (GET/SET) after yield resume.
+    /// When set, the `pending_finish_get` field contains a valid value
+    /// that must be handled in the startfunc loop before dispatching.
+    pub const CIST_PENDING_FINISH: u32 = 1 << 8;
+
+    /// Offset for __call metamethod count (bits 9-12)
+    pub const CIST_CCMT: u32 = 9;
+    /// Mask for __call metamethod count (0xf at bits 9-12 = 0x1E00)
     pub const MAX_CCMT: u32 = 0xF << CIST_CCMT;
 
     /// Extract __call count from call_status

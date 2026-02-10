@@ -229,6 +229,8 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 /// - Function calls/returns just update pointers and continue
 /// - Zero Rust function call overhead
 pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
+    use crate::lua_vm::call_info::call_status::{CIST_C, CIST_PENDING_FINISH};
+
     // STARTFUNC: Function context switching point (like Lua C's startfunc label)
     'startfunc: loop {
         // Check if we've reached target depth
@@ -241,42 +243,48 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // ===== LOAD FRAME CONTEXT =====
         // Safety: frame_idx < call_depth (guaranteed by check above)
         let ci = lua_state.get_call_info(frame_idx);
-        let func_value = ci.func;
 
-        // Check if this is a C frame (left on stack after yield-resume).
-        // This happens when e.g. pcall's body yields: pcall's C frame
-        // stays on the stack, and after the inner frames complete on resume,
-        // we reach pcall's C frame here.
-        if ci.is_c() {
-            finish_c_frame(lua_state, frame_idx)?;
-            continue 'startfunc;
+        // Combined cold-path check: C frame or pending metamethod finish.
+        // Normal Lua function entry: call_status == CIST_LUA, so this is always
+        // predicted not-taken. One branch instead of three.
+        if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
+            if ci.call_status & CIST_C != 0 {
+                // C frame left on stack after yield-resume (e.g. pcall body yielded)
+                finish_c_frame(lua_state, frame_idx)?;
+                continue 'startfunc;
+            }
+            // === luaV_finishOp equivalent ===
+            // A prior metamethod yielded; finish the interrupted operation.
+            let ci = lua_state.get_call_info(frame_idx);
+            let pending = ci.pending_finish_get;
+            let base_tmp = ci.base;
+            if pending >= 0 {
+                // GET metamethod returned: copy result to destination register
+                let dest = base_tmp + pending as usize;
+                let top = lua_state.get_top();
+                if top > 0 {
+                    let result = lua_state.stack_mut()[top - 1];
+                    lua_state.stack_mut()[dest] = result;
+                }
+                let ci_top = lua_state.get_call_info(frame_idx).top;
+                lua_state.set_top_raw(ci_top);
+            } else {
+                // pending == -2: SET metamethod returned, just restore top
+                let ci_top = lua_state.get_call_info(frame_idx).top;
+                lua_state.set_top_raw(ci_top);
+            }
+            // Clear the pending flag
+            let ci_mut = lua_state.get_call_info_mut(frame_idx);
+            ci_mut.pending_finish_get = -1;
+            ci_mut.call_status &= !CIST_PENDING_FINISH;
         }
 
+        // Hot path: read CI fields for Lua function dispatch.
+        // Separate read from the cold-path check to keep register pressure low.
+        let ci = lua_state.get_call_info(frame_idx);
+        let func_value = ci.func;
         let mut pc = ci.pc as usize;
         let mut base = ci.base;
-
-        // === luaV_finishOp equivalent ===
-        // If a prior metamethod yielded, finish the interrupted operation.
-        // The TM's return value sits at stack[top-1]; copy it to R[dest].
-        let pending = lua_state.get_call_info(frame_idx).pending_finish_get;
-        if pending >= 0 {
-            // GET metamethod returned: copy result to destination register
-            let dest = base + pending as usize;
-            let top = lua_state.get_top();
-            if top > 0 {
-                let result = lua_state.stack_mut()[top - 1];
-                lua_state.stack_mut()[dest] = result;
-            }
-            // Restore top to the frame's proper value
-            let ci_top = lua_state.get_call_info(frame_idx).top;
-            lua_state.set_top_raw(ci_top);
-            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -1;
-        } else if pending == -2 {
-            // SET metamethod returned: just restore top (no result to copy)
-            let ci_top = lua_state.get_call_info(frame_idx).top;
-            lua_state.set_top_raw(ci_top);
-            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -1;
-        }
 
         let lua_func = unsafe { func_value.as_lua_function_unchecked() };
 
@@ -1041,19 +1049,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::Return0 => {
                     // return (no values)
-                    save_pc!();
-                    return_handler::handle_return0(lua_state, frame_idx)?;
-
-                    // No check_gc here - see OP_RETURN comment above
+                    return_handler::handle_return0(lua_state, frame_idx);
                     continue 'startfunc;
                 }
                 OpCode::Return1 => {
-                    // return R[A]
+                    // return R[A] — hottest return path
                     let a = instr.get_a() as usize;
-                    save_pc!();
-                    return_handler::handle_return1(lua_state, base, frame_idx, a)?;
-
-                    // No check_gc here - see OP_RETURN comment above
+                    return_handler::handle_return1(lua_state, base, frame_idx, a);
                     continue 'startfunc;
                 }
                 OpCode::GetUpval => {
@@ -1758,7 +1760,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             Err(LuaError::Yield) => {
                                 // Metamethod yielded — save destination register
                                 // so we can finish the operation on resume.
-                                lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                                let ci = lua_state.get_call_info_mut(frame_idx);
+                                ci.pending_finish_get = a as i32;
+                                ci.call_status |= CIST_PENDING_FINISH;
                                 return Err(LuaError::Yield);
                             }
                             Err(e) => return Err(e),
@@ -1805,7 +1809,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                         Err(LuaError::Yield) => {
                             // __newindex yielded — mark for top restoration on resume
-                            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -2;
+                            let ci = lua_state.get_call_info_mut(frame_idx);
+                            ci.pending_finish_get = -2;
+                            ci.call_status |= CIST_PENDING_FINISH;
                             return Err(LuaError::Yield);
                         }
                         Err(e) => return Err(e),

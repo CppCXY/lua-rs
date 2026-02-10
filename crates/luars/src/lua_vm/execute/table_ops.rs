@@ -65,7 +65,9 @@ pub fn exec_gettable(
                     result
                 }
                 Err(LuaError::Yield) => {
-                    lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.pending_finish_get = a as i32;
+                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                     return Err(LuaError::Yield);
                 }
                 Err(e) => return Err(e),
@@ -85,7 +87,9 @@ pub fn exec_gettable(
                 result
             }
             Err(LuaError::Yield) => {
-                lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = a as i32;
+                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                 return Err(LuaError::Yield);
             }
             Err(e) => return Err(e),
@@ -161,7 +165,9 @@ pub fn exec_settable(
     match helper::finishset(lua_state, &ra, &rb, val) {
         Ok(_) => {}
         Err(LuaError::Yield) => {
-            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -2;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = -2;
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
             return Err(LuaError::Yield);
         }
         Err(e) => return Err(e),
@@ -217,7 +223,9 @@ pub fn exec_geti(
                     result
                 }
                 Err(LuaError::Yield) => {
-                    lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.pending_finish_get = a as i32;
+                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                     return Err(LuaError::Yield);
                 }
                 Err(e) => return Err(e),
@@ -238,7 +246,9 @@ pub fn exec_geti(
                 result
             }
             Err(LuaError::Yield) => {
-                lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = a as i32;
+                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                 return Err(LuaError::Yield);
             }
             Err(e) => return Err(e),
@@ -300,7 +310,9 @@ pub fn exec_seti(
             match helper::finishset(lua_state, &ra, &key, value) {
                 Ok(_) => {}
                 Err(LuaError::Yield) => {
-                    lua_state.get_call_info_mut(frame_idx).pending_finish_get = -2;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.pending_finish_get = -2;
+                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                     return Err(LuaError::Yield);
                 }
                 Err(e) => return Err(e),
@@ -319,7 +331,9 @@ pub fn exec_seti(
         match helper::finishset(lua_state, &ra, &key, value) {
             Ok(_) => {}
             Err(LuaError::Yield) => {
-                lua_state.get_call_info_mut(frame_idx).pending_finish_get = -2;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = -2;
+                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                 return Err(LuaError::Yield);
             }
             Err(e) => return Err(e),
@@ -378,7 +392,9 @@ pub fn exec_getfield(
                     result
                 }
                 Err(LuaError::Yield) => {
-                    lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.pending_finish_get = a as i32;
+                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                     return Err(LuaError::Yield);
                 }
                 Err(e) => return Err(e),
@@ -398,7 +414,9 @@ pub fn exec_getfield(
                 result
             }
             Err(LuaError::Yield) => {
-                lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = a as i32;
+                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                 return Err(LuaError::Yield);
             }
             Err(e) => return Err(e),
@@ -468,7 +486,9 @@ pub fn exec_setfield(
     match helper::finishset(lua_state, &ra, &key, value) {
         Ok(_) => {}
         Err(LuaError::Yield) => {
-            lua_state.get_call_info_mut(frame_idx).pending_finish_get = -2;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = -2;
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
             return Err(LuaError::Yield);
         }
         Err(e) => return Err(e),
@@ -538,7 +558,9 @@ pub fn exec_self(
                 stack[base + a] = result.unwrap_or(LuaValue::nil());
             }
             Err(LuaError::Yield) => {
-                lua_state.get_call_info_mut(frame_idx).pending_finish_get = a as i32;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = a as i32;
+                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
                 return Err(LuaError::Yield);
             }
             Err(e) => return Err(e),
