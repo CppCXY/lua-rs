@@ -27,14 +27,10 @@ fn table_create(l: &mut LuaState) -> LuaResult<usize> {
 
     // Validate arguments
     if narray < 0 {
-        return Err(
-            l.error("bad argument #1 to 'create' (out of range)".to_string())
-        );
+        return Err(l.error("bad argument #1 to 'create' (out of range)".to_string()));
     }
     if nhash < 0 {
-        return Err(
-            l.error("bad argument #2 to 'create' (out of range)".to_string())
-        );
+        return Err(l.error("bad argument #2 to 'create' (out of range)".to_string()));
     }
 
     // Check for overflow (INT_MAX in Lua is i32::MAX)

@@ -1687,7 +1687,9 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
             if let Some(var_desc) = fs.get_local_var_desc(vidx) {
                 // RDKCONST, RDKCTC, and RDKTOCLOSE are all readonly
                 match var_desc.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE => Some(var_desc.name.clone()),
+                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE => {
+                        Some(var_desc.name.clone())
+                    }
                     _ => None,
                 }
             } else {
@@ -1701,7 +1703,9 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
                 let upval = &fs.upvalues[upval_idx];
                 // RDKCONST, RDKCTC, and RDKTOCLOSE are all readonly
                 match upval.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE => Some(upval.name.clone()),
+                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE => {
+                        Some(upval.name.clone())
+                    }
                     _ => None,
                 }
             } else {

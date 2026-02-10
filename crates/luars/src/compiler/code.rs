@@ -1507,9 +1507,17 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
 #[inline]
 fn fold_shiftl(x: i64, y: i64) -> i64 {
     if y < 0 {
-        if y <= -64 { 0 } else { ((x as u64) >> ((-y) as u32)) as i64 }
+        if y <= -64 {
+            0
+        } else {
+            ((x as u64) >> ((-y) as u32)) as i64
+        }
     } else {
-        if y >= 64 { 0 } else { ((x as u64) << (y as u32)) as i64 }
+        if y >= 64 {
+            0
+        } else {
+            ((x as u64) << (y as u32)) as i64
+        }
     }
 }
 

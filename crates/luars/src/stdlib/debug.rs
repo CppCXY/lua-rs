@@ -1,11 +1,11 @@
 // Debug library implementation
 // Implements: traceback, getinfo, getlocal, getmetatable, getupvalue, etc.
 
+use crate::Instruction;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{Chunk, LuaValue};
-use crate::lua_vm::{LuaResult, LuaState, get_metatable};
 use crate::lua_vm::opcode::OpCode;
-use crate::Instruction;
+use crate::lua_vm::{LuaResult, LuaState, get_metatable};
 
 // ============================================================================
 // Function name resolution (mirrors Lua 5.5 ldebug.c)
@@ -32,23 +32,64 @@ fn getlocalname(chunk: &Chunk, local_number: usize, pc: usize) -> Option<&str> {
 
 /// Whether the opcode writes to register A (testAMode)
 fn test_a_mode(op: OpCode) -> bool {
-    matches!(op,
-        OpCode::Move | OpCode::LoadI | OpCode::LoadF | OpCode::LoadK | OpCode::LoadKX |
-        OpCode::LoadFalse | OpCode::LFalseSkip | OpCode::LoadTrue | OpCode::LoadNil |
-        OpCode::GetUpval | OpCode::GetTabUp | OpCode::GetTable | OpCode::GetI | OpCode::GetField |
-        OpCode::NewTable | OpCode::Self_ |
-        OpCode::AddI | OpCode::AddK | OpCode::SubK | OpCode::MulK | OpCode::ModK |
-        OpCode::PowK | OpCode::DivK | OpCode::IDivK |
-        OpCode::BAndK | OpCode::BOrK | OpCode::BXorK |
-        OpCode::ShlI | OpCode::ShrI |
-        OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Mod | OpCode::Pow |
-        OpCode::Div | OpCode::IDiv |
-        OpCode::BAnd | OpCode::BOr | OpCode::BXor | OpCode::Shl | OpCode::Shr |
-        OpCode::Unm | OpCode::BNot | OpCode::Not | OpCode::Len | OpCode::Concat |
-        OpCode::TestSet |
-        OpCode::Call | OpCode::TailCall |
-        OpCode::ForLoop | OpCode::ForPrep | OpCode::TForLoop |
-        OpCode::Closure | OpCode::Vararg | OpCode::GetVarg | OpCode::VarargPrep
+    matches!(
+        op,
+        OpCode::Move
+            | OpCode::LoadI
+            | OpCode::LoadF
+            | OpCode::LoadK
+            | OpCode::LoadKX
+            | OpCode::LoadFalse
+            | OpCode::LFalseSkip
+            | OpCode::LoadTrue
+            | OpCode::LoadNil
+            | OpCode::GetUpval
+            | OpCode::GetTabUp
+            | OpCode::GetTable
+            | OpCode::GetI
+            | OpCode::GetField
+            | OpCode::NewTable
+            | OpCode::Self_
+            | OpCode::AddI
+            | OpCode::AddK
+            | OpCode::SubK
+            | OpCode::MulK
+            | OpCode::ModK
+            | OpCode::PowK
+            | OpCode::DivK
+            | OpCode::IDivK
+            | OpCode::BAndK
+            | OpCode::BOrK
+            | OpCode::BXorK
+            | OpCode::ShlI
+            | OpCode::ShrI
+            | OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Mod
+            | OpCode::Pow
+            | OpCode::Div
+            | OpCode::IDiv
+            | OpCode::BAnd
+            | OpCode::BOr
+            | OpCode::BXor
+            | OpCode::Shl
+            | OpCode::Shr
+            | OpCode::Unm
+            | OpCode::BNot
+            | OpCode::Not
+            | OpCode::Len
+            | OpCode::Concat
+            | OpCode::TestSet
+            | OpCode::Call
+            | OpCode::TailCall
+            | OpCode::ForLoop
+            | OpCode::ForPrep
+            | OpCode::TForLoop
+            | OpCode::Closure
+            | OpCode::Vararg
+            | OpCode::GetVarg
+            | OpCode::VarargPrep
     )
 }
 
@@ -248,12 +289,8 @@ fn funcnamefromcode(chunk: &Chunk, pc: usize) -> Option<(&'static str, String)> 
     }
     let i = chunk.code[pc];
     match i.get_opcode() {
-        OpCode::Call | OpCode::TailCall => {
-            getobjname(chunk, pc, i.get_a())
-        }
-        OpCode::TForCall => {
-            Some(("for iterator", "for iterator".to_string()))
-        }
+        OpCode::Call | OpCode::TailCall => getobjname(chunk, pc, i.get_a()),
+        OpCode::TForCall => Some(("for iterator", "for iterator".to_string())),
         // Metamethod-triggering instructions
         OpCode::Self_ | OpCode::GetTabUp | OpCode::GetTable | OpCode::GetI | OpCode::GetField => {
             Some(("metamethod", "index".to_string()))

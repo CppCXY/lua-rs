@@ -13,8 +13,8 @@ pub enum CaptureValue {
 /// Information about a pattern match
 #[derive(Debug, Clone)]
 pub struct MatchInfo {
-    pub start: usize,              // Start byte offset
-    pub end: usize,                // End byte offset
+    pub start: usize,                // Start byte offset
+    pub end: usize,                  // End byte offset
     pub captures: Vec<CaptureValue>, // Captured values
 }
 
@@ -92,7 +92,11 @@ pub fn find_all_matches(text: &str, pattern: &Pattern, max: Option<usize>) -> Ve
 
 /// Find pattern in string, returns (byte_start, byte_end, captures)
 /// `init` is a 0-based byte offset. Return positions are byte offsets.
-pub fn find(text: &str, pattern: &Pattern, init: usize) -> Option<(usize, usize, Vec<CaptureValue>)> {
+pub fn find(
+    text: &str,
+    pattern: &Pattern,
+    init: usize,
+) -> Option<(usize, usize, Vec<CaptureValue>)> {
     if init > text.len() {
         return None;
     }
@@ -261,7 +265,12 @@ fn substitute_captures(
 }
 
 /// Try to match pattern at specific position
-pub fn try_match(pattern: &Pattern, text: &[char], c2b: &[usize], pos: usize) -> Option<(usize, Vec<CaptureValue>)> {
+pub fn try_match(
+    pattern: &Pattern,
+    text: &[char],
+    c2b: &[usize],
+    pos: usize,
+) -> Option<(usize, Vec<CaptureValue>)> {
     let mut captures = Vec::new();
     let mut capture_opens: Vec<(usize, usize)> = Vec::new();
     match match_impl(pattern, text, c2b, pos, &mut captures, &mut capture_opens) {
@@ -288,7 +297,14 @@ fn match_rest(
     if patterns.len() == 1 {
         return match_impl(&patterns[0], text, c2b, pos, captures, capture_opens);
     }
-    match_impl(&Pattern::Seq(patterns.to_vec()), text, c2b, pos, captures, capture_opens)
+    match_impl(
+        &Pattern::Seq(patterns.to_vec()),
+        text,
+        c2b,
+        pos,
+        captures,
+        capture_opens,
+    )
 }
 
 fn match_impl(
@@ -365,21 +381,38 @@ fn match_impl(
                                 loop {
                                     // For captured lazy repeats, push capture before trying rest
                                     if is_capture {
-                                        let captured: String = text[start_pos..try_pos].iter().collect();
+                                        let captured: String =
+                                            text[start_pos..try_pos].iter().collect();
                                         captures.push(CaptureValue::String(captured));
                                     }
-                                    if let Some(end) = match_rest(rest_patterns, text, c2b, try_pos, captures, capture_opens) {
+                                    if let Some(end) = match_rest(
+                                        rest_patterns,
+                                        text,
+                                        c2b,
+                                        try_pos,
+                                        captures,
+                                        capture_opens,
+                                    ) {
                                         return Some(end);
                                     }
-                                    captures.truncate(saved_captures_len);                                    *capture_opens = saved_opens.clone();
+                                    captures.truncate(saved_captures_len);
+                                    *capture_opens = saved_opens.clone();
 
                                     if try_pos >= text.len() {
                                         return None;
                                     }
 
-                                    match match_impl(inner, text, c2b, try_pos, captures, capture_opens) {
+                                    match match_impl(
+                                        inner,
+                                        text,
+                                        c2b,
+                                        try_pos,
+                                        captures,
+                                        capture_opens,
+                                    ) {
                                         Some(new_pos) => {
-                                            captures.truncate(saved_captures_len);                                            *capture_opens = saved_opens.clone();
+                                            captures.truncate(saved_captures_len);
+                                            *capture_opens = saved_opens.clone();
                                             if new_pos == try_pos {
                                                 try_pos += 1;
                                             } else {
@@ -394,85 +427,139 @@ fn match_impl(
                                 // Collect all possible match positions
                                 let mut match_positions = vec![pos];
                                 let mut curr_pos = pos;
-                                while let Some(new_pos) = match_impl(inner, text, c2b, curr_pos, captures, capture_opens) {
-                                    captures.truncate(saved_captures_len);                                    *capture_opens = saved_opens.clone();
+                                while let Some(new_pos) =
+                                    match_impl(inner, text, c2b, curr_pos, captures, capture_opens)
+                                {
+                                    captures.truncate(saved_captures_len);
+                                    *capture_opens = saved_opens.clone();
                                     if new_pos == curr_pos {
                                         break;
                                     }
                                     match_positions.push(new_pos);
                                     curr_pos = new_pos;
                                 }
-                                captures.truncate(saved_captures_len);                                *capture_opens = saved_opens.clone();
+                                captures.truncate(saved_captures_len);
+                                *capture_opens = saved_opens.clone();
 
                                 // Try from longest match to shortest
                                 for &try_pos in match_positions.iter().rev() {
                                     if is_capture {
-                                        let captured: String = text[start_pos..try_pos].iter().collect();
+                                        let captured: String =
+                                            text[start_pos..try_pos].iter().collect();
                                         captures.push(CaptureValue::String(captured));
                                     }
-                                    if let Some(end) = match_rest(rest_patterns, text, c2b, try_pos, captures, capture_opens) {
+                                    if let Some(end) = match_rest(
+                                        rest_patterns,
+                                        text,
+                                        c2b,
+                                        try_pos,
+                                        captures,
+                                        capture_opens,
+                                    ) {
                                         return Some(end);
                                     }
-                                    captures.truncate(saved_captures_len);                                    *capture_opens = saved_opens.clone();
+                                    captures.truncate(saved_captures_len);
+                                    *capture_opens = saved_opens.clone();
                                 }
                                 return None;
                             }
                             RepeatMode::OneOrMore => {
                                 // Must match at least once
-                                let first_pos = match match_impl(inner, text, c2b, pos, captures, capture_opens) {
+                                let first_pos = match match_impl(
+                                    inner,
+                                    text,
+                                    c2b,
+                                    pos,
+                                    captures,
+                                    capture_opens,
+                                ) {
                                     Some(p) => p,
                                     None => return None,
                                 };
-                                captures.truncate(saved_captures_len);                                *capture_opens = saved_opens.clone();
+                                captures.truncate(saved_captures_len);
+                                *capture_opens = saved_opens.clone();
 
                                 // Collect all possible match positions
                                 let mut match_positions = vec![first_pos];
                                 let mut curr_pos = first_pos;
-                                while let Some(new_pos) = match_impl(inner, text, c2b, curr_pos, captures, capture_opens) {
-                                    captures.truncate(saved_captures_len);                                    *capture_opens = saved_opens.clone();
+                                while let Some(new_pos) =
+                                    match_impl(inner, text, c2b, curr_pos, captures, capture_opens)
+                                {
+                                    captures.truncate(saved_captures_len);
+                                    *capture_opens = saved_opens.clone();
                                     if new_pos == curr_pos {
                                         break;
                                     }
                                     match_positions.push(new_pos);
                                     curr_pos = new_pos;
                                 }
-                                captures.truncate(saved_captures_len);                                *capture_opens = saved_opens.clone();
+                                captures.truncate(saved_captures_len);
+                                *capture_opens = saved_opens.clone();
 
                                 // Try from longest match to shortest
                                 for &try_pos in match_positions.iter().rev() {
                                     if is_capture {
-                                        let captured: String = text[start_pos..try_pos].iter().collect();
+                                        let captured: String =
+                                            text[start_pos..try_pos].iter().collect();
                                         captures.push(CaptureValue::String(captured));
                                     }
-                                    if let Some(end) = match_rest(rest_patterns, text, c2b, try_pos, captures, capture_opens) {
+                                    if let Some(end) = match_rest(
+                                        rest_patterns,
+                                        text,
+                                        c2b,
+                                        try_pos,
+                                        captures,
+                                        capture_opens,
+                                    ) {
                                         return Some(end);
                                     }
-                                    captures.truncate(saved_captures_len);                                    *capture_opens = saved_opens.clone();
+                                    captures.truncate(saved_captures_len);
+                                    *capture_opens = saved_opens.clone();
                                 }
                                 return None;
                             }
                             RepeatMode::ZeroOrOne => {
                                 // Try matching one
-                                if let Some(one_pos) = match_impl(inner, text, c2b, pos, captures, capture_opens) {
-                                    captures.truncate(saved_captures_len);                                    *capture_opens = saved_opens.clone();
+                                if let Some(one_pos) =
+                                    match_impl(inner, text, c2b, pos, captures, capture_opens)
+                                {
+                                    captures.truncate(saved_captures_len);
+                                    *capture_opens = saved_opens.clone();
                                     if is_capture {
-                                        let captured: String = text[start_pos..one_pos].iter().collect();
+                                        let captured: String =
+                                            text[start_pos..one_pos].iter().collect();
                                         captures.push(CaptureValue::String(captured));
                                     }
-                                    if let Some(end) = match_rest(rest_patterns, text, c2b, one_pos, captures, capture_opens) {
+                                    if let Some(end) = match_rest(
+                                        rest_patterns,
+                                        text,
+                                        c2b,
+                                        one_pos,
+                                        captures,
+                                        capture_opens,
+                                    ) {
                                         return Some(end);
                                     }
-                                    captures.truncate(saved_captures_len);                                    *capture_opens = saved_opens.clone();
+                                    captures.truncate(saved_captures_len);
+                                    *capture_opens = saved_opens.clone();
                                 }
 
                                 // Try matching zero (skip)
                                 if is_capture {
                                     captures.push(CaptureValue::String(String::new()));
                                 }
-                                if let Some(end) = match_rest(rest_patterns, text, c2b, pos, captures, capture_opens) {
+                                if let Some(end) = match_rest(
+                                    rest_patterns,
+                                    text,
+                                    c2b,
+                                    pos,
+                                    captures,
+                                    capture_opens,
+                                ) {
                                     return Some(end);
                                 }
-                                captures.truncate(saved_captures_len);                                *capture_opens = saved_opens.clone();
+                                captures.truncate(saved_captures_len);
+                                *capture_opens = saved_opens.clone();
                                 return None;
                             }
                         }
@@ -480,9 +567,13 @@ fn match_impl(
                 }
 
                 // Standalone ZeroOrOne at end of pattern (no rest)
-                if let Some((RepeatMode::ZeroOrOne, inner, is_capture)) = get_repeat_info(&patterns[i]) {
+                if let Some((RepeatMode::ZeroOrOne, inner, is_capture)) =
+                    get_repeat_info(&patterns[i])
+                {
                     let start_pos = pos;
-                    if let Some(one_pos) = match_impl(inner, text, c2b, pos, captures, capture_opens) {
+                    if let Some(one_pos) =
+                        match_impl(inner, text, c2b, pos, captures, capture_opens)
+                    {
                         if is_capture {
                             let captured: String = text[start_pos..one_pos].iter().collect();
                             captures.push(CaptureValue::String(captured));
@@ -512,7 +603,9 @@ fn match_impl(
                 RepeatMode::ZeroOrMore => {
                     // Greedy: match as many as possible
                     let mut last_pos = pos;
-                    while let Some(new_pos) = match_impl(inner, text, c2b, last_pos, captures, capture_opens) {
+                    while let Some(new_pos) =
+                        match_impl(inner, text, c2b, last_pos, captures, capture_opens)
+                    {
                         if new_pos == last_pos {
                             break; // Avoid infinite loop
                         }
@@ -524,7 +617,9 @@ fn match_impl(
                     // Must match at least once
                     let first_pos = match_impl(inner, text, c2b, pos, captures, capture_opens)?;
                     let mut last_pos = first_pos;
-                    while let Some(new_pos) = match_impl(inner, text, c2b, last_pos, captures, capture_opens) {
+                    while let Some(new_pos) =
+                        match_impl(inner, text, c2b, last_pos, captures, capture_opens)
+                    {
                         if new_pos == last_pos {
                             break;
                         }
@@ -534,7 +629,9 @@ fn match_impl(
                 }
                 RepeatMode::ZeroOrOne => {
                     // Optional: try to match once
-                    if let Some(new_pos) = match_impl(inner, text, c2b, pos, captures, capture_opens) {
+                    if let Some(new_pos) =
+                        match_impl(inner, text, c2b, pos, captures, capture_opens)
+                    {
                         Some(new_pos)
                     } else {
                         Some(pos) // Match zero times

@@ -18,8 +18,8 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{LuaError, LuaResult, LuaState},
     lua_vm::call_info::call_status::CIST_CLSRET,
+    lua_vm::{LuaError, LuaResult, LuaState},
 };
 
 /// Handle OP_RETURN instruction
@@ -177,7 +177,9 @@ pub fn handle_return1(
         func_pos
     } else if nresults == 1 || nresults == -1 {
         // Most common: caller wants exactly 1 result (or MULTRET with 1 value)
-        unsafe { *stack.get_unchecked_mut(func_pos) = return_val; }
+        unsafe {
+            *stack.get_unchecked_mut(func_pos) = return_val;
+        }
         func_pos + 1
     } else {
         // Caller wants N > 1 results — place first + fill rest with nil

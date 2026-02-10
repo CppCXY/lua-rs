@@ -1,14 +1,14 @@
 use crate::lua_value::LuaValue;
 use crate::lua_vm::execute::call::{self, call_c_function};
-use crate::lua_vm::execute::helper::{get_binop_metamethod, tonumberns, lua_shiftl};
+use crate::lua_vm::execute::helper::{get_binop_metamethod, lua_shiftl, tonumberns};
 use crate::lua_vm::execute::lua_execute;
 use crate::lua_vm::opcode::Instruction;
-use crate::stdlib::basic::parse_number::parse_lua_number;
 /// Metamethod operations
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
 use crate::lua_vm::{LuaResult, LuaState, get_metamethod_event};
+use crate::stdlib::basic::parse_number::parse_lua_number;
 
 /// Try unary metamethod (for __unm, __bnot)
 /// Port of luaT_trybinTM for unary operations

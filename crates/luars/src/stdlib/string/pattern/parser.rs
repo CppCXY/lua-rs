@@ -133,7 +133,13 @@ pub fn parse_pattern(pattern: &str) -> Result<Pattern, String> {
     Ok(pat)
 }
 
-fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool, total_captures: &mut usize, open_captures: &mut Vec<usize>) -> Result<(Pattern, usize), String> {
+fn parse_seq(
+    chars: &[char],
+    mut pos: usize,
+    in_capture: bool,
+    total_captures: &mut usize,
+    open_captures: &mut Vec<usize>,
+) -> Result<(Pattern, usize), String> {
     let mut seq = Vec::new();
 
     while pos < chars.len() {
@@ -183,7 +189,9 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool, total_captures: &
                         // Balanced match %bxy
                         pos += 1;
                         if pos + 1 >= chars.len() {
-                            return Err("malformed pattern (missing arguments to '%%b')".to_string());
+                            return Err(
+                                "malformed pattern (missing arguments to '%%b')".to_string()
+                            );
                         }
                         let open = chars[pos];
                         let close = chars[pos + 1];
@@ -253,7 +261,8 @@ fn parse_seq(chars: &[char], mut pos: usize, in_capture: bool, total_captures: &
                     *total_captures += 1;
                     let capture_idx = *total_captures;
                     open_captures.push(capture_idx);
-                    let (inner, new_pos) = parse_seq(chars, pos + 1, true, total_captures, open_captures)?;
+                    let (inner, new_pos) =
+                        parse_seq(chars, pos + 1, true, total_captures, open_captures)?;
                     open_captures.pop();
                     seq.push(Pattern::CaptureStart);
                     // Flatten inner Seq patterns into the current sequence
@@ -393,10 +402,7 @@ fn parse_set(chars: &[char], start: usize) -> Result<(Pattern, usize), String> {
     }
 
     Ok((
-        Pattern::Set {
-            items,
-            negated,
-        },
+        Pattern::Set { items, negated },
         pos + 1, // Skip ']'
     ))
 }

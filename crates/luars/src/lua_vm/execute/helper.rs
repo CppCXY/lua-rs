@@ -247,7 +247,9 @@ pub fn lua_shiftr(x: i64, y: i64) -> i64 {
 #[inline(always)]
 pub fn lua_idiv(a: i64, b: i64) -> i64 {
     // Handle overflow case: MIN_INT / -1 would overflow, wrapping gives MIN_INT (floor division same result)
-    if b == -1 { return a.wrapping_neg(); }
+    if b == -1 {
+        return a.wrapping_neg();
+    }
     let q = a / b;
     // If the signs of a and b differ and there is a remainder,
     // subtract 1 to achieve floor division (toward -infinity)
@@ -259,7 +261,9 @@ pub fn lua_idiv(a: i64, b: i64) -> i64 {
 #[inline(always)]
 pub fn lua_imod(a: i64, b: i64) -> i64 {
     // Handle overflow case: MIN_INT % -1 = 0
-    if b == -1 { return 0; }
+    if b == -1 {
+        return 0;
+    }
     let m = a % b;
     if m != 0 && (m ^ b) < 0 { m + b } else { m }
 }

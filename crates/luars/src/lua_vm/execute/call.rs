@@ -64,7 +64,14 @@ pub fn handle_call(
         let max_stack_size = chunk.max_stack_size as usize;
 
         let new_base = func_idx + 1;
-        lua_state.push_lua_frame(&func, new_base, nargs, nresults, param_count, max_stack_size)?;
+        lua_state.push_lua_frame(
+            &func,
+            new_base,
+            nargs,
+            nresults,
+            param_count,
+            max_stack_size,
+        )?;
 
         // Update call_status with __call count if status is non-zero
         if status != 0 {
@@ -215,7 +222,11 @@ pub fn call_c_function(
 
     // Results positions
     let stack_top = lua_state.get_top();
-    let first_result = if stack_top >= n { stack_top - n } else { call_base };
+    let first_result = if stack_top >= n {
+        stack_top - n
+    } else {
+        call_base
+    };
     let callee_extent = stack_top;
 
     // Pop frame (lean path, no call_status bit check)
@@ -237,8 +248,7 @@ pub fn call_c_function(
                 let wanted = nresults as usize;
                 let copy_count = n.min(wanted);
                 for i in 0..copy_count {
-                    *stack.get_unchecked_mut(func_idx + i) =
-                        *stack.get_unchecked(first_result + i);
+                    *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
                 }
                 for i in copy_count..wanted {
                     *stack.get_unchecked_mut(func_idx + i) = LuaValue::nil();
@@ -247,8 +257,7 @@ pub fn call_c_function(
             _ => {
                 // MULTRET (-1)
                 for i in 0..n {
-                    *stack.get_unchecked_mut(func_idx + i) =
-                        *stack.get_unchecked(first_result + i);
+                    *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
                 }
             }
         }
@@ -308,16 +317,20 @@ pub fn call_c_function_fast(
     // Lean frame push — no type dispatch
     lua_state.push_c_frame(func, call_base, nargs, nresults)?;
 
-    // Call the C function  
+    // Call the C function
     let n = match c_func(lua_state) {
         Ok(n) => n,
         Err(LuaError::Yield) => return Err(LuaError::Yield),
         Err(e) => return Err(e),
     };
 
-    // Results positions 
+    // Results positions
     let stack_top = lua_state.get_top();
-    let first_result = if stack_top >= n { stack_top - n } else { call_base };
+    let first_result = if stack_top >= n {
+        stack_top - n
+    } else {
+        call_base
+    };
 
     // Pop frame — no call_status bit check
     lua_state.pop_c_frame();
@@ -339,8 +352,7 @@ pub fn call_c_function_fast(
                 let wanted = if nresults < 0 { n } else { nresults as usize };
                 let copy_count = n.min(wanted);
                 for i in 0..copy_count {
-                    *stack.get_unchecked_mut(func_idx + i) =
-                        *stack.get_unchecked(first_result + i);
+                    *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
                 }
                 // Pad with nil if n < wanted
                 for i in copy_count..wanted {
@@ -350,7 +362,7 @@ pub fn call_c_function_fast(
         }
     }
 
-    // Restore caller frame top  
+    // Restore caller frame top
     let final_n = if nresults == -1 { n } else { nresults as usize };
     let new_top = func_idx + final_n;
 
@@ -535,7 +547,11 @@ fn call_c_function_tailcall(
 
     // Get the position of results BEFORE popping frame
     let stack_top = lua_state.get_top();
-    let first_result = if stack_top >= n { stack_top - n } else { call_base };
+    let first_result = if stack_top >= n {
+        stack_top - n
+    } else {
+        call_base
+    };
 
     // Pop the frame (lean path)
     lua_state.pop_c_frame();
@@ -544,8 +560,7 @@ fn call_c_function_tailcall(
     unsafe {
         let stack = lua_state.stack_mut();
         for i in 0..n {
-            *stack.get_unchecked_mut(func_idx + i) =
-                *stack.get_unchecked(first_result + i);
+            *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
         }
     }
 

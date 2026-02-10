@@ -344,8 +344,6 @@ pub struct GC {
     gc_error_msg: Option<String>,
 
     gc_memory_check: bool,
-
-
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2716,9 +2714,9 @@ impl GC {
         // Helper: sweep a list, freeing dead objects (respecting FINALIZEDBIT)
         // and keeping survivors as G_OLD
         let sweep_full_list = |list: &mut GcList,
-                                    total_bytes: &mut isize,
-                                    tobefnz: &mut Vec<GcObjectPtr>,
-                                    l: &mut LuaState|
+                               total_bytes: &mut isize,
+                               tobefnz: &mut Vec<GcObjectPtr>,
+                               l: &mut LuaState|
          -> Vec<GcObjectOwner> {
             let objects = list.take_all();
             let mut survivors: Vec<GcObjectOwner> = Vec::new();
@@ -2753,30 +2751,18 @@ impl GC {
             survivors
         };
 
-        let allgc_survivors = sweep_full_list(
-            &mut self.allgc,
-            &mut self.total_bytes,
-            &mut self.tobefnz,
-            l,
-        );
+        let allgc_survivors =
+            sweep_full_list(&mut self.allgc, &mut self.total_bytes, &mut self.tobefnz, l);
         let survival_survivors = sweep_full_list(
             &mut self.survival,
             &mut self.total_bytes,
             &mut self.tobefnz,
             l,
         );
-        let old_survivors = sweep_full_list(
-            &mut self.old,
-            &mut self.total_bytes,
-            &mut self.tobefnz,
-            l,
-        );
-        let old1_survivors = sweep_full_list(
-            &mut self.old1,
-            &mut self.total_bytes,
-            &mut self.tobefnz,
-            l,
-        );
+        let old_survivors =
+            sweep_full_list(&mut self.old, &mut self.total_bytes, &mut self.tobefnz, l);
+        let old1_survivors =
+            sweep_full_list(&mut self.old1, &mut self.total_bytes, &mut self.tobefnz, l);
 
         // All survivors go to old list
         self.old.add_all(allgc_survivors);

@@ -15,8 +15,10 @@ use crate::{
 };
 
 use super::{
-    helper::{fltvalue, ivalue, tonumberns, ttisfloat, ttisinteger, ttisstring,
-             int_lt_float, float_lt_int},
+    helper::{
+        float_lt_int, fltvalue, int_lt_float, ivalue, tonumberns, ttisfloat, ttisinteger,
+        ttisstring,
+    },
     metamethod::{self, TmKind},
 };
 

@@ -41,6 +41,10 @@ use crate::{
             chgivalue,
             fltvalue,
             ivalue,
+            lua_idiv,
+            lua_imod,
+            lua_shiftl,
+            lua_shiftr,
             // Pointer versions for zero-cost arithmetic
             pfltvalue,
             pivalue,
@@ -60,10 +64,6 @@ use crate::{
             ttisfloat,
             ttisinteger,
             ttisstring,
-            lua_shiftl,
-            lua_shiftr,
-            lua_idiv,
-            lua_imod,
         },
     },
 };
@@ -71,8 +71,8 @@ pub use helper::{get_metamethod_event, get_metatable};
 pub use metamethod::TmKind;
 // pub use metamethod::call_tm;
 
-use crate::lua_vm::call_info::call_status::CIST_YPCALL;
 use crate::lua_vm::LuaError;
+use crate::lua_vm::call_info::call_status::CIST_YPCALL;
 
 /// Finish a C frame left on the call stack after yield-resume.
 /// This is the Rust equivalent of Lua 5.5's finishCcall.
@@ -81,10 +81,7 @@ use crate::lua_vm::LuaError;
 /// - CIST_YPCALL: pcall whose body completed after yield.
 ///   The body's return values are on the stack.  Insert `true` before them,
 ///   pop the pcall C frame, and adjust results like call_c_function would.
-fn finish_c_frame(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-) -> LuaResult<()> {
+fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
     use crate::lua_vm::call_info::call_status::CIST_RECST;
 
     let ci = lua_state.get_call_info(frame_idx);
@@ -107,7 +104,11 @@ fn finish_c_frame(
                 Ok(()) => {
                     // All TBC entries closed. Set up (false, error) result.
                     let final_err = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
-                    let result_err = if !final_err.is_nil() { final_err } else { error_val };
+                    let result_err = if !final_err.is_nil() {
+                        final_err
+                    } else {
+                        error_val
+                    };
                     lua_state.clear_error();
 
                     lua_state.stack_set(pcall_func_pos, LuaValue::boolean(false))?;
@@ -149,7 +150,11 @@ fn finish_c_frame(
                 Err(LuaError::Yield) => {
                     // Another TBC close method yielded. Save cascaded error and yield.
                     let cascaded = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
-                    lua_state.error_object = if !cascaded.is_nil() { cascaded } else { error_val };
+                    lua_state.error_object = if !cascaded.is_nil() {
+                        cascaded
+                    } else {
+                        error_val
+                    };
                     Err(LuaError::Yield)
                 }
                 Err(e) => {
@@ -1032,9 +1037,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := UpValue[B]
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    let value = unsafe { upvalue_ptrs.get_unchecked(b) }.as_ref().data.get_value();
+                    let value = unsafe { upvalue_ptrs.get_unchecked(b) }
+                        .as_ref()
+                        .data
+                        .get_value();
                     let stack = lua_state.stack_mut();
-                    unsafe { *stack.get_unchecked_mut(base + a) = value; }
+                    unsafe {
+                        *stack.get_unchecked_mut(base + a) = value;
+                    }
                 }
                 OpCode::SetUpval => {
                     // UpValue[B] := R[A]
@@ -1124,10 +1134,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     save_pc!();
                     lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
-                    
+
                     // Restore stack_top to the current frame's top to ensure subsequent
-                    // instructions (like SETTABLE or LOADI) don't operate on "dead" stack slots 
-                    // if they trigger GC. This matches Lua's behavior where the stack top 
+                    // instructions (like SETTABLE or LOADI) don't operate on "dead" stack slots
+                    // if they trigger GC. This matches Lua's behavior where the stack top
                     // is maintained high (ci->top) during function execution.
                     let frame_top = lua_state.get_call_info(frame_idx).top;
                     lua_state.set_top(frame_top)?;
@@ -1151,7 +1161,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             table_ref.impl_table.raw_get(&rc)
                         };
                         if let Some(val) = result {
-                            unsafe { *stack.get_unchecked_mut(base + a) = val; }
+                            unsafe {
+                                *stack.get_unchecked_mut(base + a) = val;
+                            }
                             continue;
                         }
                     }
@@ -1178,7 +1190,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     if let Some(val) = result {
                         // Fast path succeeded - write directly, no second stack_mut() needed
-                        unsafe { *stack.get_unchecked_mut(base + a) = val; }
+                        unsafe {
+                            *stack.get_unchecked_mut(base + a) = val;
+                        }
                     } else {
                         // Slow path: metamethod lookup
                         save_pc!();
@@ -1206,7 +1220,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     if let Some(val) = result {
                         // Fast path succeeded - no second stack_mut()
-                        unsafe { *stack.get_unchecked_mut(base + a) = val; }
+                        unsafe {
+                            *stack.get_unchecked_mut(base + a) = val;
+                        }
                     } else {
                         // Slow path: metamethod lookup
                         save_pc!();
@@ -1595,7 +1611,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             &iterator,
                             c_func,
                             ra_base + 3,
-                            2,      // always 2 args (state, control)
+                            2, // always 2 args (state, control)
                             c as i32 + 1,
                         )?;
                         restore_state!();
@@ -1981,10 +1997,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = unsafe { stack.get_unchecked(base + a) };
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() < (im as i64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() < (im as f64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else {
                         comparison_ops::exec_lti(lua_state, instr, base, frame_idx, &mut pc)?;
                     }
@@ -2000,10 +2020,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = unsafe { stack.get_unchecked(base + a) };
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() <= (im as i64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() <= (im as f64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else {
                         comparison_ops::exec_lei(lua_state, instr, base, frame_idx, &mut pc)?;
                     }
@@ -2019,10 +2043,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = unsafe { stack.get_unchecked(base + a) };
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() > (im as i64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() > (im as f64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else {
                         comparison_ops::exec_gti(lua_state, instr, base, frame_idx, &mut pc)?;
                     }
@@ -2038,10 +2066,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = unsafe { stack.get_unchecked(base + a) };
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() >= (im as i64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() >= (im as f64);
-                        if cond != k { pc += 1; }
+                        if cond != k {
+                            pc += 1;
+                        }
                     } else {
                         comparison_ops::exec_gei(lua_state, instr, base, frame_idx, &mut pc)?;
                     }

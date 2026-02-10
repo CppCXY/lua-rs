@@ -360,7 +360,11 @@ fn lua_main() -> i32 {
         // Set package.path to include the script's directory
         if let Some(parent) = std::path::Path::new(filename).parent() {
             let parent_str = parent.to_string_lossy();
-            let dir = if parent_str.is_empty() { ".".to_string() } else { parent_str.to_string() };
+            let dir = if parent_str.is_empty() {
+                ".".to_string()
+            } else {
+                parent_str.to_string()
+            };
             // Prepend script dir to package.path
             let set_path = format!(
                 "package.path = '{dir}/?.lua;{dir}/?/init.lua;' .. package.path",

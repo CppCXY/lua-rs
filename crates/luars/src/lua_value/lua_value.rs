@@ -486,7 +486,7 @@ impl LuaValue {
             unsafe { self.value.n }
         }
     }
-    
+
     #[allow(unused)]
     #[inline(always)]
     pub(crate) fn pvalue(&self) -> *mut std::ffi::c_void {

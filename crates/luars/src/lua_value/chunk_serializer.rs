@@ -483,7 +483,11 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         let name = read_string(cursor)?;
         let startpc = read_u32(cursor)?;
         let endpc = read_u32(cursor)?;
-        locals.push(LocVar { name, startpc, endpc });
+        locals.push(LocVar {
+            name,
+            startpc,
+            endpc,
+        });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -566,7 +570,11 @@ fn read_chunk_with_dedup(
         let name = read_string_with_dedup(cursor, string_table)?;
         let startpc = read_u32(cursor)?;
         let endpc = read_u32(cursor)?;
-        locals.push(LocVar { name, startpc, endpc });
+        locals.push(LocVar {
+            name,
+            startpc,
+            endpc,
+        });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -811,7 +819,11 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
         let name = read_string(cursor)?;
         let startpc = read_u32(cursor)?;
         let endpc = read_u32(cursor)?;
-        locals.push(LocVar { name, startpc, endpc });
+        locals.push(LocVar {
+            name,
+            startpc,
+            endpc,
+        });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -914,7 +926,11 @@ fn read_chunk_with_vm_dedup(
         let name = read_string_with_dedup(cursor, string_table)?;
         let startpc = read_u32(cursor)?;
         let endpc = read_u32(cursor)?;
-        locals.push(LocVar { name, startpc, endpc });
+        locals.push(LocVar {
+            name,
+            startpc,
+            endpc,
+        });
     }
 
     let line_len = read_u32(cursor)? as usize;
@@ -1030,7 +1046,11 @@ fn read_chunk_with_strings(
         let name = read_string(cursor)?;
         let startpc = read_u32(cursor)?;
         let endpc = read_u32(cursor)?;
-        locals.push(LocVar { name, startpc, endpc });
+        locals.push(LocVar {
+            name,
+            startpc,
+            endpc,
+        });
     }
 
     let line_len = read_u32(cursor)? as usize;

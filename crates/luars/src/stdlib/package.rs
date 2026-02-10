@@ -91,8 +91,7 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
 
     // Get preload table from registry
     let vm = l.vm_mut();
-    let preload_val = vm.registry_get("_PRELOAD")?
-        .unwrap_or(LuaValue::nil());
+    let preload_val = vm.registry_get("_PRELOAD")?.unwrap_or(LuaValue::nil());
 
     let Some(preload_table) = preload_val.as_table_mut() else {
         return Err(l.error("package.preload is not a table".to_string()));

@@ -289,7 +289,7 @@ impl<'a> FuncState<'a> {
             kind,
             ridx,
             vidx,
-            pidx: 0, // Will be set in adjust_local_vars
+            pidx: 0,           // Will be set in adjust_local_vars
             const_value: None, // Initially no const value
         });
         vidx

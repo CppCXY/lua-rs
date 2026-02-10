@@ -14,9 +14,10 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     // Get package.loaded from registry (like standard Lua's LUA_LOADED_TABLE)
     // This ensures require works even if the global 'package' is reassigned
     let vm = l.vm_mut();
-    let loaded_val = vm
-        .registry_get("_LOADED")?
-        .ok_or_else(|| vm.main_state().error("package.loaded not found".to_string()))?;
+    let loaded_val = vm.registry_get("_LOADED")?.ok_or_else(|| {
+        vm.main_state()
+            .error("package.loaded not found".to_string())
+    })?;
 
     // Get the original package table from registry for searchers
     let package_table_value = vm

@@ -648,7 +648,9 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
                 for cap in &m.captures {
                     match cap {
                         pattern::CaptureValue::String(s) => captures.push(l.create_string(s)?),
-                        pattern::CaptureValue::Position(p) => captures.push(LuaValue::integer(*p as i64)),
+                        pattern::CaptureValue::Position(p) => {
+                            captures.push(LuaValue::integer(*p as i64))
+                        }
                     }
                 }
                 captures
@@ -657,7 +659,10 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             match l.pcall(repl_value.clone(), args) {
                 Ok((success, results)) => {
                     if success {
-                        if results.is_empty() || results[0].is_nil() || results[0] == LuaValue::boolean(false) {
+                        if results.is_empty()
+                            || results[0].is_nil()
+                            || results[0] == LuaValue::boolean(false)
+                        {
                             // No return value, nil, or false: use original match
                             result.push_str(&s_str[m.start..m.end]);
                         } else if let Some(s) = results[0].as_str() {
@@ -774,7 +779,11 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         (init - 1) as usize
     } else if init < 0 {
         let abs_init = (-init) as usize;
-        if abs_init > s_str.len() { 0 } else { s_str.len() - abs_init }
+        if abs_init > s_str.len() {
+            0
+        } else {
+            s_str.len() - abs_init
+        }
     } else {
         0
     };

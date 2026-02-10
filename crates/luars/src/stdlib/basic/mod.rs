@@ -142,13 +142,14 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
                             if let Some(func_obj) = ci.func.as_lua_function() {
                                 let chunk = func_obj.chunk();
                                 let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                                let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                                    chunk.line_info[ci.pc as usize - 1] as usize
-                                } else if !chunk.line_info.is_empty() {
-                                    chunk.line_info[0] as usize
-                                } else {
-                                    0
-                                };
+                                let line =
+                                    if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                                        chunk.line_info[ci.pc as usize - 1] as usize
+                                    } else if !chunk.line_info.is_empty() {
+                                        chunk.line_info[0] as usize
+                                    } else {
+                                        0
+                                    };
                                 if line > 0 {
                                     where_prefix = format!("{}:{}: ", source, line);
                                 } else {
@@ -161,7 +162,9 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
                 } else {
                     break;
                 }
-                if i == 0 { break; }
+                if i == 0 {
+                    break;
+                }
                 i -= 1;
             }
         }
@@ -353,9 +356,7 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
 fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
     // SAFETY: ipairs always provides (table, index) as args 1 and 2.
     // push_c_frame guarantees EXTRA_STACK (5) slots above frame_top.
-    let (table_val, index_val) = unsafe {
-        (l.get_arg_unchecked(1), l.get_arg_unchecked(2))
-    };
+    let (table_val, index_val) = unsafe { (l.get_arg_unchecked(1), l.get_arg_unchecked(2)) };
 
     if let Some(table) = table_val.as_table() {
         if let Some(index) = index_val.as_integer() {
@@ -367,7 +368,9 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
                 }
                 return Ok(2);
             } else {
-                unsafe { l.push_value_unchecked(LuaValue::nil()); }
+                unsafe {
+                    l.push_value_unchecked(LuaValue::nil());
+                }
                 return Ok(1);
             }
         }
@@ -400,9 +403,7 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     // SAFETY: pairs always provides (table, key) as args 1-2.
     // push_c_frame guarantees EXTRA_STACK slots.
-    let (table_val, index_val) = unsafe {
-        (l.get_arg_unchecked(1), l.get_arg_unchecked(2))
-    };
+    let (table_val, index_val) = unsafe { (l.get_arg_unchecked(1), l.get_arg_unchecked(2)) };
 
     let result = {
         let table = table_val
@@ -418,7 +419,9 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
         }
         Ok(2)
     } else {
-        unsafe { l.push_value_unchecked(LuaValue::nil()); }
+        unsafe {
+            l.push_value_unchecked(LuaValue::nil());
+        }
         Ok(1)
     }
 }
@@ -546,9 +549,7 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
                 let key = l.create_string("__metatable")?;
                 let has_protection = mt_table.raw_get(&key).map_or(false, |v| !v.is_nil());
                 if has_protection {
-                    return Err(l.error(
-                        "cannot change a protected metatable".to_string(),
-                    ));
+                    return Err(l.error("cannot change a protected metatable".to_string()));
                 }
             }
         }
@@ -740,7 +741,11 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // l_mem n = cast(l_mem, va_arg(argp, size_t));
             // if (n <= 0) n = g->GCdebt;
             let gc = &l.vm_mut().gc;
-            let n = if n_arg <= 0 { gc.gc_debt } else { n_arg as isize };
+            let n = if n_arg <= 0 {
+                gc.gc_debt
+            } else {
+                n_arg as isize
+            };
 
             // int work = 0;
             let mut work = false;

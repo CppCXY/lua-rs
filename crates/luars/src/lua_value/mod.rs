@@ -206,9 +206,9 @@ pub struct UpvalueDesc {
 /// Local variable debug info (mirrors Lua 5.5's LocVar)
 #[derive(Debug, Clone)]
 pub struct LocVar {
-    pub name: String,    // variable name
-    pub startpc: u32,    // first point where variable is active
-    pub endpc: u32,      // first point where variable is dead
+    pub name: String, // variable name
+    pub startpc: u32, // first point where variable is active
+    pub endpc: u32,   // first point where variable is dead
 }
 
 /// Compiled chunk (bytecode + metadata)
