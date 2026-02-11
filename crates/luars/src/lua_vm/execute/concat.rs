@@ -12,12 +12,77 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
+    Instruction,
     lua_value::LuaValue,
-    lua_vm::{LuaResult, LuaState},
+    lua_vm::{
+        LuaResult, LuaState, TmKind,
+        execute::{helper, metamethod},
+    },
 };
 
 /// Stack buffer size for small concatenations (covers most Lua concat ops)
 const STACK_BUF_SIZE: usize = 256;
+
+#[cold]
+#[inline(never)]
+pub fn handle_concat(
+    lua_state: &mut LuaState,
+    instr: Instruction,
+    base: &mut usize,
+    frame_idx: usize,
+    pc: usize,
+) -> LuaResult<()> {
+    let a = instr.get_a() as usize;
+    let n = instr.get_b() as usize;
+
+    match concat_strings(lua_state, *base, a, n) {
+        Ok(result) => {
+            let stack = lua_state.stack_mut();
+            stack[*base + a] = result;
+        }
+        Err(_) => {
+            if n >= 2 {
+                let (v1, v2) = {
+                    let stack = lua_state.stack_mut();
+                    (stack[*base + a + n - 2], stack[*base + a + n - 1])
+                };
+
+                if let Some(mm) = helper::get_binop_metamethod(lua_state, &v1, &v2, TmKind::Concat)
+                {
+                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    let result = metamethod::call_tm_res(lua_state, mm, v1, v2)?;
+                    *base = lua_state.get_frame_base(frame_idx);
+
+                    let stack = lua_state.stack_mut();
+                    stack[*base + a + n - 2] = result;
+
+                    if n == 2 {
+                        stack[*base + a] = result;
+                    } else {
+                        return Err(lua_state.error(
+                            "complex concat with metamethod not fully supported".to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(lua_state.error(format!(
+                        "attempt to concatenate {} and {} values",
+                        v1.type_name(),
+                        v2.type_name()
+                    )));
+                }
+            } else {
+                return Err(lua_state.error("concat requires at least 2 values".to_string()));
+            }
+        }
+    }
+
+    lua_state.set_frame_pc(frame_idx, pc as u32);
+    lua_state.check_gc()?;
+
+    let frame_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top_raw(frame_top);
+    Ok(())
+}
 
 /// Write value's string representation directly to buffer
 /// Returns Some(was_already_string) if convertible, None otherwise

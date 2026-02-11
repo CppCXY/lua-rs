@@ -16,17 +16,45 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
-    Chunk, UpvaluePtr,
+    Chunk, Instruction, UpvaluePtr,
     lua_value::UpvalueStore,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
+
+#[cold]
+#[inline(never)]
+pub fn handle_closure(
+    lua_state: &mut LuaState,
+    instr: Instruction,
+    base: usize,
+    frame_idx: usize,
+    chunk: &Chunk,
+    upvalue_ptrs: &[UpvaluePtr],
+    pc: usize,
+) -> LuaResult<()> {
+    let a = instr.get_a() as usize;
+    let bx = instr.get_bx() as usize;
+
+    // Create closure from child prototype
+    handle_closure_internal(lua_state, base, a, bx, chunk, &upvalue_ptrs)?;
+
+    let a = instr.get_a() as usize;
+    let new_top = base + a + 1;
+    lua_state.set_frame_pc(frame_idx, pc as u32);
+    lua_state.set_top(new_top)?;
+    lua_state.check_gc()?;
+
+    let frame_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top(frame_top)?;
+    Ok(())
+}
 
 /// Handle OP_CLOSURE instruction
 /// Create a closure from prototype Bx and store in R[A]
 ///
 /// Based on lvm.c:1929-1934 and pushclosure (lvm.c:834-849)
 #[inline]
-pub fn handle_closure(
+fn handle_closure_internal(
     lua_state: &mut LuaState,
     base: usize,
     a: usize,

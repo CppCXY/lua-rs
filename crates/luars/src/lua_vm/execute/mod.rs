@@ -19,6 +19,7 @@
 
 pub mod call;
 mod closure_handler;
+mod cold;
 mod concat;
 pub(crate) mod helper;
 mod metamethod;
@@ -37,11 +38,19 @@ use crate::{
     lua_vm::{
         LuaResult, LuaState, OpCode,
         call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
-        execute::helper::{
-            chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_idiv, lua_imod,
-            lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat,
-            pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue, tointeger,
-            tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger, ttisstring,
+        execute::{
+            closure_handler::handle_closure,
+            cold::{
+                handle_close, handle_errnil, handle_forprep_float, handle_getvarg, handle_len,
+                handle_loadkx,
+            },
+            concat::handle_concat,
+            helper::{
+                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_idiv, lua_imod,
+                lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat,
+                pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
+                tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger,
+            },
         },
     },
 };
@@ -50,6 +59,7 @@ pub use metamethod::TmKind;
 // pub use metamethod::call_tm;
 
 use crate::lua_vm::LuaError;
+
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
 /// without affecting caller frames
@@ -159,33 +169,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::LoadKX => {
-                    // R[A] := K[extra_arg]; pc++
-                    let a = instr.get_a() as usize;
-
-                    if pc >= code.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error("LOADKX: missing EXTRAARG".to_string()));
-                    }
-
-                    let extra = code[pc];
-                    pc += 1; // Consume EXTRAARG
-
-                    if extra.get_opcode() != OpCode::ExtraArg {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error("LOADKX: expected EXTRAARG".to_string()));
-                    }
-
-                    let ax = extra.get_ax() as usize;
-                    if ax >= constants.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("LOADKX: invalid constant index {}", ax))
-                        );
-                    }
-
-                    let value = constants[ax];
-                    let stack = lua_state.stack_mut();
-                    stack[base + a] = value; // setobj2s
+                    handle_loadkx(lua_state, instr, base, frame_idx, code, constants, &mut pc)?;
                 }
                 OpCode::LoadFalse => {
                     // R[A] := false
@@ -396,13 +380,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_imod(i1, i2));
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                                pc += 1;
-                                setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
-                            }
+                        }
+                    } else {
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
+                            pc += 1;
+                            setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
                         }
                     }
                 }
@@ -874,21 +858,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::Close => {
-                    // Close all upvalues and TBC variables >= R[A]
-                    let a = instr.get_a() as usize;
-                    let close_from = base + a;
-
-                    save_pc!();
-                    // Close upvalues and call __close on TBC variables
-                    match lua_state.close_all(close_from) {
-                        Ok(()) => {}
-                        Err(crate::lua_vm::LuaError::Yield) => {
-                            // __close yielded — back up PC to re-execute CLOSE on resume
-                            lua_state.get_call_info_mut(frame_idx).pc -= 1;
-                            return Err(crate::lua_vm::LuaError::Yield);
-                        }
-                        Err(e) => return Err(e),
-                    }
+                    handle_close(lua_state, instr, base, frame_idx, pc)?;
                 }
                 OpCode::Tbc => {
                     // Mark variable as to-be-closed
@@ -897,61 +867,38 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     lua_state.mark_tbc(stack_idx)?;
                 }
                 OpCode::NewTable => {
-                    // R[A] := {} (new table)
-                    // This instruction uses ivABC format:
-                    // vB (6 bits) = log2(hash size) + 1
-                    // vC (10 bits) = array size
+                    // R[A] := {} (new table) — table ops should be inlined
                     let a = instr.get_a() as usize;
-                    let vb = instr.get_vb() as usize; // Use get_vb() for ivABC format
-                    let mut vc = instr.get_vc() as usize; // Use get_vc() for ivABC format
+                    let vb = instr.get_vb() as usize;
+                    let mut vc = instr.get_vc() as usize;
                     let k = instr.get_k();
 
-                    // Calculate hash size: if vB > 0, hash_size = 2^(vB-1)
-                    // vB is 6 bits, so max value is 63
                     let hash_size = if vb > 0 {
-                        if vb > 31 {
-                            // Safety check to prevent overflow on 32-bit systems
-                            0
-                        } else {
-                            1usize << (vb - 1)
-                        }
+                        if vb > 31 { 0 } else { 1usize << (vb - 1) }
                     } else {
                         0
                     };
 
-                    // Check for EXTRAARG instruction for larger array sizes
-                    // If k is set, the EXTRAARG contains additional array size
                     if k {
                         if pc < code.len() {
                             let extra_instr = code[pc];
                             if extra_instr.get_opcode() == OpCode::ExtraArg {
-                                let extra = extra_instr.get_ax() as usize;
-                                // Add extra to array size: vc += extra * (MAXARG_vC + 1)
-                                // MAXARG_vC is 10 bits = 1023, so + 1 = 1024
-                                vc += extra * 1024;
+                                vc += extra_instr.get_ax() as usize * 1024;
                             }
                         }
                     }
 
-                    // ALWAYS skip the next instruction (EXTRAARG), as per Lua 5.4+ spec
-                    pc += 1;
+                    pc += 1; // skip EXTRAARG
 
-                    // Create table with pre-allocated sizes
                     let value = lua_state.create_table(vc, hash_size)?;
-
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
 
-                    // like checkGC
                     let new_top = base + a + 1;
                     save_pc!();
                     lua_state.set_top(new_top)?;
                     lua_state.check_gc()?;
 
-                    // Restore stack_top to the current frame's top to ensure subsequent
-                    // instructions (like SETTABLE or LOADI) don't operate on "dead" stack slots
-                    // if they trigger GC. This matches Lua's behavior where the stack top
-                    // is maintained high (ci->top) during function execution.
                     let frame_top = lua_state.get_call_info(frame_idx).top;
                     lua_state.set_top(frame_top)?;
                 }
@@ -1251,53 +1198,42 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::ForPrep => {
-                    // Prepare numeric for loop
-                    // Input: ra=init, ra+1=limit, ra+2=step
-                    // Output (integer): ra=counter, ra+1=step, ra+2=idx
-                    // Output (float): ra=limit, ra+1=step, ra+2=idx
+                    // Prepare numeric for loop — MUST be inline (hot path)
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
 
                     let stack = lua_state.stack_mut();
                     let ra = base + a;
-                    let pinit_idx = ra;
-                    let plimit_idx = ra + 1;
-                    let pstep_idx = ra + 2;
 
-                    // Check if integer loop
-                    if ttisinteger(&stack[pinit_idx]) && ttisinteger(&stack[pstep_idx]) {
+                    if ttisinteger(&stack[ra]) && ttisinteger(&stack[ra + 2]) {
                         // Integer loop
-                        let init = ivalue(&stack[pinit_idx]);
-                        let step = ivalue(&stack[pstep_idx]);
+                        let init = ivalue(&stack[ra]);
+                        let step = ivalue(&stack[ra + 2]);
 
                         if step == 0 {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            save_pc!();
                             return Err(lua_state.error("'for' step is zero".to_string()));
                         }
 
-                        // Get limit (may need conversion)
-                        let limit = if ttisinteger(&stack[plimit_idx]) {
-                            ivalue(&stack[plimit_idx])
-                        } else if ttisfloat(&stack[plimit_idx]) {
-                            let flimit = fltvalue(&stack[plimit_idx]);
+                        let limit = if ttisinteger(&stack[ra + 1]) {
+                            ivalue(&stack[ra + 1])
+                        } else if ttisfloat(&stack[ra + 1]) {
+                            let flimit = fltvalue(&stack[ra + 1]);
                             if step < 0 {
                                 flimit.ceil() as i64
                             } else {
                                 flimit.floor() as i64
                             }
                         } else {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
+                            save_pc!();
                             return Err(lua_state.error("'for' limit must be a number".to_string()));
                         };
 
-                        // Check if loop should run
                         let should_skip = if step > 0 { init > limit } else { init < limit };
 
                         if should_skip {
-                            // Skip loop
                             pc += bx + 1;
                         } else {
-                            // Prepare loop counter
                             let count = if step > 0 {
                                 ((limit as u64).wrapping_sub(init as u64)) / (step as u64)
                             } else {
@@ -1309,60 +1245,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 ((init as u64).wrapping_sub(limit as u64)) / step_abs
                             };
 
-                            // Setup: ra=counter, ra+1=step, ra+2=idx
                             setivalue(&mut stack[ra], count as i64);
                             setivalue(&mut stack[ra + 1], step);
                             setivalue(&mut stack[ra + 2], init);
                         }
                     } else {
-                        // Float loop
-                        let mut init = 0.0;
-                        let mut limit = 0.0;
-                        let mut step = 0.0;
-
-                        if !tonumberns(&stack[plimit_idx], &mut limit) {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' limit must be a number".to_string()));
-                        }
-                        if !tonumberns(&stack[pstep_idx], &mut step) {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' step must be a number".to_string()));
-                        }
-                        if !tonumberns(&stack[pinit_idx], &mut init) {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(
-                                lua_state.error("'for' initial value must be a number".to_string())
-                            );
-                        }
-
-                        if step == 0.0 {
-                            lua_state.set_frame_pc(frame_idx, pc as u32);
-                            return Err(lua_state.error("'for' step is zero".to_string()));
-                        }
-
-                        // Check if loop should run
-                        let should_skip = if step > 0.0 {
-                            limit < init
-                        } else {
-                            init < limit
-                        };
-
-                        if should_skip {
-                            // Skip loop
-                            pc += bx + 1;
-                        } else {
-                            // Setup: ra=limit, ra+1=step, ra+2=idx
-                            setfltvalue(&mut stack[ra], limit);
-                            setfltvalue(&mut stack[ra + 1], step);
-                            setfltvalue(&mut stack[ra + 2], init);
-                        }
+                        // Float loop — cold path
+                        handle_forprep_float(lua_state, base + a, bx, frame_idx, &mut pc)?;
                     }
                 }
                 OpCode::TForPrep => {
-                    // Prepare generic for loop
-                    // Before: ra=iterator, ra+1=state, ra+2=control, ra+3=closing
-                    // After: ra=iterator, ra+1=state, ra+2=closing(tbc), ra+3=control
-                    // Then jump to loop end (where TFORCALL is)
+                    // Prepare generic for loop — inline (for loop related)
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
 
@@ -1370,15 +1263,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = base + a;
 
                     // Swap control and closing variables
-                    let temp = stack[ra + 3]; // closing
-                    stack[ra + 3] = stack[ra + 2]; // control -> closing position
-                    stack[ra + 2] = temp; // closing -> control position
+                    let temp = stack[ra + 3];
+                    stack[ra + 3] = stack[ra + 2];
+                    stack[ra + 2] = temp;
 
                     // Mark ra+2 as to-be-closed if not nil
-                    // (matches luaF_newtbcupval in Lua 5.5)
                     lua_state.mark_tbc(ra + 2)?;
 
-                    // Jump to loop end (+ Bx)
                     pc += bx;
                 }
                 OpCode::TForCall => {
@@ -1610,144 +1501,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 // LENGTH AND CONCATENATION
                 // ============================================================
                 OpCode::Len => {
-                    // R[A] := #R[B]
-                    // Port of luaV_objlen from lvm.c:731-757
-                    // OPTIMIZED: Inline fasttm check for tables to avoid double metatable lookup
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-
-                    let rb = lua_state.stack_mut()[base + b];
-
-                    // Try to get length based on type
-                    if let Some(s) = rb.as_str() {
-                        // String: get length directly
-                        let len = s.len();
-                        setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
-                    } else if let Some(bytes) = rb.as_binary() {
-                        // Binary: get length directly
-                        let len = bytes.len();
-                        setivalue(&mut lua_state.stack_mut()[base + a], len as i64);
-                    } else if let Some(table) = rb.as_table_mut() {
-                        // Table: inline fasttm check for __len
-                        // This avoids the double metatable lookup in get_metamethod_event
-                        let meta = table.meta_ptr();
-                        if !meta.is_null() {
-                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                            const TM_LEN_BIT: u8 = TmKind::Len as u8;
-                            if !mt.no_tm(TM_LEN_BIT) {
-                                // fasttm says __len might exist — do hash lookup
-                                let event_key =
-                                    lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
-                                if let Some(mm) = mt.raw_get(&event_key) {
-                                    // Found __len metamethod — call it
-                                    save_pc!();
-                                    let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
-                                    restore_state!();
-                                    lua_state.stack_mut()[base + a] = result;
-                                } else {
-                                    // Not found — cache absence, use primitive length
-                                    mt.set_tm_absent(TM_LEN_BIT);
-                                    setivalue(
-                                        &mut lua_state.stack_mut()[base + a],
-                                        table.len() as i64,
-                                    );
-                                }
-                            } else {
-                                // fasttm: __len known absent — primitive length
-                                setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
-                            }
-                        } else {
-                            // No metatable — primitive length
-                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
-                        }
-                    } else {
-                        // Other types: try __len metamethod
-                        if let Some(mm) = helper::get_metamethod_event(lua_state, &rb, TmKind::Len)
-                        {
-                            save_pc!();
-                            let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
-                            restore_state!();
-                            lua_state.stack_mut()[base + a] = result;
-                        } else {
-                            // No metamethod: type error
-                            return Err(lua_state.error(format!(
-                                "attempt to get length of a {} value",
-                                rb.type_name()
-                            )));
-                        }
-                    }
+                    handle_len(lua_state, instr, &mut base, frame_idx, pc)?;
                 }
 
                 OpCode::Concat => {
-                    // R[A] := R[A].. ... ..R[A + B - 1]
-                    // Port of OP_CONCAT from lvm.c:1626
-                    let a = instr.get_a() as usize;
-                    let n = instr.get_b() as usize;
-
-                    // Try string concatenation first
-                    // If that fails (non-string without metamethod), try metamethod
-                    match concat::concat_strings(lua_state, base, a, n) {
-                        Ok(result) => {
-                            let stack = lua_state.stack_mut();
-                            stack[base + a] = result;
-                        }
-                        Err(_) => {
-                            // Not strings - try __concat metamethod on last two values
-                            // Following Lua's luaT_tryconcatTM pattern
-                            if n >= 2 {
-                                let (v1, v2) = {
-                                    let stack = lua_state.stack_mut();
-                                    (stack[base + a + n - 2], stack[base + a + n - 1])
-                                };
-
-                                // Try to get __concat metamethod
-                                if let Some(mm) = helper::get_binop_metamethod(
-                                    lua_state,
-                                    &v1,
-                                    &v2,
-                                    TmKind::Concat,
-                                ) {
-                                    save_pc!();
-                                    let result = metamethod::call_tm_res(lua_state, mm, v1, v2)?;
-                                    restore_state!();
-
-                                    // Store result back and reduce count
-                                    let stack = lua_state.stack_mut();
-                                    stack[base + a + n - 2] = result;
-
-                                    // If we still have more than 1 value left, continue concatenating
-                                    // For simplicity, just store the result in R[A]
-                                    if n == 2 {
-                                        stack[base + a] = result;
-                                    } else {
-                                        // Multiple concat with metamethod - simplified approach
-                                        // Store the result of last two, will need to handle rest
-                                        return Err(lua_state.error(
-                                            "complex concat with metamethod not fully supported"
-                                                .to_string(),
-                                        ));
-                                    }
-                                } else {
-                                    return Err(lua_state.error(format!(
-                                        "attempt to concatenate {} and {} values",
-                                        v1.type_name(),
-                                        v2.type_name()
-                                    )));
-                                }
-                            } else {
-                                return Err(lua_state
-                                    .error("concat requires at least 2 values".to_string()));
-                            }
-                        }
-                    }
-
-                    // GC check after concatenation (like Lua 5.5 OP_CONCAT)
-                    save_pc!();
-                    lua_state.check_gc()?;
-
-                    // Restore frame top (concat may have consumed extra stack slots)
-                    let frame_top = lua_state.get_call_info(frame_idx).top;
-                    lua_state.set_top_raw(frame_top);
+                    handle_concat(lua_state, instr, &mut base, frame_idx, pc)?;
                 }
 
                 // ============================================================
@@ -1762,64 +1520,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::Le => {
-                    // if ((R[A] <= R[B]) ~= k) then pc++; else donextjump
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let k = instr.get_k();
-
-                    let cond = {
-                        let stack = lua_state.stack_mut();
-                        let ra = &stack[base + a];
-                        let rb = &stack[base + b];
-
-                        if ttisinteger(ra) && ttisinteger(rb) {
-                            ivalue(ra) <= ivalue(rb)
-                        } else if ttisinteger(ra) && ttisfloat(rb) {
-                            helper::int_le_float(ivalue(ra), fltvalue(rb))
-                        } else if ttisfloat(ra) && ttisinteger(rb) {
-                            helper::float_le_int(fltvalue(ra), ivalue(rb))
-                        } else if ttisfloat(ra) && ttisfloat(rb) {
-                            fltvalue(ra) <= fltvalue(rb)
-                        } else if (ttisinteger(ra) || ttisfloat(ra))
-                            && (ttisinteger(rb) || ttisfloat(rb))
-                        {
-                            let mut na = 0.0;
-                            let mut nb = 0.0;
-                            tonumberns(ra, &mut na);
-                            tonumberns(rb, &mut nb);
-                            na <= nb
-                        } else if ttisstring(ra) && ttisstring(rb) {
-                            // String comparison - copy IDs first
-                            // OPTIMIZATION: Use as_string_str() for direct access
-                            if let (Some(sa), Some(sb)) = (ra.as_str(), rb.as_str()) {
-                                sa <= sb
-                            } else {
-                                false
-                            }
-                        } else {
-                            // Try metamethod - use Protect pattern
-                            let va = *ra;
-                            let vb = *rb;
-
-                            save_pc!();
-                            let result =
-                                match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
-                                    Some(result) => result,
-                                    None => {
-                                        return Err(lua_state.error(
-                                            "attempt to compare non-comparable values".to_string(),
-                                        ));
-                                    }
-                                };
-                            restore_state!();
-                            result
-                        }
-                    };
-
-                    if cond != k {
-                        pc += 1; // Condition failed - skip next instruction
-                    }
-                    // else: Condition succeeded - execute next instruction (must be JMP)
+                    comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc)?;
                 }
 
                 // ============================================================
@@ -1986,23 +1687,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 // CLOSURE AND VARARG
                 // ============================================================
                 OpCode::Closure => {
-                    closure_vararg_ops::exec_closure(
-                        lua_state,
-                        instr,
-                        base,
-                        &chunk,
-                        &upvalue_ptrs,
-                    )?;
-
-                    let a = instr.get_a() as usize;
-                    let new_top = base + a + 1;
-                    save_pc!();
-                    lua_state.set_top(new_top)?;
-                    lua_state.check_gc()?;
-
-                    // Restore frame top so subsequent instructions and GC see all locals
-                    let frame_top = lua_state.get_call_info(frame_idx).top;
-                    lua_state.set_top(frame_top)?;
+                    handle_closure(lua_state, instr, base, frame_idx, &chunk, &upvalue_ptrs, pc)?;
                 }
 
                 OpCode::Vararg => {
@@ -2010,78 +1695,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::GetVarg => {
-                    // R[A] := varargs[R[C]]
-                    // Based on lvm.c:1943 and ltm.c:292 luaT_getvararg
-                    // Hidden varargs are stored BEFORE ci->func.p (base - 1)
-                    // Layout: [hidden_args...] [func] [fixed_params...] [registers...]
-                    //         ^func_pos-nextra  ^func_pos=base-1  ^base
-                    let a = instr.get_a() as usize;
-                    let _b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    // Get nextraargs from CallInfo
-                    let call_info = lua_state.get_call_info(frame_idx);
-                    let nextra = call_info.nextraargs as usize;
-
-                    let stack = lua_state.stack_mut();
-                    let ra_idx = base + a;
-                    let rc = stack[base + c];
-
-                    // Check if R[C] is string "n" (get vararg count)
-                    if let Some(s) = rc.as_str() {
-                        if s == "n" {
-                            let stack = lua_state.stack_mut();
-                            setivalue(&mut stack[ra_idx], nextra as i64);
-                        } else {
-                            let stack = lua_state.stack_mut();
-                            setnilvalue(&mut stack[ra_idx]);
-                        }
-                    } else if ttisinteger(&rc) {
-                        let n = ivalue(&rc);
-
-                        let stack = lua_state.stack_mut();
-                        if nextra > 0 && n >= 1 && (n as usize) <= nextra {
-                            // func_pos = base - 1
-                            // slot = func_pos - nextra + n - 1
-                            let slot = (base - 1) - nextra + (n as usize) - 1;
-                            stack[ra_idx] = stack[slot];
-                        } else {
-                            setnilvalue(&mut stack[ra_idx]);
-                        }
-                    } else {
-                        let stack = lua_state.stack_mut();
-                        setnilvalue(&mut stack[ra_idx]);
-                    }
+                    handle_getvarg(lua_state, instr, base, frame_idx)?;
                 }
 
                 OpCode::ErrNNil => {
-                    // Raise error if R[A] is not nil (global already defined)
-                    // Based on lvm.c:1949 and ldebug.c:817 luaG_errnnil
-                    // This is used by the compiler to detect duplicate global definitions
-                    let a = instr.get_a() as usize;
-                    let bx = instr.get_bx() as usize;
-
-                    let stack = lua_state.stack_mut();
-                    let ra = &stack[base + a];
-
-                    // If value is not nil, it means the global is already defined
-                    if !ra.is_nil() {
-                        // Get global name from constants if bx > 0
-                        let global_name = if bx > 0 && bx - 1 < constants.len() {
-                            if let Some(s) = constants[bx - 1].as_str() {
-                                s.to_string()
-                            } else {
-                                "?".to_string()
-                            }
-                        } else {
-                            "?".to_string()
-                        };
-
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(
-                            lua_state.error(format!("global '{}' already defined", global_name))
-                        );
-                    }
+                    handle_errnil(lua_state, instr, base, constants, frame_idx, pc)?;
                 }
 
                 OpCode::VarargPrep => {

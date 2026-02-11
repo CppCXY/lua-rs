@@ -11,33 +11,11 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
-    UpvaluePtr,
     lua_value::{Chunk, LuaValue},
     lua_vm::{Instruction, LuaResult, LuaState, OpCode},
 };
 
-use super::{
-    closure_handler,
-    helper::{buildhiddenargs, setnilvalue},
-};
-
-/// CLOSURE: R[A] := closure(KPROTO[Bx])
-#[inline]
-pub fn exec_closure(
-    lua_state: &mut LuaState,
-    instr: Instruction,
-    base: usize,
-    chunk: &Chunk,
-    upvalue_ptrs: &[UpvaluePtr],
-) -> LuaResult<()> {
-    let a = instr.get_a() as usize;
-    let bx = instr.get_bx() as usize;
-
-    // Create closure from child prototype
-    closure_handler::handle_closure(lua_state, base, a, bx, chunk, &upvalue_ptrs)?;
-
-    Ok(())
-}
+use super::helper::{buildhiddenargs, setnilvalue};
 
 /// VARARG: R[A], ..., R[A+C-2] = varargs
 pub fn exec_vararg(
@@ -236,7 +214,6 @@ pub fn exec_varargprep(
 }
 
 /// SETLIST: R[A][vC+i] := R[A+i], 1 <= i <= vB
-#[inline]
 pub fn exec_setlist(
     lua_state: &mut LuaState,
     instr: Instruction,

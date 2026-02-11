@@ -16,8 +16,8 @@ use crate::{
 
 use super::{
     helper::{
-        float_lt_int, fltvalue, int_lt_float, ivalue, tonumberns, ttisfloat, ttisinteger,
-        ttisstring,
+        float_le_int, float_lt_int, fltvalue, int_le_float, int_lt_float, ivalue, tonumberns,
+        ttisfloat, ttisinteger, ttisstring,
     },
     metamethod::{self, TmKind},
 };
@@ -365,6 +365,68 @@ pub fn exec_gei(
                     "number"
                 )));
             }
+        }
+    };
+
+    if cond != k {
+        *pc += 1;
+    }
+    Ok(())
+}
+
+/// LE: if ((R[A] <= R[B]) ~= k) then pc++
+/// Extracted from main loop to reduce code size
+#[inline]
+pub fn exec_le(
+    lua_state: &mut LuaState,
+    instr: Instruction,
+    base: usize,
+    frame_idx: usize,
+    pc: &mut usize,
+) -> LuaResult<()> {
+    let a = instr.get_a() as usize;
+    let b = instr.get_b() as usize;
+    let k = instr.get_k();
+
+    let cond = {
+        let stack = lua_state.stack_mut();
+        let ra = &stack[base + a];
+        let rb = &stack[base + b];
+
+        if ttisinteger(ra) && ttisinteger(rb) {
+            ivalue(ra) <= ivalue(rb)
+        } else if ttisinteger(ra) && ttisfloat(rb) {
+            int_le_float(ivalue(ra), fltvalue(rb))
+        } else if ttisfloat(ra) && ttisinteger(rb) {
+            float_le_int(fltvalue(ra), ivalue(rb))
+        } else if ttisfloat(ra) && ttisfloat(rb) {
+            fltvalue(ra) <= fltvalue(rb)
+        } else if (ttisinteger(ra) || ttisfloat(ra)) && (ttisinteger(rb) || ttisfloat(rb)) {
+            let mut na = 0.0;
+            let mut nb = 0.0;
+            tonumberns(ra, &mut na);
+            tonumberns(rb, &mut nb);
+            na <= nb
+        } else if ttisstring(ra) && ttisstring(rb) {
+            if let (Some(sa), Some(sb)) = (ra.as_str(), rb.as_str()) {
+                sa <= sb
+            } else {
+                false
+            }
+        } else {
+            let va = *ra;
+            let vb = *rb;
+
+            lua_state.set_frame_pc(frame_idx, *pc as u32);
+            let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
+                Some(result) => result,
+                None => {
+                    return Err(
+                        lua_state.error("attempt to compare non-comparable values".to_string())
+                    );
+                }
+            };
+            result
         }
     };
 
