@@ -40,14 +40,6 @@ pub struct LuaState {
     /// Implements Lua's optimization: never shrink call_stack, only move this index
     call_depth: usize,
 
-    /// C call depth - tracks C function call nesting (like Lua's nCcalls)
-    /// This counter is INDEPENDENT of tail call optimization:
-    /// - Incremented on every C function entry (pcall, xpcall, C closures, etc.)
-    /// - Decremented only on C function return
-    /// - NOT affected by Lua tail call optimization
-    /// This allows detection of C-stack overflow even when Lua stack is optimized
-    c_call_depth: usize,
-
     /// Open upvalues - upvalues pointing to stack locations
     /// Uses HashMap for O(1) lookup by stack index (unlike Lua's sorted linked list)
     /// Also maintains a sorted Vec(higher indices first) for efficient traversal during close operations
@@ -96,7 +88,6 @@ impl LuaState {
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
             call_depth: 0,
-            c_call_depth: 0, // Start with no calls
             open_upvalues_map: HashMap::new(),
             open_upvalues_list: Vec::new(),
             error_msg: String::new(),
@@ -152,12 +143,6 @@ impl LuaState {
         self.call_depth
     }
 
-    /// Get C call depth
-    #[inline(always)]
-    pub fn c_call_depth(&self) -> usize {
-        self.c_call_depth
-    }
-
     /// Push a new call frame (equivalent to Lua's luaD_precall)
     /// OPTIMIZED: Reuses CallInfo slots, only allocates when needed
     ///
@@ -204,13 +189,6 @@ impl LuaState {
                     nextraargs,
                 )
             } else if func.is_c_callable() {
-                if self.c_call_depth >= self.safe_option.max_call_depth {
-                    return Err(self.error(format!(
-                        "C stack overflow (C call depth: {})",
-                        self.c_call_depth
-                    )));
-                }
-                self.c_call_depth += 1;
                 // Light C function
                 (CIST_C, nparams, nparams, 0)
             } else {
@@ -459,13 +437,6 @@ impl LuaState {
                 self.call_depth
             )));
         }
-        if self.c_call_depth >= self.safe_option.max_call_depth {
-            return Err(self.error(format!(
-                "C stack overflow (C call depth: {})",
-                self.c_call_depth
-            )));
-        }
-        self.c_call_depth += 1;
 
         // For C functions: maxstacksize = nargs, numparams = nargs (no nil filling needed)
         let frame_top = base + nargs;
@@ -515,11 +486,6 @@ impl LuaState {
     pub(crate) fn pop_frame(&mut self) {
         if self.call_depth > 0 {
             self.call_depth -= 1;
-            // Use call_status bit check instead of Option chain
-            let ci = unsafe { self.call_stack.get_unchecked(self.call_depth) };
-            if ci.call_status & CIST_C != 0 && self.c_call_depth > 0 {
-                self.c_call_depth -= 1;
-            }
         }
     }
 
@@ -529,9 +495,6 @@ impl LuaState {
     pub(crate) fn pop_c_frame(&mut self) {
         debug_assert!(self.call_depth > 0);
         self.call_depth -= 1;
-        if self.c_call_depth > 0 {
-            self.c_call_depth -= 1;
-        }
     }
 
     /// Get logical stack top (L->top.p in Lua source)
@@ -1108,7 +1071,10 @@ impl LuaState {
         } else if close_fn.is_lua_function() {
             let new_base = func_pos + 1;
             self.push_frame(close_fn, new_base, 1, 0)?;
-            lua_execute(self, caller_depth)
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, caller_depth);
+            self.dec_n_ccalls();
+            r
         } else {
             // Non-callable close method (e.g., a number)
             let type_name = close_fn.type_name();
@@ -1165,7 +1131,10 @@ impl LuaState {
         } else if close_fn.is_lua_function() {
             let new_base = func_pos + 1;
             self.push_frame(close_fn, new_base, 2, 0)?;
-            lua_execute(self, caller_depth)
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, caller_depth);
+            self.dec_n_ccalls();
+            r
         } else {
             // Non-callable close method (e.g., a number)
             let type_name = close_fn.type_name();
@@ -1376,6 +1345,31 @@ impl LuaState {
         self.vm
     }
 
+    /// Lua 5.5-style ccall depth tracking: increment shared n_ccalls before
+    /// a recursive `lua_execute` call.  Returns `Err("C stack overflow")` if
+    /// the limit is reached.  The limit is checked against this thread's
+    /// `safe_option.max_call_depth` so that xpcall's EXTRA_STACK increase
+    /// takes effect.
+    #[inline(always)]
+    pub(crate) fn inc_n_ccalls(&mut self) -> LuaResult<()> {
+        let vm = unsafe { &mut *self.vm };
+        vm.n_ccalls += 1;
+        if vm.n_ccalls >= self.safe_option.max_call_depth {
+            vm.n_ccalls -= 1;
+            Err(self.error("C stack overflow".to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Decrement shared n_ccalls after returning from a recursive `lua_execute`.
+    #[inline(always)]
+    pub(crate) fn dec_n_ccalls(&self) {
+        unsafe {
+            (*self.vm).n_ccalls -= 1;
+        }
+    }
+
     // ===== Call Frame Management =====
 
     /// Get current CallInfo by index (unchecked — caller must ensure idx < call_depth)
@@ -1392,7 +1386,7 @@ impl LuaState {
         unsafe { self.call_stack.get_unchecked_mut(idx) }
     }
 
-    /// Pop the current call frame (Lua callers only — does NOT adjust c_call_depth)
+    /// Pop the current call frame (Lua callers only — does NOT adjust VM n_ccalls)
     #[inline(always)]
     pub fn pop_call_frame(&mut self) {
         debug_assert!(self.call_depth > 0);
@@ -1788,8 +1782,10 @@ impl LuaState {
                 return Ok((false, vec![err_str]));
             }
 
-            // Execute via lua_execute_until - only execute the new frame
+            // Execute via lua_execute — only execute the new frame
+            self.inc_n_ccalls()?;
             let result = execute::lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
 
             match result {
                 Ok(()) => {
@@ -1919,7 +1915,10 @@ impl LuaState {
                 }
             }
 
-            lua_execute(self, initial_depth)
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r
         };
 
         match result {
@@ -2077,7 +2076,9 @@ impl LuaState {
         }
 
         // Execute
+        self.inc_n_ccalls()?;
         let result = execute::lua_execute(self, initial_depth);
+        self.dec_n_ccalls();
 
         match result {
             Ok(()) => {
@@ -2150,7 +2151,12 @@ impl LuaState {
                     execute::call::call_c_function(self, handler_func_idx, 1, -1)
                 } else {
                     match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
-                        Ok(()) => execute::lua_execute(self, handler_depth),
+                        Ok(()) => {
+                            self.inc_n_ccalls()?;
+                            let r = execute::lua_execute(self, handler_depth);
+                            self.dec_n_ccalls();
+                            r
+                        }
                         Err(handler_err) => Err(handler_err),
                     }
                 };
@@ -2257,7 +2263,10 @@ impl LuaState {
                 execute::call::call_c_function(self, 0, nargs, -1)
             } else {
                 // Execute Lua bytecode
-                execute::lua_execute(self, 0)
+                self.inc_n_ccalls()?;
+                let r = execute::lua_execute(self, 0);
+                self.dec_n_ccalls();
+                r
             };
 
             self.handle_resume_result(result)
@@ -2294,7 +2303,9 @@ impl LuaState {
             self.set_top_raw(new_top);
 
             // Execute until yield or completion
+            self.inc_n_ccalls()?;
             let result = execute::lua_execute(self, 0);
+            self.dec_n_ccalls();
 
             // Handle result with pcall error recovery (precover)
             self.handle_resume_result(result)
@@ -2441,7 +2452,12 @@ impl LuaState {
                             }
 
                             // Continue execution
-                            result = execute::lua_execute(self, 0);
+                            if let Err(e) = self.inc_n_ccalls() {
+                                result = Err(e);
+                            } else {
+                                result = execute::lua_execute(self, 0);
+                                self.dec_n_ccalls();
+                            }
                             // Loop again to check for more errors/yields
                         }
                         Err(LuaError::Yield) => {

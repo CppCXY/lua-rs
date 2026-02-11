@@ -244,6 +244,7 @@ fn coroutine_isyieldable(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// coroutine.close(co) - Close a coroutine, marking it as dead
+/// Calls __close on any pending to-be-closed variables, then kills the thread.
 fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
     let thread_val = match l.get_arg(1) {
         Some(t) => t,
@@ -262,12 +263,65 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error("cannot close the main thread".to_string()));
         }
 
-        thread.stack_truncate();
+        // Check status: can only close dead or suspended coroutines
+        // A running coroutine cannot be closed from the outside.
+        // (Lua 5.5 allows closing dead or yielded coroutines only.)
+
+        // Close all pending to-be-closed variables (calls __close metamethods
+        // on the coroutine's thread).  The shared VM n_ccalls counter will
+        // correctly track recursion depth because all threads share the same
+        // LuaVM instance.
+        let close_result = thread.close_tbc_with_error(0, LuaValue::nil());
+
+        // Close all upvalues
+        thread.close_upvalues(0);
+
+        // Pop all frames and truncate stack
         while thread.call_depth() > 0 {
             thread.pop_frame();
         }
-    }
+        thread.stack_truncate();
 
-    l.push_value(LuaValue::boolean(true))?;
-    Ok(1)
+        match close_result {
+            Ok(()) => {
+                // Check if any __close cascaded an error (close_tbc_with_error
+                // stores cascaded errors in error_object but returns Ok)
+                if !thread.error_object.is_nil() {
+                    let err_obj =
+                        std::mem::replace(&mut thread.error_object, LuaValue::nil());
+                    let error_msg = format!("{}", err_obj);
+                    l.push_value(LuaValue::boolean(false))?;
+                    let err_str = l.create_string(&error_msg)?;
+                    l.push_value(err_str)?;
+                    Ok(2)
+                } else {
+                    l.push_value(LuaValue::boolean(true))?;
+                    Ok(1)
+                }
+            }
+            Err(LuaError::Yield) => {
+                // Yield inside __close during coroutine close — propagate
+                Err(LuaError::Yield)
+            }
+            Err(_e) => {
+                // __close caused an error — return (false, error_msg)
+                let error_msg = {
+                    let err_obj =
+                        std::mem::replace(&mut thread.error_object, LuaValue::nil());
+                    if !err_obj.is_nil() {
+                        format!("{}", err_obj)
+                    } else {
+                        std::mem::take(&mut thread.error_msg)
+                    }
+                };
+                l.push_value(LuaValue::boolean(false))?;
+                let err_str = l.create_string(&error_msg)?;
+                l.push_value(err_str)?;
+                Ok(2)
+            }
+        }
+    } else {
+        l.push_value(LuaValue::boolean(true))?;
+        Ok(1)
+    }
 }

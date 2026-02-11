@@ -62,6 +62,12 @@ pub struct LuaVM {
 
     pub(crate) safe_option: SafeOption,
 
+    /// Shared C call depth counter — tracks real Rust stack depth across all
+    /// coroutines.  Incremented on every entry to `lua_execute` and on every
+    /// C-function frame push; decremented on the corresponding exits.
+    /// Replaces the old per-LuaState `c_call_depth`.
+    pub(crate) n_ccalls: usize,
+
     pub(crate) version: LuaLanguageLevel,
 
     /// Random number generator (using rand crate for better quality)
@@ -93,6 +99,7 @@ impl LuaVM {
             main_state: ThreadPtr::null(), //,
             string_mt: None,
             safe_option: option.clone(),
+            n_ccalls: 0,
             version: LuaLanguageLevel::Lua55,
             // Initialize RNG with a deterministic seed for reproducibility
             rng: rand::rngs::StdRng::seed_from_u64(time),
@@ -311,7 +318,11 @@ impl LuaVM {
 
     /// Main VM execution loop (equivalent to luaV_execute)
     fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
-        lua_execute(self.main_state(), 0)?;
+        // Initial entry: track n_ccalls like all other call sites
+        self.main_state().inc_n_ccalls()?;
+        let exec_result = lua_execute(self.main_state(), 0);
+        self.main_state().dec_n_ccalls();
+        exec_result?;
 
         let main_state = self.main_state();
         // Collect all values from logical stack (0 to stack_top) as return values

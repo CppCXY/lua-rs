@@ -68,6 +68,11 @@ use crate::lua_vm::LuaError;
 /// - Uses labeled loops instead of goto for context switching
 /// - Function calls/returns just update pointers and continue
 /// - Zero Rust function call overhead
+///
+/// NOTE: n_ccalls tracking is NOT done here (unlike the wrapper approach).
+/// Instead, each recursive CALL SITE (metamethods, pcall, resume, __close)
+/// increments/decrements n_ccalls around its call to lua_execute, mirroring
+/// Lua 5.5's luaD_call pattern.
 pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
     // STARTFUNC: Function context switching point (like Lua C's startfunc label)
     'startfunc: loop {

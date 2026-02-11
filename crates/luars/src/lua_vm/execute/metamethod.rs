@@ -381,7 +381,10 @@ pub fn call_tm_res(
         let caller_depth = lua_state.call_depth();
 
         lua_state.push_lua_frame(&metamethod, new_base, 2, 1, param_count, max_stack_size)?;
-        lua_execute(lua_state, caller_depth)?;
+        lua_state.inc_n_ccalls()?;
+        let r = lua_execute(lua_state, caller_depth);
+        lua_state.dec_n_ccalls();
+        r?;
     } else if metamethod.is_cfunction() {
         call_c_function(lua_state, func_pos, 2, 1)?;
     } else {
@@ -454,7 +457,10 @@ pub fn call_tm(
         let caller_depth = lua_state.call_depth();
 
         lua_state.push_lua_frame(&metamethod, new_base, 3, 0, param_count, max_stack_size)?;
-        lua_execute(lua_state, caller_depth)?;
+        lua_state.inc_n_ccalls()?;
+        let r = lua_execute(lua_state, caller_depth);
+        lua_state.dec_n_ccalls();
+        r?;
     } else if metamethod.is_cfunction() {
         call::call_c_function(lua_state, func_pos, 3, 0)?;
     } else {
