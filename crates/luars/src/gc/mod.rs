@@ -2163,7 +2163,14 @@ impl GC {
             let thread_ptr = self.twups[i];
             let thread = thread_ptr.as_ref();
 
-            debug_assert!(!thread.header.is_white(), "Thread should never be white");
+            // White thread = dead (unreachable). Remove from list.
+            // Gray thread with open upvalues = keep in list for later remarking.
+            // Otherwise (black or no upvalues) = remove and remark its upvalues.
+            if thread.header.is_white() {
+                // Thread is dead, just remove from list
+                self.twups.swap_remove(i);
+                continue;
+            }
 
             // if so, just move to the next thread
             if thread.header.is_gray() && !thread.data.open_upvalues().is_empty() {

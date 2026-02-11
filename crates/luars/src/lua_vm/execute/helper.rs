@@ -33,10 +33,10 @@ pub fn buildhiddenargs(
     let new_func_pos = func_pos + totalargs + 1;
     let new_base = new_func_pos + 1;
 
-    // Ensure enough stack space for new base + registers
-    let new_needed_size = new_base + chunk.max_stack_size;
+    // Ensure enough stack space for new base + registers + EXTRA_STACK
+    let new_needed_size = new_base + chunk.max_stack_size + 5; // +5 = EXTRA_STACK
     if new_needed_size > lua_state.stack_len() {
-        lua_state.grow_stack(new_needed_size - lua_state.stack_len())?;
+        lua_state.grow_stack(new_needed_size)?;
     }
 
     let stack = lua_state.stack_mut();

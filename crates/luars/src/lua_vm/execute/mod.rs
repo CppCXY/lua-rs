@@ -446,9 +446,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let v1 = &stack[base + b];
                     let v2 = &constants[c]; // K[C]
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
                         pc += 1;
                         setivalue(&mut stack[base + a], i1.wrapping_add(i2));
                     } else {
@@ -470,9 +470,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let v1 = &stack[base + b];
                     let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
                         pc += 1;
                         setivalue(&mut stack[base + a], i1.wrapping_sub(i2));
                     } else {
@@ -494,9 +494,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let v1 = &stack[base + b];
                     let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
                         pc += 1;
                         setivalue(&mut stack[base + a], i1.wrapping_mul(i2));
                     } else {
@@ -518,9 +518,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let v1 = &stack[base + b];
                     let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_imod(i1, i2));
@@ -580,9 +580,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let v1 = &stack[base + b];
                     let v2 = &constants[c];
 
-                    let mut i2 = 0i64;
-                    if ttisinteger(v1) && tointeger(v2, &mut i2) {
+                    if ttisinteger(v1) && ttisinteger(v2) {
                         let i1 = ivalue(v1);
+                        let i2 = ivalue(v2);
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_idiv(i1, i2));

@@ -482,6 +482,12 @@ pub fn handle_tailcall(
 
         // Update frame top: func + 1 + maxstacksize
         let frame_top = (base - 1) + 1 + chunk.max_stack_size;
+        // Ensure physical stack is large enough for the new function.
+        // The tailcalled function may need more stack space than the caller.
+        let needed_physical = frame_top + 5; // +5 = EXTRA_STACK
+        if needed_physical > lua_state.stack_len() {
+            lua_state.grow_stack(needed_physical)?;
+        }
         lua_state.set_frame_top(current_frame_idx, frame_top);
 
         // Set stack top: func + narg1 (after padding)
