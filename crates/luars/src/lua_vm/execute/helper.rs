@@ -282,6 +282,15 @@ pub unsafe fn ptointegerns(v: *const LuaValue, out: *mut i64) -> bool {
         if pttisinteger(v) {
             *out = pivalue(v);
             true
+        } else if pttisfloat(v) {
+            // Try converting integral-valued floats (e.g. 5.0 -> 5)
+            let f = pfltvalue(v);
+            if f == (f as i64 as f64) && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                *out = f as i64;
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -368,6 +377,15 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
             *out = v.value.i;
         }
         true
+    } else if v.tt() == LUA_VNUMFLT {
+        // Try converting integral-valued floats (e.g. 5.0 -> 5)
+        let f = unsafe { v.value.n };
+        if f == (f as i64 as f64) && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            *out = f as i64;
+            true
+        } else {
+            false
+        }
     } else {
         false
     }
