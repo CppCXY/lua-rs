@@ -346,7 +346,15 @@ impl LuaState {
         }
 
         // Slow path: handle extra args, nil filling, stack resize, new slot allocation
-        self.push_lua_frame_slow(func, base, nparams, nresults, param_count, max_stack_size, frame_top)
+        self.push_lua_frame_slow(
+            func,
+            base,
+            nparams,
+            nresults,
+            param_count,
+            max_stack_size,
+            frame_top,
+        )
     }
 
     /// Stack overflow error for push_lua_frame (cold path)
@@ -2138,15 +2146,14 @@ impl LuaState {
 
                 let handler_depth = self.call_depth();
 
-                let handler_result =
-                    if handler.is_cfunction() || handler.as_cclosure().is_some() {
-                        execute::call::call_c_function(self, handler_func_idx, 1, -1)
-                    } else {
-                        match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
-                            Ok(()) => execute::lua_execute(self, handler_depth),
-                            Err(handler_err) => Err(handler_err),
-                        }
-                    };
+                let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                    execute::call::call_c_function(self, handler_func_idx, 1, -1)
+                } else {
+                    match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                        Ok(()) => execute::lua_execute(self, handler_depth),
+                        Err(handler_err) => Err(handler_err),
+                    }
+                };
 
                 // Collect handler results
                 let mut results = Vec::new();
@@ -2200,9 +2207,7 @@ impl LuaState {
 
                 if results.is_empty() {
                     if handler_failed {
-                        results.push(
-                            self.create_string("error in error handling")?,
-                        );
+                        results.push(self.create_string("error in error handling")?);
                     } else {
                         results.push(self.create_string(&error_msg_str)?);
                     }

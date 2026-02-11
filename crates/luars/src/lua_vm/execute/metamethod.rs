@@ -70,7 +70,6 @@ pub fn try_unary_tm(
 ///   vmbreak;
 /// }
 /// ```
-#[inline]
 pub fn handle_mmbin(
     lua_state: &mut LuaState,
     _base: usize,         // Unused, kept for compatibility
@@ -103,7 +102,11 @@ pub fn handle_mmbin(
     let current_base = lua_state.get_frame_base(frame_idx);
 
     // Store result — unchecked
-    unsafe { *lua_state.stack_mut().get_unchecked_mut(current_base + result_reg) = result };
+    unsafe {
+        *lua_state
+            .stack_mut()
+            .get_unchecked_mut(current_base + result_reg) = result
+    };
 
     Ok(())
 }
@@ -124,7 +127,6 @@ pub fn handle_mmbin(
 ///   vmbreak;
 /// }
 /// ```
-#[inline]
 pub fn handle_mmbini(
     lua_state: &mut LuaState,
     _base: usize, // Unused, kept for compatibility
@@ -162,7 +164,11 @@ pub fn handle_mmbini(
     let current_base = lua_state.get_frame_base(frame_idx);
 
     // Store result — unchecked
-    unsafe { *lua_state.stack_mut().get_unchecked_mut(current_base + result_reg) = result };
+    unsafe {
+        *lua_state
+            .stack_mut()
+            .get_unchecked_mut(current_base + result_reg) = result
+    };
 
     Ok(())
 }
@@ -183,7 +189,6 @@ pub fn handle_mmbini(
 ///   vmbreak;
 /// }
 /// ```
-#[inline]
 pub fn handle_mmbink(
     lua_state: &mut LuaState,
     _base: usize, // Unused, kept for compatibility
@@ -222,7 +227,11 @@ pub fn handle_mmbink(
     let current_base = lua_state.get_frame_base(frame_idx);
 
     // Store result — unchecked
-    unsafe { *lua_state.stack_mut().get_unchecked_mut(current_base + result_reg) = result };
+    unsafe {
+        *lua_state
+            .stack_mut()
+            .get_unchecked_mut(current_base + result_reg) = result
+    };
 
     Ok(())
 }

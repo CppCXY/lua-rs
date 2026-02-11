@@ -13,8 +13,7 @@ use crate::lua_value::{CClosureFunction, Chunk, LuaUpvalue, LuaUserdata};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     GC, GcBinary, GcCClosure, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata,
-    LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
-    lua_value::UpvalueStore,
+    LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr, lua_value::UpvalueStore,
 };
 use std::rc::Rc;
 

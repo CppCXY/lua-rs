@@ -384,13 +384,9 @@ pub fn varinfo(l: &LuaState) -> String {
     // Determine which register to look up based on the opcode
     let reg = match op {
         // GET* instructions: table is in register B
-        OpCode::GetTable | OpCode::GetI | OpCode::GetField | OpCode::Self_ => {
-            Some(instr.get_b())
-        }
+        OpCode::GetTable | OpCode::GetI | OpCode::GetField | OpCode::Self_ => Some(instr.get_b()),
         // SET* instructions: table is in register A
-        OpCode::SetTable | OpCode::SetI | OpCode::SetField => {
-            Some(instr.get_a())
-        }
+        OpCode::SetTable | OpCode::SetI | OpCode::SetField => Some(instr.get_a()),
         // GETTABUP: table is upvalue B, not a register — handle specially
         OpCode::GetTabUp => {
             // The key being accessed is K[C]
@@ -430,7 +426,10 @@ pub fn varinfo(l: &LuaState) -> String {
 /// `op` is typically "index" for table access errors.
 pub fn typeerror(l: &mut LuaState, val_typename: &str, op: &str) -> LuaError {
     let info = varinfo(l);
-    l.error(format!("attempt to {} a {} value{}", op, val_typename, info))
+    l.error(format!(
+        "attempt to {} a {} value{}",
+        op, val_typename, info
+    ))
 }
 
 /// Get the function name for a given frame index (public wrapper).

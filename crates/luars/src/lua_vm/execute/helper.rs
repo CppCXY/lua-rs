@@ -1,7 +1,11 @@
 use crate::{
     Chunk, LuaResult, LuaValue,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
-    lua_vm::{LuaState, TmKind, execute},
+    lua_vm::{
+        LuaError, LuaState, TmKind,
+        call_info::call_status::{CIST_RECST, CIST_YPCALL},
+        execute,
+    },
     stdlib::basic::parse_number::parse_lua_number,
 };
 
@@ -732,4 +736,180 @@ pub fn float_le_int(f: f64, i: i64) -> bool {
         return false;
     }
     !int_lt_float(i, f)
+}
+
+/// Finish a C frame left on the call stack after yield-resume.
+/// This is the Rust equivalent of Lua 5.5's finishCcall.
+#[cold]
+#[inline(never)]
+fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
+    let ci = lua_state.get_call_info(frame_idx);
+    let pcall_func_pos = ci.base - ci.func_offset;
+    let nresults = ci.nresults;
+    let has_recst = ci.call_status & CIST_RECST != 0;
+
+    if ci.call_status & CIST_YPCALL != 0 {
+        if has_recst {
+            // Error recovery completed (or continuing) after yield.
+            // Retrieve the saved error value and try to close remaining TBC entries.
+            let error_val = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
+            lua_state.clear_error();
+            let close_level = pcall_func_pos + 1; // body's base position
+
+            // Try to close remaining TBC entries
+            let close_result = lua_state.close_tbc_with_error(close_level, error_val.clone());
+
+            match close_result {
+                Ok(()) => {
+                    // All TBC entries closed. Set up (false, error) result.
+                    let final_err = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
+                    let result_err = if !final_err.is_nil() {
+                        final_err
+                    } else {
+                        error_val
+                    };
+                    lua_state.clear_error();
+
+                    lua_state.stack_set(pcall_func_pos, LuaValue::boolean(false))?;
+                    lua_state.stack_set(pcall_func_pos + 1, result_err)?;
+                    let n = 2;
+
+                    // Pop pcall C frame
+                    lua_state.pop_frame();
+
+                    // Handle nresults adjustment
+                    let final_n = if nresults == -1 { n } else { nresults as usize };
+                    let new_top = pcall_func_pos + final_n;
+
+                    if nresults >= 0 {
+                        let wanted = nresults as usize;
+                        for i in n..wanted {
+                            lua_state.stack_set(pcall_func_pos + i, LuaValue::nil())?;
+                        }
+                    }
+
+                    lua_state.set_top_raw(new_top);
+
+                    // Restore caller frame top
+                    if lua_state.call_depth() > 0 {
+                        let ci_idx = lua_state.call_depth() - 1;
+                        if nresults == -1 {
+                            let ci_top = lua_state.get_call_info(ci_idx).top;
+                            if ci_top < new_top {
+                                lua_state.get_call_info_mut(ci_idx).top = new_top;
+                            }
+                        } else {
+                            let frame_top = lua_state.get_call_info(ci_idx).top;
+                            lua_state.set_top_raw(frame_top);
+                        }
+                    }
+
+                    Ok(())
+                }
+                Err(LuaError::Yield) => {
+                    // Another TBC close method yielded. Save cascaded error and yield.
+                    let cascaded = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
+                    lua_state.error_object = if !cascaded.is_nil() {
+                        cascaded
+                    } else {
+                        error_val
+                    };
+                    Err(LuaError::Yield)
+                }
+                Err(e) => {
+                    // TBC close threw — propagate as error
+                    Err(e)
+                }
+            }
+        } else {
+            // pcall body completed successfully after yield.
+            // Body's return values are at pcall_func_pos + 1 … top-1.
+            // We need: [true, res1, res2, ...] starting at pcall_func_pos.
+            let stack_top = lua_state.get_top();
+            let body_results_start = pcall_func_pos + 1;
+            let body_nres = if stack_top > body_results_start {
+                stack_top - body_results_start
+            } else {
+                0
+            };
+
+            // Place true at pcall_func_pos (body results already at +1)
+            lua_state.stack_set(pcall_func_pos, LuaValue::boolean(true))?;
+
+            let n = 1 + body_nres; // total results: true + body results
+
+            // Pop pcall C frame
+            lua_state.pop_frame();
+
+            // Handle nresults adjustment (same as call_c_function post-processing)
+            let final_n = if nresults == -1 { n } else { nresults as usize };
+            let new_top = pcall_func_pos + final_n;
+
+            if nresults >= 0 {
+                let wanted = nresults as usize;
+                // Pad with nil if needed
+                for i in n..wanted {
+                    lua_state.stack_set(pcall_func_pos + i, LuaValue::nil())?;
+                }
+            }
+
+            lua_state.set_top_raw(new_top);
+
+            // Restore caller frame top
+            if lua_state.call_depth() > 0 {
+                let ci_idx = lua_state.call_depth() - 1;
+                if nresults == -1 {
+                    let ci_top = lua_state.get_call_info(ci_idx).top;
+                    if ci_top < new_top {
+                        lua_state.get_call_info_mut(ci_idx).top = new_top;
+                    }
+                } else {
+                    let frame_top = lua_state.get_call_info(ci_idx).top;
+                    lua_state.set_top_raw(frame_top);
+                }
+            }
+
+            Ok(())
+        }
+    } else {
+        // Generic C frame after yield — just pop it.
+        // This shouldn't normally happen, but be safe.
+        lua_state.pop_frame();
+        Ok(())
+    }
+}
+
+/// Handle pending metamethod finish (cold path, extracted from main loop).
+/// Returns true if a C frame was finished and execution should restart.
+#[cold]
+#[inline(never)]
+pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<bool> {
+    use crate::lua_vm::call_info::call_status::{CIST_C, CIST_PENDING_FINISH};
+
+    let ci = lua_state.get_call_info(frame_idx);
+    if ci.call_status & CIST_C != 0 {
+        finish_c_frame(lua_state, frame_idx)?;
+        return Ok(true); // restart startfunc
+    }
+    // === luaV_finishOp equivalent ===
+    let ci = lua_state.get_call_info(frame_idx);
+    let pending = ci.pending_finish_get;
+    let base_tmp = ci.base;
+    if pending >= 0 {
+        let dest = base_tmp + pending as usize;
+        let top = lua_state.get_top();
+        if top > 0 {
+            let result = lua_state.stack_mut()[top - 1];
+            lua_state.stack_mut()[dest] = result;
+        }
+        let ci_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top_raw(ci_top);
+    } else {
+        let ci_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top_raw(ci_top);
+    }
+    let ci_mut = lua_state.get_call_info_mut(frame_idx);
+    ci_mut.pending_finish_get = -1;
+    ci_mut.call_status &= !CIST_PENDING_FINISH;
+    Ok(false) // continue to hot path
 }

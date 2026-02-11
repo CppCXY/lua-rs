@@ -229,7 +229,7 @@ pub struct Chunk {
     pub line_info: Vec<u32>,          // Line number for each instruction (for debug)
     pub linedefined: usize,           // Line where function starts (0 for main)
     pub lastlinedefined: usize,       // Line where function ends (0 for main)
-    pub proto_data_size: u32,          // Cached size for GC (code+constants+children+lines)
+    pub proto_data_size: u32,         // Cached size for GC (code+constants+children+lines)
 }
 
 impl Chunk {

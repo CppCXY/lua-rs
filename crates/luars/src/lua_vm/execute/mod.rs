@@ -36,34 +36,12 @@ use crate::{
     lua_value::{LUA_VFALSE, LUA_VTABLE, LuaValue},
     lua_vm::{
         LuaResult, LuaState, OpCode,
+        call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
         execute::helper::{
-            chgfltvalue,
-            chgivalue,
-            fltvalue,
-            ivalue,
-            lua_idiv,
-            lua_imod,
-            lua_shiftl,
-            lua_shiftr,
-            // Pointer versions for zero-cost arithmetic
-            pfltvalue,
-            pivalue,
-            psetfltvalue,
-            psetivalue,
-            pttisfloat,
-            pttisinteger,
-            setbfvalue,
-            setbtvalue,
-            setfltvalue,
-            setivalue,
-            setnilvalue,
-            tointeger,
-            tointegerns,
-            tonumber,
-            tonumberns,
-            ttisfloat,
-            ttisinteger,
-            ttisstring,
+            chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_idiv, lua_imod,
+            lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat,
+            pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue, tointeger,
+            tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger, ttisstring,
         },
     },
 };
@@ -72,154 +50,6 @@ pub use metamethod::TmKind;
 // pub use metamethod::call_tm;
 
 use crate::lua_vm::LuaError;
-use crate::lua_vm::call_info::call_status::CIST_YPCALL;
-
-/// Finish a C frame left on the call stack after yield-resume.
-/// This is the Rust equivalent of Lua 5.5's finishCcall.
-///
-/// Currently handles:
-/// - CIST_YPCALL: pcall whose body completed after yield.
-///   The body's return values are on the stack.  Insert `true` before them,
-///   pop the pcall C frame, and adjust results like call_c_function would.
-fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
-    use crate::lua_vm::call_info::call_status::CIST_RECST;
-
-    let ci = lua_state.get_call_info(frame_idx);
-    let pcall_func_pos = ci.base - ci.func_offset;
-    let nresults = ci.nresults;
-    let has_recst = ci.call_status & CIST_RECST != 0;
-
-    if ci.call_status & CIST_YPCALL != 0 {
-        if has_recst {
-            // Error recovery completed (or continuing) after yield.
-            // Retrieve the saved error value and try to close remaining TBC entries.
-            let error_val = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
-            lua_state.clear_error();
-            let close_level = pcall_func_pos + 1; // body's base position
-
-            // Try to close remaining TBC entries
-            let close_result = lua_state.close_tbc_with_error(close_level, error_val.clone());
-
-            match close_result {
-                Ok(()) => {
-                    // All TBC entries closed. Set up (false, error) result.
-                    let final_err = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
-                    let result_err = if !final_err.is_nil() {
-                        final_err
-                    } else {
-                        error_val
-                    };
-                    lua_state.clear_error();
-
-                    lua_state.stack_set(pcall_func_pos, LuaValue::boolean(false))?;
-                    lua_state.stack_set(pcall_func_pos + 1, result_err)?;
-                    let n = 2;
-
-                    // Pop pcall C frame
-                    lua_state.pop_frame();
-
-                    // Handle nresults adjustment
-                    let final_n = if nresults == -1 { n } else { nresults as usize };
-                    let new_top = pcall_func_pos + final_n;
-
-                    if nresults >= 0 {
-                        let wanted = nresults as usize;
-                        for i in n..wanted {
-                            lua_state.stack_set(pcall_func_pos + i, LuaValue::nil())?;
-                        }
-                    }
-
-                    lua_state.set_top_raw(new_top);
-
-                    // Restore caller frame top
-                    if lua_state.call_depth() > 0 {
-                        let ci_idx = lua_state.call_depth() - 1;
-                        if nresults == -1 {
-                            let ci_top = lua_state.get_call_info(ci_idx).top;
-                            if ci_top < new_top {
-                                lua_state.get_call_info_mut(ci_idx).top = new_top;
-                            }
-                        } else {
-                            let frame_top = lua_state.get_call_info(ci_idx).top;
-                            lua_state.set_top_raw(frame_top);
-                        }
-                    }
-
-                    Ok(())
-                }
-                Err(LuaError::Yield) => {
-                    // Another TBC close method yielded. Save cascaded error and yield.
-                    let cascaded = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
-                    lua_state.error_object = if !cascaded.is_nil() {
-                        cascaded
-                    } else {
-                        error_val
-                    };
-                    Err(LuaError::Yield)
-                }
-                Err(e) => {
-                    // TBC close threw — propagate as error
-                    Err(e)
-                }
-            }
-        } else {
-            // pcall body completed successfully after yield.
-            // Body's return values are at pcall_func_pos + 1 … top-1.
-            // We need: [true, res1, res2, ...] starting at pcall_func_pos.
-            let stack_top = lua_state.get_top();
-            let body_results_start = pcall_func_pos + 1;
-            let body_nres = if stack_top > body_results_start {
-                stack_top - body_results_start
-            } else {
-                0
-            };
-
-            // Place true at pcall_func_pos (body results already at +1)
-            lua_state.stack_set(pcall_func_pos, LuaValue::boolean(true))?;
-
-            let n = 1 + body_nres; // total results: true + body results
-
-            // Pop pcall C frame
-            lua_state.pop_frame();
-
-            // Handle nresults adjustment (same as call_c_function post-processing)
-            let final_n = if nresults == -1 { n } else { nresults as usize };
-            let new_top = pcall_func_pos + final_n;
-
-            if nresults >= 0 {
-                let wanted = nresults as usize;
-                // Pad with nil if needed
-                for i in n..wanted {
-                    lua_state.stack_set(pcall_func_pos + i, LuaValue::nil())?;
-                }
-            }
-
-            lua_state.set_top_raw(new_top);
-
-            // Restore caller frame top
-            if lua_state.call_depth() > 0 {
-                let ci_idx = lua_state.call_depth() - 1;
-                if nresults == -1 {
-                    let ci_top = lua_state.get_call_info(ci_idx).top;
-                    if ci_top < new_top {
-                        lua_state.get_call_info_mut(ci_idx).top = new_top;
-                    }
-                } else {
-                    let frame_top = lua_state.get_call_info(ci_idx).top;
-                    lua_state.set_top_raw(frame_top);
-                }
-            }
-
-            Ok(())
-        }
-    } else {
-        // Generic C frame after yield — just pop it.
-        // This shouldn't normally happen, but be safe.
-        lua_state.pop_frame();
-        Ok(())
-    }
-}
-
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
 /// without affecting caller frames
@@ -229,8 +59,6 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 /// - Function calls/returns just update pointers and continue
 /// - Zero Rust function call overhead
 pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
-    use crate::lua_vm::call_info::call_status::{CIST_C, CIST_PENDING_FINISH};
-
     // STARTFUNC: Function context switching point (like Lua C's startfunc label)
     'startfunc: loop {
         // Check if we've returned past target depth.
@@ -244,43 +72,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Safety: frame_idx < call_depth (guaranteed by check above)
         let ci = lua_state.get_call_info(frame_idx);
 
-        // Combined cold-path check: C frame or pending metamethod finish.
+        // Cold-path check: C frame or pending metamethod finish.
         // Normal Lua function entry: call_status == CIST_LUA, so this is always
-        // predicted not-taken. One branch instead of three.
+        // predicted not-taken.
         if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
-            if ci.call_status & CIST_C != 0 {
-                // C frame left on stack after yield-resume (e.g. pcall body yielded)
-                finish_c_frame(lua_state, frame_idx)?;
+            if handle_pending_ops(lua_state, frame_idx)? {
                 continue 'startfunc;
             }
-            // === luaV_finishOp equivalent ===
-            // A prior metamethod yielded; finish the interrupted operation.
-            let ci = lua_state.get_call_info(frame_idx);
-            let pending = ci.pending_finish_get;
-            let base_tmp = ci.base;
-            if pending >= 0 {
-                // GET metamethod returned: copy result to destination register
-                let dest = base_tmp + pending as usize;
-                let top = lua_state.get_top();
-                if top > 0 {
-                    let result = lua_state.stack_mut()[top - 1];
-                    lua_state.stack_mut()[dest] = result;
-                }
-                let ci_top = lua_state.get_call_info(frame_idx).top;
-                lua_state.set_top_raw(ci_top);
-            } else {
-                // pending == -2: SET metamethod returned, just restore top
-                let ci_top = lua_state.get_call_info(frame_idx).top;
-                lua_state.set_top_raw(ci_top);
-            }
-            // Clear the pending flag
-            let ci_mut = lua_state.get_call_info_mut(frame_idx);
-            ci_mut.pending_finish_get = -1;
-            ci_mut.call_status &= !CIST_PENDING_FINISH;
         }
 
         // Hot path: read CI fields for Lua function dispatch.
-        // Separate read from the cold-path check to keep register pressure low.
         let ci = lua_state.get_call_info(frame_idx);
         let func_value = ci.func;
         let mut pc = ci.pc as usize;
@@ -308,15 +109,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Macro to restore state after operations that may change frames
         macro_rules! restore_state {
             () => {
-                if frame_idx < lua_state.call_depth() {
-                    base = lua_state.get_frame_base(frame_idx);
-                } else {
-                    panic!(
-                        "restore_state: frame_idx {} >= call_depth {}",
-                        frame_idx,
-                        lua_state.call_depth()
-                    );
-                }
+                debug_assert!(frame_idx < lua_state.call_depth());
+                base = lua_state.get_frame_base(frame_idx);
             };
         }
 
@@ -1842,7 +1636,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             const TM_LEN_BIT: u8 = TmKind::Len as u8;
                             if !mt.no_tm(TM_LEN_BIT) {
                                 // fasttm says __len might exist — do hash lookup
-                                let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
+                                let event_key =
+                                    lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
                                 if let Some(mm) = mt.raw_get(&event_key) {
                                     // Found __len metamethod — call it
                                     save_pc!();
@@ -1852,7 +1647,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 } else {
                                     // Not found — cache absence, use primitive length
                                     mt.set_tm_absent(TM_LEN_BIT);
-                                    setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                                    setivalue(
+                                        &mut lua_state.stack_mut()[base + a],
+                                        table.len() as i64,
+                                    );
                                 }
                             } else {
                                 // fasttm: __len known absent — primitive length
