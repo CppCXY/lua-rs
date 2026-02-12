@@ -23,6 +23,7 @@ pub fn create_io_lib() -> LibraryModule {
         "close" => io_close,
         "popen" => io_popen,
     })
+    .with_initializer(init_io_streams)
 }
 
 // Note: stdin, stdout, stderr should be initialized separately with init_io_streams()

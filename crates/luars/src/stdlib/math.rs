@@ -51,7 +51,7 @@ fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
 
     // Fast path: preserve integer type
     if let Some(i) = value.as_integer() {
-        l.push_value(LuaValue::integer(i.abs()))?;
+        l.push_value(LuaValue::integer(i.wrapping_abs()))?;
         return Ok(1);
     }
 
@@ -313,7 +313,7 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
             if m < 1 {
                 return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
-            let result = (random * m as f64).floor() as i64 + 1;
+            let result = ((random * m as f64).floor() as i64).wrapping_add(1);
             l.push_value(LuaValue::integer(result))?;
             Ok(1)
         }
@@ -339,8 +339,8 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
             if m > n {
                 return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
-            let range = (n - m + 1) as f64;
-            let result = m + (random * range).floor() as i64;
+            let range = ((n as u64).wrapping_sub(m as u64).wrapping_add(1)) as f64;
+            let result = m.wrapping_add((random * range).floor() as i64);
             l.push_value(LuaValue::integer(result))?;
             Ok(1)
         }

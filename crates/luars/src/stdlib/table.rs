@@ -65,7 +65,9 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     let sep_value = l.get_arg(2);
     let sep = match sep_value {
         Some(v) => {
-            if let Some(s) = v.as_str() {
+            if v.is_nil() {
+                "".to_string()
+            } else if let Some(s) = v.as_str() {
                 s.to_string()
             } else {
                 return Err(l.error("bad argument #2 to 'concat' (string expected)".to_string()));
@@ -74,16 +76,14 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         None => "".to_string(),
     };
 
-    let Some(table) = table_val.as_table() else {
+    if !table_val.is_table() {
         return Err(l.error("bad argument #1 to 'concat' (table expected)".to_string()));
-    };
+    }
 
-    // Get arguments
+    let table = table_val.as_table().unwrap();
+
     let i = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j = l
-        .get_arg(4)
-        .and_then(|v| v.as_integer())
-        .unwrap_or_else(|| table.len() as i64);
+    let j = l.get_arg(4).and_then(|v| v.as_integer()).unwrap_or(table.len() as i64);
 
     // If i > j, return empty string immediately
     if i > j {
@@ -92,56 +92,25 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    // Check for reasonable table indices (Lua has limits on table size)
-    // Lua 5.4 uses a limit based on the maximum size of the array part
-    const MAX_TABLE_INDEX: i64 = (1 << 26) - 1; // About 67 million, reasonable for array indices
-
-    if i < 1 {
-        return Err(l.error(format!("invalid value (at index {})", i)));
-    }
-
-    // Check if indices are out of reasonable range
-    // But allow it if the table actually has values at those indices
-    let table_has_large_indices = i > MAX_TABLE_INDEX || j > MAX_TABLE_INDEX;
-    if table_has_large_indices {
-        // Check if table actually has values in the requested range
-        let has_value_at_i = table.raw_geti(i).is_some();
-        let has_value_at_j = if i == j {
-            has_value_at_i
-        } else {
-            table.raw_geti(j).is_some()
-        };
-
-        if !has_value_at_i && !has_value_at_j {
-            // Table doesn't have values at these large indices, report error at the first large index
-            let error_idx = if i > MAX_TABLE_INDEX { i } else { j };
-            return Err(l.error(format!("invalid value (at index {})", error_idx)));
-        }
-    }
-
     let mut parts = Vec::new();
     for idx in i..=j {
-        if let Some(value) = table.raw_geti(idx) {
-            if let Some(s) = value.as_str() {
-                parts.push(s.to_string());
-            } else if let Some(i) = value.as_integer() {
-                parts.push(format!("{}", i));
-            } else if let Some(f) = value.as_number() {
-                // Use Lua-style float formatting
-                if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
-                    parts.push(format!("{:.1}", f));
-                } else {
-                    // Rust doesn't have %g; use Display which approximates it
-                    parts.push(format!("{}", f));
-                }
+        let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+        if let Some(s) = value.as_str() {
+            parts.push(s.to_string());
+        } else if let Some(ival) = value.as_integer() {
+            parts.push(format!("{}", ival));
+        } else if let Some(f) = value.as_number() {
+            if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
+                parts.push(format!("{:.1}", f));
             } else {
-                let msg = format!("bad value at index {} in 'concat' (string expected)", idx);
-                return Err(l.error(msg));
+                parts.push(format!("{}", f));
             }
+        } else {
+            let msg = format!("invalid value (at index {}) in table for 'concat'", idx);
+            return Err(l.error(msg));
         }
     }
 
-    // Concat the parts with separator
     let result = l.create_string(&parts.join(&sep))?;
     l.push_value(result)?;
     Ok(1)
@@ -154,34 +123,19 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'insert' (table expected)".to_string()))?;
     let argc = l.arg_count();
 
-    let Some(table) = table_val.as_table() else {
+    if !table_val.is_table() {
         return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
-    };
+    }
 
-    let len = table.len();
+    let table = table_val.as_table_mut().unwrap();
+    let len = table.len() as i64;
 
     if argc == 2 {
         // table.insert(list, value) - append at end
         let value = l
             .get_arg(2)
             .ok_or_else(|| l.error("bad argument #2 to 'insert' (value expected)".to_string()))?;
-        let Some(table_ref) = table_val.as_table_mut() else {
-            return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
-        };
-        // Append at position len + 1 (1-based indexing)
-        match table_ref.insert_array_at(len as i64 + 1, value) {
-            Ok(new_key) => {
-                if new_key {
-                    // New key inserted - run GC barrier
-                    if value.is_collectable() {
-                        l.vm_mut().gc.barrier_back(table_val.as_gc_ptr().unwrap());
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(l.error(format!("error inserting into table: {}", e)));
-            }
-        }
+        table.raw_seti(len.wrapping_add(1), value);
     } else if argc == 3 {
         // table.insert(list, pos, value)
         let pos = l
@@ -194,25 +148,13 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
             .get_arg(3)
             .ok_or_else(|| l.error("bad argument #3 to 'insert' (value expected)".to_string()))?;
 
-        if pos < 1 || pos > len as i64 + 1 {
+        if pos < 1 || pos > len + 1 {
             return Err(l.error("bad argument #2 to 'insert' (position out of bounds)".to_string()));
         }
-        let Some(table_ref) = table_val.as_table_mut() else {
-            return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
-        };
-        match table_ref.insert_array_at(pos, value) {
-            Ok(new_key) => {
-                if new_key {
-                    // New key inserted - run GC barrier
-                    if value.is_collectable() {
-                        l.vm_mut().gc.barrier_back(table_val.as_gc_ptr().unwrap());
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(l.error(format!("error inserting into table: {}", e)));
-            }
-        }
+
+        // Shift elements up: t[i+1] = t[i] for i = len down to pos
+        let table = table_val.as_table_mut().unwrap();
+        table.insert_array_at(pos, value)?;
     } else {
         return Err(l.error("wrong number of arguments to 'insert'".to_string()));
     }
@@ -226,37 +168,42 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'remove' (table expected)".to_string()))?;
 
-    let Some(table) = table_val.as_table() else {
+    if !table_val.is_table() {
         return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
-    };
-
-    let len = table.len();
-
-    if len == 0 {
-        l.push_value(LuaValue::nil())?;
-        return Ok(1);
     }
 
+    let table = table_val.as_table_mut().unwrap();
+    let len = table.len() as i64;
+
+    // Default pos = #t (like C Lua: luaL_optinteger(L, 2, size))
+    let has_pos_arg = l.get_arg(2).is_some();
     let pos = l
         .get_arg(2)
         .and_then(|v| v.as_integer())
-        .unwrap_or(len as i64);
+        .unwrap_or(len);
 
-    if pos < 1 || pos > len as i64 {
-        return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
+    // Only validate pos if explicitly given (C Lua: "if (pos != size)")
+    if has_pos_arg && pos != len {
+        if pos < 1 || pos > len.wrapping_add(1) {
+            return Err(
+                l.error("bad argument #2 to 'remove' (position out of bounds)".to_string())
+            );
+        }
     }
 
-    let Some(table_ref) = table_val.as_table_mut() else {
-        return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
-    };
+    // Get the value at pos
+    let removed = table.raw_geti(pos).unwrap_or(LuaValue::nil());
 
-    // Remove the element using the proper method
-    let removed = match table_ref.remove_array_at(pos) {
-        Ok(val) => val,
-        Err(e) => {
-            return Err(l.error(format!("error removing from table: {}", e)));
-        }
-    };
+    // Shift elements down: t[i] = t[i+1] for i = pos to len-1
+    let mut i = pos;
+    while i < len {
+        let next_val = table.raw_geti(i.wrapping_add(1)).unwrap_or(LuaValue::nil());
+        table.raw_seti(i, next_val);
+        i += 1;
+    }
+
+    // Remove the last entry: t[len] = nil
+    table.raw_seti(i, LuaValue::nil());
 
     l.push_value(removed)?;
     Ok(1)
@@ -286,21 +233,25 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
         .as_integer()
         .ok_or_else(|| l.error("bad argument #4 to 'move' (number expected)".to_string()))?;
 
-    let dst_value = l.get_arg(5).unwrap_or_else(|| src_val.clone());
+    let dst_value = l.get_arg(5).unwrap_or(src_val);
 
-    // Copy elements
-    let Some(src_ref) = src_val.as_table() else {
-        return Err(l.error("bad argument #1 to 'move' (table expected)".to_string()));
-    };
+    let src_table = src_val
+        .as_table()
+        .ok_or_else(|| l.error("bad argument #1 to 'move' (table expected)".to_string()))?;
 
+    // Copy elements from source using raw access
     let mut values = Vec::new();
     for i in f..=e {
-        let val = src_ref.raw_geti(i).unwrap_or(LuaValue::nil());
+        let val = src_table.raw_geti(i).unwrap_or(LuaValue::nil());
         values.push(val);
     }
 
+    // Write to destination using raw access
+    let dst_table = dst_value
+        .as_table_mut()
+        .ok_or_else(|| l.error("bad argument #5 to 'move' (table expected)".to_string()))?;
     for (offset, val) in values.into_iter().enumerate() {
-        l.raw_seti(&dst_value, t + offset as i64, val);
+        dst_table.raw_seti(t.wrapping_add(offset as i64), val);
     }
 
     l.push_value(dst_value)?;
@@ -334,17 +285,14 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'unpack' (table expected)".to_string()))?;
 
-    let Some(table_ref) = table_val.as_table() else {
+    if !table_val.is_table() {
         return Err(l.error("bad argument #1 to 'unpack' (table expected)".to_string()));
-    };
+    }
 
-    // Get arguments
-    let len = table_ref.len();
+    let table = table_val.as_table().unwrap();
+
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j = l
-        .get_arg(3)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(len as i64);
+    let j = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(table.len() as i64);
 
     // Handle empty range
     if i > j {
@@ -356,15 +304,15 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     if count > 1_000_000 {
         return Err(l.error("too many results to unpack".to_string()));
     }
-    let count = count as usize;
 
-    // Collect all values
-    let mut values = Vec::with_capacity(count);
+    // Collect all values using raw access
+    let mut values = Vec::with_capacity(count as usize);
     for idx in i..=j {
-        values.push(table_ref.raw_geti(idx).unwrap_or(LuaValue::nil()));
+        let val = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+        values.push(val);
     }
 
-    // Push values after vm borrow ends
+    // Push values
     let count = values.len();
     for val in values {
         l.push_value(val)?;

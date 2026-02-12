@@ -257,7 +257,7 @@ pub fn lua_idiv(a: i64, b: i64) -> i64 {
     let q = a / b;
     // If the signs of a and b differ and there is a remainder,
     // subtract 1 to achieve floor division (toward -infinity)
-    if (a ^ b) < 0 && a % b != 0 { q - 1 } else { q }
+    if (a ^ b) < 0 && a % b != 0 { q.wrapping_sub(1) } else { q }
 }
 
 /// Lua modulo for integers: a % b
@@ -269,7 +269,7 @@ pub fn lua_imod(a: i64, b: i64) -> i64 {
         return 0;
     }
     let m = a % b;
-    if m != 0 && (m ^ b) < 0 { m + b } else { m }
+    if m != 0 && (m ^ b) < 0 { m.wrapping_add(b) } else { m }
 }
 
 // ============ 类型转换辅助函数 ============

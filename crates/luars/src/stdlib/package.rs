@@ -64,6 +64,11 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     l.raw_set(&package_table, config_key, config_value);
     l.raw_set(&package_table, searchers_key, searchers_table_value);
 
+    // Add package itself to package.loaded (normally lib_registry does this,
+    // but package.loaded doesn't exist yet when the package module is first loaded)
+    let package_mod_key = l.create_string("package")?;
+    l.raw_set(&loaded_table, package_mod_key, package_table.clone());
+
     // Store loaded table and package table in registry for use by require
     // This matches standard Lua's LUA_LOADED_TABLE ("_LOADED") and upvalue approach
     let vm = l.vm_mut();

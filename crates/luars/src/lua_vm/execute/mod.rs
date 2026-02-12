@@ -49,14 +49,14 @@ use crate::{
                 chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_idiv, lua_imod,
                 lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat,
                 pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
-                tointeger, tointegerns, tonumber, tonumberns, ttisfloat, ttisinteger,
+                tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
             },
         },
     },
 };
 pub use helper::{get_metamethod_event, get_metatable};
 pub use metamethod::TmKind;
-// pub use metamethod::call_tm;
+pub use metamethod::call_tm_res;
 
 use crate::lua_vm::LuaError;
 
@@ -1211,7 +1211,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = base + a;
 
                     if ttisinteger(&stack[ra]) && ttisinteger(&stack[ra + 2]) {
-                        // Integer loop
+                        // Integer loop (init and step are integers)
                         let init = ivalue(&stack[ra]);
                         let step = ivalue(&stack[ra + 2]);
 
@@ -1220,21 +1220,55 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             return Err(lua_state.error("'for' step is zero".to_string()));
                         }
 
-                        let limit = if ttisinteger(&stack[ra + 1]) {
-                            ivalue(&stack[ra + 1])
-                        } else if ttisfloat(&stack[ra + 1]) {
-                            let flimit = fltvalue(&stack[ra + 1]);
-                            if step < 0 {
-                                flimit.ceil() as i64
-                            } else {
-                                flimit.floor() as i64
+                        // forlimit: convert limit to integer per C Lua 5.5 logic
+                        let (limit, should_skip) = 'forlimit: {
+                            // Try integer limit directly
+                            if ttisinteger(&stack[ra + 1]) {
+                                let lim = ivalue(&stack[ra + 1]);
+                                let skip = if step > 0 { init > lim } else { init < lim };
+                                break 'forlimit (lim, skip);
                             }
-                        } else {
-                            save_pc!();
-                            return Err(lua_state.error("'for' limit must be a number".to_string()));
+                            // Try converting to float (handles float and string)
+                            let mut flimit = 0.0;
+                            if !tonumberns(&stack[ra + 1], &mut flimit) {
+                                save_pc!();
+                                return Err(
+                                    lua_state.error("'for' limit must be a number".to_string())
+                                );
+                            }
+                            // Try rounding the float to integer
+                            let nl = if step < 0 {
+                                flimit.ceil()
+                            } else {
+                                flimit.floor()
+                            };
+                            // Check if the rounded float fits in i64
+                            if nl >= (i64::MIN as f64) && nl <= (i64::MAX as f64) && nl == nl {
+                                let lim = nl as i64;
+                                let skip = if step > 0 { init > lim } else { init < lim };
+                                break 'forlimit (lim, skip);
+                            }
+                            // Float is out of integer range — use C Lua overflow logic
+                            if flimit > 0.0 {
+                                // Positive float out of range
+                                if step < 0 {
+                                    // Descending loop can't reach large positive limit
+                                    break 'forlimit (0, true);
+                                }
+                                // Ascending loop: truncate to MAXINTEGER
+                                let skip = init > i64::MAX; // always false, but matches pattern
+                                break 'forlimit (i64::MAX, skip);
+                            } else {
+                                // Negative float out of range (or -inf, NaN)
+                                if step > 0 {
+                                    // Ascending loop can't reach very negative limit
+                                    break 'forlimit (0, true);
+                                }
+                                // Descending loop: truncate to MININTEGER
+                                let skip = init < i64::MIN; // always false
+                                break 'forlimit (i64::MIN, skip);
+                            }
                         };
-
-                        let should_skip = if step > 0 { init > limit } else { init < limit };
 
                         if should_skip {
                             pc += bx + 1;

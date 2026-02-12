@@ -338,7 +338,6 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'ipairs' (value expected)".to_string()))?;
 
-    // Validate that it's a table
     if !table_val.is_table() {
         return Err(l.error("bad argument #1 to 'ipairs' (table expected)".to_string()));
     }
@@ -355,12 +354,11 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
 #[inline]
 fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
     // SAFETY: ipairs always provides (table, index) as args 1 and 2.
-    // push_c_frame guarantees EXTRA_STACK (5) slots above frame_top.
     let (table_val, index_val) = unsafe { (l.get_arg_unchecked(1), l.get_arg_unchecked(2)) };
 
     if let Some(table) = table_val.as_table() {
         if let Some(index) = index_val.as_integer() {
-            let next_index = index + 1;
+            let next_index = index.wrapping_add(1);
             if let Some(value) = table.raw_geti(next_index) {
                 unsafe {
                     l.push_value_unchecked(LuaValue::integer(next_index));
@@ -383,14 +381,13 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
 fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
     let table_val = l
         .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'pairs' (value expected)".to_string()))?;
+        .ok_or_else(|| l.error("bad argument #1 to 'pairs' (table expected)".to_string()))?;
 
-    // Validate that it's a table
     if !table_val.is_table() {
         return Err(l.error("bad argument #1 to 'pairs' (table expected)".to_string()));
     }
 
-    // Return next function, table, and nil (3 values)
+    // Return next, table, nil (3 values)
     let next_func = LuaValue::cfunction(lua_next);
     l.push_value(next_func)?;
     l.push_value(table_val)?;
@@ -401,15 +398,17 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 /// next(table [, index]) - Return next key-value pair
 /// Port of Lua 5.5's luaB_next using luaH_next
 fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
-    // SAFETY: pairs always provides (table, key) as args 1-2.
-    // push_c_frame guarantees EXTRA_STACK slots.
-    let (table_val, index_val) = unsafe { (l.get_arg_unchecked(1), l.get_arg_unchecked(2)) };
+    // arg 1 is the table (required), arg 2 is the key (optional, defaults to nil)
+    let table_val = unsafe { l.get_arg_unchecked(1) };
+    let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
 
     let result = {
         let table = table_val
             .as_table()
             .ok_or_else(|| l.error("bad argument #1 to 'next' (table expected)".to_string()))?;
-        table.next(&index_val)
+        table
+            .next(&index_val)
+            .map_err(|_| l.error("invalid key to 'next'".to_string()))?
     };
 
     if let Some((k, v)) = result {

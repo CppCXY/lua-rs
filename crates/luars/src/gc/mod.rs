@@ -1743,7 +1743,7 @@ impl GC {
 
         // CRITICAL FIX: Use next() instead of iter_all() to avoid allocation
         let mut key = LuaValue::nil();
-        while let Some((k, v)) = table.next(&key) {
+        while let Some((k, v)) = table.next(&key).unwrap_or(None) {
             // Mark key (strong reference)
             if let Some(key_ptr) = k.as_gc_ptr() {
                 self.mark_object(l, key_ptr);
@@ -1826,7 +1826,7 @@ impl GC {
         let mut marked = self.traverse_array(l, table_ptr);
 
         let mut key = LuaValue::nil();
-        while let Some((k, v)) = table.next(&key) {
+        while let Some((k, v)) = table.next(&key).unwrap_or(None) {
             let key_ptr = k.as_gc_ptr();
             let val_ptr = v.as_gc_ptr();
 

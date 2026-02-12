@@ -11,6 +11,7 @@ use std::ptr;
 
 /// Node for hash table - mimics Lua 5.5's Node structure
 /// Key-Value pair + next pointer for collision chaining
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Node {
     /// Value stored in this node
@@ -241,36 +242,34 @@ impl NativeTable {
             *self.get_arr_tag(k) = luaval.tt;
             *self.get_arr_val(k) = luaval.value;
 
-            // Update lenhint
+            // Update lenhint — tracks the length of the initial contiguous
+            // non-nil sequence from index 1 (i.e., the largest i such that
+            // a[1]..a[i] are all non-nil).
             let lenhint = *self.lenhint_ptr();
 
             if !luaval.is_nil() {
                 // Adding a non-nil value
                 if lua_index == lenhint as i64 + 1 {
-                    // Extending the array
-                    *self.lenhint_ptr() = lenhint + 1;
-                } else if lua_index > lenhint as i64 + 1 {
-                    // Adding beyond lenhint - lenhint stays the same (there's a hole)
-                }
-            } else {
-                // Setting to nil
-                // Only reduce lenhint if we're clearing the last element
-                // For holes in the middle, pairs() will skip them correctly
-                if lua_index == lenhint as i64 {
-                    // Find the new lenhint by scanning backwards
-                    let mut new_lenhint = lua_index as u32 - 1;
-                    while new_lenhint > 0 {
-                        let check_idx = new_lenhint as usize - 1;
-                        let tag = *self.get_arr_tag(check_idx);
-                        if tag != LUA_VNIL && tag != LUA_VEMPTY {
+                    // Extending the sequence — scan forward past any
+                    // existing non-nil elements to find the true boundary
+                    let mut new_lenhint = lua_index as u32;
+                    let asize = self.asize;
+                    while new_lenhint < asize {
+                        let tag = *self.get_arr_tag(new_lenhint as usize);
+                        if tag == LUA_VNIL || tag == LUA_VEMPTY {
                             break;
                         }
-                        new_lenhint -= 1;
+                        new_lenhint += 1;
                     }
                     *self.lenhint_ptr() = new_lenhint;
                 }
-                // If clearing an element in the middle, lenhint stays the same
-                // This allows pairs() to continue iterating past holes
+                // If lua_index > lenhint+1: there's a hole, lenhint unchanged
+                // If lua_index <= lenhint: already in the sequence, lenhint unchanged
+            } else {
+                // Setting to nil — if within the current sequence, truncate
+                if lua_index <= lenhint as i64 {
+                    *self.lenhint_ptr() = (lua_index as u32) - 1;
+                }
             }
         }
     }
@@ -428,11 +427,18 @@ impl NativeTable {
 
         // Rehash old entries - CRITICAL: Use raw_set to respect array/hash invariant
         // lua5.5's reinserthash calls newcheckedkey which checks keyinarray
+        // CRITICAL: Only rehash LIVE entries (non-empty value).
+        // Dead keys (key non-nil, value nil) must be skipped because:
+        // 1. The GC does not mark strings referenced only by dead keys
+        // 2. Those strings may have been collected (freed)
+        // 3. Hashing a freed string → use-after-free → crash (0xC0000005)
+        // This matches C Lua 5.5's reinserthash: `if (!isempty(gval(old)))`
         if !was_dummy && old_size > 0 {
             for i in 0..old_size {
                 unsafe {
                     let old_n = old_node.add(i);
-                    if !(*old_n).key.is_nil() {
+                    // Only rehash entries with live values (skip dead keys)
+                    if !(*old_n).key.is_nil() && !(*old_n).value.is_nil() {
                         let key = (*old_n).key;
                         let value = (*old_n).value;
                         // Must use raw_set here, not set_node!
@@ -587,11 +593,20 @@ impl NativeTable {
                 return true;
             }
 
-            // If main position is free, use it
+            // If main position is free (nil key), use it
             if (*mp).key.is_nil() {
                 (*mp).key = *key;
                 (*mp).value = value;
                 (*mp).next = 0;
+                return true;
+            }
+
+            // If main position has a dead key (nil value), reuse it
+            // Preserve chain linkage so other chains passing through are intact
+            if (*mp).value.is_nil() {
+                (*mp).key = *key;
+                (*mp).value = value;
+                // Keep (*mp).next as-is
                 return true;
             }
 
@@ -725,6 +740,13 @@ impl NativeTable {
         None // Table is full
     }
 
+    /// Compute the node offset from `from` to `to` as an i32.
+    /// Equivalent to C Lua's `cast_int(to - from)` for Node pointers.
+    #[inline(always)]
+    fn node_offset(from: *mut Node, to: *mut Node) -> i32 {
+        ((to as isize - from as isize) / std::mem::size_of::<Node>() as isize) as i32
+    }
+
     fn set_node(&mut self, key: LuaValue, value: LuaValue) {
         // If setting to nil, find existing node and only clear value (keep key for next() iteration)
         if value.is_nil() {
@@ -756,40 +778,89 @@ impl NativeTable {
         let mp = self.mainposition(&key);
 
         unsafe {
-            // If main position is free, use it
+            // If main position is free (nil key) or dead (nil value), use it.
+            // Matches C Lua 5.5: `if (!isempty(gval(mp)))`.
+            // CRITICAL: Dead keys must be treated as free to avoid hashing their
+            // (potentially GC-collected) string keys in mainposition() below.
+            // When reusing a dead key's slot, preserve the `next` link so that
+            // any chain passing through this slot remains intact.
             if (*mp).key.is_nil() {
                 (*mp).key = key;
                 (*mp).value = value;
                 (*mp).next = 0;
                 return;
             }
-
-            // Check if key already exists
-            let mut node = mp;
-            loop {
-                if (*node).key == key {
-                    (*node).value = value;
-                    return;
-                }
-
-                let next = (*node).next;
-                if next == 0 {
-                    break;
-                }
-                node = node.offset(next as isize);
+            if (*mp).value.is_nil() {
+                // Dead key: reuse slot, preserve chain linkage
+                (*mp).key = key;
+                (*mp).value = value;
+                // Keep (*mp).next as-is — other chains may pass through here
+                return;
             }
 
-            // Need to add new node - find free position using getfreepos
-            if let Some(free_node) = self.getfreepos() {
-                // Found free node
-                (*free_node).key = key;
-                (*free_node).value = value;
-                (*free_node).next = 0;
+            // Main position is occupied by a LIVE entry.
+            // Check if the occupying node belongs here.
+            // Port of C Lua 5.5 newkey collision handling.
+            let othern = self.mainposition(&(*mp).key);
 
-                // Link to chain
-                (*node).next = (free_node as isize - node as isize) as i32
-                    / std::mem::size_of::<Node>() as i32;
-                return;
+            if othern != mp {
+                // Case 1: Colliding node is NOT at its main position (displaced).
+                // Move the displaced node to a free slot and give mp to the new key.
+                // First, get a free position.
+                if let Some(free_node) = self.getfreepos() {
+                    // Find the previous node in the displaced node's own chain
+                    let mut prev = othern;
+                    while prev.offset((*prev).next as isize) != mp {
+                        prev = prev.offset((*prev).next as isize);
+                    }
+                    // Relink previous to point to free_node instead of mp
+                    (*prev).next = Self::node_offset(prev, free_node);
+                    // Copy the displaced node into the free slot (including its next pointer)
+                    *free_node = *mp;
+                    // Correct the next pointer: it was relative to mp, now it's relative to free_node
+                    if (*free_node).next != 0 {
+                        (*free_node).next += Self::node_offset(free_node, mp);
+                    }
+                    // Now mp is free for the new key
+                    (*mp).key = key;
+                    (*mp).value = value;
+                    (*mp).next = 0;
+                    return;
+                }
+                // No free position - fall through to resize
+            } else {
+                // Case 2: Colliding node IS at its main position.
+                // The new key will go into a free slot, linked into mp's chain.
+
+                // First check if key already exists in the chain
+                let mut node = mp;
+                loop {
+                    if (*node).key == key {
+                        (*node).value = value;
+                        return;
+                    }
+                    let next = (*node).next;
+                    if next == 0 {
+                        break;
+                    }
+                    node = node.offset(next as isize);
+                }
+
+                // Key not found - insert at a free position
+                if let Some(free_node) = self.getfreepos() {
+                    (*free_node).key = key;
+                    (*free_node).value = value;
+                    // Link new node at the HEAD of the chain (right after mp),
+                    // matching C Lua 5.5 behavior: gnext(f) = mp+gnext(mp) - f
+                    if (*mp).next != 0 {
+                        (*free_node).next = Self::node_offset(free_node, mp.offset((*mp).next as isize));
+                    } else {
+                        (*free_node).next = 0;
+                    }
+                    (*mp).next = Self::node_offset(mp, free_node);
+                    return;
+                }
+                // No free position - fall through to resize
             }
 
             // No free nodes - need to resize
@@ -881,10 +952,12 @@ impl NativeTable {
         !key_exists && !value.is_nil()
     }
 
-    /// Get length (#t)
+    /// Get length (#t) — simplified: returns the lenhint maintained by write_array.
+    /// This tracks the highest consecutive index from 1 that has a non-nil value.
+    /// Differs from C Lua which can search hash continuation — we only count array part.
     #[inline(always)]
     pub fn len(&self) -> usize {
-        if self.array.is_null() {
+        if self.array.is_null() || self.asize == 0 {
             return 0;
         }
         unsafe { *self.lenhint_ptr() as usize }
@@ -1049,13 +1122,16 @@ impl NativeTable {
 
     /// Port of lua5.5's luaH_next
     /// Table iteration following the unified indexing scheme
-    pub fn next(&self, key: &LuaValue) -> Option<(LuaValue, LuaValue)> {
+    /// Port of lua5.5's luaH_next.
+    /// Returns Ok(Some((key, value))) for next entry, Ok(None) for end of table,
+    /// or Err(()) for invalid key (key not found in table).
+    pub fn next(&self, key: &LuaValue) -> Result<Option<(LuaValue, LuaValue)>, ()> {
         let asize = self.asize;
 
         // Get starting index from the input key
         let mut i = match self.findindex(key) {
             Some(idx) => idx,
-            None => return None, // Invalid key (not found in table)
+            None => return Err(()), // Invalid key (not found in table)
         };
 
         // First, scan the array part [i..asize)
@@ -1066,7 +1142,7 @@ impl NativeTable {
                     // Found a non-empty array entry
                     let lua_index = (i + 1) as i64;
                     let value = self.read_array(lua_index).unwrap();
-                    return Some((LuaValue::integer(lua_index), value));
+                    return Ok(Some((LuaValue::integer(lua_index), value)));
                 }
             }
             i += 1;
@@ -1081,13 +1157,13 @@ impl NativeTable {
                 let node = self.node.add(i as usize);
                 if !(*node).key.is_nil() && !(*node).value.is_nil() {
                     // Found a non-empty hash entry (key present and value not nil)
-                    return Some(((*node).key, (*node).value));
+                    return Ok(Some(((*node).key, (*node).value)));
                 }
             }
             i += 1;
         }
 
-        None // No more elements
+        Ok(None) // No more elements
     }
 
     /// GC-safe iteration: call f for each entry

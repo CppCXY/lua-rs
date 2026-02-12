@@ -1617,6 +1617,58 @@ impl LuaState {
         execute::helper::lookup_from_metatable(self, table, key)
     }
 
+    /// Set value in table with metamethod support (__newindex)
+    pub fn table_set(
+        &mut self,
+        table: &LuaValue,
+        key: LuaValue,
+        value: LuaValue,
+    ) -> LuaResult<()> {
+        execute::helper::finishset(self, table, &key, value)?;
+        Ok(())
+    }
+
+    /// Get object length with metamethod support (__len)
+    /// Returns the length as i64, going through __len if available.
+    pub fn obj_len(&mut self, obj: &LuaValue) -> LuaResult<i64> {
+        if let Some(s) = obj.as_str() {
+            return Ok(s.len() as i64);
+        }
+        if let Some(table) = obj.as_table_mut() {
+            let meta = table.meta_ptr();
+            if !meta.is_null() {
+                let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                const TM_LEN_BIT: u8 = execute::TmKind::Len as u8;
+                if !mt.no_tm(TM_LEN_BIT) {
+                    let event_key =
+                        self.vm_mut().const_strings.get_tm_value(execute::TmKind::Len);
+                    if let Some(mm) = mt.raw_get(&event_key) {
+                        let result =
+                            execute::call_tm_res(self, mm, *obj, *obj)?;
+                        return result
+                            .as_integer()
+                            .ok_or_else(|| self.error("object length is not an integer".to_string()));
+                    } else {
+                        mt.set_tm_absent(TM_LEN_BIT);
+                    }
+                }
+            }
+            return Ok(table.len() as i64);
+        }
+        if let Some(mm) =
+            execute::get_metamethod_event(self, obj, execute::TmKind::Len)
+        {
+            let result = execute::call_tm_res(self, mm, *obj, *obj)?;
+            return result
+                .as_integer()
+                .ok_or_else(|| self.error("object length is not an integer".to_string()));
+        }
+        Err(self.error(format!(
+            "attempt to get length of a {} value",
+            obj.type_name()
+        )))
+    }
+
     /// Set value in table
     pub fn raw_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
         self.vm_mut().raw_set(table, key, value)
