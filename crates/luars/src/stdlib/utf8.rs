@@ -52,7 +52,9 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
             Err(e) if !lax => {
                 // Return nil and position of first invalid byte (1-based)
                 l.push_value(LuaValue::nil())?;
-                l.push_value(LuaValue::integer(e.valid_up_to() as i64 + 1))?;
+                let err_msg = format!("invalid UTF-8 sequence at byte {}", e.valid_up_to() + 1);
+                let err_value = l.create_string(&err_msg)?;
+                l.push_value(err_value)?;
                 return Ok(2);
             }
             Err(_) if lax => {
@@ -70,12 +72,15 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
 
     // Convert 1-based byte positions to 0-based byte indices
     let start_byte = ((i - 1).max(0) as usize).min(bytes.len());
-    let end_byte = (j.max(0) as usize).min(bytes.len());
+    let end_byte = j.max(0) as usize;
+    if end_byte > bytes.len() {
+        let err_msg = format!("out of bounds: end byte {} exceeds string length {}", end_byte, bytes.len());
+        return Err(l.error(err_msg));
+    }
 
     if start_byte > end_byte {
-        l.push_value(LuaValue::nil())?;
-        l.push_value(LuaValue::integer(start_byte as i64 + 1))?;
-        return Ok(2);
+        let err_msg = format!("invalid range: start byte {} is greater than end byte {}", start_byte + 1, end_byte);
+        return Err(l.error(err_msg));
     }
 
     // Count UTF-8 characters in byte range
@@ -88,9 +93,7 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
         Err(e) if !lax => {
             // Return nil and position of first invalid byte (1-based)
             let error_pos = start_byte + e.valid_up_to() + 1;
-            l.push_value(LuaValue::nil())?;
-            l.push_value(LuaValue::integer(error_pos as i64))?;
-            Ok(2)
+            return Err(l.error(format!("invalid UTF-8 sequence at byte {}", error_pos)));
         }
         Err(_) if lax => {
             // In lax mode, just return nil
@@ -271,8 +274,8 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
     let start_byte = if i > 0 { i - 1 } else { 0 };
 
     if start_byte > bytes.len() {
-        l.push_value(LuaValue::nil())?;
-        return Ok(1);
+        let err_msg = format!("position out of bounds: byte position {} exceeds string length {}", start_byte + 1, bytes.len());
+        return Err(l.error(err_msg));
     }
 
     let mut pos = start_byte;
@@ -289,16 +292,16 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
                 pos += ch.len_utf8();
                 count -= 1;
             } else {
-                l.push_value(LuaValue::nil())?;
-                return Ok(1);
+                let err_msg = format!("invalid UTF-8 sequence at byte {}", pos + 1);
+                return Err(l.error(err_msg));
             }
         }
         if count == 0 {
             l.push_value(LuaValue::integer((pos + 1) as i64))?;
             Ok(1)
         } else {
-            l.push_value(LuaValue::nil())?;
-            Ok(1)
+            let err_msg = format!("position out of bounds: byte position {} exceeds string length {}", pos + 1, bytes.len());
+            return Err(l.error(err_msg));
         }
     } else {
         // Backward
@@ -314,8 +317,8 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(LuaValue::integer((pos + 1) as i64))?;
             Ok(1)
         } else {
-            l.push_value(LuaValue::nil())?;
-            Ok(1)
+            let err_msg = format!("position out of bounds: byte position {} exceeds string length {}", pos + 1, bytes.len());
+            return Err(l.error(err_msg));
         }
     }
 }
