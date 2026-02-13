@@ -453,6 +453,230 @@ impl NativeTable {
         }
     }
 
+    /// Port of Lua 5.5's rehash from ltable.c
+    /// Computes optimal sizes for array and hash parts, then resizes.
+    /// Called when hash part is full and a new key needs to be inserted.
+    ///
+    /// This ensures integer keys are properly distributed between array and
+    /// hash parts, even when the table is sparse (e.g., after GC clearing
+    /// entries from a weak table).
+    fn rehash(&mut self, extra_key: &LuaValue) {
+        const MAXABITS: usize = 30; // max bits for array index (Lua 5.5 uses 26-31)
+
+        // nums[i] = number of integer keys k where 2^(i-1) < k <= 2^i
+        // nums[0] = number of keys with k == 1 (i.e., 2^0)
+        let mut nums = [0u32; MAXABITS + 1];
+
+        // Count integer keys in array part
+        let mut na = self.numusearray(&mut nums);
+        let mut totaluse = na as usize;
+
+        // Count integer keys in hash part
+        totaluse += self.numusehash(&mut nums, &mut na);
+
+        // Count the extra key (the key being inserted)
+        if extra_key.ttisinteger() {
+            let k = extra_key.ivalue();
+            if k >= 1 && (k as u64) <= (1u64 << MAXABITS) {
+                na += 1;
+                // Find which bin: ceil(log2(k))
+                let bin = if k == 1 { 0 } else { 64 - ((k - 1) as u64).leading_zeros() as usize };
+                if bin <= MAXABITS {
+                    nums[bin] += 1;
+                }
+            }
+        }
+        totaluse += 1; // count the extra key
+
+        // Compute optimal array size
+        let (optimal_asize, na_in_array) = Self::computesizes(&nums, na);
+
+        // Number of entries for hash part
+        let hash_entries = totaluse - na_in_array as usize;
+
+        // Resize both parts
+        self.resize(optimal_asize, hash_entries as u32);
+    }
+
+    /// Port of Lua 5.5's numusearray
+    /// Count integer keys in array part, populating nums[] bins.
+    fn numusearray(&self, nums: &mut [u32]) -> u32 {
+        let mut ause = 0u32; // total non-nil integer keys in array
+        let asize = self.asize;
+
+        if asize == 0 {
+            return 0;
+        }
+
+        // Iterate through array and count non-nil entries per power-of-2 bin
+        let mut twotoi = 1u32; // 2^i
+        let mut bin = 0usize;
+        let mut i = 1u32; // lua index (1-based)
+
+        while bin < nums.len() && twotoi <= asize {
+            // Count entries in range (twotoi/2, twotoi]
+            // For bin 0: range is (0, 1] i.e., just index 1
+            let limit = twotoi.min(asize);
+            while i <= limit {
+                unsafe {
+                    let k = (i - 1) as usize;
+                    let tag = *self.get_arr_tag(k);
+                    if tag != LUA_VNIL && tag != LUA_VEMPTY {
+                        ause += 1;
+                        nums[bin] += 1;
+                    }
+                }
+                i += 1;
+            }
+            bin += 1;
+            twotoi *= 2;
+        }
+
+        ause
+    }
+
+    /// Port of Lua 5.5's numusehash
+    /// Count total entries in hash part, and for integer keys, add to nums[].
+    fn numusehash(&self, nums: &mut [u32], na: &mut u32) -> usize {
+        let size = self.sizenode();
+        let mut totaluse = 0usize;
+
+        for i in 0..size {
+            unsafe {
+                let node = self.node.add(i);
+                if !(*node).key.is_nil() && !(*node).value.is_nil() {
+                    totaluse += 1;
+                    // Check if key is a positive integer
+                    if (*node).key.ttisinteger() {
+                        let k = (*node).key.ivalue();
+                        if k >= 1 && (k as u64) <= (1u64 << 30) {
+                            *na += 1;
+                            let bin = if k == 1 { 0 } else { 64 - ((k - 1) as u64).leading_zeros() as usize };
+                            if bin < nums.len() {
+                                nums[bin] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        totaluse
+    }
+
+    /// Port of Lua 5.5's computesizes
+    /// Compute optimal array size: largest power of 2 such that
+    /// more than half the slots would be filled.
+    /// Returns (optimal_array_size, count_of_integer_keys_going_to_array).
+    fn computesizes(nums: &[u32], na: u32) -> (u32, u32) {
+        let mut a = 0u32; // count of elements <= 2^i
+        let mut na_final = 0u32; // elements going to array
+        let mut optimal = 0u32; // optimal array size
+
+        let mut twotoi = 1u32; // 2^i candidate size
+
+        for i in 0..nums.len() {
+            if twotoi == 0 { break; } // overflow
+            if na <= twotoi / 2 { break; } // remaining keys can't fill half
+
+            a += nums[i];
+            if a > twotoi / 2 {
+                // More than half elements present → good size
+                optimal = twotoi;
+                na_final = a;
+            }
+            twotoi = twotoi.wrapping_mul(2);
+        }
+
+        (optimal, na_final)
+    }
+
+    /// Resize both array and hash parts. Port of Lua 5.5's luaH_resize.
+    /// Moves integer keys to array and non-integer keys to hash.
+    fn resize(&mut self, new_asize: u32, new_hash_count: u32) {
+        let old_asize = self.asize;
+
+        // Shrink array if needed: move excess array entries to hash
+        // (not common but Lua 5.5 supports it)
+        if new_asize < old_asize {
+            // First, resize hash to accommodate new entries
+            let new_lsize = if new_hash_count > 0 {
+                Self::compute_lsizenode(new_hash_count)
+            } else { 0 };
+            self.resize_hash(new_lsize);
+
+            // Move array entries [new_asize+1..old_asize] to hash
+            for i in (new_asize + 1)..=old_asize {
+                unsafe {
+                    if let Some(val) = self.read_array(i as i64) {
+                        let key = LuaValue::integer(i as i64);
+                        self.set_node(key, val);
+                    }
+                }
+            }
+            self.resize_array(new_asize);
+        } else {
+            // Grow or keep array the same
+            if new_asize > old_asize {
+                self.resize_array(new_asize);
+            }
+
+            // Resize hash
+            let new_lsize = if new_hash_count > 0 {
+                Self::compute_lsizenode(new_hash_count)
+            } else { 0 };
+
+            // Save old hash data
+            let save_node = self.node;
+            let save_size = self.sizenode();
+            let save_dummy = self.is_dummy();
+
+            // Allocate new hash
+            if new_lsize > 0 {
+                let new_size = 1usize << new_lsize;
+                let layout = Layout::array::<Node>(new_size).unwrap();
+                let new_node = unsafe { alloc::alloc(layout) as *mut Node };
+                if new_node.is_null() {
+                    panic!("Failed to allocate hash nodes");
+                }
+                unsafe {
+                    for i in 0..new_size {
+                        let node = new_node.add(i);
+                        ptr::write(node, Node {
+                            value: LuaValue::nil(),
+                            key: LuaValue::nil(),
+                            next: 0,
+                        });
+                    }
+                }
+                self.node = new_node;
+                self.lsizenode = new_lsize;
+                self.lastfree = unsafe { new_node.add(new_size) };
+            } else {
+                self.node = ptr::null_mut();
+                self.lsizenode = 0;
+                self.lastfree = ptr::null_mut();
+            }
+
+            // Re-insert old hash entries
+            if !save_dummy && save_size > 0 {
+                for i in 0..save_size {
+                    unsafe {
+                        let old_n = save_node.add(i);
+                        if !(*old_n).key.is_nil() && !(*old_n).value.is_nil() {
+                            let key = (*old_n).key;
+                            let value = (*old_n).value;
+                            // Use raw_set: integer keys in [1..new_asize] go to array
+                            self.raw_set(&key, value);
+                        }
+                    }
+                }
+                let old_layout = Layout::array::<Node>(save_size).unwrap();
+                unsafe { alloc::dealloc(save_node as *mut u8, old_layout) };
+            }
+        }
+    }
+
     /// Get main position for a key (hash index)
     #[inline(always)]
     fn mainposition(&self, key: &LuaValue) -> *mut Node {
@@ -530,9 +754,9 @@ impl NativeTable {
             return;
         }
 
-        // Only expand array if key is exactly length+1 (push operation)
-        // This avoids creating sparse arrays with large holes
-        if key >= 1 {
+        // Key outside array range: push optimization for sequential insertion
+        // Let rehash() handle proper rebalancing when hash fills up
+        if key >= 1 && !value.is_nil() {
             let current_len = self.len() as i64;
             if key == current_len + 1 {
                 // This is a push operation, expand array
@@ -545,7 +769,7 @@ impl NativeTable {
             }
         }
 
-        // Put in hash part
+        // Put in hash part (rehash will rebalance later if needed)
         let key_val = LuaValue::integer(key);
         self.set_node(key_val, value);
     }
@@ -646,10 +870,12 @@ impl NativeTable {
 
         loop {
             unsafe {
-                // Compare keys with proper equality (handles long string content comparison)
-                if (*node).key == *key {
-                    let val = (*node).value;
-                    return if val.is_nil() { None } else { Some(val) };
+                // CRITICAL: Skip dead keys (value is nil) to avoid use-after-free.
+                // Dead keys may reference freed GC objects (e.g., long strings).
+                // Comparing them would dereference dangling pointers → crash.
+                // This matches Lua 5.5's dead key handling (LUA_TDEADKEY type).
+                if !(*node).value.is_nil() && (*node).key == *key {
+                    return Some((*node).value);
                 }
 
                 let next = (*node).next;
@@ -757,7 +983,8 @@ impl NativeTable {
                 let mp = self.mainposition(&key);
                 let mut node = mp;
                 loop {
-                    if (*node).key == key {
+                    // Skip dead keys (value nil) - avoid UAF on freed strings
+                    if !(*node).value.is_nil() && (*node).key == key {
                         (*node).value = LuaValue::nil();
                         return;
                     }
@@ -835,7 +1062,8 @@ impl NativeTable {
                 // First check if key already exists in the chain
                 let mut node = mp;
                 loop {
-                    if (*node).key == key {
+                    // Skip dead keys (value nil) to avoid UAF on freed strings
+                    if !(*node).value.is_nil() && (*node).key == key {
                         (*node).value = value;
                         return;
                     }
@@ -863,9 +1091,13 @@ impl NativeTable {
                 // No free position - fall through to resize
             }
 
-            // No free nodes - need to resize
-            self.resize_hash(self.lsizenode + 1);
-            self.set_node(key, value);
+            // No free nodes - need to rehash (Lua 5.5's rehash)
+            // This rebalances integer keys between array and hash parts,
+            // which is critical when GC has cleared weak table entries
+            // and corrupted lenhint, causing integer keys to end up in hash.
+            self.rehash(&key);
+            // After rehash, use raw_set to insert with the new layout
+            self.raw_set(&key, value);
         }
     }
 
@@ -927,12 +1159,20 @@ impl NativeTable {
                 unsafe {
                     self.write_array(i, value);
                 }
+                // DEFENSIVE: If setting to nil, also clear any stale hash entry
+                // for this integer key. This can happen when GC clearing corrupted
+                // lenhint and a key was placed in both array and hash parts.
+                if value.is_nil() {
+                    self.set_node(key, LuaValue::nil());
+                }
                 return was_nil && !value.is_nil();
             }
 
             // Integer key outside current array range
-            // If it's a push operation (i == len+1), expand array
-            if i >= 1 {
+            // Use Lua 5.5-like approach: if this is a sequential push (i == len+1),
+            // expand array optimistically. Otherwise, fall through to hash and
+            // let rehash() handle proper rebalancing when hash fills up.
+            if i >= 1 && !value.is_nil() {
                 let current_len = self.len() as i64;
                 if i == current_len + 1 {
                     let new_size = ((i as u32).next_power_of_two()).max(4);
@@ -1102,8 +1342,9 @@ impl NativeTable {
 
         unsafe {
             loop {
-                // Check if this node has our key
-                if (*node).key == *key {
+                // CRITICAL: Skip dead keys (value nil) to avoid use-after-free
+                // on freed GC objects (e.g., long strings).
+                if !(*node).value.is_nil() && (*node).key == *key {
                     // Found the key, calculate its unified index
                     let hash_idx =
                         (node as usize - self.node as usize) / std::mem::size_of::<Node>();

@@ -1019,18 +1019,18 @@ impl GC {
 
         let mut keys_to_remove = Vec::new();
 
-        for (k, value) in entries {
+        for (k, value) in &entries {
             if let Some(val_ptr) = value.as_gc_ptr() {
                 if self.is_cleared(l, val_ptr) {
-                    keys_to_remove.push(k);
+                    keys_to_remove.push(k.clone());
                 }
             }
         }
 
         // Remove entries with dead values
         let table = &mut table_ptr.as_mut_ref().data;
-        for key in keys_to_remove {
-            table.raw_set(&key, LuaValue::nil());
+        for key in &keys_to_remove {
+            table.raw_set(key, LuaValue::nil());
         }
     }
 
@@ -1976,14 +1976,29 @@ impl GC {
             // Lua 5.5 lgc.c traversethread atomic phase:
             // for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
             //     setnilvalue(s2v(o));  /* clear dead stack slice */
-            // This clears stale/dead values above the current stack top so that
-            // future set_top growth won't expose dangling references.
+            //
+            // IMPORTANT: We must compute the real "stack in use" extent, not
+            // just get_top(). Some instructions (e.g. NEWTABLE, CONCAT) temporarily
+            // lower L->top before calling check_gc(). If the GC reaches the atomic
+            // phase during such a window, get_top() returns a value BELOW live
+            // local variables. Clearing from get_top() would destroy them.
+            //
+            // This mirrors C Lua's stackinuse(): we take the max of L->top and
+            // all ci->top (plus base+maxstacksize for Lua frames) across all
+            // active call frames to find the true highest live slot.
             {
                 let state = &mut gc_thread.data;
-                let stack_top = state.get_top();
+                let mut stack_in_use = state.get_top();
+                let call_depth = state.call_depth();
+                for ci_idx in 0..call_depth {
+                    let ci = state.get_call_info(ci_idx);
+                    if ci.top > stack_in_use {
+                        stack_in_use = ci.top;
+                    }
+                }
                 let stack_len = state.stack_len();
                 let stack = state.stack_mut();
-                for i in stack_top..stack_len {
+                for i in stack_in_use..stack_len {
                     stack[i] = LuaValue::nil();
                 }
             }
@@ -3326,8 +3341,11 @@ impl GC {
         // Stop GC during finalization (g->gcstp |= GCSTPGC)
         // GCSTPGC prevents GC reentrancy by making collectgarbage() return false
         let old_stopem = self.gc_stopem;
-        let old_debt = self.gc_debt;
         self.gc_stopem = true; // This is GCSTPGC, not GCSTPUSR (gc_stopped)
+
+        // NOTE: Unlike our old code, we do NOT save/restore gc_debt here.
+        // Lua 5.5's GCTM only saves/restores gcstp, not GCdebt.
+        // Allocations during finalizer execution should properly affect gc_debt.
 
         // TODO: Save and restore L->allowhook (requires VM support)
         // TODO: Set L->ci->callstatus |= CIST_FIN (requires VM support)
@@ -3337,7 +3355,6 @@ impl GC {
 
         // Restore GC state
         self.gc_stopem = old_stopem;
-        self.gc_debt = old_debt;
 
         // If error occurred, warn but don't propagate
         if let Err(_) = result {
