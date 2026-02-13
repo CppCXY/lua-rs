@@ -6,6 +6,6 @@ members = [
 
 [workspace.dependencies]
 # local
-luars = { path = "crates/luars", version = "0.1.0" }
+luars = { path = "crates/luars", version = "0.2.0" }
 
 wasm-bindgen = "0.2"
