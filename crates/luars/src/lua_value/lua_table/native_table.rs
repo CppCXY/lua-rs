@@ -760,7 +760,6 @@ impl NativeTable {
         }
 
         // Key outside array range: push optimization for sequential insertion
-        // Let rehash() handle proper rebalancing when hash fills up
         if key >= 1 && !value.is_nil() {
             let current_len = self.len() as i64;
             if key == current_len + 1 {
@@ -770,6 +769,11 @@ impl NativeTable {
                 unsafe {
                     self.write_array(key, value);
                 }
+                // After expanding, migrate any integer keys from hash that now
+                // fit in the new array range. Without this, keys already in hash
+                // (e.g., r[3]=true; r[5]=true; r[1]=true) would become invisible
+                // to raw_get since it checks array first for in-range keys.
+                self.migrate_hash_int_keys_to_array();
                 return;
             }
         }
@@ -817,26 +821,22 @@ impl NativeTable {
         unsafe {
             // Check main position first
             if (*mp).key.is_string() && (*mp).key.value.i == key_ptr {
-                // Found existing key - update value
+                // Key matches at main position
+                if (*mp).value.is_nil() {
+                    // Dead key (value=nil): fall through to slow path.
+                    // The slow path calls invalidate_tm_cache() which is
+                    // needed when re-inserting keys like "__eq" into metatables.
+                    return false;
+                }
+                // Live key - update value in place
                 (*mp).value = value;
                 return true;
             }
 
-            // If main position is free (nil key), use it
+            // If main position is free (nil key), fall through to slow path
+            // for TM cache invalidation on new key insertion.
             if (*mp).key.is_nil() {
-                (*mp).key = *key;
-                (*mp).value = value;
-                (*mp).next = 0;
-                return true;
-            }
-
-            // If main position has a dead key (nil value), reuse it
-            // Preserve chain linkage so other chains passing through are intact
-            if (*mp).value.is_nil() {
-                (*mp).key = *key;
-                (*mp).value = value;
-                // Keep (*mp).next as-is
-                return true;
+                return false;
             }
 
             // Check collision chain
@@ -845,7 +845,11 @@ impl NativeTable {
             while next != 0 {
                 node = node.offset(next as isize);
                 if (*node).key.is_string() && (*node).key.value.i == key_ptr {
-                    // Found in chain - update value
+                    if (*node).value.is_nil() {
+                        // Dead key in chain - slow path for TM cache invalidation
+                        return false;
+                    }
+                    // Live key in chain - update value
                     (*node).value = value;
                     return true;
                 }
@@ -949,6 +953,41 @@ impl NativeTable {
 
         // Hash part
         self.get_from_hash(&key)
+    }
+
+    /// After expanding the array part, move any integer keys from the hash
+    /// that now fall within [1..asize] into the array. This maintains the
+    /// invariant that integer keys in array range are stored ONLY in the
+    /// array part (otherwise `fast_geti`/`get_int` would miss them).
+    fn migrate_hash_int_keys_to_array(&mut self) {
+        let size = self.sizenode();
+        if size == 0 {
+            return;
+        }
+        let asize = self.asize as i64;
+        // Collect keys to migrate (can't modify hash while iterating)
+        let mut to_migrate: Vec<(i64, LuaValue)> = Vec::new();
+        for i in 0..size {
+            unsafe {
+                let node = self.node.add(i);
+                if !(*node).key.is_nil() && !(*node).value.is_nil() {
+                    if (*node).key.ttisinteger() {
+                        let k = (*node).key.ivalue();
+                        if k >= 1 && k <= asize {
+                            to_migrate.push((k, (*node).value));
+                        }
+                    }
+                }
+            }
+        }
+        // Move each key: write to array, remove from hash
+        for (k, v) in to_migrate {
+            unsafe {
+                self.write_array(k, v);
+            }
+            let key_val = LuaValue::integer(k);
+            self.set_node(key_val, LuaValue::nil()); // mark dead in hash
+        }
     }
 
     /// Set value in hash part
@@ -1175,8 +1214,9 @@ impl NativeTable {
 
             // Integer key outside current array range
             // Use Lua 5.5-like approach: if this is a sequential push (i == len+1),
-            // expand array optimistically. Otherwise, fall through to hash and
-            // let rehash() handle proper rebalancing when hash fills up.
+            // expand array optimistically. After expanding, migrate any integer
+            // keys from hash into the new array range to maintain the invariant
+            // that integer keys in [1..asize] only exist in the array part.
             if i >= 1 && !value.is_nil() {
                 let current_len = self.len() as i64;
                 if i == current_len + 1 {
@@ -1185,6 +1225,7 @@ impl NativeTable {
                     unsafe {
                         self.write_array(i, value);
                     }
+                    self.migrate_hash_int_keys_to_array();
                     return true;
                 }
             }

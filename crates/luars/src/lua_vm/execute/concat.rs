@@ -35,46 +35,83 @@ pub fn handle_concat(
     let a = instr.get_a() as usize;
     let n = instr.get_b() as usize;
 
-    match concat_strings(lua_state, *base, a, n) {
-        Ok(result) => {
-            let stack = lua_state.stack_mut();
-            stack[*base + a] = result;
-        }
-        Err(_) => {
-            if n >= 2 {
-                let (v1, v2) = {
-                    let stack = lua_state.stack_mut();
-                    (stack[*base + a + n - 2], stack[*base + a + n - 1])
-                };
+    // Fast path: try to concat all values at once (no tables/metamethods)
+    if let Ok(result) = concat_strings(lua_state, *base, a, n) {
+        let stack = lua_state.stack_mut();
+        stack[*base + a] = result;
+        lua_state.set_frame_pc(frame_idx, pc as u32);
+        lua_state.check_gc()?;
+        let frame_top = lua_state.get_call_info(frame_idx).top;
+        lua_state.set_top_raw(frame_top);
+        return Ok(());
+    }
 
-                if let Some(mm) = helper::get_binop_metamethod(lua_state, &v1, &v2, TmKind::Concat)
-                {
-                    lua_state.set_frame_pc(frame_idx, pc as u32);
-                    let result = metamethod::call_tm_res(lua_state, mm, v1, v2)?;
-                    *base = lua_state.get_frame_base(frame_idx);
+    // Slow path: process iteratively from right to left, like C Lua 5.5's luaV_concat.
+    // Stack range: [base+a .. base+a+n-1]. We track 'total' remaining values.
+    let mut total = n;
+    while total > 1 {
+        // Try to coalesce consecutive string/number values from the right end
+        // top points to base+a+total-1 (last value)
+        let top_idx = *base + a + total - 1;
 
-                    let stack = lua_state.stack_mut();
-                    stack[*base + a + n - 2] = result;
+        let v_top = lua_state.stack()[top_idx];
+        let v_prev = lua_state.stack()[top_idx - 1];
 
-                    if n == 2 {
-                        stack[*base + a] = result;
-                    } else {
-                        return Err(lua_state.error(
-                            "complex concat with metamethod not fully supported".to_string(),
-                        ));
-                    }
-                } else {
-                    return Err(lua_state.error(format!(
-                        "attempt to concatenate {} and {} values",
-                        v1.type_name(),
-                        v2.type_name()
-                    )));
+        let top_convertible = is_concat_convertible(&v_top);
+        let prev_convertible = is_concat_convertible(&v_prev);
+
+        if prev_convertible && top_convertible {
+            // Both are string/number - coalesce as many consecutive convertible values as possible
+            let mut coalesce_count = 2;
+            while coalesce_count < total {
+                let idx = top_idx - coalesce_count;
+                let v = lua_state.stack()[idx];
+                if !is_concat_convertible(&v) {
+                    break;
                 }
+                coalesce_count += 1;
+            }
+
+            // Concat the coalesced values
+            let start = top_idx + 1 - coalesce_count;
+            let result = concat_strings(lua_state, 0, start, coalesce_count)?;
+            let stack = lua_state.stack_mut();
+            stack[start] = result;
+            // "pop" the consumed values: total decreases by coalesce_count - 1
+            // Shift isn't needed since the result is at 'start' and we track by total
+            total -= coalesce_count - 1;
+            // Move result to the correct position if needed
+            let new_top = *base + a + total - 1;
+            if start != new_top {
+                let stack = lua_state.stack_mut();
+                stack[new_top] = stack[start];
+            }
+        } else {
+            // At least one value needs __concat metamethod
+            if let Some(mm) =
+                helper::get_binop_metamethod(lua_state, &v_prev, &v_top, TmKind::Concat)
+            {
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                let result = metamethod::call_tm_res(lua_state, mm, v_prev, v_top)?;
+                *base = lua_state.get_frame_base(frame_idx);
+
+                // Store result, replacing the two operands with one
+                let result_idx = *base + a + total - 2;
+                let stack = lua_state.stack_mut();
+                stack[result_idx] = result;
+                total -= 1;
             } else {
-                return Err(lua_state.error("concat requires at least 2 values".to_string()));
+                return Err(lua_state.error(format!(
+                    "attempt to concatenate {} and {} values",
+                    v_prev.type_name(),
+                    v_top.type_name()
+                )));
             }
         }
     }
+
+    // Final result is at stack[base+a]
+    // (It's already there since we've been collapsing towards the left)
 
     lua_state.set_frame_pc(frame_idx, pc as u32);
     lua_state.check_gc()?;
@@ -82,6 +119,12 @@ pub fn handle_concat(
     let frame_top = lua_state.get_call_info(frame_idx).top;
     lua_state.set_top_raw(frame_top);
     Ok(())
+}
+
+/// Check if a value can be directly converted to string for concatenation
+#[inline(always)]
+fn is_concat_convertible(value: &LuaValue) -> bool {
+    value.is_string() || value.is_binary() || value.as_integer().is_some() || value.as_float().is_some()
 }
 
 /// Write value's string representation directly to buffer

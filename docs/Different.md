@@ -173,3 +173,11 @@ In `test.lua` (a copy of `nextvar.lua`), the following five test sections are sk
 3. `__pairs` metamethod test (~line 912) — pairs triggers custom iterator + to-be-closed
 4. ipairs + `__index` metamethod test (~line 930) — ipairs reads virtual elements via `__index`
 5. yield inside `__pairs` test (~line 943) — yielding inside iterator returned by `__pairs`
+
+---
+
+## 19. No string-to-number coercion in arithmetic
+
+**C Lua 5.5**: Strings that look like numbers are automatically coerced to numbers in arithmetic operations (e.g., `"101" - 3` evaluates to `98`).
+
+**luars**: String-to-number coercion in arithmetic is not supported. Arithmetic operations on string operands will raise an error "attempt to perform arithmetic on non-number values". Related tests in `events.lua` have been modified (changed `"101"` to `101`).
