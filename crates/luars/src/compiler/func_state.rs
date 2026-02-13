@@ -156,9 +156,10 @@ impl VarKind {
         matches!(self, VarKind::GDKREG | VarKind::GDKCONST)
     }
 
-    // Test for readonly variables (const or for-loop control variable)
+    // Test for readonly variables (const, vararg parameter, or for-loop control variable)
+    // In Lua 5.5: vkisreadonly(v) => v->kind >= RDKCONST
     pub fn is_readonly(self) -> bool {
-        matches!(self, VarKind::RDKCONST | VarKind::GDKCONST)
+        matches!(self, VarKind::RDKCONST | VarKind::RDKVAVAR | VarKind::GDKCONST)
     }
 }
 

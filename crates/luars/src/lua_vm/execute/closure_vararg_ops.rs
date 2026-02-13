@@ -17,7 +17,43 @@ use crate::{
 
 use super::helper::{buildhiddenargs, setnilvalue};
 
+/// Get the number of vararg arguments from the vararg table's "n" field.
+/// Validates that "n" is a non-negative integer not larger than INT_MAX/2.
+/// Equivalent to C Lua 5.5's `getnumargs` when a vararg table exists.
+fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> LuaResult<usize> {
+    let table_val = {
+        let stack = lua_state.stack_mut();
+        stack[base + vatab_reg]
+    };
+
+    if let Some(table) = table_val.as_table_mut() {
+        // Read the "n" field from the table
+        let n_key = lua_state.create_string("n")?;
+        let n_val = table.raw_get(&n_key);
+
+        match n_val {
+            Some(val) if val.is_integer() => {
+                let n = val.as_integer().unwrap();
+                // l_castS2U(n) > cast_uint(INT_MAX/2) — treat as unsigned, must be <= i32::MAX/2
+                if (n as u64) > (i32::MAX as u64 / 2) {
+                    return Err(lua_state.error("vararg table has no proper 'n'".to_string()));
+                }
+                Ok(n as usize)
+            }
+            _ => {
+                Err(lua_state.error("vararg table has no proper 'n'".to_string()))
+            }
+        }
+    } else {
+        Err(lua_state.error("vararg table has no proper 'n'".to_string()))
+    }
+}
+
 /// VARARG: R[A], ..., R[A+C-2] = varargs
+///
+/// Lua 5.5: When k flag is set, B is the register of the vararg table.
+/// The number of varargs is read from the table's "n" field (which may
+/// have been modified by user code), not from CallInfo.nextraargs.
 pub fn exec_vararg(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -33,12 +69,18 @@ pub fn exec_vararg(
     // wanted = number of results wanted (C-1), -1 means all
     let wanted = if c == 0 { -1 } else { (c - 1) as i32 };
 
-    // Get nextraargs from CallInfo (set by VarargPrep)
-    let call_info = lua_state.get_call_info(frame_idx);
-    let nargs = call_info.nextraargs as usize;
-
     // Check if using vararg table (k flag set)
     let vatab = if k { b as i32 } else { -1 };
+
+    // Get the number of vararg arguments.
+    // If vatab mode, read "n" from the vararg table (user may have modified it).
+    // Otherwise, use nextraargs from CallInfo.
+    let nargs: usize = if vatab >= 0 {
+        get_vatab_len(lua_state, base, b)?
+    } else {
+        let call_info = lua_state.get_call_info(frame_idx);
+        call_info.nextraargs as usize
+    };
 
     // Calculate how many to copy
     let touse = if wanted < 0 {
@@ -82,14 +124,13 @@ pub fn exec_vararg(
             stack[ra + i] = val;
         }
     } else {
-        // Get from vararg table at R[B] - OPTIMIZED: Direct pointer access
+        // Get from vararg table at R[B]
         let table_val = {
             let stack = lua_state.stack_mut();
             stack[base + b]
         };
 
         if let Some(table) = table_val.as_table_mut() {
-            // Direct pointer access
             let mut values = Vec::with_capacity(touse);
             for i in 0..touse {
                 let val = table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil());

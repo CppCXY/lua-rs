@@ -111,6 +111,23 @@ pub fn handle_getvarg(
         } else {
             setnilvalue(&mut stack[ra_idx]);
         }
+    } else if rc.is_float() {
+        // Lua 5.5: tointegerns - convert integer-valued float to integer
+        let f = rc.as_float().unwrap();
+        let n = f as i64;
+        if (n as f64) == f {
+            // Float is integer-valued
+            let stack = lua_state.stack_mut();
+            if nextra > 0 && n >= 1 && (n as usize) <= nextra {
+                let slot = (base - 1) - nextra + (n as usize) - 1;
+                stack[ra_idx] = stack[slot];
+            } else {
+                setnilvalue(&mut stack[ra_idx]);
+            }
+        } else {
+            let stack = lua_state.stack_mut();
+            setnilvalue(&mut stack[ra_idx]);
+        }
     } else {
         let stack = lua_state.stack_mut();
         setnilvalue(&mut stack[ra_idx]);
