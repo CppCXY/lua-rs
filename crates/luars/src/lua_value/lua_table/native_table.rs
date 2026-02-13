@@ -341,12 +341,11 @@ impl NativeTable {
 
             unsafe {
                 // Copy values - values are stored backward from array pointer
-                // Old: array_old - old_size*8 .. array_old
-                // New: array_new - new_size*8 .. array_new
-                // We need to copy the old values to the END of the new values section
+                // Source: copy the FIRST copy_size values (indices 1..copy_size)
+                // V[0]..V[copy_size-1], at array - sizeof(Value) .. array - copy_size*sizeof(Value)
                 let old_values_start = self
                     .array
-                    .sub(old_size as usize * std::mem::size_of::<Value>())
+                    .sub(copy_size * std::mem::size_of::<Value>())
                     as *const Value;
                 let new_values_end = new_array.sub(std::mem::size_of::<Value>()) as *mut Value;
                 let new_values_start_for_copy = new_values_end.sub(copy_size - 1);
@@ -509,14 +508,20 @@ impl NativeTable {
         }
 
         // Iterate through array and count non-nil entries per power-of-2 bin
+        // Port of Lua 5.5's numusearray: must handle asize not being a power of 2.
         let mut twotoi = 1u32; // 2^i
         let mut bin = 0usize;
         let mut i = 1u32; // lua index (1-based)
 
-        while bin < nums.len() && twotoi <= asize {
-            // Count entries in range (twotoi/2, twotoi]
-            // For bin 0: range is (0, 1] i.e., just index 1
-            let limit = twotoi.min(asize);
+        while bin < nums.len() {
+            let mut limit = twotoi;
+            if limit > asize {
+                limit = asize;
+                if i > limit {
+                    break; // no more elements to count
+                }
+            }
+            // Count entries in range (twotoi/2, twotoi] clamped to asize
             while i <= limit {
                 unsafe {
                     let k = (i - 1) as usize;
@@ -529,7 +534,7 @@ impl NativeTable {
                 i += 1;
             }
             bin += 1;
-            twotoi *= 2;
+            twotoi = twotoi.wrapping_mul(2);
         }
 
         ause
