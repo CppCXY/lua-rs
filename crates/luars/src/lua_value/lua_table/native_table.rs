@@ -1319,24 +1319,18 @@ impl NativeTable {
             return Some(0);
         }
 
-        // Check if key is in array part (lua5.5's keyinarray)
-        // For integer keys in [1..asize], return the index directly
-        // BUT only if the key actually exists in the array (non-nil/non-empty)
+        // Check if key is in array part (Lua 5.5's keyinarray).
+        // Only checks if integer key is in [1..asize] — does NOT check whether
+        // the slot is empty. This is critical for next() iteration: after setting
+        // t[k] = nil during pairs(), the slot is empty but findindex must still
+        // return the index so iteration can continue past deleted entries.
         if let Some(i) = key.as_integer() {
             if i >= 1 && i <= self.asize as i64 {
-                // Verify the key is actually present in the array
-                unsafe {
-                    let k = (i - 1) as usize;
-                    let tag = *self.get_arr_tag(k);
-                    if tag != LUA_VNIL && tag != LUA_VEMPTY {
-                        return Some(i as u32);
-                    }
-                }
-                // Key is in array range but not in array -- fall through to hash
+                return Some(i as u32);
             }
         }
 
-        // Key must be in hash part - search for it (lua5.5's getgeneric)
+        // Key must be in hash part - search for it (Lua 5.5's getgeneric with deadok=1)
         let size = self.sizenode();
         if size == 0 {
             return None; // No hash part, key not found
@@ -1347,10 +1341,22 @@ impl NativeTable {
 
         unsafe {
             loop {
-                // CRITICAL: Skip dead keys (value nil) to avoid use-after-free
-                // on freed GC objects (e.g., long strings).
+                // Check live keys first (value not nil): full equality comparison
                 if !(*node).value.is_nil() && (*node).key == *key {
-                    // Found the key, calculate its unified index
+                    let hash_idx =
+                        (node as usize - self.node as usize) / std::mem::size_of::<Node>();
+                    return Some((hash_idx as u32 + 1) + self.asize);
+                }
+                // Check dead keys (value is nil, key preserved): use RAW comparison
+                // only (type tag + raw value bits). This avoids dereferencing freed
+                // GC objects (e.g., long strings) while still matching the exact
+                // same object returned by a previous next() call.
+                // Matches Lua 5.5's equalkey with deadok=1, which uses pointer
+                // comparison (gcvalue(k1) == gcvalueraw(keyval(n2))) for dead keys.
+                if (*node).value.is_nil() && !(*node).key.is_nil()
+                    && (*node).key.tt == key.tt
+                    && (*node).key.value.i == key.value.i
+                {
                     let hash_idx =
                         (node as usize - self.node as usize) / std::mem::size_of::<Node>();
                     return Some((hash_idx as u32 + 1) + self.asize);
@@ -1358,8 +1364,7 @@ impl NativeTable {
 
                 let next_offset = (*node).next;
                 if next_offset == 0 {
-                    // Key not found in chain
-                    return None;
+                    return None; // Key not found in chain
                 }
                 node = node.offset(next_offset as isize);
             }
