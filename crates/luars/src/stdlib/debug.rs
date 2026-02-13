@@ -870,19 +870,20 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
 
     let metatable = l.get_arg(2);
 
-    // Only support tables for now
+    let mt_val = match metatable {
+        Some(mt) if mt.is_nil() => None,
+        Some(mt) if mt.is_table() => Some(mt),
+        Some(_) => return Err(l.error("setmetatable() requires a table or nil".to_string())),
+        None => None,
+    };
+
     if let Some(table) = value.as_table_mut() {
-        if let Some(mt) = metatable {
-            if mt.is_nil() {
-                table.set_metatable(None);
-            } else if mt.is_table() {
-                table.set_metatable(Some(mt));
-            } else {
-                return Err(l.error("setmetatable() requires a table or nil".to_string()));
-            }
-        } else {
-            table.set_metatable(None);
-        }
+        // For tables, set metatable directly on the table
+        table.set_metatable(mt_val);
+    } else {
+        // For basic types (number, string, boolean), set the global type metatable
+        let kind = value.kind();
+        l.vm_mut().set_basic_metatable(kind, mt_val);
     }
 
     // Register for finalization if __gc is present

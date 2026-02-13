@@ -438,13 +438,20 @@ pub fn handle_tailcall(
         // because we're about to overwrite them with the new function's arguments
         lua_state.close_upvalues(base);
 
-        // Like Lua 5.5's luaD_pretailcall: move function and arguments down together
-        // Move func + args: [func, arg1, arg2, ...] to [ci->func, ci->func+1, ci->func+2, ...]
-        // This is: [base-1, base, base+1, ...] positions
+        // Like Lua 5.5's luaD_pretailcall: move function and arguments down
+        // to ci->func.p position (= base - func_offset), NOT base-1.
+        // This is critical for vararg functions where buildhiddenargs shifts
+        // base forward, making func_offset > 1. The return handler uses
+        // func_pos = base - func_offset to find where to place results,
+        // so func must be moved there to keep return positions correct.
+        let current_frame = lua_state.get_call_info(current_frame_idx);
+        let func_offset = current_frame.func_offset;
+        let func_pos = base - func_offset;
+
         let narg1 = nargs + 1; // Include function itself
         for i in 0..narg1 {
             let src_idx = func_idx + i;
-            let dst_idx = (base - 1) + i;
+            let dst_idx = func_pos + i;
             if let Some(val) = lua_state.stack_get(src_idx) {
                 lua_state.stack_set(dst_idx, val)?;
             } else {
@@ -453,7 +460,8 @@ pub fn handle_tailcall(
         }
 
         // After moving, update func reference to the moved position
-        let moved_func = lua_state.stack_get(base - 1).unwrap_or(func);
+        let new_base = func_pos + 1;
+        let moved_func = lua_state.stack_get(func_pos).unwrap_or(func);
 
         // Get the moved function body for parameter info
         let moved_func_body = moved_func.as_lua_function().ok_or_else(|| {
@@ -467,7 +475,7 @@ pub fn handle_tailcall(
 
         // Pad fixed parameters with nil if needed
         while current_nargs < numparams {
-            lua_state.stack_set(base + current_nargs, LuaValue::nil())?;
+            lua_state.stack_set(new_base + current_nargs, LuaValue::nil())?;
             current_nargs += 1;
         }
 
@@ -480,8 +488,17 @@ pub fn handle_tailcall(
 
         lua_state.set_frame_nextraargs(current_frame_idx, new_nextraargs);
 
+        // Update frame base and func_offset: reset to standard layout
+        // (func at new_base - 1, func_offset = 1). VARARGPREP will adjust
+        // again if the new function is vararg.
+        {
+            let ci = lua_state.get_call_info_mut(current_frame_idx);
+            ci.base = new_base;
+            ci.func_offset = 1;
+        }
+
         // Update frame top: func + 1 + maxstacksize
-        let frame_top = (base - 1) + 1 + chunk.max_stack_size;
+        let frame_top = func_pos + 1 + chunk.max_stack_size;
         // Ensure physical stack is large enough for the new function.
         // The tailcalled function may need more stack space than the caller.
         let needed_physical = frame_top + 5; // +5 = EXTRA_STACK
@@ -490,8 +507,8 @@ pub fn handle_tailcall(
         }
         lua_state.set_frame_top(current_frame_idx, frame_top);
 
-        // Set stack top: func + narg1 (after padding)
-        let stack_top = base + current_nargs;
+        // Set stack top: new_base + current_nargs
+        let stack_top = new_base + current_nargs;
         lua_state.set_top(stack_top)?;
 
         // Update frame func pointer to the moved function

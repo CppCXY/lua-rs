@@ -669,15 +669,13 @@ pub fn get_binop_metamethod(
 
 /// Get metatable for any value type
 pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaValue> {
-    if value.is_string() {
-        return lua_state.vm_mut().string_mt;
-    } else if let Some(table) = value.as_table_mut() {
+    if let Some(table) = value.as_table_mut() {
         return table.get_metatable();
     } else if let Some(ud) = value.as_userdata_mut() {
         return ud.get_metatable();
     }
-
-    None
+    // Basic types: use global type metatable
+    lua_state.vm_mut().get_basic_metatable(value.kind())
 }
 
 // ============================================================

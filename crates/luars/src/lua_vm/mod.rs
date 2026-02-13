@@ -60,6 +60,15 @@ pub struct LuaVM {
     /// String metatable (shared by all strings)
     pub(crate) string_mt: Option<LuaValue>,
 
+    /// Number metatable (shared by all numbers: integers and floats)
+    pub(crate) number_mt: Option<LuaValue>,
+
+    /// Boolean metatable (shared by all booleans)
+    pub(crate) bool_mt: Option<LuaValue>,
+
+    /// Nil metatable
+    pub(crate) nil_mt: Option<LuaValue>,
+
     pub(crate) safe_option: SafeOption,
 
     /// Shared C call depth counter — tracks real Rust stack depth across all
@@ -98,6 +107,9 @@ impl LuaVM {
             gc,
             main_state: ThreadPtr::null(), //,
             string_mt: None,
+            number_mt: None,
+            bool_mt: None,
+            nil_mt: None,
             safe_option: option.clone(),
             n_ccalls: 0,
             version: LuaLanguageLevel::Lua55,
@@ -791,16 +803,37 @@ impl LuaVM {
     }
 
     pub fn get_basic_metatable(&self, kind: LuaValueKind) -> Option<LuaValue> {
-        // support other metatables later
         match kind {
-            LuaValueKind::String => self.string_mt,
+            LuaValueKind::String | LuaValueKind::Binary => self.string_mt,
+            LuaValueKind::Integer | LuaValueKind::Float => self.number_mt,
+            LuaValueKind::Boolean => self.bool_mt,
+            LuaValueKind::Nil => self.nil_mt,
             _ => None,
+        }
+    }
+
+    pub fn set_basic_metatable(&mut self, kind: LuaValueKind, mt: Option<LuaValue>) {
+        match kind {
+            LuaValueKind::String | LuaValueKind::Binary => self.string_mt = mt,
+            LuaValueKind::Integer | LuaValueKind::Float => self.number_mt = mt,
+            LuaValueKind::Boolean => self.bool_mt = mt,
+            LuaValueKind::Nil => self.nil_mt = mt,
+            _ => {}
         }
     }
 
     pub fn get_basic_metatables(&self) -> Vec<LuaValue> {
         let mut mts = Vec::new();
         if let Some(mt) = &self.string_mt {
+            mts.push(mt.clone());
+        }
+        if let Some(mt) = &self.number_mt {
+            mts.push(mt.clone());
+        }
+        if let Some(mt) = &self.bool_mt {
+            mts.push(mt.clone());
+        }
+        if let Some(mt) = &self.nil_mt {
             mts.push(mt.clone());
         }
         mts
