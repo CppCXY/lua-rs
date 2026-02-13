@@ -1180,22 +1180,9 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         crate::lua_value::UpvalueStore::from_vec(upvalues),
     )?;
 
-    // Call the function with 0 arguments
-    let (success, results) = l.pcall(func, vec![])?;
-
-    if !success {
-        // Error occurred - results[0] contains error message
-        if !results.is_empty() {
-            // Re-throw the error with the actual message
-            let error_msg = if let Some(msg_str) = results[0].as_str() {
-                msg_str.to_string()
-            } else {
-                results[0].to_string()
-            };
-            return Err(l.error(error_msg));
-        }
-        return Err(l.error("error in dofile".to_string()));
-    }
+    // Call the function with 0 arguments (unprotected, like C Lua's lua_callk)
+    // Errors propagate naturally to the enclosing pcall boundary.
+    let results = l.call(func, vec![])?;
 
     // Push all results
     let num_results = results.len();

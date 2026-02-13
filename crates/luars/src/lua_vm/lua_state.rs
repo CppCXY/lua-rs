@@ -991,7 +991,22 @@ impl LuaState {
             let close_method = get_metamethod_event(self, &value, TmKind::Close);
 
             if let Some(close_fn) = close_method {
-                // Call __close(obj, err) with 2 arguments
+                // Match C Lua's prepcallclosemth: set L->top to just past the
+                // TBC variable + error slot.  This ensures ALL stack positions
+                // below (including pending TBC vars) are within the GC scan
+                // range (0..stack_top).  Place error on the stack at tbc_idx+1
+                // so it is also a GC root (not just a Rust local).
+                let err_slot = tbc_idx + 1;
+                let needed = err_slot + 1; // need at least tbc_idx + 2
+                if needed > self.stack.len() {
+                    self.grow_stack(needed + 3)?;
+                }
+                self.stack[err_slot] = current_error.clone();
+                self.set_top_raw(err_slot + 1);
+
+                // Call __close(obj, err) with 2 arguments.
+                // call_close_method_with_error will place the call starting at
+                // get_top() == tbc_idx + 2, right after the error slot.
                 let result =
                     self.call_close_method_with_error(&close_fn, &value, current_error.clone());
 
@@ -1693,6 +1708,81 @@ impl LuaState {
                 std::mem::take(&mut self.error_msg)
             }
         }
+    }
+
+    // ===== Unprotected Call =====
+
+    /// Unprotected call - like C Lua's lua_call / lua_callk.
+    /// Errors propagate as Err(LuaError) to the enclosing pcall boundary.
+    /// Does NOT create an error recovery boundary, so __close handlers
+    /// see the correct error chain without an extra pcall frame.
+    pub fn call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+        let initial_depth = self.call_depth();
+        let func_idx = self.stack.len();
+
+        // Push function and args to stack
+        let old_capacity = self.stack.capacity();
+        self.stack.push(func);
+        for arg in args {
+            self.stack.push(arg);
+        }
+        if self.stack.capacity() != old_capacity {
+            self.fix_open_upvalue_pointers();
+        }
+        let arg_count = self.stack.len() - func_idx - 1;
+        self.stack_top = self.stack.len();
+
+        // Resolve __call metamethod chain if needed
+        let (actual_arg_count, ccmt_depth) = resolve_call_chain(self, func_idx, arg_count)?;
+
+        let func_val = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("call: function not found".to_string()))?;
+
+        if func_val.is_c_callable() {
+            // C function - call directly via call_c_function (unprotected)
+            call_c_function(self, func_idx, actual_arg_count, -1)?;
+        } else {
+            // Lua function - push frame and execute
+            let base = func_idx + 1;
+            self.push_frame(&func_val, base, actual_arg_count, -1)?;
+
+            if ccmt_depth > 0 {
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status =
+                        call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r?; // Propagate errors without catching
+        }
+
+        // Collect results from func_idx to stack_top
+        let mut results = Vec::new();
+        for i in func_idx..self.stack_top {
+            if let Some(val) = self.stack_get(i) {
+                results.push(val);
+            }
+        }
+
+        // Clean up: remove function/result slots from physical stack
+        self.stack.truncate(func_idx);
+        self.stack_top = func_idx;
+
+        // Restore caller frame top if needed
+        if self.call_depth() > 0 {
+            let ci_idx = self.call_depth() - 1;
+            let frame_top = self.get_call_info(ci_idx).top;
+            if self.stack_top < frame_top {
+                self.stack_top = frame_top;
+            }
+        }
+
+        Ok(results)
     }
 
     // ===== Protected Call (pcall/xpcall) =====

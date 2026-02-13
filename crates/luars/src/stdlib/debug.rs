@@ -1170,6 +1170,14 @@ fn debug_upvalueid(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(LuaValue::integer(id))?;
             return Ok(1);
         }
+    } else if let Some(cclosure) = func.as_cclosure() {
+        let upvalues = cclosure.upvalues();
+        if up_index > 0 && up_index <= upvalues.len() {
+            // For C closures, use the address of the upvalue slot itself
+            let id = &upvalues[up_index - 1] as *const _ as usize as i64;
+            l.push_value(LuaValue::integer(id))?;
+            return Ok(1);
+        }
     }
 
     // Invalid upvalue index, return nil

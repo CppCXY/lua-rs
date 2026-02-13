@@ -1962,6 +1962,27 @@ impl GC {
                 count += 1;
             }
 
+            // Mark TBC (to-be-closed) variables that may be ABOVE stack_top.
+            // During error recovery (e.g., pcall unwinding), frames are popped
+            // but TBC variables in those frames haven't been closed yet.
+            // Their stack positions may be above stack_top, invisible to the
+            // scan above.  This mirrors C Lua's prepcallclosemth which sets
+            // L->top near the TBC variable level to keep lower entries marked.
+            for &tbc_idx in state.tbc_list.iter() {
+                if tbc_idx >= top && tbc_idx < stack.len() {
+                    self.mark_value(l, &stack[tbc_idx]);
+                    count += 1;
+                }
+            }
+
+            // Mark the thread's error_object — it may be held during pcall
+            // error recovery (between __close calls) and not on the stack.
+            let err_obj = &state.error_object;
+            if !err_obj.is_nil() {
+                self.mark_value(l, err_obj);
+                count += 1;
+            }
+
             for open_upval_ptr in state.open_upvalues() {
                 self.mark_object(l, open_upval_ptr.clone().into());
             }
@@ -1994,6 +2015,14 @@ impl GC {
                     let ci = state.get_call_info(ci_idx);
                     if ci.top > stack_in_use {
                         stack_in_use = ci.top;
+                    }
+                }
+                // Also protect TBC variable positions from being cleared.
+                // During error recovery, TBC variables may be above all frame
+                // tops but still need to be alive for __close calls.
+                for &tbc_idx in state.tbc_list.iter() {
+                    if tbc_idx + 1 > stack_in_use {
+                        stack_in_use = tbc_idx + 1;
                     }
                 }
                 let stack_len = state.stack_len();
