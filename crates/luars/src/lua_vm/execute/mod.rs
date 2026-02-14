@@ -87,6 +87,21 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Safety: frame_idx < call_depth (guaranteed by check above)
         let ci = lua_state.get_call_info(frame_idx);
 
+        // Ensure stack_top covers the current frame's register extent.
+        // Critical after coroutine resume where stack_top may be at
+        // func_idx + nresults (from yield return placement), which is
+        // lower than ci.top = base + maxstacksize. Without this,
+        // live registers above the CALL position would be above stack_top
+        // and could be cleared to nil by GC's atomic phase or unmarked.
+        // Matches C Lua's luaV_finishOp: `L->top = ci->top` for non-MULTRET.
+        {
+            let ci_top = ci.top;
+            if lua_state.get_top() < ci_top {
+                lua_state.set_top_raw(ci_top);
+            }
+        }
+        let ci = lua_state.get_call_info(frame_idx);
+
         // Cold-path check: C frame or pending metamethod finish.
         // Normal Lua function entry: call_status == CIST_LUA, so this is always
         // predicted not-taken.
@@ -1025,7 +1040,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         false
                     };
 
-                    if !fast_path_ok {
+                    if fast_path_ok {
+                        // GC write barrier: if the table (BLACK) now references
+                        // a new WHITE value, the GC must be notified.
+                        if value.is_collectable() {
+                            if let Some(gc_ptr) = ra.as_gc_ptr() {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                        }
+                    } else {
                         // Slow path: metamethod or hash part
                         save_pc!();
                         table_ops::exec_seti(
@@ -1033,7 +1056,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )?;
                         restore_state!();
                     }
-                    // No check_gc needed on fast path: only updates existing array slots (no allocation)
                 }
                 OpCode::SetField => {
                     // SETFIELD: R[A][K[B]:string] := RK(C)
@@ -1059,7 +1081,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         false
                     };
 
-                    if !fast_path_ok {
+                    if fast_path_ok {
+                        // GC write barrier: if the table (BLACK) now references
+                        // a new WHITE value, the GC must be notified.
+                        if value.is_collectable() {
+                            if let Some(gc_ptr) = ra.as_gc_ptr() {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                        }
+                    } else {
                         // Slow path: metamethod, new key insertion, or non-table
                         save_pc!();
                         table_ops::exec_setfield(
@@ -1067,7 +1097,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )?;
                         restore_state!();
                     }
-                    // No check_gc needed on fast path: only updates existing keys (no allocation)
                 }
                 OpCode::Self_ => {
                     table_ops::exec_self(lua_state, instr, constants, base, frame_idx, &mut pc)?;

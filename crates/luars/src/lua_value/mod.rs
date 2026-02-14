@@ -114,19 +114,68 @@ impl LuaUpvalue {
     /// Get the value with **zero branching** — single pointer dereference.
     #[inline(always)]
     pub fn get_value(&self) -> LuaValue {
-        unsafe { *self.v }
+        debug_assert!(!self.v.is_null(), "upvalue get_value: null pointer");
+        debug_assert!(
+            (self.v as usize) > 0x10000,
+            "upvalue get_value: suspiciously low pointer {:p} (stack_index={})",
+            self.v,
+            self.stack_index
+        );
+        let val = unsafe { *self.v };
+        debug_assert!(
+            Self::is_valid_tt(val.tt()),
+            "upvalue get_value: INVALID type tag 0x{:02X} read from {:p} (stack_index={}, is_open={}). Likely dangling pointer!",
+            val.tt(),
+            self.v,
+            self.stack_index,
+            self.is_open()
+        );
+        val
     }
 
     /// Get reference to the value with **zero branching**.
     #[inline(always)]
     pub fn get_value_ref(&self) -> &LuaValue {
+        debug_assert!(!self.v.is_null(), "upvalue get_value_ref: null pointer");
         unsafe { &*self.v }
     }
 
     /// Set the value with **zero branching** — single pointer write.
     #[inline(always)]
     pub fn set_value(&mut self, val: LuaValue) {
+        debug_assert!(!self.v.is_null(), "upvalue set_value: null pointer");
+        debug_assert!(
+            (self.v as usize) > 0x10000,
+            "upvalue set_value: suspiciously low pointer {:p} (stack_index={})",
+            self.v,
+            self.stack_index
+        );
         unsafe { *self.v = val }
+    }
+
+    /// Check if a type tag is valid (used for dangling pointer detection)
+    fn is_valid_tt(tt: u8) -> bool {
+        use crate::lua_value::lua_value::*;
+        matches!(
+            tt,
+            LUA_VNIL
+                | LUA_VEMPTY
+                | LUA_VABSTKEY
+                | LUA_VFALSE
+                | LUA_VTRUE
+                | LUA_VNUMINT
+                | LUA_VNUMFLT
+                | LUA_VSHRSTR
+                | LUA_VLNGSTR
+                | LUA_VBINARY
+                | LUA_VTABLE
+                | LUA_VFUNCTION
+                | LUA_CCLOSURE
+                | LUA_VLCF
+                | LUA_VLIGHTUSERDATA
+                | LUA_VUSERDATA
+                | LUA_VTHREAD
+        )
     }
 
     pub fn get_closed_value(&self) -> Option<&LuaValue> {

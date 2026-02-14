@@ -96,6 +96,11 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
 
 /// coroutine.yield(...) - Yield from current coroutine
 fn coroutine_yield(l: &mut LuaState) -> LuaResult<usize> {
+    // Check if yielding is allowed (matches C Lua's lua_yieldk check)
+    if l.is_main_thread() {
+        return Err(l.error("attempt to yield from outside a coroutine".to_string()));
+    }
+
     let args = l.get_args();
 
     // Yield with values
@@ -237,9 +242,19 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
-/// coroutine.isyieldable() - Check if current position can yield
+/// coroutine.isyieldable([co]) - Check if the given coroutine (or current) can yield
 fn coroutine_isyieldable(l: &mut LuaState) -> LuaResult<usize> {
-    l.push_value(LuaValue::boolean(!l.is_main_thread()))?;
+    // If a thread argument is given, check that thread; otherwise check current
+    let is_yieldable = if let Some(arg) = l.get_arg(1) {
+        if let Some(thread) = arg.as_thread_mut() {
+            !thread.is_main_thread()
+        } else {
+            return Err(l.error("value is not a thread".to_string()));
+        }
+    } else {
+        !l.is_main_thread()
+    };
+    l.push_value(LuaValue::boolean(is_yieldable))?;
     Ok(1)
 }
 

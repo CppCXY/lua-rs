@@ -81,6 +81,11 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         table.raw_seti((i + 1) as i64, val);
     }
 
+    // GC write barrier: table was modified directly (sorted elements may be collectable)
+    if let Some(gc_ptr) = table_val.as_gc_ptr() {
+        l.gc_barrier_back(gc_ptr);
+    }
+
     Ok(0)
 }
 

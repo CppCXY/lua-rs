@@ -798,6 +798,11 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         state_ref.raw_seti(4, LuaValue::boolean(false)); // last_was_nonempty
     }
 
+    // GC write barrier: state table was modified directly with string values
+    if let Some(gc_ptr) = state_table.as_gc_ptr() {
+        l.gc_barrier_back(gc_ptr);
+    }
+
     // Create a C closure with the state table as upvalue
     let vm = l.vm_mut();
     let closure = vm.create_c_closure(gmatch_iterator, vec![state_table])?;

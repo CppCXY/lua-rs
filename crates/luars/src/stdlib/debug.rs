@@ -880,6 +880,10 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
     if let Some(table) = value.as_table_mut() {
         // For tables, set metatable directly on the table
         table.set_metatable(mt_val);
+        // GC write barrier: table may be BLACK, new metatable may be WHITE
+        if let Some(gc_ptr) = value.as_gc_ptr() {
+            l.gc_barrier_back(gc_ptr);
+        }
     } else {
         // For basic types (number, string, boolean), set the global type metatable
         let kind = value.kind();

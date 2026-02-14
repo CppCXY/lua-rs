@@ -275,6 +275,52 @@ fn run_repl(vm: &mut LuaVM) {
 }
 
 fn main() {
+    // Install crash handler on Windows to capture crash address
+    #[cfg(windows)]
+    unsafe {
+        #[repr(C)]
+        struct ExceptionRecord {
+            exception_code: u32,
+            exception_flags: u32,
+            exception_record: *mut ExceptionRecord,
+            exception_address: *mut std::ffi::c_void,
+            number_parameters: u32,
+            exception_information: [usize; 15],
+        }
+        #[repr(C)]
+        struct ContextRecord {
+            _data: [u8; 1232], // CONTEXT is large, we don't need fields
+        }
+        #[repr(C)]
+        struct ExceptionPointers {
+            exception_record: *mut ExceptionRecord,
+            context_record: *mut ContextRecord,
+        }
+        type VectoredHandler = unsafe extern "system" fn(*mut ExceptionPointers) -> i32;
+        unsafe extern "system" fn crash_handler(info: *mut ExceptionPointers) -> i32 {
+            unsafe {
+            let record = &*(*info).exception_record;
+            if record.exception_code == 0xC0000005 {
+                // ACCESS_VIOLATION
+                let addr = record.exception_address;
+                let rw = if record.number_parameters >= 1 { record.exception_information[0] } else { 99 };
+                let target = if record.number_parameters >= 2 { record.exception_information[1] } else { 0 };
+                eprintln!("CRASH: ACCESS_VIOLATION at {:p}, type={} (0=read,1=write), target=0x{:x}", 
+                    addr, rw, target);
+                // Print a basic backtrace using std::backtrace
+                let bt = std::backtrace::Backtrace::force_capture();
+                eprintln!("Backtrace:\n{}", bt);
+                std::process::exit(99);
+            }
+            0 // EXCEPTION_CONTINUE_SEARCH
+            }
+        }
+        unsafe extern "system" {
+            fn AddVectoredExceptionHandler(first: u32, handler: VectoredHandler) -> *mut std::ffi::c_void;
+        }
+        AddVectoredExceptionHandler(1, crash_handler);
+    }
+
     // Spawn a thread with a larger stack to handle deep pcall/lua_execute recursion.
     // Each pcall calls lua_execute recursively, and lua_execute has a large stack frame.
     // With max_call_depth=256, we need ~16MB to avoid native stack overflow.

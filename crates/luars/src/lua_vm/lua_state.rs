@@ -202,13 +202,16 @@ impl LuaState {
             let start = base + nparams;
             let end = base + numparams;
 
-            // Ensure stack capacity
+            // Ensure stack capacity.
+            // CRITICAL: Use self.resize() instead of self.stack.resize() so that
+            // open upvalue raw pointers are fixed if the Vec reallocates.
+            // Direct self.stack.resize() bypasses fix_open_upvalue_pointers(),
+            // causing use-after-free when upvalues read/write via stale pointers.
             if self.stack.len() < end {
-                self.stack.resize(end, LuaValue::nil());
-            } else {
-                // Batch fill with nil (faster than loop)
-                self.stack[start..end].fill(LuaValue::nil());
+                self.resize(end)?;
             }
+            // Batch fill missing parameter slots with nil
+            self.stack[start..end].fill(LuaValue::nil());
 
             // Update stack_top if necessary
             if self.stack_top < end {
@@ -368,11 +371,13 @@ impl LuaState {
         if nparams < param_count {
             let start = base + nparams;
             let end = base + param_count;
+            // CRITICAL: Use self.resize() instead of self.stack.resize() so that
+            // open upvalue raw pointers are fixed if the Vec reallocates.
             if self.stack.len() < end {
-                self.stack.resize(end, LuaValue::nil());
-            } else {
-                self.stack[start..end].fill(LuaValue::nil());
+                self.resize(end)?;
             }
+            // Batch fill missing parameter slots with nil
+            self.stack[start..end].fill(LuaValue::nil());
             if self.stack_top < end {
                 self.stack_top = end;
             }
@@ -1131,7 +1136,7 @@ impl LuaState {
         let func_pos = self.get_top();
         // Ensure stack has room for function + 2 args
         if func_pos + 3 > self.stack().len() {
-            self.grow_stack(3)?;
+            self.grow_stack(func_pos + 3)?;
         }
         {
             let stack = self.stack_mut();
@@ -2440,7 +2445,9 @@ impl LuaState {
                 self.stack_set(func_idx + i, arg)?;
             }
 
-            // Update stack top only (do NOT modify caller frame's top)
+            // Update stack top to result extent.
+            // Values above this position were nil'd by GC's atomic phase
+            // (traverse_thread clears top..stack_end, matching C Lua).
             let new_top = func_idx + actual_nresults;
             self.set_top_raw(new_top);
 

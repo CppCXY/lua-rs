@@ -136,6 +136,10 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
             .get_arg(2)
             .ok_or_else(|| l.error("bad argument #2 to 'insert' (value expected)".to_string()))?;
         table.raw_seti(len.wrapping_add(1), value);
+        // GC write barrier: table was modified directly, bypass LuaVM::raw_seti barrier
+        if let Some(gc_ptr) = table_val.as_gc_ptr() {
+            l.gc_barrier_back(gc_ptr);
+        }
     } else if argc == 3 {
         // table.insert(list, pos, value)
         let pos = l
@@ -155,6 +159,10 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         // Shift elements up: t[i+1] = t[i] for i = len down to pos
         let table = table_val.as_table_mut().unwrap();
         table.insert_array_at(pos, value)?;
+        // GC write barrier: table was modified directly
+        if let Some(gc_ptr) = table_val.as_gc_ptr() {
+            l.gc_barrier_back(gc_ptr);
+        }
     } else {
         return Err(l.error("wrong number of arguments to 'insert'".to_string()));
     }
@@ -205,6 +213,11 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
     // Remove the last entry: t[len] = nil
     table.raw_seti(i, LuaValue::nil());
 
+    // GC write barrier: table was modified directly (shifted elements may be collectable)
+    if let Some(gc_ptr) = table_val.as_gc_ptr() {
+        l.gc_barrier_back(gc_ptr);
+    }
+
     l.push_value(removed)?;
     Ok(1)
 }
@@ -252,6 +265,11 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #5 to 'move' (table expected)".to_string()))?;
     for (offset, val) in values.into_iter().enumerate() {
         dst_table.raw_seti(t.wrapping_add(offset as i64), val);
+    }
+
+    // GC write barrier: destination table was modified directly
+    if let Some(gc_ptr) = dst_value.as_gc_ptr() {
+        l.gc_barrier_back(gc_ptr);
     }
 
     l.push_value(dst_value)?;

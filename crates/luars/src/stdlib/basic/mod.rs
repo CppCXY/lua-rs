@@ -566,6 +566,15 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
                 );
             }
         }
+
+        // GC write barrier: if the table is BLACK and the new metatable is WHITE,
+        // the GC must be notified. barrier_back turns the table back to GRAY
+        // so it gets re-traversed and the metatable gets properly marked.
+        // Without this, the metatable can be swept (freed) while the table still
+        // references it → dangling pointer → heap corruption.
+        if let Some(gc_ptr) = table.as_gc_ptr() {
+            l.gc_barrier_back(gc_ptr);
+        }
     }
 
     // Lua 5.5: luaC_checkfinalizer - register object if __gc is present
