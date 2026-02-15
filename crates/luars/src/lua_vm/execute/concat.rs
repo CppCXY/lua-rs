@@ -92,7 +92,16 @@ pub fn handle_concat(
                 helper::get_binop_metamethod(lua_state, &v_prev, &v_top, TmKind::Concat)
             {
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                let result = metamethod::call_tm_res(lua_state, mm, v_prev, v_top)?;
+                let result = match metamethod::call_tm_res(lua_state, mm, v_prev, v_top) {
+                    Ok(r) => r,
+                    Err(crate::lua_vm::LuaError::Yield) => {
+                        use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                        let ci = lua_state.get_call_info_mut(frame_idx);
+                        ci.call_status |= CIST_PENDING_FINISH;
+                        return Err(crate::lua_vm::LuaError::Yield);
+                    }
+                    Err(e) => return Err(e),
+                };
                 *base = lua_state.get_frame_base(frame_idx);
 
                 // Store result, replacing the two operands with one

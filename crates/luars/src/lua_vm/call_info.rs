@@ -29,6 +29,11 @@ pub mod call_status {
     /// that must be handled in the startfunc loop before dispatching.
     pub const CIST_PENDING_FINISH: u32 = 1 << 8;
 
+    /// xpcall: this C frame is for an xpcall call.
+    /// The error handler is stored at func_pos (base - func_offset),
+    /// and the actual body starts at func_pos + 1.
+    pub const CIST_XPCALL: u32 = 1 << 13;
+
     /// Offset for __call metamethod count (bits 9-12)
     pub const CIST_CCMT: u32 = 9;
     /// Mask for __call metamethod count (0xf at bits 9-12 = 0x1E00)

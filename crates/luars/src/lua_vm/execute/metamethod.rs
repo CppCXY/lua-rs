@@ -7,7 +7,7 @@ use crate::lua_vm::opcode::Instruction;
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
-use crate::lua_vm::{LuaResult, LuaState, get_metamethod_event};
+use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 
 /// Try unary metamethod (for __unm, __bnot)
@@ -96,7 +96,19 @@ pub fn handle_mmbin(
     let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
 
     // Call metamethod (may change stack/base)
-    let result = try_bin_tm(lua_state, v1, v2, tm)?;
+    let result = match try_bin_tm(lua_state, v1, v2, tm) {
+        Ok(r) => r,
+        Err(LuaError::Yield) => {
+            // Metamethod yielded. Save the destination register so
+            // handle_pending_ops / luaV_finishOp can store the result on resume.
+            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = result_reg as i32;
+            ci.call_status |= CIST_PENDING_FINISH;
+            return Err(LuaError::Yield);
+        }
+        Err(e) => return Err(e),
+    };
 
     // Reload base after metamethod call as it may have changed
     let current_base = lua_state.get_frame_base(frame_idx);
@@ -155,9 +167,29 @@ pub fn handle_mmbini(
 
     // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
-        try_bin_tm(lua_state, v2, v1, tm)?
+        match try_bin_tm(lua_state, v2, v1, tm) {
+            Ok(r) => r,
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = result_reg as i32;
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
+        }
     } else {
-        try_bin_tm(lua_state, v1, v2, tm)?
+        match try_bin_tm(lua_state, v1, v2, tm) {
+            Ok(r) => r,
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = result_reg as i32;
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
+        }
     };
 
     // Reload base after metamethod call
@@ -218,9 +250,29 @@ pub fn handle_mmbink(
 
     // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
-        try_bin_tm(lua_state, v2, v1, tm)?
+        match try_bin_tm(lua_state, v2, v1, tm) {
+            Ok(r) => r,
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = result_reg as i32;
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
+        }
     } else {
-        try_bin_tm(lua_state, v1, v2, tm)?
+        match try_bin_tm(lua_state, v1, v2, tm) {
+            Ok(r) => r,
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.pending_finish_get = result_reg as i32;
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
+        }
     };
 
     // Reload base after metamethod call
@@ -282,7 +334,15 @@ fn try_bin_tm(
             | TmKind::Bxor
             | TmKind::Shl
             | TmKind::Shr
-            | TmKind::Bnot => "attempt to perform bitwise operation on non-number values",
+            | TmKind::Bnot => {
+                // Check if both values are numbers — if so, the issue is
+                // that they can't be converted to integers
+                if p1.is_number() && p2.is_number() {
+                    "number has no integer representation"
+                } else {
+                    "attempt to perform bitwise operation on non-number values"
+                }
+            }
             _ => "attempt to perform arithmetic on non-number values",
         };
         Err(lua_state.error(msg.to_string()))

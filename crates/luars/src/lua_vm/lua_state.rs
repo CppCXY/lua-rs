@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
-use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA, CIST_RECST, CIST_YPCALL};
+use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::safe_option::SafeOption;
@@ -68,6 +68,23 @@ pub struct LuaState {
     /// When leaving a block (OpCode::Close), we iterate from the end and call __close
     /// on each TBC variable whose stack index >= the close level
     pub(crate) tbc_list: Vec<usize>,
+
+    /// Whether this coroutine has yielded and is waiting to be resumed.
+    /// Used to distinguish "running" from "yielded" when call_stack is non-empty.
+    /// Set to true when yield is captured by resume, false when execution resumes.
+    yielded: bool,
+
+    /// Whether close_tbc_with_error is currently running on this thread.
+    /// Used to detect re-entrant coroutine.close() calls from __close handlers.
+    pub(crate) is_closing: bool,
+
+    /// Non-yieldable nesting depth (like C Lua's nny packed in nCcalls).
+    /// Main thread starts at 1 (always non-yieldable).
+    /// Coroutine threads start at 0 (yieldable).
+    /// Incremented when entering a non-yieldable C call boundary (e.g., pcall method
+    /// used by C stdlib functions like gsub that don't support continuations).
+    /// `yieldable(L)` == `nny == 0`.
+    pub(crate) nny: u32,
 }
 
 impl LuaState {
@@ -98,6 +115,9 @@ impl LuaState {
             safe_option,
             is_main,
             tbc_list: Vec::new(),
+            yielded: false,
+            is_closing: false,
+            nny: if is_main { 1 } else { 0 },
         }
     }
 
@@ -978,6 +998,9 @@ impl LuaState {
         use crate::lua_vm::execute::TmKind;
         use crate::lua_vm::execute::get_metamethod_event;
 
+        let was_closing = self.is_closing;
+        self.is_closing = true;
+
         let mut current_error = err;
         let mut had_close_error = false;
 
@@ -1059,6 +1082,7 @@ impl LuaState {
             self.error_object = current_error;
         }
 
+        self.is_closing = was_closing;
         Ok(())
     }
 
@@ -1802,6 +1826,20 @@ impl LuaState {
         func: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        // This is equivalent to C Lua's lua_call → luaD_callnoyield:
+        // the callback runs in a non-yieldable context.
+        self.nny += 1;
+        let result = self.pcall_inner(func, args);
+        self.nny -= 1;
+        result
+    }
+
+    /// Inner implementation of pcall (separated for nny scoping)
+    fn pcall_inner(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save state for cleanup
         let initial_depth = self.call_depth();
         let saved_stack_top = self.stack_top;
@@ -1878,6 +1916,12 @@ impl LuaState {
             // Call C function
             let result = cfunc(self);
 
+            // CloseThread bypasses all pcalls — don't pop this frame,
+            // handle_resume_result will pop everything.
+            if matches!(result, Err(LuaError::CloseThread)) {
+                return Err(LuaError::CloseThread);
+            }
+
             // Pop frame
             self.pop_frame();
 
@@ -1904,6 +1948,7 @@ impl LuaState {
                     Ok((true, results))
                 }
                 Err(LuaError::Yield) => Err(LuaError::Yield),
+                Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
                 Err(e) => {
                     let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
                     let result_err = if !err_obj.is_nil() {
@@ -1959,6 +2004,7 @@ impl LuaState {
                     Ok((true, results))
                 }
                 Err(LuaError::Yield) => Err(LuaError::Yield),
+                Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
                 Err(e) => {
                     // Error occurred - clean up
                     // Lua 5.5 order: L->ci = old_ci first, then closeprotected
@@ -2093,6 +2139,10 @@ impl LuaState {
                 }
                 Err(LuaError::Yield)
             }
+            Err(LuaError::CloseThread) => {
+                // CloseThread bypasses all pcalls — propagate to resume
+                Err(LuaError::CloseThread)
+            }
             Err(e) => {
                 // Error - clean up and return error
                 // Lua 5.5 order: pop frames first, then close TBC
@@ -2203,29 +2253,88 @@ impl LuaState {
             .stack_get(func_idx)
             .ok_or_else(|| self.error("xpcall: function not found".to_string()))?;
 
-        // Create call frame, expecting all return values
-        let base = func_idx + 1;
-        if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
-            // Error during setup
-            self.set_top(handler_idx)?;
-            let error_msg = self.get_error_msg(e);
-            let err_str = self.create_string(&error_msg)?;
-            return Ok((false, vec![err_str]));
-        }
+        let is_c_callable = func.is_c_callable();
 
-        // Set ccmt count in call_status
-        if ccmt_depth > 0 {
-            use crate::lua_vm::call_info::call_status;
-            let frame_idx = self.call_depth - 1;
-            if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+        // Execute the function
+        let result = if is_c_callable {
+            // C function — call directly (like pcall_inner's C path)
+            let base = func_idx + 1;
+            if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
+                self.set_top(handler_idx)?;
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                return Ok((false, vec![err_str]));
             }
-        }
 
-        // Execute
-        self.inc_n_ccalls()?;
-        let result = execute::lua_execute(self, initial_depth);
-        self.dec_n_ccalls();
+            if ccmt_depth > 0 {
+                use crate::lua_vm::call_info::call_status;
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status =
+                        call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+
+            let cfunc = if let Some(c_func) = func.as_cfunction() {
+                c_func
+            } else if let Some(closure) = func.as_cclosure() {
+                closure.func()
+            } else {
+                unreachable!()
+            };
+
+            let c_result = cfunc(self);
+
+            // CloseThread bypasses everything
+            if matches!(c_result, Err(LuaError::CloseThread)) {
+                return Err(LuaError::CloseThread);
+            }
+
+            self.pop_frame();
+
+            match c_result {
+                Ok(nresults) => {
+                    // Collect results
+                    let result_start = if self.stack_top >= nresults {
+                        self.stack_top - nresults
+                    } else {
+                        0
+                    };
+                    // Move results to func_idx
+                    for i in 0..nresults {
+                        let val = self.stack_get(result_start + i).unwrap_or(LuaValue::nil());
+                        self.stack_set(func_idx + i, val)?;
+                    }
+                    self.set_top(func_idx + nresults)?;
+                    Ok(())
+                }
+                Err(LuaError::Yield) => Err(LuaError::Yield),
+                Err(e) => Err(e),
+            }
+        } else {
+            // Lua function — push frame and execute
+            let base = func_idx + 1;
+            if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
+                self.set_top(handler_idx)?;
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                return Ok((false, vec![err_str]));
+            }
+
+            if ccmt_depth > 0 {
+                use crate::lua_vm::call_info::call_status;
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status =
+                        call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+
+            self.inc_n_ccalls()?;
+            let r = execute::lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r
+        };
 
         match result {
             Ok(()) => {
@@ -2253,8 +2362,8 @@ impl LuaState {
                 Ok((true, results))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
             Err(e) => {
-                // Error occurred - call error handler WITH STACK INTACT
                 // so that debug.traceback can see the full call stack
                 // (mirrors CLua's luaG_errormsg which calls handler before longjmp)
 
@@ -2379,11 +2488,24 @@ impl LuaState {
     /// - finished=true: coroutine completed normally
     /// - finished=false: coroutine yielded
     pub fn resume(&mut self, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Check if this is the first resume (no frames yet)
-        if self.call_stack.is_empty() {
+        // Check coroutine state:
+        // - call_depth > 0 && !yielded → running (cannot resume)
+        // - call_depth > 0 && yielded → suspended after yield (can resume)
+        // - call_depth == 0 && stack not empty → initial state (can resume)
+        // - call_depth == 0 && stack empty → dead (cannot resume)
+        if self.call_depth > 0 && !self.yielded {
+            return Err(self.error("cannot resume non-suspended coroutine".to_string()));
+        }
+
+        // Mark as running (not yielded)
+        self.yielded = false;
+
+        // Check if this is the first resume (no active frames)
+        if self.call_depth == 0 {
             // Initial resume - need to set up the function
             // The function should be at stack[0] (set by create_thread)
             if self.stack.is_empty() {
+                self.error_object = LuaValue::nil(); // clear stale error object
                 return Err(self.error("cannot resume dead coroutine".to_string()));
             }
 
@@ -2474,15 +2596,42 @@ impl LuaState {
         loop {
             match result {
                 Ok(()) => {
-                    // Coroutine completed
+                    // Coroutine completed — pop any remaining frames
+                    // (e.g., the initial frame pushed by resume for C functions)
                     let results = self.get_all_return_values(0);
+                    while self.call_depth() > 0 {
+                        self.pop_frame();
+                    }
                     self.stack.clear();
+                    self.stack_top = 0;
                     return Ok((true, results));
                 }
                 Err(LuaError::Yield) => {
-                    // Coroutine yielded
+                    // Coroutine yielded — mark as yielded for resume detection
+                    self.yielded = true;
                     let yield_vals = self.take_yield();
                     return Ok((false, yield_vals));
+                }
+                Err(LuaError::CloseThread) => {
+                    // Self-close: coroutine.close() closed TBC vars/upvalues
+                    // and threw CloseThread to bypass all pcalls.
+                    // Pop all remaining frames and mark thread as dead.
+                    while self.call_depth() > 0 {
+                        self.pop_frame();
+                    }
+                    // Check if __close set an error
+                    let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                    self.stack.clear();
+                    self.stack_top = 0;
+                    if err_obj.is_nil() {
+                        // Normal close — success with no return values
+                        return Ok((true, vec![]));
+                    } else {
+                        // __close errored — coroutine dies with error.
+                        // Store error back so coroutine_resume can retrieve it.
+                        self.error_object = err_obj;
+                        return Err(LuaError::RuntimeError);
+                    }
                 }
                 Err(_e) => {
                     // Error — try to find a pcall frame to recover
@@ -2517,6 +2666,11 @@ impl LuaState {
                             self.error_msg = format!("{}", self.error_object);
                         }
 
+                        // Mark coroutine as dead by clearing the stack.
+                        // error_msg is stored separately and remains accessible.
+                        self.stack.clear();
+                        self.stack_top = 0;
+
                         return Err(_e);
                     }
                     let pcall_frame_idx = pcall_idx.unwrap();
@@ -2526,6 +2680,14 @@ impl LuaState {
                     let pcall_func_pos = pcall_ci.base - pcall_ci.func_offset;
                     let pcall_nresults = pcall_ci.nresults;
                     let close_level = pcall_ci.base; // close from body position
+                    let is_xpcall = pcall_ci.call_status & CIST_XPCALL != 0;
+
+                    // Save the xpcall handler before anything overwrites it
+                    let xpcall_handler = if is_xpcall {
+                        self.stack_get(pcall_func_pos).unwrap_or(LuaValue::nil())
+                    } else {
+                        LuaValue::nil()
+                    };
 
                     // Get error object
                     let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
@@ -2561,6 +2723,21 @@ impl LuaState {
                                 error_val
                             };
                             self.clear_error();
+
+                            // If xpcall, call error handler to transform the error
+                            let result_err = if is_xpcall {
+                                self.nny += 1;
+                                let handler_result = self.pcall(xpcall_handler.clone(), vec![result_err.clone()]);
+                                self.nny -= 1;
+                                match handler_result {
+                                    Ok((true, results)) => {
+                                        results.into_iter().next().unwrap_or(LuaValue::nil())
+                                    }
+                                    _ => self.create_string("error in error handling")?,
+                                }
+                            } else {
+                                result_err
+                            };
 
                             // Set up pcall error result: (false, error)
                             self.stack_set(pcall_func_pos, LuaValue::boolean(false))
@@ -2622,6 +2799,9 @@ impl LuaState {
                             }
                             // Store the error value for finish_c_frame to retrieve later
                             self.error_object = error_val;
+
+                            // Mark coroutine as yielded so resume works
+                            self.yielded = true;
 
                             // Return yield values normally
                             let yield_vals = self.take_yield();
@@ -2771,6 +2951,11 @@ impl LuaState {
 
     pub fn is_main_thread(&self) -> bool {
         self.is_main
+    }
+
+    /// Check if this coroutine has yielded and is waiting to be resumed.
+    pub fn is_yielded(&self) -> bool {
+        self.yielded
     }
 }
 

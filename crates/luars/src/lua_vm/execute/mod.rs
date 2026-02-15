@@ -87,17 +87,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Safety: frame_idx < call_depth (guaranteed by check above)
         let ci = lua_state.get_call_info(frame_idx);
 
-        // Ensure stack_top covers the current frame's register extent.
-        // Critical after coroutine resume where stack_top may be at
-        // func_idx + nresults (from yield return placement), which is
-        // lower than ci.top = base + maxstacksize. Without this,
-        // live registers above the CALL position would be above stack_top
-        // and could be cleared to nil by GC's atomic phase or unmarked.
-        // Matches C Lua's luaV_finishOp: `L->top = ci->top` for non-MULTRET.
+        // Clear stale stack slots between current top and the frame's
+        // register extent (ci.top = base + maxstacksize).
+        // After a CALL returns, the return handler lowers stack_top to
+        // func_pos + nresults. Slots above this new top may contain stale
+        // GC pointers from the previous frame or from before the call.
+        // Without clearing, a later push_lua_frame could raise top past
+        // these stale slots, bringing dangling pointers into GC marking
+        // range and causing crashes during sweep.
+        // We nil them here instead of raising top (which would break
+        // RETURN B=0 MULTRET semantics that rely on top for counting).
         {
+            let current_top = lua_state.get_top();
             let ci_top = ci.top;
-            if lua_state.get_top() < ci_top {
-                lua_state.set_top_raw(ci_top);
+            if current_top < ci_top {
+                let stack = lua_state.stack_mut();
+                for i in current_top..ci_top {
+                    stack[i] = LuaValue::nil();
+                }
             }
         }
         let ci = lua_state.get_call_info(frame_idx);
@@ -374,6 +381,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_idiv(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to divide by zero".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
@@ -400,6 +410,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_imod(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
@@ -445,12 +458,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             // Try __unm metamethod with Protect pattern
                             save_pc!();
-                            metamethod::try_unary_tm(
+                            match metamethod::try_unary_tm(
                                 lua_state,
                                 rb,
                                 base + a,
                                 metamethod::TmKind::Unm,
-                            )?;
+                            ) {
+                                Ok(_) => {}
+                                Err(LuaError::Yield) => {
+                                    let ci = lua_state.get_call_info_mut(frame_idx);
+                                    ci.call_status |= CIST_PENDING_FINISH;
+                                    return Err(LuaError::Yield);
+                                }
+                                Err(e) => return Err(e),
+                            }
                             restore_state!();
                         }
                     }
@@ -544,15 +565,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_imod(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            if n2 != 0.0 {
-                                pc += 1;
-                                setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
-                            }
+                            pc += 1;
+                            setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
                         }
                     }
                 }
@@ -606,15 +628,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_idiv(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to divide by zero".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            if n2 != 0.0 {
-                                pc += 1;
-                                setfltvalue(&mut stack[base + a], (n1 / n2).floor());
-                            }
+                            pc += 1;
+                            setfltvalue(&mut stack[base + a], (n1 / n2).floor());
                         }
                     }
                 }
@@ -768,12 +791,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         // Try __bnot metamethod with Protect pattern
                         save_pc!();
-                        metamethod::try_unary_tm(
+                        match metamethod::try_unary_tm(
                             lua_state,
                             v1,
                             base + a,
                             metamethod::TmKind::Bnot,
-                        )?;
+                        ) {
+                            Ok(_) => {}
+                            Err(LuaError::Yield) => {
+                                let ci = lua_state.get_call_info_mut(frame_idx);
+                                ci.call_status |= CIST_PENDING_FINISH;
+                                return Err(LuaError::Yield);
+                            }
+                            Err(e) => return Err(e),
+                        }
                         restore_state!();
                     }
                 }

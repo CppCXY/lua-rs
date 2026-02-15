@@ -3,7 +3,7 @@ use crate::{
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
     lua_vm::{
         LuaError, LuaState, TmKind,
-        call_info::call_status::{CIST_RECST, CIST_YPCALL},
+        call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YPCALL},
         execute,
     },
     stdlib::basic::parse_number::parse_lua_number,
@@ -763,9 +763,17 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
     let pcall_func_pos = ci.base - ci.func_offset;
     let nresults = ci.nresults;
     let has_recst = ci.call_status & CIST_RECST != 0;
+    let is_xpcall = ci.call_status & CIST_XPCALL != 0;
 
     if ci.call_status & CIST_YPCALL != 0 {
         if has_recst {
+            // Save handler before it gets overwritten (only for xpcall)
+            let handler = if is_xpcall {
+                lua_state.stack_get(pcall_func_pos).unwrap_or(LuaValue::nil())
+            } else {
+                LuaValue::nil()
+            };
+
             // Error recovery completed (or continuing) after yield.
             // Retrieve the saved error value and try to close remaining TBC entries.
             let error_val = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
@@ -785,6 +793,21 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                         error_val
                     };
                     lua_state.clear_error();
+
+                    // If xpcall, call error handler to transform the error
+                    let result_err = if is_xpcall {
+                        lua_state.nny += 1;
+                        let handler_result = lua_state.pcall(handler.clone(), vec![result_err.clone()]);
+                        lua_state.nny -= 1;
+                        match handler_result {
+                            Ok((true, results)) => {
+                                results.into_iter().next().unwrap_or(LuaValue::nil())
+                            }
+                            _ => lua_state.create_string("error in error handling")?,
+                        }
+                    } else {
+                        result_err
+                    };
 
                     lua_state.stack_set(pcall_func_pos, LuaValue::boolean(false))?;
                     lua_state.stack_set(pcall_func_pos + 1, result_err)?;
@@ -897,6 +920,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 
 /// Handle pending metamethod finish (cold path, extracted from main loop).
 /// Returns true if a C frame was finished and execution should restart.
+/// This is the equivalent of C Lua's luaV_finishOp.
 #[cold]
 #[inline(never)]
 pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<bool> {
@@ -908,22 +932,95 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
         return Ok(true); // restart startfunc
     }
     // === luaV_finishOp equivalent ===
+    // The interrupted instruction is at savedpc - 1.
+    // We need to check what opcode was interrupted and handle accordingly.
     let ci = lua_state.get_call_info(frame_idx);
-    let pending = ci.pending_finish_get;
+    let saved_pc = ci.pc as usize;
     let base_tmp = ci.base;
-    if pending >= 0 {
-        let dest = base_tmp + pending as usize;
-        let top = lua_state.get_top();
-        if top > 0 {
-            let result = lua_state.stack_mut()[top - 1];
-            lua_state.stack_mut()[dest] = result;
+    let nresults = ci.nresults;
+
+    // Get the chunk to read the interrupted instruction
+    let func_value = ci.func;
+    if let Some(lua_func) = func_value.as_lua_function() {
+        let chunk = lua_func.chunk();
+        let code = &chunk.code;
+
+        if saved_pc > 0 && saved_pc <= code.len() {
+            let interrupted_instr = code[saved_pc - 1];
+            let op = interrupted_instr.get_opcode();
+
+            use crate::lua_vm::OpCode;
+            match op {
+                OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
+                    // Arithmetic metamethod: result at stack[top-1],
+                    // destination from the instruction at savedpc - 2
+                    let top = lua_state.get_top();
+                    if top > 0 && saved_pc >= 2 {
+                        let arith_instr = code[saved_pc - 2];
+                        let dest = base_tmp + arith_instr.get_a() as usize;
+                        let result = lua_state.stack_mut()[top - 1];
+                        lua_state.stack_mut()[dest] = result;
+                        lua_state.set_top_raw(top - 1);
+                    }
+                }
+                OpCode::Unm | OpCode::BNot | OpCode::Len
+                | OpCode::GetTabUp | OpCode::GetTable | OpCode::GetI
+                | OpCode::GetField | OpCode::Self_ => {
+                    // Unary/table get ops: result at stack[top-1],
+                    // destination at base + A of the interrupted instruction
+                    let top = lua_state.get_top();
+                    if top > 0 {
+                        let dest = base_tmp + interrupted_instr.get_a() as usize;
+                        let result = lua_state.stack_mut()[top - 1];
+                        lua_state.stack_mut()[dest] = result;
+                        lua_state.set_top_raw(top - 1);
+                    }
+                }
+                OpCode::Lt | OpCode::Le
+                | OpCode::LtI | OpCode::LeI
+                | OpCode::GtI | OpCode::GeI
+                | OpCode::Eq => {
+                    // Comparison ops: truthiness of stack[top-1] is the result.
+                    // Next instruction should be JMP.
+                    // If result != k, skip the JMP.
+                    let top = lua_state.get_top();
+                    if top > 0 {
+                        let res_val = lua_state.stack_mut()[top - 1];
+                        let res = !res_val.is_nil() && !(res_val == LuaValue::boolean(false));
+                        lua_state.set_top_raw(top - 1);
+                        let k = interrupted_instr.get_k();
+                        if res != k {
+                            // Skip the JMP instruction
+                            let ci = lua_state.get_call_info_mut(frame_idx);
+                            ci.pc += 1;
+                        }
+                    }
+                }
+                OpCode::Concat => {
+                    // Concat: partial concat, result of TM at stack[top-1]
+                    let top = lua_state.get_top();
+                    if top > 1 {
+                        // Put TM result in proper position
+                        let result = lua_state.stack_mut()[top - 1];
+                        lua_state.stack_mut()[top - 3] = result;
+                        lua_state.set_top_raw(top - 1);
+                        // Continue concat (may yield again) - handled by main loop
+                    }
+                }
+                _ => {
+                    // CALL, TAILCALL, TFORCALL, SETTAB*, SETFIELD, SETI — no special action needed
+                }
+            }
         }
-        let ci_top = lua_state.get_call_info(frame_idx).top;
-        lua_state.set_top_raw(ci_top);
-    } else {
-        let ci_top = lua_state.get_call_info(frame_idx).top;
+    }
+
+    // Restore ci_top
+    let ci_top = lua_state.get_call_info(frame_idx).top;
+    let current_top = lua_state.get_top();
+    if current_top < ci_top {
         lua_state.set_top_raw(ci_top);
     }
+
     let ci_mut = lua_state.get_call_info_mut(frame_idx);
     ci_mut.pending_finish_get = -1;
     ci_mut.call_status &= !CIST_PENDING_FINISH;

@@ -246,7 +246,16 @@ pub fn handle_len(
                 let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
                 if let Some(mm) = mt.raw_get(&event_key) {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
-                    let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
+                    let result = match metamethod::call_tm_res(lua_state, mm, rb, rb) {
+                        Ok(r) => r,
+                        Err(crate::lua_vm::LuaError::Yield) => {
+                            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                            let ci = lua_state.get_call_info_mut(frame_idx);
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(crate::lua_vm::LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    };
                     *base = lua_state.get_frame_base(frame_idx);
                     lua_state.stack_mut()[*base + a] = result;
                 } else {
@@ -262,7 +271,16 @@ pub fn handle_len(
     } else {
         if let Some(mm) = helper::get_metamethod_event(lua_state, &rb, TmKind::Len) {
             lua_state.set_frame_pc(frame_idx, pc as u32);
-            let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
+            let result = match metamethod::call_tm_res(lua_state, mm, rb, rb) {
+                Ok(r) => r,
+                Err(crate::lua_vm::LuaError::Yield) => {
+                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.call_status |= CIST_PENDING_FINISH;
+                    return Err(crate::lua_vm::LuaError::Yield);
+                }
+                Err(e) => return Err(e),
+            };
             *base = lua_state.get_frame_base(frame_idx);
             lua_state.stack_mut()[*base + a] = result;
         } else {

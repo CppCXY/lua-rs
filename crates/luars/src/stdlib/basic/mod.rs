@@ -470,38 +470,99 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
 fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
-    // Get function (first argument)
-    let func = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'xpcall' (value expected)".to_string()))?;
-
-    // Get error handler (second argument)
-    let err_handler = l
-        .get_arg(2)
-        .ok_or_else(|| l.error("bad argument #2 to 'xpcall' (value expected)".to_string()))?;
-
-    // Collect remaining arguments
-    let mut args = Vec::new();
+    // xpcall(f, msgh, arg1, arg2, ...)
+    // Stack layout from call:
+    //   xpcall's C frame has: base+0=f, base+1=msgh, base+2..=args
     let arg_count = l.arg_count();
-    for i in 3..=arg_count {
-        if let Some(arg) = l.get_arg(i) {
-            args.push(arg);
+    if arg_count < 2 {
+        return Err(l.error("bad argument #2 to 'xpcall' (value expected)".to_string()));
+    }
+
+    let base = l
+        .current_frame()
+        .map(|f| f.base)
+        .ok_or_else(|| LuaError::RuntimeError)?;
+    let xpcall_func_pos = l
+        .current_frame()
+        .map(|f| f.base - f.func_offset)
+        .ok_or_else(|| LuaError::RuntimeError)?;
+
+    // Rearrange stack for pcall_stack_based:
+    // We want [handler, f, arg1, arg2, ...] starting at xpcall_func_pos.
+    //   xpcall_func_pos = handler (was xpcall function itself, overwrite)
+    //   xpcall_func_pos+1 = f (the function to protect)
+    //   xpcall_func_pos+2.. = args
+    //
+    // Currently: xpcall_func_pos=xpcall, base+0=f, base+1=msgh, base+2..=args
+    // We need: xpcall_func_pos=msgh, xpcall_func_pos+1=f, xpcall_func_pos+2..=args
+    let msgh = l.stack_get(base + 1).unwrap_or(LuaValue::nil());
+    let f = l.stack_get(base).unwrap_or(LuaValue::nil());
+
+    // Store handler at xpcall_func_pos
+    l.stack_set(xpcall_func_pos, msgh)?;
+
+    // Store function at xpcall_func_pos+1
+    l.stack_set(xpcall_func_pos + 1, f)?;
+
+    // Shift args to xpcall_func_pos+2..
+    let call_arg_count = arg_count - 2;
+    for i in 0..call_arg_count {
+        let val = l.stack_get(base + 2 + i).unwrap_or(LuaValue::nil());
+        l.stack_set(xpcall_func_pos + 2 + i, val)?;
+    }
+    let func_idx = xpcall_func_pos + 1;
+    l.set_top(func_idx + 1 + call_arg_count)?;
+
+    // Mark current (xpcall's) C frame with CIST_XPCALL
+    // so finish_c_frame knows to apply the error handler on error recovery.
+    {
+        use crate::lua_vm::call_info::call_status::CIST_XPCALL;
+        let frame_idx = l.call_depth() - 1;
+        let ci = l.get_call_info_mut(frame_idx);
+        ci.call_status |= CIST_XPCALL;
+    }
+
+    // Call using stack-based API
+    let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
+
+    if success {
+        // Prepend true, results are at func_idx..func_idx+result_count
+        // We need: handler_idx=true, handler_idx+1=res1, ...
+        // Move results to xpcall_func_pos
+        let mut all_results = Vec::with_capacity(result_count + 1);
+        all_results.push(LuaValue::boolean(true));
+        for i in 0..result_count {
+            all_results.push(l.stack_get(func_idx + i).unwrap_or(LuaValue::nil()));
         }
+        for (i, val) in all_results.iter().enumerate() {
+            l.push_value(*val)?;
+        }
+        Ok(all_results.len())
+    } else {
+        // Error — call error handler
+        let error_val = if result_count > 0 {
+            l.stack_get(func_idx).unwrap_or(LuaValue::nil())
+        } else {
+            LuaValue::nil()
+        };
+        let handler = l.stack_get(xpcall_func_pos).unwrap_or(LuaValue::nil());
+
+        // Call handler(error_val) — this is non-yieldable (nny context)
+        let handler_result = l.pcall(handler, vec![error_val.clone()]);
+        let transformed_error = match handler_result {
+            Ok((true, results)) => {
+                results.into_iter().next().unwrap_or(LuaValue::nil())
+            }
+            _ => {
+                // Handler failed — return "error in error handling" per Lua spec
+                l.create_string("error in error handling")?
+            }
+        };
+
+        l.push_value(LuaValue::boolean(false))?;
+        l.push_value(transformed_error)?;
+        Ok(2)
     }
-
-    // Call xpcall
-    let (success, results) = l.xpcall(func, args, err_handler)?;
-
-    // Push success status
-    l.push_value(LuaValue::boolean(success))?;
-
-    // Push results and count them
-    let result_count = results.len();
-    for result in results {
-        l.push_value(result)?;
-    }
-
-    Ok(1 + result_count)
 }
 
 /// getmetatable(object) - Get metatable
