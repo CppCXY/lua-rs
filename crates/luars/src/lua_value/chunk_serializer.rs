@@ -185,6 +185,8 @@ fn write_chunk(
     buf.push(if chunk.is_vararg { 1 } else { 0 });
     buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
+    write_u32(buf, chunk.linedefined as u32);
+    write_u32(buf, chunk.lastlinedefined as u32);
 
     // Write upvalue descriptors
     write_u32(buf, chunk.upvalue_descs.len() as u32);
@@ -253,6 +255,8 @@ fn write_chunk_with_dedup(
     buf.push(if chunk.is_vararg { 1 } else { 0 });
     buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
+    write_u32(buf, chunk.linedefined as u32);
+    write_u32(buf, chunk.lastlinedefined as u32);
 
     // Write upvalue descriptors (with string dedup for names)
     write_u32(buf, chunk.upvalue_descs.len() as u32);
@@ -322,6 +326,8 @@ fn write_chunk_no_pool_with_dedup(
     buf.push(if chunk.is_vararg { 1 } else { 0 });
     buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
+    write_u32(buf, chunk.linedefined as u32);
+    write_u32(buf, chunk.lastlinedefined as u32);
 
     // Write upvalue descriptors with deduplication
     write_u32(buf, chunk.upvalue_descs.len() as u32);
@@ -387,6 +393,8 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
     buf.push(if chunk.is_vararg { 1 } else { 0 });
     buf.push(if chunk.needs_vararg_table { 1 } else { 0 });
     write_u32(buf, chunk.max_stack_size as u32);
+    write_u32(buf, chunk.linedefined as u32);
+    write_u32(buf, chunk.lastlinedefined as u32);
 
     // Write upvalue descriptors
     write_u32(buf, chunk.upvalue_descs.len() as u32);
@@ -452,6 +460,8 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     let is_vararg = read_u8(cursor)? != 0;
     let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
+    let linedefined = read_u32(cursor)? as usize;
+    let lastlinedefined = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors
     let desc_len = read_u32(cursor)? as usize;
@@ -510,8 +520,8 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         upvalue_descs,
         source_name,
         line_info,
-        linedefined: 0,
-        lastlinedefined: 0,
+        linedefined,
+        lastlinedefined,
         proto_data_size: 0,
     };
     chunk.compute_proto_data_size();
@@ -542,6 +552,8 @@ fn read_chunk_with_dedup(
     let is_vararg = read_u8(cursor)? != 0;
     let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
+    let linedefined = read_u32(cursor)? as usize;
+    let lastlinedefined = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors with string deduplication
     let desc_len = read_u32(cursor)? as usize;
@@ -600,8 +612,8 @@ fn read_chunk_with_dedup(
         upvalue_descs,
         source_name,
         line_info,
-        linedefined: 0,
-        lastlinedefined: 0,
+        linedefined,
+        lastlinedefined,
         proto_data_size: 0,
     };
     chunk.compute_proto_data_size();
@@ -794,6 +806,8 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
     let is_vararg = read_u8(cursor)? != 0;
     let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
+    let linedefined = read_u32(cursor)? as usize;
+    let lastlinedefined = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors
     let desc_len = read_u32(cursor)? as usize;
@@ -852,8 +866,8 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
         line_info,
         needs_vararg_table,
         use_hidden_vararg: false,
-        linedefined: 0,
-        lastlinedefined: 0,
+        linedefined,
+        lastlinedefined,
         proto_data_size: 0,
     };
     chunk.compute_proto_data_size();
@@ -904,6 +918,8 @@ fn read_chunk_with_vm_dedup(
     let is_vararg = read_u8(cursor)? != 0;
     let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
+    let linedefined = read_u32(cursor)? as usize;
+    let lastlinedefined = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors with deduplication
     let desc_len = read_u32(cursor)? as usize;
@@ -962,8 +978,8 @@ fn read_chunk_with_vm_dedup(
         line_info,
         needs_vararg_table,
         use_hidden_vararg: false,
-        linedefined: 0,
-        lastlinedefined: 0,
+        linedefined,
+        lastlinedefined,
         proto_data_size: 0,
     };
     chunk.compute_proto_data_size();
@@ -1027,6 +1043,8 @@ fn read_chunk_with_strings(
     let is_vararg = read_u8(cursor)? != 0;
     let needs_vararg_table = read_u8(cursor)? != 0;
     let max_stack_size = read_u32(cursor)? as usize;
+    let linedefined = read_u32(cursor)? as usize;
+    let lastlinedefined = read_u32(cursor)? as usize;
 
     // Read upvalue descriptors
     let desc_len = read_u32(cursor)? as usize;
@@ -1085,8 +1103,8 @@ fn read_chunk_with_strings(
         upvalue_descs,
         source_name,
         line_info,
-        linedefined: 0,
-        lastlinedefined: 0,
+        linedefined,
+        lastlinedefined,
         proto_data_size: 0,
     };
     chunk.compute_proto_data_size();
