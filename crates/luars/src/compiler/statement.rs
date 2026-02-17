@@ -143,11 +143,11 @@ fn check(fs: &mut FuncState, expected: LuaTokenKind) -> Result<(), String> {
 
 // Port of error_expected from lparser.c
 fn error_expected(fs: &mut FuncState, token: LuaTokenKind) -> Result<(), String> {
-    let msg = format!("expected '{}'", token);
+    let msg = format!("'{}' expected", token);
     Err(fs.token_error(&msg))
 }
 
-fn check_match(
+pub fn check_match(
     fs: &mut FuncState,
     what: LuaTokenKind,
     who: LuaTokenKind,
@@ -157,8 +157,8 @@ fn check_match(
         if where_ == fs.lexer.line {
             error_expected(fs, what)?;
         } else {
-            return Err(fs.syntax_error(&format!(
-                "expected '{}' (to close '{}' at line {})",
+            return Err(fs.token_error(&format!(
+                "'{}' expected (to close '{}' at line {})",
                 what, who, where_
             )));
         }
@@ -210,8 +210,28 @@ pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: u8) {
 // Port of leaveblock from lparser.c:672-692
 // Port of closegoto from lparser.c:597-621
 // Solves the goto at index 'g' to given 'label' and removes it from the list
-fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
+// varnames: mapping from nactvar index -> variable name, for error messages
+fn solvegoto(
+    fs: &mut FuncState,
+    g: usize,
+    label: &LabelDesc,
+    bl_upval: bool,
+    varnames: &std::collections::HashMap<u16, String>,
+) -> Result<(), String> {
     let gt = &fs.pending_gotos[g].clone(); // Clone to avoid borrow issues
+
+    // lparser.c:603-605: Check if goto jumps into the scope of a local variable
+    if gt.nactvar < label.nactvar {
+        // The goto jumps over a variable declaration
+        let varname = varnames
+            .get(&gt.nactvar)
+            .map(|s| s.as_str())
+            .unwrap_or("?");
+        return Err(format!(
+            "{}:{}: <goto {}> at line {} jumps into the scope of '{}'",
+            fs.source_name, gt.line, gt.name, gt.line, varname
+        ));
+    }
 
     // lparser.c:606-614: Check if goto needs a CLOSE instruction
     // gt->close means the goto jumps out of the scope of some variables
@@ -239,6 +259,7 @@ fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
 
     // lparser.c:616-619: Remove goto from pending list
     fs.pending_gotos.remove(g);
+    Ok(())
 }
 
 // Port of findlabel from lparser.c:544-557
@@ -302,7 +323,8 @@ fn solvegotos_on_leaveblock(
     bl: &BlockCnt,
     outlevel: u8,
     goto_levels: &[(usize, u8)],
-) {
+    varnames: &std::collections::HashMap<u16, String>,
+) -> Result<(), String> {
     let mut igt = bl.first_goto; // first goto in the finishing block
     let mut level_idx = 0;
 
@@ -318,28 +340,11 @@ fn solvegotos_on_leaveblock(
         if let Some(label) = label_opt {
             // Found a match - close and remove goto
             let bl_upval = bl.upval;
-            solvegoto(fs, igt, &label, bl_upval);
+            solvegoto(fs, igt, &label, bl_upval, varnames)?;
             // solvegoto removes the goto, so don't increment igt or level_idx
         } else {
             // Adjust goto for outer block
             // lparser.c:710-711: if block has upvalues and goto escapes scope, mark for close
-            //
-            // NOTE: Known issue with goto.lua test:
-            // When a goto jumps out of a block containing local variables (not upvalues),
-            // the official Lua 5.5 somehow generates a CLOSE instruction, but our
-            // implementation doesn't because bl.upval is false for regular local variables.
-            //
-            // The condition `bl.upval && gt_level > outlevel` correctly follows Lua 5.5
-            // lparser.c:710-711, but there may be another mechanism in Lua 5.5 that
-            // marks bl->upval=true in cases we haven't identified, or the CLOSE is
-            // generated through a different path (possibly in closegoto when the label
-            // is found in an outer block with upvalues).
-            //
-            // Removing the bl.upval check causes other tests to fail, so the current
-            // implementation matches Lua 5.5 source code but may not match its behavior
-            // in all cases.
-            //
-            // Use pre-computed level from goto_levels
             let gt_level = if level_idx < goto_levels.len() && goto_levels[level_idx].0 == igt {
                 let level = goto_levels[level_idx].1;
                 level_idx += 1;
@@ -360,10 +365,11 @@ fn solvegotos_on_leaveblock(
 
     // lparser.c:716: remove local labels
     fs.labels.truncate(bl.first_label);
+    Ok(())
 }
 
 // Port of leaveblock from lparser.c:745-762 (Lua 5.5)
-pub fn leaveblock(fs: &mut FuncState) {
+pub fn leaveblock(fs: &mut FuncState) -> Result<(), String> {
     if let Some(bl_id) = fs.block_cnt_id {
         // Get block info
         let (nactvar, first_goto, is_loop, has_previous, previous_id, upval) = {
@@ -377,7 +383,7 @@ pub fn leaveblock(fs: &mut FuncState) {
                     bl.upval,
                 )
             } else {
-                return;
+                return Ok(());
             }
         };
 
@@ -391,6 +397,15 @@ pub fn leaveblock(fs: &mut FuncState) {
             let gt_nactvar = fs.pending_gotos[i].nactvar;
             let gt_level = fs.reglevel(gt_nactvar);
             goto_levels.push((i, gt_level));
+        }
+
+        // Pre-compute variable names for goto scope checking
+        // We need these before remove_vars truncates actvar
+        let mut varnames = std::collections::HashMap::new();
+        for i in 0..fs.nactvar {
+            if let Some(vd) = fs.actvar.get(i as usize) {
+                varnames.insert(i, vd.name.clone());
+            }
         }
 
         // lparser.c:749-750: need a 'close'?
@@ -421,22 +436,25 @@ pub fn leaveblock(fs: &mut FuncState) {
                 is_loop: bl.is_loop,
                 in_scope: bl.in_scope,
             };
-            solvegotos_on_leaveblock(fs, &bl_info, stklevel, &goto_levels);
+            solvegotos_on_leaveblock(fs, &bl_info, stklevel, &goto_levels, &varnames)?;
         }
 
         // lparser.c:757-760: check for undefined gotos at function level
         if !has_previous {
-            if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
-                if bl.first_goto < fs.pending_gotos.len() {
-                    // In full implementation, this would raise an error
-                    // For now, we'll just leave them
-                }
+            if !fs.pending_gotos.is_empty() {
+                // Report the first unresolved goto as an error
+                let gt = &fs.pending_gotos[0];
+                return Err(format!(
+                    "{}:{}: no visible label '{}' for <goto> at line {}",
+                    fs.source_name, gt.line, gt.name, gt.line
+                ));
             }
         }
 
         // lparser.c:761: current block now is previous one
         fs.block_cnt_id = previous_id;
     }
+    Ok(())
 }
 
 // Port of block from lparser.c
@@ -444,7 +462,7 @@ fn block(fs: &mut FuncState) -> Result<(), String> {
     let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
     enterblock(fs, bl_id, 0);
     statlist(fs)?;
-    leaveblock(fs);
+    leaveblock(fs)?;
     Ok(())
 }
 
@@ -707,7 +725,7 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     block(fs)?; // Official Lua uses block(ls), not statlist
     code::jumpto(fs, whileinit);
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkWhile, line)?;
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // Patch exit jump - false conditions finish the loop
     code::patchtohere(fs, condexit);
@@ -762,7 +780,7 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         .get_blockcnt_mut(bl2_id)
         .map(|bl| bl.nactvar)
         .unwrap_or(0);
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // lparser.c:1499-1505: handle upvalues
     if bl2_upval {
@@ -777,7 +795,7 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     code::patchlist(fs, condexit, repeat_init as isize);
 
     // lparser.c:1507: leaveblock(fs); /* finish loop */
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     Ok(())
 }
@@ -818,7 +836,7 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkFor, line)?;
 
     // lparser.c:1633: leaveblock(fs);  /* loop scope ('break' jumps to this point) */
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     Ok(())
 }
@@ -891,7 +909,7 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     block(fs)?;
 
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // Generate FORLOOP with initial Bx=0, will be fixed by fix_for_jump
     let loop_pc = code::code_abx(fs, OpCode::ForLoop, base as u32, 0);
@@ -975,12 +993,12 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
 
     // lparser.c:1670: adjustlocalvars(ls, nvars); /* activate declared variables */
     // nvars-3 because we already adjusted 3 internal variables
-    fs.adjust_local_vars((nvars - 3) as u8);
+    fs.adjust_local_vars((nvars - 3) as u16);
     code::reserve_regs(fs, (nvars - 3) as u8);
 
     block(fs)?;
 
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // lparser.c:1674: fixforjump(fs, prep, luaK_getlabel(fs), 0);
     // Fix TFORPREP to jump to current position (after leaveblock)
@@ -1029,8 +1047,8 @@ fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     let mut func_val = ExpDesc::new_void();
     expr_parser::body(fs, &mut func_val, is_method)?;
 
-    // Check if variable is readonly
-    check_readonly(fs, &mut base)?;
+    // Check if variable is readonly - use original line (where FUNCTION keyword was)
+    check_readonly_at_line(fs, &mut base, line)?;
 
     // Store function: base = func_val
     storevar(fs, &base, &mut func_val);
@@ -1133,7 +1151,7 @@ fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) -> Resul
 
 // Port of markupval from lparser.c:411-417
 // Mark block where variable at given level was defined (to emit close instructions later)
-pub fn mark_upval(fs: &mut FuncState, level: u8) {
+pub fn mark_upval(fs: &mut FuncState, level: u16) {
     let mut bl_id_opt = fs.block_cnt_id;
     while let Some(bl_id) = bl_id_opt {
         if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
@@ -1164,7 +1182,7 @@ fn check_to_close(fs: &mut FuncState, level: isize) {
         // lparser.c:1812: marktobeclosed(fs);
         mark_to_be_closed(fs);
         // lparser.c:1813: luaK_codeABC(fs, OP_TBC, reglevel(fs, level), 0, 0);
-        let reg_level = fs.reglevel(level as u8);
+        let reg_level = fs.reglevel(level as u16);
         code::code_abc(fs, OpCode::Tbc, reg_level as u32, 0, 0);
     }
 }
@@ -1745,6 +1763,16 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
     Ok(())
 }
 
+// Like check_readonly but reports error at a specific line instead of current lexer line
+fn check_readonly_at_line(fs: &mut FuncState, e: &mut ExpDesc, line: usize) -> Result<(), String> {
+    // Temporarily save and override the lexer line, then restore
+    let saved_line = fs.lexer.line;
+    fs.lexer.line = line;
+    let result = check_readonly(fs, e);
+    fs.lexer.line = saved_line;
+    result
+}
+
 // ============ Lua 5.5: Global statement support ============
 
 // Port of globalstatfunc from lparser.c:1962-1969
@@ -1823,7 +1851,7 @@ fn globalnames(fs: &mut FuncState, defkind: VarKind) -> Result<(), String> {
     }
 
     // Activate all declared globals
-    fs.nactvar = (fs.nactvar as i32 + nvars) as u8;
+    fs.nactvar = (fs.nactvar as i32 + nvars) as u16;
 
     Ok(())
 }

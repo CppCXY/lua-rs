@@ -468,7 +468,7 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
             if var.kind == ExpKind::VLOCAL {
                 // lparser.c:483: mark that this local will be used as upvalue
                 let vidx = var.u.var().vidx;
-                mark_upval(fs, vidx as u8);
+                mark_upval(fs, vidx as u16);
             }
         }
         // lparser.c:485: else nothing else to be done (base=true, used in current scope)
@@ -757,6 +757,7 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
 
 // Port of constructor from lparser.c
 fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
+    let line = fs.lexer.line;
     expect(fs, LuaTokenKind::TkLeftBrace)?;
 
     let table_reg = fs.freereg;
@@ -784,7 +785,7 @@ fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         fs.lexer.bump();
     }
 
-    expect(fs, LuaTokenKind::TkRightBrace)?;
+    statement::check_match(fs, LuaTokenKind::TkRightBrace, LuaTokenKind::TkLeftBrace, line)?;
     lastlistfield(fs, &mut cc);
     code::settablesize(fs, pc, table_reg, cc.na, cc.nh);
     Ok(())
@@ -881,7 +882,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     for i in 0..nparams {
         child_fs.new_localvar(params[i].clone(), param_kinds[i]);
     }
-    child_fs.adjust_local_vars(nparams as u8);
+    child_fs.adjust_local_vars(nparams as u16);
 
     // lparser.c:982: Set numparams BEFORE registering vararg parameter
     // f->numparams = cast_byte(fs->nactvar);
@@ -937,7 +938,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     code::ret(&mut child_fs, first_reg, 0);
 
     // lparser.c:760: close_func calls leaveblock(fs) - close function body block
-    statement::leaveblock(&mut child_fs);
+    statement::leaveblock(&mut child_fs)?;
 
     // Set param_count on chunk BEFORE calling finish, so finish can use it for RETURN instructions
     child_fs.chunk.param_count = param_count;

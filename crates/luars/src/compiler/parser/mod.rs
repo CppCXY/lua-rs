@@ -104,6 +104,9 @@ impl<'a> LuaLexer<'a> {
     }
 
     pub fn current_token_text(&self) -> &str {
+        if self.current_token == LuaTokenKind::TkEof {
+            return "<eof>";
+        }
         if self.token_index < self.tokens.len() {
             let range = &self.tokens[self.token_index].range;
             &self.text[range.start_offset..range.end_offset()]

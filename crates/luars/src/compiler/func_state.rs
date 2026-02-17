@@ -24,7 +24,7 @@ pub struct FuncState<'a> {
     pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
     pub labels: Vec<LabelDesc>,        // list of active labels
     pub actvar: Vec<VarDesc>,          // list of all variable descriptors (active and pending)
-    pub nactvar: u8,                   // number of active variables (actvar[0..nactvar] are active)
+    pub nactvar: u16,                   // number of active variables (actvar[0..nactvar] are active)
     pub upvalues: Vec<Upvaldesc>,      // upvalue descriptors
     pub nups: u8,                      // number of upvalues
     pub freereg: u8,                   // first free register
@@ -105,7 +105,7 @@ pub struct BlockCnt {
     pub previous: Option<BlockCntId>, // link to the enclosing block
     pub first_label: usize,           // index of first label in this block
     pub first_goto: usize,            // index of first pending goto in this block
-    pub nactvar: u8,                  // number of active variables outside the block
+    pub nactvar: u16,                  // number of active variables outside the block
     pub upval: bool,                  // true if some variable in block is an upvalue
     pub is_loop: u8,                  // 0: not a loop; 1: loop; 2: loop with pending breaks
     pub in_scope: bool,               // true if 'block' is still in scope
@@ -117,7 +117,7 @@ pub struct LabelDesc {
     pub name: String,
     pub pc: usize,
     pub line: usize,
-    pub nactvar: u8,
+    pub nactvar: u16,
     pub stklevel: u8, // NEW: saved stack level at goto/label creation
     pub close: bool,
 }
@@ -211,20 +211,21 @@ impl<'a> FuncState<'a> {
     // Unified error generation function (port of luaX_syntaxerror from llex.c)
     pub fn syntax_error(&self, msg: &str) -> String {
         let line = self.lexer.line;
-        format!("{}:{}: {}", self.source_name, line, msg)
+        format!("{}:{}: {}", format_source(&self.source_name), line, msg)
     }
 
     // Generate error with current token information
     pub fn token_error(&self, msg: &str) -> String {
         let token_text = self.lexer.current_token_text();
         let line = self.lexer.line;
+        let source = format_source(&self.source_name);
         // Special handling for <eof> - don't add quotes around it
         if token_text == "<eof>" {
-            format!("{}:{}: {} near {}", self.source_name, line, msg, token_text)
+            format!("{}:{}: {} near {}", source, line, msg, token_text)
         } else {
             format!(
                 "{}:{}: {} near '{}'",
-                self.source_name, line, msg, token_text
+                source, line, msg, token_text
             )
         }
     }
@@ -302,7 +303,7 @@ impl<'a> FuncState<'a> {
     }
 
     // Port of adjustlocalvars from lparser.c:329-338
-    pub fn adjust_local_vars(&mut self, nvars: u8) {
+    pub fn adjust_local_vars(&mut self, nvars: u16) {
         // Variables have already been added to actvar by new_localvar
         // This function assigns register indices to them and marks them as active
         let mut reglevel = self.reglevel(self.nactvar);
@@ -328,7 +329,7 @@ impl<'a> FuncState<'a> {
     // Port of reglevel from lparser.c:236-242
     // Returns the register level for variables outside the block
     // Matches Lua 5.5's: while (nvar-- > 0) { if (varinreg(vd)) return vd->ridx + 1; }
-    pub fn reglevel(&self, nvar: u8) -> u8 {
+    pub fn reglevel(&self, nvar: u16) -> u8 {
         let mut n = nvar as i32 - 1;
         while n >= 0 {
             if let Some(vd) = self.actvar.get(n as usize) {
@@ -349,7 +350,7 @@ impl<'a> FuncState<'a> {
     }
 
     // Port of removevars from lparser.c
-    pub fn remove_vars(&mut self, tolevel: u8) {
+    pub fn remove_vars(&mut self, tolevel: u16) {
         let endpc = self.chunk.code.len() as u32;
         while self.nactvar > tolevel {
             self.nactvar -= 1;
@@ -447,7 +448,7 @@ impl<'a> FuncState<'a> {
                 // Mark the variable in parent function as needing upvalue closure
                 if !prev_ptr.is_null() {
                     let prev = &mut *prev_ptr;
-                    crate::compiler::statement::mark_upval(prev, vidx as u8);
+                    crate::compiler::statement::mark_upval(prev, vidx as u16);
                 }
 
                 let prev = &*prev_ptr;
@@ -472,5 +473,40 @@ impl<'a> FuncState<'a> {
         self.nups = self.upvalues.len() as u8;
 
         (self.nups - 1) as i32
+    }
+}
+
+/// Format source name for error messages (port of luaO_chunkid from lobject.c)
+/// - "@filename" → "filename" (strip @ prefix, truncate if needed)
+/// - "=display" → "display" (strip = prefix, use as-is)
+/// - other → [string "first_line..."] (wrap in [string "..."], truncate)
+pub fn format_source(source: &str) -> String {
+    const MAX_SRC: usize = 60;
+    if source.starts_with('=') {
+        // Remove the '=' prefix, take as display name
+        source[1..].to_string()
+    } else if source.starts_with('@') {
+        let name = &source[1..];
+        if name.len() <= MAX_SRC {
+            name.to_string()
+        } else {
+            // Truncate from the end, add "..."
+            format!("...{}", &name[name.len() - (MAX_SRC - 3)..])
+        }
+    } else {
+        // Source is a literal string - wrap as [string "..."]
+        // Take first line only, truncate if needed
+        let first_line = source.lines().next().unwrap_or(source);
+        let max_content = MAX_SRC - "[string \"...\"]".len();
+        if first_line.len() <= max_content && source.lines().count() <= 1 {
+            format!("[string \"{}\"]", first_line)
+        } else {
+            let truncated = if first_line.len() > max_content {
+                &first_line[..max_content]
+            } else {
+                first_line
+            };
+            format!("[string \"{}...\"]", truncated)
+        }
     }
 }

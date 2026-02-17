@@ -1132,7 +1132,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
         Err(e) => {
             // Return nil and error message
-            let err_msg = l.create_string(&format!("load error: {}", e))?;
+            let err_msg = l.create_string(&e)?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -1179,7 +1179,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         Err(e) => {
-            let err_msg = l.create_string(&format!("load error: {}", e))?;
+            let err_msg = l.create_string(&e.to_string())?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)

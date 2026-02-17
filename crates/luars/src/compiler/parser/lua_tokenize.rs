@@ -42,6 +42,13 @@ impl<'a> LuaTokenize<'a> {
             return Err(err.clone());
         }
 
+        // Push EOF token with the final line number so error messages reference the correct line
+        tokens.push(LuaTokenData::with_line(
+            LuaTokenKind::TkEof,
+            self.reader.current_range(),
+            self.line,
+        ));
+
         Ok(tokens)
     }
 

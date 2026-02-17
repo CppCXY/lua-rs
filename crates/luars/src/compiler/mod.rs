@@ -48,7 +48,7 @@ pub fn compile_code_with_name(
     let tokens = match tokenize_result {
         Ok(tokens) => tokens,
         Err(err) => {
-            return Err(format!("{}:{}", chunk_name, err));
+            return Err(format!("{}:{}", func_state::format_source(chunk_name), err));
         }
     };
 
@@ -122,7 +122,7 @@ pub fn compile_code_with_name(
     //  Port of close_func from lparser.c:885-891
     // Must call leaveblock AFTER generating RETURN to solve pending gotos!
     // This resolves exported gotos that jumped out of inner blocks to labels in main chunk
-    statement::leaveblock(&mut fs);
+    statement::leaveblock(&mut fs)?;
 
     // Port of close_func from lparser.c:763 - finish code generation
     code::finish(&mut fs);
