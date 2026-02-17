@@ -487,7 +487,7 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
         .map(|f| f.base - f.func_offset)
         .ok_or_else(|| LuaError::RuntimeError)?;
 
-    // Rearrange stack for pcall_stack_based:
+    // Rearrange stack for xpcall_stack_based:
     // We want [handler, f, arg1, arg2, ...] starting at xpcall_func_pos.
     //   xpcall_func_pos = handler (was xpcall function itself, overwrite)
     //   xpcall_func_pos+1 = f (the function to protect)
@@ -511,6 +511,7 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
         l.stack_set(xpcall_func_pos + 2 + i, val)?;
     }
     let func_idx = xpcall_func_pos + 1;
+    let handler_idx = xpcall_func_pos;
     l.set_top(func_idx + 1 + call_arg_count)?;
 
     // Mark current (xpcall's) C frame with CIST_XPCALL
@@ -522,13 +523,11 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
         ci.call_status |= CIST_XPCALL;
     }
 
-    // Call using stack-based API
-    let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
+    // Call using xpcall_stack_based which calls handler BEFORE unwinding frames
+    let (success, result_count) = l.xpcall_stack_based(func_idx, call_arg_count, handler_idx)?;
 
     if success {
         // Prepend true, results are at func_idx..func_idx+result_count
-        // We need: handler_idx=true, handler_idx+1=res1, ...
-        // Move results to xpcall_func_pos
         let mut all_results = Vec::with_capacity(result_count + 1);
         all_results.push(LuaValue::boolean(true));
         for i in 0..result_count {
@@ -539,26 +538,8 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
         }
         Ok(all_results.len())
     } else {
-        // Error — call error handler
-        let error_val = if result_count > 0 {
-            l.stack_get(func_idx).unwrap_or(LuaValue::nil())
-        } else {
-            LuaValue::nil()
-        };
-        let handler = l.stack_get(xpcall_func_pos).unwrap_or(LuaValue::nil());
-
-        // Call handler(error_val) — this is non-yieldable (nny context)
-        let handler_result = l.pcall(handler, vec![error_val.clone()]);
-        let transformed_error = match handler_result {
-            Ok((true, results)) => {
-                results.into_iter().next().unwrap_or(LuaValue::nil())
-            }
-            _ => {
-                // Handler failed — return "error in error handling" per Lua spec
-                l.create_string("error in error handling")?
-            }
-        };
-
+        // Error — handler already called by xpcall_stack_based, result is at func_idx
+        let transformed_error = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
         l.push_value(LuaValue::boolean(false))?;
         l.push_value(transformed_error)?;
         Ok(2)

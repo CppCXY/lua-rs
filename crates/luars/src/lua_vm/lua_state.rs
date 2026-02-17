@@ -2214,6 +2214,182 @@ impl LuaState {
         }
     }
 
+    /// Protected call with error handler, stack-based (xpcall semantics).
+    /// Like pcall_stack_based but calls the error handler at `handler_idx`
+    /// BEFORE unwinding call frames, so debug.traceback can see the full stack.
+    /// Returns (success, result_count) where results are left on stack at func_idx.
+    pub fn xpcall_stack_based(
+        &mut self,
+        func_idx: usize,
+        arg_count: usize,
+        handler_idx: usize,
+    ) -> LuaResult<(bool, usize)> {
+        let initial_depth = self.call_depth();
+
+        let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok((count, depth)) => (count, depth),
+            Err(e) => {
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                self.stack_set(func_idx, err_str)?;
+                self.set_top(func_idx + 1)?;
+                return Ok((false, 1));
+            }
+        };
+
+        let func = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("xpcall: function not found after resolution".to_string()))?;
+
+        let result = if func.is_c_callable() {
+            call_c_function(self, func_idx, actual_arg_count, -1).map(|_| ())
+        } else {
+            let base = func_idx + 1;
+            self.push_frame(&func, base, actual_arg_count, -1)?;
+            if ccmt_depth > 0 {
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r
+        };
+
+        match result {
+            Ok(()) => {
+                let stack_top = self.get_top();
+                let result_count = if stack_top > func_idx {
+                    stack_top - func_idx
+                } else {
+                    0
+                };
+                Ok((true, result_count))
+            }
+            Err(LuaError::Yield) => {
+                if initial_depth > 0 {
+                    let pcall_frame_idx = initial_depth - 1;
+                    if pcall_frame_idx < self.call_depth {
+                        let ci = self.get_call_info_mut(pcall_frame_idx);
+                        ci.call_status |= CIST_YPCALL;
+                    }
+                }
+                Err(LuaError::Yield)
+            }
+            Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
+            Err(e) => {
+                // Get error object BEFORE any cleanup
+                let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                let error_msg_str = self.get_error_msg(e);
+
+                let err_value = if !err_obj.is_nil() {
+                    err_obj.clone()
+                } else {
+                    self.create_string(&error_msg_str)?.into()
+                };
+
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+
+                // Temporarily increase max_call_depth for error handler
+                let saved_max_depth = self.safe_option.max_call_depth;
+                self.safe_option.max_call_depth = saved_max_depth + 30;
+
+                // Call error handler WITH ALL ERROR FRAMES STILL ON STACK
+                let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
+                let current_top = self.stack_top;
+                self.push_value(handler)?;
+                let handler_func_idx = current_top;
+                self.push_value(err_value.clone())?;
+
+                let handler_depth = self.call_depth();
+
+                let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                    call_c_function(self, handler_func_idx, 1, -1)
+                } else {
+                    match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                        Ok(()) => {
+                            self.inc_n_ccalls()?;
+                            let r = lua_execute(self, handler_depth);
+                            self.dec_n_ccalls();
+                            r
+                        }
+                        Err(handler_err) => Err(handler_err),
+                    }
+                };
+
+                // Collect handler results
+                let handler_failed;
+                let transformed_error;
+                match handler_result {
+                    Ok(_) => {
+                        handler_failed = false;
+                        transformed_error = self.stack_get(handler_func_idx).unwrap_or(LuaValue::nil());
+                    }
+                    Err(_) => {
+                        handler_failed = true;
+                        transformed_error = LuaValue::nil();
+                    }
+                }
+
+                // Clean up handler frames
+                while self.call_depth() > handler_depth {
+                    self.pop_frame();
+                }
+
+                // Restore max_call_depth
+                self.safe_option.max_call_depth = saved_max_depth;
+
+                // NOW pop error frames (after handler has seen them)
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+
+                // Close upvalues and TBC
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let close_result = self.close_tbc_with_error(base, err_obj);
+                    match close_result {
+                        Ok(()) => {}
+                        Err(LuaError::Yield) => {
+                            let pcall_ci_idx = initial_depth - 1;
+                            if pcall_ci_idx < self.call_depth {
+                                let ci = self.get_call_info_mut(pcall_ci_idx);
+                                ci.call_status |= CIST_YPCALL | CIST_RECST;
+                            }
+                            let cascaded =
+                                std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            self.error_object = if !cascaded.is_nil() {
+                                cascaded
+                            } else {
+                                err_value
+                            };
+                            return Err(LuaError::Yield);
+                        }
+                        Err(_e2) => {}
+                    }
+                }
+
+                // Determine final error value
+                let final_error = if handler_failed {
+                    self.create_string("error in error handling")?.into()
+                } else {
+                    transformed_error
+                };
+
+                self.stack_set(func_idx, final_error)?;
+                self.set_top(func_idx + 1)?;
+
+                Ok((false, 1))
+            }
+        }
+    }
+
     /// Protected call with error handler (xpcall semantics)
     /// The error handler is called if an error occurs
     /// Returns (success, results)
