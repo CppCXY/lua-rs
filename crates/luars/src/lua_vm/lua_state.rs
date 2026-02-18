@@ -3300,6 +3300,14 @@ impl LuaState {
                 return Ok(format!("{}", value));
             }
             _ => {
+                // Check for trait-based __tostring on userdata
+                if value.ttisfulluserdata() {
+                    if let Some(ud) = value.as_userdata_mut() {
+                        if let Some(s) = ud.get_trait().lua_tostring() {
+                            return Ok(s);
+                        }
+                    }
+                }
                 // Check for __tostring metamethod
                 if let Some(mm) = get_metamethod_event(self, value, TmKind::ToString) {
                     // Call __tostring metamethod

@@ -277,6 +277,16 @@ pub fn handle_len(
             setivalue(&mut lua_state.stack_mut()[*base + a], table.len() as i64);
         }
     } else {
+        // Try trait-based __len for userdata first
+        if rb.ttisfulluserdata() {
+            if let Some(ud) = rb.as_userdata_mut() {
+                if let Some(udv) = ud.get_trait().lua_len() {
+                    let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                    lua_state.stack_mut()[*base + a] = result;
+                    return Ok(());
+                }
+            }
+        }
         if let Some(mm) = helper::get_metamethod_event(lua_state, &rb, TmKind::Len) {
             lua_state.set_frame_pc(frame_idx, pc as u32);
             let result = match metamethod::call_tm_res(lua_state, mm, rb, rb) {

@@ -331,6 +331,47 @@ impl fmt::Display for UdValue {
     }
 }
 
+// ==================== UdValue ↔ LuaValue conversion ====================
+
+/// Convert a `UdValue` to a `LuaValue`.
+///
+/// Most variants are zero-cost. `UdValue::Str` requires GC allocation via `LuaState`.
+/// This is the bridge between trait-based dispatch (which returns `UdValue`) and the
+/// VM's internal representation (`LuaValue`).
+pub fn udvalue_to_lua_value(
+    lua_state: &mut crate::lua_vm::LuaState,
+    udv: UdValue,
+) -> crate::lua_vm::LuaResult<crate::lua_value::LuaValue> {
+    use crate::lua_value::LuaValue;
+    match udv {
+        UdValue::Nil => Ok(LuaValue::nil()),
+        UdValue::Boolean(b) => Ok(LuaValue::boolean(b)),
+        UdValue::Integer(i) => Ok(LuaValue::integer(i)),
+        UdValue::Number(n) => Ok(LuaValue::float(n)),
+        UdValue::Str(s) => lua_state.create_string(&s),
+    }
+}
+
+/// Convert a `LuaValue` to a `UdValue`.
+///
+/// Lossless for nil, bool, int, float, string. Other types (table, function, etc.)
+/// become `UdValue::Nil` since they can't be represented in the trait world.
+pub fn lua_value_to_udvalue(value: &crate::lua_value::LuaValue) -> UdValue {
+    if value.is_nil() {
+        UdValue::Nil
+    } else if let Some(b) = value.as_boolean() {
+        UdValue::Boolean(b)
+    } else if let Some(i) = value.as_integer() {
+        UdValue::Integer(i)
+    } else if let Some(n) = value.as_float() {
+        UdValue::Number(n)
+    } else if let Some(s) = value.as_str() {
+        UdValue::Str(s.to_owned())
+    } else {
+        UdValue::Nil
+    }
+}
+
 // ==================== Convenience macro for simple types ====================
 
 /// Implement `UserDataTrait` for types that only need type name and downcast support.

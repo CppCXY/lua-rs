@@ -136,7 +136,16 @@ pub fn handle_concat(
 /// Check if a value can be directly converted to string for concatenation
 #[inline(always)]
 fn is_concat_convertible(value: &LuaValue) -> bool {
-    value.is_string() || value.is_binary() || value.as_integer().is_some() || value.as_float().is_some()
+    if value.is_string() || value.is_binary() || value.as_integer().is_some() || value.as_float().is_some() {
+        return true;
+    }
+    // Userdata with lua_tostring can be concat-converted
+    if value.ttisfulluserdata() {
+        if let Some(ud) = value.as_userdata_mut() {
+            return ud.get_trait().lua_tostring().is_some();
+        }
+    }
+    false
 }
 
 /// Write value's string representation directly to buffer
@@ -166,6 +175,15 @@ fn value_to_bytes_write(value: &LuaValue, buf: &mut Vec<u8>) -> Option<bool> {
         // ryu would change format and break tests
         buf.extend_from_slice(f.to_string().as_bytes());
         Some(false)
+    } else if value.ttisfulluserdata() {
+        // Userdata with lua_tostring can be used in concatenation
+        if let Some(ud) = value.as_userdata_mut() {
+            if let Some(s) = ud.get_trait().lua_tostring() {
+                buf.extend_from_slice(s.as_bytes());
+                return Some(false);
+            }
+        }
+        None
     } else {
         // Table, function, nil, bool=false, etc. cannot be auto-converted
         // Let caller decide whether to try metamethod
@@ -248,6 +266,15 @@ pub fn concat_strings(
         } else if value.as_float().is_some() {
             total_len += 24; // max chars for f64
             all_strings = false;
+        } else if value.ttisfulluserdata() {
+            if let Some(ud) = value.as_userdata_mut() {
+                if let Some(s) = ud.get_trait().lua_tostring() {
+                    total_len += s.len();
+                    all_strings = false;
+                    continue;
+                }
+            }
+            return Err(crate::stdlib::debug::typeerror(lua_state, &value, "concatenate"));
         } else {
             return Err(crate::stdlib::debug::typeerror(lua_state, &value, "concatenate"));
         }

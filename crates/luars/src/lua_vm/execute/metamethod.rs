@@ -34,6 +34,18 @@ pub fn try_unary_tm(
         }
     }
 
+    // Try trait-based __unm for userdata
+    if tm_kind == TmKind::Unm && operand.ttisfulluserdata() {
+        if let Some(ud) = operand.as_userdata_mut() {
+            if let Some(udv) = ud.get_trait().lua_unm() {
+                let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                let stack = lua_state.stack_mut();
+                stack[result_pos] = result;
+                return Ok(());
+            }
+        }
+    }
+
     // Try to get metamethod from operand
     let metamethod = get_metamethod_event(lua_state, &operand, tm_kind);
     if let Some(mm) = metamethod {
@@ -331,6 +343,26 @@ fn try_bin_tm(
     // tried tonumberns/tointeger before falling through to MMBIN/MMBINI/MMBINK.
     // If we reach here, coercion has already failed.
 
+    // Try trait-based arithmetic for userdata
+    if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
+        let trait_result = if let Some(ud) = p1.as_userdata_mut() {
+            let other = crate::lua_value::lua_value_to_udvalue(&p2);
+            match tm_kind {
+                TmKind::Add => ud.get_trait().lua_add(&other),
+                TmKind::Sub => ud.get_trait().lua_sub(&other),
+                TmKind::Mul => ud.get_trait().lua_mul(&other),
+                TmKind::Div => ud.get_trait().lua_div(&other),
+                TmKind::Mod => ud.get_trait().lua_mod(&other),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(udv) = trait_result {
+            return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
+        }
+    }
+
     // Try to get metamethod from p1, then p2
     let metamethod = get_binop_metamethod(lua_state, &p1, &p2, tm_kind);
     if let Some(mm) = metamethod {
@@ -548,6 +580,22 @@ pub fn try_comp_tm(
     p2: LuaValue,
     tm_kind: TmKind,
 ) -> LuaResult<Option<bool>> {
+    // Try trait-based comparison for userdata
+    if p1.ttisfulluserdata() {
+        if let Some(ud1) = p1.as_userdata_mut() {
+            if let Some(ud2) = p2.as_userdata_mut() {
+                let result = match tm_kind {
+                    TmKind::Lt => ud1.get_trait().lua_lt(ud2.get_trait()),
+                    TmKind::Le => ud1.get_trait().lua_le(ud2.get_trait()),
+                    _ => None,
+                };
+                if let Some(b) = result {
+                    return Ok(Some(b));
+                }
+            }
+        }
+    }
+
     // Try to get metamethod from p1, then p2
     let metamethod = get_binop_metamethod(lua_state, &p1, &p2, tm_kind);
 
@@ -579,6 +627,14 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
         if let (Some(u_ptr1), Some(u_ptr2)) = (t1.as_userdata_ptr(), t2.as_userdata_ptr()) {
             if u_ptr1 == u_ptr2 {
                 return Ok(true);
+            }
+        }
+        // Try trait-based lua_eq before metatable
+        if let Some(ud1) = t1.as_userdata_mut() {
+            if let Some(ud2) = t2.as_userdata_mut() {
+                if let Some(result) = ud1.get_trait().lua_eq(ud2.get_trait()) {
+                    return Ok(result);
+                }
             }
         }
         // Different userdata - try __eq metamethod

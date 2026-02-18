@@ -430,7 +430,25 @@ pub fn lookup_from_metatable(
                 }
             }
         } else {
-            // Non-table (string, userdata): fall back to general path
+            // Non-table (string, userdata): check trait-based field access first
+            if t.ttisfulluserdata() {
+                if let Some(ud) = t.as_userdata_mut() {
+                    // Try trait-based get_field (key must be a string)
+                    if let Some(key_str) = key.as_str() {
+                        if let Some(udv) = ud.get_trait().get_field(key_str) {
+                            let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                            return Ok(Some(result));
+                        }
+                        // Try trait-based call_method — returns a closure wrapping the method
+                        // Method names are checked here; actual call happens when Lua invokes it
+                        if ud.get_trait().method_names().contains(&key_str) {
+                            // Fall through to metatable — methods are dispatched via __index table
+                            // or will be handled at call time. For now, let metatable handle it.
+                        }
+                    }
+                }
+            }
+            // Fall back to general metamethod path
             match get_metamethod_event(lua_state, &t, TmKind::Index) {
                 Some(tm) => tm,
                 None => {
@@ -604,7 +622,22 @@ pub fn finishset(
                 continue;
             }
         } else {
-            // Not a table - get __newindex metamethod
+            // Not a table — try trait-based set_field for userdata first
+            if t.ttisfulluserdata() {
+                if let Some(ud) = t.as_userdata_mut() {
+                    if let Some(key_str) = key.as_str() {
+                        let udv = crate::lua_value::lua_value_to_udvalue(&value);
+                        match ud.get_trait_mut().set_field(key_str, udv) {
+                            Some(Ok(())) => return Ok(true),
+                            Some(Err(msg)) => {
+                                return Err(lua_state.error(msg));
+                            }
+                            None => {} // Fall through to metatable
+                        }
+                    }
+                }
+            }
+            // Get __newindex metamethod
             if let Some(tm) = get_metamethod_event(lua_state, &t, TmKind::NewIndex) {
                 if tm.is_function() {
                     // Call metamethod

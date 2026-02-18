@@ -234,3 +234,170 @@ fn test_simple_userdata_macro() {
     assert!(ud.downcast_ref::<SimpleHandle>().is_some());
     assert_eq!(ud.downcast_ref::<SimpleHandle>().unwrap().id, 42);
 }
+
+// ==================== VM Integration Tests ====================
+// These tests verify that userdata is properly wired to the VM,
+// so Lua scripts can access fields, set fields, and trigger metamethods.
+
+use crate::lua_vm::{LuaVM, SafeOption};
+use crate::stdlib;
+
+/// Helper: create a VM with basic stdlib and register a Point userdata as global "p"
+fn setup_point_vm() -> Box<LuaVM> {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+    vm.open_stdlib(stdlib::Stdlib::String).unwrap();
+
+    let p = Point { x: 3.0, y: 4.0, _id: 0 };
+    let ud = LuaUserdata::new(p);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("p", ud_val).unwrap();
+    vm
+}
+
+#[test]
+fn test_vm_get_field() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string("return p.x, p.y").unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_number(), Some(3.0));
+    assert_eq!(results[1].as_number(), Some(4.0));
+}
+
+#[test]
+fn test_vm_set_field() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string(r#"
+        p.x = 10.0
+        p.y = 20.0
+        return p.x, p.y
+    "#).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_number(), Some(10.0));
+    assert_eq!(results[1].as_number(), Some(20.0));
+}
+
+#[test]
+fn test_vm_tostring() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string("return tostring(p)").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("Point(3, 4)"));
+}
+
+#[test]
+fn test_vm_eq() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let p1 = Point { x: 1.0, y: 2.0, _id: 0 };
+    let p2 = Point { x: 1.0, y: 2.0, _id: 0 };
+    let p3 = Point { x: 3.0, y: 4.0, _id: 0 };
+
+    let state = vm.main_state();
+    let v1 = state.create_userdata(LuaUserdata::new(p1)).unwrap();
+    let v2 = state.create_userdata(LuaUserdata::new(p2)).unwrap();
+    let v3 = state.create_userdata(LuaUserdata::new(p3)).unwrap();
+    state.set_global("p1", v1).unwrap();
+    state.set_global("p2", v2).unwrap();
+    state.set_global("p3", v3).unwrap();
+
+    let results = vm.execute_string("return p1 == p2, p1 == p3").unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_boolean(), Some(true));
+    assert_eq!(results[1].as_boolean(), Some(false));
+}
+
+#[test]
+fn test_vm_lt_le() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let p1 = Point { x: 1.0, y: 2.0, _id: 0 };
+    let p2 = Point { x: 3.0, y: 4.0, _id: 0 };
+
+    let state = vm.main_state();
+    let v1 = state.create_userdata(LuaUserdata::new(p1)).unwrap();
+    let v2 = state.create_userdata(LuaUserdata::new(p2)).unwrap();
+    state.set_global("p1", v1).unwrap();
+    state.set_global("p2", v2).unwrap();
+
+    let results = vm.execute_string("return p1 < p2, p1 <= p2, p2 < p1").unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_boolean(), Some(true));
+    assert_eq!(results[1].as_boolean(), Some(true));
+    assert_eq!(results[2].as_boolean(), Some(false));
+}
+
+#[test]
+fn test_vm_concat() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string(r#"return "pos=" .. tostring(p)"#).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("pos=Point(3, 4)"));
+}
+
+#[test]
+fn test_vm_pass_userdata_to_function() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string(r#"
+        local function get_x(obj)
+            return obj.x
+        end
+        return get_x(p)
+    "#).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_number(), Some(3.0));
+}
+
+#[test]
+fn test_vm_config_readonly() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let cfg = Config {
+        name: "test".to_string(),
+        version: 42,
+        secret: "hidden".to_string(),
+        item_count: 10,
+    };
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(LuaUserdata::new(cfg)).unwrap();
+    state.set_global("cfg", ud_val).unwrap();
+
+    // Can read name and version
+    let results = vm.execute_string("return cfg.name, cfg.version, cfg.count").unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_str(), Some("test"));
+    assert_eq!(results[1].as_integer(), Some(42));
+    assert_eq!(results[2].as_integer(), Some(10));
+
+    // Can set name (writable)
+    let results = vm.execute_string(r#"cfg.name = "new"; return cfg.name"#).unwrap();
+    assert_eq!(results[0].as_str(), Some("new"));
+
+    // Cannot set version (readonly) — should error
+    let result = vm.execute_string("cfg.version = 99");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_vm_unknown_field_is_nil() {
+    let mut vm = setup_point_vm();
+    // Accessing a field that doesn't exist should fall through to metatable,
+    // and since there's no metatable, should error (attempt to index userdata)
+    // Actually, looking at the code: if get_field returns None AND there's no __index,
+    // it produces an error. Let's verify the error case:
+    let result = vm.execute_string("return p.nonexistent");
+    // With no metatable set, this should error since no __index metamethod exists
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_vm_type_of_userdata() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string("return type(p)").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("userdata"));
+}
