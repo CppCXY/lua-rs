@@ -653,16 +653,20 @@ impl LuaState {
             if ci.is_lua() {
                 if let Some(func_obj) = ci.func.as_lua_function() {
                     let chunk = func_obj.chunk();
-                    let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                    let source = match chunk.source_name.as_deref() {
+                        Some(raw) => crate::compiler::format_source(raw),
+                        None => "?".to_string(), // stripped debug info
+                    };
                     let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
                         chunk.line_info[ci.pc as usize - 1] as usize
-                    } else if !chunk.line_info.is_empty() {
-                        chunk.line_info[0] as usize
                     } else {
                         0
                     };
                     location = if line > 0 {
                         format!("{}:{}: ", source, line)
+                    } else if chunk.line_info.is_empty() {
+                        // No line info at all (stripped) — use ?
+                        format!("{}:?: ", source)
                     } else {
                         format!("{}: ", source)
                     };
@@ -671,6 +675,47 @@ impl LuaState {
         };
 
         self.error_msg = format!("{}{}", location, msg);
+        LuaError::RuntimeError
+    }
+
+    /// Raise an error from a C function, finding the calling Lua frame for location.
+    /// Mirrors C Lua's luaL_error behavior: uses luaL_where(L,1) to get
+    /// location from the Lua frame that called the current C function.
+    #[cold]
+    #[inline(never)]
+    pub fn error_from_c(&mut self, msg: String) -> LuaError {
+        // Find the nearest Lua frame by traversing up from current frame
+        let depth = self.call_depth;
+        for level in 0..depth {
+            let idx = depth - 1 - level;
+            if let Some(ci) = self.get_frame(idx) {
+                if ci.is_lua() {
+                    if let Some(func_obj) = ci.func.as_lua_function() {
+                        let chunk = func_obj.chunk();
+                        let source = match chunk.source_name.as_deref() {
+                            Some(raw) => crate::compiler::format_source(raw),
+                            None => "?".to_string(),
+                        };
+                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            chunk.line_info[ci.pc as usize - 1] as usize
+                        } else {
+                            0
+                        };
+                        let location = if line > 0 {
+                            format!("{}:{}: ", source, line)
+                        } else if chunk.line_info.is_empty() {
+                            format!("{}:?: ", source)
+                        } else {
+                            format!("{}: ", source)
+                        };
+                        self.error_msg = format!("{}{}", location, msg);
+                        return LuaError::RuntimeError;
+                    }
+                }
+            }
+        }
+        // Fallback: no Lua frame found
+        self.error_msg = msg;
         LuaError::RuntimeError
     }
 
@@ -3122,7 +3167,14 @@ impl LuaState {
         }
 
         // Fallback: generic representation
-        Ok(format!("{}", value))
+        // Check for __name in metatable (luaT_objtypename)
+        let type_prefix = crate::stdlib::debug::objtypename(self, value);
+        if type_prefix != value.type_name() {
+            // Use __name as prefix instead of built-in type name
+            Ok(format!("{}: 0x{:x}", type_prefix, value.raw_ptr_repr() as usize))
+        } else {
+            Ok(format!("{}", value))
+        }
     }
 
     pub fn is_main_thread(&self) -> bool {

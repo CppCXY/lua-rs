@@ -286,6 +286,11 @@ pub fn create_file_metatable(l: &mut LuaState) -> LuaResult<LuaValue> {
     let index_key = l.create_string("__index")?;
     l.raw_set(&mt, index_key, index_table);
 
+    // Set __name = "FILE*" for type identification (luaT_objtypename)
+    let name_key = l.create_string("__name")?;
+    let name_val = l.create_string("FILE*")?;
+    l.raw_set(&mt, name_key, name_val);
+
     Ok(mt)
 }
 

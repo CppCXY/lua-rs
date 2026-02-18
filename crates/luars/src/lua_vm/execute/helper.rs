@@ -438,7 +438,7 @@ pub fn lookup_from_metatable(
                     // Use typeerror for enhanced error message with varinfo
                     return Err(crate::stdlib::debug::typeerror(
                         lua_state,
-                        &t.type_name(),
+                        &t,
                         "index",
                     ));
                 }
@@ -623,7 +623,7 @@ pub fn finishset(
             // No metamethod found for non-table
             return Err(crate::stdlib::debug::typeerror(
                 lua_state,
-                &t.type_name(),
+                &t,
                 "index",
             ));
         }

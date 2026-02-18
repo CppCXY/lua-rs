@@ -152,7 +152,7 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
                     n.to_string()
                 } else {
                     return Err(
-                        l.error("bad argument to 'write' (string or number expected)".to_string())
+                        crate::stdlib::debug::arg_typeerror(l, i, "string or number", &arg)
                     );
                 };
 
@@ -429,7 +429,7 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
             if let Some(ud) = arg_val.as_userdata_mut() {
                 let data = ud.get_data_mut();
                 if data.downcast_ref::<LuaFile>().is_none() {
-                    return Err(l.error("bad argument #1 to 'input' (file expected)".to_string()));
+                    return Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &arg_val));
                 }
             }
 
@@ -438,7 +438,7 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
             let key = l.create_string("_IO_input")?;
             l.raw_set(&registry, key, arg_val);
         } else {
-            return Err(l.error("bad argument #1 to 'input' (string or file expected)".to_string()));
+            return Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &arg_val));
         }
     }
 

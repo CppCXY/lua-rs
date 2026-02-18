@@ -1290,10 +1290,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             // Try converting to float (handles float and string)
                             let mut flimit = 0.0;
-                            if !tonumberns(&stack[ra + 1], &mut flimit) {
+                            let limit_val = stack[ra + 1]; // Copy to avoid borrow conflict
+                            if !tonumberns(&limit_val, &mut flimit) {
+                                let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
                                 save_pc!();
                                 return Err(
-                                    lua_state.error("'for' limit must be a number".to_string())
+                                    lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
                                 );
                             }
                             // Try rounding the float to integer

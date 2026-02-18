@@ -9,6 +9,33 @@ use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
 
+/// Mirrors luaL_checkinteger: convert a LuaValue to integer, producing
+/// appropriate error messages like C Lua.
+fn value_to_integer(v: &LuaValue) -> Result<i64, &'static str> {
+    if let Some(i) = v.as_integer() {
+        return Ok(i);
+    }
+    if let Some(f) = v.as_number() {
+        if f == f.floor() && f.is_finite() && f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+            return Ok(f as i64);
+        }
+        return Err("number has no integer representation");
+    }
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        if let Ok(i) = s.parse::<i64>() {
+            return Ok(i);
+        }
+        if let Ok(f) = s.parse::<f64>() {
+            if f == f.floor() && f.is_finite() && f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+                return Ok(f as i64);
+            }
+            return Err("number has no integer representation");
+        }
+    }
+    Err("number expected")
+}
+
 pub fn create_string_lib() -> LibraryModule {
     crate::lib_module!("string", {
         "byte" => string_byte,
@@ -247,8 +274,9 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     let Some(n_value) = n_value else {
         return Err(l.error("bad argument #2 to 'string.rep' (number expected)".to_string()));
     };
-    let Some(n) = n_value.as_integer() else {
-        return Err(l.error("bad argument #2 to 'string.rep' (number expected)".to_string()));
+    let n = match value_to_integer(&n_value) {
+        Ok(i) => i,
+        Err(msg) => return Err(l.error(format!("bad argument #2 to 'string.rep' ({})", msg))),
     };
 
     if n <= 0 {
@@ -354,7 +382,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
 fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'string.sub' (string expected)".to_string()))?;
+        .ok_or_else(|| crate::stdlib::debug::argerror(l, 1, "string expected"))?;
 
     // Get string data - handle both string and binary types
     let s_bytes = if let Some(s) = s_value.as_str() {
@@ -362,17 +390,21 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     } else if let Some(bytes) = s_value.as_binary() {
         bytes
     } else {
-        return Err(l.error("bad argument #1 to 'string.sub' (string expected)".to_string()));
+        return Err(crate::stdlib::debug::arg_typeerror(l, 1, "string", &s_value));
     };
 
     let i_value = l
         .get_arg(2)
-        .ok_or_else(|| l.error("bad argument #2 to 'string.sub' (number expected)".to_string()))?;
-    let Some(i) = i_value.as_integer() else {
-        return Err(l.error("bad argument #2 to 'string.sub' (number expected)".to_string()));
+        .ok_or_else(|| crate::stdlib::debug::argerror(l, 2, "number expected"))?;
+    let i = match value_to_integer(&i_value) {
+        Ok(i) => i,
+        Err(msg) => return Err(crate::stdlib::debug::argerror(l, 2, &msg)),
     };
 
-    let j = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(-1);
+    let j = l.get_arg(3).map(|v| match value_to_integer(&v) {
+        Ok(i) => Ok(i),
+        Err(msg) => Err(crate::stdlib::debug::argerror(l, 3, &msg)),
+    }).transpose()?.unwrap_or(-1);
 
     // Get string length and compute byte indices
     let vm = l.vm_mut();

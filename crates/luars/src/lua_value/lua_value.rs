@@ -921,7 +921,7 @@ impl LuaValue {
         }
     }
 
-    fn raw_ptr_repr(&self) -> *const u8 {
+    pub fn raw_ptr_repr(&self) -> *const u8 {
         unsafe { self.value.ptr }
     }
 

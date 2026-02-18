@@ -730,9 +730,14 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
     let arg1 = l.get_arg(1);
 
-    let opt = arg1
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "collect".to_string());
+    let opt = match &arg1 {
+        Some(v) if v.is_nil() => "collect".to_string(),
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_string(),
+            None => return Err(crate::stdlib::debug::arg_typeerror(l, 1, "string", v)),
+        },
+        None => "collect".to_string(),
+    };
 
     match opt.as_str() {
         "collect" => {

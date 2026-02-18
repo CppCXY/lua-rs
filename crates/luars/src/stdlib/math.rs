@@ -5,8 +5,26 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::lua_vm::LuaError;
 use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaState;
+
+/// Check that argument at position `n` is a number, with proper error message.
+fn checknumber(l: &mut LuaState, n: usize, fname: &str) -> Result<f64, LuaError> {
+    let Some(v) = l.get_arg(n) else {
+        return Err(l.error(format!("bad argument #{} to '{}' (number expected)", n, fname)));
+    };
+    if let Some(f) = v.as_number() {
+        return Ok(f);
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(f) = s.trim().parse::<f64>() {
+            return Ok(f);
+        }
+    }
+    let t = crate::stdlib::debug::objtypename(l, &v);
+    Err(l.error(format!("bad argument #{} to '{}' (number expected, got {})", n, fname, t)))
+}
 
 pub fn create_math_lib() -> LibraryModule {
     let mut module = crate::lib_module!("math", {
@@ -381,11 +399,7 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_sin(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'sin' (number expected)".to_string()))?
-        .as_number()
-        .ok_or_else(|| l.error("bad argument #1 to 'sin' (number expected)".to_string()))?;
+    let x = checknumber(l, 1, "sin")?;
     l.push_value(LuaValue::float(x.sin()))?;
     Ok(1)
 }

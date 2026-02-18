@@ -46,11 +46,12 @@ pub fn try_unary_tm(
         Ok(())
     } else {
         // No metamethod found
-        Err(lua_state.error(format!(
-            "attempt to perform '{}' on a {} value",
-            tm_kind.name(),
-            operand.type_name()
-        )))
+        if tm_kind == TmKind::Bnot && operand.is_number() {
+            // Float that can't be converted to integer
+            Err(lua_state.error("number has no integer representation".to_string()))
+        } else {
+            Err(crate::stdlib::debug::typeerror(lua_state, &operand, &format!("perform '{}' on", tm_kind.name())))
+        }
     }
 }
 
@@ -96,7 +97,7 @@ pub fn handle_mmbin(
     let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
 
     // Call metamethod (may change stack/base)
-    let result = match try_bin_tm(lua_state, v1, v2, tm) {
+    let result = match try_bin_tm(lua_state, v1, v2, tm, a as u32, b as u32) {
         Ok(r) => r,
         Err(LuaError::Yield) => {
             // Metamethod yielded. Save the destination register so
@@ -167,7 +168,7 @@ pub fn handle_mmbini(
 
     // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
-        match try_bin_tm(lua_state, v2, v1, tm) {
+        match try_bin_tm(lua_state, v2, v1, tm, u32::MAX, a as u32) {
             Ok(r) => r,
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -179,7 +180,7 @@ pub fn handle_mmbini(
             Err(e) => return Err(e),
         }
     } else {
-        match try_bin_tm(lua_state, v1, v2, tm) {
+        match try_bin_tm(lua_state, v1, v2, tm, a as u32, u32::MAX) {
             Ok(r) => r,
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -250,7 +251,7 @@ pub fn handle_mmbink(
 
     // Call metamethod (flip if needed, may change stack/base)
     let result = if k {
-        match try_bin_tm(lua_state, v2, v1, tm) {
+        match try_bin_tm(lua_state, v2, v1, tm, u32::MAX, a as u32) {
             Ok(r) => r,
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -262,7 +263,7 @@ pub fn handle_mmbink(
             Err(e) => return Err(e),
         }
     } else {
-        match try_bin_tm(lua_state, v1, v2, tm) {
+        match try_bin_tm(lua_state, v1, v2, tm, a as u32, u32::MAX) {
             Ok(r) => r,
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -315,6 +316,8 @@ fn try_bin_tm(
     p1: LuaValue,
     p2: LuaValue,
     tm_kind: TmKind,
+    p1_reg: u32,
+    p2_reg: u32,
 ) -> LuaResult<LuaValue> {
     // NOTE: String-to-number coercion is NOT needed here.
     // The original arithmetic/bitwise opcode (OP_ADD, OP_ADDI, etc.) already
@@ -338,14 +341,14 @@ fn try_bin_tm(
                 // Check if both values are numbers — if so, the issue is
                 // that they can't be converted to integers
                 if p1.is_number() && p2.is_number() {
-                    "number has no integer representation"
+                    return Err(lua_state.error("number has no integer representation".to_string()));
                 } else {
-                    "attempt to perform bitwise operation on non-number values"
+                    "perform bitwise operation on"
                 }
             }
-            _ => "attempt to perform arithmetic on non-number values",
+            _ => "perform arithmetic on",
         };
-        Err(lua_state.error(msg.to_string()))
+        Err(crate::stdlib::debug::opinterror(lua_state, p1_reg, p2_reg, &p1, &p2, msg))
     }
 }
 
@@ -448,7 +451,7 @@ pub fn call_tm_res(
     } else if metamethod.is_cfunction() {
         call_c_function(lua_state, func_pos, 2, 1)?;
     } else {
-        return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
+        return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
 
     // Lua 5.5: setobjs2s(L, res, --L->top.p)
@@ -524,7 +527,7 @@ pub fn call_tm(
     } else if metamethod.is_cfunction() {
         call::call_c_function(lua_state, func_pos, 3, 0)?;
     } else {
-        return Err(lua_state.error("attempt to call non-function as metamethod".to_string()));
+        return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
 
     Ok(())

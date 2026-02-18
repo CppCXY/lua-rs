@@ -1666,7 +1666,7 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
     } else {
         // It's a function call
         if lh_v.kind != ExpKind::VCALL {
-            return Err("syntax error".to_string());
+            return Err(fs.syntax_error("syntax error").to_string());
         }
         // Set to use no results
         let pc = lh_v.u.info() as usize;

@@ -110,11 +110,14 @@ pub fn handle_concat(
                 stack[result_idx] = result;
                 total -= 1;
             } else {
-                return Err(lua_state.error(format!(
-                    "attempt to concatenate {} and {} values",
-                    v_prev.type_name(),
-                    v_top.type_name()
-                )));
+                // Like C Lua's luaG_concaterror: if p1 is string/number, blame p2
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                let blame_val = if v_prev.is_string() || v_prev.is_number() || v_prev.is_integer() {
+                    v_top
+                } else {
+                    v_prev
+                };
+                return Err(crate::stdlib::debug::typeerror(lua_state, &blame_val, "concatenate"));
             }
         }
     }
@@ -199,10 +202,7 @@ pub fn concat_strings(
                 lua_state.create_string(&s)
             };
         } else {
-            return Err(lua_state.error(format!(
-                "attempt to concatenate a {} value",
-                val.type_name()
-            )));
+            return Err(crate::stdlib::debug::typeerror(lua_state, &val, "concatenate"));
         }
     }
 
@@ -249,10 +249,7 @@ pub fn concat_strings(
             total_len += 24; // max chars for f64
             all_strings = false;
         } else {
-            return Err(lua_state.error(format!(
-                "attempt to concatenate a {} value",
-                value.type_name()
-            )));
+            return Err(crate::stdlib::debug::typeerror(lua_state, &value, "concatenate"));
         }
     }
 

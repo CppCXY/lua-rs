@@ -7,6 +7,28 @@ use crate::lua_value::{Chunk, LuaValue};
 use crate::lua_vm::opcode::OpCode;
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 
+/// Get the type name of an object, checking __name in metatable first.
+/// Mirrors C Lua's luaT_objtypename.
+pub fn objtypename(l: &mut LuaState, v: &LuaValue) -> String {
+    // Special case: nil is "no value" (matches C Lua's luaT_objtypename behavior)
+    if v.is_nil() {
+        return "no value".to_string();
+    }
+    if let Some(mt) = get_metatable(l, v) {
+        if let Some(mt_table) = mt.as_table() {
+            // Create a string key for __name lookup
+            if let Ok(key) = l.create_string("__name") {
+                if let Some(name_val) = mt_table.raw_get(&key) {
+                    if let Some(s) = name_val.as_str() {
+                        return s.to_string();
+                    }
+                }
+            }
+        }
+    }
+    v.type_name().to_string()
+}
+
 // ============================================================================
 // Function name resolution (mirrors Lua 5.5 ldebug.c)
 // ============================================================================
@@ -266,9 +288,26 @@ fn getobjname(chunk: &Chunk, lastpc: usize, reg: u32) -> Option<(&'static str, S
             }
             OpCode::GetField => {
                 let k = i.get_c() as usize;
-                let name = kname(chunk, k).unwrap_or_else(|| "?".to_string());
+                let field_name = kname(chunk, k).unwrap_or_else(|| "?".to_string());
                 let kind = is_env(chunk, pc as usize, i, false);
-                return Some((kind, name));
+                // Try to produce a qualified name like "table.sort"
+                // Check if the table operand (B) was loaded from a GETTABUP on _ENV
+                let table_reg = i.get_b();
+                let table_set_pc = findsetreg(chunk, pc as usize, table_reg);
+                if table_set_pc >= 0 {
+                    let table_instr = chunk.code[table_set_pc as usize];
+                    if table_instr.get_opcode() == OpCode::GetTabUp {
+                        // Check if it's from _ENV
+                        let up_idx = table_instr.get_b() as usize;
+                        if upvalname(chunk, up_idx) == "_ENV" {
+                            let table_key = table_instr.get_c() as usize;
+                            if let Some(table_name) = kname(chunk, table_key) {
+                                return Some((kind, format!("{}.{}", table_name, field_name)));
+                            }
+                        }
+                    }
+                }
+                return Some((kind, field_name));
             }
             OpCode::Self_ => {
                 let k = i.get_c() as usize;
@@ -331,19 +370,25 @@ fn getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static str, Strin
     if ci.is_tail() {
         return None;
     }
-    let prev_idx = ci_frame_idx - 1;
-    let prev = l.get_frame(prev_idx)?;
-    if !prev.is_lua() {
-        return None; // Caller is not a Lua function
+    // Traverse upward to find the nearest Lua caller frame
+    let mut prev_idx = ci_frame_idx - 1;
+    loop {
+        let prev = l.get_frame(prev_idx)?;
+        if prev.is_lua() {
+            // Get caller's chunk
+            let prev_func = l.get_frame_func(prev_idx)?;
+            let lua_func = prev_func.as_lua_function()?;
+            let chunk = lua_func.chunk();
+            // prev.pc points to the instruction AFTER the call (due to pc += 1 in fetch).
+            // So the call instruction is at pc - 1.
+            let pc = prev.pc.saturating_sub(1) as usize;
+            return funcnamefromcode(chunk, pc);
+        }
+        if prev_idx == 0 {
+            return None;
+        }
+        prev_idx -= 1;
     }
-    // Get caller's chunk
-    let prev_func = l.get_frame_func(prev_idx)?;
-    let lua_func = prev_func.as_lua_function()?;
-    let chunk = lua_func.chunk();
-    // prev.pc points to the instruction AFTER the call (due to pc += 1 in fetch).
-    // So the call instruction is at pc - 1.
-    let pc = prev.pc.saturating_sub(1) as usize;
-    funcnamefromcode(chunk, pc)
 }
 
 // ============================================================================
@@ -387,28 +432,82 @@ pub fn varinfo(l: &LuaState) -> String {
         OpCode::GetTable | OpCode::GetI | OpCode::GetField | OpCode::Self_ => Some(instr.get_b()),
         // SET* instructions: table is in register A
         OpCode::SetTable | OpCode::SetI | OpCode::SetField => Some(instr.get_a()),
-        // GETTABUP: table is upvalue B, not a register — handle specially
+        // GETTABUP: table is upvalue B — the upvalue itself is being indexed
+        // When this instruction fails, it's because the upvalue is not indexable
         OpCode::GetTabUp => {
-            // The key being accessed is K[C]
-            let c = instr.get_c() as usize;
-            let name = kname(chunk, c).unwrap_or_else(|| "?".to_string());
-            let kind = is_env(chunk, currentpc, instr, true);
-            return format!(" ({} '{}')", kind, name);
+            let upval_idx = instr.get_b() as usize;
+            if upval_idx < chunk.upvalue_descs.len() {
+                let upname = &chunk.upvalue_descs[upval_idx].name;
+                if upname == "_ENV" {
+                    // For _ENV, report the key as global
+                    let c = instr.get_c() as usize;
+                    let name = kname(chunk, c).unwrap_or_else(|| "?".to_string());
+                    return format!(" (global '{}')", name);
+                } else {
+                    return format!(" (upvalue '{}')", upname);
+                }
+            }
+            return String::new();
         }
-        // SETTABUP: table is upvalue A, not a register — handle specially
+        // SETTABUP: table is upvalue A — the upvalue itself is being indexed
         OpCode::SetTabUp => {
-            let b = instr.get_b() as usize;
-            let name = kname(chunk, b).unwrap_or_else(|| "?".to_string());
-            // For SETTABUP, need to check if upvalue A is _ENV
-            // Reconstruct as upvalue check
             let upval_idx = instr.get_a() as usize;
-            let upname = if upval_idx < chunk.upvalue_descs.len() {
-                chunk.upvalue_descs[upval_idx].name.clone()
+            if upval_idx < chunk.upvalue_descs.len() {
+                let upname = &chunk.upvalue_descs[upval_idx].name;
+                if upname == "_ENV" {
+                    // For _ENV, report the key as global
+                    let b = instr.get_b() as usize;
+                    let name = kname(chunk, b).unwrap_or_else(|| "?".to_string());
+                    return format!(" (global '{}')", name);
+                } else {
+                    return format!(" (upvalue '{}')", upname);
+                }
+            }
+            return String::new();
+        }
+        // CALL/TAILCALL: function being called is in register A
+        OpCode::Call | OpCode::TailCall => Some(instr.get_a()),
+        // Unary ops: operand is in register B
+        OpCode::Unm | OpCode::BNot | OpCode::Len | OpCode::Not => Some(instr.get_b()),
+        // CONCAT: operand is in register A (first concat value)
+        OpCode::Concat => Some(instr.get_a()),
+        // MmBin: look at previous instruction for the actual arithmetic/comparison op
+        OpCode::MmBin => {
+            // MmBin is emitted AFTER the arithmetic op (ADD, SUB, etc.)
+            // The previous instruction has the operands
+            if currentpc > 0 {
+                let prev_instr = chunk.code[currentpc - 1];
+                let prev_op = prev_instr.get_opcode();
+                match prev_op {
+                    OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Mod |
+                    OpCode::Pow | OpCode::Div | OpCode::IDiv |
+                    OpCode::BAnd | OpCode::BOr | OpCode::BXor |
+                    OpCode::Shl | OpCode::Shr |
+                    OpCode::Eq | OpCode::Lt | OpCode::Le => {
+                        // Binary ops: first operand in register A (aka sRA)
+                        Some(prev_instr.get_a())
+                    }
+                    _ => None,
+                }
             } else {
-                "?".to_string()
-            };
-            let kind = if upname == "_ENV" { "global" } else { "field" };
-            return format!(" ({} '{}')", kind, name);
+                None
+            }
+        }
+        OpCode::MmBinI => {
+            if currentpc > 0 {
+                let prev_instr = chunk.code[currentpc - 1];
+                Some(prev_instr.get_a())
+            } else {
+                None
+            }
+        }
+        OpCode::MmBinK => {
+            if currentpc > 0 {
+                let prev_instr = chunk.code[currentpc - 1];
+                Some(prev_instr.get_a())
+            } else {
+                None
+            }
         }
         _ => None,
     };
@@ -424,12 +523,139 @@ pub fn varinfo(l: &LuaState) -> String {
 /// Generate a type error with variable info.
 /// Mirrors Lua 5.5's luaG_typeerror.
 /// `op` is typically "index" for table access errors.
-pub fn typeerror(l: &mut LuaState, val_typename: &str, op: &str) -> LuaError {
+pub fn typeerror(l: &mut LuaState, val: &LuaValue, op: &str) -> LuaError {
+    let tname = objtypename(l, val);
     let info = varinfo(l);
     l.error(format!(
         "attempt to {} a {} value{}",
-        op, val_typename, info
+        op, tname, info
     ))
+}
+
+/// Get the name and kind of the current function from the calling frame's bytecode.
+/// Used by C stdlib functions to get their name for error messages.
+/// Mirrors C Lua's approach in luaL_argerror: lua_getinfo(L, 0, "n").
+pub fn current_func_name_with_kind(l: &LuaState) -> Option<(&'static str, String)> {
+    let ci_idx = l.call_depth().wrapping_sub(1);
+    getfuncname(l, ci_idx)
+}
+
+/// Get just the name of the current function.
+pub fn current_func_name(l: &LuaState) -> Option<String> {
+    current_func_name_with_kind(l).map(|(_, name)| name)
+}
+
+/// Generate a standard argument error message.
+/// Mirrors C Lua's luaL_argerror.
+pub fn argerror(l: &mut LuaState, narg: usize, extramsg: &str) -> LuaError {
+    let (kind, fname) = current_func_name_with_kind(l)
+        .unwrap_or(("function", "?".to_string()));
+    // For method calls, adjust argument numbering and handle "bad self"
+    if kind == "method" {
+        let adjusted_narg = narg.wrapping_sub(1);
+        if adjusted_narg == 0 {
+            return l.error_from_c(format!("calling '{}' on bad self ({})", fname, extramsg));
+        }
+        return l.error_from_c(format!("bad argument #{} to '{}' ({})", adjusted_narg, fname, extramsg));
+    }
+    l.error_from_c(format!("bad argument #{} to '{}' ({})", narg, fname, extramsg))
+}
+
+/// Generate a type error for a function argument.
+/// Mirrors C Lua's luaL_typeerror.
+pub fn arg_typeerror(l: &mut LuaState, narg: usize, expected: &str, val: &LuaValue) -> LuaError {
+    let actual = objtypename(l, val);
+    argerror(l, narg, &format!("{} expected, got {}", expected, actual))
+}
+
+/// Get variable info for a specific register.
+/// Like varinfo() but for a known register number.
+pub fn varinfo_for_reg(l: &LuaState, reg: u32) -> String {
+    let ci_idx = l.call_depth().wrapping_sub(1);
+    let ci = match l.get_frame(ci_idx) {
+        Some(ci) => ci,
+        None => return String::new(),
+    };
+    if !ci.is_lua() {
+        return String::new();
+    }
+    let func = match l.get_frame_func(ci_idx) {
+        Some(f) => f,
+        None => return String::new(),
+    };
+    let lua_func = match func.as_lua_function() {
+        Some(f) => f,
+        None => return String::new(),
+    };
+    let chunk = lua_func.chunk();
+    let currentpc = ci.pc.saturating_sub(1) as usize;
+    if let Some((kind, name)) = getobjname(chunk, currentpc, reg) {
+        format!(" ({} '{}')", kind, name)
+    } else {
+        String::new()
+    }
+}
+
+/// Generate an arithmetic/bitwise type error (mirrors luaG_opinterror).
+/// Determines which operand is the "bad" one and generates a type error.
+pub fn opinterror(
+    l: &mut LuaState,
+    p1_reg: u32,
+    p2_reg: u32,
+    p1: &crate::LuaValue,
+    p2: &crate::LuaValue,
+    op: &str,
+) -> LuaError {
+    // If p1 is not a number, blame p1; otherwise blame p2
+    let (blame_val, blame_reg) = if !p1.is_number() && !p1.is_integer() {
+        (p1, p1_reg)
+    } else {
+        (p2, p2_reg)
+    };
+    let blame_type = objtypename(l, blame_val);
+    let info = varinfo_for_reg(l, blame_reg);
+    l.error(format!(
+        "attempt to {} a {} value{}",
+        op, blame_type, info
+    ))
+}
+
+/// Generate a comparison error (mirrors luaG_ordererror).
+pub fn ordererror(l: &mut LuaState, p1: &crate::LuaValue, p2: &crate::LuaValue) -> LuaError {
+    let t1 = objtypename(l, p1);
+    let t2 = objtypename(l, p2);
+    if t1 == t2 {
+        l.error(format!("attempt to compare two {} values", t1))
+    } else {
+        l.error(format!("attempt to compare {} with {}", t1, t2))
+    }
+}
+
+/// Generate a call error with function name info (mirrors luaG_callerror).
+/// Used when attempting to call a non-callable value.
+pub fn callerror(l: &mut LuaState, val: &crate::LuaValue) -> LuaError {
+    // Look at the current frame's instruction to determine what was being called
+    let ci_idx = l.call_depth().wrapping_sub(1);
+    if let Some(ci) = l.get_frame(ci_idx) {
+        if ci.is_lua() {
+            if let Some(func) = l.get_frame_func(ci_idx) {
+                if let Some(lua_func) = func.as_lua_function() {
+                    let chunk = lua_func.chunk();
+                    let pc = ci.pc.saturating_sub(1) as usize;
+                    if let Some((kind, name)) = funcnamefromcode(chunk, pc) {
+                        let t = objtypename(l, val);
+                        return l.error(format!(
+                            "attempt to call a {} value ({} '{}')",
+                            t, kind, name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: no name info available
+    let t = objtypename(l, val);
+    l.error(format!("attempt to call a {} value", t))
 }
 
 /// Get the function name for a given frame index (public wrapper).
@@ -453,6 +679,8 @@ pub fn create_debug_lib() -> LibraryModule {
         "upvaluejoin" => debug_upvaluejoin,
         "gethook" => debug_gethook,
         "sethook" => debug_sethook,
+        "setuservalue" => debug_setuservalue,
+        "getuservalue" => debug_getuservalue,
     })
 }
 
@@ -1169,17 +1397,16 @@ fn debug_upvalueid(l: &mut LuaState) -> LuaResult<usize> {
         let upvalues = lua_func.upvalues();
         if up_index > 0 && up_index <= upvalues.len() {
             let upvalue = &upvalues[up_index - 1];
-            // Use the pointer address as unique ID
-            let id = upvalue.as_ptr() as usize as i64;
-            l.push_value(LuaValue::integer(id))?;
+            // Return light userdata (pointer) like C Lua
+            let ptr = upvalue.as_ptr() as *mut std::ffi::c_void;
+            l.push_value(LuaValue::lightuserdata(ptr))?;
             return Ok(1);
         }
     } else if let Some(cclosure) = func.as_cclosure() {
         let upvalues = cclosure.upvalues();
         if up_index > 0 && up_index <= upvalues.len() {
-            // For C closures, use the address of the upvalue slot itself
-            let id = &upvalues[up_index - 1] as *const _ as usize as i64;
-            l.push_value(LuaValue::integer(id))?;
+            let ptr = &upvalues[up_index - 1] as *const _ as *mut std::ffi::c_void;
+            l.push_value(LuaValue::lightuserdata(ptr))?;
             return Ok(1);
         }
     }
@@ -1252,4 +1479,41 @@ fn debug_upvaluejoin(l: &mut LuaState) -> LuaResult<usize> {
     upvalues1_mut[n1 - 1] = upvalue_to_share;
 
     Ok(0)
+}
+
+/// debug.setuservalue(udata, value [, n]) - Set user value of a userdata
+fn debug_setuservalue(l: &mut LuaState) -> LuaResult<usize> {
+    let udata = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'setuservalue' (userdata expected)".to_string()))?;
+
+    // Must be full userdata (not light userdata)
+    if udata.ttislightuserdata() {
+        return Err(l.error("bad argument #1 to 'setuservalue' (full userdata expected, got light userdata)".to_string()));
+    }
+
+    if !udata.is_userdata() {
+        let t = udata.type_name();
+        return Err(l.error(format!("bad argument #1 to 'setuservalue' (userdata expected, got {})", t)));
+    }
+
+    // For now, setuservalue is a no-op (user values not yet stored in LuaUserdata)
+    l.push_value(udata)?;
+    Ok(1)
+}
+
+/// debug.getuservalue(udata [, n]) - Get user value of a userdata
+fn debug_getuservalue(l: &mut LuaState) -> LuaResult<usize> {
+    let udata = l
+        .get_arg(1)
+        .ok_or_else(|| l.error("bad argument #1 to 'getuservalue' (userdata expected)".to_string()))?;
+
+    if !udata.is_userdata() || udata.ttislightuserdata() {
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    }
+
+    // User values not yet supported, return nil
+    l.push_value(LuaValue::nil())?;
+    Ok(1)
 }

@@ -117,7 +117,7 @@ pub fn exec_lt(
                 Ok(Some(result)) => result,
                 Ok(None) => {
                     return Err(
-                        lua_state.error("attempt to compare non-comparable values".to_string())
+                        crate::stdlib::debug::ordererror(lua_state, &va, &vb)
                     );
                 }
                 Err(LuaError::Yield) => {
@@ -232,11 +232,9 @@ pub fn exec_lti(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    va.type_name(),
-                    "number"
-                )));
+                return Err(
+                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
+                );
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -286,11 +284,9 @@ pub fn exec_lei(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    va.type_name(),
-                    "number"
-                )));
+                return Err(
+                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
+                );
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -341,11 +337,9 @@ pub fn exec_gti(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    vb.type_name(),
-                    "number"
-                )));
+                return Err(
+                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
+                );
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -396,11 +390,9 @@ pub fn exec_gei(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    vb.type_name(),
-                    "number"
-                )));
+                return Err(
+                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
+                );
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -466,7 +458,7 @@ pub fn exec_le(
                 Ok(Some(result)) => result,
                 Ok(None) => {
                     return Err(
-                        lua_state.error("attempt to compare non-comparable values".to_string())
+                        crate::stdlib::debug::ordererror(lua_state, &va, &vb)
                     );
                 }
                 Err(LuaError::Yield) => {

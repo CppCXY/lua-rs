@@ -183,17 +183,25 @@ pub fn handle_forprep_float(
     let mut limit = 0.0;
     let mut step = 0.0;
 
-    if !tonumberns(&stack[ra + 1], &mut limit) {
+    // Copy values for potential error messages (avoids borrow conflict)
+    let limit_val = stack[ra + 1];
+    let step_val = stack[ra + 2];
+    let init_val = stack[ra];
+
+    if !tonumberns(&limit_val, &mut limit) {
+        let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error("'for' limit must be a number".to_string()));
+        return Err(lua_state.error(format!("bad 'for' limit (number expected, got {})", t)));
     }
-    if !tonumberns(&stack[ra + 2], &mut step) {
+    if !tonumberns(&step_val, &mut step) {
+        let t = crate::stdlib::debug::objtypename(lua_state, &step_val);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error("'for' step must be a number".to_string()));
+        return Err(lua_state.error(format!("bad 'for' step (number expected, got {})", t)));
     }
-    if !tonumberns(&stack[ra], &mut init) {
+    if !tonumberns(&init_val, &mut init) {
+        let t = crate::stdlib::debug::objtypename(lua_state, &init_val);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error("'for' initial value must be a number".to_string()));
+        return Err(lua_state.error(format!("bad 'for' initial value (number expected, got {})", t)));
     }
 
     if step == 0.0 {
@@ -284,10 +292,7 @@ pub fn handle_len(
             *base = lua_state.get_frame_base(frame_idx);
             lua_state.stack_mut()[*base + a] = result;
         } else {
-            return Err(lua_state.error(format!(
-                "attempt to get length of a {} value",
-                rb.type_name()
-            )));
+            return Err(crate::stdlib::debug::typeerror(lua_state, &rb, "get length of"));
         }
     }
     Ok(())
