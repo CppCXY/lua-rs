@@ -3,10 +3,13 @@
 pub mod chunk_serializer;
 mod lua_table;
 mod lua_value;
+pub mod userdata_trait;
 
 use std::any::Any;
 use std::fmt;
 use std::rc::Rc;
+
+pub use userdata_trait::{UdValue, UserDataTrait};
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
@@ -187,34 +190,77 @@ impl LuaUpvalue {
     }
 }
 
-/// Userdata - arbitrary Rust data with optional metatable
+/// Userdata - arbitrary Rust data with optional metatable.
+///
+/// Uses `Box<dyn UserDataTrait>` for trait-based dispatch of field access,
+/// method calls, and metamethods. Falls back to metatable for Lua-level customization.
 pub struct LuaUserdata {
-    data: Box<dyn Any>,
+    data: Box<dyn UserDataTrait>,
     metatable: TablePtr,
 }
 
 impl LuaUserdata {
-    pub fn new<T: Any>(data: T) -> Self {
+    /// Create a new userdata wrapping a value that implements `UserDataTrait`.
+    pub fn new<T: UserDataTrait>(data: T) -> Self {
         LuaUserdata {
             data: Box::new(data),
             metatable: TablePtr::null(),
         }
     }
 
-    pub fn with_metatable<T: Any>(data: T, metatable: TablePtr) -> Self {
+    /// Create a new userdata with an initial metatable.
+    pub fn with_metatable<T: UserDataTrait>(data: T, metatable: TablePtr) -> Self {
         LuaUserdata {
             data: Box::new(data),
             metatable,
         }
     }
 
-    pub fn get_data(&self) -> &Box<dyn Any> {
-        &self.data
+    // ==================== Trait-based access ====================
+
+    /// Get the trait object for direct field/method/metamethod dispatch.
+    #[inline]
+    pub fn get_trait(&self) -> &dyn UserDataTrait {
+        self.data.as_ref()
     }
 
-    pub fn get_data_mut(&mut self) -> &mut Box<dyn Any> {
-        &mut self.data
+    /// Get the mutable trait object.
+    #[inline]
+    pub fn get_trait_mut(&mut self) -> &mut dyn UserDataTrait {
+        self.data.as_mut()
     }
+
+    /// Get the type name from the trait.
+    #[inline]
+    pub fn type_name(&self) -> &'static str {
+        self.data.type_name()
+    }
+
+    // ==================== Backward-compatible downcast access ====================
+
+    /// Downcast to a concrete type (immutable). Equivalent to old `get_data().downcast_ref::<T>()`.
+    #[inline]
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        self.data.as_any().downcast_ref::<T>()
+    }
+
+    /// Downcast to a concrete type (mutable). Equivalent to old `get_data_mut().downcast_mut::<T>()`.
+    #[inline]
+    pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.data.as_any_mut().downcast_mut::<T>()
+    }
+
+    /// Get raw `&dyn Any` reference (backward compatibility).
+    pub fn get_data(&self) -> &dyn Any {
+        self.data.as_any()
+    }
+
+    /// Get raw `&mut dyn Any` reference (backward compatibility).
+    pub fn get_data_mut(&mut self) -> &mut dyn Any {
+        self.data.as_any_mut()
+    }
+
+    // ==================== Metatable ====================
 
     pub fn get_metatable(&self) -> Option<LuaValue> {
         if self.metatable.is_null() {
@@ -240,7 +286,7 @@ impl LuaUserdata {
 
 impl fmt::Debug for LuaUserdata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Userdata({:p})", self.data.as_ref() as *const dyn Any)
+        write!(f, "Userdata({}@{:p})", self.data.type_name(), self.data.as_any() as *const dyn Any)
     }
 }
 

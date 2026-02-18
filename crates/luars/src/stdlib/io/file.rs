@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 
 use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_vm::{LuaResult, LuaState};
 
 /// File handle wrapper - supports files and standard streams
@@ -245,6 +246,31 @@ impl LuaFile {
         // Replace the inner with Closed to drop the file handles
         self.inner = FileInner::Closed;
         Ok(())
+    }
+}
+
+// LuaFile uses metatables for its Lua-visible API (read, write, etc.),
+// so we only implement the minimal UserDataTrait for type identity and downcast.
+impl UserDataTrait for LuaFile {
+    fn type_name(&self) -> &'static str {
+        "FILE*"
+    }
+
+    fn lua_gc(&mut self) {
+        // Flush on GC — don't propagate errors
+        let _ = self.flush();
+    }
+
+    fn lua_close(&mut self) {
+        let _ = self.close();
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
