@@ -46,7 +46,7 @@ use crate::{
             },
             concat::handle_concat,
             helper::{
-                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_idiv, lua_imod,
+                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod,
                 lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat,
                 pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
                 tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
@@ -419,7 +419,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
                             pc += 1;
-                            setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
+                            setfltvalue(&mut stack[base + a], lua_fmod(n1, n2));
                         }
                     }
                 }
@@ -574,7 +574,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
                             pc += 1;
-                            setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
+                            setfltvalue(&mut stack[base + a], lua_fmod(n1, n2));
                         }
                     }
                 }
@@ -1305,7 +1305,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 flimit.floor()
                             };
                             // Check if the rounded float fits in i64
-                            if nl >= (i64::MIN as f64) && nl <= (i64::MAX as f64) && nl == nl {
+                            if nl >= (i64::MIN as f64) && nl < -(i64::MIN as f64) && nl == nl {
                                 let lim = nl as i64;
                                 let skip = if step > 0 { init > lim } else { init < lim };
                                 break 'forlimit (lim, skip);

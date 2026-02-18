@@ -272,6 +272,17 @@ pub fn lua_imod(a: i64, b: i64) -> i64 {
     if m != 0 && (m ^ b) < 0 { m.wrapping_add(b) } else { m }
 }
 
+/// Float modulo matching C Lua's `luai_nummod`.
+/// Uses hardware fmod (Rust's `%` operator on f64) then adjusts sign.
+#[inline(always)]
+pub fn lua_fmod(a: f64, b: f64) -> f64 {
+    let mut m = a % b; // C fmod
+    if m != 0.0 && ((m > 0.0) != (b > 0.0)) {
+        m += b;
+    }
+    m
+}
+
 // ============ 类型转换辅助函数 ============
 
 /// tointegerns - 尝试转换为整数 (不抛出错误)
@@ -284,8 +295,12 @@ pub unsafe fn ptointegerns(v: *const LuaValue, out: *mut i64) -> bool {
             true
         } else if pttisfloat(v) {
             // Try converting integral-valued floats (e.g. 5.0 -> 5)
+            // Range check matches C Lua's lua_numbertointeger:
+            //   f >= (i64::MIN as f64) && f < -(i64::MIN as f64)
+            // Note: i64::MAX as f64 rounds UP to 2^63, so we must use strict <
+            // with -(i64::MIN as f64) = 2^63 (exactly representable).
             let f = pfltvalue(v);
-            if f == (f as i64 as f64) && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
                 *out = f as i64;
                 true
             } else {
@@ -379,8 +394,9 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
         true
     } else if v.tt() == LUA_VNUMFLT {
         // Try converting integral-valued floats (e.g. 5.0 -> 5)
+        // Range check: f must be in [i64::MIN, 2^63) — see ptointegerns for details.
         let f = unsafe { v.value.n };
-        if f == (f as i64 as f64) && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+        if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
             *out = f as i64;
             true
         } else {

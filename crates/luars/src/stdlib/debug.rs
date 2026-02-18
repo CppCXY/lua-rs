@@ -290,23 +290,6 @@ fn getobjname(chunk: &Chunk, lastpc: usize, reg: u32) -> Option<(&'static str, S
                 let k = i.get_c() as usize;
                 let field_name = kname(chunk, k).unwrap_or_else(|| "?".to_string());
                 let kind = is_env(chunk, pc as usize, i, false);
-                // Try to produce a qualified name like "table.sort"
-                // Check if the table operand (B) was loaded from a GETTABUP on _ENV
-                let table_reg = i.get_b();
-                let table_set_pc = findsetreg(chunk, pc as usize, table_reg);
-                if table_set_pc >= 0 {
-                    let table_instr = chunk.code[table_set_pc as usize];
-                    if table_instr.get_opcode() == OpCode::GetTabUp {
-                        // Check if it's from _ENV
-                        let up_idx = table_instr.get_b() as usize;
-                        if upvalname(chunk, up_idx) == "_ENV" {
-                            let table_key = table_instr.get_c() as usize;
-                            if let Some(table_name) = kname(chunk, table_key) {
-                                return Some((kind, format!("{}.{}", table_name, field_name)));
-                            }
-                        }
-                    }
-                }
                 return Some((kind, field_name));
             }
             OpCode::Self_ => {

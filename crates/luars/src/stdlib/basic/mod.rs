@@ -216,36 +216,150 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
     let value = l
         .get_arg(1)
         .ok_or_else(|| l.error("tonumber() requires argument 1".to_string()))?;
+    let has_base = l.get_arg(2).is_some();
     let base = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(10);
 
-    if base < 2 || base > 36 {
+    if has_base && (base < 2 || base > 36) {
         return Err(l.error("bad argument #2 to 'tonumber' (base out of range)".to_string()));
     }
 
     let result = match value.kind() {
-        LuaValueKind::Integer => value.clone(),
-        LuaValueKind::Float => value.clone(),
+        LuaValueKind::Integer if !has_base => value.clone(),
+        LuaValueKind::Float if !has_base => value.clone(),
         LuaValueKind::String => {
             if let Some(s) = value.as_str() {
                 let s_str = s.trim();
-                if base == 10 {
-                    parse_lua_number(s_str)
-                } else {
-                    if let Ok(i) = i64::from_str_radix(s_str, base as u32) {
-                        LuaValue::integer(i)
+                if has_base {
+                    // Explicit base: parse as base-N integer.
+                    // Leading/trailing spaces are allowed; 0x prefix is NOT.
+                    // Handle optional leading sign.
+                    let (neg, digits) = if let Some(rest) = s_str.strip_prefix('-') {
+                        (true, rest.trim_start())
+                    } else if let Some(rest) = s_str.strip_prefix('+') {
+                        (false, rest.trim_start())
                     } else {
+                        (false, s_str)
+                    };
+                    // Reject empty, strings with embedded whitespace, or null bytes
+                    if digits.is_empty() || digits.contains('\0') {
                         LuaValue::nil()
+                    } else {
+                        // u64 to handle full unsigned range, then cast to i64 (wrapping)
+                        let mut result: u64 = 0;
+                        let mut valid = true;
+                        let mut has_any = false;
+                        for ch in digits.chars() {
+                            if let Some(d) = ch.to_digit(base as u32) {
+                                result = result.wrapping_mul(base as u64).wrapping_add(d as u64);
+                                has_any = true;
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if valid && has_any {
+                            let i = result as i64;
+                            LuaValue::integer(if neg { i.wrapping_neg() } else { i })
+                        } else {
+                            LuaValue::nil()
+                        }
                     }
+                } else {
+                    parse_lua_number(s_str)
                 }
             } else {
                 LuaValue::nil()
             }
         }
-        _ => LuaValue::nil(),
+        _ => {
+            if has_base {
+                return Err(l.error("bad argument #1 to 'tonumber' (string expected, got number)".to_string()));
+            }
+            LuaValue::nil()
+        },
     };
 
     l.push_value(result)?;
     Ok(1)
+}
+
+/// Format a float value matching Lua 5.5's tostringbuffFloat behavior:
+/// First try %.15g (max digits preserving tostring(tonumber(x)) == x),
+/// then %.17g if roundtrip fails, and append ".0" if result looks integer-like.
+pub(crate) fn lua_float_to_string(n: f64) -> String {
+    if n.is_nan() {
+        return if n.is_sign_negative() { "-nan" } else { "-nan" }.to_string();
+    }
+    if n.is_infinite() {
+        return if n > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+
+    // First try: format with roughly 15 significant digits (%.15g equivalent)
+    let s = format_g(n, 15);
+
+    // Check if it roundtrips
+    let mut result = if s.parse::<f64>().ok() == Some(n) {
+        s
+    } else {
+        // Second try: format with 17 significant digits (%.17g equivalent)
+        format_g(n, 17)
+    };
+
+    // If result looks like an integer (no '.', 'e', 'E', 'n', 'i'), add ".0"
+    if !result.contains('.') && !result.contains('e') && !result.contains('E')
+        && !result.contains('n') && !result.contains('i')
+    {
+        result.push_str(".0");
+    }
+
+    result
+}
+
+/// Format a float with %.<prec>g semantics (C-style %g formatting)
+fn format_g(n: f64, prec: usize) -> String {
+    if n == 0.0 {
+        return if n.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+
+    let abs_n = n.abs();
+    // Determine the base-10 exponent
+    let exp = abs_n.log10().floor() as i32;
+
+    let formatted = if exp >= -4 && exp < prec as i32 {
+        // Fixed-point notation: precision = prec - (exp + 1) decimal places
+        let decimal_places = (prec as i32 - exp - 1).max(0) as usize;
+        format!("{:.prec$}", n, prec = decimal_places)
+    } else {
+        // Scientific notation: precision = prec - 1 decimal places
+        format!("{:.prec$e}", n, prec = prec - 1)
+    };
+
+    // Strip trailing zeros after decimal point (matching %g behavior)
+    strip_trailing_zeros(&formatted)
+}
+
+/// Strip trailing zeros from a formatted number string (matching C's %g behavior)
+fn strip_trailing_zeros(s: &str) -> String {
+    if let Some(e_pos) = s.find('e').or_else(|| s.find('E')) {
+        // Scientific notation: strip zeros between decimal and 'e'
+        let (mantissa, exponent) = s.split_at(e_pos);
+        let stripped = strip_decimal_zeros(mantissa);
+        format!("{}{}", stripped, exponent)
+    } else if s.contains('.') {
+        strip_decimal_zeros(s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Strip trailing zeros after decimal point, remove point if no digits follow
+fn strip_decimal_zeros(s: &str) -> String {
+    let trimmed = s.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        trimmed[..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// tostring(v) - Convert to string
@@ -260,8 +374,9 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    // Fast path: integer — use itoa to avoid heap allocation
-    if let Some(n) = value.as_integer() {
+    // Fast path: raw integer type — use itoa
+    if value.is_integer() {
+        let n = value.as_integer_strict().unwrap();
         let mut buf = itoa::Buffer::new();
         let s = buf.format(n);
         let result_value = l.create_string(s)?;
@@ -269,9 +384,10 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    // Fast path: float — use stack buffer with write!
-    if let Some(n) = value.as_number() {
-        let s = n.to_string();
+    // Fast path: raw float type — use Lua-compatible formatting
+    if value.is_float() {
+        let n = value.as_number().unwrap();
+        let s = lua_float_to_string(n);
         let result_value = l.create_string(&s)?;
         l.push_value(result_value)?;
         return Ok(1);
@@ -689,6 +805,14 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #3 to 'rawset' (value expected)".to_string()))?;
 
     if table.is_table() {
+        // Check for NaN key
+        if key.is_float() {
+            if let Some(f) = key.as_number() {
+                if f.is_nan() {
+                    return Err(l.error("table index is NaN".to_string()));
+                }
+            }
+        }
         l.raw_set(&table, key, value);
         l.push_value(table)?;
         return Ok(1);

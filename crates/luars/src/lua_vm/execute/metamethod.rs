@@ -1,6 +1,6 @@
 use crate::lua_value::LuaValue;
 use crate::lua_vm::execute::call::{self, call_c_function};
-use crate::lua_vm::execute::helper::{get_binop_metamethod, tonumberns};
+use crate::lua_vm::execute::helper::{get_binop_metamethod, lua_idiv, lua_imod, tonumberns};
 use crate::lua_vm::execute::lua_execute;
 use crate::lua_vm::opcode::Instruction;
 /// Metamethod operations
@@ -330,6 +330,37 @@ pub fn handle_mmbink(
 ///   }
 /// }
 /// ```
+
+/// Try to convert a LuaValue to integer, including string coercion.
+/// Matches C Lua's `ivalue_try` / `forone` in luaO_arith.
+/// Returns Some(i64) if the value is an integer, an integral float, or a string
+/// that parses as an integer.
+fn value_to_integer(v: &LuaValue) -> Option<i64> {
+    if let Some(i) = v.as_integer() {
+        return Some(i);
+    }
+    if let Some(f) = v.as_number() {
+        // Integral float → integer
+        if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
+            return Some(f as i64);
+        }
+        return None;
+    }
+    if let Some(s) = v.as_str() {
+        let parsed = parse_lua_number(s);
+        if let Some(i) = parsed.as_integer() {
+            return Some(i);
+        }
+        // Try float string → integral float → integer
+        if let Some(f) = parsed.as_number() {
+            if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
+                return Some(f as i64);
+            }
+        }
+    }
+    None
+}
+
 fn try_bin_tm(
     lua_state: &mut LuaState,
     p1: LuaValue,
@@ -338,10 +369,65 @@ fn try_bin_tm(
     p1_reg: u32,
     p2_reg: u32,
 ) -> LuaResult<LuaValue> {
-    // NOTE: String-to-number coercion is NOT needed here.
-    // The original arithmetic/bitwise opcode (OP_ADD, OP_ADDI, etc.) already
-    // tried tonumberns/tointeger before falling through to MMBIN/MMBINI/MMBINK.
-    // If we reach here, coercion has already failed.
+    // Arithmetic string-to-number coercion (matches C Lua's luaT_trybinassocTM → luaO_arith).
+    // Immediate/constant opcodes (AddI, ShlI, etc.) only check native numeric types
+    // in their slow paths. When they fall through to MMBINI/MMBINK, we must still
+    // try string-to-number coercion before looking for metamethods.
+    match tm_kind {
+        TmKind::Add | TmKind::Sub | TmKind::Mul
+        | TmKind::Mod | TmKind::IDiv => {
+            // Try integer-preserving path first (like C Lua's intarith_aux)
+            if let (Some(i1), Some(i2)) = (value_to_integer(&p1), value_to_integer(&p2)) {
+                let result = match tm_kind {
+                    TmKind::Add => i1.wrapping_add(i2),
+                    TmKind::Sub => i1.wrapping_sub(i2),
+                    TmKind::Mul => i1.wrapping_mul(i2),
+                    TmKind::Mod => {
+                        if i2 == 0 {
+                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
+                        }
+                        lua_imod(i1, i2)
+                    }
+                    TmKind::IDiv => {
+                        if i2 == 0 {
+                            return Err(lua_state.error("attempt to divide by zero".to_string()));
+                        }
+                        lua_idiv(i1, i2)
+                    }
+                    _ => unreachable!(),
+                };
+                return Ok(LuaValue::integer(result));
+            }
+            // Fall through to float path
+            let mut n1 = 0.0f64;
+            let mut n2 = 0.0f64;
+            if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
+                let result = match tm_kind {
+                    TmKind::Add => n1 + n2,
+                    TmKind::Sub => n1 - n2,
+                    TmKind::Mul => n1 * n2,
+                    TmKind::Mod => crate::lua_vm::execute::helper::lua_fmod(n1, n2),
+                    TmKind::IDiv => (n1 / n2).floor(),
+                    _ => unreachable!(),
+                };
+                return Ok(LuaValue::number(result));
+            }
+        }
+        TmKind::Div | TmKind::Pow => {
+            // These always produce float results
+            let mut n1 = 0.0f64;
+            let mut n2 = 0.0f64;
+            if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
+                let result = match tm_kind {
+                    TmKind::Div => n1 / n2,
+                    TmKind::Pow => n1.powf(n2),
+                    _ => unreachable!(),
+                };
+                return Ok(LuaValue::number(result));
+            }
+        }
+        _ => {}
+    }
 
     // Try trait-based arithmetic for userdata
     if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
@@ -378,9 +464,17 @@ fn try_bin_tm(
             | TmKind::Shr
             | TmKind::Bnot => {
                 // Check if both values are numbers — if so, the issue is
-                // that they can't be converted to integers
+                // that they can't be converted to integers.
+                // Mirror C Lua's luaG_tointerror: include varinfo for the
+                // problematic operand (the float that can't convert to int).
                 if p1.is_number() && p2.is_number() {
-                    return Err(lua_state.error("number has no integer representation".to_string()));
+                    // Blame the operand that's a float (not integer)
+                    let blame_reg = if !p1.is_integer() { p1_reg } else { p2_reg };
+                    let info = crate::stdlib::debug::varinfo_for_reg(lua_state, blame_reg);
+                    return Err(lua_state.error(format!(
+                        "number has no integer representation{}",
+                        info
+                    )));
                 } else {
                     "perform bitwise operation on"
                 }

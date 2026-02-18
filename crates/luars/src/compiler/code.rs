@@ -959,7 +959,7 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
 
     // Check if perturbed key can be converted to integer (lcode.c:630)
     // If yes, don't use kcache (would collide), just create new entry
-    if k.floor() == k && k >= i64::MIN as f64 && k <= i64::MAX as f64 {
+    if k.floor() == k && k >= i64::MIN as f64 && k < -(i64::MIN as f64) {
         // Key is still an integer, would collide - create new entry directly
         // Port of lcode.c:636: return addk(fs, fs->f, &o);
         let idx = fs.chunk.constants.len();
@@ -1482,7 +1482,7 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
                     v.is_finite()
                         && v.fract() == 0.0
                         && v >= i64::MIN as f64
-                        && v <= i64::MAX as f64
+                        && v < -(i64::MIN as f64)
                 }
                 _ => false,
             };
@@ -1493,7 +1493,7 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
                     v.is_finite()
                         && v.fract() == 0.0
                         && v >= i64::MIN as f64
-                        && v <= i64::MAX as f64
+                        && v < -(i64::MIN as f64)
                 }
                 _ => false,
             };

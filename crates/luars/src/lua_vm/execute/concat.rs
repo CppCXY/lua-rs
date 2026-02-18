@@ -166,14 +166,16 @@ fn value_to_bytes_write(value: &LuaValue, buf: &mut Vec<u8>) -> Option<bool> {
     }
 
     // Convert numbers using stack-allocated formatting (no heap alloc)
-    if let Some(i) = value.as_integer() {
+    if value.is_integer() {
+        let i = value.as_integer_strict().unwrap();
         let mut itoa_buf = itoa::Buffer::new();
         buf.extend_from_slice(itoa_buf.format(i).as_bytes());
         Some(false)
-    } else if let Some(f) = value.as_float() {
-        // Use Rust's default formatting (matches Lua's %.14g closely enough)
-        // ryu would change format and break tests
-        buf.extend_from_slice(f.to_string().as_bytes());
+    } else if value.is_float() {
+        let f = value.as_number().unwrap();
+        use crate::stdlib::basic::lua_float_to_string;
+        let s = lua_float_to_string(f);
+        buf.extend_from_slice(s.as_bytes());
         Some(false)
     } else if value.ttisfulluserdata() {
         // Userdata with lua_tostring can be used in concatenation

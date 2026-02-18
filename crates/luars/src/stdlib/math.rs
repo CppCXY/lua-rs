@@ -38,6 +38,8 @@ pub fn create_math_lib() -> LibraryModule {
         "exp" => math_exp,
         "floor" => math_floor,
         "fmod" => math_fmod,
+        "frexp" => math_frexp,
+        "ldexp" => math_ldexp,
         "log" => math_log,
         "max" => math_max,
         "min" => math_min,
@@ -124,7 +126,13 @@ fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     if let Some(f) = value.as_float() {
-        l.push_value(LuaValue::integer(f.ceil() as i64))?;
+        let ceiled = f.ceil();
+        // Return integer if result fits, otherwise keep as float
+        if ceiled >= (i64::MIN as f64) && ceiled < -(i64::MIN as f64) {
+            l.push_value(LuaValue::integer(ceiled as i64))?;
+        } else {
+            l.push_value(LuaValue::float(ceiled))?;
+        }
         return Ok(1);
     }
 
@@ -173,7 +181,13 @@ fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     if let Some(f) = value.as_float() {
-        l.push_value(LuaValue::integer(f.floor() as i64))?;
+        let floored = f.floor();
+        // Return integer if result fits, otherwise keep as float
+        if floored >= (i64::MIN as f64) && floored < -(i64::MIN as f64) {
+            l.push_value(LuaValue::integer(floored as i64))?;
+        } else {
+            l.push_value(LuaValue::float(floored))?;
+        }
         return Ok(1);
     }
 
@@ -181,16 +195,37 @@ fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_fmod(l: &mut LuaState) -> LuaResult<usize> {
-    let x = l
+    let arg1 = l
         .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?
-        .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?;
-    let y = l
+    let arg2 = l
         .get_arg(2)
-        .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?
-        .as_number()
         .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?;
+
+    // If both arguments are raw integers (not float-that-happens-to-be-integral), do integer fmod
+    if arg1.is_integer() && arg2.is_integer() {
+        let a = arg1.as_integer_strict().unwrap();
+        let b = arg2.as_integer_strict().unwrap();
+        if b == 0 {
+            return Err(l.error("bad argument #2 to 'fmod' (zero)".to_string()));
+        }
+        // C Lua uses luaV_mod for integers: a % b with sign adjustment
+        // But math.fmod for integers just uses C's fmod semantics (truncated division remainder)
+        // In C Lua, math_fmod calls luaV_modf which for integers does:
+        //   if b == -1: result = 0 (avoid overflow of minint % -1)
+        //   else: result = a % b (C remainder, truncated toward zero)
+        let result = if b == -1 { 0 } else { a % b };
+        l.push_value(LuaValue::integer(result))?;
+        return Ok(1);
+    }
+
+    let x = arg1.as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?;
+    let y = arg2.as_number()
+        .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?;
+    if y == 0.0 {
+        return Err(l.error("bad argument #2 to 'fmod' (zero)".to_string()));
+    }
     l.push_value(LuaValue::float(x % y))?;
     Ok(1)
 }
@@ -209,6 +244,68 @@ fn math_log(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
+/// Compare two numeric LuaValues properly without losing precision.
+/// Returns true if a < b.
+fn lua_num_lt(a: &LuaValue, b: &LuaValue) -> bool {
+    match (a.as_integer_strict(), b.as_integer_strict()) {
+        (Some(ai), Some(bi)) => ai < bi,
+        (Some(ai), None) => {
+            let bf = b.as_number().unwrap_or(f64::NAN);
+            // int < float: compare carefully
+            lua_int_lt_float(ai, bf)
+        }
+        (None, Some(bi)) => {
+            let af = a.as_number().unwrap_or(f64::NAN);
+            // float < int
+            lua_float_lt_int(af, bi)
+        }
+        (None, None) => {
+            let af = a.as_number().unwrap_or(f64::NAN);
+            let bf = b.as_number().unwrap_or(f64::NAN);
+            af < bf
+        }
+    }
+}
+
+/// int < float comparison (matching C Lua's LTintfloat)
+fn lua_int_lt_float(a: i64, b: f64) -> bool {
+    if b.is_nan() {
+        return false;
+    }
+    // If b is within i64 range, cast to i64 and compare; else compare as float
+    if b >= -(i64::MIN as f64) {
+        true // b >= 2^63, any i64 < b
+    } else if b < (i64::MIN as f64) {
+        false // b < -2^63, no i64 < b
+    } else {
+        let bi = b as i64;
+        if (bi as f64) == b {
+            a < bi // b is exactly representable
+        } else {
+            (a as f64) < b // compare as floats
+        }
+    }
+}
+
+/// float < int comparison (matching C Lua's LTfloatint)
+fn lua_float_lt_int(a: f64, b: i64) -> bool {
+    if a.is_nan() {
+        return false;
+    }
+    if a < (i64::MIN as f64) {
+        true // a < -2^63, a < any i64
+    } else if a >= -(i64::MIN as f64) {
+        false // a >= 2^63, no i64 > a
+    } else {
+        let ai = a as i64;
+        if (ai as f64) == a {
+            ai < b // a is exactly representable
+        } else {
+            a < (b as f64)
+        }
+    }
+}
+
 fn math_max(l: &mut LuaState) -> LuaResult<usize> {
     let argc = l.arg_count();
 
@@ -220,7 +317,8 @@ fn math_max(l: &mut LuaState) -> LuaResult<usize> {
     let first = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
-    let mut max_val = first
+    // Validate it's a number
+    let _ = first
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
     let mut max_arg = first;
@@ -230,11 +328,10 @@ fn math_max(l: &mut LuaState) -> LuaResult<usize> {
         let arg = l
             .get_arg(i)
             .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
-        let val = arg
+        let _ = arg
             .as_number()
             .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
-        if val > max_val {
-            max_val = val;
+        if lua_num_lt(&max_arg, &arg) {
             max_arg = arg;
         }
     }
@@ -254,7 +351,7 @@ fn math_min(l: &mut LuaState) -> LuaResult<usize> {
     let first = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
-    let mut min_val = first
+    let _ = first
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
     let mut min_arg = first;
@@ -264,11 +361,10 @@ fn math_min(l: &mut LuaState) -> LuaResult<usize> {
         let arg = l
             .get_arg(i)
             .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
-        let val = arg
+        let _ = arg
             .as_number()
             .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
-        if val < min_val {
-            min_val = val;
+        if lua_num_lt(&arg, &min_arg) {
             min_arg = arg;
         }
     }
@@ -287,7 +383,7 @@ fn math_modf(l: &mut LuaState) -> LuaResult<usize> {
     let frac_part = if x.is_infinite() { 0.0 } else { x - int_part };
 
     // Return integer part as integer if it fits
-    if !x.is_nan() && !x.is_infinite() && int_part >= i64::MIN as f64 && int_part <= i64::MAX as f64
+    if !x.is_nan() && !x.is_infinite() && int_part >= i64::MIN as f64 && int_part < -(i64::MIN as f64)
     {
         l.push_value(LuaValue::integer(int_part as i64))?;
     } else {
@@ -310,91 +406,116 @@ fn math_rad(l: &mut LuaState) -> LuaResult<usize> {
 fn math_random(l: &mut LuaState) -> LuaResult<usize> {
     let argc = l.arg_count();
 
-    // Use rand crate for better quality random numbers
-    let random: f64 = rand::Rng::gen_range(&mut l.vm_mut().rng, 0.0..1.0);
+    if argc > 2 {
+        return Err(l.error("wrong number of arguments to 'random'".to_string()));
+    }
 
     match argc {
         0 => {
-            l.push_value(LuaValue::float(random))?;
+            // No arguments: return float in [0, 1)
+            let r = l.vm_mut().rng.next_float();
+            l.push_value(LuaValue::float(r))?;
             Ok(1)
         }
         1 => {
-            let m = l
+            let rv = l.vm_mut().rng.next_rand();
+            let up = l
                 .get_arg(1)
                 .ok_or_else(|| {
                     l.error("bad argument #1 to 'random' (number expected)".to_string())
                 })?
-                .as_number()
+                .as_integer()
                 .ok_or_else(|| {
-                    l.error("bad argument #1 to 'random' (number expected)".to_string())
-                })? as i64;
-            if m < 1 {
-                return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
+                    l.error("bad argument #1 to 'random' (number expected, got float)".to_string())
+                })?;
+            if up == 0 {
+                // random(0): return raw random integer
+                l.push_value(LuaValue::integer(rv as i64))?;
+                return Ok(1);
             }
-            let result = ((random * m as f64).floor() as i64).wrapping_add(1);
+            // random(n): return random integer in [1, n]
+            if up < 1 {
+                return Err(
+                    l.error("bad argument #1 to 'random' (interval is empty)".to_string())
+                );
+            }
+            let result = project(rv, 1, up as u64)?;
             l.push_value(LuaValue::integer(result))?;
             Ok(1)
         }
         _ => {
-            let m = l
+            let rv = l.vm_mut().rng.next_rand();
+            let low = l
                 .get_arg(1)
                 .ok_or_else(|| {
                     l.error("bad argument #1 to 'random' (number expected)".to_string())
                 })?
-                .as_number()
+                .as_integer()
                 .ok_or_else(|| {
-                    l.error("bad argument #1 to 'random' (number expected)".to_string())
-                })? as i64;
-            let n = l
+                    l.error("bad argument #1 to 'random' (number expected, got float)".to_string())
+                })?;
+            let up = l
                 .get_arg(2)
                 .ok_or_else(|| {
                     l.error("bad argument #2 to 'random' (number expected)".to_string())
                 })?
-                .as_number()
+                .as_integer()
                 .ok_or_else(|| {
-                    l.error("bad argument #2 to 'random' (number expected)".to_string())
-                })? as i64;
-            if m > n {
-                return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
+                    l.error("bad argument #2 to 'random' (number expected, got float)".to_string())
+                })?;
+            if low > up {
+                return Err(
+                    l.error("bad argument #2 to 'random' (interval is empty)".to_string())
+                );
             }
-            let range = ((n as u64).wrapping_sub(m as u64).wrapping_add(1)) as f64;
-            let result = m.wrapping_add((random * range).floor() as i64);
+            let result = project(rv, low as u64, up as u64)?;
             l.push_value(LuaValue::integer(result))?;
             Ok(1)
         }
     }
 }
 
-fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
-    use rand::SeedableRng;
-
-    // Lua 5.4+: math.randomseed() with no args uses time-based seed
-    let seed = if let Some(arg) = l.get_arg(1) {
-        if arg.is_nil() {
-            // Use time-based seed
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0)
-        } else if let Some(n) = arg.as_number() {
-            n as u64
-        } else {
-            return Err(l.error("bad argument #1 to 'randomseed' (number expected)".to_string()));
-        }
+/// Project a random u64 into [low, up] range (matching C Lua's project)
+fn project(rv: u64, low: u64, up: u64) -> LuaResult<i64> {
+    // range = up - low + 1 (could overflow for full range)
+    let range = up.wrapping_sub(low).wrapping_add(1);
+    if range == 0 {
+        // Full u64 range
+        Ok(low.wrapping_add(rv) as i64)
     } else {
-        // No argument - use time-based seed
-        std::time::SystemTime::now()
+        // Compute rv % range using rejection sampling to avoid bias
+        // Simple version: just use modulo (C Lua does this too for the common case)
+        Ok(low.wrapping_add(rv % range) as i64)
+    }
+}
+
+fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
+    use crate::lua_vm::LuaRng;
+    let argc = l.arg_count();
+
+    let (n1, n2) = if argc == 0 || (argc >= 1 && l.get_arg(1).map_or(true, |v| v.is_nil())) {
+        // No argument or nil: use time-based seed
+        let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        (time as i64, 0i64)
+    } else {
+        let seed1 = l
+            .get_arg(1)
+            .and_then(|v| v.as_integer())
+            .ok_or_else(|| {
+                l.error("bad argument #1 to 'randomseed' (number expected)".to_string())
+            })?;
+        let seed2 = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(0);
+        (seed1, seed2)
     };
 
-    // Re-seed the RNG with the new seed
-    l.vm_mut().rng = rand::rngs::StdRng::seed_from_u64(seed);
+    l.vm_mut().rng = LuaRng::from_seed(n1, n2);
 
-    // Lua 5.4+ returns two values from randomseed (high and low 32 bits)
-    l.push_value(LuaValue::integer((seed >> 32) as i64))?;
-    l.push_value(LuaValue::integer((seed & 0xFFFFFFFF) as i64))?;
+    // Return two seed values
+    l.push_value(LuaValue::integer(n1))?;
+    l.push_value(LuaValue::integer(n2))?;
     Ok(2)
 }
 
@@ -525,5 +646,80 @@ fn math_ult(l: &mut LuaState) -> LuaResult<usize> {
     // Unsigned less than
     let result = (m as u64) < (n as u64);
     l.push_value(LuaValue::boolean(result))?;
+    Ok(1)
+}
+
+/// math.frexp(x) -> m, e such that x = m * 2^e, 0.5 <= |m| < 1
+fn math_frexp(l: &mut LuaState) -> LuaResult<usize> {
+    let x = l
+        .get_arg(1)
+        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+        .ok_or_else(|| l.error("bad argument #1 to 'frexp' (number expected)".to_string()))?;
+
+    if x == 0.0 {
+        l.push_value(LuaValue::float(0.0))?;
+        l.push_value(LuaValue::integer(0))?;
+        return Ok(2);
+    }
+    if x.is_infinite() || x.is_nan() {
+        l.push_value(LuaValue::float(x))?;
+        l.push_value(LuaValue::integer(0))?;
+        return Ok(2);
+    }
+
+    // frexp: extract mantissa and exponent
+    let bits = x.to_bits();
+    let sign = if (bits >> 63) != 0 { -1.0 } else { 1.0 };
+    let abs_x = x.abs();
+    let mut exp = ((bits >> 52) & 0x7FF) as i64 - 1022;
+    let mut mantissa = sign * f64::from_bits((abs_x.to_bits() & 0x000FFFFFFFFFFFFF) | 0x3FE0000000000000);
+
+    // Handle subnormals
+    if ((bits >> 52) & 0x7FF) == 0 {
+        // Subnormal: multiply by 2^53 to normalize, then adjust exponent
+        let norm = abs_x * (2.0f64.powi(53));
+        let norm_bits = norm.to_bits();
+        exp = ((norm_bits >> 52) & 0x7FF) as i64 - 1022 - 53;
+        mantissa = sign * f64::from_bits((norm_bits & 0x000FFFFFFFFFFFFF) | 0x3FE0000000000000);
+    }
+
+    l.push_value(LuaValue::float(mantissa))?;
+    l.push_value(LuaValue::integer(exp))?;
+    Ok(2)
+}
+
+/// math.ldexp(m, e) -> m * 2^e
+fn math_ldexp(l: &mut LuaState) -> LuaResult<usize> {
+    let m = l
+        .get_arg(1)
+        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+        .ok_or_else(|| l.error("bad argument #1 to 'ldexp' (number expected)".to_string()))?;
+    let e = l
+        .get_arg(2)
+        .and_then(|v| v.as_integer())
+        .ok_or_else(|| l.error("bad argument #2 to 'ldexp' (number expected)".to_string()))?;
+
+    // Use the ldexp helper from parse_number to handle large exponents
+    let mut result = m;
+    let mut exp = e;
+    while exp > 1023 {
+        result *= 2.0f64.powi(1023);
+        exp -= 1023;
+        if result.is_infinite() {
+            break;
+        }
+    }
+    while exp < -1074 {
+        result *= 2.0f64.powi(-1074);
+        exp += 1074;
+        if result == 0.0 {
+            break;
+        }
+    }
+    if !result.is_infinite() && result != 0.0 {
+        result *= 2.0f64.powi(exp as i32);
+    }
+
+    l.push_value(LuaValue::float(result))?;
     Ok(1)
 }
