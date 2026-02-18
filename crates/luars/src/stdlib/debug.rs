@@ -719,14 +719,37 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
     // Adjust level to skip the traceback function itself if called from Lua
     let start_level = level;
 
-    // Iterate through call frames, starting from 'level'
+    // Port of luaL_traceback from lauxlib.c
+    // LEVELS1 = 10 (first part), LEVELS2 = 11 (last part)
+    const LEVELS1: usize = 10;
+    const LEVELS2: usize = 11;
+
+    // Collect frame indices (most-recent first, matching C Lua's level ordering)
     if start_level < call_depth {
-        let mut shown = 0;
-        for i in (start_level..call_depth).rev() {
-            // Limit traceback to avoid overly long output
-            if shown >= 20 {
-                trace.push_str("\n\t...");
-                break;
+        let frames: Vec<usize> = (start_level..call_depth).rev().collect();
+        let total = frames.len();
+        let limit2show: isize = if total > LEVELS1 + LEVELS2 {
+            LEVELS1 as isize
+        } else {
+            -1 // show all
+        };
+
+        let mut countdown = limit2show;
+
+        for (idx, &i) in frames.iter().enumerate() {
+            if countdown == 0 {
+                // Skip middle frames
+                let n = total - LEVELS1 - LEVELS2;
+                trace.push_str(&format!("\n\t...\t(skipping {} levels)", n));
+                countdown -= 1; // prevent re-triggering
+                continue;
+            } else if countdown > 0 {
+                countdown -= 1;
+            }
+
+            // Skip frames in the gap
+            if limit2show > 0 && idx > LEVELS1 && idx < total - LEVELS2 {
+                continue;
             }
 
             if let Some(func) = l.get_frame_func(i) {
@@ -803,7 +826,6 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                 } else {
                     trace.push_str("\n\t?: in function");
                 }
-                shown += 1;
             }
         }
     }

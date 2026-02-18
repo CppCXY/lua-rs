@@ -721,7 +721,7 @@ impl<'a> LuaTokenize<'a> {
             return LuaTokenKind::TkInt;
         }
 
-        if self.reader.current_char().is_alphabetic() {
+        if self.reader.current_char().is_ascii_alphabetic() {
             let ch = self.reader.current_char();
             self.error(|| format!("malformed number near '%{ch}'", ch = ch));
         }
@@ -742,9 +742,9 @@ impl<'a> LuaTokenize<'a> {
 }
 
 fn is_name_start(ch: char) -> bool {
-    ch.is_alphabetic() || ch == '_'
+    ch.is_ascii_alphabetic() || ch == '_'
 }
 
 fn is_name_continue(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
+    ch.is_ascii_alphanumeric() || ch == '_'
 }

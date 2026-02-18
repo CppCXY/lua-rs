@@ -51,12 +51,14 @@ fn get_unary_opcode(op: UnaryOperator) -> OpCode {
 // Port of subexpr from lparser.c
 // Returns the first untreated operator (like Lua C implementation)
 fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<BinaryOperator, String> {
+    fs.enter_level()?; // control recursion depth
     let uop = to_unary_operator(fs.lexer.current_token());
     if uop != UnaryOperator::OpNop {
         let op = get_unary_opcode(uop);
+        let line = fs.lexer.line; // Save operator line (lparser.c:1263)
         fs.lexer.bump();
         let _ = subexpr(fs, v, UNARY_PRIORITY)?; // Discard returned op from recursive call
-        code::prefix(fs, op, v);
+        code::prefix(fs, op, v, line);
     } else {
         simpleexp(fs, v)?;
     }
@@ -65,6 +67,7 @@ fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<BinaryOper
     // Port of lparser.c:1273-1284
     let mut op = to_binary_operator(fs.lexer.current_token());
     while op != BinaryOperator::OpNop && op.get_priority().left > limit {
+        let line = fs.lexer.line; // Save operator line (lparser.c:1276)
         fs.lexer.bump();
 
         // lcode.c:1637-1676: luaK_infix handles special cases like 'and', 'or'
@@ -76,11 +79,12 @@ fn subexpr(fs: &mut FuncState, v: &mut ExpDesc, limit: i32) -> Result<BinaryOper
 
         // lcode.c:1706-1783: luaK_posfix
         // 'and' and 'or' don't generate opcodes - they use control flow
-        code::posfix(fs, op, v, &mut v2);
+        code::posfix(fs, op, v, &mut v2, line);
 
         op = nextop; // Use returned operator instead of re-checking token (lparser.c:1284)
     }
 
+    fs.leave_level();
     Ok(op) // Return first untreated operator (lparser.c:1286)
 }
 
@@ -365,7 +369,7 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
         // lparser.c:526-527: global by default in the scope of a global declaration?
         if info == -2 {
-            return Err(format!("variable '{}' not declared", name));
+            return Err(fs.sem_error(&format!("variable '{}' not declared", name)));
         }
 
         // lparser.c:528: buildglobal(ls, varname, var)
@@ -411,6 +415,9 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         }
     }
 
+    // Check for deferred errors (e.g., too many upvalues)
+    fs.check_pending_checklimit()?;
+
     Ok(())
 }
 
@@ -424,10 +431,10 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
 
     // lparser.c:507-509: _ENV is global when accessing variable?
     if var.kind == ExpKind::VGLOBAL {
-        return Err(format!(
+        return Err(fs.sem_error(&format!(
             "_ENV is global when accessing variable '{}'",
             varname
-        ));
+        )));
     }
 
     // lparser.c:510: _ENV could be a constant
@@ -853,6 +860,10 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     let fs_ptr = fs as *mut FuncState;
     let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
 
+    // Set linedefined early (C Lua: new_fs.f->linedefined = line)
+    // This must happen before parsing body so error messages reference the correct line
+    child_fs.chunk.linedefined = linedefined;
+
     // lparser.c:753: open_func calls enterblock(fs, bl, 0) - create function body block
     //  Must be done BEFORE registering parameters, with nactvar=0
     // This is critical - every function body needs an outer block!
@@ -882,7 +893,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     for i in 0..nparams {
         child_fs.new_localvar(params[i].clone(), param_kinds[i]);
     }
-    child_fs.adjust_local_vars(nparams as u16);
+    child_fs.adjust_local_vars(nparams as u16)?;
 
     // lparser.c:982: Set numparams BEFORE registering vararg parameter
     // f->numparams = cast_byte(fs->nactvar);
@@ -903,7 +914,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
             // It will be set later if the vararg table is actually used
             // (e.g., via GETVARG, vapar2local, check_readonly)
             child_fs.new_localvar(vararg_name.clone(), param_kinds[nparams]);
-            child_fs.adjust_local_vars(1); // vararg parameter
+            child_fs.adjust_local_vars(1)?; // vararg parameter
         }
     } else {
         // Non-vararg functions don't use hidden vararg

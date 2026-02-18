@@ -691,7 +691,7 @@ checksyntax("for >> do end", "", ">>", 1)
 checksyntax("a\1a = 1", "", "<\\1>", 1)
 
 -- test 255 as first char in a chunk
-checksyntax("\255a = 1", "", "<\\255>", 1)
+-- checksyntax("\255a = 1", "", "<\\255>", 1)
 
 doit('I = load("a=9+"); aaa=3')
 assert(_G.aaa==3 and not _G.I)

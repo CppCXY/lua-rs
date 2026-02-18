@@ -937,7 +937,7 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
     let ci = lua_state.get_call_info(frame_idx);
     let saved_pc = ci.pc as usize;
     let base_tmp = ci.base;
-    let nresults = ci.nresults;
+    let _nresults = ci.nresults;
 
     // Get the chunk to read the interrupted instruction
     let func_value = ci.func;

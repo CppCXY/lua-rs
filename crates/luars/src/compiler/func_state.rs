@@ -35,6 +35,7 @@ pub struct FuncState<'a> {
     pub first_local: usize,            // index of first local variable in prev
     pub source_name: String,           // source file name for error messages
     pub kcache: LuaValue, // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
+    pub checklimit_error: Option<String>, // deferred error from checkstack/checklimit
 }
 
 pub struct CompilerState {
@@ -205,13 +206,57 @@ impl<'a> FuncState<'a> {
             source_name,
             first_local: 0,
             kcache,
+            checklimit_error: None,
         }
     }
 
     // Unified error generation function (port of luaX_syntaxerror from llex.c)
+    // Always adds "near <token>" like C Lua's luaX_syntaxerror
     pub fn syntax_error(&self, msg: &str) -> String {
-        let line = self.lexer.line;
+        self.token_error(msg)
+    }
+
+    // Semantic error - uses lastline (port of luaK_semerror from lcode.c)
+    // Reports error at the line of the last consumed token, not the current lookahead
+    pub fn sem_error(&self, msg: &str) -> String {
+        let line = self.lexer.lastline;
         format!("{}:{}: {}", format_source(&self.source_name), line, msg)
+    }
+
+    // Port of errorlimit from lparser.c:73-84
+    // Generates "too many <what> (limit is <limit>) in <where>" error
+    pub fn errorlimit(&self, limit: usize, what: &str) -> String {
+        let linedefined = self.chunk.linedefined;
+        let where_str = if linedefined == 0 {
+            "main function".to_string()
+        } else {
+            format!("function at line {}", linedefined)
+        };
+        let msg = format!("too many {} (limit is {}) in {}", what, limit, where_str);
+        self.syntax_error(&msg)
+    }
+
+    // Check and consume any pending checklimit error
+    pub fn check_pending_checklimit(&mut self) -> Result<(), String> {
+        if let Some(err) = self.checklimit_error.take() {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+
+    // Port of enterlevel/leavelevel from lparser.c
+    // Tracks recursion depth during parsing; MAXCCALLS = 200
+    pub fn enter_level(&mut self) -> Result<(), String> {
+        self.lexer.nesting_level += 1;
+        if self.lexer.nesting_level >= 200 {
+            return Err(self.syntax_error("chunk has too many syntax levels"));
+        }
+        Ok(())
+    }
+
+    pub fn leave_level(&mut self) {
+        self.lexer.nesting_level -= 1;
     }
 
     // Generate error with current token information
@@ -223,6 +268,20 @@ impl<'a> FuncState<'a> {
         if token_text == "<eof>" {
             format!("{}:{}: {} near {}", source, line, msg, token_text)
         } else {
+            // Check if the token is a single non-printable character
+            // (including bytes 128-255 mapped from Latin-1)
+            let chars: Vec<char> = token_text.chars().collect();
+            if chars.len() == 1 {
+                let c = chars[0];
+                let code = c as u32;
+                if code <= 255 && !(c.is_ascii_graphic() || c == ' ') {
+                    // Non-printable byte — show as <\N>
+                    return format!(
+                        "{}:{}: {} near '<\\{}>'",
+                        source, line, msg, code
+                    );
+                }
+            }
             format!(
                 "{}:{}: {} near '{}'",
                 source, line, msg, token_text
@@ -273,6 +332,7 @@ impl<'a> FuncState<'a> {
             first_local: parent.actvar.len(),
             source_name: parent.source_name.clone(),
             kcache,
+            checklimit_error: None,
         }
     }
 
@@ -303,7 +363,7 @@ impl<'a> FuncState<'a> {
     }
 
     // Port of adjustlocalvars from lparser.c:329-338
-    pub fn adjust_local_vars(&mut self, nvars: u16) {
+    pub fn adjust_local_vars(&mut self, nvars: u16) -> Result<(), String> {
         // Variables have already been added to actvar by new_localvar
         // This function assigns register indices to them and marks them as active
         let mut reglevel = self.reglevel(self.nactvar);
@@ -313,6 +373,10 @@ impl<'a> FuncState<'a> {
             if let Some(var) = self.actvar.get_mut(vidx as usize) {
                 var.ridx = reglevel as i16;
                 reglevel += 1;
+                // Check limit: MAXVARS = 200
+                if reglevel as usize > 200 {
+                    return Err(self.errorlimit(200, "local variables"));
+                }
                 // Add variable debug info (LocVar) to chunk
                 let pidx = self.chunk.locals.len();
                 var.pidx = pidx;
@@ -324,6 +388,7 @@ impl<'a> FuncState<'a> {
             }
             self.nactvar += 1;
         }
+        Ok(())
     }
 
     // Port of reglevel from lparser.c:236-242
@@ -434,6 +499,14 @@ impl<'a> FuncState<'a> {
 
     // Port of newupvalue from lparser.c (lines 364-382)
     pub fn newupvalue(&mut self, name: &str, v: &ExpDesc) -> i32 {
+        // Port of luaY_checklimit(fs, fs->nups + 1, MAXUPVAL, "upvalues")
+        // MAXUPVAL = 255
+        if self.nups as usize + 1 > 255 {
+            if self.checklimit_error.is_none() {
+                self.checklimit_error = Some(self.errorlimit(255, "upvalues"));
+            }
+        }
+
         let prev_ptr = match &self.prev {
             Some(p) => *p as *const _ as *mut FuncState,
             None => std::ptr::null_mut(),
@@ -481,10 +554,16 @@ impl<'a> FuncState<'a> {
 /// - "=display" → "display" (strip = prefix, use as-is)
 /// - other → [string "first_line..."] (wrap in [string "..."], truncate)
 pub fn format_source(source: &str) -> String {
-    const MAX_SRC: usize = 60;
+    // LUA_IDSIZE = 60 in luaconf.h, but includes null terminator, so max usable = 59
+    const MAX_SRC: usize = 59;
     if source.starts_with('=') {
-        // Remove the '=' prefix, take as display name
-        source[1..].to_string()
+        // Remove the '=' prefix, take as display name, truncate to MAX_SRC
+        let name = &source[1..];
+        if name.len() <= MAX_SRC {
+            name.to_string()
+        } else {
+            name[..MAX_SRC].to_string()
+        }
     } else if source.starts_with('@') {
         let name = &source[1..];
         if name.len() <= MAX_SRC {

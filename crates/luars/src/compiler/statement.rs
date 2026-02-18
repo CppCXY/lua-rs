@@ -38,7 +38,7 @@ fn block_follow(fs: &FuncState, withuntil: bool) -> bool {
 // Port of statement from lparser.c
 fn statement(fs: &mut FuncState) -> Result<(), String> {
     let line = fs.lexer.line;
-    // enterlevel(fs.lexer);
+    fs.enter_level()?;
 
     match fs.lexer.current_token() {
         LuaTokenKind::TkSemicolon => {
@@ -119,7 +119,7 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
     // Use the reglevel method from FuncState which correctly handles all variable kinds
     fs.freereg = fs.nvarstack();
 
-    // leavelevel(fs.lexer);
+    fs.leave_level();
     Ok(())
 }
 
@@ -227,10 +227,10 @@ fn solvegoto(
             .get(&gt.nactvar)
             .map(|s| s.as_str())
             .unwrap_or("?");
-        return Err(format!(
-            "{}:{}: <goto {}> at line {} jumps into the scope of '{}'",
-            fs.source_name, gt.line, gt.name, gt.line, varname
-        ));
+        return Err(fs.sem_error(&format!(
+            "<goto {}> at line {} jumps into the scope of '{}'",
+            gt.name, gt.line, varname
+        )));
     }
 
     // lparser.c:606-614: Check if goto needs a CLOSE instruction
@@ -272,10 +272,10 @@ fn findlabel<'a>(fs: &'a FuncState, name: &str) -> Option<&'a LabelDesc> {
 // Check whether there is already a label with the given 'name'
 fn checkrepeated(fs: &FuncState, name: &str) -> Result<(), String> {
     if let Some(lb) = findlabel(fs, name) {
-        return Err(format!(
+        return Err(fs.sem_error(&format!(
             "label '{}' already defined on line {}",
             name, lb.line
-        ));
+        )));
     }
     Ok(())
 }
@@ -444,10 +444,10 @@ pub fn leaveblock(fs: &mut FuncState) -> Result<(), String> {
             if !fs.pending_gotos.is_empty() {
                 // Report the first unresolved goto as an error
                 let gt = &fs.pending_gotos[0];
-                return Err(format!(
-                    "{}:{}: no visible label '{}' for <goto> at line {}",
-                    fs.source_name, gt.line, gt.name, gt.line
-                ));
+                return Err(fs.sem_error(&format!(
+                    "no visible label '{}' for <goto> at line {}",
+                    gt.name, gt.line
+                )));
             }
         }
 
@@ -488,6 +488,10 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
         nret = 0;
     } else {
         nret = explist(fs, &mut e)? as i32;
+        // Check limit: MAXARG_B = 255, nret + 1 must fit
+        if nret > 254 {
+            return Err(fs.errorlimit(254, "returns"));
+        }
         // Check if expression has multiple returns (VCALL or VVARARG)
         if matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG) {
             code::setmultret(fs, &mut e);
@@ -539,15 +543,10 @@ pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
 
     while testnext(fs, LuaTokenKind::TkComma) {
         code::exp2nextreg(fs, e);
+        fs.check_pending_checklimit()?; // check register overflow
         *e = ExpDesc::new_void(); // Reset ExpDesc for next expression
         expr_internal(fs, e)?;
         n += 1;
-
-        // Check limit: Lua allows at most 254 return values
-        // (255 is reserved for LUA_MULTRET)
-        if n > 254 {
-            return Err("too many returns".to_string());
-        }
     }
 
     Ok(n)
@@ -878,7 +877,7 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     // Adjust local variables (2 internal control variables only!)
     // The loop variable itself will be adjusted in forbody
-    fs.adjust_local_vars(2);
+    fs.adjust_local_vars(2)?;
 
     // Generate FORPREP with initial jump offset 0
     let prep_pc = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
@@ -904,7 +903,7 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     // Activate the loop variable (4th variable)
     // lparser.c:1553-1554: adjustlocalvars + luaK_reserveregs
-    fs.adjust_local_vars(1);
+    fs.adjust_local_vars(1)?;
     code::reserve_regs(fs, 1);
 
     block(fs)?;
@@ -954,6 +953,9 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     check(fs, LuaTokenKind::TkIn)?;
     fs.lexer.bump(); // skip IN
 
+    // lparser.c:1725: line = ls->linenumber (captured AFTER consuming 'in')
+    let line = fs.lexer.line;
+
     // Parse iterator expressions
     let mut e = ExpDesc::new_void();
     let nexps = explist(fs, &mut e)?;
@@ -963,13 +965,14 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
 
     // Activate the 3 internal control variables (not the control variable yet!)
     // Per lparser.c:1727: adjustlocalvars(ls, 3);
-    fs.adjust_local_vars(3);
+    fs.adjust_local_vars(3)?;
 
     // lparser.c:1728: marktobeclosed(fs); /* last internal var. must be closed */
     mark_to_be_closed(fs);
 
     // lparser.c:1735: luaK_checkstack(fs, 2); /* extra space to call iterator */
     code::checkstack(fs, 2);
+    fs.check_pending_checklimit()?; // check register overflow
 
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
@@ -993,8 +996,9 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
 
     // lparser.c:1670: adjustlocalvars(ls, nvars); /* activate declared variables */
     // nvars-3 because we already adjusted 3 internal variables
-    fs.adjust_local_vars((nvars - 3) as u16);
+    fs.adjust_local_vars((nvars - 3) as u16)?;
     code::reserve_regs(fs, (nvars - 3) as u8);
+    fs.check_pending_checklimit()?; // check register overflow
 
     block(fs)?;
 
@@ -1008,6 +1012,8 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1676: Generate TFORCALL for generic for
     // nvars-3 because the first 3 are internal variables
     code::code_abc(fs, OpCode::TForCall, base as u32, 0, (nvars - 3) as u32);
+    // lparser.c:1677: luaK_fixline(fs, line); /* pretend TFORCALL is on 'for' line */
+    code::fixline(fs, line);
 
     // lparser.c:1679: Generate TFORLOOP with Bx=0, will be fixed later
     let endfor_pc = code::code_abx(fs, OpCode::TForLoop, base as u32, 0);
@@ -1066,7 +1072,7 @@ fn localfunc(fs: &mut FuncState) -> Result<(), String> {
 
     // Register local variable
     fs.new_localvar(name, VarKind::VDKREG);
-    fs.adjust_local_vars(1);
+    fs.adjust_local_vars(1)?;
 
     // Parse function body
     let mut v = ExpDesc::new_void();
@@ -1094,7 +1100,7 @@ fn getvarattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, Stri
         } else if attr == "close" {
             Ok(VarKind::RDKTOCLOSE)
         } else {
-            Err(fs.syntax_error(&format!("unknown attribute '{}'", attr)))
+            Err(fs.sem_error(&format!("unknown attribute '{}'", attr)))
         }
     } else {
         Ok(default) // return default value
@@ -1106,7 +1112,7 @@ fn getvarattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, Stri
 fn getglobalattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, String> {
     let kind = getvarattribute(fs, default)?;
     match kind {
-        VarKind::RDKTOCLOSE => Err(fs.syntax_error("global variables cannot be to-be-closed")),
+        VarKind::RDKTOCLOSE => Err(fs.sem_error("global variables cannot be to-be-closed")),
         VarKind::RDKCONST => Ok(VarKind::GDKCONST), // adjust kind for global variable
         _ => Ok(kind),
     }
@@ -1248,7 +1254,7 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
 
         if kind == VarKind::RDKTOCLOSE {
             if toclose != -1 {
-                return Err("multiple to-be-closed variables in local list".to_string());
+                return Err(fs.sem_error("multiple to-be-closed variables in local list"));
             }
             toclose = (fs.nactvar + nvars) as isize;
         }
@@ -1296,7 +1302,7 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
             var_desc.ridx = ridx as i16;
         }
         // adjustlocalvars(ls, nvars - 1) - exclude last variable (lparser.c:1906)
-        fs.adjust_local_vars(nvars - 1);
+        fs.adjust_local_vars(nvars - 1)?;
         // fs->nactvar++ - but count it (lparser.c:1907)
         fs.nactvar += 1;
         // NOTE: Don't adjust freereg here! Official Lua doesn't do it either.
@@ -1307,7 +1313,8 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     }
 
     adjust_assign(fs, nvars as usize, nexps, &mut e);
-    fs.adjust_local_vars(nvars);
+    fs.check_pending_checklimit()?; // check register overflow from adjust_assign
+    fs.adjust_local_vars(nvars)?;
 
     check_to_close(fs, toclose);
 
@@ -1757,7 +1764,7 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
 
     if let Some(name) = varname {
         let msg = format!("attempt to assign to const variable '{}'", name);
-        return Err(fs.syntax_error(&msg));
+        return Err(fs.sem_error(&msg));
     }
 
     Ok(())
@@ -1765,11 +1772,14 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
 
 // Like check_readonly but reports error at a specific line instead of current lexer line
 fn check_readonly_at_line(fs: &mut FuncState, e: &mut ExpDesc, line: usize) -> Result<(), String> {
-    // Temporarily save and override the lexer line, then restore
+    // Temporarily save and override both line and lastline, then restore
     let saved_line = fs.lexer.line;
+    let saved_lastline = fs.lexer.lastline;
     fs.lexer.line = line;
+    fs.lexer.lastline = line;
     let result = check_readonly(fs, e);
     fs.lexer.line = saved_line;
+    fs.lexer.lastline = saved_lastline;
     result
 }
 

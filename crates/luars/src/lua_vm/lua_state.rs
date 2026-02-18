@@ -182,6 +182,10 @@ impl LuaState {
     ) -> LuaResult<()> {
         // Fast path: check stack depth (branch predictor friendly - usually succeeds)
         if self.call_depth >= self.safe_option.max_call_depth {
+            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+                // In error handler extra zone - C Lua's stackerror behavior
+                return Err(LuaError::ErrorInErrorHandling);
+            }
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -362,6 +366,10 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     fn push_lua_frame_overflow(&mut self) -> LuaResult<()> {
+        if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+            // In error handler extra zone - C Lua's stackerror behavior
+            return Err(LuaError::ErrorInErrorHandling);
+        }
         Err(self.error(format!(
             "stack overflow (Lua stack depth: {})",
             self.call_depth
@@ -457,6 +465,10 @@ impl LuaState {
     ) -> LuaResult<()> {
         // Check stack depth
         if self.call_depth >= self.safe_option.max_call_depth {
+            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+                // In error handler extra zone - C Lua's stackerror behavior
+                return Err(LuaError::ErrorInErrorHandling);
+            }
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -527,6 +539,12 @@ impl LuaState {
     #[inline(always)]
     pub fn get_top(&self) -> usize {
         self.stack_top
+    }
+
+    /// Port of lua_checkstack (lapi.c): check if the stack can grow by `n` slots.
+    /// Returns true if the stack can accommodate `n` more elements.
+    pub fn check_stack(&self, n: usize) -> bool {
+        self.stack_top + n <= self.safe_option.max_stack_size
     }
 
     /// Set logical stack top (L->top.p = L->stack + new_top in Lua)
@@ -1445,6 +1463,10 @@ impl LuaState {
         vm.n_ccalls += 1;
         if vm.n_ccalls >= self.safe_option.max_call_depth {
             vm.n_ccalls -= 1;
+            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+                // In error handler extra zone - C Lua's stackerror behavior
+                return Err(LuaError::ErrorInErrorHandling);
+            }
             Err(self.error("C stack overflow".to_string()))
         } else {
             Ok(())
@@ -2188,6 +2210,25 @@ impl LuaState {
                 // CloseThread bypasses all pcalls — propagate to resume
                 Err(LuaError::CloseThread)
             }
+            Err(LuaError::ErrorInErrorHandling) => {
+                // Stack overflow in error handler zone - C Lua's stackerror
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, LuaValue::nil());
+                }
+                let err_msg = self.create_string("error in error handling")?.into();
+                self.stack_set(func_idx, err_msg)?;
+                self.set_top(func_idx + 1)?;
+                Ok((false, 1))
+            }
             Err(e) => {
                 // Error - clean up and return error
                 // Lua 5.5 order: pop frames first, then close TBC
@@ -2324,12 +2365,31 @@ impl LuaState {
                 Err(LuaError::Yield)
             }
             Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
+            Err(LuaError::ErrorInErrorHandling) => {
+                // Stack overflow in error handler zone - skip handler entirely
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, LuaValue::nil());
+                }
+                let err_msg = self.create_string("error in error handling")?.into();
+                self.stack_set(func_idx, err_msg)?;
+                self.set_top(func_idx + 1)?;
+                Ok((false, 1))
+            }
             Err(e) => {
                 // Get error object BEFORE any cleanup
                 let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
                 let error_msg_str = self.get_error_msg(e);
 
-                let err_value = if !err_obj.is_nil() {
+                let mut err_value = if !err_obj.is_nil() {
                     err_obj.clone()
                 } else {
                     self.create_string(&error_msg_str)?.into()
@@ -2345,46 +2405,94 @@ impl LuaState {
                 let saved_max_depth = self.safe_option.max_call_depth;
                 self.safe_option.max_call_depth = saved_max_depth + 30;
 
-                // Call error handler WITH ALL ERROR FRAMES STILL ON STACK
+                // Call error handler WITH ALL ERROR FRAMES STILL ON STACK.
+                // C Lua's luaG_errormsg recursively calls the handler when the
+                // handler itself errors. We implement this as a loop.
+                // Track accumulated "virtual depth" to simulate C Lua's nCcalls
+                // accumulation during recursive handler calls.
                 let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
-                let current_top = self.stack_top;
-                self.push_value(handler)?;
-                let handler_func_idx = current_top;
-                self.push_value(err_value.clone())?;
 
-                let handler_depth = self.call_depth();
+                let mut handler_failed = false;
+                let mut transformed_error = LuaValue::nil();
 
-                let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some() {
-                    call_c_function(self, handler_func_idx, 1, -1)
-                } else {
-                    match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
-                        Ok(()) => {
-                            self.inc_n_ccalls()?;
-                            let r = lua_execute(self, handler_depth);
-                            self.dec_n_ccalls();
-                            r
-                        }
-                        Err(handler_err) => Err(handler_err),
-                    }
-                };
+                // Budget: how many retries before we hit the depth limit.
+                // In C Lua, each recursive handler call adds ~1 to nCcalls.
+                // At MAXCCALLS (200), "C stack overflow" fires.
+                // At MAXCCALLS*1.1 (220), hard "error in error handling" fires.
+                let depth_budget = saved_max_depth.saturating_sub(initial_depth);
+                let hard_limit = depth_budget + 30; // extra room for error handling
+                let mut retry_count: usize = 0;
 
-                // Collect handler results
-                let handler_failed;
-                let transformed_error;
-                match handler_result {
-                    Ok(_) => {
-                        handler_failed = false;
-                        transformed_error = self.stack_get(handler_func_idx).unwrap_or(LuaValue::nil());
-                    }
-                    Err(_) => {
+                loop {
+                    retry_count += 1;
+
+                    // Hard limit: too many retries even in error zone
+                    if retry_count > hard_limit {
                         handler_failed = true;
-                        transformed_error = LuaValue::nil();
+                        break;
                     }
-                }
 
-                // Clean up handler frames
-                while self.call_depth() > handler_depth {
-                    self.pop_frame();
+                    // Soft limit: generate "C stack overflow" error for handler
+                    if retry_count > depth_budget {
+                        let overflow_str = self.create_string("C stack overflow")?;
+                        err_value = overflow_str.into();
+                    }
+
+                    let current_top = self.stack_top;
+                    self.push_value(handler.clone())?;
+                    let handler_func_idx = current_top;
+                    self.push_value(err_value.clone())?;
+
+                    let handler_depth = self.call_depth();
+
+                    let handler_result =
+                        if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                            call_c_function(self, handler_func_idx, 1, -1)
+                        } else {
+                            match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                                Ok(()) => {
+                                    self.inc_n_ccalls()?;
+                                    let r = lua_execute(self, handler_depth);
+                                    self.dec_n_ccalls();
+                                    r
+                                }
+                                Err(handler_err) => Err(handler_err),
+                            }
+                        };
+
+                    match handler_result {
+                        Ok(_) => {
+                            transformed_error =
+                                self.stack_get(handler_func_idx).unwrap_or(LuaValue::nil());
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            break;
+                        }
+                        Err(LuaError::ErrorInErrorHandling) => {
+                            handler_failed = true;
+                            self.error_object = LuaValue::nil();
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            self.set_top(current_top)?;
+                            break;
+                        }
+                        Err(_handler_err) => {
+                            // Handler failed with normal error — retry with new error
+                            let new_err =
+                                std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            self.set_top(current_top)?;
+                            if new_err.is_nil() {
+                                handler_failed = true;
+                                break;
+                            }
+                            err_value = new_err;
+                        }
+                    }
                 }
 
                 // Restore max_call_depth
@@ -2584,6 +2692,24 @@ impl LuaState {
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
             Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
+            Err(LuaError::ErrorInErrorHandling) => {
+                // Stack overflow in error handler zone - skip handler entirely
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, LuaValue::nil());
+                }
+                let results = vec![self.create_string("error in error handling")?];
+                self.set_top(handler_idx)?;
+                Ok((false, results))
+            }
             Err(e) => {
                 // so that debug.traceback can see the full call stack
                 // (mirrors CLua's luaG_errormsg which calls handler before longjmp)
@@ -2593,7 +2719,7 @@ impl LuaState {
                 let error_msg_str = self.get_error_msg(e);
 
                 // Prepare error value for the handler
-                let err_value = if !err_obj.is_nil() {
+                let mut err_value = if !err_obj.is_nil() {
                     err_obj.clone()
                 } else {
                     self.create_string(&error_msg_str)?.into()
@@ -2612,56 +2738,86 @@ impl LuaState {
                 let saved_max_depth = self.safe_option.max_call_depth;
                 self.safe_option.max_call_depth = saved_max_depth + 30;
 
-                // Call error handler with all error frames still on stack
+                // Call error handler with error value.
+                // C Lua's luaG_errormsg recursively calls the handler when the
+                // handler itself errors. We implement this as a loop: if the
+                // handler fails with a normal error, retry with the new error.
                 let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
 
-                // Push handler and error value ON TOP of current stack
-                // (above any error frames)
-                let current_top = self.stack_top;
-                self.push_value(handler)?;
-                let handler_func_idx = current_top;
-                self.push_value(err_value.clone())?;
-
-                let handler_depth = self.call_depth();
-
-                let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some() {
-                    execute::call::call_c_function(self, handler_func_idx, 1, -1)
-                } else {
-                    match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
-                        Ok(()) => {
-                            self.inc_n_ccalls()?;
-                            let r = execute::lua_execute(self, handler_depth);
-                            self.dec_n_ccalls();
-                            r
-                        }
-                        Err(handler_err) => Err(handler_err),
-                    }
-                };
-
-                // Collect handler results
                 let mut results = Vec::new();
-                let handler_failed;
-                match handler_result {
-                    Ok(()) => {
-                        handler_failed = false;
-                        let result_top = self.stack_top;
-                        if result_top > handler_func_idx {
-                            for i in handler_func_idx..result_top {
-                                if let Some(val) = self.stack_get(i) {
-                                    results.push(val);
+                let mut handler_failed = false;
+
+                loop {
+                    let current_top = self.stack_top;
+                    self.push_value(handler.clone())?;
+                    let handler_func_idx = current_top;
+                    self.push_value(err_value.clone())?;
+
+                    let handler_depth = self.call_depth();
+
+                    let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some()
+                    {
+                        execute::call::call_c_function(self, handler_func_idx, 1, -1)
+                    } else {
+                        match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                            Ok(()) => {
+                                self.inc_n_ccalls()?;
+                                let r = execute::lua_execute(self, handler_depth);
+                                self.dec_n_ccalls();
+                                r
+                            }
+                            Err(handler_err) => Err(handler_err),
+                        }
+                    };
+
+                    match handler_result {
+                        Ok(()) => {
+                            // Handler succeeded — collect results
+                            let result_top = self.stack_top;
+                            if result_top > handler_func_idx {
+                                for i in handler_func_idx..result_top {
+                                    if let Some(val) = self.stack_get(i) {
+                                        results.push(val);
+                                    }
                                 }
                             }
+                            // Clean up handler frames
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            break;
+                        }
+                        Err(LuaError::ErrorInErrorHandling) => {
+                            // Stack overflow in error handler zone — give up
+                            handler_failed = true;
+                            self.error_object = LuaValue::nil();
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            self.set_top(current_top)?;
+                            break;
+                        }
+                        Err(_handler_err) => {
+                            // Handler failed with a normal error.
+                            // C Lua retries: luaG_errormsg calls errfunc again.
+                            // Get the new error value and retry.
+                            let new_err =
+                                std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            // Clean up handler frames before retrying
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            // Reset stack top to before handler push
+                            self.set_top(current_top)?;
+                            if new_err.is_nil() {
+                                // No error object — can't retry, treat as failure
+                                handler_failed = true;
+                                break;
+                            }
+                            err_value = new_err;
+                            // Loop continues — retry handler with new error value
                         }
                     }
-                    Err(_) => {
-                        handler_failed = true;
-                        // Handler failed — will use "error in error handling" below
-                    }
-                }
-
-                // Clean up any handler frames that remain
-                while self.call_depth() > handler_depth {
-                    self.pop_frame();
                 }
 
                 // Restore max_call_depth after error handler completes

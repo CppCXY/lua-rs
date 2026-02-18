@@ -318,8 +318,9 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Check for excessive range (Lua 5.5: "too many results to unpack")
+    // Port of tunpack (ltablib.c): n >= INT_MAX || !lua_checkstack(L, n)
     let count = (j as u64).wrapping_sub(i as u64).wrapping_add(1);
-    if count > 1_000_000 {
+    if count >= i32::MAX as u64 || !l.check_stack(count as usize) {
         return Err(l.error("too many results to unpack".to_string()));
     }
 

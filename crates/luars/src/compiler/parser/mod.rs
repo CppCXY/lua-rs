@@ -22,6 +22,7 @@ pub struct LuaLexer<'a> {
     pub parse_config: ParserConfig,
     pub line: usize,     // current line number (linenumber in Lua)
     pub lastline: usize, // line of last token consumed (lastline in Lua)
+    pub nesting_level: usize, // parser nesting depth (like C Lua's nCcalls during compilation)
 }
 
 impl<'a> LuaLexer<'a> {
@@ -36,6 +37,7 @@ impl<'a> LuaLexer<'a> {
             parse_config: config,
             line: 1,
             lastline: 1, // Initialize lastline to 1 (llex.c:176)
+            nesting_level: 0,
         };
 
         parser.init();

@@ -50,7 +50,14 @@ pub fn try_unary_tm(
             // Float that can't be converted to integer
             Err(lua_state.error("number has no integer representation".to_string()))
         } else {
-            Err(crate::stdlib::debug::typeerror(lua_state, &operand, &format!("perform '{}' on", tm_kind.name())))
+            // Use descriptive operation name like C Lua
+            let op_desc = match tm_kind {
+                TmKind::Bnot => "perform bitwise operation on",
+                TmKind::Unm => "perform arithmetic on",
+                TmKind::Len => "get length of",
+                _ => "perform arithmetic on",
+            };
+            Err(crate::stdlib::debug::typeerror(lua_state, &operand, op_desc))
         }
     }
 }

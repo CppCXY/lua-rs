@@ -92,20 +92,92 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
 fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
     let arg_count = l.arg_count();
 
+    // assert() without arguments: error "value expected"
+    if arg_count == 0 {
+        return Err(l.error("bad argument #1 to 'assert' (value expected)".to_string()));
+    }
+
     // Get first argument without consuming it
     let condition = l.get_arg(1).unwrap_or(LuaValue::nil());
 
     if !condition.is_truthy() {
-        let message = l
-            .get_arg(2)
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "assertion failed!".to_string());
-        return Err(l.error(message));
+        // Check if second argument is present and what type
+        let msg_arg = l.get_arg(2);
+
+        if let Some(msg) = msg_arg {
+            if msg.is_string() {
+                // String message: add source:line prefix like error() does
+                let message = l.to_string(&msg)?;
+                let where_prefix = lua_where(l, 1);
+                let formatted = format!("{}{}", where_prefix, message);
+                let err_str = l.create_string(&formatted)?;
+                l.error_object = err_str.into();
+                l.error_msg = formatted;
+                return Err(LuaError::RuntimeError);
+            } else {
+                // Non-string: raise as error object (like error(obj, 0))
+                let message = l.to_string(&msg)?;
+                return Err(l.error_with_object(message, msg));
+            }
+        }
+
+        // No second argument: default "assertion failed!" with source prefix
+        let where_prefix = lua_where(l, 1);
+        let formatted = format!("{}assertion failed!", where_prefix);
+        let err_str = l.create_string(&formatted)?;
+        l.error_object = err_str.into();
+        l.error_msg = formatted;
+        return Err(LuaError::RuntimeError);
     }
 
     // Return all arguments - they are already on stack
     // Just return the count
     Ok(arg_count)
+}
+
+/// Helper: compute "source:line: " prefix at the given call level (like luaL_where)
+/// Counts ALL frames (C and Lua) for the level, but only returns info for Lua frames.
+fn lua_where(l: &LuaState, level: usize) -> String {
+    let depth = l.call_depth();
+    let mut lvl = level;
+    // Start from the frame BELOW the current one (skip the current C frame itself)
+    if depth >= 2 {
+        let mut i = depth - 2;
+        loop {
+            // Count ALL frames (C and Lua)
+            lvl -= 1;
+            if lvl == 0 {
+                let ci = l.get_call_info(i);
+                // Only extract info from Lua frames
+                if ci.is_lua() {
+                    if let Some(func_obj) = ci.func.as_lua_function() {
+                        let chunk = func_obj.chunk();
+                        let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                        let line =
+                            if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                                chunk.line_info[ci.pc as usize - 1] as usize
+                            } else if !chunk.line_info.is_empty() {
+                                chunk.line_info[0] as usize
+                            } else {
+                                0
+                            };
+                        return if line > 0 {
+                            format!("{}:{}: ", source, line)
+                        } else {
+                            format!("{}: ", source)
+                        };
+                    }
+                }
+                // C frame at target level: no line info available
+                break;
+            }
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+    }
+    String::new()
 }
 
 /// error(message) - Raise an error
@@ -123,51 +195,7 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
     if arg.is_string() && level > 0 {
         // Add position info to string error message (like luaL_where)
         let message = l.to_string(&arg)?;
-
-        // Find the Lua frame at 'level' up from the current frame
-        // Skip C frames when counting levels (like luaL_where)
-        let mut where_prefix = String::new();
-        let depth = l.call_depth();
-        let mut lvl = level as usize;
-        // Start from the frame BELOW the current one (skip the error() C frame itself)
-        if depth >= 2 {
-            let mut i = depth - 2;
-            loop {
-                if i < depth {
-                    let ci = l.get_call_info(i);
-                    if ci.is_lua() {
-                        lvl -= 1;
-                        if lvl == 0 {
-                            // Found the target frame
-                            if let Some(func_obj) = ci.func.as_lua_function() {
-                                let chunk = func_obj.chunk();
-                                let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                                let line =
-                                    if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                                        chunk.line_info[ci.pc as usize - 1] as usize
-                                    } else if !chunk.line_info.is_empty() {
-                                        chunk.line_info[0] as usize
-                                    } else {
-                                        0
-                                    };
-                                if line > 0 {
-                                    where_prefix = format!("{}:{}: ", source, line);
-                                } else {
-                                    where_prefix = format!("{}: ", source);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                } else {
-                    break;
-                }
-                if i == 0 {
-                    break;
-                }
-                i -= 1;
-            }
-        }
+        let where_prefix = lua_where(l, level as usize);
 
         let formatted_msg = format!("{}{}", where_prefix, message);
         let err_str = l.create_string(&formatted_msg)?;
@@ -533,7 +561,7 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
         for i in 0..result_count {
             all_results.push(l.stack_get(func_idx + i).unwrap_or(LuaValue::nil()));
         }
-        for (i, val) in all_results.iter().enumerate() {
+        for (_i, val) in all_results.iter().enumerate() {
             l.push_value(*val)?;
         }
         Ok(all_results.len())
@@ -1032,7 +1060,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
         (accumulated, is_binary)
     } else if let Some(b) = chunk_val.as_binary() {
-        (b.to_vec(), true)
+        let is_binary = b.first() == Some(&0x1B);
+        (b.to_vec(), is_binary)
     } else if let Some(s) = chunk_val.as_str() {
         // Check if this is binary bytecode by looking at first byte
         let is_binary = s.as_bytes().first() == Some(&0x1B);
@@ -1090,10 +1119,10 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
     } else {
         // Compile text code using VM's string pool with chunk name
-        let code_str = match String::from_utf8(code_bytes) {
-            Ok(s) => s,
-            Err(_) => return Err(l.error("invalid UTF-8 in text code".to_string())),
-        };
+        // Map bytes to Unicode code points 1:1 (Latin-1 style) to handle
+        // non-UTF-8 bytes in Lua source. This ensures bytes 128-255 become
+        // valid Unicode characters while preserving their identity.
+        let code_str: String = code_bytes.iter().map(|&b| b as char).collect();
         let vm = l.vm_mut();
         vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
             // Get the actual error message from VM
