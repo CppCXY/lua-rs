@@ -353,25 +353,21 @@ fn getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static str, Strin
     if ci.is_tail() {
         return None;
     }
-    // Traverse upward to find the nearest Lua caller frame
-    let mut prev_idx = ci_frame_idx - 1;
-    loop {
-        let prev = l.get_frame(prev_idx)?;
-        if prev.is_lua() {
-            // Get caller's chunk
-            let prev_func = l.get_frame_func(prev_idx)?;
-            let lua_func = prev_func.as_lua_function()?;
-            let chunk = lua_func.chunk();
-            // prev.pc points to the instruction AFTER the call (due to pc += 1 in fetch).
-            // So the call instruction is at pc - 1.
-            let pc = prev.pc.saturating_sub(1) as usize;
-            return funcnamefromcode(chunk, pc);
-        }
-        if prev_idx == 0 {
-            return None;
-        }
-        prev_idx -= 1;
+    // Look at the immediately previous frame only (matching C Lua's getfuncname)
+    let prev_idx = ci_frame_idx - 1;
+    let prev = l.get_frame(prev_idx)?;
+    if prev.is_lua() {
+        // Get caller's chunk
+        let prev_func = l.get_frame_func(prev_idx)?;
+        let lua_func = prev_func.as_lua_function()?;
+        let chunk = lua_func.chunk();
+        // prev.pc points to the instruction AFTER the call (due to pc += 1 in fetch).
+        // So the call instruction is at pc - 1.
+        let pc = prev.pc.saturating_sub(1) as usize;
+        return funcnamefromcode(chunk, pc);
     }
+    // Previous frame is C — cannot determine name from bytecode
+    None
 }
 
 // ============================================================================
@@ -528,11 +524,76 @@ pub fn current_func_name(l: &LuaState) -> Option<String> {
     current_func_name_with_kind(l).map(|(_, name)| name)
 }
 
+/// Search through loaded modules (package.loaded) to find the name of a function.
+/// Mirrors C Lua's pushglobalfuncname / findfield.
+/// Returns e.g. "table.sort", "string.sub", "math.sin", etc.
+fn find_global_func_name(l: &LuaState, target: &LuaValue) -> Option<String> {
+    // Get _LOADED from registry by iterating registry entries
+    let vm = unsafe { &*l.vm_ptr() };
+    let registry_table = vm.registry.as_table()?;
+    let mut loaded: Option<LuaValue> = None;
+    for (key, val) in registry_table.iter_all() {
+        if let Some(s) = key.as_str() {
+            if s == "_LOADED" {
+                loaded = Some(val);
+                break;
+            }
+        }
+    }
+    let loaded = loaded?;
+    let loaded_table = loaded.as_table()?;
+
+    // Search through loaded modules (level 1: check each module's values)
+    for (mod_key, mod_val) in loaded_table.iter_all() {
+        if let Some(mod_name) = mod_key.as_str() {
+            // Check if the module itself IS the target
+            if mod_val == *target {
+                let name = mod_name.to_string();
+                // Strip _G. prefix
+                return Some(if name.starts_with("_G.") {
+                    name[3..].to_string()
+                } else {
+                    name
+                });
+            }
+            // Search within the module table (level 2)
+            if let Some(mod_table) = mod_val.as_table() {
+                for (field_key, field_val) in mod_table.iter_all() {
+                    if let Some(field_name) = field_key.as_str() {
+                        if field_val == *target {
+                            let full_name = format!("{}.{}", mod_name, field_name);
+                            // Strip _G. prefix
+                            return Some(if full_name.starts_with("_G.") {
+                                full_name[3..].to_string()
+                            } else {
+                                full_name
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Generate a standard argument error message.
 /// Mirrors C Lua's luaL_argerror.
 pub fn argerror(l: &mut LuaState, narg: usize, extramsg: &str) -> LuaError {
-    let (kind, fname) = current_func_name_with_kind(l)
-        .unwrap_or(("function", "?".to_string()));
+    let result = current_func_name_with_kind(l);
+    let (kind, fname) = match &result {
+        Some((k, n)) => (*k, n.as_str()),
+        None => {
+            // Fallback: search loaded modules for the function (like pushglobalfuncname)
+            let ci_idx = l.call_depth().wrapping_sub(1);
+            let func_val = l.get_frame_func(ci_idx);
+            let global_name = func_val.as_ref().and_then(|f| find_global_func_name(l, f));
+            if let Some(name) = global_name {
+                return l.error_from_c(format!("bad argument #{} to '{}' ({})", narg, name, extramsg));
+            }
+            ("function", "?")
+        }
+    };
     // For method calls, adjust argument numbering and handle "bad self"
     if kind == "method" {
         let adjusted_narg = narg.wrapping_sub(1);
