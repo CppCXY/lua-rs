@@ -185,6 +185,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "luars-example"
+version = "0.1.0"
+dependencies = [
+ "luars",
+]
+
+[[package]]
 name = "luars_interpreter"
 version = "0.1.0"
 dependencies = [

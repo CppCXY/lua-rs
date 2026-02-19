@@ -14,6 +14,7 @@ A Lua 5.5 interpreter written in pure Rust (~49,000 lines). Faithfully ported fr
 - **Lua 5.5**: Compiler, VM, and standard libraries implement the Lua 5.5 specification
 - **Pure Rust**: No C dependencies, no `unsafe` FFI — the entire runtime is self-contained Rust
 - **Official Test Suite**: Passes 28 of 30 official Lua 5.5 test files — `all.lua` runs to `final OK` (see [Compatibility](#compatibility))
+- **UserData API**: Derive macros to expose Rust structs to Lua with fields, methods, and constructors (see [User Guide](docs/UserGuide.md))
 - **~49K lines of Rust** across compiler, VM, GC, and standard libraries
 
 ## Architecture
@@ -96,6 +97,32 @@ For a full list of behavioral differences, see [docs/Different.md](docs/Differen
 - **UTF-8 strings** — strings are UTF-8 encoded; no arbitrary binary bytes (use the separate `binary` type)
 - **Deterministic `#t`** — length operator uses array lenhint, no hash-part search
 
+## UserData API — Exposing Rust Types to Lua
+
+luars provides derive macros to expose Rust structs to Lua with automatic field access, methods, and constructors:
+
+```rust
+#[derive(LuaUserData)]
+#[lua_impl(Display)]
+struct Point { pub x: f64, pub y: f64 }
+
+#[lua_methods]
+impl Point {
+    pub fn new(x: f64, y: f64) -> Self { Point { x, y } }
+    pub fn distance(&self) -> f64 { (self.x * self.x + self.y * self.y).sqrt() }
+}
+
+// Register and use from Lua:
+state.register_type("Point", Point::__lua_static_methods())?;
+```
+
+```lua
+local p = Point.new(3, 4)
+print(p.x, p:distance())   -- 3.0  5.0
+```
+
+**Full documentation:** [docs/UserGuide.md](docs/UserGuide.md)
+
 ## Building
 
 ### Prerequisites
@@ -175,7 +202,9 @@ lua_rt/
 ├── benchmarks/              — Performance benchmarks (16 files)
 ├── bytecode_comparison_output/ — Compiler correctness: our vs official bytecode
 ├── docs/
-│   └── Different.md         — Full behavioral differences documentation
+│   ├── Different.md         — Full behavioral differences documentation
+│   └── UserGuide.md         — UserData API guide (Chinese)
+│       └── userdata/        — Detailed sub-docs (6 files)
 └── libs/                    — Test helper modules
 ```
 
