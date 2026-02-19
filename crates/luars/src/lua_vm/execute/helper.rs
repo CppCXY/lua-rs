@@ -458,16 +458,12 @@ pub fn lookup_from_metatable(
             if t.ttisfulluserdata() {
                 if let Some(ud) = t.as_userdata_mut() {
                     // Try trait-based get_field (key must be a string)
+                    // This handles both field access AND method lookup
+                    // (methods return UdValue::Function(cfunction))
                     if let Some(key_str) = key.as_str() {
                         if let Some(udv) = ud.get_trait().get_field(key_str) {
                             let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
                             return Ok(Some(result));
-                        }
-                        // Try trait-based call_method — returns a closure wrapping the method
-                        // Method names are checked here; actual call happens when Lua invokes it
-                        if ud.get_trait().method_names().contains(&key_str) {
-                            // Fall through to metatable — methods are dispatched via __index table
-                            // or will be handled at call time. For now, let metatable handle it.
                         }
                     }
                 }

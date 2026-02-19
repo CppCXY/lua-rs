@@ -17,12 +17,13 @@ pub mod stdlib;
 #[cfg(feature = "serde")]
 pub mod serde;
 
-// Re-export the derive macro so users can `use luars::LuaUserData;`
+// Re-export the derive macros so users can `use luars::LuaUserData;`
 pub use luars_derive::LuaUserData;
+pub use luars_derive::lua_methods;
 
 // Re-export userdata trait types at crate root for convenience
 pub use lua_value::LuaUserdata;
-pub use lua_value::userdata_trait::{UdValue, UserDataTrait};
+pub use lua_value::userdata_trait::{LuaMethodProvider, UdValue, UserDataTrait};
 
 #[cfg(test)]
 use crate::lua_vm::SafeOption;

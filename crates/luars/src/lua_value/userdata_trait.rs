@@ -14,11 +14,13 @@
 use std::any::Any;
 use std::fmt;
 
+use crate::lua_vm::CFunction;
+
 /// Intermediate value type for userdata field/method returns.
 ///
 /// Since `LuaValue` requires GC-allocated strings, trait methods return `UdValue`
 /// which the VM converts to proper `LuaValue` (interning strings as needed).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum UdValue {
     Nil,
     Boolean(bool),
@@ -26,6 +28,8 @@ pub enum UdValue {
     Number(f64),
     /// A Rust string — will be interned by the VM when converting to LuaValue
     Str(String),
+    /// A light C function — used for returning methods from `get_field`
+    Function(CFunction),
 }
 
 impl UdValue {
@@ -37,14 +41,15 @@ impl UdValue {
 
 /// Describes how a userdata type can be accessed from Lua.
 ///
-/// This trait replaces `dyn Any` in `LuaUserdata`, providing rich, typed access
-/// to struct fields, methods, and standard operations. The `#[derive(LuaUserData)]`
-/// macro auto-implements this trait by exposing public fields and methods.
+/// This trait provides rich, typed access to struct fields, methods, and standard
+/// operations. The `#[derive(LuaUserData)]` macro auto-implements this trait by
+/// exposing public fields. Methods are exposed via `#[lua_methods]` attribute macro
+/// on impl blocks, which generates static C wrapper functions returned from `get_field`
+/// as `UdValue::Function(cfunction)`.
 ///
 /// # Dispatch priority (when Lua accesses `obj.key`):
-/// 1. `get_field(key)` — direct field access (fastest)
-/// 2. `call_method(key, args)` — trait-based method dispatch
-/// 3. Metatable `__index` — traditional Lua fallback
+/// 1. `get_field(key)` — field or method access (fields return value, methods return CFunction)
+/// 2. Metatable `__index` — traditional Lua fallback
 ///
 /// # Example (manual implementation)
 /// ```ignore
@@ -96,21 +101,6 @@ pub trait UserDataTrait: 'static {
     /// - `Some(Err(msg))` — field exists but value is invalid (type mismatch, etc.)
     /// - `None` — field not found, fall through to metatable `__newindex`
     fn set_field(&mut self, _key: &str, _value: UdValue) -> Option<Result<(), String>> {
-        None
-    }
-
-    // ==================== Method Dispatch ====================
-
-    /// Call a method by name with the given arguments.
-    /// Returns:
-    /// - `Some(Ok(values))` — method executed, return values to push
-    /// - `Some(Err(msg))` — method exists but execution failed
-    /// - `None` — method not found, fall through to metatable
-    fn call_method(
-        &mut self,
-        _name: &str,
-        _args: &[UdValue],
-    ) -> Option<Result<Vec<UdValue>, String>> {
         None
     }
 
@@ -201,11 +191,6 @@ pub trait UserDataTrait: 'static {
 
     /// List available field names (for debugging, iteration, auto-completion).
     fn field_names(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    /// List available method names.
-    fn method_names(&self) -> &'static [&'static str] {
         &[]
     }
 
@@ -315,6 +300,19 @@ impl UdValue {
     }
 }
 
+impl fmt::Debug for UdValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UdValue::Nil => write!(f, "Nil"),
+            UdValue::Boolean(b) => write!(f, "Boolean({})", b),
+            UdValue::Integer(i) => write!(f, "Integer({})", i),
+            UdValue::Number(n) => write!(f, "Number({})", n),
+            UdValue::Str(s) => write!(f, "Str({:?})", s),
+            UdValue::Function(_) => write!(f, "Function(<cfunction>)"),
+        }
+    }
+}
+
 impl fmt::Display for UdValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -323,6 +321,7 @@ impl fmt::Display for UdValue {
             UdValue::Integer(i) => write!(f, "{}", i),
             UdValue::Number(n) => write!(f, "{}", n),
             UdValue::Str(s) => write!(f, "{}", s),
+            UdValue::Function(_) => write!(f, "function"),
         }
     }
 }
@@ -345,6 +344,7 @@ pub fn udvalue_to_lua_value(
         UdValue::Integer(i) => Ok(LuaValue::integer(i)),
         UdValue::Number(n) => Ok(LuaValue::float(n)),
         UdValue::Str(s) => lua_state.create_string(&s),
+        UdValue::Function(f) => Ok(LuaValue::cfunction(f)),
     }
 }
 
@@ -394,3 +394,20 @@ macro_rules! impl_simple_userdata {
         }
     };
 }
+
+// ==================== Method Provider ====================
+
+/// Blanket trait providing a default no-op method lookup.
+///
+/// When `#[lua_methods]` attribute macro is used on an impl block,
+/// it generates an inherent `__lua_lookup_method` function on the type
+/// that shadows this trait's default. The derive macro's `get_field`
+/// calls `Self::__lua_lookup_method(key)` which resolves to the
+/// inherent method (if defined) or falls back to this default.
+pub trait LuaMethodProvider {
+    fn __lua_lookup_method(_key: &str) -> Option<CFunction> {
+        None
+    }
+}
+
+impl<T> LuaMethodProvider for T {}

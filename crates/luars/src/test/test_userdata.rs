@@ -22,6 +22,44 @@ impl fmt::Display for Point {
     }
 }
 
+/// Methods exposed to Lua via `#[lua_methods]`
+#[lua_methods]
+impl Point {
+    /// Euclidean distance from origin
+    pub fn distance(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+
+    /// Translate the point by (dx, dy) — mutating method
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.x += dx;
+        self.y += dy;
+    }
+
+    /// Scale both coordinates — returns self for testing
+    pub fn scale(&mut self, factor: f64) {
+        self.x *= factor;
+        self.y *= factor;
+    }
+
+    /// Method with optional parameter
+    pub fn greet(&self, name: Option<String>) -> String {
+        match name {
+            Some(n) => format!("Hello {} from Point({}, {})", n, self.x, self.y),
+            None => format!("Hello from Point({}, {})", self.x, self.y),
+        }
+    }
+
+    /// Method returning Result
+    pub fn checked_div(&self, divisor: f64) -> Result<f64, String> {
+        if divisor == 0.0 {
+            Err("division by zero".to_string())
+        } else {
+            Ok(self.x / divisor)
+        }
+    }
+}
+
 #[allow(unused)]
 /// Demonstrates readonly and skip attributes
 #[derive(LuaUserData)]
@@ -491,4 +529,87 @@ fn test_vm_type_of_userdata() {
     let results = vm.execute_string("return type(p)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("userdata"));
+}
+
+// ==================== #[lua_methods] Tests ====================
+
+#[test]
+fn test_vm_method_distance() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string("return p:distance()").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_float(), Some(5.0)); // 3-4-5 triangle
+}
+
+#[test]
+fn test_vm_method_translate() {
+    let mut vm = setup_point_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        p:translate(10, 20)
+        return p.x, p.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_number(), Some(13.0));
+    assert_eq!(results[1].as_number(), Some(24.0));
+}
+
+#[test]
+fn test_vm_method_scale() {
+    let mut vm = setup_point_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        p:scale(2)
+        return p.x, p.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_number(), Some(6.0));
+    assert_eq!(results[1].as_number(), Some(8.0));
+}
+
+#[test]
+fn test_vm_method_optional_param() {
+    let mut vm = setup_point_vm();
+
+    // With parameter
+    let results = vm
+        .execute_string(r#"return p:greet("Alice")"#)
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("Hello Alice from Point(3, 4)"));
+
+    // Without parameter (nil/missing → None)
+    let results = vm.execute_string("return p:greet()").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("Hello from Point(3, 4)"));
+}
+
+#[test]
+fn test_vm_method_result_ok() {
+    let mut vm = setup_point_vm();
+    let results = vm.execute_string("return p:checked_div(2)").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_number(), Some(1.5)); // 3.0 / 2
+}
+
+#[test]
+fn test_vm_method_result_err() {
+    let mut vm = setup_point_vm();
+    let result = vm.execute_string("return p:checked_div(0)");
+    assert!(result.is_err()); // Should raise Lua error
+}
+
+#[test]
+fn test_vm_method_as_field_access() {
+    let mut vm = setup_point_vm();
+    // Methods are accessed as fields that return CFunction values
+    let results = vm.execute_string("return type(p.distance)").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("function"));
 }
