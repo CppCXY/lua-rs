@@ -2,6 +2,13 @@
 name = "luars-derive"
 version = "0.1.0"
 edition = "2024"
+authors = ["CppCXY"]
+description = "A procedural macro crate for luars, providing derive macros for Lua userdata types"
+license = "MIT"
+repository = "https://github.com/CppCXY/lua-rs"
+readme = "README.md"
+keywords = ["lua", "derive", "procedural-macro"]
+categories = ["development-tools"]
 
 [lib]
 proc-macro = true

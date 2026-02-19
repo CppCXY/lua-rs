@@ -967,7 +967,14 @@ fn file_flush(l: &mut LuaState) -> LuaResult<usize> {
         let data = ud.get_data_mut();
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if let Err(e) = lua_file.flush() {
-                return Err(l.error(format!("flush error: {}", e)));
+                // Return nil, errmsg, errno (like C Lua)
+                l.push_value(LuaValue::nil())?;
+                let msg = format!("{}", e);
+                let errno = e.raw_os_error().unwrap_or(0) as i64;
+                let err_str = l.create_string(&msg)?;
+                l.push_value(err_str)?;
+                l.push_value(LuaValue::integer(errno))?;
+                return Ok(3);
             }
             l.push_value(LuaValue::boolean(true))?;
             return Ok(1);
