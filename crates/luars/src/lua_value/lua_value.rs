@@ -28,12 +28,12 @@
 // - Bits 0-3: 基础类型 (LUA_TNIL, LUA_TBOOLEAN, LUA_TNUMBER, etc.)
 // - Bits 4-5: variant bits (区分子类型,如integer/float, short/long string)
 // - Bit 6: BIT_ISCOLLECTABLE (标记是否是GC对象)
-use crate::lua_value::{CClosureFunction, LuaUserdata};
+use crate::lua_value::{CClosureFunction, LuaUserdata, RClosureFunction};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    BinaryPtr, CClosurePtr, FunctionPtr, GcBinary, GcCClosure, GcFunction, GcObjectPtr, GcString,
-    GcTable, GcThread, GcUserdata, LuaFunction, LuaTable, StringPtr, TablePtr, ThreadPtr,
-    UserdataPtr,
+    BinaryPtr, CClosurePtr, FunctionPtr, GcBinary, GcCClosure, GcFunction, GcObjectPtr, GcRClosure,
+    GcString, GcTable, GcThread, GcUserdata, LuaFunction, LuaTable, RClosurePtr, StringPtr,
+    TablePtr, ThreadPtr, UserdataPtr,
 };
 
 // ============ Basic type tags (bits 0-3) ============
@@ -86,6 +86,7 @@ pub const LUA_VTABLE: u8 = LUA_TTABLE | BIT_ISCOLLECTABLE; // 0x45
 pub const LUA_VFUNCTION: u8 = makevariant!(LUA_TFUNCTION, 0) | BIT_ISCOLLECTABLE; // 0x46
 pub const LUA_CCLOSURE: u8 = makevariant!(LUA_TFUNCTION, 1) | BIT_ISCOLLECTABLE; // 0x56 - C closure
 pub const LUA_VLCF: u8 = makevariant!(LUA_TFUNCTION, 2); // 0x26 - light C function
+pub const LUA_VRCLOSURE: u8 = makevariant!(LUA_TFUNCTION, 3) | BIT_ISCOLLECTABLE; // 0x76 - Rust closure (Box<dyn Fn>)
 
 // userdata and thread
 pub const LUA_VUSERDATA: u8 = LUA_TUSERDATA | BIT_ISCOLLECTABLE; // 0x47
@@ -286,6 +287,16 @@ impl LuaValue {
                 ptr: ptr.as_ptr() as *const u8,
             },
             tt: LUA_CCLOSURE,
+        }
+    }
+
+    #[inline(always)]
+    pub fn rclosure(ptr: RClosurePtr) -> Self {
+        Self {
+            value: Value {
+                ptr: ptr.as_ptr() as *const u8,
+            },
+            tt: LUA_VRCLOSURE,
         }
     }
 
@@ -568,8 +579,13 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn is_rclosure(&self) -> bool {
+        self.checktag(LUA_VRCLOSURE)
+    }
+
+    #[inline(always)]
     pub fn is_c_callable(&self) -> bool {
-        self.is_cfunction() || self.is_cclosure()
+        self.is_cfunction() || self.is_cclosure() || self.is_rclosure()
     }
 
     #[inline(always)]
@@ -756,6 +772,37 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn as_rclosure(&self) -> Option<&RClosureFunction> {
+        if self.is_rclosure() {
+            let gc = unsafe { &*(self.value.ptr as *const GcRClosure) };
+            Some(&gc.data)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_rclosure_mut(&self) -> Option<&mut RClosureFunction> {
+        if self.is_rclosure() {
+            let gc = unsafe { &mut *(self.value.ptr as *mut GcRClosure) };
+            Some(&mut gc.data)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_rclosure_ptr(&self) -> Option<RClosurePtr> {
+        if self.is_rclosure() {
+            Some(RClosurePtr::new(unsafe {
+                self.value.ptr as *mut GcRClosure
+            }))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
     pub fn as_userdata_mut(&self) -> Option<&mut LuaUserdata> {
         if self.ttisfulluserdata() {
             let gc = unsafe { &mut *(self.value.ptr as *mut GcUserdata) };
@@ -849,6 +896,7 @@ impl LuaValue {
             LuaValueKind::Table => self.as_table_ptr().map(GcObjectPtr::Table),
             LuaValueKind::Function => self.as_function_ptr().map(GcObjectPtr::Function),
             LuaValueKind::CClosure => self.as_cclosure_ptr().map(GcObjectPtr::CClosure),
+            LuaValueKind::RClosure => self.as_rclosure_ptr().map(GcObjectPtr::RClosure),
             LuaValueKind::String => self.as_string_ptr().map(GcObjectPtr::String),
             LuaValueKind::Binary => self.as_binary_ptr().map(GcObjectPtr::Binary),
             LuaValueKind::Thread => self.as_thread_ptr().map(GcObjectPtr::Thread),
@@ -913,6 +961,8 @@ impl LuaValue {
                     LuaValueKind::CFunction
                 } else if self.is_cclosure() {
                     LuaValueKind::CClosure
+                } else if self.is_rclosure() {
+                    LuaValueKind::RClosure
                 } else {
                     LuaValueKind::Function
                 }
@@ -1085,6 +1135,7 @@ pub enum LuaValueKind {
     Function,
     CFunction,
     CClosure,
+    RClosure,
     Userdata,
     Thread,
 }
@@ -1117,6 +1168,9 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::CClosure => {
                 write!(f, "cclosure(0x{:#x})", self.raw_ptr_repr() as usize)
             }
+            LuaValueKind::RClosure => {
+                write!(f, "rclosure(0x{:#x})", self.raw_ptr_repr() as usize)
+            }
             LuaValueKind::Userdata => write!(f, "userdata(0x{:#x})", self.raw_ptr_repr() as usize),
             LuaValueKind::Thread => write!(f, "thread(0x{:#x})", self.raw_ptr_repr() as usize),
         }
@@ -1144,6 +1198,9 @@ impl std::fmt::Display for LuaValue {
             }
             LuaValueKind::CFunction => write!(f, "function: 0x{:x}", unsafe { self.value.f }),
             LuaValueKind::CClosure => {
+                write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
+            }
+            LuaValueKind::RClosure => {
                 write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
             }
             LuaValueKind::Userdata => {

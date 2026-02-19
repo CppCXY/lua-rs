@@ -197,11 +197,13 @@ pub fn call_c_function(
     // Get the function (already validated as c_callable by caller)
     let func = lua_state.stack_mut()[func_idx];
 
-    // Get the C function pointer - handle both light C functions and GC C functions
-    let c_func: CFunction = if let Some(c_func) = func.as_cfunction() {
-        c_func
+    // Get the C function pointer - handle light C functions, GC C closures, and Rust closures
+    let c_func: Option<CFunction> = if let Some(c_func) = func.as_cfunction() {
+        Some(c_func)
     } else if let Some(cclosure) = func.as_cclosure() {
-        cclosure.func()
+        Some(cclosure.func())
+    } else if func.is_rclosure() {
+        None // RClosure - will be called via trait object below
     } else {
         return Err(lua_state.error("Not a callable value".to_string()));
     };
@@ -211,13 +213,28 @@ pub fn call_c_function(
     // Use lean push_c_frame (skips type dispatch)
     lua_state.push_c_frame(&func, call_base, nargs, nresults)?;
 
-    // Call the C function (it returns number of results)
-    let n = match c_func(lua_state) {
-        Ok(n) => n,
-        Err(LuaError::Yield) => {
-            return Err(LuaError::Yield);
+    // Call the function (it returns number of results)
+    let n = if let Some(c_func) = c_func {
+        match c_func(lua_state) {
+            Ok(n) => n,
+            Err(LuaError::Yield) => {
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e),
+    } else {
+        // RClosure path: call through the trait object.
+        // Safety: func is a Copy of the stack value, as_rclosure() dereferences
+        // the GcPtr into GC heap memory. The GC won't run during this call
+        // because we hold &mut LuaState.
+        let rclosure = func.as_rclosure().unwrap();
+        match rclosure.call(lua_state) {
+            Ok(n) => n,
+            Err(LuaError::Yield) => {
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
+        }
     };
 
     // Results positions
@@ -519,8 +536,8 @@ pub fn handle_tailcall(
 
         // Return FrameAction::TailCall - main loop will load new chunk and continue
         Ok(FrameAction::TailCall)
-    } else if func.is_cfunction() || func.is_cclosure() {
-        // Light C function tail call (direct, not from object pool)
+    } else if func.is_cfunction() || func.is_cclosure() || func.is_rclosure() {
+        // C function / Rust closure tail call
         call_c_function_tailcall(lua_state, func_idx, nargs, base)?;
         Ok(FrameAction::Continue)
     } else {
@@ -551,11 +568,13 @@ fn call_c_function_tailcall(
     // Get the function
     let func = lua_state.stack_mut()[func_idx];
 
-    // Get the C function pointer
-    let c_func: CFunction = if let Some(c_func) = func.as_cfunction() {
-        c_func
+    // Get the C function pointer (None for RClosure)
+    let c_func: Option<CFunction> = if let Some(c_func) = func.as_cfunction() {
+        Some(c_func)
     } else if let Some(cclosure) = func.as_cclosure() {
-        cclosure.func()
+        Some(cclosure.func())
+    } else if func.is_rclosure() {
+        None
     } else {
         return Err(lua_state.error("Not a callable value".to_string()));
     };
@@ -565,8 +584,13 @@ fn call_c_function_tailcall(
     // Use lean push_c_frame
     lua_state.push_c_frame(&func, call_base, nargs, -1)?;
 
-    // Call the C function
-    let n = c_func(lua_state)?;
+    // Call the function
+    let n = if let Some(c_func) = c_func {
+        c_func(lua_state)?
+    } else {
+        let rclosure = func.as_rclosure().unwrap();
+        rclosure.call(lua_state)?
+    };
 
     // Get the position of results BEFORE popping frame
     let stack_top = lua_state.get_top();

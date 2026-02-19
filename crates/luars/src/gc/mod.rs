@@ -1960,6 +1960,22 @@ impl GC {
         count as usize // Estimate of work done
     }
 
+    fn traverse_rclosure(&mut self, l: &mut LuaState, closure_ptr: RClosurePtr) -> usize {
+        // Mark the Rust closure black and get references to data we need
+        let gc_closure = closure_ptr.as_mut_ref();
+        gc_closure.header.make_black();
+
+        let mut count = 1; // Estimate of work done
+        let upvalues = gc_closure.data.upvalues();
+        count += upvalues.len();
+        // Mark upvalues (the RustCallback itself doesn't contain GC references)
+        for upval in upvalues {
+            self.mark_value(l, upval);
+        }
+
+        count as usize // Estimate of work done
+    }
+
     fn traverse_thread(&mut self, l: &mut LuaState, thread_ptr: ThreadPtr) -> usize {
         // Mark the thread black and get references to data we need
         let gc_thread = thread_ptr.as_mut_ref();
@@ -2110,6 +2126,7 @@ impl GC {
             GcObjectPtr::Table(table_ptr) => self.traverse_table(l, table_ptr),
             GcObjectPtr::Function(func_ptr) => self.traverse_function(l, func_ptr),
             GcObjectPtr::CClosure(closure_ptr) => self.traverse_cclosure(l, closure_ptr),
+            GcObjectPtr::RClosure(closure_ptr) => self.traverse_rclosure(l, closure_ptr),
             GcObjectPtr::Userdata(userdata_ptr) => {
                 // Userdata: mark the userdata itself and its metatable if any
                 let gc_ud = userdata_ptr.as_mut_ref();
@@ -3073,6 +3090,7 @@ impl GC {
             GcObjectOwner::Table(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Function(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::CClosure(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::RClosure(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::String(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Binary(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Thread(b) => b.as_ref() as *const _ as u64,

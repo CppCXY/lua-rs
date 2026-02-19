@@ -508,6 +508,41 @@ impl CClosureFunction {
     }
 }
 
+/// Rust closure callback — can capture arbitrary Rust state via Box<dyn Fn>
+pub type RustCallback = Box<dyn Fn(&mut crate::lua_vm::LuaState) -> crate::LuaResult<usize>>;
+
+/// RClosure: Rust closure function with optional LuaValue upvalues.
+/// Unlike CClosureFunction (which stores a bare fn pointer), this stores
+/// a heap-allocated trait object that can capture arbitrary Rust state.
+pub struct RClosureFunction {
+    func: RustCallback,
+    upvalues: Vec<LuaValue>,
+}
+
+impl RClosureFunction {
+    pub fn new(func: RustCallback, upvalues: Vec<LuaValue>) -> Self {
+        RClosureFunction { func, upvalues }
+    }
+
+    /// Call the Rust closure
+    #[inline(always)]
+    pub fn call(&self, state: &mut crate::lua_vm::LuaState) -> crate::LuaResult<usize> {
+        (self.func)(state)
+    }
+
+    /// Get upvalues
+    #[inline(always)]
+    pub fn upvalues(&self) -> &Vec<LuaValue> {
+        &self.upvalues
+    }
+
+    /// Get mutable access to upvalues
+    #[inline(always)]
+    pub fn upvalues_mut(&mut self) -> &mut Vec<LuaValue> {
+        &mut self.upvalues
+    }
+}
+
 #[cfg(test)]
 mod value_tests {
     use super::*;

@@ -9,11 +9,14 @@
 // 6. GC headers embedded in objects for mark-sweep
 
 use crate::gc::string_interner::StringInterner;
-use crate::lua_value::{CClosureFunction, Chunk, LuaUpvalue, LuaUserdata};
+use crate::lua_value::{
+    CClosureFunction, Chunk, LuaUpvalue, LuaUserdata, RClosureFunction, RustCallback,
+};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    GC, GcBinary, GcCClosure, GcFunction, GcObjectOwner, GcTable, GcThread, GcUpvalue, GcUserdata,
-    LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr, lua_value::UpvalueStore,
+    GC, GcBinary, GcCClosure, GcFunction, GcObjectOwner, GcRClosure, GcTable, GcThread, GcUpvalue,
+    GcUserdata, LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
+    lua_value::UpvalueStore,
 };
 use std::rc::Rc;
 
@@ -212,6 +215,29 @@ impl ObjectAllocator {
         let ptr = gc_func.as_closure_ptr().unwrap();
         gc.trace_object(gc_func)?;
         Ok(LuaValue::cclosure(ptr))
+    }
+
+    /// Create an RClosure (Rust closure with captured state + optional upvalues)
+    /// Unlike C closures which store a bare fn pointer, this stores a Box<dyn Fn>
+    /// that can capture arbitrary Rust state.
+    #[inline]
+    pub fn create_rclosure(
+        &mut self,
+        gc: &mut GC,
+        func: RustCallback,
+        upvalues: Vec<LuaValue>,
+    ) -> CreateResult {
+        let current_white = gc.current_white;
+        let size = std::mem::size_of::<GcRClosure>() as u32
+            + (upvalues.len() as u32 * std::mem::size_of::<LuaValue>() as u32);
+        let gc_func = GcObjectOwner::RClosure(Box::new(GcRClosure::new(
+            RClosureFunction::new(func, upvalues),
+            current_white,
+            size,
+        )));
+        let ptr = gc_func.as_rclosure_ptr().unwrap();
+        gc.trace_object(gc_func)?;
+        Ok(LuaValue::rclosure(ptr))
     }
 
     // ==================== Upvalue Operations ====================

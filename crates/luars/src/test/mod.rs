@@ -19,3 +19,4 @@ pub mod test_advanced_calls;
 pub mod test_c_functions;
 pub mod test_functions;
 pub mod test_gc_metamethods;
+pub mod test_rclosure;

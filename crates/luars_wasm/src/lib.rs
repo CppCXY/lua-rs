@@ -94,41 +94,89 @@ impl LuaWasm {
         }
     }
 
-    /// Register a simple JavaScript callback that can be called from Lua
-    /// Note: This is a simplified version - full JS callback support requires additional work
+    /// Register a JavaScript callback that can be called from Lua.
+    /// The JS function receives Lua arguments converted to JsValues and
+    /// its return value is converted back to a Lua value.
+    ///
+    /// Supported types: nil, boolean, number, string.
+    /// Tables and other complex types are passed as `null` / `nil`.
     #[wasm_bindgen(js_name = registerFunction)]
     pub fn register_function(
         &mut self,
         name: String,
-        _callback: js_sys::Function,
+        callback: js_sys::Function,
     ) -> Result<(), JsValue> {
-        // For now, we'll create a placeholder function
-        // Full JS callback support would require using thread_local storage
-        let code = format!(
-            r#"
-            function {}(...)
-                error("JS callbacks not yet fully implemented - use setGlobal for values")
-            end
-        "#,
-            name
-        );
-
-        let chunk = self
+        // Create an RClosure capturing the JS callback
+        let closure_value = self
             .vm
-            .compile(&code)
-            .map_err(|e| JsValue::from_str(&format!("Failed to register function: {:?}", e)))?;
+            .create_closure(move |state: &mut luars::lua_vm::LuaState| {
+                let nargs = state.arg_count();
+
+                // Convert Lua arguments to a JS array
+                let js_args = js_sys::Array::new_with_length(nargs as u32);
+                for i in 0..nargs {
+                    let lua_val = state.get_arg(i + 1).unwrap_or(luars::LuaValue::nil());
+                    js_args.set(i as u32, lua_to_js_basic(&lua_val));
+                }
+
+                // Call the JS callback: callback.apply(null, args)
+                let result = callback
+                    .apply(&JsValue::NULL, &js_args)
+                    .map_err(|e| state.error(format!("JS callback error: {:?}", e)))?;
+
+                // Convert JS result back to Lua and push
+                let lua_result = js_to_lua_basic(state, &result)
+                    .map_err(|msg| state.error(format!("JS result conversion error: {}", msg)))?;
+                state.push_value(lua_result)?;
+                Ok(1)
+            })
+            .map_err(|e| JsValue::from_str(&format!("Failed to create closure: {:?}", e)))?;
 
         self.vm
-            .execute(std::rc::Rc::new(chunk))
-            .map_err(|e| JsValue::from_str(&format!("Failed to execute registration: {:?}", e)))?;
+            .set_global(&name, closure_value)
+            .map_err(|e| JsValue::from_str(&format!("Failed to set global: {:?}", e)))?;
 
         Ok(())
     }
 }
 
-// Note: Conversion functions moved to conversion.rs module
-// The module provides enhanced conversion with:
-// - Table to Object/Array conversion
-// - Nested structure support
-// - Cycle detection
-// - Recursion depth limits
+/// Simple Lua → JS conversion for basic types (no VM access needed).
+fn lua_to_js_basic(value: &luars::LuaValue) -> JsValue {
+    if value.is_nil() {
+        JsValue::NULL
+    } else if let Some(b) = value.as_bool() {
+        JsValue::from_bool(b)
+    } else if let Some(i) = value.as_integer() {
+        JsValue::from_f64(i as f64)
+    } else if let Some(n) = value.as_number() {
+        JsValue::from_f64(n)
+    } else if let Some(s) = value.as_str() {
+        JsValue::from_str(s)
+    } else {
+        JsValue::NULL
+    }
+}
+
+/// Simple JS → Lua conversion for basic types.
+fn js_to_lua_basic(
+    state: &mut luars::lua_vm::LuaState,
+    value: &JsValue,
+) -> Result<luars::LuaValue, String> {
+    if value.is_null() || value.is_undefined() {
+        Ok(luars::LuaValue::nil())
+    } else if let Some(b) = value.as_bool() {
+        Ok(luars::LuaValue::boolean(b))
+    } else if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+            Ok(luars::LuaValue::integer(n as i64))
+        } else {
+            Ok(luars::LuaValue::number(n))
+        }
+    } else if let Some(s) = value.as_string() {
+        state
+            .create_string(&s)
+            .map_err(|e| format!("create_string failed: {:?}", e))
+    } else {
+        Ok(luars::LuaValue::nil())
+    }
+}

@@ -618,6 +618,42 @@ impl LuaVM {
             .create_c_closure(&mut self.gc, func, upvalues)
     }
 
+    /// Create an RClosure from a Rust closure (Box<dyn Fn>).
+    /// Unlike CFunction (bare fn pointer), this can capture arbitrary Rust state.
+    #[inline]
+    pub fn create_rclosure(
+        &mut self,
+        func: crate::lua_value::RustCallback,
+        upvalues: Vec<LuaValue>,
+    ) -> CreateResult {
+        self.object_allocator
+            .create_rclosure(&mut self.gc, func, upvalues)
+    }
+
+    /// Convenience: create an RClosure from any `Fn(&mut LuaState) -> LuaResult<usize> + 'static`.
+    /// Boxes the closure automatically.
+    #[inline]
+    pub fn create_closure<F>(&mut self, func: F) -> CreateResult
+    where
+        F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
+    {
+        self.create_rclosure(Box::new(func), Vec::new())
+    }
+
+    /// Convenience: create an RClosure with upvalues from any
+    /// `Fn(&mut LuaState) -> LuaResult<usize> + 'static`.
+    #[inline]
+    pub fn create_closure_with_upvalues<F>(
+        &mut self,
+        func: F,
+        upvalues: Vec<LuaValue>,
+    ) -> CreateResult
+    where
+        F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
+    {
+        self.create_rclosure(Box::new(func), upvalues)
+    }
+
     /// Create an open upvalue pointing to a stack index
     #[inline(always)]
     pub fn create_upvalue_open(

@@ -1713,6 +1713,29 @@ impl LuaState {
         self.vm_mut().create_userdata(data)
     }
 
+    /// Create an RClosure from any `Fn(&mut LuaState) -> LuaResult<usize> + 'static`.
+    /// Unlike `CFunction` (bare fn pointer), this can capture arbitrary Rust state.
+    #[inline]
+    pub fn create_closure<F>(&mut self, func: F) -> CreateResult
+    where
+        F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
+    {
+        self.vm_mut().create_closure(func)
+    }
+
+    /// Create an RClosure with upvalues.
+    #[inline]
+    pub fn create_closure_with_upvalues<F>(
+        &mut self,
+        func: F,
+        upvalues: Vec<LuaValue>,
+    ) -> CreateResult
+    where
+        F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
+    {
+        self.vm_mut().create_closure_with_upvalues(func, upvalues)
+    }
+
     // ===== Global Access =====
 
     /// Get global variable
