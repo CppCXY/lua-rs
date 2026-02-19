@@ -791,7 +791,12 @@ fn constructor(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         fs.lexer.bump();
     }
 
-    statement::check_match(fs, LuaTokenKind::TkRightBrace, LuaTokenKind::TkLeftBrace, line)?;
+    statement::check_match(
+        fs,
+        LuaTokenKind::TkRightBrace,
+        LuaTokenKind::TkLeftBrace,
+        line,
+    )?;
     lastlistfield(fs, &mut cc);
     code::settablesize(fs, pc, table_reg, cc.na, cc.nh);
     Ok(())

@@ -69,7 +69,9 @@ pub fn try_unary_tm(
                 TmKind::Len => "get length of",
                 _ => "perform arithmetic on",
             };
-            Err(crate::stdlib::debug::typeerror(lua_state, &operand, op_desc))
+            Err(crate::stdlib::debug::typeerror(
+                lua_state, &operand, op_desc,
+            ))
         }
     }
 }
@@ -374,8 +376,7 @@ fn try_bin_tm(
     // in their slow paths. When they fall through to MMBINI/MMBINK, we must still
     // try string-to-number coercion before looking for metamethods.
     match tm_kind {
-        TmKind::Add | TmKind::Sub | TmKind::Mul
-        | TmKind::Mod | TmKind::IDiv => {
+        TmKind::Add | TmKind::Sub | TmKind::Mul | TmKind::Mod | TmKind::IDiv => {
             // Try integer-preserving path first (like C Lua's intarith_aux)
             if let (Some(i1), Some(i2)) = (value_to_integer(&p1), value_to_integer(&p2)) {
                 let result = match tm_kind {
@@ -471,17 +472,18 @@ fn try_bin_tm(
                     // Blame the operand that's a float (not integer)
                     let blame_reg = if !p1.is_integer() { p1_reg } else { p2_reg };
                     let info = crate::stdlib::debug::varinfo_for_reg(lua_state, blame_reg);
-                    return Err(lua_state.error(format!(
-                        "number has no integer representation{}",
-                        info
-                    )));
+                    return Err(
+                        lua_state.error(format!("number has no integer representation{}", info))
+                    );
                 } else {
                     "perform bitwise operation on"
                 }
             }
             _ => "perform arithmetic on",
         };
-        Err(crate::stdlib::debug::opinterror(lua_state, p1_reg, p2_reg, &p1, &p2, msg))
+        Err(crate::stdlib::debug::opinterror(
+            lua_state, p1_reg, p2_reg, &p1, &p2, msg,
+        ))
     }
 }
 

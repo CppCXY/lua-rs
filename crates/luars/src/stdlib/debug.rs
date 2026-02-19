@@ -458,11 +458,21 @@ pub fn varinfo(l: &LuaState) -> String {
                 let prev_instr = chunk.code[currentpc - 1];
                 let prev_op = prev_instr.get_opcode();
                 match prev_op {
-                    OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Mod |
-                    OpCode::Pow | OpCode::Div | OpCode::IDiv |
-                    OpCode::BAnd | OpCode::BOr | OpCode::BXor |
-                    OpCode::Shl | OpCode::Shr |
-                    OpCode::Eq | OpCode::Lt | OpCode::Le => {
+                    OpCode::Add
+                    | OpCode::Sub
+                    | OpCode::Mul
+                    | OpCode::Mod
+                    | OpCode::Pow
+                    | OpCode::Div
+                    | OpCode::IDiv
+                    | OpCode::BAnd
+                    | OpCode::BOr
+                    | OpCode::BXor
+                    | OpCode::Shl
+                    | OpCode::Shr
+                    | OpCode::Eq
+                    | OpCode::Lt
+                    | OpCode::Le => {
                         // Binary ops: first operand in register A (aka sRA)
                         Some(prev_instr.get_a())
                     }
@@ -505,10 +515,7 @@ pub fn varinfo(l: &LuaState) -> String {
 pub fn typeerror(l: &mut LuaState, val: &LuaValue, op: &str) -> LuaError {
     let tname = objtypename(l, val);
     let info = varinfo(l);
-    l.error(format!(
-        "attempt to {} a {} value{}",
-        op, tname, info
-    ))
+    l.error(format!("attempt to {} a {} value{}", op, tname, info))
 }
 
 /// Get the name and kind of the current function from the calling frame's bytecode.
@@ -589,7 +596,10 @@ pub fn argerror(l: &mut LuaState, narg: usize, extramsg: &str) -> LuaError {
             let func_val = l.get_frame_func(ci_idx);
             let global_name = func_val.as_ref().and_then(|f| find_global_func_name(l, f));
             if let Some(name) = global_name {
-                return l.error_from_c(format!("bad argument #{} to '{}' ({})", narg, name, extramsg));
+                return l.error_from_c(format!(
+                    "bad argument #{} to '{}' ({})",
+                    narg, name, extramsg
+                ));
             }
             ("function", "?")
         }
@@ -600,9 +610,15 @@ pub fn argerror(l: &mut LuaState, narg: usize, extramsg: &str) -> LuaError {
         if adjusted_narg == 0 {
             return l.error_from_c(format!("calling '{}' on bad self ({})", fname, extramsg));
         }
-        return l.error_from_c(format!("bad argument #{} to '{}' ({})", adjusted_narg, fname, extramsg));
+        return l.error_from_c(format!(
+            "bad argument #{} to '{}' ({})",
+            adjusted_narg, fname, extramsg
+        ));
     }
-    l.error_from_c(format!("bad argument #{} to '{}' ({})", narg, fname, extramsg))
+    l.error_from_c(format!(
+        "bad argument #{} to '{}' ({})",
+        narg, fname, extramsg
+    ))
 }
 
 /// Generate a type error for a function argument.
@@ -658,10 +674,7 @@ pub fn opinterror(
     };
     let blame_type = objtypename(l, blame_val);
     let info = varinfo_for_reg(l, blame_reg);
-    l.error(format!(
-        "attempt to {} a {} value{}",
-        op, blame_type, info
-    ))
+    l.error(format!("attempt to {} a {} value{}", op, blame_type, info))
 }
 
 /// Generate a comparison error (mirrors luaG_ordererror).
@@ -1258,7 +1271,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
         let pc = l.get_frame_pc(frame_idx) as usize;
         // PC is usually 1 ahead of the currently executing instruction
         let pc = if pc > 0 { pc - 1 } else { 0 };
-        
+
         // Use PC-based filtering to find the Nth active local
         // Walk through chunk.locals, counting only those active at current PC
         let mut active_count = 0;
@@ -1295,7 +1308,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
                     reg += 1;
                 }
             }
-            
+
             let base = l.get_frame_base(frame_idx);
             let value_idx = base + reg;
 
@@ -1354,7 +1367,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
         let chunk = lua_func.chunk();
         let pc = l.get_frame_pc(frame_idx) as usize;
         let pc = if pc > 0 { pc - 1 } else { 0 };
-        
+
         // Find the Nth active local at current PC
         let mut active_count = 0;
         let mut reg = 0;
@@ -1608,18 +1621,24 @@ fn debug_upvaluejoin(l: &mut LuaState) -> LuaResult<usize> {
 
 /// debug.setuservalue(udata, value [, n]) - Set user value of a userdata
 fn debug_setuservalue(l: &mut LuaState) -> LuaResult<usize> {
-    let udata = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'setuservalue' (userdata expected)".to_string()))?;
+    let udata = l.get_arg(1).ok_or_else(|| {
+        l.error("bad argument #1 to 'setuservalue' (userdata expected)".to_string())
+    })?;
 
     // Must be full userdata (not light userdata)
     if udata.ttislightuserdata() {
-        return Err(l.error("bad argument #1 to 'setuservalue' (full userdata expected, got light userdata)".to_string()));
+        return Err(l.error(
+            "bad argument #1 to 'setuservalue' (full userdata expected, got light userdata)"
+                .to_string(),
+        ));
     }
 
     if !udata.is_userdata() {
         let t = udata.type_name();
-        return Err(l.error(format!("bad argument #1 to 'setuservalue' (userdata expected, got {})", t)));
+        return Err(l.error(format!(
+            "bad argument #1 to 'setuservalue' (userdata expected, got {})",
+            t
+        )));
     }
 
     // For now, setuservalue is a no-op (user values not yet stored in LuaUserdata)
@@ -1629,9 +1648,9 @@ fn debug_setuservalue(l: &mut LuaState) -> LuaResult<usize> {
 
 /// debug.getuservalue(udata [, n]) - Get user value of a userdata
 fn debug_getuservalue(l: &mut LuaState) -> LuaResult<usize> {
-    let udata = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'getuservalue' (userdata expected)".to_string()))?;
+    let udata = l.get_arg(1).ok_or_else(|| {
+        l.error("bad argument #1 to 'getuservalue' (userdata expected)".to_string())
+    })?;
 
     if !udata.is_userdata() || udata.ttislightuserdata() {
         l.push_value(LuaValue::nil())?;

@@ -257,7 +257,11 @@ pub fn lua_idiv(a: i64, b: i64) -> i64 {
     let q = a / b;
     // If the signs of a and b differ and there is a remainder,
     // subtract 1 to achieve floor division (toward -infinity)
-    if (a ^ b) < 0 && a % b != 0 { q.wrapping_sub(1) } else { q }
+    if (a ^ b) < 0 && a % b != 0 {
+        q.wrapping_sub(1)
+    } else {
+        q
+    }
 }
 
 /// Lua modulo for integers: a % b
@@ -269,7 +273,11 @@ pub fn lua_imod(a: i64, b: i64) -> i64 {
         return 0;
     }
     let m = a % b;
-    if m != 0 && (m ^ b) < 0 { m.wrapping_add(b) } else { m }
+    if m != 0 && (m ^ b) < 0 {
+        m.wrapping_add(b)
+    } else {
+        m
+    }
 }
 
 /// Float modulo matching C Lua's `luai_nummod`.
@@ -470,11 +478,7 @@ pub fn lookup_from_metatable(
                 None => {
                     // No __index metamethod on non-table value → error
                     // Use typeerror for enhanced error message with varinfo
-                    return Err(crate::stdlib::debug::typeerror(
-                        lua_state,
-                        &t,
-                        "index",
-                    ));
+                    return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
                 }
             }
         };
@@ -670,11 +674,7 @@ pub fn finishset(
             }
 
             // No metamethod found for non-table
-            return Err(crate::stdlib::debug::typeerror(
-                lua_state,
-                &t,
-                "index",
-            ));
+            return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
         }
     }
 
@@ -818,7 +818,9 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
         if has_recst {
             // Save handler before it gets overwritten (only for xpcall)
             let handler = if is_xpcall {
-                lua_state.stack_get(pcall_func_pos).unwrap_or(LuaValue::nil())
+                lua_state
+                    .stack_get(pcall_func_pos)
+                    .unwrap_or(LuaValue::nil())
             } else {
                 LuaValue::nil()
             };
@@ -846,7 +848,8 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                     // If xpcall, call error handler to transform the error
                     let result_err = if is_xpcall {
                         lua_state.nny += 1;
-                        let handler_result = lua_state.pcall(handler.clone(), vec![result_err.clone()]);
+                        let handler_result =
+                            lua_state.pcall(handler.clone(), vec![result_err.clone()]);
                         lua_state.nny -= 1;
                         match handler_result {
                             Ok((true, results)) => {
@@ -972,7 +975,9 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 
         // Move results down to func_pos
         for i in 0..body_nres {
-            let val = lua_state.stack_get(body_results_start + i).unwrap_or(LuaValue::nil());
+            let val = lua_state
+                .stack_get(body_results_start + i)
+                .unwrap_or(LuaValue::nil());
             lua_state.stack_set(pcall_func_pos + i, val)?;
         }
 
@@ -1059,9 +1064,14 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
                         lua_state.set_top_raw(top - 1);
                     }
                 }
-                OpCode::Unm | OpCode::BNot | OpCode::Len
-                | OpCode::GetTabUp | OpCode::GetTable | OpCode::GetI
-                | OpCode::GetField | OpCode::Self_ => {
+                OpCode::Unm
+                | OpCode::BNot
+                | OpCode::Len
+                | OpCode::GetTabUp
+                | OpCode::GetTable
+                | OpCode::GetI
+                | OpCode::GetField
+                | OpCode::Self_ => {
                     // Unary/table get ops: result at stack[top-1],
                     // destination at base + A of the interrupted instruction
                     let top = lua_state.get_top();
@@ -1072,9 +1082,12 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
                         lua_state.set_top_raw(top - 1);
                     }
                 }
-                OpCode::Lt | OpCode::Le
-                | OpCode::LtI | OpCode::LeI
-                | OpCode::GtI | OpCode::GeI
+                OpCode::Lt
+                | OpCode::Le
+                | OpCode::LtI
+                | OpCode::LeI
+                | OpCode::GtI
+                | OpCode::GeI
                 | OpCode::Eq => {
                     // Comparison ops: truthiness of stack[top-1] is the result.
                     // Next instruction should be JMP.

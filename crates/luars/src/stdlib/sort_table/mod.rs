@@ -9,7 +9,9 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
     let comp = l.get_arg(2);
 
     if !table_val.is_table() {
-        return Err(crate::stdlib::debug::arg_typeerror(l, 1, "table", &table_val));
+        return Err(crate::stdlib::debug::arg_typeerror(
+            l, 1, "table", &table_val,
+        ));
     }
 
     // Use obj_len to respect __len metamethod (like C Lua's aux_getn / luaL_len)
@@ -25,7 +27,11 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     let has_comp = comp.is_some() && !comp.as_ref().map(|v| v.is_nil()).unwrap_or(true);
-    let comp_func = if has_comp { comp.unwrap() } else { LuaValue::nil() };
+    let comp_func = if has_comp {
+        comp.unwrap()
+    } else {
+        LuaValue::nil()
+    };
 
     // Block yields during sort — sort is a non-continuable C call boundary
     l.nny += 1;

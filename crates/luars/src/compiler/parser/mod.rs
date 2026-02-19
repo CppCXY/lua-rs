@@ -20,8 +20,8 @@ pub struct LuaLexer<'a> {
     token_index: usize,
     current_token: LuaTokenKind,
     pub parse_config: ParserConfig,
-    pub line: usize,     // current line number (linenumber in Lua)
-    pub lastline: usize, // line of last token consumed (lastline in Lua)
+    pub line: usize,          // current line number (linenumber in Lua)
+    pub lastline: usize,      // line of last token consumed (lastline in Lua)
     pub nesting_level: usize, // parser nesting depth (like C Lua's nCcalls during compilation)
 }
 

@@ -12,7 +12,10 @@ use crate::lua_vm::LuaState;
 /// Check that argument at position `n` is a number, with proper error message.
 fn checknumber(l: &mut LuaState, n: usize, fname: &str) -> Result<f64, LuaError> {
     let Some(v) = l.get_arg(n) else {
-        return Err(l.error(format!("bad argument #{} to '{}' (number expected)", n, fname)));
+        return Err(l.error(format!(
+            "bad argument #{} to '{}' (number expected)",
+            n, fname
+        )));
     };
     if let Some(f) = v.as_number() {
         return Ok(f);
@@ -23,7 +26,10 @@ fn checknumber(l: &mut LuaState, n: usize, fname: &str) -> Result<f64, LuaError>
         }
     }
     let t = crate::stdlib::debug::objtypename(l, &v);
-    Err(l.error(format!("bad argument #{} to '{}' (number expected, got {})", n, fname, t)))
+    Err(l.error(format!(
+        "bad argument #{} to '{}' (number expected, got {})",
+        n, fname, t
+    )))
 }
 
 pub fn create_math_lib() -> LibraryModule {
@@ -219,9 +225,11 @@ fn math_fmod(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    let x = arg1.as_number()
+    let x = arg1
+        .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'fmod' (number expected)".to_string()))?;
-    let y = arg2.as_number()
+    let y = arg2
+        .as_number()
         .ok_or_else(|| l.error("bad argument #2 to 'fmod' (number expected)".to_string()))?;
     if y == 0.0 {
         return Err(l.error("bad argument #2 to 'fmod' (zero)".to_string()));
@@ -383,7 +391,10 @@ fn math_modf(l: &mut LuaState) -> LuaResult<usize> {
     let frac_part = if x.is_infinite() { 0.0 } else { x - int_part };
 
     // Return integer part as integer if it fits
-    if !x.is_nan() && !x.is_infinite() && int_part >= i64::MIN as f64 && int_part < -(i64::MIN as f64)
+    if !x.is_nan()
+        && !x.is_infinite()
+        && int_part >= i64::MIN as f64
+        && int_part < -(i64::MIN as f64)
     {
         l.push_value(LuaValue::integer(int_part as i64))?;
     } else {
@@ -435,9 +446,7 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
             }
             // random(n): return random integer in [1, n]
             if up < 1 {
-                return Err(
-                    l.error("bad argument #1 to 'random' (interval is empty)".to_string())
-                );
+                return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
             let result = project(rv, 1, up as u64)?;
             l.push_value(LuaValue::integer(result))?;
@@ -464,9 +473,7 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
                     l.error("bad argument #2 to 'random' (number expected, got float)".to_string())
                 })?;
             if low > up {
-                return Err(
-                    l.error("bad argument #2 to 'random' (interval is empty)".to_string())
-                );
+                return Err(l.error("bad argument #2 to 'random' (interval is empty)".to_string()));
             }
             let result = project(rv, low as u64, up as u64)?;
             l.push_value(LuaValue::integer(result))?;
@@ -501,12 +508,9 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
             .unwrap_or(0);
         (time as i64, 0i64)
     } else {
-        let seed1 = l
-            .get_arg(1)
-            .and_then(|v| v.as_integer())
-            .ok_or_else(|| {
-                l.error("bad argument #1 to 'randomseed' (number expected)".to_string())
-            })?;
+        let seed1 = l.get_arg(1).and_then(|v| v.as_integer()).ok_or_else(|| {
+            l.error("bad argument #1 to 'randomseed' (number expected)".to_string())
+        })?;
         let seed2 = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(0);
         (seed1, seed2)
     };
@@ -672,7 +676,8 @@ fn math_frexp(l: &mut LuaState) -> LuaResult<usize> {
     let sign = if (bits >> 63) != 0 { -1.0 } else { 1.0 };
     let abs_x = x.abs();
     let mut exp = ((bits >> 52) & 0x7FF) as i64 - 1022;
-    let mut mantissa = sign * f64::from_bits((abs_x.to_bits() & 0x000FFFFFFFFFFFFF) | 0x3FE0000000000000);
+    let mut mantissa =
+        sign * f64::from_bits((abs_x.to_bits() & 0x000FFFFFFFFFFFFF) | 0x3FE0000000000000);
 
     // Handle subnormals
     if ((bits >> 52) & 0x7FF) == 0 {

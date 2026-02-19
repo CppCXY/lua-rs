@@ -223,9 +223,12 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
                 } else if let Some(b) = arg.as_binary() {
                     lua_file.write_bytes(b)
                 } else {
-                    return Err(
-                        crate::stdlib::debug::arg_typeerror(l, i, "string or number", &arg)
-                    );
+                    return Err(crate::stdlib::debug::arg_typeerror(
+                        l,
+                        i,
+                        "string or number",
+                        &arg,
+                    ));
                 };
 
                 if let Err(e) = write_result {
@@ -296,7 +299,11 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
 
 /// Helper function: read one value from a LuaFile using a format specifier.
 /// Shared by io.read, io.lines, and file:read.
-fn read_one_format_file(l: &mut LuaState, lua_file: &mut LuaFile, fmt: &LuaValue) -> LuaResult<LuaValue> {
+fn read_one_format_file(
+    l: &mut LuaState,
+    lua_file: &mut LuaFile,
+    fmt: &LuaValue,
+) -> LuaResult<LuaValue> {
     use file::ReadNumberResult;
 
     // Check if format is an integer (byte count)
@@ -322,7 +329,9 @@ fn read_one_format_file(l: &mut LuaState, lua_file: &mut LuaFile, fmt: &LuaValue
     }
 
     // Get format string (default "l" for nil sentinel)
-    let format_str = fmt.as_str().map(|s| s.to_string())
+    let format_str = fmt
+        .as_str()
+        .map(|s| s.to_string())
         .unwrap_or_else(|| "l".to_string());
     let format = format_str.strip_prefix('*').unwrap_or(&format_str);
 
@@ -348,9 +357,7 @@ fn read_one_format_file(l: &mut LuaState, lua_file: &mut LuaFile, fmt: &LuaValue
             Ok(None) => Ok(LuaValue::nil()),
             Err(_) => Ok(LuaValue::nil()),
         },
-        _ => {
-            Err(l.error(format!("invalid format")))
-        }
+        _ => Err(l.error(format!("invalid format"))),
     }
 }
 
@@ -435,7 +442,6 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
-
 const MAXARGLINE: usize = 250;
 
 /// io.lines([filename]) - Return iterator for lines
@@ -491,7 +497,11 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                 let fmts_key = l.create_string("fmts")?;
                 l.raw_set(&state_table, fmts_key, fmts_table);
                 let nfmts_key = l.create_string("nfmts")?;
-                l.raw_set(&state_table, nfmts_key, LuaValue::integer(formats.len() as i64));
+                l.raw_set(
+                    &state_table,
+                    nfmts_key,
+                    LuaValue::integer(formats.len() as i64),
+                );
 
                 // Also set __call so the table is directly callable (for load() etc.)
                 let mt = l.create_table(0, 1)?;
@@ -504,7 +514,8 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                 // Create C closure for the iterator (captures state table as upvalue)
                 // This allows both `for l in io.lines(file)` and `local f = io.lines(file); f()` to work
                 let vm = l.vm_mut();
-                let iterator_closure = vm.create_c_closure(io_lines_next, vec![state_table.clone()])?;
+                let iterator_closure =
+                    vm.create_c_closure(io_lines_next, vec![state_table.clone()])?;
 
                 // Return 4 values for generic for: iterator, state, nil, to-be-closed
                 l.push_value(iterator_closure)?;
@@ -543,7 +554,11 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
         let fmts_key = l.create_string("fmts")?;
         l.raw_set(&state_table, fmts_key, fmts_table);
         let nfmts_key = l.create_string("nfmts")?;
-        l.raw_set(&state_table, nfmts_key, LuaValue::integer(formats.len() as i64));
+        l.raw_set(
+            &state_table,
+            nfmts_key,
+            LuaValue::integer(formats.len() as i64),
+        );
 
         let mt = l.create_table(0, 1)?;
         let call_key = l.create_string("__call")?;
@@ -608,7 +623,8 @@ pub(crate) fn io_lines_call(l: &mut LuaState) -> LuaResult<usize> {
 fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usize> {
     // Check if already closed
     let closed_key = l.create_string("closed")?;
-    let is_closed = l.raw_get(&state_val, &closed_key)
+    let is_closed = l
+        .raw_get(&state_val, &closed_key)
         .and_then(|v| v.as_boolean())
         .unwrap_or(false);
     if is_closed {
@@ -622,7 +638,8 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
 
     // Get format count
     let nfmts_key = l.create_string("nfmts")?;
-    let nfmts = l.raw_get(&state_val, &nfmts_key)
+    let nfmts = l
+        .raw_get(&state_val, &nfmts_key)
         .and_then(|v| v.as_integer())
         .unwrap_or(0) as usize;
 
@@ -677,9 +694,15 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
 }
 
 /// Helper: close file (or not) on EOF and return nil
-fn io_lines_close_on_eof(l: &mut LuaState, lua_file: &mut LuaFile, state_val: &LuaValue, closed_key: &LuaValue) -> LuaResult<usize> {
+fn io_lines_close_on_eof(
+    l: &mut LuaState,
+    lua_file: &mut LuaFile,
+    state_val: &LuaValue,
+    closed_key: &LuaValue,
+) -> LuaResult<usize> {
     let noclose_key = l.create_string("noclose")?;
-    let no_close = l.raw_get(state_val, &noclose_key)
+    let no_close = l
+        .raw_get(state_val, &noclose_key)
         .and_then(|v| v.as_boolean())
         .unwrap_or(false);
     if !no_close {
@@ -693,7 +716,6 @@ fn io_lines_close_on_eof(l: &mut LuaState, lua_file: &mut LuaFile, state_val: &L
 }
 
 /// Read one value from file using a format specifier
-
 
 /// io.input([file]) - Set or get default input file
 fn io_input(l: &mut LuaState) -> LuaResult<usize> {

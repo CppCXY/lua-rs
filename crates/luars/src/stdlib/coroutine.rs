@@ -149,15 +149,8 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
                 // Thread has frames and is not yielded — it's either running
                 // or normal (resumed another coroutine and waiting).
                 // Compare identity: if calling thread IS this thread, it's "running".
-                let is_self = std::ptr::eq(
-                    l as *const LuaState,
-                    thread as *const LuaState,
-                );
-                if is_self {
-                    "running"
-                } else {
-                    "normal"
-                }
+                let is_self = std::ptr::eq(l as *const LuaState, thread as *const LuaState);
+                if is_self { "running" } else { "normal" }
             }
         } else if !thread.stack().is_empty() {
             // Has stack but no frames - initial state
@@ -371,8 +364,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
                 // Check if coroutine had a pending error (dead-by-error)
                 // or if __close cascaded an error
                 if !thread.error_object.is_nil() {
-                    let err_obj =
-                        std::mem::replace(&mut thread.error_object, LuaValue::nil());
+                    let err_obj = std::mem::replace(&mut thread.error_object, LuaValue::nil());
                     l.push_value(LuaValue::boolean(false))?;
                     l.push_value(err_obj)?;
                     Ok(2)
@@ -387,8 +379,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
             }
             Err(_e) => {
                 // __close caused an error — return (false, error_value)
-                let err_obj =
-                    std::mem::replace(&mut thread.error_object, LuaValue::nil());
+                let err_obj = std::mem::replace(&mut thread.error_object, LuaValue::nil());
                 let error_val = if !err_obj.is_nil() {
                     err_obj
                 } else {

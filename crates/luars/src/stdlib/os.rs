@@ -120,7 +120,7 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
             // Use chrono to build a NaiveDateTime, then convert to local time
             // chrono handles month/day normalization naturally
             use chrono::NaiveDate;
-            
+
             // Handle out-of-range months by adjusting year
             let mut adj_year = year;
             let mut adj_month = month;
@@ -129,7 +129,7 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
                 adj_year += (adj_month - 1).div_euclid(12);
                 adj_month = (adj_month - 1).rem_euclid(12) + 1;
             }
-            
+
             // Try building the date - handle day overflow via duration addition
             // For years that fit in i32, use chrono. For larger years, compute directly.
             if adj_year >= i32::MIN as i64 && adj_year <= i32::MAX as i64 {
@@ -143,15 +143,16 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
                         + chrono::Duration::hours(hour)
                         + chrono::Duration::minutes(min)
                         + chrono::Duration::seconds(sec);
-                    
+
                     // Convert to local timezone timestamp
                     let local_result = Local.from_local_datetime(&dt);
-                    if let Some(local_dt) = local_result.single().or_else(|| local_result.latest()) {
+                    if let Some(local_dt) = local_result.single().or_else(|| local_result.latest())
+                    {
                         let timestamp = local_dt.timestamp();
-                        
+
                         // Normalize the input table (like C's mktime)
                         normalize_time_table(l, &table_val, &local_dt)?;
-                        
+
                         l.push_value(LuaValue::integer(timestamp))?;
                         return Ok(1);
                     }
@@ -165,15 +166,20 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
                     // C's int (year - 1900 must fit in i32)
                     let result_year = year_from_timestamp(t);
                     let result_year_offset = result_year - 1900;
-                    if result_year_offset < i32::MIN as i64 || result_year_offset > i32::MAX as i64 {
-                        return Err(l.error("time result cannot be represented in this installation".to_string()));
+                    if result_year_offset < i32::MIN as i64 || result_year_offset > i32::MAX as i64
+                    {
+                        return Err(l.error(
+                            "time result cannot be represented in this installation".to_string(),
+                        ));
                     }
                     l.push_value(LuaValue::integer(t))?;
                     return Ok(1);
                 }
             }
 
-            return Err(l.error("time result cannot be represented in this installation".to_string()));
+            return Err(
+                l.error("time result cannot be represented in this installation".to_string())
+            );
         } else {
             return Err(l.error("table expected".to_string()));
         }
@@ -203,9 +209,10 @@ fn mktime_approx(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64)
         let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
         era * 146097 + doe as i64 - 719468 // days since 1970-01-01
     }
-    
+
     let days = days_from_civil(year, month, day);
-    let ts = days.checked_mul(86400)?
+    let ts = days
+        .checked_mul(86400)?
         .checked_add(hour * 3600)?
         .checked_add(min * 60)?
         .checked_add(sec)?;
@@ -228,7 +235,11 @@ fn year_from_timestamp(ts: i64) -> i64 {
 }
 
 /// Normalize the time table fields after computing the timestamp (like C's mktime)
-fn normalize_time_table(l: &mut LuaState, table_val: &LuaValue, dt: &DateTime<Local>) -> LuaResult<()> {
+fn normalize_time_table(
+    l: &mut LuaState,
+    table_val: &LuaValue,
+    dt: &DateTime<Local>,
+) -> LuaResult<()> {
     let year_key = LuaValue::from(l.create_string("year")?);
     l.raw_set(table_val, year_key, LuaValue::integer(dt.year() as i64));
     let month_key = LuaValue::from(l.create_string("month")?);
@@ -242,10 +253,14 @@ fn normalize_time_table(l: &mut LuaState, table_val: &LuaValue, dt: &DateTime<Lo
     let sec_key = LuaValue::from(l.create_string("sec")?);
     l.raw_set(table_val, sec_key, LuaValue::integer(dt.second() as i64));
     let wday_key = LuaValue::from(l.create_string("wday")?);
-    l.raw_set(table_val, wday_key, LuaValue::integer(dt.weekday().number_from_sunday() as i64));
+    l.raw_set(
+        table_val,
+        wday_key,
+        LuaValue::integer(dt.weekday().number_from_sunday() as i64),
+    );
     let yday_key = LuaValue::from(l.create_string("yday")?);
     l.raw_set(table_val, yday_key, LuaValue::integer(dt.ordinal() as i64));
-    
+
     Ok(())
 }
 
@@ -292,13 +307,14 @@ fn os_date(l: &mut LuaState) -> LuaResult<usize> {
     let dt: DateTime<Local> = if use_utc {
         Utc.timestamp_opt(timestamp, 0)
             .single()
-            .ok_or_else(|| l.error("time result cannot be represented in this installation".to_string()))?
+            .ok_or_else(|| {
+                l.error("time result cannot be represented in this installation".to_string())
+            })?
             .with_timezone(&Local)
     } else {
-        Local
-            .timestamp_opt(timestamp, 0)
-            .single()
-            .ok_or_else(|| l.error("time result cannot be represented in this installation".to_string()))?
+        Local.timestamp_opt(timestamp, 0).single().ok_or_else(|| {
+            l.error("time result cannot be represented in this installation".to_string())
+        })?
     };
 
     // Handle special formats
@@ -344,8 +360,7 @@ fn os_date(l: &mut LuaState) -> LuaResult<usize> {
         }
         _ => {
             // Use strftime-style format string
-            let date_str = format_date_string(dt, actual_format)
-                .map_err(|e| l.error(e))?;
+            let date_str = format_date_string(dt, actual_format).map_err(|e| l.error(e))?;
             let result = l.create_string(&date_str)?;
             l.push_value(result)?;
             Ok(1)
@@ -424,7 +439,10 @@ fn format_date_string(dt: DateTime<Local>, format: &str) -> Result<String, Strin
                                     continue;
                                 }
                                 _ => {
-                                    return Err(format!("invalid conversion specifier '%E{}'", mod_ch));
+                                    return Err(format!(
+                                        "invalid conversion specifier '%E{}'",
+                                        mod_ch
+                                    ));
                                 }
                             }
                         } else {
@@ -434,7 +452,8 @@ fn format_date_string(dt: DateTime<Local>, format: &str) -> Result<String, Strin
                     'O' => {
                         if let Some(&mod_ch) = chars.peek() {
                             match mod_ch {
-                                'd' | 'e' | 'H' | 'I' | 'm' | 'M' | 'S' | 'u' | 'U' | 'V' | 'w' | 'W' | 'y' => {
+                                'd' | 'e' | 'H' | 'I' | 'm' | 'M' | 'S' | 'u' | 'U' | 'V' | 'w'
+                                | 'W' | 'y' => {
                                     chars.next();
                                     let formatted = match mod_ch {
                                         'd' => dt.format("%d").to_string(),
@@ -456,7 +475,10 @@ fn format_date_string(dt: DateTime<Local>, format: &str) -> Result<String, Strin
                                     continue;
                                 }
                                 _ => {
-                                    return Err(format!("invalid conversion specifier '%O{}'", mod_ch));
+                                    return Err(format!(
+                                        "invalid conversion specifier '%O{}'",
+                                        mod_ch
+                                    ));
                                 }
                             }
                         } else {

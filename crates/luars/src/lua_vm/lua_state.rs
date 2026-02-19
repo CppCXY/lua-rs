@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
-use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL};
+use crate::lua_vm::call_info::call_status::{
+    self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
+};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::safe_option::SafeOption;
@@ -1741,12 +1743,7 @@ impl LuaState {
     }
 
     /// Set value in table with metamethod support (__newindex)
-    pub fn table_set(
-        &mut self,
-        table: &LuaValue,
-        key: LuaValue,
-        value: LuaValue,
-    ) -> LuaResult<()> {
+    pub fn table_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> LuaResult<()> {
         execute::helper::finishset(self, table, &key, value)?;
         Ok(())
     }
@@ -1793,14 +1790,15 @@ impl LuaState {
                 let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
                 const TM_LEN_BIT: u8 = execute::TmKind::Len as u8;
                 if !mt.no_tm(TM_LEN_BIT) {
-                    let event_key =
-                        self.vm_mut().const_strings.get_tm_value(execute::TmKind::Len);
+                    let event_key = self
+                        .vm_mut()
+                        .const_strings
+                        .get_tm_value(execute::TmKind::Len);
                     if let Some(mm) = mt.raw_get(&event_key) {
-                        let result =
-                            execute::call_tm_res(self, mm, *obj, *obj)?;
-                        return result
-                            .as_integer()
-                            .ok_or_else(|| self.error("object length is not an integer".to_string()));
+                        let result = execute::call_tm_res(self, mm, *obj, *obj)?;
+                        return result.as_integer().ok_or_else(|| {
+                            self.error("object length is not an integer".to_string())
+                        });
                     } else {
                         mt.set_tm_absent(TM_LEN_BIT);
                     }
@@ -1808,9 +1806,7 @@ impl LuaState {
             }
             return Ok(table.len() as i64);
         }
-        if let Some(mm) =
-            execute::get_metamethod_event(self, obj, execute::TmKind::Len)
-        {
+        if let Some(mm) = execute::get_metamethod_event(self, obj, execute::TmKind::Len) {
             let result = execute::call_tm_res(self, mm, *obj, *obj)?;
             return result
                 .as_integer()
@@ -1894,8 +1890,7 @@ impl LuaState {
             if ccmt_depth > 0 {
                 let frame_idx = self.call_depth - 1;
                 if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                    frame.call_status =
-                        call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
                 }
             }
 
@@ -2172,11 +2167,7 @@ impl LuaState {
     /// Like pcall_stack_based but errors propagate instead of being caught.
     /// Uses CIST_YCALL flag so finish_c_frame can properly move results after yield.
     /// Returns result_count on success; results are left on stack starting at func_idx.
-    pub fn call_stack_based(
-        &mut self,
-        func_idx: usize,
-        arg_count: usize,
-    ) -> LuaResult<usize> {
+    pub fn call_stack_based(&mut self, func_idx: usize, arg_count: usize) -> LuaResult<usize> {
         let initial_depth = self.call_depth();
 
         let (actual_arg_count, _ccmt_depth) = resolve_call_chain(self, func_idx, arg_count)?;
@@ -2701,8 +2692,7 @@ impl LuaState {
                 use crate::lua_vm::call_info::call_status;
                 let frame_idx = self.call_depth - 1;
                 if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                    frame.call_status =
-                        call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
                 }
             }
 
@@ -2756,8 +2746,7 @@ impl LuaState {
                 use crate::lua_vm::call_info::call_status;
                 let frame_idx = self.call_depth - 1;
                 if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                    frame.call_status =
-                        call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
                 }
             }
 
@@ -2857,20 +2846,20 @@ impl LuaState {
 
                     let handler_depth = self.call_depth();
 
-                    let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some()
-                    {
-                        execute::call::call_c_function(self, handler_func_idx, 1, -1)
-                    } else {
-                        match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
-                            Ok(()) => {
-                                self.inc_n_ccalls()?;
-                                let r = execute::lua_execute(self, handler_depth);
-                                self.dec_n_ccalls();
-                                r
+                    let handler_result =
+                        if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                            execute::call::call_c_function(self, handler_func_idx, 1, -1)
+                        } else {
+                            match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                                Ok(()) => {
+                                    self.inc_n_ccalls()?;
+                                    let r = execute::lua_execute(self, handler_depth);
+                                    self.dec_n_ccalls();
+                                    r
+                                }
+                                Err(handler_err) => Err(handler_err),
                             }
-                            Err(handler_err) => Err(handler_err),
-                        }
-                    };
+                        };
 
                     match handler_result {
                         Ok(()) => {
@@ -3206,7 +3195,8 @@ impl LuaState {
                             // If xpcall, call error handler to transform the error
                             let result_err = if is_xpcall {
                                 self.nny += 1;
-                                let handler_result = self.pcall(xpcall_handler.clone(), vec![result_err.clone()]);
+                                let handler_result =
+                                    self.pcall(xpcall_handler.clone(), vec![result_err.clone()]);
                                 self.nny -= 1;
                                 match handler_result {
                                     Ok((true, results)) => {
@@ -3437,7 +3427,11 @@ impl LuaState {
         let type_prefix = crate::stdlib::debug::objtypename(self, value);
         if type_prefix != value.type_name() {
             // Use __name as prefix instead of built-in type name
-            Ok(format!("{}: 0x{:x}", type_prefix, value.raw_ptr_repr() as usize))
+            Ok(format!(
+                "{}: 0x{:x}",
+                type_prefix,
+                value.raw_ptr_repr() as usize
+            ))
         } else {
             Ok(format!("{}", value))
         }

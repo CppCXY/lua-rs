@@ -83,7 +83,10 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     let table = table_val.as_table().unwrap();
 
     let i = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j = l.get_arg(4).and_then(|v| v.as_integer()).unwrap_or(table.len() as i64);
+    let j = l
+        .get_arg(4)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(table.len() as i64);
 
     // If i > j, return empty string immediately
     if i > j {
@@ -186,17 +189,12 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
 
     // Default pos = #t (like C Lua: luaL_optinteger(L, 2, size))
     let has_pos_arg = l.get_arg(2).is_some();
-    let pos = l
-        .get_arg(2)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(len);
+    let pos = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(len);
 
     // Only validate pos if explicitly given (C Lua: "if (pos != size)")
     if has_pos_arg && pos != len {
         if pos < 1 || pos > len.wrapping_add(1) {
-            return Err(
-                l.error("bad argument #2 to 'remove' (position out of bounds)".to_string())
-            );
+            return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
         }
     }
 
@@ -333,7 +331,10 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     let table = table_val.as_table().unwrap();
 
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(table.len() as i64);
+    let j = l
+        .get_arg(3)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(table.len() as i64);
 
     // Handle empty range
     if i > j {

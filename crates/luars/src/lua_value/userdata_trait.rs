@@ -291,11 +291,7 @@ impl UdValue {
             UdValue::Integer(i) => Some(*i),
             UdValue::Number(n) => {
                 let i = *n as i64;
-                if (i as f64) == *n {
-                    Some(i)
-                } else {
-                    None
-                }
+                if (i as f64) == *n { Some(i) } else { None }
             }
             _ => None,
         }

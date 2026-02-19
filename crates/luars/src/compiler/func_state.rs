@@ -19,21 +19,21 @@ pub struct FuncState<'a> {
     pub vm: &'a mut LuaVM,
     pub compiler_state: &'a mut CompilerState,
     pub block_cnt_id: Option<BlockCntId>,
-    pub pc: usize,                     // next position to code (equivalent to pc)
-    pub last_target: usize,            // label of last 'jump label'
-    pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
-    pub labels: Vec<LabelDesc>,        // list of active labels
-    pub actvar: Vec<VarDesc>,          // list of all variable descriptors (active and pending)
-    pub nactvar: u16,                   // number of active variables (actvar[0..nactvar] are active)
-    pub upvalues: Vec<Upvaldesc>,      // upvalue descriptors
-    pub nups: u8,                      // number of upvalues
-    pub freereg: u8,                   // first free register
-    pub iwthabs: u8,                   // instructions issued since last absolute line info
-    pub needclose: bool,               // true if function needs to close upvalues when returning
-    pub is_vararg: bool,               // true if function is vararg
-    pub numparams: u8,                 // number of fixed parameters (excluding vararg parameter)
-    pub first_local: usize,            // index of first local variable in prev
-    pub source_name: String,           // source file name for error messages
+    pub pc: usize,                        // next position to code (equivalent to pc)
+    pub last_target: usize,               // label of last 'jump label'
+    pub pending_gotos: Vec<LabelDesc>,    // list of pending gotos
+    pub labels: Vec<LabelDesc>,           // list of active labels
+    pub actvar: Vec<VarDesc>,             // list of all variable descriptors (active and pending)
+    pub nactvar: u16, // number of active variables (actvar[0..nactvar] are active)
+    pub upvalues: Vec<Upvaldesc>, // upvalue descriptors
+    pub nups: u8,     // number of upvalues
+    pub freereg: u8,  // first free register
+    pub iwthabs: u8,  // instructions issued since last absolute line info
+    pub needclose: bool, // true if function needs to close upvalues when returning
+    pub is_vararg: bool, // true if function is vararg
+    pub numparams: u8, // number of fixed parameters (excluding vararg parameter)
+    pub first_local: usize, // index of first local variable in prev
+    pub source_name: String, // source file name for error messages
     pub kcache: LuaValue, // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
     pub checklimit_error: Option<String>, // deferred error from checkstack/checklimit
 }
@@ -106,7 +106,7 @@ pub struct BlockCnt {
     pub previous: Option<BlockCntId>, // link to the enclosing block
     pub first_label: usize,           // index of first label in this block
     pub first_goto: usize,            // index of first pending goto in this block
-    pub nactvar: u16,                  // number of active variables outside the block
+    pub nactvar: u16,                 // number of active variables outside the block
     pub upval: bool,                  // true if some variable in block is an upvalue
     pub is_loop: u8,                  // 0: not a loop; 1: loop; 2: loop with pending breaks
     pub in_scope: bool,               // true if 'block' is still in scope
@@ -160,7 +160,10 @@ impl VarKind {
     // Test for readonly variables (const, vararg parameter, or for-loop control variable)
     // In Lua 5.5: vkisreadonly(v) => v->kind >= RDKCONST
     pub fn is_readonly(self) -> bool {
-        matches!(self, VarKind::RDKCONST | VarKind::RDKVAVAR | VarKind::GDKCONST)
+        matches!(
+            self,
+            VarKind::RDKCONST | VarKind::RDKVAVAR | VarKind::GDKCONST
+        )
     }
 }
 
@@ -276,16 +279,10 @@ impl<'a> FuncState<'a> {
                 let code = c as u32;
                 if code <= 255 && !(c.is_ascii_graphic() || c == ' ') {
                     // Non-printable byte — show as <\N>
-                    return format!(
-                        "{}:{}: {} near '<\\{}>'",
-                        source, line, msg, code
-                    );
+                    return format!("{}:{}: {} near '<\\{}>'", source, line, msg, code);
                 }
             }
-            format!(
-                "{}:{}: {} near '{}'",
-                source, line, msg, token_text
-            )
+            format!("{}:{}: {} near '{}'", source, line, msg, token_text)
         }
     }
 

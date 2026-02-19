@@ -286,7 +286,12 @@ impl LuaUserdata {
 
 impl fmt::Debug for LuaUserdata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Userdata({}@{:p})", self.data.type_name(), self.data.as_any() as *const dyn Any)
+        write!(
+            f,
+            "Userdata({}@{:p})",
+            self.data.type_name(),
+            self.data.as_any() as *const dyn Any
+        )
     }
 }
 

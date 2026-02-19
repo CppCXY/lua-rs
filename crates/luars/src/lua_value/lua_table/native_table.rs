@@ -343,10 +343,8 @@ impl NativeTable {
                 // Copy values - values are stored backward from array pointer
                 // Source: copy the FIRST copy_size values (indices 1..copy_size)
                 // V[0]..V[copy_size-1], at array - sizeof(Value) .. array - copy_size*sizeof(Value)
-                let old_values_start = self
-                    .array
-                    .sub(copy_size * std::mem::size_of::<Value>())
-                    as *const Value;
+                let old_values_start =
+                    self.array.sub(copy_size * std::mem::size_of::<Value>()) as *const Value;
                 let new_values_end = new_array.sub(std::mem::size_of::<Value>()) as *mut Value;
                 let new_values_start_for_copy = new_values_end.sub(copy_size - 1);
                 ptr::copy_nonoverlapping(old_values_start, new_values_start_for_copy, copy_size);
@@ -479,7 +477,11 @@ impl NativeTable {
             if k >= 1 && (k as u64) <= (1u64 << MAXABITS) {
                 na += 1;
                 // Find which bin: ceil(log2(k))
-                let bin = if k == 1 { 0 } else { 64 - ((k - 1) as u64).leading_zeros() as usize };
+                let bin = if k == 1 {
+                    0
+                } else {
+                    64 - ((k - 1) as u64).leading_zeros() as usize
+                };
                 if bin <= MAXABITS {
                     nums[bin] += 1;
                 }
@@ -556,7 +558,11 @@ impl NativeTable {
                         let k = (*node).key.ivalue();
                         if k >= 1 && (k as u64) <= (1u64 << 30) {
                             *na += 1;
-                            let bin = if k == 1 { 0 } else { 64 - ((k - 1) as u64).leading_zeros() as usize };
+                            let bin = if k == 1 {
+                                0
+                            } else {
+                                64 - ((k - 1) as u64).leading_zeros() as usize
+                            };
                             if bin < nums.len() {
                                 nums[bin] += 1;
                             }
@@ -581,8 +587,12 @@ impl NativeTable {
         let mut twotoi = 1u32; // 2^i candidate size
 
         for i in 0..nums.len() {
-            if twotoi == 0 { break; } // overflow
-            if na <= twotoi / 2 { break; } // remaining keys can't fill half
+            if twotoi == 0 {
+                break;
+            } // overflow
+            if na <= twotoi / 2 {
+                break;
+            } // remaining keys can't fill half
 
             a += nums[i];
             if a > twotoi / 2 {
@@ -607,7 +617,9 @@ impl NativeTable {
             // First, resize hash to accommodate new entries
             let new_lsize = if new_hash_count > 0 {
                 Self::compute_lsizenode(new_hash_count)
-            } else { 0 };
+            } else {
+                0
+            };
             self.resize_hash(new_lsize);
 
             // Move array entries [new_asize+1..old_asize] to hash
@@ -629,7 +641,9 @@ impl NativeTable {
             // Resize hash
             let new_lsize = if new_hash_count > 0 {
                 Self::compute_lsizenode(new_hash_count)
-            } else { 0 };
+            } else {
+                0
+            };
 
             // Save old hash data
             let save_node = self.node;
@@ -647,11 +661,14 @@ impl NativeTable {
                 unsafe {
                     for i in 0..new_size {
                         let node = new_node.add(i);
-                        ptr::write(node, Node {
-                            value: LuaValue::nil(),
-                            key: LuaValue::nil(),
-                            next: 0,
-                        });
+                        ptr::write(
+                            node,
+                            Node {
+                                value: LuaValue::nil(),
+                                key: LuaValue::nil(),
+                                next: 0,
+                            },
+                        );
                     }
                 }
                 self.node = new_node;
@@ -1125,7 +1142,8 @@ impl NativeTable {
                     // Link new node at the HEAD of the chain (right after mp),
                     // matching C Lua 5.5 behavior: gnext(f) = mp+gnext(mp) - f
                     if (*mp).next != 0 {
-                        (*free_node).next = Self::node_offset(free_node, mp.offset((*mp).next as isize));
+                        (*free_node).next =
+                            Self::node_offset(free_node, mp.offset((*mp).next as isize));
                     } else {
                         (*free_node).next = 0;
                     }
@@ -1394,7 +1412,8 @@ impl NativeTable {
                 // same object returned by a previous next() call.
                 // Matches Lua 5.5's equalkey with deadok=1, which uses pointer
                 // comparison (gcvalue(k1) == gcvalueraw(keyval(n2))) for dead keys.
-                if (*node).value.is_nil() && !(*node).key.is_nil()
+                if (*node).value.is_nil()
+                    && !(*node).key.is_nil()
                     && (*node).key.tt == key.tt
                     && (*node).key.value.i == key.value.i
                 {

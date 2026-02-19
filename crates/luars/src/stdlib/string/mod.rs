@@ -390,7 +390,9 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     } else if let Some(bytes) = s_value.as_binary() {
         bytes
     } else {
-        return Err(crate::stdlib::debug::arg_typeerror(l, 1, "string", &s_value));
+        return Err(crate::stdlib::debug::arg_typeerror(
+            l, 1, "string", &s_value,
+        ));
     };
 
     let i_value = l
@@ -401,10 +403,14 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
         Err(msg) => return Err(crate::stdlib::debug::argerror(l, 2, &msg)),
     };
 
-    let j = l.get_arg(3).map(|v| match value_to_integer(&v) {
-        Ok(i) => Ok(i),
-        Err(msg) => Err(crate::stdlib::debug::argerror(l, 3, &msg)),
-    }).transpose()?.unwrap_or(-1);
+    let j = l
+        .get_arg(3)
+        .map(|v| match value_to_integer(&v) {
+            Ok(i) => Ok(i),
+            Err(msg) => Err(crate::stdlib::debug::argerror(l, 3, &msg)),
+        })
+        .transpose()?
+        .unwrap_or(-1);
 
     // Get string length and compute byte indices
     let vm = l.vm_mut();

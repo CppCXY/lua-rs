@@ -117,7 +117,11 @@ pub fn handle_concat(
                 } else {
                     v_prev
                 };
-                return Err(crate::stdlib::debug::typeerror(lua_state, &blame_val, "concatenate"));
+                return Err(crate::stdlib::debug::typeerror(
+                    lua_state,
+                    &blame_val,
+                    "concatenate",
+                ));
             }
         }
     }
@@ -136,7 +140,11 @@ pub fn handle_concat(
 /// Check if a value can be directly converted to string for concatenation
 #[inline(always)]
 fn is_concat_convertible(value: &LuaValue) -> bool {
-    if value.is_string() || value.is_binary() || value.as_integer().is_some() || value.as_float().is_some() {
+    if value.is_string()
+        || value.is_binary()
+        || value.as_integer().is_some()
+        || value.as_float().is_some()
+    {
         return true;
     }
     // Userdata with lua_tostring can be concat-converted
@@ -222,7 +230,11 @@ pub fn concat_strings(
                 lua_state.create_string(&s)
             };
         } else {
-            return Err(crate::stdlib::debug::typeerror(lua_state, &val, "concatenate"));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &val,
+                "concatenate",
+            ));
         }
     }
 
@@ -276,9 +288,17 @@ pub fn concat_strings(
                     continue;
                 }
             }
-            return Err(crate::stdlib::debug::typeerror(lua_state, &value, "concatenate"));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &value,
+                "concatenate",
+            ));
         } else {
-            return Err(crate::stdlib::debug::typeerror(lua_state, &value, "concatenate"));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &value,
+                "concatenate",
+            ));
         }
     }
 

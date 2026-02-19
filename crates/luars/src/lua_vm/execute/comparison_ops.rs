@@ -116,9 +116,7 @@ pub fn exec_lt(
             let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
                 Ok(Some(result)) => result,
                 Ok(None) => {
-                    return Err(
-                        crate::stdlib::debug::ordererror(lua_state, &va, &vb)
-                    );
+                    return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
                 }
                 Err(LuaError::Yield) => {
                     use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -232,9 +230,7 @@ pub fn exec_lti(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(
-                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
-                );
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -284,9 +280,7 @@ pub fn exec_lei(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(
-                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
-                );
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -337,9 +331,7 @@ pub fn exec_gti(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(
-                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
-                );
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -390,9 +382,7 @@ pub fn exec_gei(
         match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
             Ok(Some(result)) => result,
             Ok(None) => {
-                return Err(
-                    crate::stdlib::debug::ordererror(lua_state, &va, &vb)
-                );
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
             Err(LuaError::Yield) => {
                 use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
@@ -457,9 +447,7 @@ pub fn exec_le(
             let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
                 Ok(Some(result)) => result,
                 Ok(None) => {
-                    return Err(
-                        crate::stdlib::debug::ordererror(lua_state, &va, &vb)
-                    );
+                    return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
                 }
                 Err(LuaError::Yield) => {
                     use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;

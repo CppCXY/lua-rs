@@ -34,11 +34,7 @@ fn u_posrelat(pos: i64, len: usize) -> i64 {
         pos
     } else {
         let upos = (-pos) as usize;
-        if upos > len {
-            0
-        } else {
-            len as i64 + pos + 1
-        }
+        if upos > len { 0 } else { len as i64 + pos + 1 }
     }
 }
 
@@ -132,8 +128,14 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
     let mut posj = u_posrelat(j_raw, len);
 
     // luaL_argcheck: 1 <= posi && --posi <= len
-    if posi < 1 || { posi -= 1; posi } > len as i64 {
-        return Err(l.error("bad argument #2 to 'len' (initial position out of bounds)".to_string()));
+    if posi < 1 || {
+        posi -= 1;
+        posi
+    } > len as i64
+    {
+        return Err(
+            l.error("bad argument #2 to 'len' (initial position out of bounds)".to_string())
+        );
     }
     // luaL_argcheck: --posj < len
     posj -= 1;
@@ -190,7 +192,7 @@ fn utf8_char(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    // Try to create as UTF-8 string, fallback to binary  
+    // Try to create as UTF-8 string, fallback to binary
     let val = match String::from_utf8(result_bytes.clone()) {
         Ok(s) => l.create_string(&s)?,
         Err(_) => l.create_binary(result_bytes)?,
@@ -322,9 +324,8 @@ fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
 
     while pos < se {
         let remaining = &bytes[pos..];
-        // Decode one UTF-8 character  
-        let (code, char_len) = decode_utf8(remaining, !lax)
-            .map_err(|e| l.error(e))?;
+        // Decode one UTF-8 character
+        let (code, char_len) = decode_utf8(remaining, !lax).map_err(|e| l.error(e))?;
         l.push_value(LuaValue::integer(code as i64))?;
         count += 1;
         pos += char_len;
@@ -359,11 +360,18 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
 
     // Default i: if n >= 0 then 1 else len+1
     let default_i = if n >= 0 { 1i64 } else { len as i64 + 1 };
-    let i_raw = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(default_i);
+    let i_raw = l
+        .get_arg(3)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(default_i);
     let mut posi = u_posrelat(i_raw, len);
 
     // luaL_argcheck: 1 <= posi && --posi <= len
-    if posi < 1 || { posi -= 1; posi } > len as i64 {
+    if posi < 1 || {
+        posi -= 1;
+        posi
+    } > len as i64
+    {
         return Err(l.error("bad argument #3 to 'offset' (position out of bounds)".to_string()));
     }
 

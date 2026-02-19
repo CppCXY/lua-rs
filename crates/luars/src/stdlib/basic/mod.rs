@@ -153,14 +153,13 @@ fn lua_where(l: &LuaState, level: usize) -> String {
                     if let Some(func_obj) = ci.func.as_lua_function() {
                         let chunk = func_obj.chunk();
                         let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                        let line =
-                            if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                                chunk.line_info[ci.pc as usize - 1] as usize
-                            } else if !chunk.line_info.is_empty() {
-                                chunk.line_info[0] as usize
-                            } else {
-                                0
-                            };
+                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            chunk.line_info[ci.pc as usize - 1] as usize
+                        } else if !chunk.line_info.is_empty() {
+                            chunk.line_info[0] as usize
+                        } else {
+                            0
+                        };
                         return if line > 0 {
                             format!("{}:{}: ", source, line)
                         } else {
@@ -273,10 +272,12 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
         }
         _ => {
             if has_base {
-                return Err(l.error("bad argument #1 to 'tonumber' (string expected, got number)".to_string()));
+                return Err(l.error(
+                    "bad argument #1 to 'tonumber' (string expected, got number)".to_string(),
+                ));
             }
             LuaValue::nil()
-        },
+        }
     };
 
     l.push_value(result)?;
@@ -306,8 +307,11 @@ pub(crate) fn lua_float_to_string(n: f64) -> String {
     };
 
     // If result looks like an integer (no '.', 'e', 'E', 'n', 'i'), add ".0"
-    if !result.contains('.') && !result.contains('e') && !result.contains('E')
-        && !result.contains('n') && !result.contains('i')
+    if !result.contains('.')
+        && !result.contains('e')
+        && !result.contains('E')
+        && !result.contains('n')
+        && !result.contains('i')
     {
         result.push_str(".0");
     }
@@ -1365,15 +1369,13 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
     // Validate mode
     if !mode.is_empty() && mode.chars().all(|c| c == 'b' || c == 't') {
         if is_binary && !mode.contains('b') {
-            let err_msg =
-                l.create_string("attempt to load a binary chunk (mode is 'text')")?;
+            let err_msg = l.create_string("attempt to load a binary chunk (mode is 'text')")?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             return Ok(2);
         }
         if !is_binary && !mode.contains('t') {
-            let err_msg =
-                l.create_string("attempt to load a text chunk (mode is 'binary')")?;
+            let err_msg = l.create_string("attempt to load a text chunk (mode is 'binary')")?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             return Ok(2);
@@ -1389,7 +1391,11 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             .map_err(|e| format!("binary load error: {}", e))
     } else {
         // For text, strip BOM but keep shebang (tokenizer handles it)
-        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
+        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            3
+        } else {
+            0
+        };
         // Source files must be valid UTF-8
         let code_str = match String::from_utf8(file_bytes[text_start..].to_vec()) {
             Ok(s) => s,
@@ -1493,11 +1499,15 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         chunk_serializer::deserialize_chunk_with_strings_vm(&file_bytes[skip_offset..], vm)
             .map_err(|e| l.error(format!("binary load error: {}", e)))?
     } else {
-        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
-        let code_str = String::from_utf8(file_bytes[text_start..].to_vec()).map_err(|_| {
-            l.error("source file is not valid UTF-8".to_string())
-        })?;
-        l.vm_mut().compile_with_name(&code_str, &chunkname)
+        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            3
+        } else {
+            0
+        };
+        let code_str = String::from_utf8(file_bytes[text_start..].to_vec())
+            .map_err(|_| l.error("source file is not valid UTF-8".to_string()))?;
+        l.vm_mut()
+            .compile_with_name(&code_str, &chunkname)
             .map_err(|e| l.error(format!("error loading {}: {}", filename_str, e)))?
     };
 
@@ -1535,7 +1545,9 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
 
     // At least one argument required, all must be strings
     if args.is_empty() {
-        return Err(l.error("bad argument #1 to 'warn' (string expected, got no value)".to_string()));
+        return Err(
+            l.error("bad argument #1 to 'warn' (string expected, got no value)".to_string())
+        );
     }
     let mut parts: Vec<String> = Vec::with_capacity(args.len());
     for (i, arg) in args.iter().enumerate() {

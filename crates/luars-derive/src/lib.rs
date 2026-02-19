@@ -33,7 +33,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Data, Fields, Ident, Meta};
+use syn::{Data, DeriveInput, Fields, Ident, Meta, parse_macro_input};
 
 /// Derive `UserDataTrait` for a struct, exposing public fields to Lua.
 ///
@@ -259,13 +259,15 @@ fn parse_lua_impl_attrs(input: &DeriveInput) -> Vec<String> {
 // ==================== Code generation helpers ====================
 
 /// Generate code to convert a Rust field value → UdValue
-fn field_to_udvalue(ty: &syn::Type, accessor: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn field_to_udvalue(
+    ty: &syn::Type,
+    accessor: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     let type_str = normalize_type(ty);
 
     match type_str.as_str() {
         // Integers → UdValue::Integer
-        "i8" | "i16" | "i32" | "i64" | "isize" |
-        "u8" | "u16" | "u32" | "u64" | "usize" => {
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
             quote! { luars::lua_value::userdata_trait::UdValue::Integer(#accessor as i64) }
         }
         // Floats → UdValue::Number

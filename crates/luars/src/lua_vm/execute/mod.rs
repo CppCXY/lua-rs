@@ -46,10 +46,10 @@ use crate::{
             },
             concat::handle_concat,
             helper::{
-                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod,
-                lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat,
-                pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
-                tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
+                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
+                lua_imod, lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue,
+                pttisfloat, pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue,
+                setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
             },
         },
     },
@@ -1294,9 +1294,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             if !tonumberns(&limit_val, &mut flimit) {
                                 let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
                                 save_pc!();
-                                return Err(
-                                    lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
-                                );
+                                return Err(lua_state.error(format!(
+                                    "bad 'for' limit (number expected, got {})",
+                                    t
+                                )));
                             }
                             // Try rounding the float to integer
                             let nl = if step < 0 {

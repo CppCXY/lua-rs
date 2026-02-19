@@ -1392,7 +1392,13 @@ fn codeeq(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut Exp
 // Port of codeorder from lcode.c:1553-1581
 // Emit code for order comparisons. When using an immediate operand,
 // 'isfloat' tells whether the original value was a float.
-fn codeorder(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc, line: usize) {
+fn codeorder(
+    fs: &mut FuncState,
+    op: BinaryOperator,
+    e1: &mut ExpDesc,
+    e2: &mut ExpDesc,
+    line: usize,
+) {
     let r1: u32;
     let r2: u32;
     let mut im: i32 = 0;
@@ -1725,7 +1731,13 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
 
 // Port of luaK_posfix from lcode.c:1706-1783
 // void luaK_posfix (FuncState *fs, BinOpr opr, expdesc *e1, expdesc *e2, int line)
-pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc, line: usize) {
+pub fn posfix(
+    fs: &mut FuncState,
+    op: BinaryOperator,
+    e1: &mut ExpDesc,
+    e2: &mut ExpDesc,
+    line: usize,
+) {
     use BinaryOperator;
 
     discharge_vars(fs, e2);

@@ -3017,25 +3017,37 @@ impl GC {
         use std::collections::HashMap;
         let mut ptrs: HashMap<u64, (String, usize, usize, u8)> = HashMap::new();
 
-        let collect_from_thread = |name: &str, state: &crate::lua_vm::LuaState, marked: u8, ptrs: &mut HashMap<u64, (String, usize, usize, u8)>| {
-            let stack = state.stack();
-            let top = state.get_top();
-            // Only scan 0..top — values above top are stale and will be
-            // cleared to nil by atomic phase (matching C Lua's traversethread).
-            let scan_end = top.min(stack.len());
-            for i in 0..scan_end {
-                let v = &stack[i];
-                if v.is_collectable() {
-                    ptrs.insert(unsafe { v.value.ptr as u64 }, (name.to_string(), i, top, marked));
+        let collect_from_thread =
+            |name: &str,
+             state: &crate::lua_vm::LuaState,
+             marked: u8,
+             ptrs: &mut HashMap<u64, (String, usize, usize, u8)>| {
+                let stack = state.stack();
+                let top = state.get_top();
+                // Only scan 0..top — values above top are stale and will be
+                // cleared to nil by atomic phase (matching C Lua's traversethread).
+                let scan_end = top.min(stack.len());
+                for i in 0..scan_end {
+                    let v = &stack[i];
+                    if v.is_collectable() {
+                        ptrs.insert(
+                            unsafe { v.value.ptr as u64 },
+                            (name.to_string(), i, top, marked),
+                        );
+                    }
                 }
-            }
-        };
+            };
 
         // Main thread
         collect_from_thread("main", l, 0, &mut ptrs);
 
         // All threads in all GC lists — skip dead (white) threads
-        let lists: [(&str, &GcList); 4] = [("allgc", allgc), ("survival", survival), ("old1", old1), ("old", old)];
+        let lists: [(&str, &GcList); 4] = [
+            ("allgc", allgc),
+            ("survival", survival),
+            ("old1", old1),
+            ("old", old),
+        ];
         for (list_name, list) in lists {
             for (idx, obj) in list.iter().enumerate() {
                 if let GcObjectOwner::Thread(t) = obj {
@@ -3055,8 +3067,11 @@ impl GC {
 
     /// DEBUG: Validate that an object about to be freed is NOT on any thread's stack.
     #[cfg(debug_assertions)]
-    fn validate_not_on_stack(gc_owner: &GcObjectOwner, stack_ptrs: &std::collections::HashMap<u64, (String, usize, usize, u8)>,
-        old_list: &GcList) {
+    fn validate_not_on_stack(
+        gc_owner: &GcObjectOwner,
+        stack_ptrs: &std::collections::HashMap<u64, (String, usize, usize, u8)>,
+        old_list: &GcList,
+    ) {
         let raw_ptr = match gc_owner {
             GcObjectOwner::Table(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Function(b) => b.as_ref() as *const _ as u64,
@@ -3079,7 +3094,11 @@ impl GC {
                     let name = format!("thread_old_{}", idx);
                     if &name == thread_name {
                         let state = &t.data;
-                        thread_info.push_str(&format!("\n  Thread call_depth={}, stack_len={}", state.call_depth(), state.stack_len()));
+                        thread_info.push_str(&format!(
+                            "\n  Thread call_depth={}, stack_len={}",
+                            state.call_depth(),
+                            state.stack_len()
+                        ));
                         for ci_idx in 0..state.call_depth() {
                             let ci = state.get_call_info(ci_idx);
                             thread_info.push_str(&format!("\n    ci[{}]: base={}, top={}, pc={}, nresults={}, status=0x{:02X}",
@@ -3091,11 +3110,28 @@ impl GC {
                         let stack = state.stack();
                         for i in start..end {
                             let v = &stack[i];
-                            let marker = if i == *slot { " <== FREED" } else if i == *top { " <== TOP" } else { "" };
-                            if v.is_collectable() {
-                                thread_info.push_str(&format!("\n    stack[{}]: tt={}, ptr={:#x}{}", i, v.tt(), unsafe { v.value.ptr as u64 }, marker));
+                            let marker = if i == *slot {
+                                " <== FREED"
+                            } else if i == *top {
+                                " <== TOP"
                             } else {
-                                thread_info.push_str(&format!("\n    stack[{}]: tt={} (non-gc){}", i, v.tt(), marker));
+                                ""
+                            };
+                            if v.is_collectable() {
+                                thread_info.push_str(&format!(
+                                    "\n    stack[{}]: tt={}, ptr={:#x}{}",
+                                    i,
+                                    v.tt(),
+                                    unsafe { v.value.ptr as u64 },
+                                    marker
+                                ));
+                            } else {
+                                thread_info.push_str(&format!(
+                                    "\n    stack[{}]: tt={} (non-gc){}",
+                                    i,
+                                    v.tt(),
+                                    marker
+                                ));
                             }
                         }
                     }
@@ -3104,7 +3140,16 @@ impl GC {
 
             panic!(
                 "SWEEP BUG: Freeing {:?} at {:#x} ON STACK! thread='{}', slot={}, top={}{}, obj_marked=0x{:02X}, obj_age={}, thread_marked=0x{:02X}{}",
-                kind, raw_ptr, thread_name, slot, top, above_top, header.marked, header.age(), thread_marked, thread_info
+                kind,
+                raw_ptr,
+                thread_name,
+                slot,
+                top,
+                above_top,
+                header.marked,
+                header.age(),
+                thread_marked,
+                thread_info
             );
         }
     }
@@ -3116,7 +3161,8 @@ impl GC {
         // DEBUG: Collect all raw pointers from all thread stacks to validate
         // that we never free an object that is still on a stack.
         #[cfg(debug_assertions)]
-        let stack_ptrs = Self::collect_all_stack_ptrs(l, &self.allgc, &self.survival, &self.old1, &self.old);
+        let stack_ptrs =
+            Self::collect_all_stack_ptrs(l, &self.allgc, &self.survival, &self.old1, &self.old);
 
         // Phase 1: Sweep allgc list (G_NEW objects)
         // Dead objects are freed, survivors are promoted to survival (G_SURVIVAL)

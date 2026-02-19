@@ -80,7 +80,6 @@ impl LuaRng {
     }
 }
 
-
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
 /// Now takes LuaContext instead of LuaVM for better ergonomics

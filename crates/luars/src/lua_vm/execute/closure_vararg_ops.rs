@@ -40,9 +40,7 @@ fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> Lua
                 }
                 Ok(n as usize)
             }
-            _ => {
-                Err(lua_state.error("vararg table has no proper 'n'".to_string()))
-            }
+            _ => Err(lua_state.error("vararg table has no proper 'n'".to_string())),
         }
     } else {
         Err(lua_state.error("vararg table has no proper 'n'".to_string()))

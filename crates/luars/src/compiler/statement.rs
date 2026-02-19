@@ -223,10 +223,7 @@ fn solvegoto(
     // lparser.c:603-605: Check if goto jumps into the scope of a local variable
     if gt.nactvar < label.nactvar {
         // The goto jumps over a variable declaration
-        let varname = varnames
-            .get(&gt.nactvar)
-            .map(|s| s.as_str())
-            .unwrap_or("?");
+        let varname = varnames.get(&gt.nactvar).map(|s| s.as_str()).unwrap_or("?");
         return Err(fs.sem_error(&format!(
             "<goto {}> at line {} jumps into the scope of '{}'",
             gt.name, gt.line, varname
@@ -1712,9 +1709,10 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
             if let Some(var_desc) = fs.get_local_var_desc(vidx) {
                 // RDKCONST, RDKCTC, RDKVAVAR, and RDKTOCLOSE are all readonly
                 match var_desc.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE | VarKind::RDKVAVAR => {
-                        Some(var_desc.name.clone())
-                    }
+                    VarKind::RDKCONST
+                    | VarKind::RDKCTC
+                    | VarKind::RDKTOCLOSE
+                    | VarKind::RDKVAVAR => Some(var_desc.name.clone()),
                     _ => None,
                 }
             } else {
@@ -1728,9 +1726,10 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
                 let upval = &fs.upvalues[upval_idx];
                 // RDKCONST, RDKCTC, RDKVAVAR, and RDKTOCLOSE are all readonly
                 match upval.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE | VarKind::RDKVAVAR => {
-                        Some(upval.name.clone())
-                    }
+                    VarKind::RDKCONST
+                    | VarKind::RDKCTC
+                    | VarKind::RDKTOCLOSE
+                    | VarKind::RDKVAVAR => Some(upval.name.clone()),
                     _ => None,
                 }
             } else {

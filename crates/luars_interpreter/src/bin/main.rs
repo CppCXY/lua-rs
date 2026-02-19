@@ -292,24 +292,37 @@ fn main() {
         type VectoredHandler = unsafe extern "system" fn(*mut ExceptionPointers) -> i32;
         unsafe extern "system" fn crash_handler(info: *mut ExceptionPointers) -> i32 {
             unsafe {
-            let record = &*(*info).exception_record;
-            if record.exception_code == 0xC0000005 {
-                // ACCESS_VIOLATION
-                let addr = record.exception_address;
-                let rw = if record.number_parameters >= 1 { record.exception_information[0] } else { 99 };
-                let target = if record.number_parameters >= 2 { record.exception_information[1] } else { 0 };
-                eprintln!("CRASH: ACCESS_VIOLATION at {:p}, type={} (0=read,1=write), target=0x{:x}", 
-                    addr, rw, target);
-                // Print a basic backtrace using std::backtrace
-                let bt = std::backtrace::Backtrace::force_capture();
-                eprintln!("Backtrace:\n{}", bt);
-                std::process::exit(99);
-            }
-            0 // EXCEPTION_CONTINUE_SEARCH
+                let record = &*(*info).exception_record;
+                if record.exception_code == 0xC0000005 {
+                    // ACCESS_VIOLATION
+                    let addr = record.exception_address;
+                    let rw = if record.number_parameters >= 1 {
+                        record.exception_information[0]
+                    } else {
+                        99
+                    };
+                    let target = if record.number_parameters >= 2 {
+                        record.exception_information[1]
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "CRASH: ACCESS_VIOLATION at {:p}, type={} (0=read,1=write), target=0x{:x}",
+                        addr, rw, target
+                    );
+                    // Print a basic backtrace using std::backtrace
+                    let bt = std::backtrace::Backtrace::force_capture();
+                    eprintln!("Backtrace:\n{}", bt);
+                    std::process::exit(99);
+                }
+                0 // EXCEPTION_CONTINUE_SEARCH
             }
         }
         unsafe extern "system" {
-            fn AddVectoredExceptionHandler(first: u32, handler: VectoredHandler) -> *mut std::ffi::c_void;
+            fn AddVectoredExceptionHandler(
+                first: u32,
+                handler: VectoredHandler,
+            ) -> *mut std::ffi::c_void;
         }
         AddVectoredExceptionHandler(1, crash_handler);
     }
@@ -367,7 +380,12 @@ fn lua_main() -> i32 {
     }
     // Setup arg table
     let exe_path = env::args().next().unwrap_or_else(|| "lua".to_string());
-    setup_arg_table(&mut vm, &exe_path, opts.script_file.as_deref(), &opts.script_args);
+    setup_arg_table(
+        &mut vm,
+        &exe_path,
+        opts.script_file.as_deref(),
+        &opts.script_args,
+    );
 
     // Require modules
     for module in &opts.require_modules {

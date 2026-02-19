@@ -201,7 +201,10 @@ pub fn handle_forprep_float(
     if !tonumberns(&init_val, &mut init) {
         let t = crate::stdlib::debug::objtypename(lua_state, &init_val);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error(format!("bad 'for' initial value (number expected, got {})", t)));
+        return Err(lua_state.error(format!(
+            "bad 'for' initial value (number expected, got {})",
+            t
+        )));
     }
 
     if step == 0.0 {
@@ -302,7 +305,11 @@ pub fn handle_len(
             *base = lua_state.get_frame_base(frame_idx);
             lua_state.stack_mut()[*base + a] = result;
         } else {
-            return Err(crate::stdlib::debug::typeerror(lua_state, &rb, "get length of"));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &rb,
+                "get length of",
+            ));
         }
     }
     Ok(())

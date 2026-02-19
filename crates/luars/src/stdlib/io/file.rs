@@ -4,8 +4,8 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 
-use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_value::userdata_trait::UserDataTrait;
+use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaResult, LuaState};
 
 pub enum ReadNumberResult {
@@ -22,7 +22,9 @@ fn parse_lua_integer(s: &str) -> Option<i64> {
         u64::from_str_radix(hex, 16).ok().map(|n| n as i64)
     } else if s.starts_with("-0x") || s.starts_with("-0X") {
         let hex = &s[3..];
-        u64::from_str_radix(hex, 16).ok().map(|n| (n as i64).wrapping_neg())
+        u64::from_str_radix(hex, 16)
+            .ok()
+            .map(|n| (n as i64).wrapping_neg())
     } else {
         s.parse::<i64>().ok()
     }
@@ -47,13 +49,13 @@ fn parse_lua_float(s: &str) -> Option<f64> {
         let hex = &rest[2..];
         // Split at 'p' or 'P'
         let (mantissa_str, exp_str) = if let Some(p) = hex.find(|c: char| c == 'p' || c == 'P') {
-            (&hex[..p], Some(&hex[p+1..]))
+            (&hex[..p], Some(&hex[p + 1..]))
         } else {
             (hex, None)
         };
         // Parse mantissa (integer part . fractional part)
         let (int_str, frac_str) = if let Some(dot) = mantissa_str.find('.') {
-            (&mantissa_str[..dot], Some(&mantissa_str[dot+1..]))
+            (&mantissa_str[..dot], Some(&mantissa_str[dot + 1..]))
         } else {
             (mantissa_str, None)
         };
@@ -73,7 +75,9 @@ fn parse_lua_float(s: &str) -> Option<f64> {
             let exp_val: i32 = exp.parse().ok()?;
             result *= 2f64.powi(exp_val);
         }
-        if neg { result = -result; }
+        if neg {
+            result = -result;
+        }
         return Some(result);
     }
     None
@@ -290,39 +294,54 @@ impl LuaFile {
     /// optional exponent (e/E or p/P) with optional sign + digits.
     pub fn read_number(&mut self) -> io::Result<Option<ReadNumberResult>> {
         use std::io::Read;
-        
+
         let mut buf = Vec::new();
         let mut byte_buf = [0u8; 1];
         let mut last_byte: Option<u8> = None; // for ungetc
         const L_MAXLENNUM: usize = 200; // max length of a numeral (C Lua's L_MAXLENNUM)
-        
+
         // Read one byte (with pushback support)
-        let read_byte_inner = |inner: &mut FileInner, byte_buf: &mut [u8; 1]| -> io::Result<Option<u8>> {
-            match inner {
-                FileInner::Read(reader) => {
-                    let n = reader.read(&mut byte_buf[..])?;
-                    if n == 0 { Ok(None) } else { Ok(Some(byte_buf[0])) }
+        let read_byte_inner =
+            |inner: &mut FileInner, byte_buf: &mut [u8; 1]| -> io::Result<Option<u8>> {
+                match inner {
+                    FileInner::Read(reader) => {
+                        let n = reader.read(&mut byte_buf[..])?;
+                        if n == 0 {
+                            Ok(None)
+                        } else {
+                            Ok(Some(byte_buf[0]))
+                        }
+                    }
+                    FileInner::ReadWrite(reader) => {
+                        let n = reader.read(&mut byte_buf[..])?;
+                        if n == 0 {
+                            Ok(None)
+                        } else {
+                            Ok(Some(byte_buf[0]))
+                        }
+                    }
+                    FileInner::Stdin => {
+                        let n = io::stdin().lock().read(&mut byte_buf[..])?;
+                        if n == 0 {
+                            Ok(None)
+                        } else {
+                            Ok(Some(byte_buf[0]))
+                        }
+                    }
+                    _ => Err(io::Error::new(io::ErrorKind::Other, "not readable")),
                 }
-                FileInner::ReadWrite(reader) => {
-                    let n = reader.read(&mut byte_buf[..])?;
-                    if n == 0 { Ok(None) } else { Ok(Some(byte_buf[0])) }
-                }
-                FileInner::Stdin => {
-                    let n = io::stdin().lock().read(&mut byte_buf[..])?;
-                    if n == 0 { Ok(None) } else { Ok(Some(byte_buf[0])) }
-                }
-                _ => Err(io::Error::new(io::ErrorKind::Other, "not readable")),
+            };
+
+        let ungetc = |inner: &mut FileInner| match inner {
+            FileInner::Read(reader) => {
+                let _ = reader.seek(std::io::SeekFrom::Current(-1));
             }
-        };
-        
-        let ungetc = |inner: &mut FileInner| {
-            match inner {
-                FileInner::Read(reader) => { let _ = reader.seek(std::io::SeekFrom::Current(-1)); }
-                FileInner::ReadWrite(reader) => { let _ = reader.seek(std::io::SeekFrom::Current(-1)); }
-                _ => {}
+            FileInner::ReadWrite(reader) => {
+                let _ = reader.seek(std::io::SeekFrom::Current(-1));
             }
+            _ => {}
         };
-        
+
         // Macro-like helpers
         // test2: if current char matches c1 or c2, add to buf and read next
         macro_rules! getc {
@@ -334,7 +353,7 @@ impl LuaFile {
                 }
             }};
         }
-        
+
         // Skip whitespace
         let mut c = loop {
             match getc!(self) {
@@ -343,16 +362,19 @@ impl LuaFile {
                 Some(b) => break b,
             }
         };
-        
+
         // Optional sign
         if c == b'+' || c == b'-' {
             buf.push(c);
             match getc!(self) {
-                None => { /* end of file after sign */ return Ok(None); }
+                None => {
+                    /* end of file after sign */
+                    return Ok(None);
+                }
                 Some(b) => c = b,
             }
         }
-        
+
         // Check for hex prefix: 0x or 0X
         let mut digit_count: usize = 0;
         let hex = if c == b'0' {
@@ -367,7 +389,9 @@ impl LuaFile {
                     buf.push(b);
                     digit_count = 0; // reset — need hex digits after prefix
                     match getc!(self) {
-                        None => { c = 0; }
+                        None => {
+                            c = 0;
+                        }
                         Some(b2) => c = b2,
                     }
                     true
@@ -380,7 +404,7 @@ impl LuaFile {
         } else {
             false
         };
-        
+
         // Read digits (integral part)
         loop {
             let is_digit = if hex {
@@ -388,20 +412,27 @@ impl LuaFile {
             } else {
                 (c as char).is_ascii_digit()
             };
-            if !is_digit || buf.len() >= L_MAXLENNUM { break; }
+            if !is_digit || buf.len() >= L_MAXLENNUM {
+                break;
+            }
             buf.push(c);
             digit_count += 1;
             match getc!(self) {
-                None => { c = 0; break; }
+                None => {
+                    c = 0;
+                    break;
+                }
                 Some(b) => c = b,
             }
         }
-        
+
         // Optional decimal point
         if c == b'.' {
             buf.push(c);
             match getc!(self) {
-                None => { c = 0; }
+                None => {
+                    c = 0;
+                }
                 Some(b) => c = b,
             }
             // Fractional digits
@@ -411,16 +442,21 @@ impl LuaFile {
                 } else {
                     (c as char).is_ascii_digit()
                 };
-                if !is_digit || buf.len() >= L_MAXLENNUM { break; }
+                if !is_digit || buf.len() >= L_MAXLENNUM {
+                    break;
+                }
                 buf.push(c);
                 digit_count += 1;
                 match getc!(self) {
-                    None => { c = 0; break; }
+                    None => {
+                        c = 0;
+                        break;
+                    }
                     Some(b) => c = b,
                 }
             }
         }
-        
+
         // Optional exponent
         if digit_count > 0 {
             let exp_char = if hex { b'p' } else { b'e' };
@@ -428,34 +464,43 @@ impl LuaFile {
             if c == exp_char || c == exp_char_upper {
                 buf.push(c);
                 match getc!(self) {
-                    None => { c = 0; }
+                    None => {
+                        c = 0;
+                    }
                     Some(b) => c = b,
                 }
                 // Optional exponent sign
                 if c == b'+' || c == b'-' {
                     buf.push(c);
                     match getc!(self) {
-                        None => { c = 0; }
+                        None => {
+                            c = 0;
+                        }
                         Some(b) => c = b,
                     }
                 }
                 // Exponent digits (always decimal)
                 loop {
-                    if !(c as char).is_ascii_digit() || buf.len() >= L_MAXLENNUM { break; }
+                    if !(c as char).is_ascii_digit() || buf.len() >= L_MAXLENNUM {
+                        break;
+                    }
                     buf.push(c);
                     match getc!(self) {
-                        None => { c = 0; break; }
+                        None => {
+                            c = 0;
+                            break;
+                        }
                         Some(b) => c = b,
                     }
                 }
             }
         }
-        
+
         // Unread the look-ahead character
         if c != 0 {
             ungetc(&mut self.inner);
         }
-        
+
         if buf.is_empty() || digit_count == 0 {
             return Ok(None);
         }
@@ -467,7 +512,7 @@ impl LuaFile {
 
         let s = String::from_utf8(buf).unwrap_or_default();
         let trimmed = s.trim();
-        
+
         // Try integer first
         if let Some(n) = parse_lua_integer(trimmed) {
             return Ok(Some(ReadNumberResult::Integer(n)));
@@ -476,7 +521,7 @@ impl LuaFile {
         if let Some(n) = parse_lua_float(trimmed) {
             return Ok(Some(ReadNumberResult::Float(n)));
         }
-        
+
         Ok(None)
     }
 
@@ -538,13 +583,17 @@ impl LuaFile {
         match &mut self.inner {
             FileInner::Read(reader) => {
                 let n = reader.read(&mut buf)?;
-                if n == 0 { return Ok(true); }
+                if n == 0 {
+                    return Ok(true);
+                }
                 reader.seek(SeekFrom::Current(-1))?;
                 Ok(false)
             }
             FileInner::ReadWrite(reader) => {
                 let n = reader.read(&mut buf)?;
-                if n == 0 { return Ok(true); }
+                if n == 0 {
+                    return Ok(true);
+                }
                 reader.seek(SeekFrom::Current(-1))?;
                 Ok(false)
             }
@@ -723,7 +772,7 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             let mut nresults = 0;
             let mut success = true;
-            
+
             for fmt in &formats {
                 if !success {
                     // After first nil result, all subsequent are nil
@@ -731,7 +780,7 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
                     nresults += 1;
                     continue;
                 }
-                
+
                 // Helper macro-like: on IO error, return (nil, errmsg) like C Lua
                 macro_rules! handle_read_err {
                     ($e:expr, $l:expr, $nresults:expr) => {{
@@ -777,42 +826,45 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
                     nresults += 1;
                     continue;
                 }
-                
+
                 // Get format string (default "l" for nil sentinel)
-                let format_str = fmt.as_str().map(|s| s.to_string())
+                let format_str = fmt
+                    .as_str()
+                    .map(|s| s.to_string())
                     .unwrap_or_else(|| "l".to_string());
                 let format = format_str.strip_prefix('*').unwrap_or(&format_str);
 
                 let first_char = format.chars().next().unwrap_or('l');
                 let result: LuaValue = match first_char {
-                    'l' => {
-                        match lua_file.read_line() {
-                            Ok(Some(line)) => l.create_string(&line)?,
-                            Ok(None) => { success = false; LuaValue::nil() },
-                            Err(e) => handle_read_err!(e, l, nresults),
+                    'l' => match lua_file.read_line() {
+                        Ok(Some(line)) => l.create_string(&line)?,
+                        Ok(None) => {
+                            success = false;
+                            LuaValue::nil()
                         }
-                    }
-                    'L' => {
-                        match lua_file.read_line_with_newline() {
-                            Ok(Some(line)) => l.create_string(&line)?,
-                            Ok(None) => { success = false; LuaValue::nil() },
-                            Err(e) => handle_read_err!(e, l, nresults),
+                        Err(e) => handle_read_err!(e, l, nresults),
+                    },
+                    'L' => match lua_file.read_line_with_newline() {
+                        Ok(Some(line)) => l.create_string(&line)?,
+                        Ok(None) => {
+                            success = false;
+                            LuaValue::nil()
                         }
-                    }
-                    'a' => {
-                        match lua_file.read_all() {
-                            Ok(content) => super::bytes_to_lua_value(l, content)?,
-                            Err(e) => handle_read_err!(e, l, nresults),
+                        Err(e) => handle_read_err!(e, l, nresults),
+                    },
+                    'a' => match lua_file.read_all() {
+                        Ok(content) => super::bytes_to_lua_value(l, content)?,
+                        Err(e) => handle_read_err!(e, l, nresults),
+                    },
+                    'n' => match lua_file.read_number() {
+                        Ok(Some(ReadNumberResult::Integer(n))) => LuaValue::integer(n),
+                        Ok(Some(ReadNumberResult::Float(n))) => LuaValue::float(n),
+                        Ok(None) => {
+                            success = false;
+                            LuaValue::nil()
                         }
-                    }
-                    'n' => {
-                        match lua_file.read_number() {
-                            Ok(Some(ReadNumberResult::Integer(n))) => LuaValue::integer(n),
-                            Ok(Some(ReadNumberResult::Float(n))) => LuaValue::float(n),
-                            Ok(None) => { success = false; LuaValue::nil() },
-                            Err(e) => handle_read_err!(e, l, nresults),
-                        }
-                    }
+                        Err(e) => handle_read_err!(e, l, nresults),
+                    },
                     _ => {
                         return Err(l.error(format!("invalid format: {}", format)));
                     }
@@ -821,7 +873,7 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
                 l.push_value(result)?;
                 nresults += 1;
             }
-            
+
             return Ok(nresults);
         }
     }
@@ -945,7 +997,9 @@ fn file_gc_close(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &file_val))
+    Err(crate::stdlib::debug::arg_typeerror(
+        l, 1, "FILE*", &file_val,
+    ))
 }
 
 /// file:close()
@@ -982,7 +1036,9 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &file_val))
+    Err(crate::stdlib::debug::arg_typeerror(
+        l, 1, "FILE*", &file_val,
+    ))
 }
 
 /// __tostring metamethod for file objects
@@ -1046,7 +1102,11 @@ fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
     let fmts_key = l.create_string("fmts")?;
     l.raw_set(&state_table, fmts_key, fmts_table);
     let nfmts_key = l.create_string("nfmts")?;
-    l.raw_set(&state_table, nfmts_key, LuaValue::integer(formats.len() as i64));
+    l.raw_set(
+        &state_table,
+        nfmts_key,
+        LuaValue::integer(formats.len() as i64),
+    );
 
     // Create metatable with __call using the shared io_lines_call
     let mt = l.create_table(0, 1)?;

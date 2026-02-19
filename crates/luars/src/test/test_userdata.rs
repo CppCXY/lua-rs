@@ -1,7 +1,7 @@
 // Tests for the trait-based userdata system
-use crate::*;
-use crate::lua_value::userdata_trait::{UdValue, UserDataTrait};
 use crate::lua_value::LuaUserdata;
+use crate::lua_value::userdata_trait::{UdValue, UserDataTrait};
+use crate::*;
 use std::fmt;
 
 // ==================== Test structs ====================
@@ -39,13 +39,21 @@ struct Config {
 
 #[test]
 fn test_userdata_trait_type_name() {
-    let p = Point { x: 1.0, y: 2.0, _id: 0 };
+    let p = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
     assert_eq!(p.type_name(), "Point");
 }
 
 #[test]
 fn test_userdata_trait_get_field() {
-    let p = Point { x: 3.0, y: 4.0, _id: 42 };
+    let p = Point {
+        x: 3.0,
+        y: 4.0,
+        _id: 42,
+    };
 
     // Public fields should be accessible
     assert!(matches!(p.get_field("x"), Some(UdValue::Number(n)) if n == 3.0));
@@ -60,7 +68,11 @@ fn test_userdata_trait_get_field() {
 
 #[test]
 fn test_userdata_trait_set_field() {
-    let mut p = Point { x: 1.0, y: 2.0, _id: 0 };
+    let mut p = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
 
     // Set x to 10.0
     let result = p.set_field("x", UdValue::Number(10.0));
@@ -82,7 +94,11 @@ fn test_userdata_trait_set_field() {
 
 #[test]
 fn test_userdata_trait_field_names() {
-    let p = Point { x: 0.0, y: 0.0, _id: 0 };
+    let p = Point {
+        x: 0.0,
+        y: 0.0,
+        _id: 0,
+    };
     let names = p.field_names();
     assert!(names.contains(&"x"));
     assert!(names.contains(&"y"));
@@ -91,15 +107,31 @@ fn test_userdata_trait_field_names() {
 
 #[test]
 fn test_userdata_trait_display_metamethod() {
-    let p = Point { x: 1.5, y: 2.5, _id: 0 };
+    let p = Point {
+        x: 1.5,
+        y: 2.5,
+        _id: 0,
+    };
     assert_eq!(p.lua_tostring(), Some("Point(1.5, 2.5)".to_string()));
 }
 
 #[test]
 fn test_userdata_trait_eq_metamethod() {
-    let p1 = Point { x: 1.0, y: 2.0, _id: 0 };
-    let p2 = Point { x: 1.0, y: 2.0, _id: 99 }; // different _id but same x,y
-    let p3 = Point { x: 3.0, y: 4.0, _id: 0 };
+    let p1 = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
+    let p2 = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 99,
+    }; // different _id but same x,y
+    let p3 = Point {
+        x: 3.0,
+        y: 4.0,
+        _id: 0,
+    };
 
     // Since PartialEq is derived, it compares ALL fields including _id
     // p1 != p2 because _id differs
@@ -114,8 +146,16 @@ fn test_userdata_trait_eq_metamethod() {
 
 #[test]
 fn test_userdata_trait_ord_metamethod() {
-    let p1 = Point { x: 1.0, y: 2.0, _id: 0 };
-    let p2 = Point { x: 3.0, y: 4.0, _id: 0 };
+    let p1 = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
+    let p2 = Point {
+        x: 3.0,
+        y: 4.0,
+        _id: 0,
+    };
 
     assert_eq!(p1.lua_lt(&p2), Some(true));
     assert_eq!(p2.lua_lt(&p1), Some(false));
@@ -144,7 +184,10 @@ fn test_userdata_trait_readonly_field() {
 
     // Skipped field is not accessible
     assert!(cfg.get_field("secret").is_none());
-    assert!(cfg.set_field("secret", UdValue::Str("new".into())).is_none());
+    assert!(
+        cfg.set_field("secret", UdValue::Str("new".into()))
+            .is_none()
+    );
 }
 
 #[test]
@@ -163,7 +206,11 @@ fn test_userdata_trait_renamed_field() {
 
 #[test]
 fn test_userdata_trait_downcast() {
-    let p = Point { x: 1.0, y: 2.0, _id: 0 };
+    let p = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
     let trait_obj: &dyn UserDataTrait = &p;
 
     // Downcast via as_any
@@ -174,7 +221,11 @@ fn test_userdata_trait_downcast() {
 
 #[test]
 fn test_lua_userdata_wrapper() {
-    let p = Point { x: 5.0, y: 10.0, _id: 0 };
+    let p = Point {
+        x: 5.0,
+        y: 10.0,
+        _id: 0,
+    };
     let mut ud = LuaUserdata::new(p);
 
     // Type name
@@ -248,7 +299,11 @@ fn setup_point_vm() -> Box<LuaVM> {
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();
 
-    let p = Point { x: 3.0, y: 4.0, _id: 0 };
+    let p = Point {
+        x: 3.0,
+        y: 4.0,
+        _id: 0,
+    };
     let ud = LuaUserdata::new(p);
     let state = vm.main_state();
     let ud_val = state.create_userdata(ud).unwrap();
@@ -268,11 +323,15 @@ fn test_vm_get_field() {
 #[test]
 fn test_vm_set_field() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string(r#"
+    let results = vm
+        .execute_string(
+            r#"
         p.x = 10.0
         p.y = 20.0
         return p.x, p.y
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].as_number(), Some(10.0));
     assert_eq!(results[1].as_number(), Some(20.0));
@@ -291,9 +350,21 @@ fn test_vm_eq() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
-    let p1 = Point { x: 1.0, y: 2.0, _id: 0 };
-    let p2 = Point { x: 1.0, y: 2.0, _id: 0 };
-    let p3 = Point { x: 3.0, y: 4.0, _id: 0 };
+    let p1 = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
+    let p2 = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
+    let p3 = Point {
+        x: 3.0,
+        y: 4.0,
+        _id: 0,
+    };
 
     let state = vm.main_state();
     let v1 = state.create_userdata(LuaUserdata::new(p1)).unwrap();
@@ -314,8 +385,16 @@ fn test_vm_lt_le() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
-    let p1 = Point { x: 1.0, y: 2.0, _id: 0 };
-    let p2 = Point { x: 3.0, y: 4.0, _id: 0 };
+    let p1 = Point {
+        x: 1.0,
+        y: 2.0,
+        _id: 0,
+    };
+    let p2 = Point {
+        x: 3.0,
+        y: 4.0,
+        _id: 0,
+    };
 
     let state = vm.main_state();
     let v1 = state.create_userdata(LuaUserdata::new(p1)).unwrap();
@@ -323,7 +402,9 @@ fn test_vm_lt_le() {
     state.set_global("p1", v1).unwrap();
     state.set_global("p2", v2).unwrap();
 
-    let results = vm.execute_string("return p1 < p2, p1 <= p2, p2 < p1").unwrap();
+    let results = vm
+        .execute_string("return p1 < p2, p1 <= p2, p2 < p1")
+        .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_boolean(), Some(true));
     assert_eq!(results[1].as_boolean(), Some(true));
@@ -333,7 +414,9 @@ fn test_vm_lt_le() {
 #[test]
 fn test_vm_concat() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string(r#"return "pos=" .. tostring(p)"#).unwrap();
+    let results = vm
+        .execute_string(r#"return "pos=" .. tostring(p)"#)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("pos=Point(3, 4)"));
 }
@@ -341,12 +424,16 @@ fn test_vm_concat() {
 #[test]
 fn test_vm_pass_userdata_to_function() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string(r#"
+    let results = vm
+        .execute_string(
+            r#"
         local function get_x(obj)
             return obj.x
         end
         return get_x(p)
-    "#).unwrap();
+    "#,
+        )
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_number(), Some(3.0));
 }
@@ -367,14 +454,18 @@ fn test_vm_config_readonly() {
     state.set_global("cfg", ud_val).unwrap();
 
     // Can read name and version
-    let results = vm.execute_string("return cfg.name, cfg.version, cfg.count").unwrap();
+    let results = vm
+        .execute_string("return cfg.name, cfg.version, cfg.count")
+        .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_str(), Some("test"));
     assert_eq!(results[1].as_integer(), Some(42));
     assert_eq!(results[2].as_integer(), Some(10));
 
     // Can set name (writable)
-    let results = vm.execute_string(r#"cfg.name = "new"; return cfg.name"#).unwrap();
+    let results = vm
+        .execute_string(r#"cfg.name = "new"; return cfg.name"#)
+        .unwrap();
     assert_eq!(results[0].as_str(), Some("new"));
 
     // Cannot set version (readonly) — should error
