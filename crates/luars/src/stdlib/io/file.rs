@@ -653,8 +653,10 @@ impl LuaFile {
     }
 
     pub fn close(&mut self) -> io::Result<()> {
-        // Flush before closing
-        self.flush()?;
+        // Attempt to flush before closing, but ignore errors —
+        // like C's fclose, which discards the buffer on close even
+        // if fflush failed.  The file handle is released regardless.
+        let _ = self.flush();
         // Replace the inner with Closed to drop the file handles
         self.inner = FileInner::Closed;
         Ok(())
@@ -1036,7 +1038,14 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
                 return Ok(2);
             }
             if let Err(e) = lua_file.close() {
-                return Err(l.error(format!("close error: {}", e)));
+                // Return nil, errmsg, errno (like C Lua)
+                l.push_value(LuaValue::nil())?;
+                let msg = format!("{}", e);
+                let errno = e.raw_os_error().unwrap_or(0) as i64;
+                let err_str = l.create_string(&msg)?;
+                l.push_value(err_str)?;
+                l.push_value(LuaValue::integer(errno))?;
+                return Ok(3);
             }
             l.push_value(LuaValue::boolean(true))?;
             return Ok(1);
