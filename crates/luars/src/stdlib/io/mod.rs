@@ -114,8 +114,15 @@ fn create_stderr(l: &mut LuaState) -> LuaResult<LuaValue> {
 }
 
 /// io.write(...) - Write to default output file
-fn io_write(l: &mut LuaState) -> LuaResult<usize> {
-    // Get default output file from registry
+/// Helper: get the default output file handle (fast path via VM cache, fallback to registry/io.stdout)
+#[inline]
+fn get_default_output(l: &mut LuaState) -> LuaResult<LuaValue> {
+    // Fast path: use cached handle from VM
+    if let Some(handle) = l.vm_mut().io_default_output {
+        return Ok(handle);
+    }
+
+    // Slow path: look up from registry
     let registry = l.vm_mut().registry.clone();
     let key = l.create_string("_IO_output")?;
 
@@ -125,23 +132,72 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
         None
     };
 
-    // If no output set, use stdout
-    let file_handle = if let Some(output) = output_file {
-        output
-    } else {
-        let io_table = l
-            .get_global("io")?
-            .ok_or_else(|| l.error("io not found".to_string()))?;
-        let stdout_key = l.create_string("stdout")?;
+    if let Some(output) = output_file {
+        // Cache it for next time
+        l.vm_mut().io_default_output = Some(output);
+        return Ok(output);
+    }
 
-        if let Some(io_tbl) = io_table.as_table() {
-            io_tbl
-                .raw_get(&stdout_key)
-                .ok_or_else(|| l.error("stdout not found".to_string()))?
-        } else {
-            return Err(l.error("io table is not a table".to_string()));
-        }
+    // Fallback: use io.stdout
+    let io_table = l
+        .get_global("io")?
+        .ok_or_else(|| l.error("io not found".to_string()))?;
+    let stdout_key = l.create_string("stdout")?;
+
+    if let Some(io_tbl) = io_table.as_table() {
+        let handle = io_tbl
+            .raw_get(&stdout_key)
+            .ok_or_else(|| l.error("stdout not found".to_string()))?;
+        // Cache it
+        l.vm_mut().io_default_output = Some(handle);
+        Ok(handle)
+    } else {
+        Err(l.error("io table is not a table".to_string()))
+    }
+}
+
+/// Helper: get the default input file handle (fast path via VM cache, fallback to registry/io.stdin)
+#[inline]
+fn get_default_input(l: &mut LuaState) -> LuaResult<LuaValue> {
+    // Fast path: use cached handle from VM
+    if let Some(handle) = l.vm_mut().io_default_input {
+        return Ok(handle);
+    }
+
+    // Slow path: look up from registry
+    let registry = l.vm_mut().registry.clone();
+    let key = l.create_string("_IO_input")?;
+
+    let input_file = if let Some(registry_table) = registry.as_table() {
+        registry_table.raw_get(&key)
+    } else {
+        None
     };
+
+    if let Some(input) = input_file {
+        l.vm_mut().io_default_input = Some(input);
+        return Ok(input);
+    }
+
+    // Fallback: use io.stdin
+    let io_table = l
+        .get_global("io")?
+        .ok_or_else(|| l.error("io not found".to_string()))?;
+    let stdin_key = l.create_string("stdin")?;
+
+    if let Some(io_tbl) = io_table.as_table() {
+        let handle = io_tbl
+            .raw_get(&stdin_key)
+            .ok_or_else(|| l.error("stdin not found".to_string()))?;
+        l.vm_mut().io_default_input = Some(handle);
+        Ok(handle)
+    } else {
+        Err(l.error("io table is not a table".to_string()))
+    }
+}
+
+fn io_write(l: &mut LuaState) -> LuaResult<usize> {
+    let file_handle = get_default_output(l)?;
 
     // Get the file from userdata
     if let Some(ud) = file_handle.as_userdata_mut() {
@@ -158,24 +214,21 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
                     None => break,
                 };
 
-                let text = if let Some(s) = arg.as_str() {
-                    s.to_string()
-                } else if let Some(n) = arg.as_number() {
-                    n.to_string()
+                let write_result = if let Some(s) = arg.as_str() {
+                    lua_file.write(s)
+                } else if let Some(n) = arg.as_integer() {
+                    lua_file.write(&n.to_string())
+                } else if let Some(n) = arg.as_float() {
+                    lua_file.write(&n.to_string())
                 } else if let Some(b) = arg.as_binary() {
-                    // Binary strings: write raw bytes
-                    if let Err(e) = lua_file.write_bytes(b) {
-                        return Err(l.error(format!("write error: {}", e)));
-                    }
-                    i += 1;
-                    continue;
+                    lua_file.write_bytes(b)
                 } else {
                     return Err(
                         crate::stdlib::debug::arg_typeerror(l, i, "string or number", &arg)
                     );
                 };
 
-                if let Err(e) = lua_file.write(&text) {
+                if let Err(e) = write_result {
                     return Err(l.error(format!("write error: {}", e)));
                 }
 
@@ -193,32 +246,7 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
 
 /// io.read([format, ...]) - Read from default input
 fn io_read(l: &mut LuaState) -> LuaResult<usize> {
-    // Get default input file from registry
-    let registry = l.vm_mut().registry.clone();
-    let key = l.create_string("_IO_input")?;
-
-    let input_file = if let Some(registry_table) = registry.as_table() {
-        registry_table.raw_get(&key)
-    } else {
-        None
-    };
-
-    let file_handle = if let Some(input) = input_file {
-        input
-    } else {
-        // Fall back to io.stdin
-        let io_table = l
-            .get_global("io")?
-            .ok_or_else(|| l.error("io not found".to_string()))?;
-        let stdin_key = l.create_string("stdin")?;
-        if let Some(io_tbl) = io_table.as_table() {
-            io_tbl
-                .raw_get(&stdin_key)
-                .ok_or_else(|| l.error("stdin not found".to_string()))?
-        } else {
-            return Err(l.error("io table is not a table".to_string()));
-        }
-    };
+    let file_handle = get_default_input(l)?;
 
     if let Some(ud) = file_handle.as_userdata_mut() {
         let data = ud.get_data_mut();
@@ -328,31 +356,7 @@ fn read_one_format_file(l: &mut LuaState, lua_file: &mut LuaFile, fmt: &LuaValue
 
 /// io.flush() - Flush stdout
 fn io_flush(l: &mut LuaState) -> LuaResult<usize> {
-    // Get default output file from registry
-    let registry = l.vm_mut().registry.clone();
-    let key = l.create_string("_IO_output")?;
-    let output_file = if let Some(registry_table) = registry.as_table() {
-        registry_table.raw_get(&key)
-    } else {
-        None
-    };
-
-    let file_handle = if let Some(output) = output_file {
-        output
-    } else {
-        // Fall back to io.stdout
-        let io_table = l
-            .get_global("io")?
-            .ok_or_else(|| l.error("io not found".to_string()))?;
-        let stdout_key = l.create_string("stdout")?;
-        if let Some(io_tbl) = io_table.as_table() {
-            io_tbl
-                .raw_get(&stdout_key)
-                .ok_or_else(|| l.error("stdout not found".to_string()))?
-        } else {
-            return Err(l.error("io table is not a table".to_string()));
-        }
-    };
+    let file_handle = get_default_output(l)?;
 
     if let Some(ud) = file_handle.as_userdata_mut() {
         let data = ud.get_data_mut();
@@ -714,10 +718,11 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
 
             l.vm_mut().gc.check_finalizer(&userdata);
 
-            // Store in registry
+            // Store in registry and update cache
             let registry = l.vm_mut().registry.clone();
             let key = l.create_string("_IO_input")?;
             l.raw_set(&registry, key, userdata);
+            l.vm_mut().io_default_input = Some(userdata);
         } else if arg_val.is_userdata() {
             // Verify it's a valid file handle
             if let Some(ud) = arg_val.as_userdata_mut() {
@@ -727,40 +732,20 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            // Store in registry
+            // Store in registry and update cache
             let registry = l.vm_mut().registry.clone();
             let key = l.create_string("_IO_input")?;
             l.raw_set(&registry, key, arg_val);
+            l.vm_mut().io_default_input = Some(arg_val);
         } else {
             return Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &arg_val));
         }
     }
 
     // Return current input file
-    let registry = l.vm_mut().registry.clone();
-    let key = l.create_string("_IO_input")?;
-
-    if let Some(registry_table) = registry.as_table() {
-        if let Some(input) = registry_table.raw_get(&key) {
-            l.push_value(input)?;
-            return Ok(1);
-        }
-    }
-
-    // If no input set, return stdin
-    let io_table = l
-        .get_global("io")?
-        .ok_or_else(|| l.error("io not found".to_string()))?;
-    let stdin_key = l.create_string("stdin")?;
-
-    if let Some(io_tbl) = io_table.as_table() {
-        if let Some(stdin) = io_tbl.raw_get(&stdin_key) {
-            l.push_value(stdin)?;
-            return Ok(1);
-        }
-    }
-
-    Err(l.error("stdin not found".to_string()))
+    let handle = get_default_input(l)?;
+    l.push_value(handle)?;
+    Ok(1)
 }
 
 /// io.output([file]) - Set or get default output file
@@ -795,10 +780,11 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
 
             l.vm_mut().gc.check_finalizer(&userdata);
 
-            // Store in registry
+            // Store in registry and update cache
             let registry = l.vm_mut().registry.clone();
             let key = l.create_string("_IO_output")?;
             l.raw_set(&registry, key, userdata);
+            l.vm_mut().io_default_output = Some(userdata);
         } else if arg_val.is_userdata() {
             // Verify it's a valid file handle
             if let Some(ud) = arg_val.as_userdata_mut() {
@@ -808,10 +794,11 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            // Store in registry
+            // Store in registry and update cache
             let registry = l.vm_mut().registry.clone();
             let key = l.create_string("_IO_output")?;
             l.raw_set(&registry, key, arg_val);
+            l.vm_mut().io_default_output = Some(arg_val);
         } else {
             return Err(
                 l.error("bad argument #1 to 'output' (string or file expected)".to_string())
@@ -820,30 +807,9 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Return current output file
-    let registry = l.vm_mut().registry.clone();
-    let key = l.create_string("_IO_output")?;
-
-    if let Some(registry_table) = registry.as_table() {
-        if let Some(output) = registry_table.raw_get(&key) {
-            l.push_value(output)?;
-            return Ok(1);
-        }
-    }
-
-    // If no output set, return stdout
-    let io_table = l
-        .get_global("io")?
-        .ok_or_else(|| l.error("io not found".to_string()))?;
-    let stdout_key = l.create_string("stdout")?;
-
-    if let Some(io_tbl) = io_table.as_table() {
-        if let Some(stdout) = io_tbl.raw_get(&stdout_key) {
-            l.push_value(stdout)?;
-            return Ok(1);
-        }
-    }
-
-    Err(l.error("stdout not found".to_string()))
+    let handle = get_default_output(l)?;
+    l.push_value(handle)?;
+    Ok(1)
 }
 
 /// io.type(obj) - Check if obj is a file handle
@@ -901,8 +867,8 @@ fn io_tmpfile(l: &mut LuaState) -> LuaResult<usize> {
             #[cfg(unix)]
             let _ = std::fs::remove_file(&temp_path);
 
-            // Wrap in LuaFile
-            let lua_file = LuaFile::from_file(file);
+            // Wrap in LuaFile (read+write mode for tmpfile)
+            let lua_file = LuaFile::from_file_rw(file);
 
             // Create file metatable
             let file_mt = create_file_metatable(l)?;
@@ -931,20 +897,12 @@ fn io_tmpfile(l: &mut LuaState) -> LuaResult<usize> {
 fn io_close(l: &mut LuaState) -> LuaResult<usize> {
     let file_arg = l.get_arg(1);
 
+    let is_default_output = file_arg.is_none();
     let file_val = if let Some(file) = file_arg {
         file
     } else {
         // No file given - close default output
-        let registry = l.vm_mut().registry.clone();
-        let key = l.create_string("_IO_output")?;
-
-        if let Some(registry_table) = registry.as_table() {
-            registry_table
-                .raw_get(&key)
-                .ok_or_else(|| l.error("no default output file".to_string()))?
-        } else {
-            return Err(l.error("registry is not a table".to_string()));
-        }
+        get_default_output(l)?
     };
 
     if let Some(ud) = file_val.as_userdata_mut() {
@@ -963,6 +921,10 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
             }
             match lua_file.close() {
                 Ok(_) => {
+                    // Invalidate cached handle if we closed the default output
+                    if is_default_output {
+                        l.vm_mut().io_default_output = None;
+                    }
                     l.push_value(LuaValue::boolean(true))?;
                     return Ok(1);
                 }

@@ -178,8 +178,15 @@ impl LuaFile {
         })
     }
 
-    /// Create from existing File (for tmpfile)
+    /// Create from existing File for write-only use (io.output)
     pub fn from_file(file: File) -> Self {
+        LuaFile {
+            inner: FileInner::Write(BufWriter::new(file)),
+        }
+    }
+
+    /// Create from existing File for read-write use (io.tmpfile)
+    pub fn from_file_rw(file: File) -> Self {
         LuaFile {
             inner: FileInner::ReadWrite(BufReader::new(file)),
         }
@@ -551,7 +558,11 @@ impl LuaFile {
 
     /// Write operations
     pub fn write(&mut self, data: &str) -> io::Result<()> {
-        // Convert from internal UTF-8/Latin-1 representation back to bytes
+        // Fast path: if data is ASCII, bytes == chars, skip conversion
+        if data.is_ascii() {
+            return self.write_bytes(data.as_bytes());
+        }
+        // Slow path: Convert from internal UTF-8 representation back to Latin-1 bytes
         // Each char's Unicode code point maps to its byte value (Latin-1)
         let bytes: Vec<u8> = data.chars().map(|c| c as u8).collect();
         self.write_bytes(&bytes)

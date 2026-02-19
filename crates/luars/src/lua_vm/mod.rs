@@ -136,6 +136,10 @@ pub struct LuaVM {
     pub(crate) start_time: Instant,
 
     pub const_strings: ConstString,
+
+    /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
+    pub(crate) io_default_output: Option<LuaValue>,
+    pub(crate) io_default_input: Option<LuaValue>,
 }
 
 impl LuaVM {
@@ -168,6 +172,8 @@ impl LuaVM {
             // Record start time for os.clock()
             start_time: Instant::now(),
             const_strings: cs,
+            io_default_output: None,
+            io_default_input: None,
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;

@@ -942,6 +942,24 @@ impl LuaValue {
             return unsafe { self.value.i as u64 };
         }
 
+        // For floats, use proper bit mixing to avoid catastrophic hash collisions.
+        // The raw f64 bit pattern has poor distribution in the low bits for
+        // values like n*(1+2^-52) (perturbed float keys used by the compiler's
+        // constant deduplication) and for half-integers (1.5, 2.5, etc.),
+        // causing O(n²) hash chain buildup.
+        // We apply a splitmix64 finalizer to the raw bits to ensure
+        // all output bits depend on all input bits.
+        if tt == LUA_VNUMFLT {
+            let mut h = unsafe { self.value.i as u64 };
+            // splitmix64 finalizer — bijective, excellent avalanche
+            h ^= h >> 30;
+            h = h.wrapping_mul(0xbf58476d1ce4e5b9);
+            h ^= h >> 27;
+            h = h.wrapping_mul(0x94d049bb133111eb);
+            h ^= h >> 31;
+            return h;
+        }
+
         // For other types, use pointer or value bits
         unsafe { self.value.i as u64 }
     }
