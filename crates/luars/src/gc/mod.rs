@@ -1161,6 +1161,13 @@ impl GC {
                 StepResult::Work(1)
             }
             GcState::Propagate => {
+                // In C Lua 5.5's fullinc, propagation during Propagate state
+                // is skipped: runtilstate(GCSpropagate) transitions from Pause
+                // directly, then gcstate is set to GCSenteratomic. All gray
+                // objects are processed during atomic's propagateall calls.
+                //
+                // Our fast mode mirrors this: skip straight to EnterAtomic.
+                // Non-fast mode processes one gray object per step (incremental).
                 if fast || self.gray.is_empty() {
                     self.gc_state = GcState::EnterAtomic;
                     StepResult::Work(1)
@@ -1508,6 +1515,18 @@ impl GC {
         for gc_ptr in original_list {
             if let Some(header) = gc_ptr.header_mut() {
                 if header.is_white() {
+                    // CRITICAL FIX: Don't remove WHITE threads from grayagain!
+                    // OLD threads that become unreachable survive minor collections
+                    // (old list is not swept). But their stack may reference young
+                    // objects in allgc/survival that WILL be swept. If the thread
+                    // is removed from grayagain, its stack won't be scanned, and
+                    // those young objects are freed while still referenced → crash.
+                    // Keep WHITE threads in grayagain so their stacks are always
+                    // traversed. They'll be properly collected in a major GC.
+                    if gc_ptr.kind() == GcObjectKind::Thread {
+                        list.push(gc_ptr);
+                        continue;
+                    }
                     // Object turned white during sweep - remove from list
                     continue;
                 }
@@ -1957,17 +1976,25 @@ impl GC {
             let top = state.get_top();
             let stack = state.stack();
 
+            // Guard: if stack is not yet built (empty), skip marking.
+            // Matches C Lua: "if (o == NULL) return 0;"
+            if stack.is_empty() {
+                return 1;
+            }
+
+            // Mark stack values from 0..top, matching C Lua's traversethread.
+            // C Lua marks exactly stack.p to top.p — no stackinuse extension.
+            // Live locals in suspended coroutines are guaranteed to be below top
+            // because resume restores stack_top to ci.top (the Lua frame's
+            // base + maxstacksize), covering all registers.
             for i in 0..top {
                 self.mark_value(l, &stack[i]);
                 count += 1;
             }
 
-            // Mark TBC (to-be-closed) variables that may be ABOVE stack_top.
-            // During error recovery (e.g., pcall unwinding), frames are popped
-            // but TBC variables in those frames haven't been closed yet.
-            // Their stack positions may be above stack_top, invisible to the
-            // scan above.  This mirrors C Lua's prepcallclosemth which sets
-            // L->top near the TBC variable level to keep lower entries marked.
+            // Also mark TBC variables that may be ABOVE stack_top as a safety net.
+            // These should normally be below top (within the frame's register range),
+            // but mark them defensively in case of edge cases.
             for &tbc_idx in state.tbc_list.iter() {
                 if tbc_idx >= top && tbc_idx < stack.len() {
                     self.mark_value(l, &stack[tbc_idx]);
@@ -1994,19 +2021,13 @@ impl GC {
                 // TODO: implement stack shrinking if needed
             }
 
-            // Lua 5.5 lgc.c traversethread atomic phase:
-            // for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
-            //     setnilvalue(s2v(o));  /* clear dead stack slice */
-            //
-            // IMPORTANT: We must compute the real "stack in use" extent, not
-            // just get_top(). Some instructions (e.g. NEWTABLE, CONCAT) temporarily
-            // lower L->top before calling check_gc(). If the GC reaches the atomic
-            // phase during such a window, get_top() returns a value BELOW live
-            // local variables. Clearing from get_top() would destroy them.
-            //
-            // This mirrors C Lua's stackinuse(): we take the max of L->top and
-            // all ci->top (plus base+maxstacksize for Lua frames) across all
-            // active call frames to find the true highest live slot.
+            // Clear values above "stack in use" to nil.
+            // stackinuse = max(top, all ci.top values) — the extent of stack
+            // actually in use including suspended coroutine frames.
+            // We clear from stackinuse (not top) to preserve values within ci
+            // ranges that may be needed when the coroutine resumes.
+            // The push_c_frame fix ensures stack_top is high enough during
+            // yield suspension to cover all live registers for GC marking.
             {
                 let state = &mut gc_thread.data;
                 let mut stack_in_use = state.get_top();
@@ -2018,8 +2039,6 @@ impl GC {
                     }
                 }
                 // Also protect TBC variable positions from being cleared.
-                // During error recovery, TBC variables may be above all frame
-                // tops but still need to be alive for __close calls.
                 for &tbc_idx in state.tbc_list.iter() {
                     if tbc_idx + 1 > stack_in_use {
                         stack_in_use = tbc_idx + 1;
@@ -2137,6 +2156,15 @@ impl GC {
         // Propagate changes from remark_upvalues
         self.propagate_all(l);
 
+        // Process grayagain list — re-traverse ALL objects, matching C Lua 5.5's
+        // atomic (lgc.c line 1559): `g->gray = grayagain; propagateall(g);`
+        //
+        // During this re-traversal (with gc_state == Atomic):
+        //   - All-weak tables go to the allweak list (not back to grayagain),
+        //     ensuring their entries are later cleared by clear_by_values.
+        //   - Threads get re-scanned with 0..top marking (top is correct
+        //     because resume restores stack_top to ci.top).
+        //   - Ephemeron tables go to the ephemeron list for convergeephemerons.
         let grayagain = std::mem::take(&mut self.grayagain);
         self.gray = grayagain;
         self.propagate_all(l);
@@ -2166,10 +2194,70 @@ impl GC {
 
         self.current_white = GcHeader::otherwhite(self.current_white); // Flip current white
 
+        // CRITICAL: Close open upvalues on dead threads BEFORE sweep starts.
+        //
+        // When a coroutine is GC'd, its stack (Vec<LuaValue>) is freed. But closures
+        // created inside the coroutine may still reference open upvalues pointing into
+        // that stack with raw pointers. Without closing them first, those upvalue pointers
+        // become dangling → use-after-free → heap corruption.
+        //
+        // This mirrors Lua 5.5's luaF_closethread(L, L1, 0) called from luaE_freethread.
+        // We do it here (after white flip, before sweep) because at this point ALL objects
+        // are still in memory — we can safely access both threads and their upvalues.
+        // During sweep, objects are freed incrementally and the order is not guaranteed,
+        // so a dead upvalue might be freed before its owning thread.
+        self.close_dead_threads_upvalues();
+
         debug_assert!(
             self.gray.is_empty(),
             "Gray list should be empty at end of atomic phase"
         );
+    }
+
+    /// Close open upvalues on dead threads to prevent dangling stack pointers.
+    ///
+    /// Called during atomic phase after white flip. At this point:
+    /// - Dead threads are identifiable (have other_white color)
+    /// - ALL objects are still in memory (sweep hasn't started)
+    /// - Upvalue objects are safely accessible
+    ///
+    /// We close ALL open upvalues on dead threads (both alive and dead upvalues).
+    /// Alive upvalues NEED closing (live closures still reference them).
+    /// Dead upvalues don't need closing but it's harmless and simpler than filtering.
+    fn close_dead_threads_upvalues(&mut self) {
+        let other_white = GcHeader::otherwhite(self.current_white);
+
+        // Helper closure to process one GC list
+        let process_list = |list: &GcList| {
+            for obj in list.iter() {
+                if let GcObjectOwner::Thread(thread_box) = obj {
+                    let thread = thread_box.as_ref();
+                    let is_dead = thread.header.is_dead(other_white);
+                    // Check if thread is dead (has the old white color)
+                    if is_dead && !thread.data.open_upvalues().is_empty() {
+                        // Close all open upvalues on this dead thread
+                        for upval_ptr in thread.data.open_upvalues() {
+                            let upval_data = &mut upval_ptr.as_mut_ref().data;
+                            if upval_data.is_open() {
+                                let stack_idx = upval_data.get_stack_index();
+                                let value = thread
+                                    .data
+                                    .stack()
+                                    .get(stack_idx)
+                                    .copied()
+                                    .unwrap_or(LuaValue::nil());
+                                upval_data.close(value);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        process_list(&self.allgc);
+        process_list(&self.survival);
+        process_list(&self.old1);
+        process_list(&self.old);
     }
 
     fn propagate_all(&mut self, l: &mut LuaState) {
@@ -2915,9 +3003,166 @@ impl GC {
     /// - old: Only G_OLD1 are processed by mark_old, others are skipped
     ///
     /// Returns: bytes promoted to OLD1 generation
+
+    /// DEBUG: Collect all raw pointers from all thread stacks.
+    /// Used to validate that sweep never frees a stack-referenced object.
+    #[cfg(debug_assertions)]
+    fn collect_all_stack_ptrs(
+        l: &LuaState,
+        allgc: &GcList,
+        survival: &GcList,
+        old1: &GcList,
+        old: &GcList,
+    ) -> std::collections::HashMap<u64, (String, usize, usize, u8)> {
+        use std::collections::HashMap;
+        let mut ptrs: HashMap<u64, (String, usize, usize, u8)> = HashMap::new();
+
+        let collect_from_thread =
+            |name: &str,
+             state: &crate::lua_vm::LuaState,
+             marked: u8,
+             ptrs: &mut HashMap<u64, (String, usize, usize, u8)>| {
+                let stack = state.stack();
+                let top = state.get_top();
+                // Only scan 0..top — values above top are stale and will be
+                // cleared to nil by atomic phase (matching C Lua's traversethread).
+                let scan_end = top.min(stack.len());
+                for i in 0..scan_end {
+                    let v = &stack[i];
+                    if v.is_collectable() {
+                        ptrs.insert(
+                            unsafe { v.value.ptr as u64 },
+                            (name.to_string(), i, top, marked),
+                        );
+                    }
+                }
+            };
+
+        // Main thread
+        collect_from_thread("main", l, 0, &mut ptrs);
+
+        // All threads in all GC lists — skip dead (white) threads
+        let lists: [(&str, &GcList); 4] = [
+            ("allgc", allgc),
+            ("survival", survival),
+            ("old1", old1),
+            ("old", old),
+        ];
+        for (list_name, list) in lists {
+            for (idx, obj) in list.iter().enumerate() {
+                if let GcObjectOwner::Thread(t) = obj {
+                    // Skip dead threads: if the thread is white, it's unreachable
+                    // and will be freed — objects on its stack are expected to be freed too.
+                    if t.header.is_white() {
+                        continue;
+                    }
+                    let name = format!("thread_{}_{}", list_name, idx);
+                    collect_from_thread(&name, &t.data, t.header.marked, &mut ptrs);
+                }
+            }
+        }
+
+        ptrs
+    }
+
+    /// DEBUG: Validate that an object about to be freed is NOT on any thread's stack.
+    #[cfg(debug_assertions)]
+    fn validate_not_on_stack(
+        gc_owner: &GcObjectOwner,
+        stack_ptrs: &std::collections::HashMap<u64, (String, usize, usize, u8)>,
+        old_list: &GcList,
+    ) {
+        let raw_ptr = match gc_owner {
+            GcObjectOwner::Table(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::Function(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::CClosure(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::String(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::Binary(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::Thread(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::Upvalue(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::Userdata(b) => b.as_ref() as *const _ as u64,
+        };
+        if let Some((thread_name, slot, top, thread_marked)) = stack_ptrs.get(&raw_ptr) {
+            let kind = gc_owner.as_gc_ptr().kind();
+            let header = gc_owner.header();
+            let above_top = if *slot >= *top { " (ABOVE TOP!)" } else { "" };
+
+            // Find the thread and dump its call stack info
+            let mut thread_info = String::new();
+            for (idx, obj) in old_list.iter().enumerate() {
+                if let GcObjectOwner::Thread(t) = obj {
+                    let name = format!("thread_old_{}", idx);
+                    if &name == thread_name {
+                        let state = &t.data;
+                        thread_info.push_str(&format!(
+                            "\n  Thread call_depth={}, stack_len={}",
+                            state.call_depth(),
+                            state.stack_len()
+                        ));
+                        for ci_idx in 0..state.call_depth() {
+                            let ci = state.get_call_info(ci_idx);
+                            thread_info.push_str(&format!("\n    ci[{}]: base={}, top={}, pc={}, nresults={}, status=0x{:02X}",
+                                ci_idx, ci.base, ci.top, ci.pc, ci.nresults, ci.call_status));
+                        }
+                        // Show collectable values around the slot in question
+                        let start = (*slot).saturating_sub(5);
+                        let end = (*slot + 5).min(state.stack_len());
+                        let stack = state.stack();
+                        for i in start..end {
+                            let v = &stack[i];
+                            let marker = if i == *slot {
+                                " <== FREED"
+                            } else if i == *top {
+                                " <== TOP"
+                            } else {
+                                ""
+                            };
+                            if v.is_collectable() {
+                                thread_info.push_str(&format!(
+                                    "\n    stack[{}]: tt={}, ptr={:#x}{}",
+                                    i,
+                                    v.tt(),
+                                    unsafe { v.value.ptr as u64 },
+                                    marker
+                                ));
+                            } else {
+                                thread_info.push_str(&format!(
+                                    "\n    stack[{}]: tt={} (non-gc){}",
+                                    i,
+                                    v.tt(),
+                                    marker
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            panic!(
+                "SWEEP BUG: Freeing {:?} at {:#x} ON STACK! thread='{}', slot={}, top={}{}, obj_marked=0x{:02X}, obj_age={}, thread_marked=0x{:02X}{}",
+                kind,
+                raw_ptr,
+                thread_name,
+                slot,
+                top,
+                above_top,
+                header.marked,
+                header.age(),
+                thread_marked,
+                thread_info
+            );
+        }
+    }
+
     fn sweep_gen(&mut self, l: &mut LuaState) -> isize {
         let other_white = 1 - self.current_white;
         let mut added_old1: isize = 0;
+
+        // DEBUG: Collect all raw pointers from all thread stacks to validate
+        // that we never free an object that is still on a stack.
+        #[cfg(debug_assertions)]
+        let stack_ptrs =
+            Self::collect_all_stack_ptrs(l, &self.allgc, &self.survival, &self.old1, &self.old);
 
         // Phase 1: Sweep allgc list (G_NEW objects)
         // Dead objects are freed, survivors are promoted to survival (G_SURVIVAL)
@@ -2947,6 +3192,8 @@ impl GC {
                     if let GcObjectPtr::String(str_ptr) = gc_ptr {
                         Self::remove_dead_string_from_intern(l, str_ptr);
                     }
+                    #[cfg(debug_assertions)]
+                    Self::validate_not_on_stack(&gc_owner, &stack_ptrs, &self.old);
                     self.total_bytes -= gc_owner.size() as isize;
                     self.release_object(gc_owner);
                 }
@@ -2984,6 +3231,8 @@ impl GC {
                     if let GcObjectPtr::String(str_ptr) = gc_ptr {
                         Self::remove_dead_string_from_intern(l, str_ptr);
                     }
+                    #[cfg(debug_assertions)]
+                    Self::validate_not_on_stack(&gc_owner, &stack_ptrs, &self.old);
                     self.total_bytes -= gc_owner.size() as isize;
                     self.release_object(gc_owner);
                 }

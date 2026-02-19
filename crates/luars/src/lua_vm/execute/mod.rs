@@ -22,7 +22,7 @@ mod closure_handler;
 mod cold;
 mod concat;
 pub(crate) mod helper;
-mod metamethod;
+pub(crate) mod metamethod;
 mod return_handler;
 
 // Extracted opcode modules to reduce main loop size
@@ -46,10 +46,10 @@ use crate::{
             },
             concat::handle_concat,
             helper::{
-                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_idiv, lua_imod,
-                lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue, pttisfloat,
-                pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
-                tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
+                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
+                lua_imod, lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue,
+                pttisfloat, pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue,
+                setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
             },
         },
     },
@@ -85,6 +85,28 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let frame_idx = current_depth - 1;
         // ===== LOAD FRAME CONTEXT =====
         // Safety: frame_idx < call_depth (guaranteed by check above)
+        let ci = lua_state.get_call_info(frame_idx);
+
+        // Clear stale stack slots between current top and the frame's
+        // register extent (ci.top = base + maxstacksize).
+        // After a CALL returns, the return handler lowers stack_top to
+        // func_pos + nresults. Slots above this new top may contain stale
+        // GC pointers from the previous frame or from before the call.
+        // Without clearing, a later push_lua_frame could raise top past
+        // these stale slots, bringing dangling pointers into GC marking
+        // range and causing crashes during sweep.
+        // We nil them here instead of raising top (which would break
+        // RETURN B=0 MULTRET semantics that rely on top for counting).
+        {
+            let current_top = lua_state.get_top();
+            let ci_top = ci.top;
+            if current_top < ci_top {
+                let stack = lua_state.stack_mut();
+                for i in current_top..ci_top {
+                    stack[i] = LuaValue::nil();
+                }
+            }
+        }
         let ci = lua_state.get_call_info(frame_idx);
 
         // Cold-path check: C frame or pending metamethod finish.
@@ -359,6 +381,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_idiv(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to divide by zero".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
@@ -385,13 +410,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_imod(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
                             pc += 1;
-                            setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
+                            setfltvalue(&mut stack[base + a], lua_fmod(n1, n2));
                         }
                     }
                 }
@@ -430,12 +458,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             // Try __unm metamethod with Protect pattern
                             save_pc!();
-                            metamethod::try_unary_tm(
+                            match metamethod::try_unary_tm(
                                 lua_state,
                                 rb,
                                 base + a,
                                 metamethod::TmKind::Unm,
-                            )?;
+                            ) {
+                                Ok(_) => {}
+                                Err(LuaError::Yield) => {
+                                    let ci = lua_state.get_call_info_mut(frame_idx);
+                                    ci.call_status |= CIST_PENDING_FINISH;
+                                    return Err(LuaError::Yield);
+                                }
+                                Err(e) => return Err(e),
+                            }
                             restore_state!();
                         }
                     }
@@ -529,15 +565,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_imod(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            if n2 != 0.0 {
-                                pc += 1;
-                                setfltvalue(&mut stack[base + a], n1 - (n1 / n2).floor() * n2);
-                            }
+                            pc += 1;
+                            setfltvalue(&mut stack[base + a], lua_fmod(n1, n2));
                         }
                     }
                 }
@@ -591,15 +628,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if i2 != 0 {
                             pc += 1;
                             setivalue(&mut stack[base + a], lua_idiv(i1, i2));
+                        } else {
+                            save_pc!();
+                            return Err(lua_state.error("attempt to divide by zero".to_string()));
                         }
                     } else {
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            if n2 != 0.0 {
-                                pc += 1;
-                                setfltvalue(&mut stack[base + a], (n1 / n2).floor());
-                            }
+                            pc += 1;
+                            setfltvalue(&mut stack[base + a], (n1 / n2).floor());
                         }
                     }
                 }
@@ -753,12 +791,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         // Try __bnot metamethod with Protect pattern
                         save_pc!();
-                        metamethod::try_unary_tm(
+                        match metamethod::try_unary_tm(
                             lua_state,
                             v1,
                             base + a,
                             metamethod::TmKind::Bnot,
-                        )?;
+                        ) {
+                            Ok(_) => {}
+                            Err(LuaError::Yield) => {
+                                let ci = lua_state.get_call_info_mut(frame_idx);
+                                ci.call_status |= CIST_PENDING_FINISH;
+                                return Err(LuaError::Yield);
+                            }
+                            Err(e) => return Err(e),
+                        }
                         restore_state!();
                     }
                 }
@@ -1025,7 +1071,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         false
                     };
 
-                    if !fast_path_ok {
+                    if fast_path_ok {
+                        // GC write barrier: if the table (BLACK) now references
+                        // a new WHITE value, the GC must be notified.
+                        if value.is_collectable() {
+                            if let Some(gc_ptr) = ra.as_gc_ptr() {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                        }
+                    } else {
                         // Slow path: metamethod or hash part
                         save_pc!();
                         table_ops::exec_seti(
@@ -1033,7 +1087,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )?;
                         restore_state!();
                     }
-                    // No check_gc needed on fast path: only updates existing array slots (no allocation)
                 }
                 OpCode::SetField => {
                     // SETFIELD: R[A][K[B]:string] := RK(C)
@@ -1059,7 +1112,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         false
                     };
 
-                    if !fast_path_ok {
+                    if fast_path_ok {
+                        // GC write barrier: if the table (BLACK) now references
+                        // a new WHITE value, the GC must be notified.
+                        if value.is_collectable() {
+                            if let Some(gc_ptr) = ra.as_gc_ptr() {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                        }
+                    } else {
                         // Slow path: metamethod, new key insertion, or non-table
                         save_pc!();
                         table_ops::exec_setfield(
@@ -1067,7 +1128,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )?;
                         restore_state!();
                     }
-                    // No check_gc needed on fast path: only updates existing keys (no allocation)
                 }
                 OpCode::Self_ => {
                     table_ops::exec_self(lua_state, instr, constants, base, frame_idx, &mut pc)?;
@@ -1230,11 +1290,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             // Try converting to float (handles float and string)
                             let mut flimit = 0.0;
-                            if !tonumberns(&stack[ra + 1], &mut flimit) {
+                            let limit_val = stack[ra + 1]; // Copy to avoid borrow conflict
+                            if !tonumberns(&limit_val, &mut flimit) {
+                                let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
                                 save_pc!();
-                                return Err(
-                                    lua_state.error("'for' limit must be a number".to_string())
-                                );
+                                return Err(lua_state.error(format!(
+                                    "bad 'for' limit (number expected, got {})",
+                                    t
+                                )));
                             }
                             // Try rounding the float to integer
                             let nl = if step < 0 {
@@ -1243,7 +1306,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 flimit.floor()
                             };
                             // Check if the rounded float fits in i64
-                            if nl >= (i64::MIN as f64) && nl <= (i64::MAX as f64) && nl == nl {
+                            if nl >= (i64::MIN as f64) && nl < -(i64::MIN as f64) && nl == nl {
                                 let lim = nl as i64;
                                 let skip = if step > 0 { init > lim } else { init < lim };
                                 break 'forlimit (lim, skip);

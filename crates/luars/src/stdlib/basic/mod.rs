@@ -92,20 +92,91 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
 fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
     let arg_count = l.arg_count();
 
+    // assert() without arguments: error "value expected"
+    if arg_count == 0 {
+        return Err(l.error("bad argument #1 to 'assert' (value expected)".to_string()));
+    }
+
     // Get first argument without consuming it
     let condition = l.get_arg(1).unwrap_or(LuaValue::nil());
 
     if !condition.is_truthy() {
-        let message = l
-            .get_arg(2)
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "assertion failed!".to_string());
-        return Err(l.error(message));
+        // Check if second argument is present and what type
+        let msg_arg = l.get_arg(2);
+
+        if let Some(msg) = msg_arg {
+            if msg.is_string() {
+                // String message: add source:line prefix like error() does
+                let message = l.to_string(&msg)?;
+                let where_prefix = lua_where(l, 1);
+                let formatted = format!("{}{}", where_prefix, message);
+                let err_str = l.create_string(&formatted)?;
+                l.error_object = err_str.into();
+                l.error_msg = formatted;
+                return Err(LuaError::RuntimeError);
+            } else {
+                // Non-string: raise as error object (like error(obj, 0))
+                let message = l.to_string(&msg)?;
+                return Err(l.error_with_object(message, msg));
+            }
+        }
+
+        // No second argument: default "assertion failed!" with source prefix
+        let where_prefix = lua_where(l, 1);
+        let formatted = format!("{}assertion failed!", where_prefix);
+        let err_str = l.create_string(&formatted)?;
+        l.error_object = err_str.into();
+        l.error_msg = formatted;
+        return Err(LuaError::RuntimeError);
     }
 
     // Return all arguments - they are already on stack
     // Just return the count
     Ok(arg_count)
+}
+
+/// Helper: compute "source:line: " prefix at the given call level (like luaL_where)
+/// Counts ALL frames (C and Lua) for the level, but only returns info for Lua frames.
+fn lua_where(l: &LuaState, level: usize) -> String {
+    let depth = l.call_depth();
+    let mut lvl = level;
+    // Start from the frame BELOW the current one (skip the current C frame itself)
+    if depth >= 2 {
+        let mut i = depth - 2;
+        loop {
+            // Count ALL frames (C and Lua)
+            lvl -= 1;
+            if lvl == 0 {
+                let ci = l.get_call_info(i);
+                // Only extract info from Lua frames
+                if ci.is_lua() {
+                    if let Some(func_obj) = ci.func.as_lua_function() {
+                        let chunk = func_obj.chunk();
+                        let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            chunk.line_info[ci.pc as usize - 1] as usize
+                        } else if !chunk.line_info.is_empty() {
+                            chunk.line_info[0] as usize
+                        } else {
+                            0
+                        };
+                        return if line > 0 {
+                            format!("{}:{}: ", source, line)
+                        } else {
+                            format!("{}: ", source)
+                        };
+                    }
+                }
+                // C frame at target level: no line info available
+                break;
+            }
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+    }
+    String::new()
 }
 
 /// error(message) - Raise an error
@@ -123,51 +194,7 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
     if arg.is_string() && level > 0 {
         // Add position info to string error message (like luaL_where)
         let message = l.to_string(&arg)?;
-
-        // Find the Lua frame at 'level' up from the current frame
-        // Skip C frames when counting levels (like luaL_where)
-        let mut where_prefix = String::new();
-        let depth = l.call_depth();
-        let mut lvl = level as usize;
-        // Start from the frame BELOW the current one (skip the error() C frame itself)
-        if depth >= 2 {
-            let mut i = depth - 2;
-            loop {
-                if i < depth {
-                    let ci = l.get_call_info(i);
-                    if ci.is_lua() {
-                        lvl -= 1;
-                        if lvl == 0 {
-                            // Found the target frame
-                            if let Some(func_obj) = ci.func.as_lua_function() {
-                                let chunk = func_obj.chunk();
-                                let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                                let line =
-                                    if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                                        chunk.line_info[ci.pc as usize - 1] as usize
-                                    } else if !chunk.line_info.is_empty() {
-                                        chunk.line_info[0] as usize
-                                    } else {
-                                        0
-                                    };
-                                if line > 0 {
-                                    where_prefix = format!("{}:{}: ", source, line);
-                                } else {
-                                    where_prefix = format!("{}: ", source);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                } else {
-                    break;
-                }
-                if i == 0 {
-                    break;
-                }
-                i -= 1;
-            }
-        }
+        let where_prefix = lua_where(l, level as usize);
 
         let formatted_msg = format!("{}{}", where_prefix, message);
         let err_str = l.create_string(&formatted_msg)?;
@@ -188,36 +215,155 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
     let value = l
         .get_arg(1)
         .ok_or_else(|| l.error("tonumber() requires argument 1".to_string()))?;
+    let has_base = l.get_arg(2).is_some();
     let base = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(10);
 
-    if base < 2 || base > 36 {
+    if has_base && (base < 2 || base > 36) {
         return Err(l.error("bad argument #2 to 'tonumber' (base out of range)".to_string()));
     }
 
     let result = match value.kind() {
-        LuaValueKind::Integer => value.clone(),
-        LuaValueKind::Float => value.clone(),
+        LuaValueKind::Integer if !has_base => value.clone(),
+        LuaValueKind::Float if !has_base => value.clone(),
         LuaValueKind::String => {
             if let Some(s) = value.as_str() {
                 let s_str = s.trim();
-                if base == 10 {
-                    parse_lua_number(s_str)
-                } else {
-                    if let Ok(i) = i64::from_str_radix(s_str, base as u32) {
-                        LuaValue::integer(i)
+                if has_base {
+                    // Explicit base: parse as base-N integer.
+                    // Leading/trailing spaces are allowed; 0x prefix is NOT.
+                    // Handle optional leading sign.
+                    let (neg, digits) = if let Some(rest) = s_str.strip_prefix('-') {
+                        (true, rest.trim_start())
+                    } else if let Some(rest) = s_str.strip_prefix('+') {
+                        (false, rest.trim_start())
                     } else {
+                        (false, s_str)
+                    };
+                    // Reject empty, strings with embedded whitespace, or null bytes
+                    if digits.is_empty() || digits.contains('\0') {
                         LuaValue::nil()
+                    } else {
+                        // u64 to handle full unsigned range, then cast to i64 (wrapping)
+                        let mut result: u64 = 0;
+                        let mut valid = true;
+                        let mut has_any = false;
+                        for ch in digits.chars() {
+                            if let Some(d) = ch.to_digit(base as u32) {
+                                result = result.wrapping_mul(base as u64).wrapping_add(d as u64);
+                                has_any = true;
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if valid && has_any {
+                            let i = result as i64;
+                            LuaValue::integer(if neg { i.wrapping_neg() } else { i })
+                        } else {
+                            LuaValue::nil()
+                        }
                     }
+                } else {
+                    parse_lua_number(s_str)
                 }
             } else {
                 LuaValue::nil()
             }
         }
-        _ => LuaValue::nil(),
+        _ => {
+            if has_base {
+                return Err(l.error(
+                    "bad argument #1 to 'tonumber' (string expected, got number)".to_string(),
+                ));
+            }
+            LuaValue::nil()
+        }
     };
 
     l.push_value(result)?;
     Ok(1)
+}
+
+/// Format a float value matching Lua 5.5's tostringbuffFloat behavior:
+/// First try %.15g (max digits preserving tostring(tonumber(x)) == x),
+/// then %.17g if roundtrip fails, and append ".0" if result looks integer-like.
+pub(crate) fn lua_float_to_string(n: f64) -> String {
+    if n.is_nan() {
+        return if n.is_sign_negative() { "-nan" } else { "-nan" }.to_string();
+    }
+    if n.is_infinite() {
+        return if n > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+
+    // First try: format with roughly 15 significant digits (%.15g equivalent)
+    let s = format_g(n, 15);
+
+    // Check if it roundtrips
+    let mut result = if s.parse::<f64>().ok() == Some(n) {
+        s
+    } else {
+        // Second try: format with 17 significant digits (%.17g equivalent)
+        format_g(n, 17)
+    };
+
+    // If result looks like an integer (no '.', 'e', 'E', 'n', 'i'), add ".0"
+    if !result.contains('.')
+        && !result.contains('e')
+        && !result.contains('E')
+        && !result.contains('n')
+        && !result.contains('i')
+    {
+        result.push_str(".0");
+    }
+
+    result
+}
+
+/// Format a float with %.<prec>g semantics (C-style %g formatting)
+fn format_g(n: f64, prec: usize) -> String {
+    if n == 0.0 {
+        return if n.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+
+    let abs_n = n.abs();
+    // Determine the base-10 exponent
+    let exp = abs_n.log10().floor() as i32;
+
+    let formatted = if exp >= -4 && exp < prec as i32 {
+        // Fixed-point notation: precision = prec - (exp + 1) decimal places
+        let decimal_places = (prec as i32 - exp - 1).max(0) as usize;
+        format!("{:.prec$}", n, prec = decimal_places)
+    } else {
+        // Scientific notation: precision = prec - 1 decimal places
+        format!("{:.prec$e}", n, prec = prec - 1)
+    };
+
+    // Strip trailing zeros after decimal point (matching %g behavior)
+    strip_trailing_zeros(&formatted)
+}
+
+/// Strip trailing zeros from a formatted number string (matching C's %g behavior)
+fn strip_trailing_zeros(s: &str) -> String {
+    if let Some(e_pos) = s.find('e').or_else(|| s.find('E')) {
+        // Scientific notation: strip zeros between decimal and 'e'
+        let (mantissa, exponent) = s.split_at(e_pos);
+        let stripped = strip_decimal_zeros(mantissa);
+        format!("{}{}", stripped, exponent)
+    } else if s.contains('.') {
+        strip_decimal_zeros(s)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Strip trailing zeros after decimal point, remove point if no digits follow
+fn strip_decimal_zeros(s: &str) -> String {
+    let trimmed = s.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        trimmed[..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// tostring(v) - Convert to string
@@ -232,8 +378,9 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    // Fast path: integer — use itoa to avoid heap allocation
-    if let Some(n) = value.as_integer() {
+    // Fast path: raw integer type — use itoa
+    if value.is_integer() {
+        let n = value.as_integer_strict().unwrap();
         let mut buf = itoa::Buffer::new();
         let s = buf.format(n);
         let result_value = l.create_string(s)?;
@@ -241,9 +388,10 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    // Fast path: float — use stack buffer with write!
-    if let Some(n) = value.as_number() {
-        let s = n.to_string();
+    // Fast path: raw float type — use Lua-compatible formatting
+    if value.is_float() {
+        let n = value.as_number().unwrap();
+        let s = lua_float_to_string(n);
         let result_value = l.create_string(&s)?;
         l.push_value(result_value)?;
         return Ok(1);
@@ -470,38 +618,80 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
 
 /// xpcall(f, msgh [, arg1, ...]) - Protected call with error handler
 fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
-    // Get function (first argument)
-    let func = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'xpcall' (value expected)".to_string()))?;
-
-    // Get error handler (second argument)
-    let err_handler = l
-        .get_arg(2)
-        .ok_or_else(|| l.error("bad argument #2 to 'xpcall' (value expected)".to_string()))?;
-
-    // Collect remaining arguments
-    let mut args = Vec::new();
+    // xpcall(f, msgh, arg1, arg2, ...)
+    // Stack layout from call:
+    //   xpcall's C frame has: base+0=f, base+1=msgh, base+2..=args
     let arg_count = l.arg_count();
-    for i in 3..=arg_count {
-        if let Some(arg) = l.get_arg(i) {
-            args.push(arg);
+    if arg_count < 2 {
+        return Err(l.error("bad argument #2 to 'xpcall' (value expected)".to_string()));
+    }
+
+    let base = l
+        .current_frame()
+        .map(|f| f.base)
+        .ok_or_else(|| LuaError::RuntimeError)?;
+    let xpcall_func_pos = l
+        .current_frame()
+        .map(|f| f.base - f.func_offset)
+        .ok_or_else(|| LuaError::RuntimeError)?;
+
+    // Rearrange stack for xpcall_stack_based:
+    // We want [handler, f, arg1, arg2, ...] starting at xpcall_func_pos.
+    //   xpcall_func_pos = handler (was xpcall function itself, overwrite)
+    //   xpcall_func_pos+1 = f (the function to protect)
+    //   xpcall_func_pos+2.. = args
+    //
+    // Currently: xpcall_func_pos=xpcall, base+0=f, base+1=msgh, base+2..=args
+    // We need: xpcall_func_pos=msgh, xpcall_func_pos+1=f, xpcall_func_pos+2..=args
+    let msgh = l.stack_get(base + 1).unwrap_or(LuaValue::nil());
+    let f = l.stack_get(base).unwrap_or(LuaValue::nil());
+
+    // Store handler at xpcall_func_pos
+    l.stack_set(xpcall_func_pos, msgh)?;
+
+    // Store function at xpcall_func_pos+1
+    l.stack_set(xpcall_func_pos + 1, f)?;
+
+    // Shift args to xpcall_func_pos+2..
+    let call_arg_count = arg_count - 2;
+    for i in 0..call_arg_count {
+        let val = l.stack_get(base + 2 + i).unwrap_or(LuaValue::nil());
+        l.stack_set(xpcall_func_pos + 2 + i, val)?;
+    }
+    let func_idx = xpcall_func_pos + 1;
+    let handler_idx = xpcall_func_pos;
+    l.set_top(func_idx + 1 + call_arg_count)?;
+
+    // Mark current (xpcall's) C frame with CIST_XPCALL
+    // so finish_c_frame knows to apply the error handler on error recovery.
+    {
+        use crate::lua_vm::call_info::call_status::CIST_XPCALL;
+        let frame_idx = l.call_depth() - 1;
+        let ci = l.get_call_info_mut(frame_idx);
+        ci.call_status |= CIST_XPCALL;
+    }
+
+    // Call using xpcall_stack_based which calls handler BEFORE unwinding frames
+    let (success, result_count) = l.xpcall_stack_based(func_idx, call_arg_count, handler_idx)?;
+
+    if success {
+        // Prepend true, results are at func_idx..func_idx+result_count
+        let mut all_results = Vec::with_capacity(result_count + 1);
+        all_results.push(LuaValue::boolean(true));
+        for i in 0..result_count {
+            all_results.push(l.stack_get(func_idx + i).unwrap_or(LuaValue::nil()));
         }
+        for (_i, val) in all_results.iter().enumerate() {
+            l.push_value(*val)?;
+        }
+        Ok(all_results.len())
+    } else {
+        // Error — handler already called by xpcall_stack_based, result is at func_idx
+        let transformed_error = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+        l.push_value(LuaValue::boolean(false))?;
+        l.push_value(transformed_error)?;
+        Ok(2)
     }
-
-    // Call xpcall
-    let (success, results) = l.xpcall(func, args, err_handler)?;
-
-    // Push success status
-    l.push_value(LuaValue::boolean(success))?;
-
-    // Push results and count them
-    let result_count = results.len();
-    for result in results {
-        l.push_value(result)?;
-    }
-
-    Ok(1 + result_count)
 }
 
 /// getmetatable(object) - Get metatable
@@ -566,6 +756,15 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
                 );
             }
         }
+
+        // GC write barrier: if the table is BLACK and the new metatable is WHITE,
+        // the GC must be notified. barrier_back turns the table back to GRAY
+        // so it gets re-traversed and the metatable gets properly marked.
+        // Without this, the metatable can be swept (freed) while the table still
+        // references it → dangling pointer → heap corruption.
+        if let Some(gc_ptr) = table.as_gc_ptr() {
+            l.gc_barrier_back(gc_ptr);
+        }
     }
 
     // Lua 5.5: luaC_checkfinalizer - register object if __gc is present
@@ -610,6 +809,14 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #3 to 'rawset' (value expected)".to_string()))?;
 
     if table.is_table() {
+        // Check for NaN key
+        if key.is_float() {
+            if let Some(f) = key.as_number() {
+                if f.is_nan() {
+                    return Err(l.error("table index is NaN".to_string()));
+                }
+            }
+        }
         l.raw_set(&table, key, value);
         l.push_value(table)?;
         return Ok(1);
@@ -679,9 +886,14 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
     let arg1 = l.get_arg(1);
 
-    let opt = arg1
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "collect".to_string());
+    let opt = match &arg1 {
+        Some(v) if v.is_nil() => "collect".to_string(),
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_string(),
+            None => return Err(crate::stdlib::debug::arg_typeerror(l, 1, "string", v)),
+        },
+        None => "collect".to_string(),
+    };
 
     match opt.as_str() {
         "collect" => {
@@ -888,8 +1100,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let mode_arg = l.get_arg(3).and_then(|v| v.as_str().map(|s| s.to_string()));
     let env_arg = l.get_arg(4);
 
+    // Check if chunk is callable (function, cfunction, or table with __call metamethod)
+    let is_reader = chunk_val.is_function() || chunk_val.is_table();
+
     // Get the chunk string or binary data
-    let (code_bytes, is_binary) = if chunk_val.is_function() {
+    let (code_bytes, is_binary) = if is_reader {
         // chunk is a reader function - call it repeatedly to get source
         let mut accumulated = Vec::new();
         let mut is_binary = false;
@@ -976,7 +1191,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
         (accumulated, is_binary)
     } else if let Some(b) = chunk_val.as_binary() {
-        (b.to_vec(), true)
+        let is_binary = b.first() == Some(&0x1B);
+        (b.to_vec(), is_binary)
     } else if let Some(s) = chunk_val.as_str() {
         // Check if this is binary bytecode by looking at first byte
         let is_binary = s.as_bytes().first() == Some(&0x1B);
@@ -1002,6 +1218,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
     // Optional mode ("b", "t", or "bt")
     let mode = mode_arg.unwrap_or_else(|| "bt".to_string());
+
+    // Validate mode string - must contain only 'b' and/or 't'
+    if mode.is_empty() || mode.chars().any(|c| c != 'b' && c != 't') {
+        return Err(crate::stdlib::debug::argerror(l, 3, "invalid mode"));
+    }
 
     // Check if mode allows this chunk type
     if is_binary {
@@ -1034,9 +1255,10 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
     } else {
         // Compile text code using VM's string pool with chunk name
-        let code_str = match String::from_utf8(code_bytes) {
+        // Source code should be valid UTF-8
+        let code_str = match String::from_utf8(code_bytes.clone()) {
             Ok(s) => s,
-            Err(_) => return Err(l.error("invalid UTF-8 in text code".to_string())),
+            Err(_) => return Err(l.error("source is not valid UTF-8".to_string())),
         };
         let vm = l.vm_mut();
         vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
@@ -1081,7 +1303,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
         Err(e) => {
             // Return nil and error message
-            let err_msg = l.create_string(&format!("load error: {}", e))?;
+            let err_msg = l.create_string(&e)?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -1091,6 +1313,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
 /// loadfile([filename [, mode [, env]]]) - Load a file as a chunk
 fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
+    use crate::lua_value::chunk_serializer;
+
     let filename = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'loadfile' (value expected)".to_string()))?;
@@ -1101,9 +1325,18 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'loadfile' (string expected)".to_string()));
     };
 
-    // Load from specified file
-    let code = match std::fs::read_to_string(&filename_str) {
-        Ok(c) => c,
+    // Optional mode ("b", "t", or "bt")
+    let mode = l
+        .get_arg(2)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "bt".to_string());
+
+    // Optional environment table
+    let env_arg = l.get_arg(3);
+
+    // Load from specified file as bytes (to handle both text and binary)
+    let file_bytes = match std::fs::read(&filename_str) {
+        Ok(b) => b,
         Err(e) => {
             let err_msg = l.create_string(&format!("cannot open {}: {}", filename_str, e))?;
             l.push_value(LuaValue::nil())?;
@@ -1112,14 +1345,95 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    // Compile the code using VM's string pool with chunk name
+    // Determine content after skipping shebang/BOM for binary detection
+    // For text files, the tokenizer handles shebang natively
+    let mut skip_offset = 0;
+
+    // Skip initial comment line (shebang) if present
+    if file_bytes.first() == Some(&b'#') {
+        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
+            skip_offset = pos + 1;
+        } else {
+            skip_offset = file_bytes.len();
+        }
+    }
+
+    // Skip UTF-8 BOM if present (after potential shebang skip)
+    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
+        skip_offset += 3;
+    }
+
+    // Check if it's a binary chunk (starts with 0x1B after shebang/BOM)
+    let is_binary = file_bytes.get(skip_offset) == Some(&0x1B);
+
+    // Validate mode
+    if !mode.is_empty() && mode.chars().all(|c| c == 'b' || c == 't') {
+        if is_binary && !mode.contains('b') {
+            let err_msg = l.create_string("attempt to load a binary chunk (mode is 'text')")?;
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
+            return Ok(2);
+        }
+        if !is_binary && !mode.contains('t') {
+            let err_msg = l.create_string("attempt to load a text chunk (mode is 'binary')")?;
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
+            return Ok(2);
+        }
+    }
+
     let chunkname = format!("@{}", filename_str);
-    match l.vm_mut().compile_with_name(&code, &chunkname) {
+
+    let chunk_result = if is_binary {
+        // Deserialize binary bytecode (skip shebang/BOM)
+        let vm = l.vm_mut();
+        chunk_serializer::deserialize_chunk_with_strings_vm(&file_bytes[skip_offset..], vm)
+            .map_err(|e| format!("binary load error: {}", e))
+    } else {
+        // For text, strip BOM but keep shebang (tokenizer handles it)
+        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            3
+        } else {
+            0
+        };
+        // Source files must be valid UTF-8
+        let code_str = match String::from_utf8(file_bytes[text_start..].to_vec()) {
+            Ok(s) => s,
+            Err(_) => {
+                // loadfile returns nil + error message on failure
+                let err_msg = l.create_string("source file is not valid UTF-8")?;
+                l.push_value(LuaValue::nil())?;
+                l.push_value(err_msg)?;
+                return Ok(2);
+            }
+        };
+        let vm = l.vm_mut();
+        vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
+            let msg = vm.get_error_message(e);
+            msg
+        })
+    };
+
+    match chunk_result {
         Ok(chunk) => {
-            // Create upvalue for _ENV (global table)
-            let global = l.vm_mut().global.clone();
-            let env_upvalue = l.create_upvalue_closed(global)?;
-            let upvalues = vec![env_upvalue];
+            let upvalue_count = chunk.upvalue_count;
+            let mut upvalues = Vec::with_capacity(upvalue_count);
+
+            for i in 0..upvalue_count {
+                if i == 0 {
+                    let env_upvalue_id = if let Some(env) = env_arg {
+                        l.create_upvalue_closed(env)?
+                    } else {
+                        let global = l.vm_mut().global.clone();
+                        l.create_upvalue_closed(global)?
+                    };
+                    upvalues.push(env_upvalue_id);
+                } else {
+                    let nil_upvalue = l.create_upvalue_closed(LuaValue::nil())?;
+                    upvalues.push(nil_upvalue);
+                }
+            }
+
             let func = l.create_function(
                 std::rc::Rc::new(chunk),
                 crate::lua_value::UpvalueStore::from_vec(upvalues),
@@ -1128,7 +1442,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         Err(e) => {
-            let err_msg = l.create_string(&format!("load error: {}", e))?;
+            let err_msg = l.create_string(&e.to_string())?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -1154,21 +1468,47 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
     };
 
-    // Load from file
-    let code = match std::fs::read_to_string(&filename_str) {
-        Ok(c) => c,
+    // Load from file as bytes
+    let file_bytes = match std::fs::read(&filename_str) {
+        Ok(b) => b,
         Err(e) => {
             return Err(l.error(format!("cannot open {}: {}", filename_str, e)));
         }
     };
 
-    // Compile the code
-    let chunkname = format!("@{}", filename_str);
-    let chunk = match l.vm_mut().compile_with_name(&code, &chunkname) {
-        Ok(chunk) => chunk,
-        Err(e) => {
-            return Err(l.error(format!("error loading {}: {}", filename_str, e)));
+    // Determine content after skipping shebang/BOM for binary detection
+    let mut skip_offset = 0;
+    if file_bytes.first() == Some(&b'#') {
+        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
+            skip_offset = pos + 1;
+        } else {
+            skip_offset = file_bytes.len();
         }
+    }
+    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
+        skip_offset += 3;
+    }
+
+    let is_binary = file_bytes.get(skip_offset) == Some(&0x1B);
+
+    // Compile/load the code
+    let chunkname = format!("@{}", filename_str);
+    let chunk = if is_binary {
+        use crate::lua_value::chunk_serializer;
+        let vm = l.vm_mut();
+        chunk_serializer::deserialize_chunk_with_strings_vm(&file_bytes[skip_offset..], vm)
+            .map_err(|e| l.error(format!("binary load error: {}", e)))?
+    } else {
+        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            3
+        } else {
+            0
+        };
+        let code_str = String::from_utf8(file_bytes[text_start..].to_vec())
+            .map_err(|_| l.error("source file is not valid UTF-8".to_string()))?;
+        l.vm_mut()
+            .compile_with_name(&code_str, &chunkname)
+            .map_err(|e| l.error(format!("error loading {}: {}", filename_str, e)))?
     };
 
     let global = l.vm_mut().global.clone();
@@ -1180,30 +1520,98 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         crate::lua_value::UpvalueStore::from_vec(upvalues),
     )?;
 
-    // Call the function with 0 arguments (unprotected, like C Lua's lua_callk)
-    // Errors propagate naturally to the enclosing pcall boundary.
-    let results = l.call(func, vec![])?;
-
-    // Push all results
-    let num_results = results.len();
-    for result in results {
-        l.push_value(result)?;
-    }
+    // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
+    // Push the function onto the stack at the current top.
+    let func_idx = l.get_top();
+    l.push_value(func)?;
+    let num_results = l.call_stack_based(func_idx, 0)?;
 
     Ok(num_results)
 }
 
-/// warn(msg1, ...) - Emit a warning
+/// warn(msg1, ...) - Emit a warning (Lua 5.5 semantics)
+///
+/// Control messages: single argument starting with '@':
+///   @on    - enable warnings (stderr mode)
+///   @off   - disable warnings
+///   @store - store warnings in _WARN global
+///   @normal - restore normal stderr output
+///   other  - ignored
+///
+/// Regular messages: concatenate all arguments; output according to state.
+/// Warnings are OFF by default.
 fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
 
+    // At least one argument required, all must be strings
+    if args.is_empty() {
+        return Err(
+            l.error("bad argument #1 to 'warn' (string expected, got no value)".to_string())
+        );
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(args.len());
     for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            // Separator
-            eprint!("\t");
+        if let Some(s) = arg.as_str() {
+            parts.push(s.to_string());
+        } else {
+            return Err(l.error(format!(
+                "bad argument #{} to 'warn' (string expected, got {})",
+                i + 1,
+                arg.type_name()
+            )));
         }
-        let s = l.to_string(arg)?;
-        eprint!("{}", s);
+    }
+
+    // Get current warn mode from registry ("off", "on", "store")
+    let registry = l.vm_mut().registry.clone();
+    let mode_key = l.create_string("_WARN_MODE")?;
+    let current_mode = l
+        .raw_get(&registry, &mode_key)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "off".to_string());
+
+    // Check for control message: single argument starting with '@'
+    if parts.len() == 1 && parts[0].starts_with('@') {
+        let control = &parts[0][1..];
+        match control {
+            "on" => {
+                let mode_val = l.create_string("on")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            "off" => {
+                let mode_val = l.create_string("off")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            "store" => {
+                let mode_val = l.create_string("store")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            "normal" => {
+                let mode_val = l.create_string("on")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            _ => {
+                // Unknown control message, ignored
+            }
+        }
+        return Ok(0);
+    }
+
+    // Regular message: concatenate all parts (no separator)
+    let message: String = parts.concat();
+
+    match current_mode.as_str() {
+        "on" => {
+            eprintln!("Lua warning: {}", message);
+        }
+        "store" => {
+            // Store in _WARN global
+            let warn_val = l.create_string(&message)?;
+            l.vm_mut().set_global("_WARN", warn_val)?;
+        }
+        _ => {
+            // "off" - do nothing
+        }
     }
 
     Ok(0)

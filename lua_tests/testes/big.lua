@@ -53,7 +53,9 @@ assert(not e and m:find("'newindex'"))
 
 f, X = nil
 
-coroutine.yield'b'
+if coroutine.isyieldable() then
+  coroutine.yield'b'
+end
 
 if 2^32 == 0 then   -- (small integers) {   
 

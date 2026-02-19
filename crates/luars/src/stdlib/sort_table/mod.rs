@@ -1,23 +1,31 @@
 use crate::{LuaResult, LuaValue, lua_vm::LuaState};
 
 /// table.sort(list [, comp]) - Sort table in place
-/// Optimized: extracts array to Vec, sorts, writes back using raw API
+/// Uses manual sort algorithm to properly propagate Lua errors/yields.
 pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
     let table_val = l
         .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'sort' (table expected)".to_string()))?;
+        .ok_or_else(|| crate::stdlib::debug::argerror(l, 1, "table expected"))?;
     let comp = l.get_arg(2);
 
-    let table = table_val
-        .as_table()
-        .ok_or_else(|| l.error("bad argument #1 to 'sort' (table expected)".to_string()))?;
+    if !table_val.is_table() {
+        return Err(crate::stdlib::debug::arg_typeerror(
+            l, 1, "table", &table_val,
+        ));
+    }
 
-    let len = table.len();
+    // Use obj_len to respect __len metamethod (like C Lua's aux_getn / luaL_len)
+    let len = l.obj_len(&table_val)?;
+
+    // C Lua: luaL_argcheck(L, n < INT_MAX, 1, "array too big");
+    if len >= i32::MAX as i64 {
+        return Err(l.error("bad argument #1 to 'sort' (array too big)".to_string()));
+    }
+
     if len <= 1 {
         return Ok(0);
     }
 
-    // Check if we have a custom comparison function
     let has_comp = comp.is_some() && !comp.as_ref().map(|v| v.is_nil()).unwrap_or(true);
     let comp_func = if has_comp {
         comp.unwrap()
@@ -25,92 +33,192 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         LuaValue::nil()
     };
 
-    // Extract array elements into a Vec using raw access
-    let mut sort_arr = Vec::with_capacity(len);
-    for i in 1..=len as i64 {
-        let val = table.raw_geti(i).unwrap_or(LuaValue::nil());
-        sort_arr.push(val);
-    }
+    // Block yields during sort — sort is a non-continuable C call boundary
+    l.nny += 1;
 
-    // Sort
-    if has_comp {
-        // Custom comparison function
-        sort_arr.sort_by(|a, b| {
-            l.push_value(comp_func).ok();
-            l.push_value(*a).ok();
-            l.push_value(*b).ok();
+    // Sort in-place on the Lua table using an insertion sort + quicksort
+    // that calls comparison through unprotected Lua calls
+    let result = sort_range(l, &table_val, &comp_func, has_comp, 1, len as i64);
 
-            let func_idx = l.get_top() - 3;
-            let result = l.pcall_stack_based(func_idx, 2);
+    // Restore yieldability before returning (even on error)
+    l.nny -= 1;
 
-            match result {
-                Ok((true, result_count)) => {
-                    let cmp_result = if result_count > 0 {
-                        l.stack_get(func_idx).unwrap_or(LuaValue::nil())
-                    } else {
-                        LuaValue::nil()
-                    };
-                    let _ = l.set_top(func_idx);
-                    let is_less = if cmp_result.is_nil() {
-                        false
-                    } else if let Some(b) = cmp_result.as_boolean() {
-                        b
-                    } else {
-                        true
-                    };
-                    if is_less {
-                        std::cmp::Ordering::Less
-                    } else {
-                        std::cmp::Ordering::Greater
-                    }
-                }
-                _ => {
-                    let _ = l.set_top(func_idx);
-                    std::cmp::Ordering::Equal
-                }
-            }
-        });
-    } else {
-        // Default comparison
-        sort_arr.sort_by(|a, b| lua_compare_values(a, b));
-    }
+    result?;
 
-    // Write back sorted array using raw API
-    let table = table_val.as_table_mut().unwrap();
-    for (i, val) in sort_arr.into_iter().enumerate() {
-        table.raw_seti((i + 1) as i64, val);
+    // GC write barrier
+    if let Some(gc_ptr) = table_val.as_gc_ptr() {
+        l.gc_barrier_back(gc_ptr);
     }
 
     Ok(0)
 }
 
-/// Compare two Lua values according to Lua semantics
-fn lua_compare_values(a: &LuaValue, b: &LuaValue) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-
-    if let (Some(n1), Some(n2)) = (a.as_number(), b.as_number()) {
-        return n1.partial_cmp(&n2).unwrap_or(Ordering::Equal);
+/// Compare two values using the comparison function or default < operator.
+fn sort_compare(
+    l: &mut LuaState,
+    a: LuaValue,
+    b: LuaValue,
+    comp_func: &LuaValue,
+    has_comp: bool,
+) -> LuaResult<bool> {
+    if has_comp {
+        let results = l.call(*comp_func, vec![a, b])?;
+        Ok(results.first().map(|v| v.is_truthy()).unwrap_or(false))
+    } else {
+        // Default comparison: use < operator
+        default_less_than(l, &a, &b)
     }
-
-    if a.is_string() && b.is_string() {
-        if let (Some(str1), Some(str2)) = (a.as_str(), b.as_str()) {
-            return str1.cmp(str2);
-        }
-    }
-
-    let type_order_a = lua_type_order(a);
-    let type_order_b = lua_type_order(b);
-    type_order_a.cmp(&type_order_b)
 }
 
-fn lua_type_order(val: &LuaValue) -> u8 {
-    if val.is_nil() { return 0; }
-    if val.is_boolean() { return 1; }
-    if val.is_number() { return 2; }
-    if val.is_string() { return 3; }
-    if val.is_table() { return 4; }
-    if val.is_function() { return 5; }
-    if val.is_userdata() { return 6; }
-    if val.is_thread() { return 7; }
-    255
+/// Default less-than comparison (like Lua's < operator with metamethods).
+fn default_less_than(l: &mut LuaState, a: &LuaValue, b: &LuaValue) -> LuaResult<bool> {
+    l.obj_lt(a, b)
+}
+
+/// Sort a range [lo, hi] of the table in place.
+/// Uses insertion sort for small ranges, quicksort for larger.
+fn sort_range(
+    l: &mut LuaState,
+    table: &LuaValue,
+    comp_func: &LuaValue,
+    has_comp: bool,
+    lo: i64,
+    hi: i64,
+) -> LuaResult<()> {
+    if lo >= hi {
+        return Ok(());
+    }
+    let n = hi - lo + 1;
+    if n <= 3 {
+        // Small range: use insertion sort (no invalid order detection needed for <=3)
+        for i in (lo + 1)..=hi {
+            let t = table.as_table().unwrap();
+            let key = t.raw_geti(i).unwrap_or(LuaValue::nil());
+            let mut j = i - 1;
+            loop {
+                let t = table.as_table().unwrap();
+                let val_j = t.raw_geti(j).unwrap_or(LuaValue::nil());
+                if sort_compare(l, key, val_j, comp_func, has_comp)? {
+                    let t = table.as_table_mut().unwrap();
+                    t.raw_seti(j + 1, val_j);
+                    if j <= lo {
+                        let t = table.as_table_mut().unwrap();
+                        t.raw_seti(lo, key);
+                        break;
+                    }
+                    j -= 1;
+                } else {
+                    let t = table.as_table_mut().unwrap();
+                    t.raw_seti(j + 1, key);
+                    break;
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Quicksort with median-of-3 pivot
+    let mid = lo + (hi - lo) / 2;
+    // Sort lo, mid, hi
+    {
+        let t = table.as_table().unwrap();
+        let v_lo = t.raw_geti(lo).unwrap_or(LuaValue::nil());
+        let v_mid = t.raw_geti(mid).unwrap_or(LuaValue::nil());
+        if sort_compare(l, v_mid, v_lo, comp_func, has_comp)? {
+            let t = table.as_table_mut().unwrap();
+            t.raw_seti(lo, v_mid);
+            t.raw_seti(mid, v_lo);
+        }
+    }
+    {
+        let t = table.as_table().unwrap();
+        let v_mid = t.raw_geti(mid).unwrap_or(LuaValue::nil());
+        let v_hi = t.raw_geti(hi).unwrap_or(LuaValue::nil());
+        if sort_compare(l, v_hi, v_mid, comp_func, has_comp)? {
+            let t = table.as_table_mut().unwrap();
+            t.raw_seti(mid, v_hi);
+            t.raw_seti(hi, v_mid);
+            let t = table.as_table().unwrap();
+            let v_lo = t.raw_geti(lo).unwrap_or(LuaValue::nil());
+            let v_mid = t.raw_geti(mid).unwrap_or(LuaValue::nil());
+            if sort_compare(l, v_mid, v_lo, comp_func, has_comp)? {
+                let t = table.as_table_mut().unwrap();
+                t.raw_seti(lo, v_mid);
+                t.raw_seti(mid, v_lo);
+            }
+        }
+    }
+    if n <= 3 {
+        return Ok(());
+    }
+
+    // Pivot is now at mid
+    let t = table.as_table().unwrap();
+    let pivot = t.raw_geti(mid).unwrap_or(LuaValue::nil());
+
+    // Move pivot to hi-1
+    let t = table.as_table().unwrap();
+    let v_hi_1 = t.raw_geti(hi - 1).unwrap_or(LuaValue::nil());
+    let t = table.as_table_mut().unwrap();
+    t.raw_seti(hi - 1, pivot);
+    t.raw_seti(mid, v_hi_1);
+
+    let mut i = lo;
+    let mut j = hi - 1;
+    loop {
+        // Find element >= pivot from left
+        loop {
+            i += 1;
+            let t = table.as_table().unwrap();
+            let v_i = t.raw_geti(i).unwrap_or(LuaValue::nil());
+            if !sort_compare(l, v_i, pivot, comp_func, has_comp)? {
+                break;
+            }
+            // If scan went past pivot position, order function is invalid
+            if i >= hi - 1 {
+                return Err(l.error("invalid order function for sorting".to_string()));
+            }
+        }
+        // Find element <= pivot from right
+        loop {
+            j -= 1;
+            let t = table.as_table().unwrap();
+            let v_j = t.raw_geti(j).unwrap_or(LuaValue::nil());
+            if !sort_compare(l, pivot, v_j, comp_func, has_comp)? {
+                break;
+            }
+            // If scan went past lo, order function is invalid
+            if j <= lo {
+                return Err(l.error("invalid order function for sorting".to_string()));
+            }
+        }
+        if i >= j {
+            break;
+        }
+        // Swap
+        let t = table.as_table().unwrap();
+        let v_i = t.raw_geti(i).unwrap_or(LuaValue::nil());
+        let v_j = t.raw_geti(j).unwrap_or(LuaValue::nil());
+        let t = table.as_table_mut().unwrap();
+        t.raw_seti(i, v_j);
+        t.raw_seti(j, v_i);
+    }
+
+    // Restore pivot
+    let t = table.as_table().unwrap();
+    let v_i = t.raw_geti(i).unwrap_or(LuaValue::nil());
+    let t = table.as_table_mut().unwrap();
+    t.raw_seti(hi - 1, v_i);
+    t.raw_seti(i, pivot);
+
+    // Recurse on smaller partition first (tail-call optimization for larger)
+    if i - lo < hi - i {
+        sort_range(l, table, comp_func, has_comp, lo, i - 1)?;
+        sort_range(l, table, comp_func, has_comp, i + 1, hi)?;
+    } else {
+        sort_range(l, table, comp_func, has_comp, i + 1, hi)?;
+        sort_range(l, table, comp_func, has_comp, lo, i - 1)?;
+    }
+
+    Ok(())
 }

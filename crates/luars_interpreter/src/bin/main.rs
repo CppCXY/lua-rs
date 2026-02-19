@@ -117,34 +117,27 @@ fn parse_args() -> Result<Options, String> {
     Ok(opts)
 }
 
-#[allow(dead_code)]
-fn setup_arg_table(vm: &mut LuaVM, script_name: Option<&str>, args: &[String]) {
-    // Create arg table: arg[-1] = interpreter, arg[0] = script, arg[1..] = arguments
-    let code = format!(
-        r#"
-        arg = {{}}
-        arg[-1] = "lua"
-        arg[0] = {}
-        "#,
-        if let Some(name) = script_name {
-            format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
-        } else {
-            "nil".to_string()
-        }
-    );
+fn setup_arg_table(vm: &mut LuaVM, exe_path: &str, script_name: Option<&str>, args: &[String]) {
+    // Create arg table: arg[negative] = interpreter opts, arg[0] = script, arg[1..] = script args
+    let arg_table = vm.create_table(args.len(), 2).unwrap();
 
-    let mut full_code = code;
-    for (i, arg) in args.iter().enumerate() {
-        full_code.push_str(&format!(
-            "arg[{}] = \"{}\"\n",
-            i + 1,
-            arg.replace('\\', "\\\\").replace('"', "\\\"")
-        ));
+    // arg[0] = script name (or nil)
+    if let Some(name) = script_name {
+        let s = vm.create_string(name).unwrap();
+        vm.raw_seti(&arg_table, 0, s);
     }
 
-    if let Ok(chunk) = vm.compile(&full_code) {
-        let _ = vm.execute(Rc::new(chunk));
+    // arg[-1] = interpreter executable path
+    let exe = vm.create_string(exe_path).unwrap();
+    vm.raw_seti(&arg_table, -1, exe);
+
+    // arg[1], arg[2], ... = script arguments
+    for (i, a) in args.iter().enumerate() {
+        let s = vm.create_string(a).unwrap();
+        vm.raw_seti(&arg_table, (i + 1) as i64, s);
     }
+
+    let _ = vm.set_global("arg", arg_table);
 }
 
 fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
@@ -275,6 +268,65 @@ fn run_repl(vm: &mut LuaVM) {
 }
 
 fn main() {
+    // Install crash handler on Windows to capture crash address
+    #[cfg(windows)]
+    unsafe {
+        #[repr(C)]
+        struct ExceptionRecord {
+            exception_code: u32,
+            exception_flags: u32,
+            exception_record: *mut ExceptionRecord,
+            exception_address: *mut std::ffi::c_void,
+            number_parameters: u32,
+            exception_information: [usize; 15],
+        }
+        #[repr(C)]
+        struct ContextRecord {
+            _data: [u8; 1232], // CONTEXT is large, we don't need fields
+        }
+        #[repr(C)]
+        struct ExceptionPointers {
+            exception_record: *mut ExceptionRecord,
+            context_record: *mut ContextRecord,
+        }
+        type VectoredHandler = unsafe extern "system" fn(*mut ExceptionPointers) -> i32;
+        unsafe extern "system" fn crash_handler(info: *mut ExceptionPointers) -> i32 {
+            unsafe {
+                let record = &*(*info).exception_record;
+                if record.exception_code == 0xC0000005 {
+                    // ACCESS_VIOLATION
+                    let addr = record.exception_address;
+                    let rw = if record.number_parameters >= 1 {
+                        record.exception_information[0]
+                    } else {
+                        99
+                    };
+                    let target = if record.number_parameters >= 2 {
+                        record.exception_information[1]
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "CRASH: ACCESS_VIOLATION at {:p}, type={} (0=read,1=write), target=0x{:x}",
+                        addr, rw, target
+                    );
+                    // Print a basic backtrace using std::backtrace
+                    let bt = std::backtrace::Backtrace::force_capture();
+                    eprintln!("Backtrace:\n{}", bt);
+                    std::process::exit(99);
+                }
+                0 // EXCEPTION_CONTINUE_SEARCH
+            }
+        }
+        unsafe extern "system" {
+            fn AddVectoredExceptionHandler(
+                first: u32,
+                handler: VectoredHandler,
+            ) -> *mut std::ffi::c_void;
+        }
+        AddVectoredExceptionHandler(1, crash_handler);
+    }
+
     // Spawn a thread with a larger stack to handle deep pcall/lua_execute recursion.
     // Each pcall calls lua_execute recursively, and lua_execute has a large stack frame.
     // With max_call_depth=256, we need ~16MB to avoid native stack overflow.
@@ -316,9 +368,10 @@ fn lua_main() -> i32 {
 
     // Create VM
     let mut vm = LuaVM::new(SafeOption {
-        max_stack_size: 10000000,
+        max_stack_size: 1000000, // LUAI_MAXSTACK (Lua 5.5)
         // 问就是rust在debug版本递归限制太小了
         max_call_depth: if cfg!(debug_assertions) { 25 } else { 256 },
+        base_call_depth: if cfg!(debug_assertions) { 25 } else { 256 },
         max_memory_limit: 1024 * 1024 * 1024, // 1 GB
     });
     vm.open_stdlib(stdlib::Stdlib::All).unwrap();
@@ -326,8 +379,13 @@ fn lua_main() -> i32 {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));
     }
     // Setup arg table
-    // FIXME: Disabled due to compiler bug with negative table indices
-    // setup_arg_table(&mut vm, opts.script_file.as_deref(), &opts.script_args);
+    let exe_path = env::args().next().unwrap_or_else(|| "lua".to_string());
+    setup_arg_table(
+        &mut vm,
+        &exe_path,
+        opts.script_file.as_deref(),
+        &opts.script_args,
+    );
 
     // Require modules
     for module in &opts.require_modules {

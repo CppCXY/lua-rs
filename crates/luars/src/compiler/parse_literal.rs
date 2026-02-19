@@ -199,23 +199,13 @@ pub fn parse_float_token_value(num_text: &str) -> Result<f64, String> {
         }
         value
     } else {
-        let (float_part, exponent_part) =
-            if let Some(pos) = num_text.find('e').or_else(|| num_text.find('E')) {
-                (&num_text[..pos], &num_text[(pos + 1)..])
-            } else {
-                (num_text, "")
-            };
-
-        let mut value = float_part
+        // For decimal float literals, use Rust's std parser which gives
+        // correctly-rounded results (matching C's strtod / Lua's lua_getlocaledecpoint).
+        // Splitting mantissa and exponent and computing separately introduces
+        // intermediate rounding error.
+        num_text
             .parse::<f64>()
-            .map_err(|e| format!("Failed to parse float literal '{}': {}", num_text, e))?;
-
-        if !exponent_part.is_empty()
-            && let Ok(exp) = exponent_part.parse::<i32>()
-        {
-            value *= 10f64.powi(exp);
-        }
-        value
+            .map_err(|e| format!("Failed to parse float literal '{}': {}", num_text, e))?
     };
 
     Ok(value)

@@ -1,0 +1,64 @@
+name: Lua Test Suite
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master, dev ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lua-tests:
+    name: Lua 5.5 Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-build-
+
+    - name: Build (release)
+      run: cargo build --release
+
+    - name: Run unit tests
+      run: cargo test --release --package luars
+
+    - name: Run official Lua 5.5 test suite (Unix)
+      if: runner.os != 'Windows'
+      working-directory: lua_tests/testes
+      run: ../../target/release/lua all.lua
+      timeout-minutes: 5
+
+    - name: Run official Lua 5.5 test suite (Windows)
+      if: runner.os == 'Windows'
+      working-directory: lua_tests/testes
+      run: ..\..\target\release\lua.exe all.lua
+      timeout-minutes: 5

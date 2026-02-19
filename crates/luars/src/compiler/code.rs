@@ -776,9 +776,14 @@ pub fn free_regs(fs: &mut FuncState, r1: u8, r2: u8) {
 // Check register-stack level, keeping track of its maximum size in field 'maxstacksize'
 pub fn checkstack(fs: &mut FuncState, n: u8) {
     let newstack = (fs.freereg as usize) + (n as usize);
+    if newstack > 255 {
+        // MAX_FSTACK = MAXARG_A = 255
+        // Port of luaY_checklimit(fs, newstack, MAX_FSTACK, "registers")
+        if fs.checklimit_error.is_none() {
+            fs.checklimit_error = Some(fs.errorlimit(255, "registers"));
+        }
+    }
     if newstack > fs.chunk.max_stack_size {
-        // In Lua: luaY_checklimit(fs, newstack, MAX_FSTACK, "registers");
-        // We'll just update maxstacksize here
         fs.chunk.max_stack_size = newstack;
     }
 }
@@ -954,7 +959,7 @@ fn number_k(fs: &mut FuncState, n: f64) -> usize {
 
     // Check if perturbed key can be converted to integer (lcode.c:630)
     // If yes, don't use kcache (would collide), just create new entry
-    if k.floor() == k && k >= i64::MIN as f64 && k <= i64::MAX as f64 {
+    if k.floor() == k && k >= i64::MIN as f64 && k < -(i64::MIN as f64) {
         // Key is still an integer, would collide - create new entry directly
         // Port of lcode.c:636: return addk(fs, fs->f, &o);
         let idx = fs.chunk.constants.len();
@@ -1342,7 +1347,7 @@ pub fn code_abrk(fs: &mut FuncState, opcode: OpCode, a: u32, b: u32, ec: &mut Ex
 // Port of codeeq from lcode.c:1585-1612
 // Emit code for equality comparisons ('==', '~=')
 // 'e1' was already put as RK by 'luaK_infix'
-fn codeeq(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+fn codeeq(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc, line: usize) {
     let r1: u32;
     let r2: u32;
     let mut im: i32 = 0;
@@ -1378,6 +1383,7 @@ fn codeeq(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut Exp
 
     let k = op == BinaryOperator::OpEq;
     let pc = condjump(fs, opcode, r1, r2, isfloat as u32, k);
+    fixline(fs, line);
 
     e1.u = ExpUnion::Info(pc as i32);
     e1.kind = ExpKind::VJMP;
@@ -1386,7 +1392,13 @@ fn codeeq(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut Exp
 // Port of codeorder from lcode.c:1553-1581
 // Emit code for order comparisons. When using an immediate operand,
 // 'isfloat' tells whether the original value was a float.
-fn codeorder(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+fn codeorder(
+    fs: &mut FuncState,
+    op: BinaryOperator,
+    e1: &mut ExpDesc,
+    e2: &mut ExpDesc,
+    line: usize,
+) {
     let r1: u32;
     let r2: u32;
     let mut im: i32 = 0;
@@ -1430,6 +1442,7 @@ fn codeorder(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut 
     free_exps(fs, e1, e2);
 
     let pc = condjump(fs, opcode, r1, r2, isfloat as u32, true);
+    fixline(fs, line);
 
     e1.u = ExpUnion::Info(pc as i32);
     e1.kind = ExpKind::VJMP;
@@ -1475,7 +1488,7 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
                     v.is_finite()
                         && v.fract() == 0.0
                         && v >= i64::MIN as f64
-                        && v <= i64::MAX as f64
+                        && v < -(i64::MIN as f64)
                 }
                 _ => false,
             };
@@ -1486,7 +1499,7 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
                     v.is_finite()
                         && v.fract() == 0.0
                         && v >= i64::MIN as f64
-                        && v <= i64::MAX as f64
+                        && v < -(i64::MIN as f64)
                 }
                 _ => false,
             };
@@ -1718,7 +1731,13 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
 
 // Port of luaK_posfix from lcode.c:1706-1783
 // void luaK_posfix (FuncState *fs, BinOpr opr, expdesc *e1, expdesc *e2, int line)
-pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+pub fn posfix(
+    fs: &mut FuncState,
+    op: BinaryOperator,
+    e1: &mut ExpDesc,
+    e2: &mut ExpDesc,
+    line: usize,
+) {
     use BinaryOperator;
 
     discharge_vars(fs, e2);
@@ -1748,7 +1767,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
         }
         // lcode.c:1762-1764: OPR_EQ, OPR_NE
         BinaryOperator::OpEq | BinaryOperator::OpNe => {
-            codeeq(fs, op, e1, e2);
+            codeeq(fs, op, e1, e2, line);
         }
         // lcode.c:1765-1775: OPR_GT, OPR_GE (convert to LT, LE by swapping)
         BinaryOperator::OpGt | BinaryOperator::OpGe => {
@@ -1759,11 +1778,11 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
             } else {
                 BinaryOperator::OpLe
             };
-            codeorder(fs, new_op, e1, e2);
+            codeorder(fs, new_op, e1, e2, line);
         }
         // lcode.c:1776-1778: OPR_LT, OPR_LE
         BinaryOperator::OpLt | BinaryOperator::OpLe => {
-            codeorder(fs, op, e1, e2);
+            codeorder(fs, op, e1, e2, line);
         }
         // All other arithmetic/bitwise operators
         _ => {
@@ -1825,6 +1844,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                                 TmKind::Add as u32,
                                 flip,
                             );
+                            fixline(fs, line);
                             return;
                         }
                     }
@@ -1861,6 +1881,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                                 TmKind::Sub as u32,
                                 flip,
                             );
+                            fixline(fs, line);
                             return;
                         }
                     }
@@ -1898,6 +1919,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                             TmKind::Shl as u32,
                             true,
                         );
+                        fixline(fs, line);
                         return;
                     }
                 } else if let ExpKind::VKINT = e2.kind {
@@ -1926,6 +1948,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                             TmKind::Shl as u32,
                             flip,
                         );
+                        fixline(fs, line);
                         return;
                     }
                 }
@@ -1956,6 +1979,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                                 TmKind::Shr as u32,
                                 flip,
                             );
+                            fixline(fs, line);
                             return;
                         }
                     }
@@ -2059,6 +2083,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     tm_event as u32,
                     flip,
                 );
+                fixline(fs, line);
             } else {
                 // Both operands in registers - port of codebinNoK (lcode.c:1490-1496)
                 // If we flipped operands for K optimization attempt, swap back to original order
@@ -2116,6 +2141,7 @@ pub fn posfix(fs: &mut FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &mut
                     _ => TmKind::N,
                 };
                 code_abc(fs, OpCode::MmBin, o1 as u32, o2 as u32, tm_event as u32);
+                fixline(fs, line);
             }
         }
     }
@@ -2169,15 +2195,16 @@ fn codenot(fs: &mut FuncState, e: &mut ExpDesc) {
 // Simplified implementation of luaK_prefix - generate unary operation
 // Port of codeunexpval from lcode.c:1392-1398
 // Generate code for unary operation that produces a value
-fn codeunexpval(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
+fn codeunexpval(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc, line: usize) {
     let r = exp2anyreg(fs, e); // opcodes operate only on registers
     free_exp(fs, e);
     let pc = code_abc(fs, op, 0, r as u32, 0); // result register is 0 (will be relocated)
     e.u = ExpUnion::Info(pc as i32);
     e.kind = ExpKind::VRELOC; // all those operations are relocatable
+    fixline(fs, line);
 }
 
-pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
+pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc, line: usize) {
     discharge_vars(fs, e);
 
     // Port of luaK_prefix from lcode.c:1700-1715
@@ -2201,7 +2228,7 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
                         let negated = -val;
                         // Don't fold -0.0 (lcode.c:1432-1434)
                         if negated == 0.0 {
-                            codeunexpval(fs, op, e);
+                            codeunexpval(fs, op, e, line);
                             return;
                         }
                         e.u = ExpUnion::NVal(negated);
@@ -2210,7 +2237,7 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
                     _ => {}
                 }
             }
-            codeunexpval(fs, op, e);
+            codeunexpval(fs, op, e, line);
         }
         OpCode::BNot => {
             // Port of lcode.c:1705-1707: try constant folding for bitwise not
@@ -2242,11 +2269,11 @@ pub fn prefix(fs: &mut FuncState, op: OpCode, e: &mut ExpDesc) {
                     _ => {}
                 }
             }
-            codeunexpval(fs, op, e);
+            codeunexpval(fs, op, e, line);
         }
         OpCode::Len => {
             // LEN operation (lcode.c:1709)
-            codeunexpval(fs, op, e);
+            codeunexpval(fs, op, e, line);
         }
         OpCode::Not => {
             // NOT operation (lcode.c:1710)

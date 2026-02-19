@@ -11,6 +11,7 @@ pub mod test_package;
 pub mod test_string;
 pub mod test_syntax;
 pub mod test_table;
+pub mod test_userdata;
 pub mod test_utf8;
 pub mod test_xpcall_debug;
 // pub mod test_closures;  // Disabled - upvalue handling needs work

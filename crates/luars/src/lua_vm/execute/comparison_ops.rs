@@ -11,7 +11,7 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{Instruction, LuaResult, LuaState},
+    lua_vm::{Instruction, LuaError, LuaResult, LuaState},
 };
 
 use super::{
@@ -42,7 +42,16 @@ pub fn exec_eq(
 
     // Save PC before potential metamethod call
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    let cond = metamethod::equalobj(lua_state, ra, rb)?;
+    let cond = match metamethod::equalobj(lua_state, ra, rb) {
+        Ok(c) => c,
+        Err(LuaError::Yield) => {
+            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.call_status |= CIST_PENDING_FINISH;
+            return Err(LuaError::Yield);
+        }
+        Err(e) => return Err(e),
+    };
 
     // Verify base hasn't changed
     let new_base = lua_state.get_frame_base(frame_idx);
@@ -104,13 +113,18 @@ pub fn exec_lt(
             let vb = *rb;
 
             lua_state.set_frame_pc(frame_idx, *pc as u32);
-            let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
-                Some(result) => result,
-                None => {
-                    return Err(
-                        lua_state.error("attempt to compare non-comparable values".to_string())
-                    );
+            let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
                 }
+                Err(LuaError::Yield) => {
+                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.call_status |= CIST_PENDING_FINISH;
+                    return Err(LuaError::Yield);
+                }
+                Err(e) => return Err(e),
             };
 
             let new_base = lua_state.get_frame_base(frame_idx);
@@ -213,15 +227,18 @@ pub fn exec_lti(
             LuaValue::integer(im as i64)
         };
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
-            Some(result) => result,
-            None => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    va.type_name(),
-                    "number"
-                )));
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
         }
     };
 
@@ -260,15 +277,18 @@ pub fn exec_lei(
             LuaValue::integer(im as i64)
         };
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
-            Some(result) => result,
-            None => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    va.type_name(),
-                    "number"
-                )));
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
         }
     };
 
@@ -308,15 +328,18 @@ pub fn exec_gti(
         };
         let vb = *ra;
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt)? {
-            Some(result) => result,
-            None => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    vb.type_name(),
-                    "number"
-                )));
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
         }
     };
 
@@ -356,15 +379,18 @@ pub fn exec_gei(
         };
         let vb = *ra;
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
-            Some(result) => result,
-            None => {
-                return Err(lua_state.error(format!(
-                    "attempt to compare {} with {}",
-                    vb.type_name(),
-                    "number"
-                )));
+        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
             }
+            Err(LuaError::Yield) => {
+                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                let ci = lua_state.get_call_info_mut(frame_idx);
+                ci.call_status |= CIST_PENDING_FINISH;
+                return Err(LuaError::Yield);
+            }
+            Err(e) => return Err(e),
         }
     };
 
@@ -418,13 +444,18 @@ pub fn exec_le(
             let vb = *rb;
 
             lua_state.set_frame_pc(frame_idx, *pc as u32);
-            let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le)? {
-                Some(result) => result,
-                None => {
-                    return Err(
-                        lua_state.error("attempt to compare non-comparable values".to_string())
-                    );
+            let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
                 }
+                Err(LuaError::Yield) => {
+                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.call_status |= CIST_PENDING_FINISH;
+                    return Err(LuaError::Yield);
+                }
+                Err(e) => return Err(e),
             };
             result
         }

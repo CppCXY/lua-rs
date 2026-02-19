@@ -3,7 +3,7 @@ use crate::{
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
     lua_vm::{
         LuaError, LuaState, TmKind,
-        call_info::call_status::{CIST_RECST, CIST_YPCALL},
+        call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL},
         execute,
     },
     stdlib::basic::parse_number::parse_lua_number,
@@ -257,7 +257,11 @@ pub fn lua_idiv(a: i64, b: i64) -> i64 {
     let q = a / b;
     // If the signs of a and b differ and there is a remainder,
     // subtract 1 to achieve floor division (toward -infinity)
-    if (a ^ b) < 0 && a % b != 0 { q.wrapping_sub(1) } else { q }
+    if (a ^ b) < 0 && a % b != 0 {
+        q.wrapping_sub(1)
+    } else {
+        q
+    }
 }
 
 /// Lua modulo for integers: a % b
@@ -269,7 +273,22 @@ pub fn lua_imod(a: i64, b: i64) -> i64 {
         return 0;
     }
     let m = a % b;
-    if m != 0 && (m ^ b) < 0 { m.wrapping_add(b) } else { m }
+    if m != 0 && (m ^ b) < 0 {
+        m.wrapping_add(b)
+    } else {
+        m
+    }
+}
+
+/// Float modulo matching C Lua's `luai_nummod`.
+/// Uses hardware fmod (Rust's `%` operator on f64) then adjusts sign.
+#[inline(always)]
+pub fn lua_fmod(a: f64, b: f64) -> f64 {
+    let mut m = a % b; // C fmod
+    if m != 0.0 && ((m > 0.0) != (b > 0.0)) {
+        m += b;
+    }
+    m
 }
 
 // ============ 类型转换辅助函数 ============
@@ -284,8 +303,12 @@ pub unsafe fn ptointegerns(v: *const LuaValue, out: *mut i64) -> bool {
             true
         } else if pttisfloat(v) {
             // Try converting integral-valued floats (e.g. 5.0 -> 5)
+            // Range check matches C Lua's lua_numbertointeger:
+            //   f >= (i64::MIN as f64) && f < -(i64::MIN as f64)
+            // Note: i64::MAX as f64 rounds UP to 2^63, so we must use strict <
+            // with -(i64::MIN as f64) = 2^63 (exactly representable).
             let f = pfltvalue(v);
-            if f == (f as i64 as f64) && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
                 *out = f as i64;
                 true
             } else {
@@ -379,8 +402,9 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
         true
     } else if v.tt() == LUA_VNUMFLT {
         // Try converting integral-valued floats (e.g. 5.0 -> 5)
+        // Range check: f must be in [i64::MIN, 2^63) — see ptointegerns for details.
         let f = unsafe { v.value.n };
-        if f == (f as i64 as f64) && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+        if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
             *out = f as i64;
             true
         } else {
@@ -430,17 +454,31 @@ pub fn lookup_from_metatable(
                 }
             }
         } else {
-            // Non-table (string, userdata): fall back to general path
+            // Non-table (string, userdata): check trait-based field access first
+            if t.ttisfulluserdata() {
+                if let Some(ud) = t.as_userdata_mut() {
+                    // Try trait-based get_field (key must be a string)
+                    if let Some(key_str) = key.as_str() {
+                        if let Some(udv) = ud.get_trait().get_field(key_str) {
+                            let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                            return Ok(Some(result));
+                        }
+                        // Try trait-based call_method — returns a closure wrapping the method
+                        // Method names are checked here; actual call happens when Lua invokes it
+                        if ud.get_trait().method_names().contains(&key_str) {
+                            // Fall through to metatable — methods are dispatched via __index table
+                            // or will be handled at call time. For now, let metatable handle it.
+                        }
+                    }
+                }
+            }
+            // Fall back to general metamethod path
             match get_metamethod_event(lua_state, &t, TmKind::Index) {
                 Some(tm) => tm,
                 None => {
                     // No __index metamethod on non-table value → error
                     // Use typeerror for enhanced error message with varinfo
-                    return Err(crate::stdlib::debug::typeerror(
-                        lua_state,
-                        &t.type_name(),
-                        "index",
-                    ));
+                    return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
                 }
             }
         };
@@ -604,7 +642,22 @@ pub fn finishset(
                 continue;
             }
         } else {
-            // Not a table - get __newindex metamethod
+            // Not a table — try trait-based set_field for userdata first
+            if t.ttisfulluserdata() {
+                if let Some(ud) = t.as_userdata_mut() {
+                    if let Some(key_str) = key.as_str() {
+                        let udv = crate::lua_value::lua_value_to_udvalue(&value);
+                        match ud.get_trait_mut().set_field(key_str, udv) {
+                            Some(Ok(())) => return Ok(true),
+                            Some(Err(msg)) => {
+                                return Err(lua_state.error(msg));
+                            }
+                            None => {} // Fall through to metatable
+                        }
+                    }
+                }
+            }
+            // Get __newindex metamethod
             if let Some(tm) = get_metamethod_event(lua_state, &t, TmKind::NewIndex) {
                 if tm.is_function() {
                     // Call metamethod
@@ -621,11 +674,7 @@ pub fn finishset(
             }
 
             // No metamethod found for non-table
-            return Err(crate::stdlib::debug::typeerror(
-                lua_state,
-                &t.type_name(),
-                "index",
-            ));
+            return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
         }
     }
 
@@ -763,9 +812,19 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
     let pcall_func_pos = ci.base - ci.func_offset;
     let nresults = ci.nresults;
     let has_recst = ci.call_status & CIST_RECST != 0;
+    let is_xpcall = ci.call_status & CIST_XPCALL != 0;
 
     if ci.call_status & CIST_YPCALL != 0 {
         if has_recst {
+            // Save handler before it gets overwritten (only for xpcall)
+            let handler = if is_xpcall {
+                lua_state
+                    .stack_get(pcall_func_pos)
+                    .unwrap_or(LuaValue::nil())
+            } else {
+                LuaValue::nil()
+            };
+
             // Error recovery completed (or continuing) after yield.
             // Retrieve the saved error value and try to close remaining TBC entries.
             let error_val = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
@@ -785,6 +844,22 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                         error_val
                     };
                     lua_state.clear_error();
+
+                    // If xpcall, call error handler to transform the error
+                    let result_err = if is_xpcall {
+                        lua_state.nny += 1;
+                        let handler_result =
+                            lua_state.pcall(handler.clone(), vec![result_err.clone()]);
+                        lua_state.nny -= 1;
+                        match handler_result {
+                            Ok((true, results)) => {
+                                results.into_iter().next().unwrap_or(LuaValue::nil())
+                            }
+                            _ => lua_state.create_string("error in error handling")?,
+                        }
+                    } else {
+                        result_err
+                    };
 
                     lua_state.stack_set(pcall_func_pos, LuaValue::boolean(false))?;
                     lua_state.stack_set(pcall_func_pos + 1, result_err)?;
@@ -887,6 +962,55 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 
             Ok(())
         }
+    } else if ci.call_status & CIST_YCALL != 0 {
+        // Unprotected call (e.g. dofile) completed after yield.
+        // Move results from body_start to func_pos (no true/false prefix).
+        let stack_top = lua_state.get_top();
+        let body_results_start = pcall_func_pos + 1;
+        let body_nres = if stack_top > body_results_start {
+            stack_top - body_results_start
+        } else {
+            0
+        };
+
+        // Move results down to func_pos
+        for i in 0..body_nres {
+            let val = lua_state
+                .stack_get(body_results_start + i)
+                .unwrap_or(LuaValue::nil());
+            lua_state.stack_set(pcall_func_pos + i, val)?;
+        }
+
+        let n = body_nres;
+
+        lua_state.pop_frame();
+
+        let final_n = if nresults == -1 { n } else { nresults as usize };
+        let new_top = pcall_func_pos + final_n;
+
+        if nresults >= 0 {
+            let wanted = nresults as usize;
+            for i in n..wanted {
+                lua_state.stack_set(pcall_func_pos + i, LuaValue::nil())?;
+            }
+        }
+
+        lua_state.set_top_raw(new_top);
+
+        if lua_state.call_depth() > 0 {
+            let ci_idx = lua_state.call_depth() - 1;
+            if nresults == -1 {
+                let ci_top = lua_state.get_call_info(ci_idx).top;
+                if ci_top < new_top {
+                    lua_state.get_call_info_mut(ci_idx).top = new_top;
+                }
+            } else {
+                let frame_top = lua_state.get_call_info(ci_idx).top;
+                lua_state.set_top_raw(frame_top);
+            }
+        }
+
+        Ok(())
     } else {
         // Generic C frame after yield — just pop it.
         // This shouldn't normally happen, but be safe.
@@ -897,6 +1021,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 
 /// Handle pending metamethod finish (cold path, extracted from main loop).
 /// Returns true if a C frame was finished and execution should restart.
+/// This is the equivalent of C Lua's luaV_finishOp.
 #[cold]
 #[inline(never)]
 pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<bool> {
@@ -908,22 +1033,103 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
         return Ok(true); // restart startfunc
     }
     // === luaV_finishOp equivalent ===
+    // The interrupted instruction is at savedpc - 1.
+    // We need to check what opcode was interrupted and handle accordingly.
     let ci = lua_state.get_call_info(frame_idx);
-    let pending = ci.pending_finish_get;
+    let saved_pc = ci.pc as usize;
     let base_tmp = ci.base;
-    if pending >= 0 {
-        let dest = base_tmp + pending as usize;
-        let top = lua_state.get_top();
-        if top > 0 {
-            let result = lua_state.stack_mut()[top - 1];
-            lua_state.stack_mut()[dest] = result;
+    let _nresults = ci.nresults;
+
+    // Get the chunk to read the interrupted instruction
+    let func_value = ci.func;
+    if let Some(lua_func) = func_value.as_lua_function() {
+        let chunk = lua_func.chunk();
+        let code = &chunk.code;
+
+        if saved_pc > 0 && saved_pc <= code.len() {
+            let interrupted_instr = code[saved_pc - 1];
+            let op = interrupted_instr.get_opcode();
+
+            use crate::lua_vm::OpCode;
+            match op {
+                OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
+                    // Arithmetic metamethod: result at stack[top-1],
+                    // destination from the instruction at savedpc - 2
+                    let top = lua_state.get_top();
+                    if top > 0 && saved_pc >= 2 {
+                        let arith_instr = code[saved_pc - 2];
+                        let dest = base_tmp + arith_instr.get_a() as usize;
+                        let result = lua_state.stack_mut()[top - 1];
+                        lua_state.stack_mut()[dest] = result;
+                        lua_state.set_top_raw(top - 1);
+                    }
+                }
+                OpCode::Unm
+                | OpCode::BNot
+                | OpCode::Len
+                | OpCode::GetTabUp
+                | OpCode::GetTable
+                | OpCode::GetI
+                | OpCode::GetField
+                | OpCode::Self_ => {
+                    // Unary/table get ops: result at stack[top-1],
+                    // destination at base + A of the interrupted instruction
+                    let top = lua_state.get_top();
+                    if top > 0 {
+                        let dest = base_tmp + interrupted_instr.get_a() as usize;
+                        let result = lua_state.stack_mut()[top - 1];
+                        lua_state.stack_mut()[dest] = result;
+                        lua_state.set_top_raw(top - 1);
+                    }
+                }
+                OpCode::Lt
+                | OpCode::Le
+                | OpCode::LtI
+                | OpCode::LeI
+                | OpCode::GtI
+                | OpCode::GeI
+                | OpCode::Eq => {
+                    // Comparison ops: truthiness of stack[top-1] is the result.
+                    // Next instruction should be JMP.
+                    // If result != k, skip the JMP.
+                    let top = lua_state.get_top();
+                    if top > 0 {
+                        let res_val = lua_state.stack_mut()[top - 1];
+                        let res = !res_val.is_nil() && !(res_val == LuaValue::boolean(false));
+                        lua_state.set_top_raw(top - 1);
+                        let k = interrupted_instr.get_k();
+                        if res != k {
+                            // Skip the JMP instruction
+                            let ci = lua_state.get_call_info_mut(frame_idx);
+                            ci.pc += 1;
+                        }
+                    }
+                }
+                OpCode::Concat => {
+                    // Concat: partial concat, result of TM at stack[top-1]
+                    let top = lua_state.get_top();
+                    if top > 1 {
+                        // Put TM result in proper position
+                        let result = lua_state.stack_mut()[top - 1];
+                        lua_state.stack_mut()[top - 3] = result;
+                        lua_state.set_top_raw(top - 1);
+                        // Continue concat (may yield again) - handled by main loop
+                    }
+                }
+                _ => {
+                    // CALL, TAILCALL, TFORCALL, SETTAB*, SETFIELD, SETI — no special action needed
+                }
+            }
         }
-        let ci_top = lua_state.get_call_info(frame_idx).top;
-        lua_state.set_top_raw(ci_top);
-    } else {
-        let ci_top = lua_state.get_call_info(frame_idx).top;
+    }
+
+    // Restore ci_top
+    let ci_top = lua_state.get_call_info(frame_idx).top;
+    let current_top = lua_state.get_top();
+    if current_top < ci_top {
         lua_state.set_top_raw(ci_top);
     }
+
     let ci_mut = lua_state.get_call_info_mut(frame_idx);
     ci_mut.pending_finish_get = -1;
     ci_mut.call_status &= !CIST_PENDING_FINISH;

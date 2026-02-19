@@ -38,7 +38,7 @@ fn block_follow(fs: &FuncState, withuntil: bool) -> bool {
 // Port of statement from lparser.c
 fn statement(fs: &mut FuncState) -> Result<(), String> {
     let line = fs.lexer.line;
-    // enterlevel(fs.lexer);
+    fs.enter_level()?;
 
     match fs.lexer.current_token() {
         LuaTokenKind::TkSemicolon => {
@@ -119,7 +119,7 @@ fn statement(fs: &mut FuncState) -> Result<(), String> {
     // Use the reglevel method from FuncState which correctly handles all variable kinds
     fs.freereg = fs.nvarstack();
 
-    // leavelevel(fs.lexer);
+    fs.leave_level();
     Ok(())
 }
 
@@ -143,11 +143,11 @@ fn check(fs: &mut FuncState, expected: LuaTokenKind) -> Result<(), String> {
 
 // Port of error_expected from lparser.c
 fn error_expected(fs: &mut FuncState, token: LuaTokenKind) -> Result<(), String> {
-    let msg = format!("expected '{}'", token);
+    let msg = format!("'{}' expected", token);
     Err(fs.token_error(&msg))
 }
 
-fn check_match(
+pub fn check_match(
     fs: &mut FuncState,
     what: LuaTokenKind,
     who: LuaTokenKind,
@@ -157,8 +157,8 @@ fn check_match(
         if where_ == fs.lexer.line {
             error_expected(fs, what)?;
         } else {
-            return Err(fs.syntax_error(&format!(
-                "expected '{}' (to close '{}' at line {})",
+            return Err(fs.token_error(&format!(
+                "'{}' expected (to close '{}' at line {})",
                 what, who, where_
             )));
         }
@@ -210,8 +210,25 @@ pub fn enterblock(fs: &mut FuncState, bl_id: BlockCntId, isloop: u8) {
 // Port of leaveblock from lparser.c:672-692
 // Port of closegoto from lparser.c:597-621
 // Solves the goto at index 'g' to given 'label' and removes it from the list
-fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
+// varnames: mapping from nactvar index -> variable name, for error messages
+fn solvegoto(
+    fs: &mut FuncState,
+    g: usize,
+    label: &LabelDesc,
+    bl_upval: bool,
+    varnames: &std::collections::HashMap<u16, String>,
+) -> Result<(), String> {
     let gt = &fs.pending_gotos[g].clone(); // Clone to avoid borrow issues
+
+    // lparser.c:603-605: Check if goto jumps into the scope of a local variable
+    if gt.nactvar < label.nactvar {
+        // The goto jumps over a variable declaration
+        let varname = varnames.get(&gt.nactvar).map(|s| s.as_str()).unwrap_or("?");
+        return Err(fs.sem_error(&format!(
+            "<goto {}> at line {} jumps into the scope of '{}'",
+            gt.name, gt.line, varname
+        )));
+    }
 
     // lparser.c:606-614: Check if goto needs a CLOSE instruction
     // gt->close means the goto jumps out of the scope of some variables
@@ -239,6 +256,7 @@ fn solvegoto(fs: &mut FuncState, g: usize, label: &LabelDesc, bl_upval: bool) {
 
     // lparser.c:616-619: Remove goto from pending list
     fs.pending_gotos.remove(g);
+    Ok(())
 }
 
 // Port of findlabel from lparser.c:544-557
@@ -251,10 +269,10 @@ fn findlabel<'a>(fs: &'a FuncState, name: &str) -> Option<&'a LabelDesc> {
 // Check whether there is already a label with the given 'name'
 fn checkrepeated(fs: &FuncState, name: &str) -> Result<(), String> {
     if let Some(lb) = findlabel(fs, name) {
-        return Err(format!(
+        return Err(fs.sem_error(&format!(
             "label '{}' already defined on line {}",
             name, lb.line
-        ));
+        )));
     }
     Ok(())
 }
@@ -302,7 +320,8 @@ fn solvegotos_on_leaveblock(
     bl: &BlockCnt,
     outlevel: u8,
     goto_levels: &[(usize, u8)],
-) {
+    varnames: &std::collections::HashMap<u16, String>,
+) -> Result<(), String> {
     let mut igt = bl.first_goto; // first goto in the finishing block
     let mut level_idx = 0;
 
@@ -318,28 +337,11 @@ fn solvegotos_on_leaveblock(
         if let Some(label) = label_opt {
             // Found a match - close and remove goto
             let bl_upval = bl.upval;
-            solvegoto(fs, igt, &label, bl_upval);
+            solvegoto(fs, igt, &label, bl_upval, varnames)?;
             // solvegoto removes the goto, so don't increment igt or level_idx
         } else {
             // Adjust goto for outer block
             // lparser.c:710-711: if block has upvalues and goto escapes scope, mark for close
-            //
-            // NOTE: Known issue with goto.lua test:
-            // When a goto jumps out of a block containing local variables (not upvalues),
-            // the official Lua 5.5 somehow generates a CLOSE instruction, but our
-            // implementation doesn't because bl.upval is false for regular local variables.
-            //
-            // The condition `bl.upval && gt_level > outlevel` correctly follows Lua 5.5
-            // lparser.c:710-711, but there may be another mechanism in Lua 5.5 that
-            // marks bl->upval=true in cases we haven't identified, or the CLOSE is
-            // generated through a different path (possibly in closegoto when the label
-            // is found in an outer block with upvalues).
-            //
-            // Removing the bl.upval check causes other tests to fail, so the current
-            // implementation matches Lua 5.5 source code but may not match its behavior
-            // in all cases.
-            //
-            // Use pre-computed level from goto_levels
             let gt_level = if level_idx < goto_levels.len() && goto_levels[level_idx].0 == igt {
                 let level = goto_levels[level_idx].1;
                 level_idx += 1;
@@ -360,10 +362,11 @@ fn solvegotos_on_leaveblock(
 
     // lparser.c:716: remove local labels
     fs.labels.truncate(bl.first_label);
+    Ok(())
 }
 
 // Port of leaveblock from lparser.c:745-762 (Lua 5.5)
-pub fn leaveblock(fs: &mut FuncState) {
+pub fn leaveblock(fs: &mut FuncState) -> Result<(), String> {
     if let Some(bl_id) = fs.block_cnt_id {
         // Get block info
         let (nactvar, first_goto, is_loop, has_previous, previous_id, upval) = {
@@ -377,7 +380,7 @@ pub fn leaveblock(fs: &mut FuncState) {
                     bl.upval,
                 )
             } else {
-                return;
+                return Ok(());
             }
         };
 
@@ -391,6 +394,15 @@ pub fn leaveblock(fs: &mut FuncState) {
             let gt_nactvar = fs.pending_gotos[i].nactvar;
             let gt_level = fs.reglevel(gt_nactvar);
             goto_levels.push((i, gt_level));
+        }
+
+        // Pre-compute variable names for goto scope checking
+        // We need these before remove_vars truncates actvar
+        let mut varnames = std::collections::HashMap::new();
+        for i in 0..fs.nactvar {
+            if let Some(vd) = fs.actvar.get(i as usize) {
+                varnames.insert(i, vd.name.clone());
+            }
         }
 
         // lparser.c:749-750: need a 'close'?
@@ -421,22 +433,25 @@ pub fn leaveblock(fs: &mut FuncState) {
                 is_loop: bl.is_loop,
                 in_scope: bl.in_scope,
             };
-            solvegotos_on_leaveblock(fs, &bl_info, stklevel, &goto_levels);
+            solvegotos_on_leaveblock(fs, &bl_info, stklevel, &goto_levels, &varnames)?;
         }
 
         // lparser.c:757-760: check for undefined gotos at function level
         if !has_previous {
-            if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
-                if bl.first_goto < fs.pending_gotos.len() {
-                    // In full implementation, this would raise an error
-                    // For now, we'll just leave them
-                }
+            if !fs.pending_gotos.is_empty() {
+                // Report the first unresolved goto as an error
+                let gt = &fs.pending_gotos[0];
+                return Err(fs.sem_error(&format!(
+                    "no visible label '{}' for <goto> at line {}",
+                    gt.name, gt.line
+                )));
             }
         }
 
         // lparser.c:761: current block now is previous one
         fs.block_cnt_id = previous_id;
     }
+    Ok(())
 }
 
 // Port of block from lparser.c
@@ -444,7 +459,7 @@ fn block(fs: &mut FuncState) -> Result<(), String> {
     let bl_id = fs.compiler_state.alloc_blockcnt(BlockCnt::default());
     enterblock(fs, bl_id, 0);
     statlist(fs)?;
-    leaveblock(fs);
+    leaveblock(fs)?;
     Ok(())
 }
 
@@ -470,6 +485,10 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
         nret = 0;
     } else {
         nret = explist(fs, &mut e)? as i32;
+        // Check limit: MAXARG_B = 255, nret + 1 must fit
+        if nret > 254 {
+            return Err(fs.errorlimit(254, "returns"));
+        }
         // Check if expression has multiple returns (VCALL or VVARARG)
         if matches!(e.kind, ExpKind::VCALL | ExpKind::VVARARG) {
             code::setmultret(fs, &mut e);
@@ -521,15 +540,10 @@ pub fn explist(fs: &mut FuncState, e: &mut ExpDesc) -> Result<usize, String> {
 
     while testnext(fs, LuaTokenKind::TkComma) {
         code::exp2nextreg(fs, e);
+        fs.check_pending_checklimit()?; // check register overflow
         *e = ExpDesc::new_void(); // Reset ExpDesc for next expression
         expr_internal(fs, e)?;
         n += 1;
-
-        // Check limit: Lua allows at most 254 return values
-        // (255 is reserved for LUA_MULTRET)
-        if n > 254 {
-            return Err("too many returns".to_string());
-        }
     }
 
     Ok(n)
@@ -707,7 +721,7 @@ fn whilestat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     block(fs)?; // Official Lua uses block(ls), not statlist
     code::jumpto(fs, whileinit);
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkWhile, line)?;
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // Patch exit jump - false conditions finish the loop
     code::patchtohere(fs, condexit);
@@ -762,7 +776,7 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
         .get_blockcnt_mut(bl2_id)
         .map(|bl| bl.nactvar)
         .unwrap_or(0);
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // lparser.c:1499-1505: handle upvalues
     if bl2_upval {
@@ -777,7 +791,7 @@ fn repeatstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     code::patchlist(fs, condexit, repeat_init as isize);
 
     // lparser.c:1507: leaveblock(fs); /* finish loop */
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     Ok(())
 }
@@ -818,7 +832,7 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     check_match(fs, LuaTokenKind::TkEnd, LuaTokenKind::TkFor, line)?;
 
     // lparser.c:1633: leaveblock(fs);  /* loop scope ('break' jumps to this point) */
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     Ok(())
 }
@@ -860,7 +874,7 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     // Adjust local variables (2 internal control variables only!)
     // The loop variable itself will be adjusted in forbody
-    fs.adjust_local_vars(2);
+    fs.adjust_local_vars(2)?;
 
     // Generate FORPREP with initial jump offset 0
     let prep_pc = code::code_asbx(fs, OpCode::ForPrep, base as u32, 0);
@@ -886,12 +900,12 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
 
     // Activate the loop variable (4th variable)
     // lparser.c:1553-1554: adjustlocalvars + luaK_reserveregs
-    fs.adjust_local_vars(1);
+    fs.adjust_local_vars(1)?;
     code::reserve_regs(fs, 1);
 
     block(fs)?;
 
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // Generate FORLOOP with initial Bx=0, will be fixed by fix_for_jump
     let loop_pc = code::code_abx(fs, OpCode::ForLoop, base as u32, 0);
@@ -936,6 +950,9 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     check(fs, LuaTokenKind::TkIn)?;
     fs.lexer.bump(); // skip IN
 
+    // lparser.c:1725: line = ls->linenumber (captured AFTER consuming 'in')
+    let line = fs.lexer.line;
+
     // Parse iterator expressions
     let mut e = ExpDesc::new_void();
     let nexps = explist(fs, &mut e)?;
@@ -945,13 +962,14 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
 
     // Activate the 3 internal control variables (not the control variable yet!)
     // Per lparser.c:1727: adjustlocalvars(ls, 3);
-    fs.adjust_local_vars(3);
+    fs.adjust_local_vars(3)?;
 
     // lparser.c:1728: marktobeclosed(fs); /* last internal var. must be closed */
     mark_to_be_closed(fs);
 
     // lparser.c:1735: luaK_checkstack(fs, 2); /* extra space to call iterator */
     code::checkstack(fs, 2);
+    fs.check_pending_checklimit()?; // check register overflow
 
     check(fs, LuaTokenKind::TkDo)?;
     fs.lexer.bump(); // skip 'do'
@@ -975,12 +993,13 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
 
     // lparser.c:1670: adjustlocalvars(ls, nvars); /* activate declared variables */
     // nvars-3 because we already adjusted 3 internal variables
-    fs.adjust_local_vars((nvars - 3) as u8);
+    fs.adjust_local_vars((nvars - 3) as u16)?;
     code::reserve_regs(fs, (nvars - 3) as u8);
+    fs.check_pending_checklimit()?; // check register overflow
 
     block(fs)?;
 
-    leaveblock(fs);
+    leaveblock(fs)?;
 
     // lparser.c:1674: fixforjump(fs, prep, luaK_getlabel(fs), 0);
     // Fix TFORPREP to jump to current position (after leaveblock)
@@ -990,6 +1009,8 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1676: Generate TFORCALL for generic for
     // nvars-3 because the first 3 are internal variables
     code::code_abc(fs, OpCode::TForCall, base as u32, 0, (nvars - 3) as u32);
+    // lparser.c:1677: luaK_fixline(fs, line); /* pretend TFORCALL is on 'for' line */
+    code::fixline(fs, line);
 
     // lparser.c:1679: Generate TFORLOOP with Bx=0, will be fixed later
     let endfor_pc = code::code_abx(fs, OpCode::TForLoop, base as u32, 0);
@@ -1029,8 +1050,8 @@ fn funcstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     let mut func_val = ExpDesc::new_void();
     expr_parser::body(fs, &mut func_val, is_method)?;
 
-    // Check if variable is readonly
-    check_readonly(fs, &mut base)?;
+    // Check if variable is readonly - use original line (where FUNCTION keyword was)
+    check_readonly_at_line(fs, &mut base, line)?;
 
     // Store function: base = func_val
     storevar(fs, &base, &mut func_val);
@@ -1048,7 +1069,7 @@ fn localfunc(fs: &mut FuncState) -> Result<(), String> {
 
     // Register local variable
     fs.new_localvar(name, VarKind::VDKREG);
-    fs.adjust_local_vars(1);
+    fs.adjust_local_vars(1)?;
 
     // Parse function body
     let mut v = ExpDesc::new_void();
@@ -1076,7 +1097,7 @@ fn getvarattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, Stri
         } else if attr == "close" {
             Ok(VarKind::RDKTOCLOSE)
         } else {
-            Err(fs.syntax_error(&format!("unknown attribute '{}'", attr)))
+            Err(fs.sem_error(&format!("unknown attribute '{}'", attr)))
         }
     } else {
         Ok(default) // return default value
@@ -1088,7 +1109,7 @@ fn getvarattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, Stri
 fn getglobalattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, String> {
     let kind = getvarattribute(fs, default)?;
     match kind {
-        VarKind::RDKTOCLOSE => Err(fs.syntax_error("global variables cannot be to-be-closed")),
+        VarKind::RDKTOCLOSE => Err(fs.sem_error("global variables cannot be to-be-closed")),
         VarKind::RDKCONST => Ok(VarKind::GDKCONST), // adjust kind for global variable
         _ => Ok(kind),
     }
@@ -1133,7 +1154,7 @@ fn fix_for_jump(fs: &mut FuncState, pc: usize, dest: usize, back: bool) -> Resul
 
 // Port of markupval from lparser.c:411-417
 // Mark block where variable at given level was defined (to emit close instructions later)
-pub fn mark_upval(fs: &mut FuncState, level: u8) {
+pub fn mark_upval(fs: &mut FuncState, level: u16) {
     let mut bl_id_opt = fs.block_cnt_id;
     while let Some(bl_id) = bl_id_opt {
         if let Some(bl) = fs.compiler_state.get_blockcnt_mut(bl_id) {
@@ -1164,7 +1185,7 @@ fn check_to_close(fs: &mut FuncState, level: isize) {
         // lparser.c:1812: marktobeclosed(fs);
         mark_to_be_closed(fs);
         // lparser.c:1813: luaK_codeABC(fs, OP_TBC, reglevel(fs, level), 0, 0);
-        let reg_level = fs.reglevel(level as u8);
+        let reg_level = fs.reglevel(level as u16);
         code::code_abc(fs, OpCode::Tbc, reg_level as u32, 0, 0);
     }
 }
@@ -1230,7 +1251,7 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
 
         if kind == VarKind::RDKTOCLOSE {
             if toclose != -1 {
-                return Err("multiple to-be-closed variables in local list".to_string());
+                return Err(fs.sem_error("multiple to-be-closed variables in local list"));
             }
             toclose = (fs.nactvar + nvars) as isize;
         }
@@ -1278,7 +1299,7 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
             var_desc.ridx = ridx as i16;
         }
         // adjustlocalvars(ls, nvars - 1) - exclude last variable (lparser.c:1906)
-        fs.adjust_local_vars(nvars - 1);
+        fs.adjust_local_vars(nvars - 1)?;
         // fs->nactvar++ - but count it (lparser.c:1907)
         fs.nactvar += 1;
         // NOTE: Don't adjust freereg here! Official Lua doesn't do it either.
@@ -1289,7 +1310,8 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
     }
 
     adjust_assign(fs, nvars as usize, nexps, &mut e);
-    fs.adjust_local_vars(nvars);
+    fs.check_pending_checklimit()?; // check register overflow from adjust_assign
+    fs.adjust_local_vars(nvars)?;
 
     check_to_close(fs, toclose);
 
@@ -1648,7 +1670,7 @@ fn exprstat(fs: &mut FuncState) -> Result<(), String> {
     } else {
         // It's a function call
         if lh_v.kind != ExpKind::VCALL {
-            return Err("syntax error".to_string());
+            return Err(fs.syntax_error("syntax error").to_string());
         }
         // Set to use no results
         let pc = lh_v.u.info() as usize;
@@ -1687,9 +1709,10 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
             if let Some(var_desc) = fs.get_local_var_desc(vidx) {
                 // RDKCONST, RDKCTC, RDKVAVAR, and RDKTOCLOSE are all readonly
                 match var_desc.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE | VarKind::RDKVAVAR => {
-                        Some(var_desc.name.clone())
-                    }
+                    VarKind::RDKCONST
+                    | VarKind::RDKCTC
+                    | VarKind::RDKTOCLOSE
+                    | VarKind::RDKVAVAR => Some(var_desc.name.clone()),
                     _ => None,
                 }
             } else {
@@ -1703,9 +1726,10 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
                 let upval = &fs.upvalues[upval_idx];
                 // RDKCONST, RDKCTC, RDKVAVAR, and RDKTOCLOSE are all readonly
                 match upval.kind {
-                    VarKind::RDKCONST | VarKind::RDKCTC | VarKind::RDKTOCLOSE | VarKind::RDKVAVAR => {
-                        Some(upval.name.clone())
-                    }
+                    VarKind::RDKCONST
+                    | VarKind::RDKCTC
+                    | VarKind::RDKTOCLOSE
+                    | VarKind::RDKVAVAR => Some(upval.name.clone()),
                     _ => None,
                 }
             } else {
@@ -1739,10 +1763,23 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
 
     if let Some(name) = varname {
         let msg = format!("attempt to assign to const variable '{}'", name);
-        return Err(fs.syntax_error(&msg));
+        return Err(fs.sem_error(&msg));
     }
 
     Ok(())
+}
+
+// Like check_readonly but reports error at a specific line instead of current lexer line
+fn check_readonly_at_line(fs: &mut FuncState, e: &mut ExpDesc, line: usize) -> Result<(), String> {
+    // Temporarily save and override both line and lastline, then restore
+    let saved_line = fs.lexer.line;
+    let saved_lastline = fs.lexer.lastline;
+    fs.lexer.line = line;
+    fs.lexer.lastline = line;
+    let result = check_readonly(fs, e);
+    fs.lexer.line = saved_line;
+    fs.lexer.lastline = saved_lastline;
+    result
 }
 
 // ============ Lua 5.5: Global statement support ============
@@ -1823,7 +1860,7 @@ fn globalnames(fs: &mut FuncState, defkind: VarKind) -> Result<(), String> {
     }
 
     // Activate all declared globals
-    fs.nactvar = (fs.nactvar as i32 + nvars) as u8;
+    fs.nactvar = (fs.nactvar as i32 + nvars) as u16;
 
     Ok(())
 }

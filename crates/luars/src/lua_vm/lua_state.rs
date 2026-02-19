@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
-use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_LUA, CIST_RECST, CIST_YPCALL};
+use crate::lua_vm::call_info::call_status::{
+    self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
+};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::safe_option::SafeOption;
@@ -68,6 +70,23 @@ pub struct LuaState {
     /// When leaving a block (OpCode::Close), we iterate from the end and call __close
     /// on each TBC variable whose stack index >= the close level
     pub(crate) tbc_list: Vec<usize>,
+
+    /// Whether this coroutine has yielded and is waiting to be resumed.
+    /// Used to distinguish "running" from "yielded" when call_stack is non-empty.
+    /// Set to true when yield is captured by resume, false when execution resumes.
+    yielded: bool,
+
+    /// Whether close_tbc_with_error is currently running on this thread.
+    /// Used to detect re-entrant coroutine.close() calls from __close handlers.
+    pub(crate) is_closing: bool,
+
+    /// Non-yieldable nesting depth (like C Lua's nny packed in nCcalls).
+    /// Main thread starts at 1 (always non-yieldable).
+    /// Coroutine threads start at 0 (yieldable).
+    /// Incremented when entering a non-yieldable C call boundary (e.g., pcall method
+    /// used by C stdlib functions like gsub that don't support continuations).
+    /// `yieldable(L)` == `nny == 0`.
+    pub(crate) nny: u32,
 }
 
 impl LuaState {
@@ -98,6 +117,9 @@ impl LuaState {
             safe_option,
             is_main,
             tbc_list: Vec::new(),
+            yielded: false,
+            is_closing: false,
+            nny: if is_main { 1 } else { 0 },
         }
     }
 
@@ -162,6 +184,10 @@ impl LuaState {
     ) -> LuaResult<()> {
         // Fast path: check stack depth (branch predictor friendly - usually succeeds)
         if self.call_depth >= self.safe_option.max_call_depth {
+            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+                // In error handler extra zone - C Lua's stackerror behavior
+                return Err(LuaError::ErrorInErrorHandling);
+            }
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -202,13 +228,16 @@ impl LuaState {
             let start = base + nparams;
             let end = base + numparams;
 
-            // Ensure stack capacity
+            // Ensure stack capacity.
+            // CRITICAL: Use self.resize() instead of self.stack.resize() so that
+            // open upvalue raw pointers are fixed if the Vec reallocates.
+            // Direct self.stack.resize() bypasses fix_open_upvalue_pointers(),
+            // causing use-after-free when upvalues read/write via stale pointers.
             if self.stack.len() < end {
-                self.stack.resize(end, LuaValue::nil());
-            } else {
-                // Batch fill with nil (faster than loop)
-                self.stack[start..end].fill(LuaValue::nil());
+                self.resize(end)?;
             }
+            // Batch fill missing parameter slots with nil
+            self.stack[start..end].fill(LuaValue::nil());
 
             // Update stack_top if necessary
             if self.stack_top < end {
@@ -339,6 +368,10 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     fn push_lua_frame_overflow(&mut self) -> LuaResult<()> {
+        if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+            // In error handler extra zone - C Lua's stackerror behavior
+            return Err(LuaError::ErrorInErrorHandling);
+        }
         Err(self.error(format!(
             "stack overflow (Lua stack depth: {})",
             self.call_depth
@@ -368,11 +401,13 @@ impl LuaState {
         if nparams < param_count {
             let start = base + nparams;
             let end = base + param_count;
+            // CRITICAL: Use self.resize() instead of self.stack.resize() so that
+            // open upvalue raw pointers are fixed if the Vec reallocates.
             if self.stack.len() < end {
-                self.stack.resize(end, LuaValue::nil());
-            } else {
-                self.stack[start..end].fill(LuaValue::nil());
+                self.resize(end)?;
             }
+            // Batch fill missing parameter slots with nil
+            self.stack[start..end].fill(LuaValue::nil());
             if self.stack_top < end {
                 self.stack_top = end;
             }
@@ -432,6 +467,10 @@ impl LuaState {
     ) -> LuaResult<()> {
         // Check stack depth
         if self.call_depth >= self.safe_option.max_call_depth {
+            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+                // In error handler extra zone - C Lua's stackerror behavior
+                return Err(LuaError::ErrorInErrorHandling);
+            }
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -502,6 +541,12 @@ impl LuaState {
     #[inline(always)]
     pub fn get_top(&self) -> usize {
         self.stack_top
+    }
+
+    /// Port of lua_checkstack (lapi.c): check if the stack can grow by `n` slots.
+    /// Returns true if the stack can accommodate `n` more elements.
+    pub fn check_stack(&self, n: usize) -> bool {
+        self.stack_top + n <= self.safe_option.max_stack_size
     }
 
     /// Set logical stack top (L->top.p = L->stack + new_top in Lua)
@@ -628,16 +673,20 @@ impl LuaState {
             if ci.is_lua() {
                 if let Some(func_obj) = ci.func.as_lua_function() {
                     let chunk = func_obj.chunk();
-                    let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                    let source = match chunk.source_name.as_deref() {
+                        Some(raw) => crate::compiler::format_source(raw),
+                        None => "?".to_string(), // stripped debug info
+                    };
                     let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
                         chunk.line_info[ci.pc as usize - 1] as usize
-                    } else if !chunk.line_info.is_empty() {
-                        chunk.line_info[0] as usize
                     } else {
                         0
                     };
                     location = if line > 0 {
                         format!("{}:{}: ", source, line)
+                    } else if chunk.line_info.is_empty() {
+                        // No line info at all (stripped) — use ?
+                        format!("{}:?: ", source)
                     } else {
                         format!("{}: ", source)
                     };
@@ -646,6 +695,47 @@ impl LuaState {
         };
 
         self.error_msg = format!("{}{}", location, msg);
+        LuaError::RuntimeError
+    }
+
+    /// Raise an error from a C function, finding the calling Lua frame for location.
+    /// Mirrors C Lua's luaL_error behavior: uses luaL_where(L,1) to get
+    /// location from the Lua frame that called the current C function.
+    #[cold]
+    #[inline(never)]
+    pub fn error_from_c(&mut self, msg: String) -> LuaError {
+        // Find the nearest Lua frame by traversing up from current frame
+        let depth = self.call_depth;
+        for level in 0..depth {
+            let idx = depth - 1 - level;
+            if let Some(ci) = self.get_frame(idx) {
+                if ci.is_lua() {
+                    if let Some(func_obj) = ci.func.as_lua_function() {
+                        let chunk = func_obj.chunk();
+                        let source = match chunk.source_name.as_deref() {
+                            Some(raw) => crate::compiler::format_source(raw),
+                            None => "?".to_string(),
+                        };
+                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                            chunk.line_info[ci.pc as usize - 1] as usize
+                        } else {
+                            0
+                        };
+                        let location = if line > 0 {
+                            format!("{}:{}: ", source, line)
+                        } else if chunk.line_info.is_empty() {
+                            format!("{}:?: ", source)
+                        } else {
+                            format!("{}: ", source)
+                        };
+                        self.error_msg = format!("{}{}", location, msg);
+                        return LuaError::RuntimeError;
+                    }
+                }
+            }
+        }
+        // Fallback: no Lua frame found
+        self.error_msg = msg;
         LuaError::RuntimeError
     }
 
@@ -895,6 +985,18 @@ impl LuaState {
 
             if let Some(close_fn) = close_method {
                 let result = if let Some(ref err) = current_error {
+                    // Root the error on the Lua stack before the call so that
+                    // GC can see it (a Rust local is invisible to the collector).
+                    // This mirrors C Lua's prepcallclosemth which places the
+                    // error at uv+1 and sets L->top accordingly.
+                    let err_slot = tbc_idx + 1;
+                    let needed = err_slot + 1;
+                    if needed > self.stack.len() {
+                        self.grow_stack(needed + 3)?;
+                    }
+                    self.stack[err_slot] = err.clone();
+                    self.set_top_raw(err_slot + 1);
+
                     // Previous __close threw — pass error as 2nd arg
                     self.call_close_method_with_error(&close_fn, &value, err.clone())
                 } else {
@@ -972,6 +1074,9 @@ impl LuaState {
     pub fn close_tbc_with_error(&mut self, level: usize, err: LuaValue) -> LuaResult<()> {
         use crate::lua_vm::execute::TmKind;
         use crate::lua_vm::execute::get_metamethod_event;
+
+        let was_closing = self.is_closing;
+        self.is_closing = true;
 
         let mut current_error = err;
         let mut had_close_error = false;
@@ -1054,6 +1159,7 @@ impl LuaState {
             self.error_object = current_error;
         }
 
+        self.is_closing = was_closing;
         Ok(())
     }
 
@@ -1131,7 +1237,7 @@ impl LuaState {
         let func_pos = self.get_top();
         // Ensure stack has room for function + 2 args
         if func_pos + 3 > self.stack().len() {
-            self.grow_stack(3)?;
+            self.grow_stack(func_pos + 3)?;
         }
         {
             let stack = self.stack_mut();
@@ -1371,6 +1477,10 @@ impl LuaState {
         vm.n_ccalls += 1;
         if vm.n_ccalls >= self.safe_option.max_call_depth {
             vm.n_ccalls -= 1;
+            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+                // In error handler extra zone - C Lua's stackerror behavior
+                return Err(LuaError::ErrorInErrorHandling);
+            }
             Err(self.error("C stack overflow".to_string()))
         } else {
             Ok(())
@@ -1633,14 +1743,39 @@ impl LuaState {
     }
 
     /// Set value in table with metamethod support (__newindex)
-    pub fn table_set(
-        &mut self,
-        table: &LuaValue,
-        key: LuaValue,
-        value: LuaValue,
-    ) -> LuaResult<()> {
+    pub fn table_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> LuaResult<()> {
         execute::helper::finishset(self, table, &key, value)?;
         Ok(())
+    }
+
+    /// Compare two values using < operator with metamethod support (__lt)
+    pub fn obj_lt(&mut self, a: &LuaValue, b: &LuaValue) -> LuaResult<bool> {
+        // Integer-integer
+        if let (Some(i1), Some(i2)) = (a.as_integer(), b.as_integer()) {
+            return Ok(i1 < i2);
+        }
+        // Float-float
+        if let (Some(f1), Some(f2)) = (a.as_float(), b.as_float()) {
+            return Ok(f1 < f2);
+        }
+        // Mixed number
+        if let (Some(n1), Some(n2)) = (a.as_number(), b.as_number()) {
+            return Ok(n1 < n2);
+        }
+        // String (including binary): compare raw bytes
+        if a.is_string() && b.is_string() {
+            let ba = a.as_str().map(|s| s.as_bytes()).or_else(|| a.as_binary());
+            let bb = b.as_str().map(|s| s.as_bytes()).or_else(|| b.as_binary());
+            if let (Some(ba), Some(bb)) = (ba, bb) {
+                return Ok(ba < bb);
+            }
+        }
+        // Try __lt metamethod
+        match execute::metamethod::try_comp_tm(self, *a, *b, execute::TmKind::Lt) {
+            Ok(Some(result)) => Ok(result),
+            Ok(None) => Err(crate::stdlib::debug::ordererror(self, a, b)),
+            Err(e) => Err(e),
+        }
     }
 
     /// Get object length with metamethod support (__len)
@@ -1655,14 +1790,15 @@ impl LuaState {
                 let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
                 const TM_LEN_BIT: u8 = execute::TmKind::Len as u8;
                 if !mt.no_tm(TM_LEN_BIT) {
-                    let event_key =
-                        self.vm_mut().const_strings.get_tm_value(execute::TmKind::Len);
+                    let event_key = self
+                        .vm_mut()
+                        .const_strings
+                        .get_tm_value(execute::TmKind::Len);
                     if let Some(mm) = mt.raw_get(&event_key) {
-                        let result =
-                            execute::call_tm_res(self, mm, *obj, *obj)?;
-                        return result
-                            .as_integer()
-                            .ok_or_else(|| self.error("object length is not an integer".to_string()));
+                        let result = execute::call_tm_res(self, mm, *obj, *obj)?;
+                        return result.as_integer().ok_or_else(|| {
+                            self.error("object length is not an integer".to_string())
+                        });
                     } else {
                         mt.set_tm_absent(TM_LEN_BIT);
                     }
@@ -1670,9 +1806,7 @@ impl LuaState {
             }
             return Ok(table.len() as i64);
         }
-        if let Some(mm) =
-            execute::get_metamethod_event(self, obj, execute::TmKind::Len)
-        {
+        if let Some(mm) = execute::get_metamethod_event(self, obj, execute::TmKind::Len) {
             let result = execute::call_tm_res(self, mm, *obj, *obj)?;
             return result
                 .as_integer()
@@ -1718,19 +1852,25 @@ impl LuaState {
     /// see the correct error chain without an extra pcall frame.
     pub fn call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         let initial_depth = self.call_depth();
-        let func_idx = self.stack.len();
+        // Use stack_top (logical top) instead of stack.len() (physical end).
+        // The physical stack can be much larger than needed (e.g., after deep
+        // recursion tests), so placing the function at stack.len() would waste
+        // address space and risk hitting max_stack_size limits unnecessarily.
+        let func_idx = self.stack_top;
+        let arg_count = args.len();
+        let needed = func_idx + 1 + arg_count;
 
-        // Push function and args to stack
-        let old_capacity = self.stack.capacity();
-        self.stack.push(func);
-        for arg in args {
-            self.stack.push(arg);
+        // Ensure physical stack has room for function + args
+        if needed > self.stack.len() {
+            self.resize(needed)?;
         }
-        if self.stack.capacity() != old_capacity {
-            self.fix_open_upvalue_pointers();
+
+        // Write function and args at stack_top position
+        self.stack[func_idx] = func;
+        for (i, arg) in args.into_iter().enumerate() {
+            self.stack[func_idx + 1 + i] = arg;
         }
-        let arg_count = self.stack.len() - func_idx - 1;
-        self.stack_top = self.stack.len();
+        self.stack_top = needed;
 
         // Resolve __call metamethod chain if needed
         let (actual_arg_count, ccmt_depth) = resolve_call_chain(self, func_idx, arg_count)?;
@@ -1750,8 +1890,7 @@ impl LuaState {
             if ccmt_depth > 0 {
                 let frame_idx = self.call_depth - 1;
                 if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                    frame.call_status =
-                        call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
                 }
             }
 
@@ -1769,8 +1908,16 @@ impl LuaState {
             }
         }
 
-        // Clean up: remove function/result slots from physical stack
-        self.stack.truncate(func_idx);
+        // Clean up: nil out used slots for GC safety, restore stack_top.
+        // Don't truncate the physical stack — it may be needed by the caller's
+        // frame (ci.top). The physical stack will be shrunk naturally by GC or
+        // when the enclosing frame exits.
+        {
+            let clear_end = self.stack_top.min(self.stack.len());
+            for i in func_idx..clear_end {
+                self.stack[i] = LuaValue::nil();
+            }
+        }
         self.stack_top = func_idx;
 
         // Restore caller frame top if needed
@@ -1797,30 +1944,42 @@ impl LuaState {
         func: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        // This is equivalent to C Lua's lua_call → luaD_callnoyield:
+        // the callback runs in a non-yieldable context.
+        self.nny += 1;
+        let result = self.pcall_inner(func, args);
+        self.nny -= 1;
+        result
+    }
+
+    /// Inner implementation of pcall (separated for nny scoping)
+    fn pcall_inner(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Save state for cleanup
         let initial_depth = self.call_depth();
         let saved_stack_top = self.stack_top;
-        let func_idx = self.stack.len();
+        // Use stack_top (logical top) instead of stack.len() (physical end).
+        // See call() for rationale.
+        let func_idx = self.stack_top;
+        let arg_count = args.len();
+        let needed = func_idx + 1 + arg_count;
 
-        // Push function and args to stack
-        // Track capacity to detect Vec reallocation.
-        let old_capacity = self.stack.capacity();
-        self.stack.push(func);
-        for arg in args {
-            self.stack.push(arg);
+        // Ensure physical stack has room for function + args
+        if needed > self.stack.len() {
+            self.resize(needed)?;
         }
-        // If Vec reallocated, fix all open upvalue cached pointers.
-        // This is critical: open upvalues cache raw pointers into the Vec buffer.
-        // Vec::push can reallocate the buffer, leaving those pointers dangling.
-        if self.stack.capacity() != old_capacity {
-            self.fix_open_upvalue_pointers();
-        }
-        let arg_count = self.stack.len() - func_idx - 1;
 
-        // Sync logical stack top with physical stack after Vec::push
-        // This is critical: push_value writes to stack_top, so it must
-        // be consistent with the actual stack contents.
-        self.stack_top = self.stack.len();
+        // Write function and args at stack_top position
+        self.stack[func_idx] = func;
+        for (i, arg) in args.into_iter().enumerate() {
+            self.stack[func_idx + 1 + i] = arg;
+        }
+
+        // Sync logical stack top
+        self.stack_top = needed;
 
         // Resolve __call chain if needed
 
@@ -1829,7 +1988,6 @@ impl LuaState {
             Err(e) => {
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
-                self.stack.truncate(func_idx);
                 self.stack_top = saved_stack_top;
                 return Ok((false, vec![err_str]));
             }
@@ -1846,7 +2004,6 @@ impl LuaState {
             // Create frame for C function
             let base = func_idx + 1;
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
-                self.stack.truncate(func_idx);
                 self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1873,6 +2030,12 @@ impl LuaState {
             // Call C function
             let result = cfunc(self);
 
+            // CloseThread bypasses all pcalls — don't pop this frame,
+            // handle_resume_result will pop everything.
+            if matches!(result, Err(LuaError::CloseThread)) {
+                return Err(LuaError::CloseThread);
+            }
+
             // Pop frame
             self.pop_frame();
 
@@ -1893,12 +2056,12 @@ impl LuaState {
                     }
 
                     // Clean up stack
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
 
                     Ok((true, results))
                 }
                 Err(LuaError::Yield) => Err(LuaError::Yield),
+                Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
                 Err(e) => {
                     let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
                     let result_err = if !err_obj.is_nil() {
@@ -1907,7 +2070,6 @@ impl LuaState {
                         let error_msg = self.get_error_msg(e);
                         self.create_string(&error_msg)?.into()
                     };
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
                     Ok((false, vec![result_err]))
                 }
@@ -1917,7 +2079,6 @@ impl LuaState {
             let base = func_idx + 1;
             // pcall expects all return values
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
-                self.stack.truncate(func_idx);
                 self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -1948,12 +2109,12 @@ impl LuaState {
                     }
 
                     // Clean up stack
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
 
                     Ok((true, results))
                 }
                 Err(LuaError::Yield) => Err(LuaError::Yield),
+                Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
                 Err(e) => {
                     // Error occurred - clean up
                     // Lua 5.5 order: L->ci = old_ci first, then closeprotected
@@ -1994,12 +2155,62 @@ impl LuaState {
                     };
 
                     // Clean up stack
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
 
                     Ok((false, vec![result_err]))
                 }
             }
+        }
+    }
+
+    /// Unprotected call with stack-based arguments that supports yields.
+    /// Like pcall_stack_based but errors propagate instead of being caught.
+    /// Uses CIST_YCALL flag so finish_c_frame can properly move results after yield.
+    /// Returns result_count on success; results are left on stack starting at func_idx.
+    pub fn call_stack_based(&mut self, func_idx: usize, arg_count: usize) -> LuaResult<usize> {
+        let initial_depth = self.call_depth();
+
+        let (actual_arg_count, _ccmt_depth) = resolve_call_chain(self, func_idx, arg_count)?;
+
+        let func = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("call: function not found".to_string()))?;
+
+        let result = if func.is_c_callable() {
+            call_c_function(self, func_idx, actual_arg_count, -1).map(|_| ())
+        } else {
+            let base = func_idx + 1;
+            self.push_frame(&func, base, actual_arg_count, -1)?;
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r
+        };
+
+        match result {
+            Ok(()) => {
+                let stack_top = self.get_top();
+                let result_count = if stack_top > func_idx {
+                    stack_top - func_idx
+                } else {
+                    0
+                };
+                Ok(result_count)
+            }
+            Err(LuaError::Yield) => {
+                // Mark this C frame with CIST_YCALL so finish_c_frame
+                // knows to move results (without prepending true/false).
+                if initial_depth > 0 {
+                    use crate::lua_vm::call_info::call_status::CIST_YCALL;
+                    let frame_idx = initial_depth - 1;
+                    if frame_idx < self.call_depth {
+                        let ci = self.get_call_info_mut(frame_idx);
+                        ci.call_status |= CIST_YCALL;
+                    }
+                }
+                Err(LuaError::Yield)
+            }
+            Err(e) => Err(e), // Propagate all other errors
         }
     }
 
@@ -2088,6 +2299,29 @@ impl LuaState {
                 }
                 Err(LuaError::Yield)
             }
+            Err(LuaError::CloseThread) => {
+                // CloseThread bypasses all pcalls — propagate to resume
+                Err(LuaError::CloseThread)
+            }
+            Err(LuaError::ErrorInErrorHandling) => {
+                // Stack overflow in error handler zone - C Lua's stackerror
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, LuaValue::nil());
+                }
+                let err_msg = self.create_string("error in error handling")?.into();
+                self.stack_set(func_idx, err_msg)?;
+                self.set_top(func_idx + 1)?;
+                Ok((false, 1))
+            }
             Err(e) => {
                 // Error - clean up and return error
                 // Lua 5.5 order: pop frames first, then close TBC
@@ -2159,6 +2393,249 @@ impl LuaState {
         }
     }
 
+    /// Protected call with error handler, stack-based (xpcall semantics).
+    /// Like pcall_stack_based but calls the error handler at `handler_idx`
+    /// BEFORE unwinding call frames, so debug.traceback can see the full stack.
+    /// Returns (success, result_count) where results are left on stack at func_idx.
+    pub fn xpcall_stack_based(
+        &mut self,
+        func_idx: usize,
+        arg_count: usize,
+        handler_idx: usize,
+    ) -> LuaResult<(bool, usize)> {
+        let initial_depth = self.call_depth();
+
+        let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
+            Ok((count, depth)) => (count, depth),
+            Err(e) => {
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                self.stack_set(func_idx, err_str)?;
+                self.set_top(func_idx + 1)?;
+                return Ok((false, 1));
+            }
+        };
+
+        let func = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("xpcall: function not found after resolution".to_string()))?;
+
+        let result = if func.is_c_callable() {
+            call_c_function(self, func_idx, actual_arg_count, -1).map(|_| ())
+        } else {
+            let base = func_idx + 1;
+            self.push_frame(&func, base, actual_arg_count, -1)?;
+            if ccmt_depth > 0 {
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r
+        };
+
+        match result {
+            Ok(()) => {
+                let stack_top = self.get_top();
+                let result_count = if stack_top > func_idx {
+                    stack_top - func_idx
+                } else {
+                    0
+                };
+                Ok((true, result_count))
+            }
+            Err(LuaError::Yield) => {
+                if initial_depth > 0 {
+                    let pcall_frame_idx = initial_depth - 1;
+                    if pcall_frame_idx < self.call_depth {
+                        let ci = self.get_call_info_mut(pcall_frame_idx);
+                        ci.call_status |= CIST_YPCALL;
+                    }
+                }
+                Err(LuaError::Yield)
+            }
+            Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
+            Err(LuaError::ErrorInErrorHandling) => {
+                // Stack overflow in error handler zone - skip handler entirely
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, LuaValue::nil());
+                }
+                let err_msg = self.create_string("error in error handling")?.into();
+                self.stack_set(func_idx, err_msg)?;
+                self.set_top(func_idx + 1)?;
+                Ok((false, 1))
+            }
+            Err(e) => {
+                // Get error object BEFORE any cleanup
+                let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                let error_msg_str = self.get_error_msg(e);
+
+                let mut err_value = if !err_obj.is_nil() {
+                    err_obj.clone()
+                } else {
+                    self.create_string(&error_msg_str)?.into()
+                };
+
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+
+                // Temporarily increase max_call_depth for error handler
+                let saved_max_depth = self.safe_option.max_call_depth;
+                self.safe_option.max_call_depth = saved_max_depth + 30;
+
+                // Call error handler WITH ALL ERROR FRAMES STILL ON STACK.
+                // C Lua's luaG_errormsg recursively calls the handler when the
+                // handler itself errors. We implement this as a loop.
+                // Track accumulated "virtual depth" to simulate C Lua's nCcalls
+                // accumulation during recursive handler calls.
+                let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
+
+                let mut handler_failed = false;
+                let mut transformed_error = LuaValue::nil();
+
+                // Budget: how many retries before we hit the depth limit.
+                // In C Lua, each recursive handler call adds ~1 to nCcalls.
+                // At MAXCCALLS (200), "C stack overflow" fires.
+                // At MAXCCALLS*1.1 (220), hard "error in error handling" fires.
+                let depth_budget = saved_max_depth.saturating_sub(initial_depth);
+                let hard_limit = depth_budget + 30; // extra room for error handling
+                let mut retry_count: usize = 0;
+
+                loop {
+                    retry_count += 1;
+
+                    // Hard limit: too many retries even in error zone
+                    if retry_count > hard_limit {
+                        handler_failed = true;
+                        break;
+                    }
+
+                    // Soft limit: generate "C stack overflow" error for handler
+                    if retry_count > depth_budget {
+                        let overflow_str = self.create_string("C stack overflow")?;
+                        err_value = overflow_str.into();
+                    }
+
+                    let current_top = self.stack_top;
+                    self.push_value(handler.clone())?;
+                    let handler_func_idx = current_top;
+                    self.push_value(err_value.clone())?;
+
+                    let handler_depth = self.call_depth();
+
+                    let handler_result =
+                        if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                            call_c_function(self, handler_func_idx, 1, -1)
+                        } else {
+                            match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                                Ok(()) => {
+                                    self.inc_n_ccalls()?;
+                                    let r = lua_execute(self, handler_depth);
+                                    self.dec_n_ccalls();
+                                    r
+                                }
+                                Err(handler_err) => Err(handler_err),
+                            }
+                        };
+
+                    match handler_result {
+                        Ok(_) => {
+                            transformed_error =
+                                self.stack_get(handler_func_idx).unwrap_or(LuaValue::nil());
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            break;
+                        }
+                        Err(LuaError::ErrorInErrorHandling) => {
+                            handler_failed = true;
+                            self.error_object = LuaValue::nil();
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            self.set_top(current_top)?;
+                            break;
+                        }
+                        Err(_handler_err) => {
+                            // Handler failed with normal error — retry with new error
+                            let new_err =
+                                std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            self.set_top(current_top)?;
+                            if new_err.is_nil() {
+                                handler_failed = true;
+                                break;
+                            }
+                            err_value = new_err;
+                        }
+                    }
+                }
+
+                // Restore max_call_depth
+                self.safe_option.max_call_depth = saved_max_depth;
+
+                // NOW pop error frames (after handler has seen them)
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+
+                // Close upvalues and TBC
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let close_result = self.close_tbc_with_error(base, err_obj);
+                    match close_result {
+                        Ok(()) => {}
+                        Err(LuaError::Yield) => {
+                            let pcall_ci_idx = initial_depth - 1;
+                            if pcall_ci_idx < self.call_depth {
+                                let ci = self.get_call_info_mut(pcall_ci_idx);
+                                ci.call_status |= CIST_YPCALL | CIST_RECST;
+                            }
+                            let cascaded =
+                                std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            self.error_object = if !cascaded.is_nil() {
+                                cascaded
+                            } else {
+                                err_value
+                            };
+                            return Err(LuaError::Yield);
+                        }
+                        Err(_e2) => {}
+                    }
+                }
+
+                // Determine final error value
+                let final_error = if handler_failed {
+                    self.create_string("error in error handling")?.into()
+                } else {
+                    transformed_error
+                };
+
+                self.stack_set(func_idx, final_error)?;
+                self.set_top(func_idx + 1)?;
+
+                Ok((false, 1))
+            }
+        }
+    }
+
     /// Protected call with error handler (xpcall semantics)
     /// The error handler is called if an error occurs
     /// Returns (success, results)
@@ -2198,29 +2675,86 @@ impl LuaState {
             .stack_get(func_idx)
             .ok_or_else(|| self.error("xpcall: function not found".to_string()))?;
 
-        // Create call frame, expecting all return values
-        let base = func_idx + 1;
-        if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
-            // Error during setup
-            self.set_top(handler_idx)?;
-            let error_msg = self.get_error_msg(e);
-            let err_str = self.create_string(&error_msg)?;
-            return Ok((false, vec![err_str]));
-        }
+        let is_c_callable = func.is_c_callable();
 
-        // Set ccmt count in call_status
-        if ccmt_depth > 0 {
-            use crate::lua_vm::call_info::call_status;
-            let frame_idx = self.call_depth - 1;
-            if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-                frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+        // Execute the function
+        let result = if is_c_callable {
+            // C function — call directly (like pcall_inner's C path)
+            let base = func_idx + 1;
+            if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
+                self.set_top(handler_idx)?;
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                return Ok((false, vec![err_str]));
             }
-        }
 
-        // Execute
-        self.inc_n_ccalls()?;
-        let result = execute::lua_execute(self, initial_depth);
-        self.dec_n_ccalls();
+            if ccmt_depth > 0 {
+                use crate::lua_vm::call_info::call_status;
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+
+            let cfunc = if let Some(c_func) = func.as_cfunction() {
+                c_func
+            } else if let Some(closure) = func.as_cclosure() {
+                closure.func()
+            } else {
+                unreachable!()
+            };
+
+            let c_result = cfunc(self);
+
+            // CloseThread bypasses everything
+            if matches!(c_result, Err(LuaError::CloseThread)) {
+                return Err(LuaError::CloseThread);
+            }
+
+            self.pop_frame();
+
+            match c_result {
+                Ok(nresults) => {
+                    // Collect results
+                    let result_start = if self.stack_top >= nresults {
+                        self.stack_top - nresults
+                    } else {
+                        0
+                    };
+                    // Move results to func_idx
+                    for i in 0..nresults {
+                        let val = self.stack_get(result_start + i).unwrap_or(LuaValue::nil());
+                        self.stack_set(func_idx + i, val)?;
+                    }
+                    self.set_top(func_idx + nresults)?;
+                    Ok(())
+                }
+                Err(LuaError::Yield) => Err(LuaError::Yield),
+                Err(e) => Err(e),
+            }
+        } else {
+            // Lua function — push frame and execute
+            let base = func_idx + 1;
+            if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
+                self.set_top(handler_idx)?;
+                let error_msg = self.get_error_msg(e);
+                let err_str = self.create_string(&error_msg)?;
+                return Ok((false, vec![err_str]));
+            }
+
+            if ccmt_depth > 0 {
+                use crate::lua_vm::call_info::call_status;
+                let frame_idx = self.call_depth - 1;
+                if let Some(frame) = self.call_stack.get_mut(frame_idx) {
+                    frame.call_status = call_status::set_ccmt_count(frame.call_status, ccmt_depth);
+                }
+            }
+
+            self.inc_n_ccalls()?;
+            let r = execute::lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r
+        };
 
         match result {
             Ok(()) => {
@@ -2248,8 +2782,26 @@ impl LuaState {
                 Ok((true, results))
             }
             Err(LuaError::Yield) => Err(LuaError::Yield),
+            Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
+            Err(LuaError::ErrorInErrorHandling) => {
+                // Stack overflow in error handler zone - skip handler entirely
+                let frame_base = if self.call_depth() > initial_depth {
+                    self.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+                while self.call_depth() > initial_depth {
+                    self.pop_frame();
+                }
+                if let Some(base) = frame_base {
+                    self.close_upvalues(base);
+                    let _ = self.close_tbc_with_error(base, LuaValue::nil());
+                }
+                let results = vec![self.create_string("error in error handling")?];
+                self.set_top(handler_idx)?;
+                Ok((false, results))
+            }
             Err(e) => {
-                // Error occurred - call error handler WITH STACK INTACT
                 // so that debug.traceback can see the full call stack
                 // (mirrors CLua's luaG_errormsg which calls handler before longjmp)
 
@@ -2258,7 +2810,7 @@ impl LuaState {
                 let error_msg_str = self.get_error_msg(e);
 
                 // Prepare error value for the handler
-                let err_value = if !err_obj.is_nil() {
+                let mut err_value = if !err_obj.is_nil() {
                     err_obj.clone()
                 } else {
                     self.create_string(&error_msg_str)?.into()
@@ -2277,56 +2829,86 @@ impl LuaState {
                 let saved_max_depth = self.safe_option.max_call_depth;
                 self.safe_option.max_call_depth = saved_max_depth + 30;
 
-                // Call error handler with all error frames still on stack
+                // Call error handler with error value.
+                // C Lua's luaG_errormsg recursively calls the handler when the
+                // handler itself errors. We implement this as a loop: if the
+                // handler fails with a normal error, retry with the new error.
                 let handler = self.stack_get(handler_idx).unwrap_or(LuaValue::nil());
 
-                // Push handler and error value ON TOP of current stack
-                // (above any error frames)
-                let current_top = self.stack_top;
-                self.push_value(handler)?;
-                let handler_func_idx = current_top;
-                self.push_value(err_value.clone())?;
-
-                let handler_depth = self.call_depth();
-
-                let handler_result = if handler.is_cfunction() || handler.as_cclosure().is_some() {
-                    execute::call::call_c_function(self, handler_func_idx, 1, -1)
-                } else {
-                    match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
-                        Ok(()) => {
-                            self.inc_n_ccalls()?;
-                            let r = execute::lua_execute(self, handler_depth);
-                            self.dec_n_ccalls();
-                            r
-                        }
-                        Err(handler_err) => Err(handler_err),
-                    }
-                };
-
-                // Collect handler results
                 let mut results = Vec::new();
-                let handler_failed;
-                match handler_result {
-                    Ok(()) => {
-                        handler_failed = false;
-                        let result_top = self.stack_top;
-                        if result_top > handler_func_idx {
-                            for i in handler_func_idx..result_top {
-                                if let Some(val) = self.stack_get(i) {
-                                    results.push(val);
+                let mut handler_failed = false;
+
+                loop {
+                    let current_top = self.stack_top;
+                    self.push_value(handler.clone())?;
+                    let handler_func_idx = current_top;
+                    self.push_value(err_value.clone())?;
+
+                    let handler_depth = self.call_depth();
+
+                    let handler_result =
+                        if handler.is_cfunction() || handler.as_cclosure().is_some() {
+                            execute::call::call_c_function(self, handler_func_idx, 1, -1)
+                        } else {
+                            match self.push_frame(&handler, handler_func_idx + 1, 1, -1) {
+                                Ok(()) => {
+                                    self.inc_n_ccalls()?;
+                                    let r = execute::lua_execute(self, handler_depth);
+                                    self.dec_n_ccalls();
+                                    r
+                                }
+                                Err(handler_err) => Err(handler_err),
+                            }
+                        };
+
+                    match handler_result {
+                        Ok(()) => {
+                            // Handler succeeded — collect results
+                            let result_top = self.stack_top;
+                            if result_top > handler_func_idx {
+                                for i in handler_func_idx..result_top {
+                                    if let Some(val) = self.stack_get(i) {
+                                        results.push(val);
+                                    }
                                 }
                             }
+                            // Clean up handler frames
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            break;
+                        }
+                        Err(LuaError::ErrorInErrorHandling) => {
+                            // Stack overflow in error handler zone — give up
+                            handler_failed = true;
+                            self.error_object = LuaValue::nil();
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            self.set_top(current_top)?;
+                            break;
+                        }
+                        Err(_handler_err) => {
+                            // Handler failed with a normal error.
+                            // C Lua retries: luaG_errormsg calls errfunc again.
+                            // Get the new error value and retry.
+                            let new_err =
+                                std::mem::replace(&mut self.error_object, LuaValue::nil());
+                            // Clean up handler frames before retrying
+                            while self.call_depth() > handler_depth {
+                                self.pop_frame();
+                            }
+                            // Reset stack top to before handler push
+                            self.set_top(current_top)?;
+                            if new_err.is_nil() {
+                                // No error object — can't retry, treat as failure
+                                handler_failed = true;
+                                break;
+                            }
+                            err_value = new_err;
+                            // Loop continues — retry handler with new error value
                         }
                     }
-                    Err(_) => {
-                        handler_failed = true;
-                        // Handler failed — will use "error in error handling" below
-                    }
-                }
-
-                // Clean up any handler frames that remain
-                while self.call_depth() > handler_depth {
-                    self.pop_frame();
                 }
 
                 // Restore max_call_depth after error handler completes
@@ -2374,11 +2956,24 @@ impl LuaState {
     /// - finished=true: coroutine completed normally
     /// - finished=false: coroutine yielded
     pub fn resume(&mut self, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Check if this is the first resume (no frames yet)
-        if self.call_stack.is_empty() {
+        // Check coroutine state:
+        // - call_depth > 0 && !yielded → running (cannot resume)
+        // - call_depth > 0 && yielded → suspended after yield (can resume)
+        // - call_depth == 0 && stack not empty → initial state (can resume)
+        // - call_depth == 0 && stack empty → dead (cannot resume)
+        if self.call_depth > 0 && !self.yielded {
+            return Err(self.error("cannot resume non-suspended coroutine".to_string()));
+        }
+
+        // Mark as running (not yielded)
+        self.yielded = false;
+
+        // Check if this is the first resume (no active frames)
+        if self.call_depth == 0 {
             // Initial resume - need to set up the function
             // The function should be at stack[0] (set by create_thread)
             if self.stack.is_empty() {
+                self.error_object = LuaValue::nil(); // clear stale error object
                 return Err(self.error("cannot resume dead coroutine".to_string()));
             }
 
@@ -2440,7 +3035,9 @@ impl LuaState {
                 self.stack_set(func_idx + i, arg)?;
             }
 
-            // Update stack top only (do NOT modify caller frame's top)
+            // Update stack top to result extent.
+            // Values above this position were nil'd by GC's atomic phase
+            // (traverse_thread clears top..stack_end, matching C Lua).
             let new_top = func_idx + actual_nresults;
             self.set_top_raw(new_top);
 
@@ -2467,15 +3064,42 @@ impl LuaState {
         loop {
             match result {
                 Ok(()) => {
-                    // Coroutine completed
+                    // Coroutine completed — pop any remaining frames
+                    // (e.g., the initial frame pushed by resume for C functions)
                     let results = self.get_all_return_values(0);
+                    while self.call_depth() > 0 {
+                        self.pop_frame();
+                    }
                     self.stack.clear();
+                    self.stack_top = 0;
                     return Ok((true, results));
                 }
                 Err(LuaError::Yield) => {
-                    // Coroutine yielded
+                    // Coroutine yielded — mark as yielded for resume detection
+                    self.yielded = true;
                     let yield_vals = self.take_yield();
                     return Ok((false, yield_vals));
+                }
+                Err(LuaError::CloseThread) => {
+                    // Self-close: coroutine.close() closed TBC vars/upvalues
+                    // and threw CloseThread to bypass all pcalls.
+                    // Pop all remaining frames and mark thread as dead.
+                    while self.call_depth() > 0 {
+                        self.pop_frame();
+                    }
+                    // Check if __close set an error
+                    let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
+                    self.stack.clear();
+                    self.stack_top = 0;
+                    if err_obj.is_nil() {
+                        // Normal close — success with no return values
+                        return Ok((true, vec![]));
+                    } else {
+                        // __close errored — coroutine dies with error.
+                        // Store error back so coroutine_resume can retrieve it.
+                        self.error_object = err_obj;
+                        return Err(LuaError::RuntimeError);
+                    }
                 }
                 Err(_e) => {
                     // Error — try to find a pcall frame to recover
@@ -2510,6 +3134,11 @@ impl LuaState {
                             self.error_msg = format!("{}", self.error_object);
                         }
 
+                        // Mark coroutine as dead by clearing the stack.
+                        // error_msg is stored separately and remains accessible.
+                        self.stack.clear();
+                        self.stack_top = 0;
+
                         return Err(_e);
                     }
                     let pcall_frame_idx = pcall_idx.unwrap();
@@ -2519,6 +3148,14 @@ impl LuaState {
                     let pcall_func_pos = pcall_ci.base - pcall_ci.func_offset;
                     let pcall_nresults = pcall_ci.nresults;
                     let close_level = pcall_ci.base; // close from body position
+                    let is_xpcall = pcall_ci.call_status & CIST_XPCALL != 0;
+
+                    // Save the xpcall handler before anything overwrites it
+                    let xpcall_handler = if is_xpcall {
+                        self.stack_get(pcall_func_pos).unwrap_or(LuaValue::nil())
+                    } else {
+                        LuaValue::nil()
+                    };
 
                     // Get error object
                     let err_obj = std::mem::replace(&mut self.error_object, LuaValue::nil());
@@ -2554,6 +3191,22 @@ impl LuaState {
                                 error_val
                             };
                             self.clear_error();
+
+                            // If xpcall, call error handler to transform the error
+                            let result_err = if is_xpcall {
+                                self.nny += 1;
+                                let handler_result =
+                                    self.pcall(xpcall_handler.clone(), vec![result_err.clone()]);
+                                self.nny -= 1;
+                                match handler_result {
+                                    Ok((true, results)) => {
+                                        results.into_iter().next().unwrap_or(LuaValue::nil())
+                                    }
+                                    _ => self.create_string("error in error handling")?,
+                                }
+                            } else {
+                                result_err
+                            };
 
                             // Set up pcall error result: (false, error)
                             self.stack_set(pcall_func_pos, LuaValue::boolean(false))
@@ -2615,6 +3268,9 @@ impl LuaState {
                             }
                             // Store the error value for finish_c_frame to retrieve later
                             self.error_object = error_val;
+
+                            // Mark coroutine as yielded so resume works
+                            self.yielded = true;
 
                             // Return yield values normally
                             let yield_vals = self.take_yield();
@@ -2736,6 +3392,14 @@ impl LuaState {
                 return Ok(format!("{}", value));
             }
             _ => {
+                // Check for trait-based __tostring on userdata
+                if value.ttisfulluserdata() {
+                    if let Some(ud) = value.as_userdata_mut() {
+                        if let Some(s) = ud.get_trait().lua_tostring() {
+                            return Ok(s);
+                        }
+                    }
+                }
                 // Check for __tostring metamethod
                 if let Some(mm) = get_metamethod_event(self, value, TmKind::ToString) {
                     // Call __tostring metamethod
@@ -2759,11 +3423,27 @@ impl LuaState {
         }
 
         // Fallback: generic representation
-        Ok(format!("{}", value))
+        // Check for __name in metatable (luaT_objtypename)
+        let type_prefix = crate::stdlib::debug::objtypename(self, value);
+        if type_prefix != value.type_name() {
+            // Use __name as prefix instead of built-in type name
+            Ok(format!(
+                "{}: 0x{:x}",
+                type_prefix,
+                value.raw_ptr_repr() as usize
+            ))
+        } else {
+            Ok(format!("{}", value))
+        }
     }
 
     pub fn is_main_thread(&self) -> bool {
         self.is_main
+    }
+
+    /// Check if this coroutine has yielded and is waiting to be resumed.
+    pub fn is_yielded(&self) -> bool {
+        self.yielded
     }
 }
 

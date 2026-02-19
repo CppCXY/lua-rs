@@ -20,8 +20,9 @@ pub struct LuaLexer<'a> {
     token_index: usize,
     current_token: LuaTokenKind,
     pub parse_config: ParserConfig,
-    pub line: usize,     // current line number (linenumber in Lua)
-    pub lastline: usize, // line of last token consumed (lastline in Lua)
+    pub line: usize,          // current line number (linenumber in Lua)
+    pub lastline: usize,      // line of last token consumed (lastline in Lua)
+    pub nesting_level: usize, // parser nesting depth (like C Lua's nCcalls during compilation)
 }
 
 impl<'a> LuaLexer<'a> {
@@ -36,6 +37,7 @@ impl<'a> LuaLexer<'a> {
             parse_config: config,
             line: 1,
             lastline: 1, // Initialize lastline to 1 (llex.c:176)
+            nesting_level: 0,
         };
 
         parser.init();
@@ -104,6 +106,9 @@ impl<'a> LuaLexer<'a> {
     }
 
     pub fn current_token_text(&self) -> &str {
+        if self.current_token == LuaTokenKind::TkEof {
+            return "<eof>";
+        }
         if self.token_index < self.tokens.len() {
             let range = &self.tokens[self.token_index].range;
             &self.text[range.start_offset..range.end_offset()]

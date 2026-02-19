@@ -1,18 +1,19 @@
 # luars
 
 [![CI](https://github.com/CppCXY/lua-rs/workflows/CI/badge.svg)](https://github.com/CppCXY/lua-rs/actions)
+[![Lua Test Suite](https://github.com/CppCXY/lua-rs/workflows/Lua%20Test%20Suite/badge.svg)](https://github.com/CppCXY/lua-rs/actions/workflows/lua_testes.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![crate](https://img.shields.io/crates/v/luars.svg?style=flat-square)](https://crates.io/crates/luars)
 
 > ⚠️ **Project Notice**: This is an experimental **Lua 5.5** interpreter implementation crafted primarily through AI-assisted programming.
 
-A Lua 5.5 interpreter written in pure Rust (~49,000 lines). Faithfully ported from the official C Lua source code architecture — register-based VM, incremental/generational GC, string interning — and passes the official Lua 5.5 test suite(passed 60%, need more work).
+A Lua 5.5 interpreter written in pure Rust (~49,000 lines). Faithfully ported from the official C Lua source code architecture — register-based VM, incremental/generational GC, string interning — and **passes the official Lua 5.5 test suite** (`all.lua` — 28/30 test files).
 
 ## Highlights
 
 - **Lua 5.5**: Compiler, VM, and standard libraries implement the Lua 5.5 specification
 - **Pure Rust**: No C dependencies, no `unsafe` FFI — the entire runtime is self-contained Rust
-- **Official Test Suite**: Passes 19 of 30 official Lua 5.5 test files (see [Compatibility](#compatibility))
+- **Official Test Suite**: Passes 28 of 30 official Lua 5.5 test files — `all.lua` runs to `final OK` (see [Compatibility](#compatibility))
 - **~49K lines of Rust** across compiler, VM, GC, and standard libraries
 
 ## Architecture
@@ -69,15 +70,15 @@ Passes the official Lua 5.5 test suite (`lua_tests/testes/all.lua`):
 | strings.lua | ✅ | | api.lua | ✅ * |
 | literals.lua | ✅ | | memerr.lua | ✅ * |
 | tpack.lua | ✅ | | events.lua | ✅ |
-| attrib.lua | ✅ | | vararg.lua | [x] |
-| gengc.lua | ✅ | | closure.lua | [x] |
-| locals.lua | ✅ | | coroutine.lua | [x] |
-| constructs.lua | ✅ | | goto.lua | [x] |
-| code.lua | ✅ | | errors.lua | [x] |
-| big.lua | ✅ | | math.lua | [x] |
-| cstack.lua | ✅ | | sort.lua | [x] |
-| nextvar.lua | ✅ | | bitwise.lua | [x] |
-| verybig.lua | ✅ | | files.lua | [x] |
+| attrib.lua | ✅ | | vararg.lua | ✅ |
+| gengc.lua | ✅ | | closure.lua | ✅ |
+| locals.lua | ✅ | | coroutine.lua | ✅ * |
+| constructs.lua | ✅ | | goto.lua | ✅ |
+| code.lua | ✅ | | errors.lua | ✅ * |
+| big.lua | ✅ | | math.lua | ✅ |
+| cstack.lua | ✅ | | sort.lua | ✅ |
+| nextvar.lua | ✅ | | bitwise.lua | ✅ |
+| verybig.lua | ✅ | | files.lua | ✅ |
 | main.lua | ⏭️ | | db.lua | ⏭️ |
 
 \* Some C-API-dependent test sections are skipped (no `testC` library).
@@ -127,16 +128,18 @@ Produces two binaries in `target/release/`:
 ./target/release/bytecode_dump script.lua
 ```
 
-### Run the Official Test Suite
+### Run the Official Lua 5.5 Test Suite
 
 ```bash
 # Windows
 .\run_lua_tests.ps1
 
-# Manual
+# Linux / macOS
 cd lua_tests/testes
 ../../target/release/lua all.lua
 ```
+
+Runs the complete official Lua 5.5 test suite (`all.lua`). All 28 test files pass to `final OK` on Windows, Linux, and macOS. See [Lua Test Suite CI](https://github.com/CppCXY/lua-rs/actions/workflows/lua_testes.yml) for cross-platform results.
 
 ### Run Benchmarks
 

@@ -183,17 +183,28 @@ pub fn handle_forprep_float(
     let mut limit = 0.0;
     let mut step = 0.0;
 
-    if !tonumberns(&stack[ra + 1], &mut limit) {
+    // Copy values for potential error messages (avoids borrow conflict)
+    let limit_val = stack[ra + 1];
+    let step_val = stack[ra + 2];
+    let init_val = stack[ra];
+
+    if !tonumberns(&limit_val, &mut limit) {
+        let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error("'for' limit must be a number".to_string()));
+        return Err(lua_state.error(format!("bad 'for' limit (number expected, got {})", t)));
     }
-    if !tonumberns(&stack[ra + 2], &mut step) {
+    if !tonumberns(&step_val, &mut step) {
+        let t = crate::stdlib::debug::objtypename(lua_state, &step_val);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error("'for' step must be a number".to_string()));
+        return Err(lua_state.error(format!("bad 'for' step (number expected, got {})", t)));
     }
-    if !tonumberns(&stack[ra], &mut init) {
+    if !tonumberns(&init_val, &mut init) {
+        let t = crate::stdlib::debug::objtypename(lua_state, &init_val);
         lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error("'for' initial value must be a number".to_string()));
+        return Err(lua_state.error(format!(
+            "bad 'for' initial value (number expected, got {})",
+            t
+        )));
     }
 
     if step == 0.0 {
@@ -246,7 +257,16 @@ pub fn handle_len(
                 let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
                 if let Some(mm) = mt.raw_get(&event_key) {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
-                    let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
+                    let result = match metamethod::call_tm_res(lua_state, mm, rb, rb) {
+                        Ok(r) => r,
+                        Err(crate::lua_vm::LuaError::Yield) => {
+                            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                            let ci = lua_state.get_call_info_mut(frame_idx);
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(crate::lua_vm::LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    };
                     *base = lua_state.get_frame_base(frame_idx);
                     lua_state.stack_mut()[*base + a] = result;
                 } else {
@@ -260,16 +280,36 @@ pub fn handle_len(
             setivalue(&mut lua_state.stack_mut()[*base + a], table.len() as i64);
         }
     } else {
+        // Try trait-based __len for userdata first
+        if rb.ttisfulluserdata() {
+            if let Some(ud) = rb.as_userdata_mut() {
+                if let Some(udv) = ud.get_trait().lua_len() {
+                    let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                    lua_state.stack_mut()[*base + a] = result;
+                    return Ok(());
+                }
+            }
+        }
         if let Some(mm) = helper::get_metamethod_event(lua_state, &rb, TmKind::Len) {
             lua_state.set_frame_pc(frame_idx, pc as u32);
-            let result = metamethod::call_tm_res(lua_state, mm, rb, rb)?;
+            let result = match metamethod::call_tm_res(lua_state, mm, rb, rb) {
+                Ok(r) => r,
+                Err(crate::lua_vm::LuaError::Yield) => {
+                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                    let ci = lua_state.get_call_info_mut(frame_idx);
+                    ci.call_status |= CIST_PENDING_FINISH;
+                    return Err(crate::lua_vm::LuaError::Yield);
+                }
+                Err(e) => return Err(e),
+            };
             *base = lua_state.get_frame_base(frame_idx);
             lua_state.stack_mut()[*base + a] = result;
         } else {
-            return Err(lua_state.error(format!(
-                "attempt to get length of a {} value",
-                rb.type_name()
-            )));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &rb,
+                "get length of",
+            ));
         }
     }
     Ok(())

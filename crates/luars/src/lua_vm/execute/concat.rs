@@ -92,7 +92,16 @@ pub fn handle_concat(
                 helper::get_binop_metamethod(lua_state, &v_prev, &v_top, TmKind::Concat)
             {
                 lua_state.set_frame_pc(frame_idx, pc as u32);
-                let result = metamethod::call_tm_res(lua_state, mm, v_prev, v_top)?;
+                let result = match metamethod::call_tm_res(lua_state, mm, v_prev, v_top) {
+                    Ok(r) => r,
+                    Err(crate::lua_vm::LuaError::Yield) => {
+                        use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                        let ci = lua_state.get_call_info_mut(frame_idx);
+                        ci.call_status |= CIST_PENDING_FINISH;
+                        return Err(crate::lua_vm::LuaError::Yield);
+                    }
+                    Err(e) => return Err(e),
+                };
                 *base = lua_state.get_frame_base(frame_idx);
 
                 // Store result, replacing the two operands with one
@@ -101,11 +110,18 @@ pub fn handle_concat(
                 stack[result_idx] = result;
                 total -= 1;
             } else {
-                return Err(lua_state.error(format!(
-                    "attempt to concatenate {} and {} values",
-                    v_prev.type_name(),
-                    v_top.type_name()
-                )));
+                // Like C Lua's luaG_concaterror: if p1 is string/number, blame p2
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                let blame_val = if v_prev.is_string() || v_prev.is_number() || v_prev.is_integer() {
+                    v_top
+                } else {
+                    v_prev
+                };
+                return Err(crate::stdlib::debug::typeerror(
+                    lua_state,
+                    &blame_val,
+                    "concatenate",
+                ));
             }
         }
     }
@@ -124,7 +140,20 @@ pub fn handle_concat(
 /// Check if a value can be directly converted to string for concatenation
 #[inline(always)]
 fn is_concat_convertible(value: &LuaValue) -> bool {
-    value.is_string() || value.is_binary() || value.as_integer().is_some() || value.as_float().is_some()
+    if value.is_string()
+        || value.is_binary()
+        || value.as_integer().is_some()
+        || value.as_float().is_some()
+    {
+        return true;
+    }
+    // Userdata with lua_tostring can be concat-converted
+    if value.ttisfulluserdata() {
+        if let Some(ud) = value.as_userdata_mut() {
+            return ud.get_trait().lua_tostring().is_some();
+        }
+    }
+    false
 }
 
 /// Write value's string representation directly to buffer
@@ -145,15 +174,26 @@ fn value_to_bytes_write(value: &LuaValue, buf: &mut Vec<u8>) -> Option<bool> {
     }
 
     // Convert numbers using stack-allocated formatting (no heap alloc)
-    if let Some(i) = value.as_integer() {
+    if value.is_integer() {
+        let i = value.as_integer_strict().unwrap();
         let mut itoa_buf = itoa::Buffer::new();
         buf.extend_from_slice(itoa_buf.format(i).as_bytes());
         Some(false)
-    } else if let Some(f) = value.as_float() {
-        // Use Rust's default formatting (matches Lua's %.14g closely enough)
-        // ryu would change format and break tests
-        buf.extend_from_slice(f.to_string().as_bytes());
+    } else if value.is_float() {
+        let f = value.as_number().unwrap();
+        use crate::stdlib::basic::lua_float_to_string;
+        let s = lua_float_to_string(f);
+        buf.extend_from_slice(s.as_bytes());
         Some(false)
+    } else if value.ttisfulluserdata() {
+        // Userdata with lua_tostring can be used in concatenation
+        if let Some(ud) = value.as_userdata_mut() {
+            if let Some(s) = ud.get_trait().lua_tostring() {
+                buf.extend_from_slice(s.as_bytes());
+                return Some(false);
+            }
+        }
+        None
     } else {
         // Table, function, nil, bool=false, etc. cannot be auto-converted
         // Let caller decide whether to try metamethod
@@ -190,10 +230,11 @@ pub fn concat_strings(
                 lua_state.create_string(&s)
             };
         } else {
-            return Err(lua_state.error(format!(
-                "attempt to concatenate a {} value",
-                val.type_name()
-            )));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &val,
+                "concatenate",
+            ));
         }
     }
 
@@ -239,11 +280,25 @@ pub fn concat_strings(
         } else if value.as_float().is_some() {
             total_len += 24; // max chars for f64
             all_strings = false;
+        } else if value.ttisfulluserdata() {
+            if let Some(ud) = value.as_userdata_mut() {
+                if let Some(s) = ud.get_trait().lua_tostring() {
+                    total_len += s.len();
+                    all_strings = false;
+                    continue;
+                }
+            }
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &value,
+                "concatenate",
+            ));
         } else {
-            return Err(lua_state.error(format!(
-                "attempt to concatenate a {} value",
-                value.type_name()
-            )));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &value,
+                "concatenate",
+            ));
         }
     }
 

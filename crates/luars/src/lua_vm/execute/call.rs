@@ -121,7 +121,7 @@ pub fn handle_call(
             let new_b = if b == 0 { 0 } else { b + 1 };
             return handle_call(lua_state, base, a, new_b, c, new_status);
         } else {
-            Err(lua_state.error(format!("attempt to call a {} value", func.type_name())))
+            Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
         }
     }
 }
@@ -181,7 +181,7 @@ pub fn resolve_call_chain(
             // Continue loop to check if mm also needs __call resolution
         } else {
             // No __call metamethod and not a function
-            return Err(lua_state.error(format!("attempt to call a {} value", func.type_name())));
+            return Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"));
         }
     }
 }

@@ -17,6 +17,14 @@ pub enum LuaError {
     IndexOutOfBounds,
     /// VM exit (internal use) - returned when top-level frame returns
     Exit,
+    /// Coroutine self-close: bypasses all pcalls and goes directly to resume().
+    /// Equivalent to C Lua's luaD_throwbaselevel after luaE_resetthread.
+    /// TBC vars and upvalues are already closed; error_object carries the
+    /// close status (nil = success, non-nil = __close error value).
+    CloseThread,
+    /// Stack overflow while in the error-handler extra zone (C Lua's stackerror).
+    /// Produces "error in error handling" without invoking any further handler.
+    ErrorInErrorHandling,
 }
 
 impl std::fmt::Display for LuaError {
@@ -29,6 +37,8 @@ impl std::fmt::Display for LuaError {
             LuaError::IndexOutOfBounds => write!(f, "Index Out Of Bounds"),
             LuaError::OutOfMemory => write!(f, "Out Of Memory"),
             LuaError::Exit => write!(f, "VM Exit"),
+            LuaError::CloseThread => write!(f, "Close Thread"),
+            LuaError::ErrorInErrorHandling => write!(f, "Error In Error Handling"),
         }
     }
 }
