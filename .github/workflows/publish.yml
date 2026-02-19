@@ -83,6 +83,7 @@ jobs:
         name: v${{ github.ref_name }}
         generate_release_notes: true
         files: artifacts/*
+        token: ${{ secrets.RELEASE }}
 
   # ── Publish to crates.io ──────────────────────────────────────────────
   publish-crates:
