@@ -181,3 +181,11 @@ In `test.lua` (a copy of `nextvar.lua`), the following five test sections are sk
 **C Lua 5.5**: Strings that look like numbers are automatically coerced to numbers in arithmetic operations (e.g., `"101" - 3` evaluates to `98`).
 
 **luars**: String-to-number coercion in arithmetic is not supported. Arithmetic operations on string operands will raise an error "attempt to perform arithmetic on non-number values". Related tests in `events.lua` have been modified (changed `"101"` to `101`).
+
+---
+
+## 20. `io.popen` not implemented
+
+**C Lua 5.5**: `io.popen(prog [, mode])` opens a process and returns a file handle connected to its stdin or stdout via a pipe.
+
+**luars**: `io.popen` always raises an error `"io.popen not yet implemented"`. The popen/pclose tests in `files.lua` are guarded by a `pcall(io.popen, ...)` check and gracefully skipped.

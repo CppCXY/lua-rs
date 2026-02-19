@@ -774,7 +774,8 @@ if not _soft then
   x = nil; y = nil
 end
 
-if not _port and package.config:sub(1,1) ~= "\\" then
+if not _port and package.config:sub(1,1) ~= "\\"
+   and pcall(io.popen, "echo test") then
   local progname
   do  -- get name of running executable
     local arg = arg or ARG
