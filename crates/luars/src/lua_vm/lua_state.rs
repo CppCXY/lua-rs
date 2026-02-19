@@ -983,6 +983,18 @@ impl LuaState {
 
             if let Some(close_fn) = close_method {
                 let result = if let Some(ref err) = current_error {
+                    // Root the error on the Lua stack before the call so that
+                    // GC can see it (a Rust local is invisible to the collector).
+                    // This mirrors C Lua's prepcallclosemth which places the
+                    // error at uv+1 and sets L->top accordingly.
+                    let err_slot = tbc_idx + 1;
+                    let needed = err_slot + 1;
+                    if needed > self.stack.len() {
+                        self.grow_stack(needed + 3)?;
+                    }
+                    self.stack[err_slot] = err.clone();
+                    self.set_top_raw(err_slot + 1);
+
                     // Previous __close threw — pass error as 2nd arg
                     self.call_close_method_with_error(&close_fn, &value, err.clone())
                 } else {
