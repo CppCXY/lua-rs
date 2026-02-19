@@ -8,11 +8,18 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| crate::stdlib::debug::argerror(l, 1, "table expected"))?;
     let comp = l.get_arg(2);
 
-    let table = table_val
-        .as_table()
-        .ok_or_else(|| crate::stdlib::debug::arg_typeerror(l, 1, "table", &table_val))?;
+    if !table_val.is_table() {
+        return Err(crate::stdlib::debug::arg_typeerror(l, 1, "table", &table_val));
+    }
 
-    let len = table.len();
+    // Use obj_len to respect __len metamethod (like C Lua's aux_getn / luaL_len)
+    let len = l.obj_len(&table_val)?;
+
+    // C Lua: luaL_argcheck(L, n < INT_MAX, 1, "array too big");
+    if len >= i32::MAX as i64 {
+        return Err(l.error("bad argument #1 to 'sort' (array too big)".to_string()));
+    }
+
     if len <= 1 {
         return Ok(0);
     }
@@ -57,26 +64,9 @@ fn sort_compare(
     }
 }
 
-/// Default less-than comparison (like Lua's < operator).
+/// Default less-than comparison (like Lua's < operator with metamethods).
 fn default_less_than(l: &mut LuaState, a: &LuaValue, b: &LuaValue) -> LuaResult<bool> {
-    // Integer-integer
-    if let (Some(i1), Some(i2)) = (a.as_integer(), b.as_integer()) {
-        return Ok(i1 < i2);
-    }
-    // Float-float
-    if let (Some(f1), Some(f2)) = (a.as_float(), b.as_float()) {
-        return Ok(f1 < f2);
-    }
-    // Integer-float or float-integer: use as_number for comparison
-    if let (Some(n1), Some(n2)) = (a.as_number(), b.as_number()) {
-        return Ok(n1 < n2);
-    }
-    // String-string
-    if let (Some(s1), Some(s2)) = (a.as_str(), b.as_str()) {
-        return Ok(s1 < s2);
-    }
-    // Fall back to error - can't compare these types
-    Err(crate::stdlib::debug::ordererror(l, a, b))
+    l.obj_lt(a, b)
 }
 
 /// Sort a range [lo, hi] of the table in place.
@@ -93,8 +83,8 @@ fn sort_range(
         return Ok(());
     }
     let n = hi - lo + 1;
-    if n <= 16 {
-        // Insertion sort for small ranges
+    if n <= 3 {
+        // Small range: use insertion sort (no invalid order detection needed for <=3)
         for i in (lo + 1)..=hi {
             let t = table.as_table().unwrap();
             let key = t.raw_geti(i).unwrap_or(LuaValue::nil());
@@ -178,6 +168,10 @@ fn sort_range(
             if !sort_compare(l, v_i, pivot, comp_func, has_comp)? {
                 break;
             }
+            // If scan went past pivot position, order function is invalid
+            if i >= hi - 1 {
+                return Err(l.error("invalid order function for sorting".to_string()));
+            }
         }
         // Find element <= pivot from right
         loop {
@@ -186,6 +180,10 @@ fn sort_range(
             let v_j = t.raw_geti(j).unwrap_or(LuaValue::nil());
             if !sort_compare(l, pivot, v_j, comp_func, has_comp)? {
                 break;
+            }
+            // If scan went past lo, order function is invalid
+            if j <= lo {
+                return Err(l.error("invalid order function for sorting".to_string()));
             }
         }
         if i >= j {

@@ -3,7 +3,7 @@ use crate::{
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
     lua_vm::{
         LuaError, LuaState, TmKind,
-        call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YPCALL},
+        call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL},
         execute,
     },
     stdlib::basic::parse_number::parse_lua_number,
@@ -959,6 +959,53 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 
             Ok(())
         }
+    } else if ci.call_status & CIST_YCALL != 0 {
+        // Unprotected call (e.g. dofile) completed after yield.
+        // Move results from body_start to func_pos (no true/false prefix).
+        let stack_top = lua_state.get_top();
+        let body_results_start = pcall_func_pos + 1;
+        let body_nres = if stack_top > body_results_start {
+            stack_top - body_results_start
+        } else {
+            0
+        };
+
+        // Move results down to func_pos
+        for i in 0..body_nres {
+            let val = lua_state.stack_get(body_results_start + i).unwrap_or(LuaValue::nil());
+            lua_state.stack_set(pcall_func_pos + i, val)?;
+        }
+
+        let n = body_nres;
+
+        lua_state.pop_frame();
+
+        let final_n = if nresults == -1 { n } else { nresults as usize };
+        let new_top = pcall_func_pos + final_n;
+
+        if nresults >= 0 {
+            let wanted = nresults as usize;
+            for i in n..wanted {
+                lua_state.stack_set(pcall_func_pos + i, LuaValue::nil())?;
+            }
+        }
+
+        lua_state.set_top_raw(new_top);
+
+        if lua_state.call_depth() > 0 {
+            let ci_idx = lua_state.call_depth() - 1;
+            if nresults == -1 {
+                let ci_top = lua_state.get_call_info(ci_idx).top;
+                if ci_top < new_top {
+                    lua_state.get_call_info_mut(ci_idx).top = new_top;
+                }
+            } else {
+                let frame_top = lua_state.get_call_info(ci_idx).top;
+                lua_state.set_top_raw(frame_top);
+            }
+        }
+
+        Ok(())
     } else {
         // Generic C frame after yield — just pop it.
         // This shouldn't normally happen, but be safe.

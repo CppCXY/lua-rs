@@ -34,6 +34,11 @@ pub mod call_status {
     /// and the actual body starts at func_pos + 1.
     pub const CIST_XPCALL: u32 = 1 << 13;
 
+    /// Yieldable unprotected call (dofile body yielded)
+    /// Like CIST_YPCALL but without error catching — results are moved
+    /// without prepending true/false.
+    pub const CIST_YCALL: u32 = 1 << 14;
+
     /// Offset for __call metamethod count (bits 9-12)
     pub const CIST_CCMT: u32 = 9;
     /// Mask for __call metamethod count (0xf at bits 9-12 = 0x1E00)

@@ -117,34 +117,27 @@ fn parse_args() -> Result<Options, String> {
     Ok(opts)
 }
 
-#[allow(dead_code)]
-fn setup_arg_table(vm: &mut LuaVM, script_name: Option<&str>, args: &[String]) {
-    // Create arg table: arg[-1] = interpreter, arg[0] = script, arg[1..] = arguments
-    let code = format!(
-        r#"
-        arg = {{}}
-        arg[-1] = "lua"
-        arg[0] = {}
-        "#,
-        if let Some(name) = script_name {
-            format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
-        } else {
-            "nil".to_string()
-        }
-    );
+fn setup_arg_table(vm: &mut LuaVM, exe_path: &str, script_name: Option<&str>, args: &[String]) {
+    // Create arg table: arg[negative] = interpreter opts, arg[0] = script, arg[1..] = script args
+    let arg_table = vm.create_table(args.len(), 2).unwrap();
 
-    let mut full_code = code;
-    for (i, arg) in args.iter().enumerate() {
-        full_code.push_str(&format!(
-            "arg[{}] = \"{}\"\n",
-            i + 1,
-            arg.replace('\\', "\\\\").replace('"', "\\\"")
-        ));
+    // arg[0] = script name (or nil)
+    if let Some(name) = script_name {
+        let s = vm.create_string(name).unwrap();
+        vm.raw_seti(&arg_table, 0, s);
     }
 
-    if let Ok(chunk) = vm.compile(&full_code) {
-        let _ = vm.execute(Rc::new(chunk));
+    // arg[-1] = interpreter executable path
+    let exe = vm.create_string(exe_path).unwrap();
+    vm.raw_seti(&arg_table, -1, exe);
+
+    // arg[1], arg[2], ... = script arguments
+    for (i, a) in args.iter().enumerate() {
+        let s = vm.create_string(a).unwrap();
+        vm.raw_seti(&arg_table, (i + 1) as i64, s);
     }
+
+    let _ = vm.set_global("arg", arg_table);
 }
 
 fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
@@ -373,8 +366,8 @@ fn lua_main() -> i32 {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));
     }
     // Setup arg table
-    // FIXME: Disabled due to compiler bug with negative table indices
-    // setup_arg_table(&mut vm, opts.script_file.as_deref(), &opts.script_args);
+    let exe_path = env::args().next().unwrap_or_else(|| "lua".to_string());
+    setup_arg_table(&mut vm, &exe_path, opts.script_file.as_deref(), &opts.script_args);
 
     // Require modules
     for module in &opts.require_modules {

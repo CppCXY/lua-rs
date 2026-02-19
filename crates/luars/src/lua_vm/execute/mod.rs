@@ -22,7 +22,7 @@ mod closure_handler;
 mod cold;
 mod concat;
 pub(crate) mod helper;
-mod metamethod;
+pub(crate) mod metamethod;
 mod return_handler;
 
 // Extracted opcode modules to reduce main loop size

@@ -624,8 +624,8 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
     let s_str = if let Some(s) = s_value.as_str() {
         s.to_string()
     } else if let Some(bytes) = s_value.as_binary() {
-        // For binary data, use lossy conversion to string for pattern matching
-        String::from_utf8_lossy(bytes).into_owned()
+        // For binary data, map each byte to a Latin-1 char (preserves byte identity)
+        bytes.iter().map(|&b| b as char).collect()
     } else {
         return Err(l.error("bad argument #1 to 'gsub' (string expected)".to_string()));
     };

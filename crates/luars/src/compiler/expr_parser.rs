@@ -136,7 +136,6 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             let string_content = parse_string_token_value(text, fs.lexer.current_token());
             match string_content {
                 Ok(bytes) => {
-                    // Try to create a valid UTF-8 string, otherwise create binary
                     let string = match String::from_utf8(bytes.clone()) {
                         Ok(s) => fs.vm.create_string(&s).unwrap(),
                         Err(_) => fs.vm.create_binary(bytes).unwrap(),
@@ -300,9 +299,9 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
             // funcargs -> STRING
             let text = fs.lexer.current_token_text();
             let vec8 = parse_string_token_value(text, fs.lexer.current_token())?;
-            let k_idx = match String::from_utf8(vec8.clone()) {
+            let k_idx = match String::from_utf8(vec8) {
                 Ok(s) => string_k(fs, s),
-                Err(_) => binary_k(fs, vec8),
+                Err(e) => binary_k(fs, e.into_bytes()),
             };
             fs.lexer.bump();
             args = ExpDesc::new_k(k_idx);

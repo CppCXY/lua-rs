@@ -1096,8 +1096,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     let mode_arg = l.get_arg(3).and_then(|v| v.as_str().map(|s| s.to_string()));
     let env_arg = l.get_arg(4);
 
+    // Check if chunk is callable (function, cfunction, or table with __call metamethod)
+    let is_reader = chunk_val.is_function() || chunk_val.is_table();
+
     // Get the chunk string or binary data
-    let (code_bytes, is_binary) = if chunk_val.is_function() {
+    let (code_bytes, is_binary) = if is_reader {
         // chunk is a reader function - call it repeatedly to get source
         let mut accumulated = Vec::new();
         let mut is_binary = false;
@@ -1212,6 +1215,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     // Optional mode ("b", "t", or "bt")
     let mode = mode_arg.unwrap_or_else(|| "bt".to_string());
 
+    // Validate mode string - must contain only 'b' and/or 't'
+    if mode.is_empty() || mode.chars().any(|c| c != 'b' && c != 't') {
+        return Err(crate::stdlib::debug::argerror(l, 3, "invalid mode"));
+    }
+
     // Check if mode allows this chunk type
     if is_binary {
         // Binary chunk - mode must allow binary ("b" or "bt")
@@ -1243,10 +1251,11 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
     } else {
         // Compile text code using VM's string pool with chunk name
-        // Map bytes to Unicode code points 1:1 (Latin-1 style) to handle
-        // non-UTF-8 bytes in Lua source. This ensures bytes 128-255 become
-        // valid Unicode characters while preserving their identity.
-        let code_str: String = code_bytes.iter().map(|&b| b as char).collect();
+        // Source code should be valid UTF-8
+        let code_str = match String::from_utf8(code_bytes.clone()) {
+            Ok(s) => s,
+            Err(_) => return Err(l.error("source is not valid UTF-8".to_string())),
+        };
         let vm = l.vm_mut();
         vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
             // Get the actual error message from VM
@@ -1300,6 +1309,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
 /// loadfile([filename [, mode [, env]]]) - Load a file as a chunk
 fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
+    use crate::lua_value::chunk_serializer;
+
     let filename = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'loadfile' (value expected)".to_string()))?;
@@ -1310,9 +1321,18 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'loadfile' (string expected)".to_string()));
     };
 
-    // Load from specified file
-    let code = match std::fs::read_to_string(&filename_str) {
-        Ok(c) => c,
+    // Optional mode ("b", "t", or "bt")
+    let mode = l
+        .get_arg(2)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "bt".to_string());
+
+    // Optional environment table
+    let env_arg = l.get_arg(3);
+
+    // Load from specified file as bytes (to handle both text and binary)
+    let file_bytes = match std::fs::read(&filename_str) {
+        Ok(b) => b,
         Err(e) => {
             let err_msg = l.create_string(&format!("cannot open {}: {}", filename_str, e))?;
             l.push_value(LuaValue::nil())?;
@@ -1321,14 +1341,93 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    // Compile the code using VM's string pool with chunk name
+    // Determine content after skipping shebang/BOM for binary detection
+    // For text files, the tokenizer handles shebang natively
+    let mut skip_offset = 0;
+
+    // Skip initial comment line (shebang) if present
+    if file_bytes.first() == Some(&b'#') {
+        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
+            skip_offset = pos + 1;
+        } else {
+            skip_offset = file_bytes.len();
+        }
+    }
+
+    // Skip UTF-8 BOM if present (after potential shebang skip)
+    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
+        skip_offset += 3;
+    }
+
+    // Check if it's a binary chunk (starts with 0x1B after shebang/BOM)
+    let is_binary = file_bytes.get(skip_offset) == Some(&0x1B);
+
+    // Validate mode
+    if !mode.is_empty() && mode.chars().all(|c| c == 'b' || c == 't') {
+        if is_binary && !mode.contains('b') {
+            let err_msg =
+                l.create_string("attempt to load a binary chunk (mode is 'text')")?;
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
+            return Ok(2);
+        }
+        if !is_binary && !mode.contains('t') {
+            let err_msg =
+                l.create_string("attempt to load a text chunk (mode is 'binary')")?;
+            l.push_value(LuaValue::nil())?;
+            l.push_value(err_msg)?;
+            return Ok(2);
+        }
+    }
+
     let chunkname = format!("@{}", filename_str);
-    match l.vm_mut().compile_with_name(&code, &chunkname) {
+
+    let chunk_result = if is_binary {
+        // Deserialize binary bytecode (skip shebang/BOM)
+        let vm = l.vm_mut();
+        chunk_serializer::deserialize_chunk_with_strings_vm(&file_bytes[skip_offset..], vm)
+            .map_err(|e| format!("binary load error: {}", e))
+    } else {
+        // For text, strip BOM but keep shebang (tokenizer handles it)
+        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
+        // Source files must be valid UTF-8
+        let code_str = match String::from_utf8(file_bytes[text_start..].to_vec()) {
+            Ok(s) => s,
+            Err(_) => {
+                // loadfile returns nil + error message on failure
+                let err_msg = l.create_string("source file is not valid UTF-8")?;
+                l.push_value(LuaValue::nil())?;
+                l.push_value(err_msg)?;
+                return Ok(2);
+            }
+        };
+        let vm = l.vm_mut();
+        vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
+            let msg = vm.get_error_message(e);
+            msg
+        })
+    };
+
+    match chunk_result {
         Ok(chunk) => {
-            // Create upvalue for _ENV (global table)
-            let global = l.vm_mut().global.clone();
-            let env_upvalue = l.create_upvalue_closed(global)?;
-            let upvalues = vec![env_upvalue];
+            let upvalue_count = chunk.upvalue_count;
+            let mut upvalues = Vec::with_capacity(upvalue_count);
+
+            for i in 0..upvalue_count {
+                if i == 0 {
+                    let env_upvalue_id = if let Some(env) = env_arg {
+                        l.create_upvalue_closed(env)?
+                    } else {
+                        let global = l.vm_mut().global.clone();
+                        l.create_upvalue_closed(global)?
+                    };
+                    upvalues.push(env_upvalue_id);
+                } else {
+                    let nil_upvalue = l.create_upvalue_closed(LuaValue::nil())?;
+                    upvalues.push(nil_upvalue);
+                }
+            }
+
             let func = l.create_function(
                 std::rc::Rc::new(chunk),
                 crate::lua_value::UpvalueStore::from_vec(upvalues),
@@ -1363,21 +1462,43 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
     };
 
-    // Load from file
-    let code = match std::fs::read_to_string(&filename_str) {
-        Ok(c) => c,
+    // Load from file as bytes
+    let file_bytes = match std::fs::read(&filename_str) {
+        Ok(b) => b,
         Err(e) => {
             return Err(l.error(format!("cannot open {}: {}", filename_str, e)));
         }
     };
 
-    // Compile the code
-    let chunkname = format!("@{}", filename_str);
-    let chunk = match l.vm_mut().compile_with_name(&code, &chunkname) {
-        Ok(chunk) => chunk,
-        Err(e) => {
-            return Err(l.error(format!("error loading {}: {}", filename_str, e)));
+    // Determine content after skipping shebang/BOM for binary detection
+    let mut skip_offset = 0;
+    if file_bytes.first() == Some(&b'#') {
+        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
+            skip_offset = pos + 1;
+        } else {
+            skip_offset = file_bytes.len();
         }
+    }
+    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
+        skip_offset += 3;
+    }
+
+    let is_binary = file_bytes.get(skip_offset) == Some(&0x1B);
+
+    // Compile/load the code
+    let chunkname = format!("@{}", filename_str);
+    let chunk = if is_binary {
+        use crate::lua_value::chunk_serializer;
+        let vm = l.vm_mut();
+        chunk_serializer::deserialize_chunk_with_strings_vm(&file_bytes[skip_offset..], vm)
+            .map_err(|e| l.error(format!("binary load error: {}", e)))?
+    } else {
+        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
+        let code_str = String::from_utf8(file_bytes[text_start..].to_vec()).map_err(|_| {
+            l.error("source file is not valid UTF-8".to_string())
+        })?;
+        l.vm_mut().compile_with_name(&code_str, &chunkname)
+            .map_err(|e| l.error(format!("error loading {}: {}", filename_str, e)))?
     };
 
     let global = l.vm_mut().global.clone();
@@ -1389,30 +1510,96 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         crate::lua_value::UpvalueStore::from_vec(upvalues),
     )?;
 
-    // Call the function with 0 arguments (unprotected, like C Lua's lua_callk)
-    // Errors propagate naturally to the enclosing pcall boundary.
-    let results = l.call(func, vec![])?;
-
-    // Push all results
-    let num_results = results.len();
-    for result in results {
-        l.push_value(result)?;
-    }
+    // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
+    // Push the function onto the stack at the current top.
+    let func_idx = l.get_top();
+    l.push_value(func)?;
+    let num_results = l.call_stack_based(func_idx, 0)?;
 
     Ok(num_results)
 }
 
-/// warn(msg1, ...) - Emit a warning
+/// warn(msg1, ...) - Emit a warning (Lua 5.5 semantics)
+///
+/// Control messages: single argument starting with '@':
+///   @on    - enable warnings (stderr mode)
+///   @off   - disable warnings
+///   @store - store warnings in _WARN global
+///   @normal - restore normal stderr output
+///   other  - ignored
+///
+/// Regular messages: concatenate all arguments; output according to state.
+/// Warnings are OFF by default.
 fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
 
+    // At least one argument required, all must be strings
+    if args.is_empty() {
+        return Err(l.error("bad argument #1 to 'warn' (string expected, got no value)".to_string()));
+    }
+    let mut parts: Vec<String> = Vec::with_capacity(args.len());
     for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            // Separator
-            eprint!("\t");
+        if let Some(s) = arg.as_str() {
+            parts.push(s.to_string());
+        } else {
+            return Err(l.error(format!(
+                "bad argument #{} to 'warn' (string expected, got {})",
+                i + 1,
+                arg.type_name()
+            )));
         }
-        let s = l.to_string(arg)?;
-        eprint!("{}", s);
+    }
+
+    // Get current warn mode from registry ("off", "on", "store")
+    let registry = l.vm_mut().registry.clone();
+    let mode_key = l.create_string("_WARN_MODE")?;
+    let current_mode = l
+        .raw_get(&registry, &mode_key)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "off".to_string());
+
+    // Check for control message: single argument starting with '@'
+    if parts.len() == 1 && parts[0].starts_with('@') {
+        let control = &parts[0][1..];
+        match control {
+            "on" => {
+                let mode_val = l.create_string("on")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            "off" => {
+                let mode_val = l.create_string("off")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            "store" => {
+                let mode_val = l.create_string("store")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            "normal" => {
+                let mode_val = l.create_string("on")?;
+                l.raw_set(&registry, mode_key, mode_val);
+            }
+            _ => {
+                // Unknown control message, ignored
+            }
+        }
+        return Ok(0);
+    }
+
+    // Regular message: concatenate all parts (no separator)
+    let message: String = parts.concat();
+
+    match current_mode.as_str() {
+        "on" => {
+            eprintln!("Lua warning: {}", message);
+        }
+        "store" => {
+            // Store in _WARN global
+            let warn_val = l.create_string(&message)?;
+            l.vm_mut().set_global("_WARN", warn_val)?;
+        }
+        _ => {
+            // "off" - do nothing
+        }
     }
 
     Ok(0)

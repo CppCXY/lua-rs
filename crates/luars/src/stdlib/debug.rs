@@ -1237,27 +1237,67 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
         as usize;
 
     // Get the call frame at the specified level
+    // Level mapping: level 0 = current function (caller of getlocal)
+    //                level 1 = its caller, etc.
     let call_depth = l.call_depth();
     if level >= call_depth {
         // Level out of range, return nil
         return Ok(0);
     }
 
+    let frame_idx = call_depth - 1 - level;
+
     // Get function at this level
     let frame_func = l
-        .get_frame_func(level)
+        .get_frame_func(frame_idx)
         .ok_or_else(|| l.error("invalid stack level".to_string()))?;
 
     if let Some(lua_func) = frame_func.as_lua_function() {
         let chunk = lua_func.chunk();
-        // Get local variable name from chunk
-        if local_index > 0 && local_index <= chunk.locals.len() {
-            let name = &chunk.locals[local_index - 1].name;
+        // Get current PC for this frame
+        let pc = l.get_frame_pc(frame_idx) as usize;
+        // PC is usually 1 ahead of the currently executing instruction
+        let pc = if pc > 0 { pc - 1 } else { 0 };
+        
+        // Use PC-based filtering to find the Nth active local
+        // Walk through chunk.locals, counting only those active at current PC
+        let mut active_count = 0;
+        let mut actual_slot = None;
+        for (idx, locvar) in chunk.locals.iter().enumerate() {
+            if (locvar.startpc as usize) > pc {
+                break;
+            }
+            if pc < locvar.endpc as usize {
+                active_count += 1;
+                if active_count == local_index {
+                    actual_slot = Some((idx, &locvar.name));
+                    break;
+                }
+            }
+        }
 
-            // Get the value from the stack
-            // The local variables are at base + (local_index - 1)
-            let base = l.get_frame_base(level);
-            let value_idx = base + local_index - 1;
+        if let Some((_idx, name)) = actual_slot {
+            // The stack slot for active locals: find which register this is
+            // Active locals are stored sequentially starting at base
+            // We need to count how many locals are active before this one
+            // to find its register offset
+            let mut reg = 0;
+            let mut count = 0;
+            for locvar in &chunk.locals {
+                if (locvar.startpc as usize) > pc {
+                    break;
+                }
+                if pc < locvar.endpc as usize {
+                    count += 1;
+                    if count == local_index {
+                        break;
+                    }
+                    reg += 1;
+                }
+            }
+            
+            let base = l.get_frame_base(frame_idx);
+            let value_idx = base + reg;
 
             let top = l.get_top();
             if value_idx < top {
@@ -1303,20 +1343,39 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(0);
     }
 
+    let frame_idx = call_depth - 1 - level;
+
     // Get function at this level
     let frame_func = l
-        .get_frame_func(level)
+        .get_frame_func(frame_idx)
         .ok_or_else(|| l.error("invalid stack level".to_string()))?;
 
     if let Some(lua_func) = frame_func.as_lua_function() {
         let chunk = lua_func.chunk();
-        // Get local variable name from chunk
-        if local_index > 0 && local_index <= chunk.locals.len() {
-            let name = &chunk.locals[local_index - 1].name;
+        let pc = l.get_frame_pc(frame_idx) as usize;
+        let pc = if pc > 0 { pc - 1 } else { 0 };
+        
+        // Find the Nth active local at current PC
+        let mut active_count = 0;
+        let mut reg = 0;
+        let mut found_name = None;
+        for locvar in &chunk.locals {
+            if (locvar.startpc as usize) > pc {
+                break;
+            }
+            if pc < locvar.endpc as usize {
+                active_count += 1;
+                if active_count == local_index {
+                    found_name = Some(&locvar.name);
+                    break;
+                }
+                reg += 1;
+            }
+        }
 
-            // Set the value on the stack
-            let base = l.get_frame_base(level);
-            let value_idx = base + local_index - 1;
+        if let Some(name) = found_name {
+            let base = l.get_frame_base(frame_idx);
+            let value_idx = base + reg;
 
             let top = l.get_top();
             if value_idx < top {

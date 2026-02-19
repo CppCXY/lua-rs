@@ -1739,6 +1739,36 @@ impl LuaState {
         Ok(())
     }
 
+    /// Compare two values using < operator with metamethod support (__lt)
+    pub fn obj_lt(&mut self, a: &LuaValue, b: &LuaValue) -> LuaResult<bool> {
+        // Integer-integer
+        if let (Some(i1), Some(i2)) = (a.as_integer(), b.as_integer()) {
+            return Ok(i1 < i2);
+        }
+        // Float-float
+        if let (Some(f1), Some(f2)) = (a.as_float(), b.as_float()) {
+            return Ok(f1 < f2);
+        }
+        // Mixed number
+        if let (Some(n1), Some(n2)) = (a.as_number(), b.as_number()) {
+            return Ok(n1 < n2);
+        }
+        // String (including binary): compare raw bytes
+        if a.is_string() && b.is_string() {
+            let ba = a.as_str().map(|s| s.as_bytes()).or_else(|| a.as_binary());
+            let bb = b.as_str().map(|s| s.as_bytes()).or_else(|| b.as_binary());
+            if let (Some(ba), Some(bb)) = (ba, bb) {
+                return Ok(ba < bb);
+            }
+        }
+        // Try __lt metamethod
+        match execute::metamethod::try_comp_tm(self, *a, *b, execute::TmKind::Lt) {
+            Ok(Some(result)) => Ok(result),
+            Ok(None) => Err(crate::stdlib::debug::ordererror(self, a, b)),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Get object length with metamethod support (__len)
     /// Returns the length as i64, going through __len if available.
     pub fn obj_len(&mut self, obj: &LuaValue) -> LuaResult<i64> {
@@ -1814,19 +1844,25 @@ impl LuaState {
     /// see the correct error chain without an extra pcall frame.
     pub fn call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         let initial_depth = self.call_depth();
-        let func_idx = self.stack.len();
+        // Use stack_top (logical top) instead of stack.len() (physical end).
+        // The physical stack can be much larger than needed (e.g., after deep
+        // recursion tests), so placing the function at stack.len() would waste
+        // address space and risk hitting max_stack_size limits unnecessarily.
+        let func_idx = self.stack_top;
+        let arg_count = args.len();
+        let needed = func_idx + 1 + arg_count;
 
-        // Push function and args to stack
-        let old_capacity = self.stack.capacity();
-        self.stack.push(func);
-        for arg in args {
-            self.stack.push(arg);
+        // Ensure physical stack has room for function + args
+        if needed > self.stack.len() {
+            self.resize(needed)?;
         }
-        if self.stack.capacity() != old_capacity {
-            self.fix_open_upvalue_pointers();
+
+        // Write function and args at stack_top position
+        self.stack[func_idx] = func;
+        for (i, arg) in args.into_iter().enumerate() {
+            self.stack[func_idx + 1 + i] = arg;
         }
-        let arg_count = self.stack.len() - func_idx - 1;
-        self.stack_top = self.stack.len();
+        self.stack_top = needed;
 
         // Resolve __call metamethod chain if needed
         let (actual_arg_count, ccmt_depth) = resolve_call_chain(self, func_idx, arg_count)?;
@@ -1865,8 +1901,16 @@ impl LuaState {
             }
         }
 
-        // Clean up: remove function/result slots from physical stack
-        self.stack.truncate(func_idx);
+        // Clean up: nil out used slots for GC safety, restore stack_top.
+        // Don't truncate the physical stack — it may be needed by the caller's
+        // frame (ci.top). The physical stack will be shrunk naturally by GC or
+        // when the enclosing frame exits.
+        {
+            let clear_end = self.stack_top.min(self.stack.len());
+            for i in func_idx..clear_end {
+                self.stack[i] = LuaValue::nil();
+            }
+        }
         self.stack_top = func_idx;
 
         // Restore caller frame top if needed
@@ -1910,27 +1954,25 @@ impl LuaState {
         // Save state for cleanup
         let initial_depth = self.call_depth();
         let saved_stack_top = self.stack_top;
-        let func_idx = self.stack.len();
+        // Use stack_top (logical top) instead of stack.len() (physical end).
+        // See call() for rationale.
+        let func_idx = self.stack_top;
+        let arg_count = args.len();
+        let needed = func_idx + 1 + arg_count;
 
-        // Push function and args to stack
-        // Track capacity to detect Vec reallocation.
-        let old_capacity = self.stack.capacity();
-        self.stack.push(func);
-        for arg in args {
-            self.stack.push(arg);
+        // Ensure physical stack has room for function + args
+        if needed > self.stack.len() {
+            self.resize(needed)?;
         }
-        // If Vec reallocated, fix all open upvalue cached pointers.
-        // This is critical: open upvalues cache raw pointers into the Vec buffer.
-        // Vec::push can reallocate the buffer, leaving those pointers dangling.
-        if self.stack.capacity() != old_capacity {
-            self.fix_open_upvalue_pointers();
-        }
-        let arg_count = self.stack.len() - func_idx - 1;
 
-        // Sync logical stack top with physical stack after Vec::push
-        // This is critical: push_value writes to stack_top, so it must
-        // be consistent with the actual stack contents.
-        self.stack_top = self.stack.len();
+        // Write function and args at stack_top position
+        self.stack[func_idx] = func;
+        for (i, arg) in args.into_iter().enumerate() {
+            self.stack[func_idx + 1 + i] = arg;
+        }
+
+        // Sync logical stack top
+        self.stack_top = needed;
 
         // Resolve __call chain if needed
 
@@ -1939,7 +1981,6 @@ impl LuaState {
             Err(e) => {
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
-                self.stack.truncate(func_idx);
                 self.stack_top = saved_stack_top;
                 return Ok((false, vec![err_str]));
             }
@@ -1956,7 +1997,6 @@ impl LuaState {
             // Create frame for C function
             let base = func_idx + 1;
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
-                self.stack.truncate(func_idx);
                 self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -2009,7 +2049,6 @@ impl LuaState {
                     }
 
                     // Clean up stack
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
 
                     Ok((true, results))
@@ -2024,7 +2063,6 @@ impl LuaState {
                         let error_msg = self.get_error_msg(e);
                         self.create_string(&error_msg)?.into()
                     };
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
                     Ok((false, vec![result_err]))
                 }
@@ -2034,7 +2072,6 @@ impl LuaState {
             let base = func_idx + 1;
             // pcall expects all return values
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
-                self.stack.truncate(func_idx);
                 self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_msg(e);
                 let err_str = self.create_string(&error_msg)?;
@@ -2065,7 +2102,6 @@ impl LuaState {
                     }
 
                     // Clean up stack
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
 
                     Ok((true, results))
@@ -2112,12 +2148,66 @@ impl LuaState {
                     };
 
                     // Clean up stack
-                    self.stack.truncate(func_idx);
                     self.stack_top = saved_stack_top;
 
                     Ok((false, vec![result_err]))
                 }
             }
+        }
+    }
+
+    /// Unprotected call with stack-based arguments that supports yields.
+    /// Like pcall_stack_based but errors propagate instead of being caught.
+    /// Uses CIST_YCALL flag so finish_c_frame can properly move results after yield.
+    /// Returns result_count on success; results are left on stack starting at func_idx.
+    pub fn call_stack_based(
+        &mut self,
+        func_idx: usize,
+        arg_count: usize,
+    ) -> LuaResult<usize> {
+        let initial_depth = self.call_depth();
+
+        let (actual_arg_count, _ccmt_depth) = resolve_call_chain(self, func_idx, arg_count)?;
+
+        let func = self
+            .stack_get(func_idx)
+            .ok_or_else(|| self.error("call: function not found".to_string()))?;
+
+        let result = if func.is_c_callable() {
+            call_c_function(self, func_idx, actual_arg_count, -1).map(|_| ())
+        } else {
+            let base = func_idx + 1;
+            self.push_frame(&func, base, actual_arg_count, -1)?;
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r
+        };
+
+        match result {
+            Ok(()) => {
+                let stack_top = self.get_top();
+                let result_count = if stack_top > func_idx {
+                    stack_top - func_idx
+                } else {
+                    0
+                };
+                Ok(result_count)
+            }
+            Err(LuaError::Yield) => {
+                // Mark this C frame with CIST_YCALL so finish_c_frame
+                // knows to move results (without prepending true/false).
+                if initial_depth > 0 {
+                    use crate::lua_vm::call_info::call_status::CIST_YCALL;
+                    let frame_idx = initial_depth - 1;
+                    if frame_idx < self.call_depth {
+                        let ci = self.get_call_info_mut(frame_idx);
+                        ci.call_status |= CIST_YCALL;
+                    }
+                }
+                Err(LuaError::Yield)
+            }
+            Err(e) => Err(e), // Propagate all other errors
         }
     }
 

@@ -127,14 +127,15 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
     }
 
-    let table = table_val.as_table_mut().unwrap();
-    let len = table.len() as i64;
+    // Use obj_len to respect __len metamethod (like C Lua's aux_getn / luaL_len)
+    let len = l.obj_len(&table_val)?;
 
     if argc == 2 {
         // table.insert(list, value) - append at end
         let value = l
             .get_arg(2)
             .ok_or_else(|| l.error("bad argument #2 to 'insert' (value expected)".to_string()))?;
+        let table = table_val.as_table_mut().unwrap();
         table.raw_seti(len.wrapping_add(1), value);
         // GC write barrier: table was modified directly, bypass LuaVM::raw_seti barrier
         if let Some(gc_ptr) = table_val.as_gc_ptr() {
@@ -248,28 +249,50 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
 
     let dst_value = l.get_arg(5).unwrap_or(src_val);
 
-    let src_table = src_val
-        .as_table()
-        .ok_or_else(|| l.error("bad argument #1 to 'move' (table expected)".to_string()))?;
-
-    // Copy elements from source using raw access
-    let mut values = Vec::new();
-    for i in f..=e {
-        let val = src_table.raw_geti(i).unwrap_or(LuaValue::nil());
-        values.push(val);
+    if !src_val.is_table() {
+        return Err(l.error("bad argument #1 to 'move' (table expected)".to_string()));
     }
 
-    // Write to destination using raw access
-    let dst_table = dst_value
-        .as_table_mut()
-        .ok_or_else(|| l.error("bad argument #5 to 'move' (table expected)".to_string()))?;
-    for (offset, val) in values.into_iter().enumerate() {
-        dst_table.raw_seti(t.wrapping_add(offset as i64), val);
+    // Validate destination is a table
+    if !dst_value.is_table() {
+        return Err(l.error("bad argument #5 to 'move' (table expected)".to_string()));
     }
 
-    // GC write barrier: destination table was modified directly
-    if let Some(gc_ptr) = dst_value.as_gc_ptr() {
-        l.gc_barrier_back(gc_ptr);
+    // Validation matching C Lua's tmove (ltablib.c):
+    // 1. n = (unsigned)(e - f); if n >= LUA_MAXINTEGER error "too many"
+    // 2. n++; if t > LUA_MAXINTEGER - n + 1 error "wrap around"
+    if e >= f {
+        let n = (e as u64).wrapping_sub(f as u64);
+        if n >= i64::MAX as u64 {
+            return Err(l.error("too many elements to move".to_string()));
+        }
+        let n = n + 1; // count of elements
+        let limit = i64::MAX - (n as i64) + 1;
+        if t > limit {
+            return Err(l.error("destination wrap around".to_string()));
+        }
+    }
+
+    // Use metamethod-respecting access (like C Lua's lua_geti/lua_seti)
+    // Handle overlap correctly (C Lua: backward only when f < t <= e, same table)
+    if f <= e {
+        if t > f && t <= e {
+            // Overlapping forward move: iterate backwards to avoid overwriting
+            for i in (0..=(e - f)).rev() {
+                let key = LuaValue::integer(f.wrapping_add(i));
+                let val = l.table_get(&src_val, &key)?.unwrap_or(LuaValue::nil());
+                let dst_key = LuaValue::integer(t.wrapping_add(i));
+                l.table_set(&dst_value, dst_key, val)?;
+            }
+        } else {
+            // No overlap or backward move: iterate forwards
+            for i in 0..=(e - f) {
+                let key = LuaValue::integer(f.wrapping_add(i));
+                let val = l.table_get(&src_val, &key)?.unwrap_or(LuaValue::nil());
+                let dst_key = LuaValue::integer(t.wrapping_add(i));
+                l.table_set(&dst_value, dst_key, val)?;
+            }
+        }
     }
 
     l.push_value(dst_value)?;
@@ -318,21 +341,22 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Check for excessive range (Lua 5.5: "too many results to unpack")
-    // Port of tunpack (ltablib.c): n >= INT_MAX || !lua_checkstack(L, n)
-    let count = (j as u64).wrapping_sub(i as u64).wrapping_add(1);
-    if count >= i32::MAX as u64 || !l.check_stack(count as usize) {
+    // Port of tunpack (ltablib.c): n = e - i (elements minus 1, avoids overflow)
+    // then check n >= INT_MAX before incrementing
+    let n = (j as u64).wrapping_sub(i as u64); // count - 1 (wrapping is OK)
+    if n >= i32::MAX as u64 || !l.check_stack((n as usize).wrapping_add(1)) {
         return Err(l.error("too many results to unpack".to_string()));
     }
+    let count = (n + 1) as usize;
 
     // Collect all values using raw access
-    let mut values = Vec::with_capacity(count as usize);
+    let mut values = Vec::with_capacity(count);
     for idx in i..=j {
         let val = table.raw_geti(idx).unwrap_or(LuaValue::nil());
         values.push(val);
     }
 
     // Push values
-    let count = values.len();
     for val in values {
         l.push_value(val)?;
     }
