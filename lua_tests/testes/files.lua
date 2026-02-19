@@ -472,12 +472,17 @@ do print("testing flush")
   assert(f:close())
 
   if not _port and package.config:sub(1,1) ~= "\\" then
-    local f = io.output("/dev/full")
-    assert(f:write("abcd"))   -- write to buffer
-    assert(not f:flush())     -- cannot write to device
-    assert(f:write("abcd"))   -- write to buffer
-    assert(not io.flush())    -- cannot write to device
-    assert(f:close())
+    -- /dev/full may not be accessible in some environments (e.g., CI containers)
+    local ok, f = pcall(io.output, "/dev/full")
+    if ok then
+      assert(f:write("abcd"))   -- write to buffer
+      assert(not f:flush())     -- cannot write to device
+      assert(f:write("abcd"))   -- write to buffer
+      assert(not io.flush())    -- cannot write to device
+      assert(f:close())
+    else
+      print("  (skipping /dev/full test - not accessible)")
+    end
   end
 end
 
