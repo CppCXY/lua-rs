@@ -1725,6 +1725,42 @@ impl LuaState {
         self.vm_mut().set_global(name, value)
     }
 
+    // ===== Type Registration =====
+
+    /// Register a UserData type as a Lua global table with its static methods.
+    ///
+    /// Creates a table (e.g. `Point`) and populates it with all associated
+    /// functions defined in the type's `#[lua_methods]` block (functions
+    /// without `self`, such as constructors).
+    ///
+    /// After registration, Lua code can call e.g. `Point.new(3, 4)`.
+    ///
+    /// # Usage
+    /// ```ignore
+    /// // In Rust:
+    /// state.register_type("Point", Point::__lua_static_methods())?;
+    ///
+    /// // In Lua:
+    /// local p = Point.new(3, 4)
+    /// print(p.x, p.y)      -- 3.0  4.0
+    /// print(p:distance())   -- 5.0
+    /// ```
+    pub fn register_type(
+        &mut self,
+        name: &str,
+        static_methods: &[(&str, super::CFunction)],
+    ) -> LuaResult<()> {
+        let class_table = self.create_table(0, static_methods.len())?;
+
+        for &(method_name, func) in static_methods {
+            let key = self.create_string(method_name)?;
+            let value = LuaValue::cfunction(func);
+            self.raw_set(&class_table, key, value);
+        }
+
+        self.set_global(name, class_table)
+    }
+
     // ===== Table Operations =====
 
     /// Get value from table (raw, no metamethods)

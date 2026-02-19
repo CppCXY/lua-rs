@@ -23,7 +23,9 @@ pub use luars_derive::lua_methods;
 
 // Re-export userdata trait types at crate root for convenience
 pub use lua_value::LuaUserdata;
-pub use lua_value::userdata_trait::{LuaMethodProvider, UdValue, UserDataTrait};
+pub use lua_value::userdata_trait::{
+    LuaMethodProvider, LuaStaticMethodProvider, UdValue, UserDataTrait,
+};
 
 #[cfg(test)]
 use crate::lua_vm::SafeOption;

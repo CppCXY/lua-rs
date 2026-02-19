@@ -136,9 +136,7 @@ pub fn lua_arg_to_rust(
 /// Generate code to convert a Rust return value and push it onto the Lua stack.
 ///
 /// Returns code that evaluates to a `LuaResult<usize>` (number of return values).
-pub fn rust_return_to_lua(
-    ty: &syn::Type,
-) -> proc_macro2::TokenStream {
+pub fn rust_return_to_lua(ty: &syn::Type) -> proc_macro2::TokenStream {
     let type_str = normalize_type(ty);
 
     // Result<T, E> → unwrap or error
@@ -338,7 +336,10 @@ fn lua_arg_extract_inner(
 }
 
 /// Generate code to push a Rust value onto the Lua stack and return count.
-fn rust_value_push_code(type_str: &str, val_expr: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn rust_value_push_code(
+    type_str: &str,
+    val_expr: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     match type_str {
         // Unit / no return
         "()" => {

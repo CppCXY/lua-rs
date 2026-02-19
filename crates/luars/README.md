@@ -5,8 +5,6 @@
 
 A Lua 5.5 runtime implementation in Rust, providing both interpreter and embedding capabilities.
 
-> ⚠️ **Work in Progress**: This library is under active development and not yet feature-complete. While core functionality is working, some advanced features and edge cases may not be fully implemented. Use in production environments at your own risk.
-
 ## Features
 
 - **Lua 5.5 Core**: Implements Lua 5.5 language semantics
@@ -32,12 +30,9 @@ A Lua 5.5 runtime implementation in Rust, providing both interpreter and embeddi
 - **UTF-8 Only Strings**: Unlike standard Lua, strings must be valid UTF-8. Binary data should use the binary type from `string.pack`/`string.unpack`.
 - **Custom Bytecode Format**: Uses LuaRS-specific bytecode format, not compatible with standard Lua bytecode.
 - **Partial Debug Library**: Some introspection features are not yet implemented.
-- **Performance**: While functional, performance optimizations are ongoing.
 
 ### 🚧 Incomplete Features
-- Some advanced metatable behaviors
 - Full debug library introspection
-- Complete compliance with all Lua 5.5 edge cases
 
 ## Usage
 
@@ -45,10 +40,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-luars = "0.1"
+luars = "0.4"
 
 # Optional: Enable JSON serialization support
-luars = { version = "0.1", features = ["serde"] }
+luars = { version = "0.4", features = ["serde"] }
 ```
 
 ### Basic Example
@@ -127,8 +122,6 @@ Please open an issue before starting major work to discuss the approach.
 
 - [ ] Complete debug library implementation
 - [ ] Performance optimizations
-- [ ] More comprehensive test coverage
-- [ ] Better error messages and stack traces
 
 
 ## License

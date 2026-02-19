@@ -25,6 +25,11 @@ impl fmt::Display for Point {
 /// Methods exposed to Lua via `#[lua_methods]`
 #[lua_methods]
 impl Point {
+    /// Constructor — creates a new Point
+    pub fn new(x: f64, y: f64) -> Self {
+        Point { x, y, _id: 0 }
+    }
+
     /// Euclidean distance from origin
     pub fn distance(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
@@ -578,9 +583,7 @@ fn test_vm_method_optional_param() {
     let mut vm = setup_point_vm();
 
     // With parameter
-    let results = vm
-        .execute_string(r#"return p:greet("Alice")"#)
-        .unwrap();
+    let results = vm.execute_string(r#"return p:greet("Alice")"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Hello Alice from Point(3, 4)"));
 
@@ -612,4 +615,135 @@ fn test_vm_method_as_field_access() {
     let results = vm.execute_string("return type(p.distance)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("function"));
+}
+
+// ==================== register_type / Constructor Tests ====================
+
+/// Helper: create a VM with Point registered as a class table
+fn setup_point_class_vm() -> Box<LuaVM> {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+    vm.open_stdlib(stdlib::Stdlib::String).unwrap();
+
+    let state = vm.main_state();
+    state
+        .register_type("Point", Point::__lua_static_methods())
+        .unwrap();
+    vm
+}
+
+#[test]
+fn test_register_type_creates_global_table() {
+    let mut vm = setup_point_class_vm();
+    let results = vm.execute_string("return type(Point)").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("table"));
+}
+
+#[test]
+fn test_register_type_new_is_function() {
+    let mut vm = setup_point_class_vm();
+    let results = vm.execute_string("return type(Point.new)").unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("function"));
+}
+
+#[test]
+fn test_register_type_constructor() {
+    let mut vm = setup_point_class_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        local p = Point.new(3, 4)
+        return p.x, p.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_number(), Some(3.0));
+    assert_eq!(results[1].as_number(), Some(4.0));
+}
+
+#[test]
+fn test_register_type_constructor_with_methods() {
+    let mut vm = setup_point_class_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        local p = Point.new(3, 4)
+        return p:distance()
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_float(), Some(5.0)); // 3-4-5 triangle
+}
+
+#[test]
+fn test_register_type_constructor_with_mutation() {
+    let mut vm = setup_point_class_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        local p = Point.new(1, 2)
+        p:translate(10, 20)
+        return p.x, p.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_number(), Some(11.0));
+    assert_eq!(results[1].as_number(), Some(22.0));
+}
+
+#[test]
+fn test_register_type_constructor_tostring() {
+    let mut vm = setup_point_class_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        local p = Point.new(5, 10)
+        return tostring(p)
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("Point(5, 10)"));
+}
+
+#[test]
+fn test_register_type_multiple_instances() {
+    let mut vm = setup_point_class_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        local a = Point.new(1, 0)
+        local b = Point.new(0, 1)
+        return a.x, a.y, b.x, b.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 4);
+    assert_eq!(results[0].as_number(), Some(1.0));
+    assert_eq!(results[1].as_number(), Some(0.0));
+    assert_eq!(results[2].as_number(), Some(0.0));
+    assert_eq!(results[3].as_number(), Some(1.0));
+}
+
+#[test]
+fn test_register_type_equality() {
+    let mut vm = setup_point_class_vm();
+    let results = vm
+        .execute_string(
+            r#"
+        local a = Point.new(3, 4)
+        local b = Point.new(3, 4)
+        local c = Point.new(1, 2)
+        return a == b, a == c
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_boolean(), Some(true));
+    assert_eq!(results[1].as_boolean(), Some(false));
 }

@@ -9,7 +9,10 @@ use std::any::Any;
 use std::fmt;
 use std::rc::Rc;
 
-pub use userdata_trait::{LuaMethodProvider, UdValue, UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value};
+pub use userdata_trait::{
+    LuaMethodProvider, LuaStaticMethodProvider, UdValue, UserDataTrait, lua_value_to_udvalue,
+    udvalue_to_lua_value,
+};
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;

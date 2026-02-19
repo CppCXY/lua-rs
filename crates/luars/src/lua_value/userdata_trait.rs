@@ -411,3 +411,20 @@ pub trait LuaMethodProvider {
 }
 
 impl<T> LuaMethodProvider for T {}
+
+// ==================== Type Registration ====================
+
+/// Blanket trait providing a default empty static methods list.
+///
+/// When `#[lua_methods]` is used on an impl block that contains associated
+/// functions (no `self`), it generates an inherent `__lua_static_methods()`
+/// function on the type that shadows this trait's default.
+///
+/// Used by `LuaState::register_type::<T>(name)` to populate the class table.
+pub trait LuaStaticMethodProvider {
+    fn __lua_static_methods() -> &'static [(&'static str, CFunction)] {
+        &[]
+    }
+}
+
+impl<T> LuaStaticMethodProvider for T {}
