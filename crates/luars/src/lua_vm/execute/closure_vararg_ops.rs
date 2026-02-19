@@ -112,15 +112,10 @@ pub fn exec_vararg(
         };
         let vararg_start = old_func_pos + 1 + nfixparams;
 
-        // Collect values first to avoid borrow issues
+        // Varargs are stored below base, ra is at base+a, so ranges never overlap.
+        // Use copy_within to avoid heap allocation.
         let stack = lua_state.stack_mut();
-        let mut values = Vec::with_capacity(touse);
-        for i in 0..touse {
-            values.push(stack[vararg_start + i]);
-        }
-        for (i, val) in values.into_iter().enumerate() {
-            stack[ra + i] = val;
-        }
+        stack.copy_within(vararg_start..vararg_start + touse, ra);
     } else {
         // Get from vararg table at R[B]
         let table_val = {
@@ -129,15 +124,9 @@ pub fn exec_vararg(
         };
 
         if let Some(table) = table_val.as_table_mut() {
-            let mut values = Vec::with_capacity(touse);
-            for i in 0..touse {
-                let val = table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil());
-                values.push(val);
-            }
-            // Now write to stack
             let stack = lua_state.stack_mut();
-            for (i, val) in values.into_iter().enumerate() {
-                stack[ra + i] = val;
+            for i in 0..touse {
+                stack[ra + i] = table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil());
             }
         } else {
             // Not a table, fill with nil

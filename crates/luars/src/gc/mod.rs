@@ -2021,32 +2021,29 @@ impl GC {
                 // TODO: implement stack shrinking if needed
             }
 
-            // Clear values above "stack in use" to nil.
-            // stackinuse = max(top, all ci.top values) — the extent of stack
-            // actually in use including suspended coroutine frames.
-            // We clear from stackinuse (not top) to preserve values within ci
-            // ranges that may be needed when the coroutine resumes.
-            // The push_c_frame fix ensures stack_top is high enough during
-            // yield suspension to cover all live registers for GC marking.
+            // Clear dead stack slice above top, matching C Lua 5.5's
+            // traversethread: "for (o = th->top.p; ...) setnilvalue(s2v(o));"
+            //
+            // This removes stale pointers left by function returns that
+            // lowered stack_top. Without this, a future stack_top raise
+            // (e.g. push_lua_frame, set_top_raw) would expose dangling
+            // pointers to the next GC cycle's mark phase.
+            //
+            // C Lua clears from top to stack_last; we protect TBC variable
+            // positions defensively (they should be below top, but guard
+            // against edge cases).
             {
                 let state = &mut gc_thread.data;
-                let mut stack_in_use = state.get_top();
-                let call_depth = state.call_depth();
-                for ci_idx in 0..call_depth {
-                    let ci = state.get_call_info(ci_idx);
-                    if ci.top > stack_in_use {
-                        stack_in_use = ci.top;
-                    }
-                }
-                // Also protect TBC variable positions from being cleared.
+                let mut clear_start = state.get_top();
+                // Protect TBC variable positions from being cleared.
                 for &tbc_idx in state.tbc_list.iter() {
-                    if tbc_idx + 1 > stack_in_use {
-                        stack_in_use = tbc_idx + 1;
+                    if tbc_idx + 1 > clear_start {
+                        clear_start = tbc_idx + 1;
                     }
                 }
                 let stack_len = state.stack_len();
                 let stack = state.stack_mut();
-                for i in stack_in_use..stack_len {
+                for i in clear_start..stack_len {
                     stack[i] = LuaValue::nil();
                 }
             }

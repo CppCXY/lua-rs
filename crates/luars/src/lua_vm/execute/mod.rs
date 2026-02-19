@@ -85,34 +85,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let frame_idx = current_depth - 1;
         // ===== LOAD FRAME CONTEXT =====
         // Safety: frame_idx < call_depth (guaranteed by check above)
-        let ci = lua_state.get_call_info(frame_idx);
-
-        // Clear stale stack slots between current top and the frame's
-        // register extent (ci.top = base + maxstacksize).
-        // After a CALL returns, the return handler lowers stack_top to
-        // func_pos + nresults. Slots above this new top may contain stale
-        // GC pointers from the previous frame or from before the call.
-        // Without clearing, a later push_lua_frame could raise top past
-        // these stale slots, bringing dangling pointers into GC marking
-        // range and causing crashes during sweep.
-        // We nil them here instead of raising top (which would break
-        // RETURN B=0 MULTRET semantics that rely on top for counting).
-        {
-            let current_top = lua_state.get_top();
-            let ci_top = ci.top;
-            if current_top < ci_top {
-                let stack = lua_state.stack_mut();
-                for i in current_top..ci_top {
-                    stack[i] = LuaValue::nil();
-                }
-            }
-        }
-        let ci = lua_state.get_call_info(frame_idx);
+        // Stale stack slots above stack_top are NOT cleared here.
+        // Instead, push_lua_frame nil-fills [stack_top, frame_top) when
+        // raising stack_top, which is the only moment stale pointers
+        // become visible to the GC (GC scans 0..stack_top).
 
         // Cold-path check: C frame or pending metamethod finish.
-        // Normal Lua function entry: call_status == CIST_LUA, so this is always
-        // predicted not-taken.
-        if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
+        // Read call_status first (single field), avoids holding a borrow
+        // across the mutable handle_pending_ops call.
+        let call_status = lua_state.get_call_info(frame_idx).call_status;
+        if call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
             if handle_pending_ops(lua_state, frame_idx)? {
                 continue 'startfunc;
             }
