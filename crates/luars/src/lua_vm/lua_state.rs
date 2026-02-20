@@ -2,7 +2,6 @@
 // Represents a single thread/coroutine execution context
 // Multiple LuaStates can share the same LuaVM (global_State)
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
@@ -45,9 +44,9 @@ pub struct LuaState {
     call_depth: usize,
 
     /// Open upvalues - upvalues pointing to stack locations
-    /// Uses HashMap for O(1) lookup by stack index (unlike Lua's sorted linked list)
-    /// Also maintains a sorted Vec(higher indices first) for efficient traversal during close operations
-    open_upvalues_map: HashMap<usize, UpvaluePtr>,
+    /// Sorted Vec (higher stack indices first) for efficient lookup and close traversal.
+    /// Linear scan is faster than HashMap for typical 0-5 open upvalues due to
+    /// no hashing overhead and better cache locality. Matches C Lua's sorted list design.
     open_upvalues_list: Vec<UpvaluePtr>,
 
     /// Error message storage (lightweight error handling)
@@ -109,7 +108,6 @@ impl LuaState {
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
             call_depth: 0,
-            open_upvalues_map: HashMap::new(),
             open_upvalues_list: Vec::new(),
             error_msg: String::new(),
             error_object: LuaValue::nil(),
@@ -862,15 +860,11 @@ impl LuaState {
 
         if count > 0 {
             // Process upvalues to close in-place, then drain.
-            // First pass: close each upvalue and remove from map.
             for i in 0..count {
                 let upval_ptr = self.open_upvalues_list[i];
                 let data = &upval_ptr.as_ref().data;
                 if data.is_open() {
                     let stack_idx = data.get_stack_index();
-
-                    // Remove from map (maintain consistency)
-                    self.open_upvalues_map.remove(&stack_idx);
 
                     // Capture value from stack
                     let value = self
@@ -1288,13 +1282,20 @@ impl LuaState {
         result
     }
 
-    /// Find or create an open upvalue for the given stack index
-    /// Uses HashMap for O(1) lookup instead of O(n) linear search
-    /// This is a major optimization over the naive linked list approach
+    /// Find or create an open upvalue for the given stack index.
+    /// Uses linear scan on sorted Vec — faster than HashMap for typical 0-5 open upvalues.
     pub fn find_or_create_upvalue(&mut self, stack_index: usize) -> LuaResult<UpvaluePtr> {
-        // O(1) lookup in HashMap
-        if let Some(&upval_ptr) = self.open_upvalues_map.get(&stack_index) {
-            return Ok(upval_ptr);
+        // Linear scan on sorted list (descending by stack index).
+        // For 0-5 elements, this is faster than HashMap (no hash computation).
+        for &upval_ptr in &self.open_upvalues_list {
+            let idx = upval_ptr.as_ref().data.get_stack_index();
+            if idx == stack_index {
+                return Ok(upval_ptr);
+            }
+            if idx < stack_index {
+                // Passed the insertion point — not found (list is sorted descending)
+                break;
+            }
         }
 
         // Not found, create a new one
@@ -1306,17 +1307,12 @@ impl LuaState {
             vm.create_upvalue_open(stack_index, ptr)?
         };
 
-        // Add to HashMap for O(1) future lookups
-        self.open_upvalues_map.insert(stack_index, upval_ptr);
-
-        // Also add to sorted list for traversal (insert in sorted position, higher indices first)
-        // Collect existing upvalue IDs and their stack indices
-        let insert_pos = {
-            self.open_upvalues_list
-                .iter()
-                .position(|&ptr| ptr.as_ref().data.get_stack_index() < stack_index)
-                .unwrap_or(self.open_upvalues_list.len())
-        };
+        // Insert in sorted position (higher indices first)
+        let insert_pos = self
+            .open_upvalues_list
+            .iter()
+            .position(|&ptr| ptr.as_ref().data.get_stack_index() < stack_index)
+            .unwrap_or(self.open_upvalues_list.len());
 
         self.open_upvalues_list.insert(insert_pos, upval_ptr);
 

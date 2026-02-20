@@ -419,8 +419,7 @@ impl PartialEq for LuaString {
 }
 
 /// Inline storage for upvalue pointers — avoids heap allocation for 0-2 upvalues.
-/// Used as a temporary construction helper in handle_closure.
-/// Converted to Box<[UpvaluePtr]> for storage in LuaFunction (branchless deref).
+/// Stored directly in LuaFunction: 0-2 upvalues are inline, 3+ use Box<[UpvaluePtr]>.
 pub enum UpvalueStore {
     Empty,
     One(UpvaluePtr),
@@ -453,6 +452,30 @@ impl UpvalueStore {
         }
     }
 
+    /// Get upvalue pointers as a slice (branchless for Many, single match for 0-2).
+    /// Called once per function entry — branch cost is negligible.
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[UpvaluePtr] {
+        match self {
+            UpvalueStore::Empty => &[],
+            UpvalueStore::One(p) => std::slice::from_ref(p),
+            UpvalueStore::Two(a) => a.as_slice(),
+            UpvalueStore::Many(v) => v,
+        }
+    }
+
+    /// Get mutable upvalue pointers as a slice.
+    /// Used by debug.upvaluejoin (rare).
+    #[inline(always)]
+    pub fn as_mut_slice(&mut self) -> &mut [UpvaluePtr] {
+        match self {
+            UpvalueStore::Empty => &mut [],
+            UpvalueStore::One(p) => std::slice::from_mut(p),
+            UpvalueStore::Two(a) => a.as_mut_slice(),
+            UpvalueStore::Many(v) => v,
+        }
+    }
+
     #[inline(always)]
     pub fn len(&self) -> usize {
         match self {
@@ -466,14 +489,14 @@ impl UpvalueStore {
 
 pub struct LuaFunction {
     chunk: Rc<Chunk>,
-    upvalue_ptrs: Box<[UpvaluePtr]>,
+    upvalue_ptrs: UpvalueStore,
 }
 
 impl LuaFunction {
     pub fn new(chunk: Rc<Chunk>, upvalue_ptrs: UpvalueStore) -> Self {
         LuaFunction {
             chunk,
-            upvalue_ptrs: upvalue_ptrs.into_boxed_slice(),
+            upvalue_ptrs,
         }
     }
 
@@ -483,17 +506,17 @@ impl LuaFunction {
         &self.chunk
     }
 
-    /// Get cached upvalues (direct pointers for fast access)
-    /// Box<[T]> deref is branchless — no match overhead
+    /// Get upvalue pointers as a slice.
+    /// Called once per 'startfunc iteration (function entry) — branch is negligible.
     #[inline(always)]
     pub fn upvalues(&self) -> &[UpvaluePtr] {
-        &self.upvalue_ptrs
+        self.upvalue_ptrs.as_slice()
     }
 
-    /// Get mutable access to cached upvalues for updating pointers
+    /// Get mutable access to upvalue pointers (used by debug.upvaluejoin)
     #[inline(always)]
     pub fn upvalues_mut(&mut self) -> &mut [UpvaluePtr] {
-        &mut self.upvalue_ptrs
+        self.upvalue_ptrs.as_mut_slice()
     }
 }
 
