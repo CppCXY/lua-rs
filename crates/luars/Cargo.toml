@@ -23,5 +23,6 @@ ahash.workspace = true
 rand.workspace = true
 chrono.workspace = true
 itoa.workspace = true
+smol_str.workspace = true
 serde = { version = "1.0", optional = true, features = ["derive"] }
 serde_json = { version = "1.0", optional = true }

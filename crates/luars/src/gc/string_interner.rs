@@ -1,4 +1,5 @@
 use ahash::RandomState;
+use smol_str::SmolStr;
 use std::hash::{BuildHasher, Hash, Hasher};
 
 use crate::lua_value::LuaString;
@@ -56,7 +57,7 @@ impl StringInterner {
         // Use hash=0 (lazy hash — computed on demand when used as table key)
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
-            let lua_string = LuaString::new(s.to_string(), 0);
+            let lua_string = LuaString::new(SmolStr::new(s), 0);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
@@ -85,7 +86,7 @@ impl StringInterner {
         if self.nuse >= self.size() {
             self.grow(gc);
         }
-        self.create_short_string(s.to_string(), hash, slen, current_white, gc)
+        self.create_short_string(SmolStr::new(s), hash, slen, current_white, gc)
     }
 
     /// Intern an owned string - avoids extra allocation when string is already owned
@@ -97,7 +98,7 @@ impl StringInterner {
         // Long strings are not interned — lazy hash (hash=0)
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
-            let lua_string = LuaString::new(s, 0);
+            let lua_string = LuaString::new(SmolStr::from(s), 0);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
@@ -112,7 +113,7 @@ impl StringInterner {
         let mut ts = self.buckets[idx];
         while !ts.is_null() {
             let gc_str = ts.as_ref();
-            if gc_str.data.str.len() == slen && gc_str.data.str == s {
+            if gc_str.data.str.len() == slen && *gc_str.data.str == s {
                 // Found! Resurrect if needed. `s` dropped here — no waste.
                 if gc_str.header.is_white() {
                     ts.as_mut_ref().header.make_black();
@@ -126,7 +127,7 @@ impl StringInterner {
         if self.nuse >= self.size() {
             self.grow(gc);
         }
-        self.create_short_string(s, hash, slen, current_white, gc)
+        self.create_short_string(SmolStr::from(s), hash, slen, current_white, gc)
     }
 
     /// Create a new short string GC object and prepend to its bucket chain.
@@ -134,7 +135,7 @@ impl StringInterner {
     #[inline]
     fn create_short_string(
         &mut self,
-        s: String,
+        s: SmolStr,
         hash: u64,
         slen: usize,
         current_white: u8,

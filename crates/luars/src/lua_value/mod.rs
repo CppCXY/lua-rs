@@ -371,7 +371,7 @@ impl Chunk {
 
 #[derive(Clone)]
 pub struct LuaString {
-    pub str: String,
+    pub str: smol_str::SmolStr,
     pub hash: u64,
     /// Intrusive chain pointer for the string intern table (short strings only).
     /// Forms a singly-linked list of strings sharing the same bucket.
@@ -389,7 +389,7 @@ impl std::fmt::Debug for LuaString {
 }
 
 impl LuaString {
-    pub fn new(s: String, hash: u64) -> Self {
+    pub fn new(s: smol_str::SmolStr, hash: u64) -> Self {
         Self {
             str: s,
             hash,
