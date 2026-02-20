@@ -227,7 +227,7 @@ pub fn concat_strings(
             // SAFETY: number formatting always produces valid UTF-8
             return unsafe {
                 let s = String::from_utf8_unchecked(result);
-                lua_state.create_string(&s)
+                lua_state.create_string_owned(s)
             };
         } else {
             return Err(crate::stdlib::debug::typeerror(
@@ -260,7 +260,48 @@ pub fn concat_strings(
             let mut result = String::with_capacity(total_len);
             result.push_str(s1);
             result.push_str(s2);
-            return lua_state.create_string(&result);
+            return lua_state.create_string_owned(result);
+        }
+
+        // Fast path: string + integer (very common: "key" .. i)
+        if let Some(s1) = v1.as_str() {
+            if let Some(i2) = v2.as_integer_strict() {
+                let mut buf = [0u8; STACK_BUF_SIZE];
+                let s1_bytes = s1.as_bytes();
+                let mut itoa_buf = itoa::Buffer::new();
+                let num_str = itoa_buf.format(i2);
+                let total_len = s1_bytes.len() + num_str.len();
+                if total_len <= STACK_BUF_SIZE {
+                    buf[..s1_bytes.len()].copy_from_slice(s1_bytes);
+                    buf[s1_bytes.len()..total_len].copy_from_slice(num_str.as_bytes());
+                    let s = unsafe { std::str::from_utf8_unchecked(&buf[..total_len]) };
+                    return lua_state.create_string(s);
+                }
+                let mut result = String::with_capacity(total_len);
+                result.push_str(s1);
+                result.push_str(num_str);
+                return lua_state.create_string_owned(result);
+            }
+        }
+        // Fast path: integer + string
+        if let Some(i1) = v1.as_integer_strict() {
+            if let Some(s2) = v2.as_str() {
+                let mut buf = [0u8; STACK_BUF_SIZE];
+                let mut itoa_buf = itoa::Buffer::new();
+                let num_str = itoa_buf.format(i1);
+                let s2_bytes = s2.as_bytes();
+                let total_len = num_str.len() + s2_bytes.len();
+                if total_len <= STACK_BUF_SIZE {
+                    buf[..num_str.len()].copy_from_slice(num_str.as_bytes());
+                    buf[num_str.len()..total_len].copy_from_slice(s2_bytes);
+                    let s = unsafe { std::str::from_utf8_unchecked(&buf[..total_len]) };
+                    return lua_state.create_string(s);
+                }
+                let mut result = String::with_capacity(total_len);
+                result.push_str(num_str);
+                result.push_str(s2);
+                return lua_state.create_string_owned(result);
+            }
         }
     }
 
@@ -337,7 +378,7 @@ pub fn concat_strings(
     // All number/string formatting produces valid UTF-8, so this is safe
     // Only binary data could be non-UTF-8, and as_binary() returns bytes directly
     match String::from_utf8(result) {
-        Ok(s) => lua_state.create_string(&s),
+        Ok(s) => lua_state.create_string_owned(s),
         Err(e) => lua_state.create_binary(e.into_bytes()),
     }
 }

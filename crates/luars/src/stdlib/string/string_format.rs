@@ -11,52 +11,76 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'format' (string expected)".to_string()))?;
 
-    // Get format string directly without object_pool
-    let format = format_str_value
-        .as_str()
-        .ok_or_else(|| l.error("invalid format string".to_string()))?
-        .to_string();
+    // Get format string as raw bytes — avoid cloning.
+    // SAFETY: format string is Lua arg 1, held on the Lua stack, won't be GC'd
+    // during this function. GC only runs at `create_string_owned` at the very end.
+    let (fmt_bytes, fmt_len) = {
+        let format_str = format_str_value
+            .as_str()
+            .ok_or_else(|| l.error("invalid format string".to_string()))?;
+        let ptr = format_str.as_ptr();
+        let len = format_str.len();
+        (unsafe { std::slice::from_raw_parts(ptr, len) }, len)
+    };
 
     // Collect arguments
     let args = l.get_args();
     let mut arg_index = 1;
 
-    // Pre-allocate result (estimate: format length + 50% for expansions)
-    let mut result = String::with_capacity(format.len() + format.len() / 2);
-    let mut chars = format.chars().peekable();
+    let mut pos = 0;
 
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            result.push(ch);
-            continue;
+    // Pre-allocate result (estimate: format length + 50% for expansions)
+    let mut result = String::with_capacity(fmt_len + fmt_len / 2);
+
+    while pos < fmt_len {
+        // Find next '%' — copy non-format sections in bulk
+        let start = pos;
+        while pos < fmt_len && fmt_bytes[pos] != b'%' {
+            pos += 1;
+        }
+        if pos > start {
+            // SAFETY: format string is valid UTF-8, non-% ASCII segments are valid UTF-8
+            result.push_str(unsafe { std::str::from_utf8_unchecked(&fmt_bytes[start..pos]) });
+        }
+        if pos >= fmt_len {
+            break;
+        }
+
+        // Skip the '%'
+        pos += 1;
+        if pos >= fmt_len {
+            return Err(l.error("incomplete format".to_string()));
         }
 
         // Check for %%
-        if matches!(chars.peek(), Some(&'%')) {
-            chars.next();
+        if fmt_bytes[pos] == b'%' {
             result.push('%');
+            pos += 1;
             continue;
         }
 
-        // Parse flags (-, +, space, #, 0)
-        let mut flags = String::new();
-        while let Some(&c) = chars.peek() {
-            if matches!(c, '-' | '+' | ' ' | '#' | '0' | '1'..='9' | '.') {
-                flags.push(c);
-                chars.next();
-                // Check for format string too long (max 99 for width/precision)
-                if flags.len() > 200 {
+        // Parse flags (-, +, space, #, 0) and width/precision as a byte slice — no allocation
+        let flags_start = pos;
+        while pos < fmt_len {
+            let c = fmt_bytes[pos];
+            if matches!(c, b'-' | b'+' | b' ' | b'#' | b'0' | b'1'..=b'9' | b'.') {
+                pos += 1;
+                if pos - flags_start > 200 {
                     return Err(l.error("invalid format (too long)".to_string()));
                 }
             } else {
                 break;
             }
         }
+        // SAFETY: format string is valid UTF-8, flag chars are ASCII
+        let flags = unsafe { std::str::from_utf8_unchecked(&fmt_bytes[flags_start..pos]) };
 
         // Get format character
-        let fmt_char = chars
-            .next()
-            .ok_or_else(|| l.error("incomplete format".to_string()))?;
+        if pos >= fmt_len {
+            return Err(l.error("incomplete format".to_string()));
+        }
+        let fmt_char = fmt_bytes[pos] as char;
+        pos += 1;
 
         // Validate format specifier and flags combination
         validate_format(&flags, fmt_char, l)?;
@@ -109,8 +133,13 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
 
 // Validate format specifier and flags combination
 fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<()> {
+    // Fast path: no flags (most common case)
+    if flags.is_empty() {
+        return Ok(());
+    }
+
     // Check for modifiers on %q
-    if fmt_char == 'q' && !flags.is_empty() {
+    if fmt_char == 'q' {
         return Err(
             l.error("specifier '%q' cannot have modifiers (width, precision, flags)".to_string())
         );
@@ -273,6 +302,13 @@ fn format_char(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) 
 fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
 
+    // Fast path: no flags (most common case: %d or %i)
+    if flags.is_empty() {
+        let mut itoa_buf = itoa::Buffer::new();
+        buf.push_str(itoa_buf.format(num));
+        return Ok(());
+    }
+
     // Parse flags: look for -, +, 0, width, and precision
     let mut left_align = false;
     let mut zero_pad = false;
@@ -318,8 +354,9 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
         num as u64
     };
 
-    // Format the absolute number
-    let mut num_str = format!("{}", abs_num);
+    // Format the absolute number using itoa (no heap allocation)
+    let mut itoa_buf = itoa::Buffer::new();
+    let mut num_str = itoa_buf.format(abs_num).to_string();
 
     // Apply precision (minimum digits)
     if let Some(prec) = precision {

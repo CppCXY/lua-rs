@@ -62,19 +62,21 @@ impl StringInterner {
     #[inline]
     pub fn intern(&mut self, s: &str, gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
-        let hash = self.hash_string(s);
         let slen = s.len();
 
         // Long strings are not interned (like Lua 5.5)
+        // Use hash=0 (lazy hash — computed on demand when used as table key)
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
-            let lua_string = LuaString::new(s.to_string(), hash);
+            let lua_string = LuaString::new(s.to_string(), 0);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
             return Ok(LuaValue::longstring(ptr));
         }
+
+        let hash = self.hash_string(s);
 
         // Short strings: check if already interned
         if let Some(ptr) = self.find_interned(hash, s, slen) {
@@ -89,19 +91,20 @@ impl StringInterner {
     #[inline]
     pub fn intern_owned(&mut self, s: String, gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
-        let hash = self.hash_string(&s);
         let slen = s.len();
 
-        // Long strings are not interned
+        // Long strings are not interned — lazy hash (hash=0)
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
-            let lua_string = LuaString::new(s, hash); // Takes ownership, no clone
+            let lua_string = LuaString::new(s, 0); // Takes ownership, no clone, no hash
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
             gc.trace_object(gc_string)?;
             return Ok(LuaValue::longstring(ptr));
         }
+
+        let hash = self.hash_string(&s);
 
         // Short strings: check if already interned
         if let Some(ptr) = self.find_interned(hash, &s, slen) {

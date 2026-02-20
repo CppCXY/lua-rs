@@ -67,6 +67,7 @@ impl Vec2 {
 
     /// Internal helper — skipped from Lua, only callable from Rust
     #[lua(skip)]
+    #[allow(dead_code)]
     pub fn raw_components(&self) -> (f64, f64) {
         (self.x, self.y)
     }

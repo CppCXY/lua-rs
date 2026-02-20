@@ -982,9 +982,23 @@ impl LuaValue {
     pub fn hash_value(&self) -> u64 {
         let tt = self.tt();
 
-        // Fast path for strings: use precomputed hash
-        if tt == LUA_VSHRSTR || tt == LUA_VLNGSTR {
+        // Fast path for short strings: always have precomputed hash
+        if tt == LUA_VSHRSTR {
             return unsafe { (*(self.value.ptr as *const GcString)).data.hash };
+        }
+
+        // Long strings: lazy hash (computed on demand, cached for reuse)
+        if tt == LUA_VLNGSTR {
+            let gs = unsafe { &*(self.value.ptr as *const GcString) };
+            let hash = gs.data.hash;
+            if hash != 0 {
+                return hash;
+            }
+            // Compute hash lazily (like C Lua's luaS_hashlongstr)
+            let computed = compute_long_string_hash(gs.data.str.as_bytes());
+            // Cache the computed hash (safe: single-threaded, Box won't move)
+            unsafe { (*(self.value.ptr as *mut GcString)).data.hash = computed; }
+            return computed;
         }
 
         // For integers, use direct value
@@ -1018,7 +1032,15 @@ impl LuaValue {
     /// SAFETY: caller must guarantee self is a string (short or long).
     #[inline(always)]
     pub unsafe fn hash_string_unchecked(&self) -> u64 {
-        unsafe { (*(self.value.ptr as *const GcString)).data.hash }
+        let gs = unsafe { &*(self.value.ptr as *const GcString) };
+        let hash = gs.data.hash;
+        if hash != 0 {
+            return hash;
+        }
+        // Lazy hash for long string (short strings always have non-zero hash)
+        let computed = compute_long_string_hash(gs.data.str.as_bytes());
+        unsafe { (*(self.value.ptr as *mut GcString)).data.hash = computed; }
+        computed
     }
 }
 
@@ -1064,7 +1086,8 @@ impl PartialEq for LuaValue {
                 LUA_VLNGSTR => {
                     let s1 = unsafe { &*(self.value.ptr as *const GcString) };
                     let s2 = unsafe { &*(other.value.ptr as *const GcString) };
-                    s1.data.hash == s2.data.hash && s1.data.str == s2.data.str
+                    // Skip hash comparison for long strings (hash may be 0 = lazy)
+                    s1.data.str == s2.data.str
                 }
                 LUA_VBINARY => {
                     let b1 = unsafe { &*(self.value.ptr as *const GcBinary) };
@@ -1120,6 +1143,20 @@ impl PartialEq for LuaValue {
 // Lua tables can use floats as keys, so we implement Eq even though it's not strictly correct
 // This is fine because NaN values are rare as table keys in Lua
 impl Eq for LuaValue {}
+
+/// Compute hash for a long string lazily (like C Lua's luaS_hashlongstr).
+/// Uses a simple hash function that doesn't require external state.
+/// Returns a non-zero hash value (0 is reserved for "not yet computed").
+#[inline]
+fn compute_long_string_hash(bytes: &[u8]) -> u64 {
+    let l = bytes.len();
+    let mut h = l as u64 ^ 0x5bd1e995; // seed
+    for &b in bytes.iter() {
+        h = h ^ ((h << 5).wrapping_add(h >> 2).wrapping_add(b as u64));
+    }
+    // Ensure non-zero (0 means "not yet computed")
+    if h == 0 { 1 } else { h }
+}
 
 // ============ Type enum for pattern matching ============
 
@@ -1223,11 +1260,16 @@ impl std::hash::Hash for LuaValue {
 
         // Fast path for strings: use precomputed hash directly
         // This is the most common case for table lookups
-        // Both short strings (LUA_VSHRSTR = 0x44) and long strings (LUA_VLNGSTR = 0x54)
+        // Short strings (LUA_VSHRSTR = 0x44) always have hash set.
+        // Long strings (LUA_VLNGSTR = 0x54) use lazy hash (compute on demand).
         if tt == LUA_VSHRSTR || tt == LUA_VLNGSTR {
-            // For strings, just hash the precomputed hash value
-            // No need to hash tt since string vs binary is distinguished in eq()
-            let hash = unsafe { (*(self.value.ptr as *const GcString)).data.hash };
+            let gs = unsafe { &*(self.value.ptr as *const GcString) };
+            let mut hash = gs.data.hash;
+            if hash == 0 {
+                // Lazy hash for long strings — compute and cache
+                hash = compute_long_string_hash(gs.data.str.as_bytes());
+                unsafe { (*(self.value.ptr as *mut GcString)).data.hash = hash; }
+            }
             hash.hash(state);
             return;
         }
