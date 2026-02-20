@@ -369,15 +369,32 @@ impl Chunk {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LuaString {
     pub str: String,
     pub hash: u64,
+    /// Intrusive chain pointer for the string intern table (short strings only).
+    /// Forms a singly-linked list of strings sharing the same bucket.
+    /// Null for long strings (they are not interned).
+    pub next: crate::StringPtr,
+}
+
+impl std::fmt::Debug for LuaString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LuaString")
+            .field("str", &self.str)
+            .field("hash", &self.hash)
+            .finish()
+    }
 }
 
 impl LuaString {
     pub fn new(s: String, hash: u64) -> Self {
-        Self { str: s, hash }
+        Self {
+            str: s,
+            hash,
+            next: crate::StringPtr::null(),
+        }
     }
 
     pub fn as_str(&self) -> &str {

@@ -1,64 +1,52 @@
 use ahash::RandomState;
-use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 
 use crate::lua_value::LuaString;
 use crate::{CreateResult, GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
-/// Identity hasher — passes through pre-computed u64 hash values without re-hashing.
-/// Used because we already hash strings with ahash before HashMap lookup.
-struct IdentityHasher(u64);
-
-impl Hasher for IdentityHasher {
-    #[inline(always)]
-    fn write_u64(&mut self, v: u64) {
-        self.0 = v;
-    }
-    fn write(&mut self, _: &[u8]) {
-        unreachable!("IdentityHasher only accepts u64");
-    }
-    #[inline(always)]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Clone)]
-struct IdentityBuildHasher;
-
-impl BuildHasher for IdentityBuildHasher {
-    type Hasher = IdentityHasher;
-    #[inline(always)]
-    fn build_hasher(&self) -> IdentityHasher {
-        IdentityHasher(0)
-    }
-}
-
-/// Complete string interner - ALL strings are interned for maximum performance
-/// - Same content always returns same StringId
-/// - O(1) hash lookup for new strings (using ahash for speed)
-/// - GC can collect unused strings via mark-sweep
+/// Lua 5.5-style string table — flat bucket array with intrusive separate chaining.
 ///
+/// Each bucket is a `StringPtr` (head of a singly-linked list via `LuaString.next`).
+/// This mirrors C Lua's `stringtable` exactly:
+/// - Zero extra allocation per bucket (no `Vec`, no `HashMap` overhead)
+/// - Power-of-2 bucket count for fast modulo: `hash & (size - 1)`
+/// - Grows when `nuse >= size` (load factor ≥ 1.0)
+/// - Shrink support via `resize()` (called by GC when load < 0.25)
 pub struct StringInterner {
-    // Content hash -> StringIds mapping for deduplication
-    // Uses IdentityBuildHasher to avoid double-hashing (ahash is applied on content,
-    // then the u64 hash is used directly as HashMap key)
-    map: HashMap<u64, Vec<StringPtr>, IdentityBuildHasher>,
-
+    /// Bucket array — each entry is the head of a chain (null = empty bucket)
+    buckets: Vec<StringPtr>,
+    /// Number of interned strings
+    nuse: usize,
+    /// Hash builder (ahash for speed)
     hashbuilder: RandomState,
 }
 
 impl StringInterner {
     pub const SHORT_STRING_LIMIT: usize = 40;
+    /// Initial bucket count (power of 2, same as C Lua)
+    const INITIAL_SIZE: usize = 128;
 
     pub fn new() -> Self {
         Self {
-            map: HashMap::with_capacity_and_hasher(256, IdentityBuildHasher),
+            buckets: vec![StringPtr::null(); Self::INITIAL_SIZE],
+            nuse: 0,
             hashbuilder: RandomState::new(),
         }
     }
 
-    /// Intern a string - returns existing StringId if already interned, creates new otherwise
+    /// Number of buckets
+    #[inline(always)]
+    fn size(&self) -> usize {
+        self.buckets.len()
+    }
+
+    /// Bucket index for a given hash
+    #[inline(always)]
+    fn bucket_index(&self, hash: u64) -> usize {
+        (hash as usize) & (self.size() - 1)
+    }
+
+    /// Intern a string - returns existing StringPtr if already interned, creates new otherwise
     #[inline]
     pub fn intern(&mut self, s: &str, gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
@@ -78,12 +66,25 @@ impl StringInterner {
 
         let hash = self.hash_string(s);
 
-        // Short strings: check if already interned
-        if let Some(ptr) = self.find_interned(hash, s, slen) {
-            return Ok(LuaValue::shortstring(ptr));
+        // Search the chain for an existing match (like C Lua's internshrstr)
+        let idx = self.bucket_index(hash);
+        let mut ts = self.buckets[idx];
+        while !ts.is_null() {
+            let gc_str = ts.as_ref();
+            if gc_str.data.str.len() == slen && gc_str.data.str == s {
+                // Found! Resurrect if dead-but-not-yet-collected
+                if gc_str.header.is_white() {
+                    ts.as_mut_ref().header.make_black();
+                }
+                return Ok(LuaValue::shortstring(ts));
+            }
+            ts = gc_str.data.next;
         }
 
-        // Not found - create new short string
+        // Not found — grow table if load factor >= 1.0, then create
+        if self.nuse >= self.size() {
+            self.grow(gc);
+        }
         self.create_short_string(s.to_string(), hash, slen, current_white, gc)
     }
 
@@ -96,7 +97,7 @@ impl StringInterner {
         // Long strings are not interned — lazy hash (hash=0)
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
-            let lua_string = LuaString::new(s, 0); // Takes ownership, no clone, no hash
+            let lua_string = LuaString::new(s, 0);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
@@ -106,35 +107,30 @@ impl StringInterner {
 
         let hash = self.hash_string(&s);
 
-        // Short strings: check if already interned
-        if let Some(ptr) = self.find_interned(hash, &s, slen) {
-            return Ok(LuaValue::shortstring(ptr));
-            // `s` is dropped here — no waste since we found it in cache
+        // Search chain for existing match
+        let idx = self.bucket_index(hash);
+        let mut ts = self.buckets[idx];
+        while !ts.is_null() {
+            let gc_str = ts.as_ref();
+            if gc_str.data.str.len() == slen && gc_str.data.str == s {
+                // Found! Resurrect if needed. `s` dropped here — no waste.
+                if gc_str.header.is_white() {
+                    ts.as_mut_ref().header.make_black();
+                }
+                return Ok(LuaValue::shortstring(ts));
+            }
+            ts = gc_str.data.next;
         }
 
-        // Not found - create new short string, taking ownership of s
+        // Not found — grow if needed, then create
+        if self.nuse >= self.size() {
+            self.grow(gc);
+        }
         self.create_short_string(s, hash, slen, current_white, gc)
     }
 
-    /// Look up an interned short string by hash and content
-    #[inline]
-    fn find_interned(&mut self, hash: u64, s: &str, slen: usize) -> Option<StringPtr> {
-        if let Some(ptrs) = self.map.get(&hash) {
-            for &ptr in ptrs {
-                let gc_str = ptr.as_ref();
-                if gc_str.data.str.len() == slen && gc_str.data.str == s {
-                    // Found! Resurrect if needed
-                    if gc_str.header.is_white() {
-                        ptr.as_mut_ref().header.make_black();
-                    }
-                    return Some(ptr);
-                }
-            }
-        }
-        None
-    }
-
-    /// Create a new short string GC object and add to intern map
+    /// Create a new short string GC object and prepend to its bucket chain.
+    /// This is the C Lua equivalent of: `ts->u.hnext = *list; *list = ts;`
     #[inline]
     fn create_short_string(
         &mut self,
@@ -149,8 +145,14 @@ impl StringInterner {
         let gc_string =
             GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
+
+        // Prepend to chain (must be done BEFORE trace_object, since ptr is stable after Box)
+        let idx = self.bucket_index(hash);
+        ptr.as_mut_ref().data.next = self.buckets[idx];
+        self.buckets[idx] = ptr;
+        self.nuse += 1;
+
         gc.trace_object(gc_string)?;
-        self.map.entry(hash).or_insert_with(Vec::new).push(ptr);
         Ok(LuaValue::shortstring(ptr))
     }
 
@@ -162,17 +164,86 @@ impl StringInterner {
         hasher.finish()
     }
 
-    /// Remove dead strings (called by GC)
+    /// Remove a dead short string from the intern table.
+    /// Walks the chain to unlink the string (like C Lua's `luaS_remove`).
     pub fn remove_dead_intern(&mut self, ptr: StringPtr) {
         let gc_string = ptr.as_ref();
         let hash = gc_string.data.hash;
+        let idx = self.bucket_index(hash);
 
-        // Remove from map
-        if let Some(ids) = self.map.get_mut(&hash) {
-            ids.retain(|&i| i != ptr);
-            if ids.is_empty() {
-                self.map.remove(&hash);
+        // Walk chain to find and unlink
+        let mut prev_ptr: *mut StringPtr = &mut self.buckets[idx];
+        unsafe {
+            while !(*prev_ptr).is_null() {
+                if *prev_ptr == ptr {
+                    // Unlink: prev->next = current->next
+                    *prev_ptr = ptr.as_ref().data.next;
+                    self.nuse -= 1;
+                    return;
+                }
+                prev_ptr = &mut (*prev_ptr).as_mut_ref().data.next;
             }
         }
+    }
+
+    /// Double the bucket array size and rehash all entries.
+    /// Like C Lua's `growstrtab` / `luaS_resize`.
+    fn grow(&mut self, _gc: &mut GC) {
+        let new_size = self.size() * 2;
+        self.resize_to(new_size);
+    }
+
+    /// Resize the bucket array (can grow or shrink). Power-of-2 only.
+    /// Like C Lua's `luaS_resize` + `tablerehash`.
+    pub fn resize(&mut self, new_size: usize) {
+        // Clamp to power of 2
+        let new_size = new_size.next_power_of_two();
+        if new_size != self.size() {
+            self.resize_to(new_size);
+        }
+    }
+
+    fn resize_to(&mut self, new_size: usize) {
+        debug_assert!(new_size.is_power_of_two());
+        let old_size = self.size();
+
+        // Extend bucket array with nulls (for grow) or prepare new array
+        if new_size > old_size {
+            self.buckets.resize(new_size, StringPtr::null());
+        }
+
+        // Rehash: redistribute all entries to correct buckets in the new-size array.
+        // Walk every bucket in the old range, unlink each node, reinsert into new bucket.
+        let mask = new_size - 1;
+        for i in 0..old_size.min(new_size) {
+            let mut p = self.buckets[i];
+            self.buckets[i] = StringPtr::null();
+            while !p.is_null() {
+                let next = p.as_ref().data.next;
+                let new_idx = (p.as_ref().data.hash as usize) & mask;
+                p.as_mut_ref().data.next = self.buckets[new_idx];
+                self.buckets[new_idx] = p;
+                p = next;
+            }
+        }
+
+        // Shrink: truncate array after rehashing moved all entries into lower buckets
+        if new_size < old_size {
+            self.buckets.truncate(new_size);
+            self.buckets.shrink_to_fit();
+        }
+    }
+
+    /// Check if the string table should shrink (called by GC during sweep).
+    /// Like C Lua's `checkSizes`: shrink if `nuse < size / 4`.
+    pub fn check_shrink(&mut self) {
+        if self.nuse < self.size() / 4 && self.size() > Self::INITIAL_SIZE {
+            self.resize(self.size() / 2);
+        }
+    }
+
+    /// Get current intern table stats
+    pub fn stats(&self) -> (usize, usize) {
+        (self.nuse, self.size())
     }
 }

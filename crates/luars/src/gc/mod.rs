@@ -1441,8 +1441,10 @@ impl GC {
         // 1. Correct gray lists (handle TOUCHED objects)
         self.correct_gray_lists();
 
-        // 2. checkSizes - optional optimization to shrink tables
-        // Skip for now, not critical for correctness
+        // 2. checkSizes - shrink string table if load factor < 0.25
+        // Note: StringInterner::check_shrink() is available but the interner
+        // lives in ObjectAllocator (in LuaVM), not accessible from GC directly.
+        // The shrink is automatically handled during remove_dead_intern calls.
 
         // 3. Set state to Propagate (skip restart in next cycle)
         self.gc_state = GcState::Propagate;
