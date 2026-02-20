@@ -27,8 +27,27 @@ pub fn match_class(c: char, cl: char) -> bool {
 fn is_class_letter(cl: char) -> bool {
     matches!(
         cl,
-        'a' | 'c' | 'd' | 'g' | 'l' | 'p' | 's' | 'u' | 'w' | 'x' | 'z'
-            | 'A' | 'C' | 'D' | 'G' | 'L' | 'P' | 'S' | 'U' | 'W' | 'X' | 'Z'
+        'a' | 'c'
+            | 'd'
+            | 'g'
+            | 'l'
+            | 'p'
+            | 's'
+            | 'u'
+            | 'w'
+            | 'x'
+            | 'z'
+            | 'A'
+            | 'C'
+            | 'D'
+            | 'G'
+            | 'L'
+            | 'P'
+            | 'S'
+            | 'U'
+            | 'W'
+            | 'X'
+            | 'Z'
     )
 }
 
@@ -44,6 +63,7 @@ fn is_class_letter(cl: char) -> bool {
 ///
 /// `None` return means the character did NOT match.
 /// `Some(next_pp)` means it matched, and `next_pp` is the index past this element.
+#[inline]
 pub fn singlematch(c: char, pat: &[char], pp: usize) -> bool {
     match pat[pp] {
         '.' => true,
@@ -93,6 +113,7 @@ pub fn element_end(pat: &[char], pp: usize) -> usize {
 }
 
 /// Match character `c` against a `[set]` starting at `pat[pp]` (pp points to `[`).
+#[inline]
 fn matchset(c: char, pat: &[char], pp: usize) -> bool {
     let mut i = pp + 1; // skip '['
     let negated = i < pat.len() && pat[i] == '^';

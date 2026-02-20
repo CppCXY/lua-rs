@@ -14,4 +14,4 @@
 mod class;
 mod engine;
 
-pub use engine::{CaptureValue, MatchInfo, find, find_all_matches, gsub, match_pattern};
+pub use engine::{CaptureValue, find, find_all_matches, gsub};

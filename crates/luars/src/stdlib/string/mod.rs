@@ -561,7 +561,11 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
         (init - 1) as usize
     } else if init < 0 {
         let abs_init = (-init) as usize;
-        if abs_init > s_str.len() { 0 } else { s_str.len() - abs_init }
+        if abs_init > s_str.len() {
+            0
+        } else {
+            s_str.len() - abs_init
+        }
     } else {
         0
     };
@@ -791,7 +795,6 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
     let s_str = s_value
         .as_str()
         .ok_or_else(|| l.error("bad argument #1 to 'gmatch' (string expected)".to_string()))?;
-    let _s_len = s_str.len() as i64;
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
     let start_pos = if init > 0 {
         (init - 1) as usize
@@ -806,38 +809,115 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         0
     };
 
-    // Create state table: {string, pattern, position, last_was_nonempty}
-    let state_table = l.create_table(4, 0)?;
+    let pattern_str = pattern_value
+        .as_str()
+        .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
 
-    if let Some(state_ref) = state_table.as_table_mut() {
-        state_ref.raw_seti(1, s_value);
-        state_ref.raw_seti(2, pattern_value);
-        state_ref.raw_seti(3, LuaValue::integer(start_pos as i64)); // byte position
-        state_ref.raw_seti(4, LuaValue::boolean(false)); // last_was_nonempty
+    // Pre-compute all matches in one shot (avoids repeated Vec<char>/c2b allocation)
+    let s_str_owned = s_str.to_string();
+    let pattern_str_owned = pattern_str.to_string();
+
+    // Use find() in a loop to handle init offset and collect matches
+    let mut all_matches = Vec::new();
+    let mut pos = start_pos;
+    let mut last_was_nonempty = false;
+    loop {
+        match pattern::find(&s_str_owned, &pattern_str_owned, pos) {
+            Ok(Some((start, end, captures))) => {
+                let is_empty = end == start;
+                if is_empty && last_was_nonempty {
+                    let rest = &s_str_owned[pos..];
+                    if let Some(c) = rest.chars().next() {
+                        pos = pos + c.len_utf8();
+                    } else {
+                        break;
+                    }
+                    last_was_nonempty = false;
+                    continue;
+                }
+                all_matches.push((start, end, captures));
+                if end > start {
+                    pos = end;
+                    last_was_nonempty = true;
+                } else {
+                    let rest = &s_str_owned[end..];
+                    pos = end + rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    last_was_nonempty = false;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
+        }
     }
 
-    // GC write barrier: state table was modified directly with string values
+    // Store pre-computed results as a table of tables
+    let results_table = l.create_table(all_matches.len(), 0)?;
+    for (i, (start, end, captures)) in all_matches.iter().enumerate() {
+        let entry = l.create_table(captures.len().max(1), 0)?;
+        if let Some(entry_ref) = entry.as_table_mut() {
+            if captures.is_empty() {
+                let matched = l.create_string(&s_str_owned[*start..*end])?;
+                entry_ref.raw_seti(1, matched);
+            } else {
+                for (j, cap) in captures.iter().enumerate() {
+                    match cap {
+                        pattern::CaptureValue::String(s) => {
+                            let val = l.create_string(s)?;
+                            entry_ref.raw_seti((j + 1) as i64, val);
+                        }
+                        pattern::CaptureValue::Position(p) => {
+                            entry_ref.raw_seti((j + 1) as i64, LuaValue::integer(*p as i64));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(results_ref) = results_table.as_table_mut() {
+            results_ref.raw_seti((i + 1) as i64, entry.clone());
+        }
+        // GC barrier for entry
+        if let Some(gc_ptr) = entry.as_gc_ptr() {
+            l.gc_barrier_back(gc_ptr);
+        }
+    }
+
+    // GC barrier for results table
+    if let Some(gc_ptr) = results_table.as_gc_ptr() {
+        l.gc_barrier_back(gc_ptr);
+    }
+
+    // State: {results_table, current_index, total_count, num_captures_per_entry}
+    let num_caps_per_entry = if let Some((_, _, caps)) = all_matches.first() {
+        if caps.is_empty() { 1 } else { caps.len() }
+    } else {
+        1
+    };
+
+    let state_table = l.create_table(4, 0)?;
+    if let Some(state_ref) = state_table.as_table_mut() {
+        state_ref.raw_seti(1, results_table);
+        state_ref.raw_seti(2, LuaValue::integer(1)); // current index (1-based)
+        state_ref.raw_seti(3, LuaValue::integer(all_matches.len() as i64));
+        state_ref.raw_seti(4, LuaValue::integer(num_caps_per_entry as i64));
+    }
+
     if let Some(gc_ptr) = state_table.as_gc_ptr() {
         l.gc_barrier_back(gc_ptr);
     }
 
-    // Create a C closure with the state table as upvalue
     let vm = l.vm_mut();
     let closure = vm.create_c_closure(gmatch_iterator, vec![state_table])?;
     l.push_value(closure)?;
     Ok(1)
 }
 
-/// Iterator function for string.gmatch
-/// Called as: f() - state is stored in upvalue[0]
+/// Iterator function for string.gmatch — returns pre-computed results
 fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
-    // Get current function from call frame
     let func_val = l
         .current_frame()
         .map(|frame| frame.func.clone())
         .ok_or_else(|| l.error("gmatch iterator: no active call frame".to_string()))?;
 
-    // Get upvalue from function (must be a C closure)
     let state_table_value = if let Some(cclosure) = func_val.as_cclosure() {
         if cclosure.upvalues().is_empty() {
             return Err(l.error("gmatch iterator: no upvalues".to_string()));
@@ -851,94 +931,59 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("gmatch iterator: state is not a table".to_string()));
     };
 
-    // Extract string, pattern, position, and last_was_nonempty from state
-    let Some(s_val) = state_ref.raw_geti(1) else {
-        return Err(l.error("gmatch iterator: string not found in state".to_string()));
-    };
-    let s_str = s_val
-        .as_str()
-        .ok_or_else(|| l.error("gmatch iterator: string invalid".to_string()))?;
+    let current_idx = state_ref
+        .raw_geti(2)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(1) as i64;
 
-    let Some(pattern_val) = state_ref.raw_geti(2) else {
-        return Err(l.error("gmatch iterator: pattern not found in state".to_string()));
-    };
-    let pattern_str = pattern_val
-        .as_str()
-        .ok_or_else(|| l.error("gmatch iterator: pattern invalid".to_string()))?;
-
-    let position = state_ref
+    let total = state_ref
         .raw_geti(3)
         .and_then(|v| v.as_integer())
-        .unwrap_or(0) as usize;
+        .unwrap_or(0) as i64;
 
-    let last_was_nonempty = state_ref
+    let num_caps = state_ref
         .raw_geti(4)
-        .map(|v| v.is_truthy())
-        .unwrap_or(false);
+        .and_then(|v| v.as_integer())
+        .unwrap_or(1) as usize;
 
-    // Find next match, handling empty-match-after-nonempty skip
-    let mut pos = position;
-    let mut skip_empty = last_was_nonempty;
+    if current_idx > total {
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    }
 
-    loop {
-        match pattern::find(&s_str, &pattern_str, pos) {
-            Ok(Some((start, end, captures))) => {
-                let is_empty = end == start;
+    // Get results table
+    let Some(results_val) = state_ref.raw_geti(1) else {
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    };
 
-                // Skip empty match right after non-empty match (Lua 5.3.3+ semantics)
-                if is_empty && skip_empty {
-                    // Advance past current character
-                    let rest = &s_str[pos..];
-                    if let Some(c) = rest.chars().next() {
-                        pos = pos + c.len_utf8();
-                    } else {
-                        // Past end of string, done
-                        l.push_value(LuaValue::nil())?;
-                        return Ok(1);
-                    }
-                    skip_empty = false;
-                    continue;
-                }
+    let Some(results_ref) = results_val.as_table() else {
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    };
 
-                // Update position for next iteration
-                let next_pos = if end > start {
-                    end
-                } else {
-                    let rest = &s_str[end..];
-                    end + rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1)
-                };
-                l.raw_seti(&state_table_value, 3, LuaValue::integer(next_pos as i64));
-                l.raw_seti(&state_table_value, 4, LuaValue::boolean(!is_empty));
+    // Get entry at current index
+    let Some(entry_val) = results_ref.raw_geti(current_idx) else {
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    };
 
-                // Return captures if any, otherwise return the matched string
-                if captures.is_empty() {
-                    let matched = &s_str[start..end];
-                    let result = l.create_string(matched)?;
-                    l.push_value(result)?;
-                    return Ok(1);
-                } else {
-                    for cap in &captures {
-                        match cap {
-                            pattern::CaptureValue::String(s) => {
-                                let result = l.create_string(s)?;
-                                l.push_value(result)?;
-                            }
-                            pattern::CaptureValue::Position(p) => {
-                                l.push_value(LuaValue::integer(*p as i64))?;
-                            }
-                        }
-                    }
-                    return Ok(captures.len());
-                }
-            }
-            Ok(None) => {
-                // No more matches - return nil to end iteration
-                l.push_value(LuaValue::nil())?;
-                return Ok(1);
-            }
-            Err(e) => {
-                return Err(l.error(format!("invalid pattern: {}", e)));
-            }
+    let Some(entry_ref) = entry_val.as_table() else {
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    };
+
+    // Increment index for next call
+    l.raw_seti(&state_table_value, 2, LuaValue::integer(current_idx + 1));
+
+    // Push all captures from the entry
+    for j in 1..=num_caps {
+        if let Some(val) = entry_ref.raw_geti(j as i64) {
+            l.push_value(val)?;
+        } else {
+            l.push_value(LuaValue::nil())?;
         }
     }
+
+    Ok(num_caps)
 }

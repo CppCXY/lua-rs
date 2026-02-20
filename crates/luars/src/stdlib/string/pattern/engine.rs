@@ -14,7 +14,11 @@ pub const LUA_MAXCAPTURES: usize = 32;
 /// Validate a pattern for common syntax errors before matching.
 /// Returns Ok(()) if valid, Err(message) if malformed.
 fn validate_pattern(pat: &[char]) -> Result<(), String> {
-    let mut i = if !pat.is_empty() && pat[0] == '^' { 1 } else { 0 };
+    let mut i = if !pat.is_empty() && pat[0] == '^' {
+        1
+    } else {
+        0
+    };
     while i < pat.len() {
         match pat[i] {
             '%' => {
@@ -112,11 +116,11 @@ pub enum CaptureLen {
 
 /// Match state — all matching context on the stack
 pub struct MatchState<'a> {
-    pub text: &'a [char],     // source string as chars
-    pub pat: &'a [char],      // pattern as chars
+    pub text: &'a [char], // source string as chars
+    pub pat: &'a [char],  // pattern as chars
     pub captures: [Capture; LUA_MAXCAPTURES],
     pub num_captures: usize,
-    pub depth: usize,         // recursion counter
+    pub depth: usize, // recursion counter
     // byte offsets for each char (text_bytes[i] = byte offset of text[i], text_bytes[len] = total bytes)
     pub text_bytes: &'a [usize],
     pub error: Option<String>, // error message if matching fails with a hard error
@@ -139,9 +143,12 @@ impl<'a> MatchState<'a> {
         }
     }
 
-    /// Check if pattern has anchor `^` at the start
-    pub fn is_anchored(&self) -> bool {
-        !self.pat.is_empty() && self.pat[0] == '^'
+    /// Reset match state for reuse (avoids re-zeroing full capture array)
+    #[inline]
+    pub fn reset(&mut self) {
+        self.num_captures = 0;
+        self.depth = 0;
+        self.error = None;
     }
 }
 
@@ -244,8 +251,8 @@ fn match_inner(ms: &mut MatchState, mut si: usize, mut pp: usize) -> Option<usiz
 fn match_greedy(
     ms: &mut MatchState,
     si: usize,
-    pp: usize,   // pattern element start
-    rp: usize,   // rest of pattern (after repetition char)
+    pp: usize, // pattern element start
+    rp: usize, // rest of pattern (after repetition char)
     min: usize,
 ) -> Option<usize> {
     // Count maximum matches
@@ -267,12 +274,7 @@ fn match_greedy(
 }
 
 /// Lazy repetition (-)
-fn match_lazy(
-    ms: &mut MatchState,
-    si: usize,
-    pp: usize,
-    rp: usize,
-) -> Option<usize> {
+fn match_lazy(ms: &mut MatchState, si: usize, pp: usize, rp: usize) -> Option<usize> {
     let mut i = si;
     loop {
         if let Some(end) = match_impl(ms, i, rp) {
@@ -287,12 +289,7 @@ fn match_lazy(
 }
 
 /// Optional repetition (?)
-fn match_optional(
-    ms: &mut MatchState,
-    si: usize,
-    pp: usize,
-    rp: usize,
-) -> Option<usize> {
+fn match_optional(ms: &mut MatchState, si: usize, pp: usize, rp: usize) -> Option<usize> {
     if si < ms.text.len() && singlematch(ms.text[si], ms.pat, pp) {
         if let Some(end) = match_impl(ms, si + 1, rp) {
             return Some(end);
@@ -403,7 +400,11 @@ fn match_frontier(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
     let set_end = element_end(ms.pat, set_start); // past ']'
 
     let prev_char = if si > 0 { ms.text[si - 1] } else { '\0' };
-    let curr_char = if si < ms.text.len() { ms.text[si] } else { '\0' };
+    let curr_char = if si < ms.text.len() {
+        ms.text[si]
+    } else {
+        '\0'
+    };
 
     let prev_matches = singlematch(prev_char, ms.pat, set_start);
     let curr_matches = singlematch(curr_char, ms.pat, set_start);
@@ -460,23 +461,44 @@ pub enum CaptureValue {
 /// Information about a single match
 #[derive(Debug, Clone)]
 pub struct MatchInfo {
-    pub start: usize,                // byte offset
-    pub end: usize,                  // byte offset
+    pub start: usize, // byte offset
+    pub end: usize,   // byte offset
     pub captures: Vec<CaptureValue>,
 }
 
 /// Build char-to-byte offset map. Returns vec of len `chars.len() + 1`.
 fn char_to_byte_map(text: &str) -> Vec<usize> {
-    text.char_indices()
-        .map(|(i, _)| i)
-        .chain(std::iter::once(text.len()))
-        .collect()
+    if text.is_ascii() {
+        // ASCII fast path: byte offset == char index
+        (0..=text.len()).collect()
+    } else {
+        text.char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect()
+    }
+}
+
+/// Convert text to Vec<char>, with ASCII fast path.
+#[inline]
+fn text_to_chars(text: &str) -> Vec<char> {
+    if text.is_ascii() {
+        // ASCII fast path: skip UTF-8 decoding
+        text.as_bytes().iter().map(|&b| b as char).collect()
+    } else {
+        text.chars().collect()
+    }
 }
 
 /// Convert byte offset to char index
+#[inline]
 fn byte_to_char_index(text: &str, byte_pos: usize) -> usize {
-    let clamped = byte_pos.min(text.len());
-    text[..clamped].chars().count()
+    if text.is_ascii() {
+        byte_pos.min(text.len())
+    } else {
+        let clamped = byte_pos.min(text.len());
+        text[..clamped].chars().count()
+    }
 }
 
 /// Check that all captures in a successful match are finished
@@ -490,7 +512,7 @@ fn check_captures(ms: &MatchState) -> Result<(), String> {
 }
 
 /// Extract captures from MatchState into CaptureValue vec
-fn extract_captures(ms: &MatchState, match_start: usize, match_end: usize) -> Vec<CaptureValue> {
+fn extract_captures(ms: &MatchState) -> Vec<CaptureValue> {
     let mut caps = Vec::new();
     for i in 0..ms.num_captures {
         let cap = &ms.captures[i];
@@ -522,21 +544,26 @@ pub fn find(
         return Ok(None);
     }
 
-    let text_chars: Vec<char> = text.chars().collect();
-    let pat_chars: Vec<char> = pat_str.chars().collect();
+    let text_chars = text_to_chars(text);
+    let pat_chars = text_to_chars(pat_str);
     validate_pattern(&pat_chars)?;
     let c2b = char_to_byte_map(text);
     let init_ci = byte_to_char_index(text, init);
 
-    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' { 1 } else { 0 };
+    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
+        1
+    } else {
+        0
+    };
     let anchored = pp_start == 1;
 
+    let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
     let mut si = init_ci;
     loop {
-        let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
+        ms.reset();
         if let Some(end_ci) = match_impl(&mut ms, si, pp_start) {
             check_captures(&ms)?;
-            let caps = extract_captures(&ms, si, end_ci);
+            let caps = extract_captures(&ms);
             return Ok(Some((c2b[si], c2b[end_ci], caps)));
         }
         if let Some(err) = ms.error {
@@ -549,29 +576,26 @@ pub fn find(
     }
 }
 
-/// Match pattern against text from the start (like `string.match`).
-pub fn match_pattern(
-    text: &str,
-    pat_str: &str,
-) -> Result<Option<(usize, usize, Vec<CaptureValue>)>, String> {
-    find(text, pat_str, 0)
-}
-
 /// Find all matches of pattern in text (for gmatch/gsub).
 pub fn find_all_matches(
     text: &str,
     pat_str: &str,
     max: Option<usize>,
 ) -> Result<Vec<MatchInfo>, String> {
-    let text_chars: Vec<char> = text.chars().collect();
-    let pat_chars: Vec<char> = pat_str.chars().collect();
+    let text_chars = text_to_chars(text);
+    let pat_chars = text_to_chars(pat_str);
     validate_pattern(&pat_chars)?;
     let c2b = char_to_byte_map(text);
 
-    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' { 1 } else { 0 };
+    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
+        1
+    } else {
+        0
+    };
     let anchored = pp_start == 1;
 
     let mut matches = Vec::new();
+    let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
     let mut si = 0usize;
     let mut last_was_nonempty = false;
 
@@ -582,7 +606,7 @@ pub fn find_all_matches(
             }
         }
 
-        let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
+        ms.reset();
         if let Some(end_ci) = match_impl(&mut ms, si, pp_start) {
             check_captures(&ms)?;
             let is_empty = end_ci == si;
@@ -596,7 +620,7 @@ pub fn find_all_matches(
                 continue;
             }
 
-            let caps = extract_captures(&ms, si, end_ci);
+            let caps = extract_captures(&ms);
             matches.push(MatchInfo {
                 start: c2b[si],
                 end: c2b[end_ci],
@@ -636,17 +660,22 @@ pub fn gsub(
     replacement: &str,
     max: Option<usize>,
 ) -> Result<(String, usize), String> {
-    let text_chars: Vec<char> = text.chars().collect();
-    let pat_chars: Vec<char> = pat_str.chars().collect();
+    let text_chars = text_to_chars(text);
+    let pat_chars = text_to_chars(pat_str);
     validate_pattern(&pat_chars)?;
     let c2b = char_to_byte_map(text);
 
-    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' { 1 } else { 0 };
+    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
+        1
+    } else {
+        0
+    };
     let anchored = pp_start == 1;
     let needs_substitution = replacement.contains('%');
 
     let mut result = String::new();
     let mut count = 0usize;
+    let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
     let mut si = 0usize;
     let mut last_was_nonempty = false;
     // Track last byte position for copying unmatched text
@@ -659,7 +688,7 @@ pub fn gsub(
             }
         }
 
-        let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
+        ms.reset();
         if let Some(end_ci) = match_impl(&mut ms, si, pp_start) {
             check_captures(&ms)?;
             let is_empty = end_ci == si;
@@ -750,9 +779,7 @@ fn substitute_captures(
                                 result.push_str(&s);
                             }
                             CaptureLen::Position => {
-                                result.push_str(
-                                    &(ms.text_bytes[cap.start] + 1).to_string(),
-                                );
+                                result.push_str(&(ms.text_bytes[cap.start] + 1).to_string());
                             }
                             CaptureLen::Unfinished => {}
                         }

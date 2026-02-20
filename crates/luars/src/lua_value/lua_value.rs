@@ -997,7 +997,9 @@ impl LuaValue {
             // Compute hash lazily (like C Lua's luaS_hashlongstr)
             let computed = compute_long_string_hash(gs.data.str.as_bytes());
             // Cache the computed hash (safe: single-threaded, Box won't move)
-            unsafe { (*(self.value.ptr as *mut GcString)).data.hash = computed; }
+            unsafe {
+                (*(self.value.ptr as *mut GcString)).data.hash = computed;
+            }
             return computed;
         }
 
@@ -1039,7 +1041,9 @@ impl LuaValue {
         }
         // Lazy hash for long string (short strings always have non-zero hash)
         let computed = compute_long_string_hash(gs.data.str.as_bytes());
-        unsafe { (*(self.value.ptr as *mut GcString)).data.hash = computed; }
+        unsafe {
+            (*(self.value.ptr as *mut GcString)).data.hash = computed;
+        }
         computed
     }
 }
@@ -1268,7 +1272,9 @@ impl std::hash::Hash for LuaValue {
             if hash == 0 {
                 // Lazy hash for long strings — compute and cache
                 hash = compute_long_string_hash(gs.data.str.as_bytes());
-                unsafe { (*(self.value.ptr as *mut GcString)).data.hash = hash; }
+                unsafe {
+                    (*(self.value.ptr as *mut GcString)).data.hash = hash;
+                }
             }
             hash.hash(state);
             return;
