@@ -428,3 +428,15 @@ pub trait LuaStaticMethodProvider {
 }
 
 impl<T> LuaStaticMethodProvider for T {}
+
+/// Trait for types that can be registered with Lua via `register_type_of::<T>`.
+///
+/// This trait is explicitly implemented by `#[lua_methods]` (no blanket impl),
+/// so `T::lua_static_methods()` dispatches to the actual generated methods.
+///
+/// Unlike `LuaStaticMethodProvider` (which has a blanket impl that always
+/// returns `&[]`), this trait guarantees that the type has real method info.
+pub trait LuaRegistrable {
+    /// Return all static (associated) methods for type registration.
+    fn lua_static_methods() -> &'static [(&'static str, CFunction)];
+}

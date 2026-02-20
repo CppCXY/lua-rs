@@ -75,7 +75,7 @@ impl Vec2 {
 
 ```rust
 let state = vm.main_state();
-state.register_type("Vec2", Vec2::__lua_static_methods())?;
+state.register_type_of::<Vec2>("Vec2")?;
 ```
 
 ### Lua Usage
@@ -154,7 +154,7 @@ impl AppConfig {
 ### Registration and Usage
 
 ```rust
-state.register_type("AppConfig", AppConfig::__lua_static_methods())?;
+state.register_type_of::<AppConfig>("AppConfig")?;
 ```
 
 ```lua
@@ -305,8 +305,8 @@ impl Color {
 ### Registration and Usage
 
 ```rust
-state.register_type("Vec2", Vec2::__lua_static_methods())?;
-state.register_type("Color", Color::__lua_static_methods())?;
+state.register_type_of::<Vec2>("Vec2")?;
+state.register_type_of::<Color>("Color")?;
 ```
 
 ```lua

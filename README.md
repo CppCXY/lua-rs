@@ -113,7 +113,7 @@ impl Point {
 }
 
 // Register and use from Lua:
-state.register_type("Point", Point::__lua_static_methods())?;
+state.register_type_of::<Point>("Point")?;
 ```
 
 ```lua
@@ -121,7 +121,7 @@ local p = Point.new(3, 4)
 print(p.x, p:distance())   -- 3.0  5.0
 ```
 
-**Full documentation:** [docs/UserGuide.md](docs/UserGuide.md)
+**Full documentation:** [docs/Guide.md](docs/Guide.md) — covers VM creation, executing code, values, Rust functions, UserData, error handling, and API reference.
 
 ## Building
 
@@ -202,8 +202,10 @@ lua_rt/
 ├── benchmarks/              — Performance benchmarks (16 files)
 ├── bytecode_comparison_output/ — Compiler correctness: our vs official bytecode
 ├── docs/
+│   ├── Guide.md             — Comprehensive usage guide (start here)
+│   │   └── guide/           — Guide sub-docs (7 files)
 │   ├── Different.md         — Full behavioral differences documentation
-│   └── UserGuide.md         — UserData API guide (Chinese)
+│   └── UserGuide.md         — UserData API guide
 │       └── userdata/        — Detailed sub-docs (6 files)
 └── libs/                    — Test helper modules
 ```

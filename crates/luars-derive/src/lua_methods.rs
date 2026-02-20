@@ -55,7 +55,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, ItemImpl, Pat, ReturnType, parse_macro_input};
 
-use crate::type_utils::{lua_arg_to_rust, normalize_type, rust_return_to_lua};
+use crate::type_utils::normalize_type;
 
 /// Kind of method discovered in the impl block.
 enum MethodKind {
@@ -105,6 +105,32 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
                 continue;
             }
 
+            // Parse #[lua(...)] attributes on this method
+            let mut skip = false;
+            let mut lua_name_override: Option<String> = None;
+            for attr in &method.attrs {
+                if attr.path().is_ident("lua") {
+                    if let Ok(list) = attr.meta.require_list() {
+                        let _ = list.parse_nested_meta(|meta| {
+                            if meta.path.is_ident("skip") {
+                                skip = true;
+                            } else if meta.path.is_ident("name") {
+                                if let Ok(value) = meta.value() {
+                                    if let Ok(lit) = value.parse::<syn::LitStr>() {
+                                        lua_name_override = Some(lit.value());
+                                    }
+                                }
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+            }
+
+            if skip {
+                continue;
+            }
+
             // Determine method kind
             let kind = match sig.inputs.first() {
                 Some(FnArg::Receiver(r)) => {
@@ -141,7 +167,7 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
             };
 
             let rust_name = sig.ident.clone();
-            let lua_name = rust_name.to_string();
+            let lua_name = lua_name_override.unwrap_or_else(|| rust_name.to_string());
 
             methods.push(MethodInfo {
                 rust_name,
@@ -162,6 +188,14 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
         .iter()
         .filter(|m| matches!(m.kind, MethodKind::Static))
         .collect();
+
+    // Create a cleaned copy of the impl block with #[lua(...)] attributes stripped
+    let mut cleaned_impl = item_impl.clone();
+    for item in &mut cleaned_impl.items {
+        if let syn::ImplItem::Fn(method) = item {
+            method.attrs.retain(|attr| !attr.path().is_ident("lua"));
+        }
+    }
 
     // Generate wrapper functions for instance methods
     let instance_wrapper_fns: Vec<proc_macro2::TokenStream> = instance_methods
@@ -196,8 +230,8 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
         .collect();
 
     let expanded = quote! {
-        // Re-emit the original impl block unchanged
-        #item_impl
+        // Re-emit the original impl block with #[lua(...)] attributes stripped
+        #cleaned_impl
 
         // Additional impl block with lookup + static method registration
         impl #self_ty {
@@ -227,6 +261,15 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
                 &[#(#static_entries)*]
             }
         }
+
+        // Explicit trait impl for LuaRegistrable — enables register_type_of::<T>.
+        // Unlike the blanket LuaStaticMethodProvider, this dispatches to the
+        // actual generated methods rather than returning &[].
+        impl luars::LuaRegistrable for #self_ty {
+            fn lua_static_methods() -> &'static [(&'static str, luars::lua_vm::CFunction)] {
+                #self_ty::__lua_static_methods()
+            }
+        }
     };
 
     expanded.into()
@@ -245,8 +288,7 @@ fn gen_instance_wrapper_fn(self_ty: &syn::Type, method: &MethodInfo) -> proc_mac
         .map(|(i, (name, ty))| {
             let arg_index = i + 2;
             let param_name_str = name.to_string();
-            let extract = lua_arg_to_rust(ty, arg_index, &param_name_str);
-            quote! { let #name = #extract; }
+            gen_from_lua_extraction(name, ty, arg_index, &param_name_str)
         })
         .collect();
 
@@ -278,8 +320,7 @@ fn gen_static_wrapper_fn(self_ty: &syn::Type, method: &MethodInfo) -> proc_macro
         .map(|(i, (name, ty))| {
             let arg_index = i + 1; // 1-based, no self to skip
             let param_name_str = name.to_string();
-            let extract = lua_arg_to_rust(ty, arg_index, &param_name_str);
-            quote! { let #name = #extract; }
+            gen_from_lua_extraction(name, ty, arg_index, &param_name_str)
         })
         .collect();
 
@@ -295,6 +336,78 @@ fn gen_static_wrapper_fn(self_ty: &syn::Type, method: &MethodInfo) -> proc_macro
     }
 }
 
+// ==================== Trait-based codegen helpers ====================
+
+/// Generate code to extract a parameter from a Lua argument using `FromLua`.
+///
+/// For `&str` parameters, generates `String` extraction then borrows.
+/// For all other types, generates a direct `FromLua::from_lua()` call.
+fn gen_from_lua_extraction(
+    name: &syn::Ident,
+    ty: &syn::Type,
+    arg_index: usize,
+    param_name: &str,
+) -> proc_macro2::TokenStream {
+    let type_str = normalize_type(ty);
+
+    if type_str == "&str" {
+        // &str cannot implement FromLua (not Sized + lifetime).
+        // Extract as String, then the call site uses &name.
+        let storage_name = format_ident!("__{}_storage", name);
+        quote! {
+            let #storage_name: String = {
+                let __v = __l.get_arg(#arg_index).unwrap_or(luars::LuaValue::nil());
+                <String as luars::FromLua>::from_lua(__v, __l)
+                    .map_err(|e| __l.error(format!("bad argument #{} '{}': {}", #arg_index, #param_name, e)))?
+            };
+            let #name: &str = &#storage_name;
+        }
+    } else {
+        quote! {
+            let #name: #ty = {
+                let __v = __l.get_arg(#arg_index).unwrap_or(luars::LuaValue::nil());
+                <#ty as luars::FromLua>::from_lua(__v, __l)
+                    .map_err(|e| __l.error(format!("bad argument #{} '{}': {}", #arg_index, #param_name, e)))?
+            };
+        }
+    }
+}
+
+/// Generate code to push a return value onto the Lua stack using `IntoLua`.
+///
+/// Special cases:
+/// - `Self` → wrap in `LuaUserdata::new()` and push as userdata
+/// - All other types → `IntoLua::into_lua(result, state)`
+fn gen_return_push(
+    _self_ty: &syn::Type,
+    return_type: &Option<syn::Type>,
+) -> proc_macro2::TokenStream {
+    match return_type {
+        None => {
+            // Unit return → 0 values
+            quote! { Ok(0) }
+        }
+        Some(ret_ty) => {
+            let type_str = normalize_type(ret_ty);
+            if type_str == "Self" {
+                // Self → wrap in LuaUserdata and push
+                quote! {
+                    let __ud = luars::LuaUserdata::new(__result);
+                    let __ud_val = __l.create_userdata(__ud)?;
+                    __l.push_value(__ud_val)?;
+                    Ok(1)
+                }
+            } else {
+                // Use IntoLua trait — handles Result<T,E>, Option<T>, primitives, String, etc.
+                quote! {
+                    luars::IntoLua::into_lua(__result, __l)
+                        .map_err(|e| __l.error(e))
+                }
+            }
+        }
+    }
+}
+
 /// Generate code for calling a static/associated function.
 fn gen_static_call(
     self_ty: &syn::Type,
@@ -302,40 +415,21 @@ fn gen_static_call(
     param_names: &[&syn::Ident],
     return_type: &Option<syn::Type>,
 ) -> proc_macro2::TokenStream {
+    let push = gen_return_push(self_ty, return_type);
     match return_type {
         None => {
-            // Unit return
             quote! {
                 #self_ty::#method_name(#(#param_names),*);
-                Ok(0)
+                #push
             }
         }
-        Some(ret_ty) => {
-            let type_str = normalize_type(ret_ty);
-            if is_self_return(&type_str) {
-                // Returns Self → wrap in LuaUserdata and push as userdata
-                quote! {
-                    let __result = #self_ty::#method_name(#(#param_names),*);
-                    let __ud = luars::LuaUserdata::new(__result);
-                    let __ud_val = __l.create_userdata(__ud)?;
-                    __l.push_value(__ud_val)?;
-                    Ok(1)
-                }
-            } else {
-                // Normal return type (number, string, etc.)
-                let push_result = rust_return_to_lua(ret_ty);
-                quote! {
-                    let __result = #self_ty::#method_name(#(#param_names),*);
-                    #push_result
-                }
+        Some(_) => {
+            quote! {
+                let __result = #self_ty::#method_name(#(#param_names),*);
+                #push
             }
         }
     }
-}
-
-/// Check if a normalized type string represents `Self`.
-fn is_self_return(type_str: &str) -> bool {
-    type_str == "Self"
 }
 
 /// Generate code for calling a `&self` method.
@@ -347,6 +441,7 @@ fn gen_ref_call(
 ) -> proc_macro2::TokenStream {
     let type_name = quote!(#self_ty).to_string();
     let method_name_str = method_name.to_string();
+    let push = gen_return_push(self_ty, return_type);
 
     match return_type {
         None => {
@@ -356,21 +451,20 @@ fn gen_ref_call(
                 if let Some(__ud) = __self_val.as_userdata_mut() {
                     if let Some(__this) = __ud.downcast_ref::<#self_ty>() {
                         __this.#method_name(#(#param_names),*);
-                        return Ok(0);
+                        return #push;
                     }
                 }
                 Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
             }
         }
-        Some(ret_ty) => {
-            let push_result = rust_return_to_lua(ret_ty);
+        Some(_) => {
             quote! {
                 let __self_val = __l.get_arg(1)
                     .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
                 if let Some(__ud) = __self_val.as_userdata_mut() {
                     if let Some(__this) = __ud.downcast_ref::<#self_ty>() {
                         let __result = __this.#method_name(#(#param_names),*);
-                        return { #push_result };
+                        return { #push };
                     }
                 }
                 Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
@@ -388,6 +482,7 @@ fn gen_mut_call(
 ) -> proc_macro2::TokenStream {
     let type_name = quote!(#self_ty).to_string();
     let method_name_str = method_name.to_string();
+    let push = gen_return_push(self_ty, return_type);
 
     match return_type {
         None => {
@@ -397,21 +492,20 @@ fn gen_mut_call(
                 if let Some(__ud) = __self_val.as_userdata_mut() {
                     if let Some(__this) = __ud.downcast_mut::<#self_ty>() {
                         __this.#method_name(#(#param_names),*);
-                        return Ok(0);
+                        return #push;
                     }
                 }
                 Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))
             }
         }
-        Some(ret_ty) => {
-            let push_result = rust_return_to_lua(ret_ty);
+        Some(_) => {
             quote! {
                 let __self_val = __l.get_arg(1)
                     .ok_or_else(|| __l.error(format!("{}:{} — missing self argument", #type_name, #method_name_str)))?;
                 if let Some(__ud) = __self_val.as_userdata_mut() {
                     if let Some(__this) = __ud.downcast_mut::<#self_ty>() {
                         let __result = __this.#method_name(#(#param_names),*);
-                        return { #push_result };
+                        return { #push };
                     }
                 }
                 Err(__l.error(format!("{}:{} — invalid self", #type_name, #method_name_str)))

@@ -91,6 +91,35 @@ The Lua side receives a full userdata object with field access, method calls, an
 
 **Only `pub` functions are processed.** Private methods are never exposed to Lua.
 
+## Skipping Methods (`#[lua(skip)]`)
+
+Use `#[lua(skip)]` to exclude a `pub` method from Lua exposure:
+
+```rust
+#[lua_methods]
+impl Vec2 {
+    pub fn length(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+
+    /// Internal helper — pub for Rust callers, but hidden from Lua
+    #[lua(skip)]
+    pub fn raw_components(&self) -> (f64, f64) {
+        (self.x, self.y)
+    }
+}
+```
+
+In Lua, `raw_components` will not be found:
+
+```lua
+local v = Vec2.new(3, 4)
+print(v:length())           -- 5.0
+print(v:raw_components())   -- error: method not found
+```
+
+This is useful when a method must be `pub` for Rust but should not be part of the Lua API.
+
 ## Supported Parameter Types
 
 ```rust

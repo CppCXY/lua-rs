@@ -2,6 +2,8 @@
 
 This guide explains how to define custom Rust types and expose them to Lua scripts.
 
+> **Looking for the full usage guide?** See [Guide.md](Guide.md) for documentation covering the entire API — from VM creation to executing code, working with values, Rust functions, and more.
+
 luars provides a declarative, derive-macro-based API that lets you map a Rust struct to Lua with just a few annotations — including field access, method calls, constructors, operator overloading, and more.
 
 ## Contents
@@ -9,10 +11,10 @@ luars provides a declarative, derive-macro-based API that lets you map a Rust st
 | Document | Description |
 |----------|-------------|
 | [Getting Started](userdata/GettingStarted.md) | 5-minute quickstart: define a Point, create and use it in Lua |
-| [#[derive(LuaUserData)]](userdata/DeriveUserData.md) | Field exposure and attributes (skip / readonly / name) |
-| [#[lua_methods]](userdata/LuaMethods.md) | Instance methods, constructors (associated functions), Self returns |
-| [register_type](userdata/RegisterType.md) | Type registration: creating class tables and constructors in Lua |
-| [Type Conversions](userdata/TypeConversions.md) | Parameter types, return types, Option / Result handling |
+| [#\[derive(LuaUserData)\]](userdata/DeriveUserData.md) | Field exposure and attributes (`skip` / `readonly` / `name`) |
+| [#\[lua_methods\]](userdata/LuaMethods.md) | Instance methods, constructors, `#[lua(skip)]` on methods |
+| [register_type](userdata/RegisterType.md) | Type registration: `register_type` and `register_type_of` |
+| [Type Conversions](userdata/TypeConversions.md) | Parameter types, return types, `Option` / `Result` handling, `FromLua` / `IntoLua` |
 | [Complete Examples](userdata/Examples.md) | End-to-end examples: Vec2, AppConfig, Calculator, and more |
 
 ## Overall Workflow
@@ -31,8 +33,7 @@ luars provides a declarative, derive-macro-based API that lets you map a Rust st
 │     }                                                    │
 ├─────────────────────────────────────────────────────────┤
 │  3. Register with the Lua VM                             │
-│     state.register_type("Point",                         │
-│         Point::__lua_static_methods())?;                 │
+│     state.register_type_of::<Point>("Point")?;           │
 ├─────────────────────────────────────────────────────────┤
 │  4. Use in Lua                                           │
 │     local p = Point.new(3, 4)                            │
@@ -49,7 +50,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-luars = "0.3"
+luars = "0.4"
 ```
 
 The `#[derive(LuaUserData)]` and `#[lua_methods]` macros are re-exported by `luars` automatically — no need to add `luars-derive` separately.

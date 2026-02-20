@@ -58,10 +58,10 @@ fn main() {
 
     // Register the Point type — creates a "Point" table in Lua globals
     let state = vm.main_state();
-    state.register_type("Point", Point::__lua_static_methods()).unwrap();
+    state.register_type_of::<Point>("Point").unwrap();
 
     // Execute Lua code
-    let results = vm.execute_string(r#"
+    let results = state.execute_string(r#"
         local p = Point.new(3, 4)
         print(p.x, p.y)         -- 3.0  4.0
         print(p:distance())     -- 5.0
@@ -99,7 +99,7 @@ Rust got back: Some(13.0)
 | `pub fn new(...) -> Self` | No `self` parameter → associated function → registered as a static method |
 | `pub fn distance(&self)` | `&self` → instance method → called via `p:distance()` |
 | `pub fn translate(&mut self, ...)` | `&mut self` → mutable instance method |
-| `register_type("Point", ...)` | Creates a Lua global table `Point` populated with static methods (e.g. `new`) |
+| `register_type_of::<Point>("Point")` | Creates a Lua global table `Point` populated with static methods (e.g. `new`) |
 
 ## Next
 

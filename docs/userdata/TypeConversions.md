@@ -2,6 +2,8 @@
 
 This document lists all supported Rust ↔ Lua type mappings for `#[lua_methods]` and `#[derive(LuaUserData)]`.
 
+> **See also:** [FromLua / IntoLua](../guide/05-FromLuaIntoLua.md) — the underlying conversion traits used by `#[lua_methods]`. You can implement these traits for your own types.
+
 ## Parameter Types (Lua → Rust)
 
 Method parameters are extracted from the Lua stack and converted to Rust types.

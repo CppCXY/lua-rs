@@ -12,6 +12,9 @@ A Lua 5.5 runtime implementation in Rust, providing both interpreter and embeddi
 - **Embeddable**: Designed to be embedded in Rust applications
 - **Standard Libraries**: Comprehensive coverage of Lua standard libraries
 - **UTF-8 Strings**: All Lua strings are valid UTF-8 (non-standard but safer)
+- **UserData API**: Derive macros to expose Rust structs to Lua with fields, methods, and constructors
+- **Rust Closures**: Register Rust closures (with captured state) as Lua functions via `RClosure`
+- **FromLua / IntoLua**: Automatic type conversion traits for seamless Rust ↔ Lua interop
 - **Optional Serde**: JSON serialization support for Lua values (feature-gated)
 
 ## Current Status
@@ -49,11 +52,11 @@ luars = { version = "0.4", features = ["serde"] }
 ### Basic Example
 
 ```rust
-use luars::lua_vm::LuaVM;
+use luars::lua_vm::{LuaVM, SafeOption};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    vm.open_stdlib(luars::Stdlib::All).unwrap();
     let result = vm.execute_string(r#"
         function greet(name)
             return "Hello, " .. name .. "!"
@@ -64,6 +67,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     Ok(())
 }
+```
+
+### UserData Example
+
+```rust
+use luars::{LuaUserData, lua_methods};
+
+#[derive(LuaUserData)]
+#[lua_impl(Display)]
+struct Point { pub x: f64, pub y: f64 }
+
+#[lua_methods]
+impl Point {
+    pub fn new(x: f64, y: f64) -> Self { Point { x, y } }
+    pub fn distance(&self) -> f64 { (self.x * self.x + self.y * self.y).sqrt() }
+}
+
+// Register and use:
+let state = vm.main_state();
+state.register_type_of::<Point>("Point")?;
+state.execute_string(r#"
+    local p = Point.new(3, 4)
+    print(p.x, p:distance())   -- 3.0  5.0
+"#)?;
+```
+
+### Rust Closures in Lua
+
+```rust
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+let counter = Arc::new(AtomicUsize::new(0));
+let counter_clone = counter.clone();
+let func = vm.create_closure(move |state| {
+    let n = counter_clone.fetch_add(1, Ordering::SeqCst);
+    state.push_value(luars::LuaValue::integer(n as i64))?;
+    Ok(1)
+})?;
+vm.set_global("next_id", func)?;
 ```
 
 ## Standard Library Coverage
@@ -122,6 +164,18 @@ Please open an issue before starting major work to discuss the approach.
 
 - [ ] Complete debug library implementation
 - [ ] Performance optimizations
+
+## Documentation
+
+See [docs/Guide.md](../../docs/Guide.md) for the comprehensive usage guide covering:
+- VM creation and configuration
+- Executing Lua code
+- Working with values, globals, and tables
+- Registering Rust functions and closures
+- UserData (exposing Rust structs to Lua)
+- FromLua / IntoLua type conversion
+- Error handling
+- Full API reference
 
 
 ## License

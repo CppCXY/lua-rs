@@ -1,6 +1,7 @@
 // Lua 5.4 compatible value representation
 // 16 bytes, no pointer caching, all GC objects accessed via ID
 pub mod chunk_serializer;
+pub mod lua_convert;
 mod lua_table;
 mod lua_value;
 pub mod userdata_trait;
@@ -10,8 +11,8 @@ use std::fmt;
 use std::rc::Rc;
 
 pub use userdata_trait::{
-    LuaMethodProvider, LuaStaticMethodProvider, UdValue, UserDataTrait, lua_value_to_udvalue,
-    udvalue_to_lua_value,
+    LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, UdValue, UserDataTrait,
+    lua_value_to_udvalue, udvalue_to_lua_value,
 };
 
 // Re-export the optimized LuaValue and type enum for pattern matching

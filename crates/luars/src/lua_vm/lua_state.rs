@@ -13,7 +13,9 @@ use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
-use crate::{Chunk, CreateResult, GcObjectPtr, LuaVM, StringPtr, ThreadPtr, UpvaluePtr};
+use crate::{
+    Chunk, CreateResult, GcObjectPtr, LuaRegistrable, LuaVM, StringPtr, ThreadPtr, UpvaluePtr,
+};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -753,6 +755,11 @@ impl LuaState {
         self.error_msg.clear();
         self.error_object = LuaValue::nil();
         self.yield_values.clear();
+    }
+
+    /// Get the last error message (for debugging)
+    pub fn last_error_msg(&self) -> &str {
+        &self.error_msg
     }
 
     /// Generate a Lua-style stack traceback
@@ -1748,6 +1755,31 @@ impl LuaState {
         self.vm_mut().set_global(name, value)
     }
 
+    // ===== Execute =====
+
+    /// Compile and execute a Lua source string, returning results.
+    ///
+    /// This is a convenience proxy for `LuaVM::execute_string`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let results = state.execute_string("return 1 + 2")?;
+    /// assert_eq!(results[0].as_integer(), Some(3));
+    /// ```
+    pub fn execute_string(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
+        self.vm_mut().execute_string(source)
+    }
+
+    /// Execute a pre-compiled chunk, returning results.
+    ///
+    /// This is a convenience proxy for `LuaVM::execute`.
+    pub fn execute(
+        &mut self,
+        chunk: std::rc::Rc<crate::lua_value::Chunk>,
+    ) -> LuaResult<Vec<LuaValue>> {
+        self.vm_mut().execute(chunk)
+    }
+
     // ===== Type Registration =====
 
     /// Register a UserData type as a Lua global table with its static methods.
@@ -1782,6 +1814,24 @@ impl LuaState {
         }
 
         self.set_global(name, class_table)
+    }
+
+    /// Register a UserData type by its generic type parameter.
+    ///
+    /// Equivalent to `register_type(name, T::__lua_static_methods())` but more
+    /// concise and type-safe. Uses the `LuaStaticMethodProvider` trait (auto-
+    /// implemented by `#[lua_methods]`) to discover static methods.
+    ///
+    /// # Usage
+    /// ```ignore
+    /// // Instead of:
+    /// state.register_type("Point", Point::__lua_static_methods())?;
+    ///
+    /// // Write:
+    /// state.register_type_of::<Point>("Point")?;
+    /// ```
+    pub fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()> {
+        self.register_type(name, T::lua_static_methods())
     }
 
     // ===== Table Operations =====

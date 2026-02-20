@@ -32,18 +32,11 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     // Parse #[lua_impl(...)] attribute for trait detection
     let trait_impls = parse_lua_impl_attrs(&input);
 
-    // Only works on structs with named fields
-    let fields = match &input.data {
+    // Handle named-field structs normally; tuple/unit structs get a minimal impl
+    let fields_named = match &input.data {
         Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            _ => {
-                return syn::Error::new_spanned(
-                    &input.ident,
-                    "LuaUserData can only be derived for structs with named fields",
-                )
-                .to_compile_error()
-                .into();
-            }
+            Fields::Named(fields) => Some(&fields.named),
+            _ => None, // tuple or unit struct — no field export
         },
         _ => {
             return syn::Error::new_spanned(
@@ -54,6 +47,12 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
             .into();
         }
     };
+
+    // If no named fields (tuple/unit struct), generate minimal impl
+    if fields_named.is_none() {
+        return gen_minimal_impl(name, &trait_impls);
+    }
+    let fields = fields_named.unwrap();
 
     // Collect field info
     let mut field_infos: Vec<FieldInfo> = Vec::new();
@@ -127,42 +126,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     let field_name_strs: Vec<&String> = field_infos.iter().map(|f| &f.lua_name).collect();
 
     // Generate metamethod impls based on #[lua_impl(...)]
-    let tostring_impl = if trait_impls.contains(&"Display".to_string()) {
-        quote! {
-            fn lua_tostring(&self) -> Option<String> {
-                Some(format!("{}", self))
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let eq_impl = if trait_impls.contains(&"PartialEq".to_string()) {
-        quote! {
-            fn lua_eq(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
-                other.as_any().downcast_ref::<#name>().map(|o| self == o)
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let ord_impl = if trait_impls.contains(&"PartialOrd".to_string()) {
-        quote! {
-            fn lua_lt(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
-                other.as_any().downcast_ref::<#name>()
-                    .and_then(|o| self.partial_cmp(o))
-                    .map(|c| c == std::cmp::Ordering::Less)
-            }
-            fn lua_le(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
-                other.as_any().downcast_ref::<#name>()
-                    .and_then(|o| self.partial_cmp(o))
-                    .map(|c| c != std::cmp::Ordering::Greater)
-            }
-        }
-    } else {
-        quote! {}
-    };
+    let (tostring_impl, eq_impl, ord_impl) = gen_metamethods(name, &trait_impls);
 
     let type_name_str = name.to_string();
 
@@ -229,4 +193,93 @@ fn parse_lua_impl_attrs(input: &DeriveInput) -> Vec<String> {
         }
     }
     impls
+}
+
+// ==================== Metamethod generation ====================
+
+/// Generate metamethod implementations from #[lua_impl(...)] traits.
+fn gen_metamethods(
+    name: &Ident,
+    trait_impls: &[String],
+) -> (
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+) {
+    let tostring_impl = if trait_impls.contains(&"Display".to_string()) {
+        quote! {
+            fn lua_tostring(&self) -> Option<String> {
+                Some(format!("{}", self))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let eq_impl = if trait_impls.contains(&"PartialEq".to_string()) {
+        quote! {
+            fn lua_eq(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
+                other.as_any().downcast_ref::<#name>().map(|o| self == o)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let ord_impl = if trait_impls.contains(&"PartialOrd".to_string()) {
+        quote! {
+            fn lua_lt(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
+                other.as_any().downcast_ref::<#name>()
+                    .and_then(|o| self.partial_cmp(o))
+                    .map(|c| c == std::cmp::Ordering::Less)
+            }
+            fn lua_le(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
+                other.as_any().downcast_ref::<#name>()
+                    .and_then(|o| self.partial_cmp(o))
+                    .map(|c| c != std::cmp::Ordering::Greater)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    (tostring_impl, eq_impl, ord_impl)
+}
+
+// ==================== Minimal impl for tuple/unit structs ====================
+
+/// Generate a minimal UserDataTrait impl for tuple or unit structs.
+///
+/// No field access — only type_name, method lookup, metamethods, and as_any.
+fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
+    let type_name_str = name.to_string();
+    let (tostring_impl, eq_impl, ord_impl) = gen_metamethods(name, trait_impls);
+
+    let expanded = quote! {
+        impl luars::lua_value::userdata_trait::UserDataTrait for #name {
+            fn type_name(&self) -> &'static str {
+                #type_name_str
+            }
+
+            fn get_field(&self, key: &str) -> Option<luars::lua_value::userdata_trait::UdValue> {
+                // No named fields — only method lookup
+                Self::__lua_lookup_method(key)
+                    .map(luars::lua_value::userdata_trait::UdValue::Function)
+            }
+
+            #tostring_impl
+            #eq_impl
+            #ord_impl
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+    };
+
+    expanded.into()
 }

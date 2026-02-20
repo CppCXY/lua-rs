@@ -24,7 +24,7 @@ pub use luars_derive::lua_methods;
 // Re-export userdata trait types at crate root for convenience
 pub use lua_value::LuaUserdata;
 pub use lua_value::userdata_trait::{
-    LuaMethodProvider, LuaStaticMethodProvider, UdValue, UserDataTrait,
+    LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, UdValue, UserDataTrait,
 };
 
 #[cfg(test)]
@@ -32,6 +32,7 @@ use crate::lua_vm::SafeOption;
 pub use gc::*;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::RustCallback;
+pub use lua_value::lua_convert::{FromLua, IntoLua};
 pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
 pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
 pub use stdlib::Stdlib;
