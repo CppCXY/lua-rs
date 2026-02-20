@@ -511,52 +511,29 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
     } else {
-        // Complex pattern matching
-        match pattern::parse_pattern(&pattern) {
-            Ok(parsed_pattern) => {
-                // Fast path: if pattern is just a literal string, use plain search
-                if let Some(literal) = parsed_pattern.as_literal_string() {
-                    if start_pos > s_str.len() {
-                        l.push_value(LuaValue::nil())?;
-                        return Ok(1);
-                    }
+        // Complex pattern matching — use pattern2 engine (no parse phase)
+        match pattern::find(&s_str, &pattern, start_pos) {
+            Ok(Some((start, end, captures))) => {
+                l.push_value(LuaValue::integer((start + 1) as i64))?;
+                l.push_value(LuaValue::integer(end as i64))?;
 
-                    if let Some(pos) = s_str[start_pos..].find(&literal) {
-                        let actual_pos = start_pos + pos;
-                        let end_pos = actual_pos + literal.len();
-                        l.push_value(LuaValue::integer((actual_pos + 1) as i64))?;
-                        l.push_value(LuaValue::integer(end_pos as i64))?;
-                        Ok(2)
-                    } else {
-                        l.push_value(LuaValue::nil())?;
-                        Ok(1)
-                    }
-                } else {
-                    // Complex pattern - use full pattern matcher
-                    if let Some((start, end, captures)) =
-                        pattern::find(&s_str, &parsed_pattern, start_pos)
-                    {
-                        l.push_value(LuaValue::integer((start + 1) as i64))?;
-                        l.push_value(LuaValue::integer(end as i64))?;
-
-                        // Add captures
-                        for cap in &captures {
-                            match cap {
-                                pattern::CaptureValue::String(s) => {
-                                    let cap_str = l.create_string(s)?;
-                                    l.push_value(cap_str)?;
-                                }
-                                pattern::CaptureValue::Position(p) => {
-                                    l.push_value(LuaValue::integer(*p as i64))?;
-                                }
-                            }
+                // Add captures
+                for cap in &captures {
+                    match cap {
+                        pattern::CaptureValue::String(s) => {
+                            let cap_str = l.create_string(s)?;
+                            l.push_value(cap_str)?;
                         }
-                        Ok(2 + captures.len())
-                    } else {
-                        l.push_value(LuaValue::nil())?;
-                        Ok(1)
+                        pattern::CaptureValue::Position(p) => {
+                            l.push_value(LuaValue::integer(*p as i64))?;
+                        }
                     }
                 }
+                Ok(2 + captures.len())
+            }
+            Ok(None) => {
+                l.push_value(LuaValue::nil())?;
+                Ok(1)
             }
             Err(e) => Err(l.error(format!("invalid pattern: {}", e))),
         }
@@ -580,39 +557,41 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
-    let start_pos = if init > 0 { (init - 1) as usize } else { 0 };
-    let text = s_str[start_pos..].to_string();
+    let start_pos = if init > 0 {
+        (init - 1) as usize
+    } else if init < 0 {
+        let abs_init = (-init) as usize;
+        if abs_init > s_str.len() { 0 } else { s_str.len() - abs_init }
+    } else {
+        0
+    };
 
-    match pattern::parse_pattern(&pattern_str) {
-        Ok(pattern) => {
-            if let Some((start, end, captures)) = pattern::find(&text, &pattern, 0) {
-                if captures.is_empty() {
-                    // No captures, return the matched portion
-                    let matched = text[start..end].to_string();
-                    let matched_str = l.create_string(&matched)?;
-                    l.push_value(matched_str)?;
-                    Ok(1)
-                } else {
-                    // Return captures
-                    for cap in &captures {
-                        match cap {
-                            pattern::CaptureValue::String(s) => {
-                                let cap_str = l.create_string(s)?;
-                                l.push_value(cap_str)?;
-                            }
-                            pattern::CaptureValue::Position(p) => {
-                                l.push_value(LuaValue::integer(*p as i64))?;
-                            }
+    match pattern::find(s_str, pattern_str, start_pos) {
+        Ok(Some((start, end, captures))) => {
+            if captures.is_empty() {
+                // No captures, return the matched portion
+                let matched_str = l.create_string(&s_str[start..end])?;
+                l.push_value(matched_str)?;
+                Ok(1)
+            } else {
+                let ncaps = captures.len();
+                for cap in &captures {
+                    match cap {
+                        pattern::CaptureValue::String(s) => {
+                            let cap_str = l.create_string(s)?;
+                            l.push_value(cap_str)?;
+                        }
+                        pattern::CaptureValue::Position(p) => {
+                            l.push_value(LuaValue::integer(*p as i64))?;
                         }
                     }
-                    Ok(pattern::find(&text, &pattern, 0)
-                        .map(|(_, _, caps)| caps.len())
-                        .unwrap_or(0))
                 }
-            } else {
-                l.push_value(LuaValue::nil())?;
-                Ok(1)
+                Ok(ncaps)
             }
+        }
+        Ok(None) => {
+            l.push_value(LuaValue::nil())?;
+            Ok(1)
         }
         Err(e) => Err(l.error(format!("invalid pattern: {}", e))),
     }
@@ -653,15 +632,10 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         .and_then(|v| v.as_integer())
         .map(|n| n as usize);
 
-    let pattern = match pattern::parse_pattern(&pattern_str) {
-        Ok(p) => p,
-        Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
-    };
-
     // String replacement
     if let Some(repl_str) = repl_value.as_str() {
         let repl_str = repl_str.to_string();
-        match pattern::gsub(&s_str, &pattern, &repl_str, max) {
+        match pattern::gsub(&s_str, &pattern_str, &repl_str, max) {
             Ok((result_str, count)) => {
                 let result = l.create_string(&result_str)?;
                 l.push_value(result)?;
@@ -671,7 +645,10 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             Err(e) => Err(l.error(e)),
         }
     } else if repl_value.is_function() {
-        let matches = pattern::find_all_matches(&s_str, &pattern, max);
+        let matches = match pattern::find_all_matches(&s_str, &pattern_str, max) {
+            Ok(m) => m,
+            Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
+        };
         let mut result = String::new();
         let mut last_end = 0;
         let mut count = 0;
@@ -740,7 +717,10 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         Ok(2)
     } else if repl_value.is_table() {
         // Table replacement
-        let matches = pattern::find_all_matches(&s_str, &pattern, max);
+        let matches = match pattern::find_all_matches(&s_str, &pattern_str, max) {
+            Ok(m) => m,
+            Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
+        };
         let mut result = String::new();
         let mut last_end = 0;
         let mut count = 0;
@@ -896,69 +876,69 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
         .map(|v| v.is_truthy())
         .unwrap_or(false);
 
-    // Parse pattern
-    let pattern = match pattern::parse_pattern(&pattern_str) {
-        Ok(p) => p,
-        Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
-    };
-
     // Find next match, handling empty-match-after-nonempty skip
     let mut pos = position;
     let mut skip_empty = last_was_nonempty;
 
     loop {
-        if let Some((start, end, captures)) = pattern::find(&s_str, &pattern, pos) {
-            let is_empty = end == start;
+        match pattern::find(&s_str, &pattern_str, pos) {
+            Ok(Some((start, end, captures))) => {
+                let is_empty = end == start;
 
-            // Skip empty match right after non-empty match (Lua 5.3.3+ semantics)
-            if is_empty && skip_empty {
-                // Advance past current character
-                let rest = &s_str[pos..];
-                if let Some(c) = rest.chars().next() {
-                    pos = pos + c.len_utf8();
-                } else {
-                    // Past end of string, done
-                    l.push_value(LuaValue::nil())?;
-                    return Ok(1);
+                // Skip empty match right after non-empty match (Lua 5.3.3+ semantics)
+                if is_empty && skip_empty {
+                    // Advance past current character
+                    let rest = &s_str[pos..];
+                    if let Some(c) = rest.chars().next() {
+                        pos = pos + c.len_utf8();
+                    } else {
+                        // Past end of string, done
+                        l.push_value(LuaValue::nil())?;
+                        return Ok(1);
+                    }
+                    skip_empty = false;
+                    continue;
                 }
-                skip_empty = false;
-                continue;
-            }
 
-            // Update position for next iteration
-            let next_pos = if end > start {
-                end
-            } else {
-                let rest = &s_str[end..];
-                end + rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1)
-            };
-            l.raw_seti(&state_table_value, 3, LuaValue::integer(next_pos as i64));
-            l.raw_seti(&state_table_value, 4, LuaValue::boolean(!is_empty));
+                // Update position for next iteration
+                let next_pos = if end > start {
+                    end
+                } else {
+                    let rest = &s_str[end..];
+                    end + rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1)
+                };
+                l.raw_seti(&state_table_value, 3, LuaValue::integer(next_pos as i64));
+                l.raw_seti(&state_table_value, 4, LuaValue::boolean(!is_empty));
 
-            // Return captures if any, otherwise return the matched string
-            if captures.is_empty() {
-                let matched = &s_str[start..end];
-                let result = l.create_string(matched)?;
-                l.push_value(result)?;
-                return Ok(1);
-            } else {
-                for cap in &captures {
-                    match cap {
-                        pattern::CaptureValue::String(s) => {
-                            let result = l.create_string(s)?;
-                            l.push_value(result)?;
-                        }
-                        pattern::CaptureValue::Position(p) => {
-                            l.push_value(LuaValue::integer(*p as i64))?;
+                // Return captures if any, otherwise return the matched string
+                if captures.is_empty() {
+                    let matched = &s_str[start..end];
+                    let result = l.create_string(matched)?;
+                    l.push_value(result)?;
+                    return Ok(1);
+                } else {
+                    for cap in &captures {
+                        match cap {
+                            pattern::CaptureValue::String(s) => {
+                                let result = l.create_string(s)?;
+                                l.push_value(result)?;
+                            }
+                            pattern::CaptureValue::Position(p) => {
+                                l.push_value(LuaValue::integer(*p as i64))?;
+                            }
                         }
                     }
+                    return Ok(captures.len());
                 }
-                return Ok(captures.len());
             }
-        } else {
-            // No more matches - return nil to end iteration
-            l.push_value(LuaValue::nil())?;
-            return Ok(1);
+            Ok(None) => {
+                // No more matches - return nil to end iteration
+                l.push_value(LuaValue::nil())?;
+                return Ok(1);
+            }
+            Err(e) => {
+                return Err(l.error(format!("invalid pattern: {}", e)));
+            }
         }
     }
 }
