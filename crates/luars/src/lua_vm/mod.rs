@@ -547,6 +547,104 @@ impl LuaVM {
         async_thread.await
     }
 
+    /// Call a Lua function value asynchronously.
+    ///
+    /// Creates a fresh coroutine, runs the function with the given arguments,
+    /// and drives any async yields to completion. This avoids the overhead of
+    /// string construction and recompilation that [`execute_async`](Self::execute_async)
+    /// requires.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let func = vm.get_global("process")?.unwrap();
+    /// let arg = vm.create_string("hello")?;
+    /// let results = vm.call_async(func, vec![arg]).await?;
+    /// ```
+    pub async fn call_async(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<Vec<LuaValue>> {
+        let thread_val = self.create_thread(func)?;
+        let vm_ptr = self as *mut LuaVM;
+        let async_thread = async_thread::AsyncThread::new(thread_val, vm_ptr, args);
+        async_thread.await
+    }
+
+    /// Look up a global function by name and call it asynchronously.
+    ///
+    /// Convenience wrapper: [`get_global`](Self::get_global) + [`call_async`](Self::call_async).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let arg = vm.create_string("world")?;
+    /// let results = vm.call_async_global("greet", vec![arg]).await?;
+    /// ```
+    pub async fn call_async_global(
+        &mut self,
+        name: &str,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<Vec<LuaValue>> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.call_async(func, args).await
+    }
+
+    /// Create a reusable [`AsyncCallHandle`](async_thread::AsyncCallHandle) for
+    /// a function value.
+    ///
+    /// The handle keeps a runner coroutine alive across multiple calls,
+    /// reducing allocation and GC overhead compared to [`call_async`](Self::call_async).
+    ///
+    /// **Requires** the table standard library (`table.pack` / `table.unpack`).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let func = vm.get_global("process")?.unwrap();
+    /// let mut handle = vm.create_async_call_handle(func)?;
+    /// let r1 = handle.call(vec![vm.create_string("a")?]).await?;
+    /// let r2 = handle.call(vec![vm.create_string("b")?]).await?;
+    /// ```
+    pub fn create_async_call_handle(
+        &mut self,
+        func: LuaValue,
+    ) -> LuaResult<async_thread::AsyncCallHandle> {
+        let chunk = self.compile(async_thread::ASYNC_CALL_RUNNER)?;
+        let env_upval = self.create_upvalue_closed(self.global)?;
+        let runner_func =
+            self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))?;
+        let thread_val = self.create_thread(runner_func)?;
+        let vm_ptr = self as *mut LuaVM;
+        async_thread::AsyncCallHandle::new(thread_val, vm_ptr, func)
+    }
+
+    /// Look up a global function and create a reusable
+    /// [`AsyncCallHandle`](async_thread::AsyncCallHandle) for it.
+    ///
+    /// Convenience wrapper: [`get_global`](Self::get_global) +
+    /// [`create_async_call_handle`](Self::create_async_call_handle).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut handle = vm.create_async_call_handle_global("handle_request")?;
+    /// let args = vec![vm.create_string("GET")?, vm.create_string("/")?];
+    /// let result = handle.call(args).await?;
+    /// ```
+    pub fn create_async_call_handle_global(
+        &mut self,
+        name: &str,
+    ) -> LuaResult<async_thread::AsyncCallHandle> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.create_async_call_handle(func)
+    }
+
     /// Register a Rust enum as a Lua global table of integer constants.
     ///
     /// Each variant becomes a key in the table with its discriminant as value.

@@ -6,7 +6,7 @@
 //! - A `handle_request(method, path, headers_str, body)` entry point driven from Rust
 
 use luars::lua_vm::{LuaVM, SafeOption};
-use luars::{LuaResult, Stdlib};
+use luars::{LuaResult, LuaValue, Stdlib};
 
 use crate::async_io;
 
@@ -33,6 +33,9 @@ pub fn create_vm(lua_script: &str) -> LuaResult<Box<LuaVM>> {
 
 /// Call the Lua `handle_request` function asynchronously.
 ///
+/// Uses [`LuaVM::call_async_global`] to call the function directly,
+/// avoiding string construction and recompilation overhead.
+///
 /// The Lua function signature:
 /// ```lua
 /// function handle_request(method, path, query, headers_json, body)
@@ -49,20 +52,21 @@ pub async fn call_handler(
     headers_json: &str,
     body: &str,
 ) -> LuaResult<(u16, String, String)> {
-    let query_arg = match query {
-        Some(q) => format!("\"{}\"", escape_lua_string(q)),
-        None => "nil".to_string(),
+    let method_val = vm.create_string(method)?;
+    let path_val = vm.create_string(path)?;
+    let query_val = match query {
+        Some(q) => vm.create_string(q)?,
+        None => LuaValue::nil(),
     };
-    let source = format!(
-        r#"return handle_request("{}", "{}", {}, [=[{}]=], [=[{}]=])"#,
-        escape_lua_string(method),
-        escape_lua_string(path),
-        query_arg,
-        headers_json,
-        body,
-    );
+    let headers_val = vm.create_string(headers_json)?;
+    let body_val = vm.create_string(body)?;
 
-    let results = vm.execute_async(&source).await?;
+    let results = vm
+        .call_async_global(
+            "handle_request",
+            vec![method_val, path_val, query_val, headers_val, body_val],
+        )
+        .await?;
 
     // Extract: status_code (integer), content_type (string), body (string)
     let status = results.first().and_then(|v| v.as_integer()).unwrap_or(200) as u16;
@@ -78,12 +82,4 @@ pub async fn call_handler(
         .to_string();
 
     Ok((status, content_type, resp_body))
-}
-
-/// Escape a string for safe embedding in Lua double-quoted strings.
-fn escape_lua_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
 }

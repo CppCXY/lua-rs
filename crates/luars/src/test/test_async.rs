@@ -371,3 +371,195 @@ async fn test_async_return_mixed_userdata_and_values() {
     assert_eq!(results[1].as_str(), Some("ok"));
     assert_eq!(results[2].as_integer(), Some(42));
 }
+
+// ============ call_async tests ============
+
+#[tokio::test]
+async fn test_call_async_basic() {
+    let mut vm = new_vm();
+
+    vm.execute("function add(a, b) return a + b end").unwrap();
+
+    let func = vm.get_global("add").unwrap().unwrap();
+    let results = vm
+        .call_async(func, vec![LuaValue::integer(10), LuaValue::integer(20)])
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_integer(), Some(30));
+}
+
+#[tokio::test]
+async fn test_call_async_with_async_function() {
+    let mut vm = new_vm();
+
+    vm.register_async("async_double", |args| async move {
+        let n = args[0].as_integer().unwrap_or(0);
+        Ok(vec![AsyncReturnValue::integer(n * 2)])
+    })
+    .unwrap();
+
+    vm.execute("function process(x) return async_double(x) end")
+        .unwrap();
+
+    let func = vm.get_global("process").unwrap().unwrap();
+    let results = vm
+        .call_async(func, vec![LuaValue::integer(21)])
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_integer(), Some(42));
+}
+
+#[tokio::test]
+async fn test_call_async_global() {
+    let mut vm = new_vm();
+
+    vm.execute("function greet(name) return 'Hello, ' .. name end")
+        .unwrap();
+
+    let name = vm.create_string("World").unwrap();
+    let results = vm.call_async_global("greet", vec![name]).await.unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("Hello, World"));
+}
+
+#[tokio::test]
+async fn test_call_async_global_not_found() {
+    let mut vm = new_vm();
+
+    let result = vm.call_async_global("nonexistent", vec![]).await;
+    assert!(result.is_err());
+}
+
+// ============ AsyncCallHandle tests ============
+
+#[tokio::test]
+async fn test_async_call_handle_basic() {
+    let mut vm = new_vm();
+
+    vm.execute("function add(a, b) return a + b end").unwrap();
+
+    let mut handle = vm.create_async_call_handle_global("add").unwrap();
+
+    // First call
+    let r1 = handle
+        .call(vec![LuaValue::integer(1), LuaValue::integer(2)])
+        .await
+        .unwrap();
+    assert_eq!(r1[0].as_integer(), Some(3));
+
+    // Second call (reuses the coroutine)
+    let r2 = handle
+        .call(vec![LuaValue::integer(10), LuaValue::integer(20)])
+        .await
+        .unwrap();
+    assert_eq!(r2[0].as_integer(), Some(30));
+
+    // Third call
+    let r3 = handle
+        .call(vec![LuaValue::integer(100), LuaValue::integer(200)])
+        .await
+        .unwrap();
+    assert_eq!(r3[0].as_integer(), Some(300));
+
+    assert!(handle.is_alive());
+}
+
+#[tokio::test]
+async fn test_async_call_handle_error_recovery() {
+    let mut vm = new_vm();
+
+    vm.execute(
+        r#"
+        function maybe_fail(x)
+            if x < 0 then
+                error("negative!")
+            end
+            return x * 2
+        end
+    "#,
+    )
+    .unwrap();
+
+    let mut handle = vm.create_async_call_handle_global("maybe_fail").unwrap();
+
+    // Successful call
+    let r1 = handle.call(vec![LuaValue::integer(5)]).await.unwrap();
+    assert_eq!(r1[0].as_integer(), Some(10));
+
+    // Failed call (pcall catches it, handle stays alive)
+    let r2 = handle.call(vec![LuaValue::integer(-1)]).await;
+    assert!(r2.is_err());
+    assert!(handle.is_alive()); // Still alive!
+
+    // Successful call after error
+    let r3 = handle.call(vec![LuaValue::integer(7)]).await.unwrap();
+    assert_eq!(r3[0].as_integer(), Some(14));
+}
+
+#[tokio::test]
+async fn test_async_call_handle_with_async() {
+    let mut vm = new_vm();
+
+    vm.register_async("async_add", |args| async move {
+        let a = args[0].as_integer().unwrap_or(0);
+        let b = args[1].as_integer().unwrap_or(0);
+        Ok(vec![AsyncReturnValue::integer(a + b)])
+    })
+    .unwrap();
+
+    vm.execute("function process(a, b) return async_add(a, b) end")
+        .unwrap();
+
+    let mut handle = vm.create_async_call_handle_global("process").unwrap();
+
+    let r1 = handle
+        .call(vec![LuaValue::integer(3), LuaValue::integer(4)])
+        .await
+        .unwrap();
+    assert_eq!(r1[0].as_integer(), Some(7));
+
+    let r2 = handle
+        .call(vec![LuaValue::integer(10), LuaValue::integer(20)])
+        .await
+        .unwrap();
+    assert_eq!(r2[0].as_integer(), Some(30));
+}
+
+#[tokio::test]
+async fn test_async_call_handle_multiple_returns() {
+    let mut vm = new_vm();
+
+    vm.execute("function multi(x) return x, x*2, x*3 end")
+        .unwrap();
+
+    let mut handle = vm.create_async_call_handle_global("multi").unwrap();
+
+    let results = handle.call(vec![LuaValue::integer(5)]).await.unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_integer(), Some(5));
+    assert_eq!(results[1].as_integer(), Some(10));
+    assert_eq!(results[2].as_integer(), Some(15));
+}
+
+#[tokio::test]
+async fn test_async_call_handle_no_args_no_returns() {
+    let mut vm = new_vm();
+
+    vm.execute("x = 0; function inc() x = x + 1 end").unwrap();
+
+    let mut handle = vm.create_async_call_handle_global("inc").unwrap();
+
+    let r = handle.call(vec![]).await.unwrap();
+    assert!(r.is_empty());
+
+    handle.call(vec![]).await.unwrap();
+    handle.call(vec![]).await.unwrap();
+
+    let results = vm.execute("return x").unwrap();
+    assert_eq!(results[0].as_integer(), Some(3));
+}

@@ -428,3 +428,195 @@ where
         Ok(0)
     }
 }
+
+// ============ AsyncCallHandle ============
+
+/// Lua source for the reusable runner coroutine.
+///
+/// Receives the target function on first resume, then loops:
+/// 1. Yield to wait for call arguments
+/// 2. Call the target function via `pcall` (so Lua errors don't kill the runner)
+/// 3. Yield the pcall results back to Rust
+///
+/// **Requires** the table standard library (`table.pack` / `table.unpack`).
+pub(crate) const ASYNC_CALL_RUNNER: &str = "\
+local f = ...\n\
+local args = table.pack(coroutine.yield())\n\
+while true do\n\
+  args = table.pack(coroutine.yield(pcall(f, table.unpack(args, 1, args.n))))\n\
+end";
+
+/// A reusable async call handle that keeps a runner coroutine alive
+/// across multiple calls to the same Lua function.
+///
+/// Created via [`LuaVM::create_async_call_handle`] or
+/// [`LuaVM::create_async_call_handle_global`].
+///
+/// Unlike [`LuaVM::call_async`] which creates a new coroutine for each
+/// invocation, `AsyncCallHandle` reuses a single coroutine, reducing GC
+/// pressure and allocation overhead for repeated calls.
+///
+/// The runner uses `pcall` internally, so Lua errors in the target function
+/// are caught and returned as `Err` without invalidating the handle. Only
+/// infrastructure failures (async future errors, coroutine death) mark the
+/// handle as dead.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut handle = vm.create_async_call_handle_global("process")?;
+/// for item in items {
+///     let arg = vm.create_string(&item)?;
+///     let result = handle.call(vec![arg]).await?;
+/// }
+/// ```
+pub struct AsyncCallHandle {
+    /// The runner coroutine thread value.
+    thread_val: LuaValue,
+    /// Raw pointer to the owning VM.
+    vm: *mut LuaVM,
+    /// Registry reference that keeps the thread alive against GC.
+    ref_id: RefId,
+    /// Whether the handle is still usable.
+    alive: bool,
+}
+
+impl AsyncCallHandle {
+    /// Create a new `AsyncCallHandle`.
+    ///
+    /// The target function is passed to the runner coroutine on the first
+    /// resume. After initialization, the handle is ready for [`call`](Self::call).
+    pub(crate) fn new(thread_val: LuaValue, vm: *mut LuaVM, func: LuaValue) -> LuaResult<Self> {
+        let ref_id = {
+            let vm_ref = unsafe { &mut *vm };
+            let lua_ref = vm_ref.create_ref(thread_val);
+            lua_ref.ref_id().unwrap_or(0)
+        };
+
+        let handle = AsyncCallHandle {
+            thread_val,
+            vm,
+            ref_id,
+            alive: true,
+        };
+
+        // First resume: pass the target function to the runner.
+        // The runner captures it via `...` and yields, waiting for call args.
+        let thread_state = handle
+            .thread_val
+            .as_thread_mut()
+            .ok_or_else(|| unsafe { &mut *vm }.error("invalid thread value".to_string()))?;
+        let (finished, _) = thread_state.resume(vec![func])?;
+        if finished {
+            return Err(
+                unsafe { &mut *vm }.error("runner coroutine finished during init".to_string())
+            );
+        }
+
+        Ok(handle)
+    }
+
+    /// Returns `true` if the handle is still usable for calls.
+    ///
+    /// A handle becomes dead if:
+    /// - An async future returned an error
+    /// - The runner coroutine terminated unexpectedly
+    pub fn is_alive(&self) -> bool {
+        self.alive
+    }
+
+    /// Resume the runner coroutine and classify the result.
+    fn do_resume(&mut self, args: Vec<LuaValue>) -> ResumeResult {
+        let thread_state = match self.thread_val.as_thread_mut() {
+            Some(state) => state,
+            None => {
+                return ResumeResult::Finished(Err(
+                    unsafe { &mut *self.vm }.error("invalid thread value".to_string())
+                ));
+            }
+        };
+
+        match thread_state.resume(args) {
+            Ok((true, results)) => ResumeResult::Finished(Ok(results)),
+            Ok((false, values)) => {
+                if is_async_sentinel(&values) {
+                    match thread_state.take_pending_future() {
+                        Some(fut) => ResumeResult::AsyncYield(fut),
+                        None => ResumeResult::Finished(Err(unsafe { &mut *self.vm }
+                            .error("async yield without pending future".to_string()))),
+                    }
+                } else {
+                    ResumeResult::NormalYield(values)
+                }
+            }
+            Err(e) => ResumeResult::Finished(Err(e)),
+        }
+    }
+
+    /// Call the wrapped function with the given arguments.
+    ///
+    /// Drives the runner coroutine, handling async yields transparently.
+    /// Returns the function's return values on success.
+    ///
+    /// If the target function raises a Lua error, it is caught by the internal
+    /// `pcall` and returned as `Err`, but the handle **remains alive** for
+    /// future calls. If an async future fails or the coroutine dies, the handle
+    /// is marked as dead and subsequent calls return an error immediately.
+    pub async fn call(&mut self, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+        if !self.alive {
+            return Err(
+                unsafe { &mut *self.vm }.error("async call handle is no longer alive".to_string())
+            );
+        }
+
+        let mut resume_args = args;
+        loop {
+            match self.do_resume(resume_args) {
+                ResumeResult::Finished(result) => {
+                    self.alive = false;
+                    match result {
+                        Ok(_) => {
+                            return Err(unsafe { &mut *self.vm }
+                                .error("runner coroutine finished unexpectedly".to_string()));
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                ResumeResult::AsyncYield(fut) => match fut.await {
+                    Ok(async_values) => {
+                        let vm = unsafe { &mut *self.vm };
+                        resume_args = materialize_values(vm, async_values)?;
+                    }
+                    Err(e) => {
+                        self.alive = false;
+                        return Err(e);
+                    }
+                },
+                ResumeResult::NormalYield(values) => {
+                    // The runner yields pcall results: (ok: bool, results... | err)
+                    let ok = values.first().and_then(|v| v.as_boolean()).unwrap_or(false);
+                    if ok {
+                        return Ok(values[1..].to_vec());
+                    } else {
+                        // Lua error caught by pcall — handle stays alive
+                        let err_msg = values
+                            .get(1)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error")
+                            .to_string();
+                        return Err(unsafe { &mut *self.vm }.error(err_msg));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for AsyncCallHandle {
+    fn drop(&mut self) {
+        if self.ref_id > 0 {
+            let vm = unsafe { &mut *self.vm };
+            vm.release_ref_id(self.ref_id);
+        }
+    }
+}

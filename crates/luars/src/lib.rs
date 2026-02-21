@@ -34,6 +34,6 @@ pub use lib_registry::LibraryRegistry;
 pub use lua_value::RustCallback;
 pub use lua_value::lua_convert::{FromLua, IntoLua};
 pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
-pub use lua_vm::async_thread::{AsyncFuture, AsyncReturnValue, AsyncThread};
+pub use lua_vm::async_thread::{AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread};
 pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
 pub use stdlib::Stdlib;
