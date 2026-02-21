@@ -601,19 +601,19 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
     // Call using stack-based API (no Vec allocation!)
     let (success, result_count) = l.pcall_stack_based(func_idx, call_arg_count)?;
 
-    let mut all_results = Vec::with_capacity(result_count + 1);
-    all_results.push(LuaValue::boolean(success));
-    for i in 0..result_count {
-        if let Some(val) = l.stack_get(func_idx + i) {
-            all_results.push(val);
-        } else {
-            all_results.push(LuaValue::nil());
-        }
-    }
+    // Results at stack[func_idx..func_idx+result_count], top = func_idx + result_count.
+    // Need to return [bool, result1, result2, ...] — shift results right by 1.
+    // Push a nil to ensure stack capacity for the extra boolean slot.
+    l.push_value(LuaValue::nil())?;
 
-    // Push all results so call_c_function can collect them
-    for val in all_results {
-        l.push_value(val)?;
+    // In-place shift: move results right by 1, insert boolean at func_idx.
+    // Zero allocation, single O(n) copy.
+    {
+        let stack = l.stack_mut();
+        for i in (0..result_count).rev() {
+            stack[func_idx + 1 + i] = stack[func_idx + i];
+        }
+        stack[func_idx] = LuaValue::boolean(success);
     }
 
     Ok(result_count + 1)
@@ -678,16 +678,16 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
     let (success, result_count) = l.xpcall_stack_based(func_idx, call_arg_count, handler_idx)?;
 
     if success {
-        // Prepend true, results are at func_idx..func_idx+result_count
-        let mut all_results = Vec::with_capacity(result_count + 1);
-        all_results.push(LuaValue::boolean(true));
-        for i in 0..result_count {
-            all_results.push(l.stack_get(func_idx + i).unwrap_or(LuaValue::nil()));
+        // Results at func_idx..func_idx+result_count — shift right by 1 for boolean
+        l.push_value(LuaValue::nil())?; // extend stack by 1
+        {
+            let stack = l.stack_mut();
+            for i in (0..result_count).rev() {
+                stack[func_idx + 1 + i] = stack[func_idx + i];
+            }
+            stack[func_idx] = LuaValue::boolean(true);
         }
-        for (_i, val) in all_results.iter().enumerate() {
-            l.push_value(*val)?;
-        }
-        Ok(all_results.len())
+        Ok(result_count + 1)
     } else {
         // Error — handler already called by xpcall_stack_based, result is at func_idx
         let transformed_error = l.stack_get(func_idx).unwrap_or(LuaValue::nil());

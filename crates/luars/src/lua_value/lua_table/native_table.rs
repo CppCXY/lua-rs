@@ -768,6 +768,23 @@ impl NativeTable {
         false
     }
 
+    /// Fast SETI variant that only succeeds when an existing non-nil value exists.
+    /// Safe to use when the table has a metatable, because __newindex is only
+    /// consulted for keys whose rawget() returns nil.
+    #[inline(always)]
+    pub fn fast_seti_existing(&mut self, key: i64, value: LuaValue) -> bool {
+        if key >= 1 && key <= self.asize as i64 {
+            let existing = unsafe { self.read_array(key) };
+            if existing.is_some_and(|v| !v.is_nil()) {
+                unsafe {
+                    self.write_array(key, value);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     /// Set value in array part
     #[inline(always)]
     pub fn set_int(&mut self, key: i64, value: LuaValue) {

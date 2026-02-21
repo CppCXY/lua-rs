@@ -274,7 +274,30 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
     // Use metamethod-respecting access (like C Lua's lua_geti/lua_seti)
     // Handle overlap correctly (C Lua: backward only when f < t <= e, same table)
     if f <= e {
-        if t > f && t <= e {
+        // Fast path: both tables have no metatables → use raw access
+        let use_raw = src_val.as_table().map_or(false, |t| !t.has_metatable())
+            && dst_value.as_table().map_or(false, |t| !t.has_metatable());
+
+        if use_raw {
+            // Raw access path: no metamethods, much faster
+            if t > f && t <= e && src_val.as_gc_ptr() == dst_value.as_gc_ptr() {
+                // Overlapping forward move on same table: iterate backwards
+                for i in (0..=(e - f)).rev() {
+                    let val = l
+                        .raw_geti(&src_val, f.wrapping_add(i))
+                        .unwrap_or(LuaValue::nil());
+                    l.raw_seti(&dst_value, t.wrapping_add(i), val);
+                }
+            } else {
+                // No overlap or different tables: iterate forwards
+                for i in 0..=(e - f) {
+                    let val = l
+                        .raw_geti(&src_val, f.wrapping_add(i))
+                        .unwrap_or(LuaValue::nil());
+                    l.raw_seti(&dst_value, t.wrapping_add(i), val);
+                }
+            }
+        } else if t > f && t <= e {
             // Overlapping forward move: iterate backwards to avoid overwriting
             for i in (0..=(e - f)).rev() {
                 let key = LuaValue::integer(f.wrapping_add(i));

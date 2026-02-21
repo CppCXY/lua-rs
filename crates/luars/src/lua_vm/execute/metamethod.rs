@@ -8,7 +8,6 @@ use crate::lua_vm::opcode::Instruction;
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event};
-use crate::stdlib::basic::parse_number::parse_lua_number;
 
 /// Try unary metamethod (for __unm, __bnot)
 /// Port of luaT_trybinTM for unary operations
@@ -333,10 +332,8 @@ pub fn handle_mmbink(
 /// }
 /// ```
 
-/// Try to convert a LuaValue to integer, including string coercion.
-/// Matches C Lua's `ivalue_try` / `forone` in luaO_arith.
-/// Returns Some(i64) if the value is an integer, an integral float, or a string
-/// that parses as an integer.
+/// Try to convert a LuaValue to integer (NO string coercion).
+/// Returns Some(i64) if the value is an integer or an integral float.
 fn value_to_integer(v: &LuaValue) -> Option<i64> {
     if let Some(i) = v.as_integer() {
         return Some(i);
@@ -345,19 +342,6 @@ fn value_to_integer(v: &LuaValue) -> Option<i64> {
         // Integral float → integer
         if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
             return Some(f as i64);
-        }
-        return None;
-    }
-    if let Some(s) = v.as_str() {
-        let parsed = parse_lua_number(s);
-        if let Some(i) = parsed.as_integer() {
-            return Some(i);
-        }
-        // Try float string → integral float → integer
-        if let Some(f) = parsed.as_number() {
-            if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
-                return Some(f as i64);
-            }
         }
     }
     None
@@ -487,7 +471,7 @@ fn try_bin_tm(
     }
 }
 
-/// Try to convert a LuaValue to integer (for bitwise string coercion)
+/// Try to convert a LuaValue to integer (NO string coercion)
 fn try_to_integer(v: &LuaValue) -> Option<i64> {
     if let Some(i) = v.as_integer() {
         return Some(i);
@@ -497,20 +481,6 @@ fn try_to_integer(v: &LuaValue) -> Option<i64> {
             // Check f is within i64 range before casting
             if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
                 return Some(f as i64);
-            }
-        }
-        return None;
-    }
-    if let Some(s) = v.as_str() {
-        let parsed = parse_lua_number(s);
-        if let Some(i) = parsed.as_integer() {
-            return Some(i);
-        }
-        if let Some(f) = parsed.as_number() {
-            if f == f.floor() && f.is_finite() {
-                if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
-                    return Some(f as i64);
-                }
             }
         }
     }

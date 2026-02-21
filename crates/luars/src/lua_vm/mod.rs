@@ -566,10 +566,12 @@ impl LuaVM {
     /// - Cache hit (interned): O(1) hash lookup, 0 allocations, 0 atomic ops
     /// - Cache miss (new): 1 Box allocation, GC registration, pool insertion
     /// - Long string: 1 Box allocation, GC registration, no pooling
+    #[inline]
     pub fn create_string(&mut self, s: &str) -> CreateResult {
         self.object_allocator.create_string(&mut self.gc, s)
     }
 
+    #[inline]
     pub fn create_binary(&mut self, data: Vec<u8>) -> CreateResult {
         self.object_allocator.create_binary(&mut self.gc, data)
     }

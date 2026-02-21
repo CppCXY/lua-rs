@@ -1699,14 +1699,17 @@ impl LuaState {
     }
 
     /// Create/intern string (automatically handles short string interning)
+    #[inline]
     pub fn create_string(&mut self, s: &str) -> CreateResult {
         self.vm_mut().create_string(s)
     }
 
+    #[inline]
     pub fn create_string_owned(&mut self, s: String) -> CreateResult {
         self.vm_mut().create_string_owned(s)
     }
 
+    #[inline]
     pub fn create_binary(&mut self, data: Vec<u8>) -> CreateResult {
         self.vm_mut().create_binary(data)
     }

@@ -23,7 +23,10 @@ use crate::{
 /// Stack buffer size for small concatenations (covers most Lua concat ops)
 const STACK_BUF_SIZE: usize = 256;
 
-#[cold]
+/// Short string limit matching StringInterner::SHORT_STRING_LIMIT.
+/// Strings ≤ this length are interned (hash table dedup).
+const SHORT_STR_LIMIT: usize = 40;
+
 #[inline(never)]
 pub fn handle_concat(
     lua_state: &mut LuaState,
@@ -34,11 +37,61 @@ pub fn handle_concat(
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
     let n = instr.get_b() as usize;
+    let start = *base + a;
 
-    // Fast path: try to concat all values at once (no tables/metamethods)
+    // === Ultra-fast path: all values are already strings ===
+    // Single scan to verify all-string + compute total length, then copy
+    // into a small 40-byte buffer for short results (matching C Lua's
+    // LUAI_MAXSHORTLEN). Avoids the 256-byte zero-init and multi-branch
+    // type checking of the general path.
+    {
+        let stack = lua_state.stack();
+        let mut total_len = 0usize;
+        let mut all_strings = true;
+
+        for i in 0..n {
+            if let Some(s) = unsafe { stack.get_unchecked(start + i) }.as_str() {
+                total_len += s.len();
+            } else {
+                all_strings = false;
+                break;
+            }
+        }
+
+        if all_strings {
+            let result = if total_len <= SHORT_STR_LIMIT {
+                // Short result: small stack buffer, will be interned
+                let mut buf = [0u8; SHORT_STR_LIMIT];
+                let mut pos = 0;
+                let stack = lua_state.stack();
+                for i in 0..n {
+                    let s = unsafe { stack.get_unchecked(start + i).as_str().unwrap_unchecked() };
+                    let bytes = s.as_bytes();
+                    buf[pos..pos + bytes.len()].copy_from_slice(bytes);
+                    pos += bytes.len();
+                }
+                let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..pos]) };
+                lua_state.create_string(result_str)?
+            } else {
+                // Long result: single heap alloc with exact capacity, no interning
+                let mut result_buf = String::with_capacity(total_len);
+                let stack = lua_state.stack();
+                for i in 0..n {
+                    let s = unsafe { stack.get_unchecked(start + i).as_str().unwrap_unchecked() };
+                    result_buf.push_str(s);
+                }
+                lua_state.create_string_owned(result_buf)?
+            };
+            lua_state.stack_mut()[start] = result;
+            lua_state.set_frame_pc(frame_idx, pc as u32);
+            lua_state.check_gc()?;
+            return Ok(());
+        }
+    }
+
+    // General path: handles numbers, binary, mixed types (no metamethods)
     if let Ok(result) = concat_strings(lua_state, *base, a, n) {
-        let stack = lua_state.stack_mut();
-        stack[*base + a] = result;
+        lua_state.stack_mut()[start] = result;
         lua_state.set_frame_pc(frame_idx, pc as u32);
         lua_state.check_gc()?;
         let frame_top = lua_state.get_call_info(frame_idx).top;
@@ -305,27 +358,60 @@ pub fn concat_strings(
         }
     }
 
-    // ===== General path: N values =====
-    // Pre-calculate total length for exact Vec capacity
-    let mut total_len = 0usize;
-    let mut all_strings = true;
+    // ===== General path: N values (single-pass into stack buffer) =====
+    let start = base + a;
+    let mut buf = [0u8; STACK_BUF_SIZE];
+    let mut pos = 0;
+    let mut has_binary = false;
+
     for i in 0..n {
-        let value = lua_state.stack_mut()[base + a + i];
+        let value = lua_state.stack[start + i];
+
         if let Some(s) = value.as_str() {
-            total_len += s.len();
+            let bytes = s.as_bytes();
+            let new_pos = pos + bytes.len();
+            if new_pos > STACK_BUF_SIZE {
+                return concat_large(lua_state, start, n);
+            }
+            buf[pos..new_pos].copy_from_slice(bytes);
+            pos = new_pos;
         } else if let Some(b) = value.as_binary() {
-            total_len += b.len();
-        } else if value.as_integer().is_some() {
-            total_len += 20; // max digits for i64
-            all_strings = false;
-        } else if value.as_float().is_some() {
-            total_len += 24; // max chars for f64
-            all_strings = false;
+            let new_pos = pos + b.len();
+            if new_pos > STACK_BUF_SIZE {
+                return concat_large(lua_state, start, n);
+            }
+            buf[pos..new_pos].copy_from_slice(b);
+            pos = new_pos;
+            has_binary = true;
+        } else if value.is_integer() {
+            let ival = unsafe { value.as_integer_strict().unwrap_unchecked() };
+            let mut itoa_buf = itoa::Buffer::new();
+            let num_str = itoa_buf.format(ival);
+            let new_pos = pos + num_str.len();
+            if new_pos > STACK_BUF_SIZE {
+                return concat_large(lua_state, start, n);
+            }
+            buf[pos..new_pos].copy_from_slice(num_str.as_bytes());
+            pos = new_pos;
+        } else if value.is_float() {
+            let f = unsafe { value.as_number().unwrap_unchecked() };
+            use crate::stdlib::basic::lua_float_to_string;
+            let s = lua_float_to_string(f);
+            let new_pos = pos + s.len();
+            if new_pos > STACK_BUF_SIZE {
+                return concat_large(lua_state, start, n);
+            }
+            buf[pos..new_pos].copy_from_slice(s.as_bytes());
+            pos = new_pos;
         } else if value.ttisfulluserdata() {
             if let Some(ud) = value.as_userdata_mut() {
                 if let Some(s) = ud.get_trait().lua_tostring() {
-                    total_len += s.len();
-                    all_strings = false;
+                    let new_pos = pos + s.len();
+                    if new_pos > STACK_BUF_SIZE {
+                        return concat_large(lua_state, start, n);
+                    }
+                    buf[pos..new_pos].copy_from_slice(s.as_bytes());
+                    pos = new_pos;
                     continue;
                 }
             }
@@ -343,40 +429,35 @@ pub fn concat_strings(
         }
     }
 
-    // For small all-string results, use stack buffer
-    if all_strings && total_len <= STACK_BUF_SIZE {
-        let mut buf = [0u8; STACK_BUF_SIZE];
-        let mut pos = 0;
-        for i in 0..n {
-            let value = lua_state.stack_mut()[base + a + i];
-            if let Some(s) = value.as_str() {
-                let bytes = s.as_bytes();
-                buf[pos..pos + bytes.len()].copy_from_slice(bytes);
-                pos += bytes.len();
-            } else if let Some(b) = value.as_binary() {
-                buf[pos..pos + b.len()].copy_from_slice(b);
-                pos += b.len();
-            }
+    if has_binary {
+        // Binary data may not be valid UTF-8
+        match std::str::from_utf8(&buf[..pos]) {
+            Ok(s) => lua_state.create_string(s),
+            Err(_) => lua_state.create_binary(buf[..pos].to_vec()),
         }
-        // All inputs are valid UTF-8 strings
+    } else {
+        // All inputs are valid UTF-8 (strings + number formatting)
         let s = unsafe { std::str::from_utf8_unchecked(&buf[..pos]) };
-        return lua_state.create_string(s);
+        lua_state.create_string(s)
     }
+}
 
-    let mut result: Vec<u8> = Vec::with_capacity(total_len);
-
+/// Large concat fallback — total bytes exceed STACK_BUF_SIZE (256).
+/// Cold path: most Lua concat results are short.
+#[cold]
+#[inline(never)]
+fn concat_large(lua_state: &mut LuaState, start: usize, n: usize) -> LuaResult<LuaValue> {
+    let mut result: Vec<u8> = Vec::with_capacity(512);
     for i in 0..n {
-        let value = lua_state.stack_mut()[base + a + i];
+        let value = lua_state.stack[start + i];
         if value_to_bytes_write(&value, &mut result).is_none() {
-            return Err(lua_state.error(format!(
-                "attempt to concatenate a {} value",
-                value.type_name()
-            )));
+            return Err(crate::stdlib::debug::typeerror(
+                lua_state,
+                &value,
+                "concatenate",
+            ));
         }
     }
-
-    // All number/string formatting produces valid UTF-8, so this is safe
-    // Only binary data could be non-UTF-8, and as_binary() returns bytes directly
     match String::from_utf8(result) {
         Ok(s) => lua_state.create_string_owned(s),
         Err(e) => lua_state.create_binary(e.into_bytes()),

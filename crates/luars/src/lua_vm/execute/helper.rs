@@ -6,7 +6,6 @@ use crate::{
         call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL},
         execute,
     },
-    stdlib::basic::parse_number::parse_lua_number,
 };
 
 /// Build hidden arguments for vararg functions
@@ -326,8 +325,8 @@ pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
     unsafe { ptointegerns(v as *const LuaValue, out as *mut i64) }
 }
 
-/// tonumberns - 尝试转换为浮点数 (不抛出错误)
-/// Supports string-to-number coercion per Lua 5.5 spec
+/// ptonumberns - 尝试转换为浮点数 (不抛出错误)
+/// Only handles float and integer (NO string coercion).
 #[inline(always)]
 pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
     unsafe {
@@ -338,32 +337,19 @@ pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
             *out = pivalue(v) as f64;
             true
         } else {
-            // String coercion: try to convert string to number
-            let val = &*v;
-            if let Some(s) = val.as_str() {
-                let parsed = parse_lua_number(s);
-                if let Some(n) = parsed.as_number() {
-                    *out = n;
-                    return true;
-                }
-                if let Some(i) = parsed.as_integer() {
-                    *out = i as f64;
-                    return true;
-                }
-            }
             false
         }
     }
 }
 
-/// tonumberns_ref - 引用版本（保留兼容性）
+/// tonumberns - 引用版本
 #[inline(always)]
 pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
     unsafe { ptonumberns(v as *const LuaValue, out as *mut f64) }
 }
 
 /// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
-/// Supports string-to-number coercion per Lua 5.5 spec
+/// Only handles float and integer (NO string coercion).
 #[inline(always)]
 pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
     if v.tt() == LUA_VNUMFLT {
@@ -376,17 +362,6 @@ pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
             *out = v.value.i as f64;
         }
         true
-    } else if let Some(s) = v.as_str() {
-        let parsed = parse_lua_number(s);
-        if let Some(n) = parsed.as_number() {
-            *out = n;
-            return true;
-        }
-        if let Some(i) = parsed.as_integer() {
-            *out = i as f64;
-            return true;
-        }
-        false
     } else {
         false
     }

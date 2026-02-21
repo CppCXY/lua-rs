@@ -48,8 +48,8 @@ use crate::{
             helper::{
                 chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
                 lua_imod, lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue,
-                pttisfloat, pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue,
-                setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
+                ptonumberns, pttisfloat, pttisinteger, setbfvalue, setbtvalue, setfltvalue,
+                setivalue, setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
             },
         },
     },
@@ -236,11 +236,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             psetivalue(ra_ptr, i1.wrapping_add(i2));
                             pc += 1; // Skip metamethod on success
                         }
-                        // Slow path: try float conversion
+                        // Slow path: try float conversion (no string coercion)
                         else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
-                            if tonumberns(&*v1_ptr, &mut n1) && tonumberns(&*v2_ptr, &mut n2) {
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 + n2);
                                 pc += 1; // Skip metamethod on success
                             }
@@ -296,7 +296,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
-                            if tonumberns(&*v1_ptr, &mut n1) && tonumberns(&*v2_ptr, &mut n2) {
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 - n2);
                                 pc += 1;
                             }
@@ -323,7 +323,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
-                            if tonumberns(&*v1_ptr, &mut n1) && tonumberns(&*v2_ptr, &mut n2) {
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 * n2);
                                 pc += 1;
                             }
@@ -1042,12 +1042,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = stack[base + a];
                     let value = if k { constants[c] } else { stack[base + c] };
 
-                    // Try fast path: table with array access
+                    // Try fast path: table with array access.
+                    // Without metatable: any in-range array write is fine.
+                    // With metatable: only overwrite existing non-nil values
+                    // (nil slots require __newindex check).
                     let fast_path_ok = if let Some(table_ref) = ra.as_table_mut() {
                         if !table_ref.has_metatable() {
                             table_ref.impl_table.fast_seti(b as i64, value)
                         } else {
-                            false
+                            table_ref.impl_table.fast_seti_existing(b as i64, value)
                         }
                     } else {
                         false
@@ -1083,13 +1086,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let key = &constants[b];
                     let value = if k { constants[c] } else { stack[base + c] };
 
-                    // Try fast path: table without metatable
+                    // Try fast path: fast_setfield only succeeds when the key
+                    // already exists with a non-nil value. Per Lua semantics,
+                    // __newindex is NEVER consulted when the key already exists
+                    // in the table's own hash part. So this is safe regardless
+                    // of whether the table has a metatable.
                     let fast_path_ok = if let Some(table_ref) = ra.as_table_mut() {
-                        if !table_ref.has_metatable() {
-                            table_ref.impl_table.fast_setfield(key, value)
-                        } else {
-                            false
-                        }
+                        table_ref.impl_table.fast_setfield(key, value)
                     } else {
                         false
                     };

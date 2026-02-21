@@ -141,12 +141,20 @@ pub fn exec_settable(
     // OPTIMIZED: Fast path - check if we can avoid metamethod call
     if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
-            // Fast path: no metatable, directly set
+            // No metatable - directly set, no __newindex check needed
             // NOTE: No check_gc() here - matches C Lua 5.5's OP_SETTABLE which
             // does NOT have checkGC. Running GC here would scan the stack and
             // mark the value register alive, preventing weak table clearing.
             lua_state.raw_set(&ra, rb, val);
             return Ok(());
+        }
+        // Has metatable: if key already exists with non-nil value,
+        // __newindex is NOT consulted (Lua semantics). Try a fast check.
+        if let Some(existing) = table.impl_table.raw_get(&rb) {
+            if !existing.is_nil() {
+                lua_state.raw_set(&ra, rb, val);
+                return Ok(());
+            }
         }
     }
 
@@ -300,24 +308,33 @@ pub fn exec_seti(
             // mark the value register alive, preventing weak table clearing.
             lua_state.raw_seti(&ra, b as i64, value);
         } else {
-            // Slow path: has __newindex metamethod
-            let key = LuaValue::integer(b as i64);
-            lua_state.set_frame_pc(frame_idx, *pc as u32);
-            match helper::finishset(lua_state, &ra, &key, value) {
-                Ok(_) => {}
-                Err(LuaError::Yield) => {
-                    let ci = lua_state.get_call_info_mut(frame_idx);
-                    ci.pending_finish_get = -2;
-                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                    return Err(LuaError::Yield);
+            // Has metatable: check if key already exists with non-nil value.
+            // If yes, __newindex is NOT consulted (Lua semantics).
+            let key_int = b as i64;
+            let existing = table.impl_table.get_int(key_int);
+            if existing.is_some_and(|v| !v.is_nil()) {
+                lua_state.raw_seti(&ra, key_int, value);
+            } else {
+                // Slow path: key doesn't exist or is nil → check __newindex
+                let key = LuaValue::integer(b as i64);
+                lua_state.set_frame_pc(frame_idx, *pc as u32);
+                match helper::finishset(lua_state, &ra, &key, value) {
+                    Ok(_) => {}
+                    Err(LuaError::Yield) => {
+                        let ci = lua_state.get_call_info_mut(frame_idx);
+                        ci.pending_finish_get = -2;
+                        ci.call_status |=
+                            crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                        return Err(LuaError::Yield);
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
-            }
-            // Restore top after metamethod call
-            lua_state.set_top(call_info_top)?;
-            let new_base = lua_state.get_frame_base(frame_idx);
-            if new_base != base {
-                return Err(lua_state.error("base changed in SETI".to_string()));
+                // Restore top after metamethod call
+                lua_state.set_top(call_info_top)?;
+                let new_base = lua_state.get_frame_base(frame_idx);
+                if new_base != base {
+                    return Err(lua_state.error("base changed in SETI".to_string()));
+                }
             }
         }
     } else {
@@ -460,12 +477,20 @@ pub fn exec_setfield(
     // OPTIMIZED: Fast path - check if we can avoid metamethod call
     if let Some(table) = ra.as_table() {
         if !table.has_metatable() {
-            // Fast path: no __newindex metamethod, directly set
+            // No metatable - directly set, no __newindex check needed
             // NOTE: No check_gc() here - matches C Lua 5.5's OP_SETFIELD which
             // does NOT have checkGC. Running GC here would scan the stack and
             // mark the value register alive, preventing weak table clearing.
             lua_state.raw_set(&ra, key, value);
             return Ok(());
+        }
+        // Has metatable: if key already exists with non-nil value,
+        // __newindex is NOT consulted (Lua semantics). Try fast path.
+        if let Some(existing) = table.impl_table.raw_get(&key) {
+            if !existing.is_nil() {
+                lua_state.raw_set(&ra, key, value);
+                return Ok(());
+            }
         }
     }
 
