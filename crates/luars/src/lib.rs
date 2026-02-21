@@ -35,5 +35,7 @@ pub use lua_value::RustCallback;
 pub use lua_value::lua_convert::{FromLua, IntoLua};
 pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
 pub use lua_vm::async_thread::{AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread};
+pub use lua_vm::lua_error::LuaFullError;
+pub use lua_vm::table_builder::TableBuilder;
 pub use lua_vm::{Instruction, LuaResult, LuaVM, OpCode};
 pub use stdlib::Stdlib;

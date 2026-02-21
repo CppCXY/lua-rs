@@ -42,3 +42,51 @@ impl std::fmt::Display for LuaError {
         }
     }
 }
+
+impl std::error::Error for LuaError {}
+
+/// Rich error type combining [`LuaError`] kind with the actual Lua error message.
+///
+/// Created via [`LuaVM::into_full_error`](super::LuaVM::into_full_error)
+/// after catching a `LuaError`.
+///
+/// Implements `Display` and `std::error::Error`, so it integrates with
+/// `anyhow`, `thiserror`, and the `?` operator:
+///
+/// ```ignore
+/// let result = vm.execute("bad code")
+///     .map_err(|e| vm.into_full_error(e))?; // propagates with full message
+/// ```
+#[derive(Debug, Clone)]
+pub struct LuaFullError {
+    /// The error variant (RuntimeError, CompileError, etc.)
+    pub kind: LuaError,
+    /// The human-readable error message with source location and traceback
+    pub message: String,
+}
+
+impl std::fmt::Display for LuaFullError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.message.is_empty() {
+            write!(f, "{}", self.kind)
+        } else {
+            write!(f, "{}", self.message)
+        }
+    }
+}
+
+impl std::error::Error for LuaFullError {}
+
+impl LuaFullError {
+    /// Returns the error kind ([`LuaError`] variant).
+    #[inline]
+    pub fn kind(&self) -> LuaError {
+        self.kind
+    }
+
+    /// Returns the error message.
+    #[inline]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}

@@ -52,6 +52,19 @@ pub enum AsyncReturnValue {
     String(String),
     /// A userdata that needs to be GC-allocated via the VM
     UserData(LuaUserdata),
+    /// A table of key-value pairs that will be created as a Lua table via the VM.
+    ///
+    /// Supports nested tables (keys and values can themselves be `Table`).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// AsyncReturnValue::Table(vec![
+    ///     (AsyncReturnValue::string("name"), AsyncReturnValue::string("Alice")),
+    ///     (AsyncReturnValue::integer(1), AsyncReturnValue::integer(100)),
+    /// ])
+    /// ```
+    Table(Vec<(AsyncReturnValue, AsyncReturnValue)>),
 }
 
 impl AsyncReturnValue {
@@ -89,6 +102,14 @@ impl AsyncReturnValue {
     #[inline]
     pub fn userdata<T: UserDataTrait>(data: T) -> Self {
         AsyncReturnValue::UserData(LuaUserdata::new(data))
+    }
+
+    /// Create a table return value from key-value pairs.
+    ///
+    /// Both keys and values are `AsyncReturnValue`, allowing nested tables.
+    #[inline]
+    pub fn table(entries: Vec<(AsyncReturnValue, AsyncReturnValue)>) -> Self {
+        AsyncReturnValue::Table(entries)
     }
 }
 
@@ -182,19 +203,27 @@ enum ResumeResult {
 fn materialize_values(vm: &mut LuaVM, values: Vec<AsyncReturnValue>) -> LuaResult<Vec<LuaValue>> {
     let mut result = Vec::with_capacity(values.len());
     for v in values {
-        match v {
-            AsyncReturnValue::Value(lv) => result.push(lv),
-            AsyncReturnValue::String(s) => {
-                let lv = vm.create_string(&s)?;
-                result.push(lv);
-            }
-            AsyncReturnValue::UserData(ud) => {
-                let lv = vm.create_userdata(ud)?;
-                result.push(lv);
-            }
-        }
+        result.push(materialize_single(vm, v)?);
     }
     Ok(result)
+}
+
+/// Recursively convert a single `AsyncReturnValue` to a `LuaValue`.
+fn materialize_single(vm: &mut LuaVM, value: AsyncReturnValue) -> LuaResult<LuaValue> {
+    match value {
+        AsyncReturnValue::Value(lv) => Ok(lv),
+        AsyncReturnValue::String(s) => vm.create_string(&s),
+        AsyncReturnValue::UserData(ud) => vm.create_userdata(ud),
+        AsyncReturnValue::Table(entries) => {
+            let table = vm.create_table(0, entries.len())?;
+            for (k, v) in entries {
+                let key = materialize_single(vm, k)?;
+                let val = materialize_single(vm, v)?;
+                vm.raw_set(&table, key, val);
+            }
+            Ok(table)
+        }
+    }
 }
 
 // ============ AsyncThread ============

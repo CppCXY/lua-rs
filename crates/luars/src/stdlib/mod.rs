@@ -12,6 +12,7 @@ pub mod string;
 pub mod table;
 pub mod utf8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stdlib {
     Io,
     Os,

@@ -4,11 +4,12 @@ pub mod async_thread;
 pub mod call_info;
 mod const_string;
 mod execute;
-mod lua_error;
+pub mod lua_error;
 mod lua_ref;
 mod lua_state;
 pub mod opcode;
 mod safe_option;
+pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::GC;
@@ -25,8 +26,8 @@ pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
 use crate::{
-    CreateResult, GcKind, LuaEnum, ObjectAllocator, RustCallback, ThreadPtr, UpvaluePtr,
-    lib_registry,
+    CreateResult, GcKind, LuaEnum, LuaRegistrable, ObjectAllocator, RustCallback, ThreadPtr,
+    UpvaluePtr, lib_registry,
 };
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
@@ -259,6 +260,21 @@ impl LuaVM {
         Ok(())
     }
 
+    /// Open multiple standard libraries at once.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use luars::Stdlib;
+    /// vm.open_stdlibs(&[Stdlib::Math, Stdlib::String, Stdlib::Table])?;
+    /// ```
+    pub fn open_stdlibs(&mut self, libs: &[Stdlib]) -> LuaResult<()> {
+        for lib in libs {
+            self.open_stdlib(*lib)?;
+        }
+        Ok(())
+    }
+
     /// Serialize a Lua value to JSON (requires 'serde' feature)
     #[cfg(feature = "serde")]
     pub fn serialize_to_json(&self, value: &LuaValue) -> Result<serde_json::Value, String> {
@@ -299,6 +315,118 @@ impl LuaVM {
     pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.compile(source)?;
         self.execute_chunk(Rc::new(chunk))
+    }
+
+    /// Compile source code and return a callable function value with _ENV wired.
+    ///
+    /// Unlike [`execute`](Self::execute), this does **not** run the code — it
+    /// returns a `LuaValue` that can be stored, passed to Lua, or called later
+    /// via [`call`](Self::call) or [`call_async`](Self::call_async).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let func = vm.load("return 42")?;
+    /// let results = vm.call(func, vec![])?;
+    /// assert_eq!(results[0].as_integer(), Some(42));
+    /// ```
+    pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
+        let chunk = self.compile(source)?;
+        let env_upval = self.create_upvalue_closed(self.global)?;
+        self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))
+    }
+
+    /// Compile source code with a chunk name and return a callable function value.
+    ///
+    /// The chunk name is used in error messages (e.g. `@script.lua`).
+    pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
+        let chunk = self.compile_with_name(source, chunk_name)?;
+        let env_upval = self.create_upvalue_closed(self.global)?;
+        self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))
+    }
+
+    /// Read a file, compile it, and execute it.
+    ///
+    /// Sets the chunk name to `@path` for proper error messages.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let results = vm.dofile("scripts/init.lua")?;
+    /// ```
+    pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+        let chunk_name = format!("@{}", path);
+        let chunk = self.compile_with_name(&source, &chunk_name)?;
+        self.execute_chunk(Rc::new(chunk))
+    }
+
+    /// Call a function value with arguments (synchronous).
+    ///
+    /// This is the primary way to invoke Lua functions from Rust without
+    /// string construction overhead.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let func = vm.get_global("process")?.unwrap();
+    /// let results = vm.call(func, vec![LuaValue::integer(42)])?;
+    /// ```
+    pub fn call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+        self.execute_function(func, args)
+    }
+
+    /// Look up a global function by name and call it (synchronous).
+    ///
+    /// Convenience wrapper: [`get_global`](Self::get_global) + [`call`](Self::call).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let results = vm.call_global("greet", vec![vm.create_string("World")?])?;
+    /// ```
+    pub fn call_global(&mut self, name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.call(func, args)
+    }
+
+    /// Register a synchronous Rust closure as a Lua global function.
+    ///
+    /// This is the synchronous counterpart to [`register_async`](Self::register_async).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// vm.register_function("add", |state| {
+    ///     let a = state.get_arg(1).and_then(|v| v.as_integer()).unwrap_or(0);
+    ///     let b = state.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(0);
+    ///     state.push_value(LuaValue::integer(a + b))?;
+    ///     Ok(1)
+    /// })?;
+    /// ```
+    pub fn register_function<F>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
+    {
+        let closure_val = self.create_closure(f)?;
+        self.set_global(name, closure_val)
+    }
+
+    /// Register a UserData type as a Lua global with its static methods.
+    ///
+    /// Convenience wrapper so you don't need to access `main_state()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// vm.register_type_of::<Point>("Point")?;
+    /// // Lua: local p = Point.new(3, 4)
+    /// ```
+    pub fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()> {
+        self.main_state().register_type_of::<T>(name)
     }
 
     /// Execute a function with arguments
@@ -406,6 +534,28 @@ impl LuaVM {
         Ok(())
     }
 
+    /// Get a global variable and convert it to a Rust type via [`FromLua`](crate::FromLua).
+    ///
+    /// Returns `Ok(None)` if the global does not exist, `Err` if type conversion fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// vm.execute("count = 42")?;
+    /// let count: i64 = vm.get_global_as::<i64>("count")?.unwrap();
+    /// assert_eq!(count, 42);
+    /// ```
+    pub fn get_global_as<T: crate::FromLua>(&mut self, name: &str) -> LuaResult<Option<T>> {
+        match self.get_global(name)? {
+            None => Ok(None),
+            Some(val) => {
+                let converted =
+                    T::from_lua(val, self.main_state()).map_err(|msg| self.error(msg))?;
+                Ok(Some(converted))
+            }
+        }
+    }
+
     /// Set the metatable for all strings
     /// This allows string methods to be called with : syntax (e.g., str:upper())
     pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) -> LuaResult<()> {
@@ -468,6 +618,29 @@ impl LuaVM {
     pub fn raw_get(&self, table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
         let table = table_value.as_table()?;
         table.raw_get(key)
+    }
+
+    /// Iterate over all key-value pairs in a table (raw, no metamethods).
+    ///
+    /// Returns a `Vec` of `(key, value)` pairs. This is a snapshot; modifying
+    /// the table afterwards does not affect the returned pairs.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for (k, v) in vm.table_pairs(&table)? {
+    ///     println!("{} = {}", k, v);
+    /// }
+    /// ```
+    pub fn table_pairs(&self, table_value: &LuaValue) -> LuaResult<Vec<(LuaValue, LuaValue)>> {
+        let table = table_value.as_table().ok_or(LuaError::RuntimeError)?;
+        Ok(table.iter_all())
+    }
+
+    /// Get the length of the array part of a table (like `#t` in Lua).
+    pub fn table_length(&self, table_value: &LuaValue) -> LuaResult<usize> {
+        let table = table_value.as_table().ok_or(LuaError::RuntimeError)?;
+        Ok(table.len())
     }
 
     // ============ Async Support ============
@@ -941,6 +1114,28 @@ impl LuaVM {
     #[inline]
     pub fn get_error_message(&mut self, e: LuaError) -> String {
         self.main_state().get_error_msg(e)
+    }
+
+    /// Convert a [`LuaError`] into a [`LuaFullError`] that carries the error message.
+    ///
+    /// This consumes the stored error message from the VM, so it should only be
+    /// called once per error.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// match vm.execute("bad code") {
+    ///     Err(e) => {
+    ///         let full = vm.into_full_error(e);
+    ///         eprintln!("{}", full); // prints full message with source location
+    ///     }
+    ///     Ok(_) => {}
+    /// }
+    /// ```
+    #[inline]
+    pub fn into_full_error(&mut self, e: LuaError) -> lua_error::LuaFullError {
+        let message = self.get_error_message(e);
+        lua_error::LuaFullError { kind: e, message }
     }
 
     /// Generate a stack traceback string

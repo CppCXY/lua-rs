@@ -1791,6 +1791,61 @@ impl LuaState {
         self.vm_mut().set_global(name, value)
     }
 
+    // ===== Convenience API =====
+
+    /// Compile source code and return a callable function value with _ENV wired.
+    ///
+    /// See [`LuaVM::load`] for details.
+    pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
+        self.vm_mut().load(source)
+    }
+
+    /// Compile source code with a chunk name and return a callable function value.
+    ///
+    /// See [`LuaVM::load_with_name`] for details.
+    pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
+        self.vm_mut().load_with_name(source, chunk_name)
+    }
+
+    /// Read a file, compile it, and execute it.
+    ///
+    /// See [`LuaVM::dofile`] for details.
+    pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
+        self.vm_mut().dofile(path)
+    }
+
+    /// Call a function value with arguments.
+    ///
+    /// Unlike the LuaVM version, this operates on the *current* coroutine state
+    /// and is safe to call from within a CFunction.
+    pub fn call_function(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<Vec<LuaValue>> {
+        self.call(func, args)
+    }
+
+    /// Look up a global function by name and call it.
+    ///
+    /// Safe to call from within a CFunction — operates on the current state.
+    pub fn call_global(&mut self, name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.call(func, args)
+    }
+
+    /// Register a synchronous Rust closure as a Lua global function.
+    ///
+    /// See [`LuaVM::register_function`] for details.
+    pub fn register_function<F>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
+    {
+        self.vm_mut().register_function(name, f)
+    }
+
     // ===== Async Support =====
 
     /// Register an async function as a Lua global (convenience proxy for `LuaVM::register_async`).
