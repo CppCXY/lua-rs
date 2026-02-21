@@ -440,3 +440,41 @@ pub trait LuaRegistrable {
     /// Return all static (associated) methods for type registration.
     fn lua_static_methods() -> &'static [(&'static str, CFunction)];
 }
+
+// ==================== Enum Export ====================
+
+/// Trait for Rust enums that can be exported to Lua as a table of constants.
+///
+/// Automatically implemented by `#[derive(LuaUserData)]` on C-like enums
+/// (enums with no data fields). Each variant becomes a key-value pair in
+/// a Lua table.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(LuaUserData)]
+/// enum Color {
+///     Red,    // 0
+///     Green,  // 1
+///     Blue,   // 2
+/// }
+///
+/// // With explicit discriminants:
+/// #[derive(LuaUserData)]
+/// enum HttpStatus {
+///     Ok = 200,
+///     NotFound = 404,
+///     ServerError = 500,
+/// }
+///
+/// // Register in Lua:
+/// vm.register_enum::<Color>("Color")?;
+/// // Lua: Color.Red == 0, Color.Green == 1, Color.Blue == 2
+/// ```
+pub trait LuaEnum {
+    /// Return variant name-value pairs for Lua table construction.
+    fn variants() -> &'static [(&'static str, i64)];
+
+    /// Return the enum's type name.
+    fn enum_name() -> &'static str;
+}

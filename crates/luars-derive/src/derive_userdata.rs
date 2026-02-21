@@ -38,10 +38,14 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
             Fields::Named(fields) => Some(&fields.named),
             _ => None, // tuple or unit struct — no field export
         },
+        Data::Enum(data) => {
+            // Delegate to enum-specific codegen
+            return derive_lua_enum_impl(name, data);
+        }
         _ => {
             return syn::Error::new_spanned(
                 &input.ident,
-                "LuaUserData can only be derived for structs",
+                "LuaUserData can only be derived for structs and C-like enums",
             )
             .to_compile_error()
             .into();
@@ -282,4 +286,99 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
     };
 
     expanded.into()
+}
+
+// ==================== Enum impl ====================
+
+/// Generate `LuaEnum` implementation for C-like enums.
+///
+/// Produces a compile error if any variant has fields (data enums not supported).
+/// Each variant gets its discriminant value (explicit or auto-incremented from 0).
+fn derive_lua_enum_impl(name: &Ident, data: &syn::DataEnum) -> TokenStream {
+    let type_name_str = name.to_string();
+
+    // Validate: all variants must be unit (no fields)
+    for variant in &data.variants {
+        if !variant.fields.is_empty() {
+            return syn::Error::new_spanned(
+                &variant.ident,
+                "LuaUserData enum export only supports C-like enums (no fields on variants)",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
+    // Collect variant names and discriminant values
+    let mut entries = Vec::new();
+    let mut next_discriminant: i64 = 0;
+
+    for variant in &data.variants {
+        let variant_name = variant.ident.to_string();
+        let disc_value = if let Some((_, expr)) = &variant.discriminant {
+            match parse_discriminant_expr(expr) {
+                Ok(v) => {
+                    next_discriminant = v + 1;
+                    v
+                }
+                Err(e) => return e.to_compile_error().into(),
+            }
+        } else {
+            let v = next_discriminant;
+            next_discriminant += 1;
+            v
+        };
+
+        entries.push((variant_name, disc_value));
+    }
+
+    let variant_names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    let variant_values: Vec<i64> = entries.iter().map(|(_, v)| *v).collect();
+
+    let expanded = quote! {
+        impl luars::lua_value::userdata_trait::LuaEnum for #name {
+            fn variants() -> &'static [(&'static str, i64)] {
+                &[#( (#variant_names, #variant_values) ),*]
+            }
+
+            fn enum_name() -> &'static str {
+                #type_name_str
+            }
+        }
+    };
+
+    expanded.into()
+}
+
+/// Parse an enum discriminant expression to i64.
+fn parse_discriminant_expr(expr: &syn::Expr) -> Result<i64, syn::Error> {
+    match expr {
+        syn::Expr::Lit(lit) => {
+            if let syn::Lit::Int(int_lit) = &lit.lit {
+                int_lit.base10_parse::<i64>().map_err(|_| {
+                    syn::Error::new_spanned(int_lit, "enum discriminant must be a valid i64")
+                })
+            } else {
+                Err(syn::Error::new_spanned(
+                    expr,
+                    "enum discriminant must be an integer literal",
+                ))
+            }
+        }
+        syn::Expr::Unary(unary) => {
+            if let syn::UnOp::Neg(_) = unary.op {
+                let val = parse_discriminant_expr(&unary.expr)?;
+                Ok(-val)
+            } else {
+                Err(syn::Error::new_spanned(
+                    expr,
+                    "enum discriminant must be an integer literal",
+                ))
+            }
+        }
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "enum discriminant must be an integer literal",
+        )),
+    }
 }

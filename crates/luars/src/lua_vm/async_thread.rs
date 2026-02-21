@@ -1,6 +1,6 @@
 //! Async support for lua-rs: bridge Lua coroutines to Rust Futures.
 //!
-//! This module implements the "coroutine-driven Future bridging" pattern (mlua style):
+//! This module implements the "coroutine-driven Future bridging" pattern:
 //! - An async Rust function is wrapped as a synchronous CFunction that stores a
 //!   `Pin<Box<dyn Future>>` in the coroutine's `pending_future` slot, then yields
 //!   with a special sentinel value.
@@ -27,7 +27,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::lua_ref::RefId;
 use crate::lua_vm::{LuaResult, LuaVM};
 
@@ -42,13 +42,15 @@ use crate::lua_vm::{LuaResult, LuaVM};
 ///
 /// For non-GC types (integers, floats, booleans, nil), the value is stored
 /// directly as a `LuaValue`. For strings, an owned `String` is stored and
-/// later interned via `vm.create_string()`.
-#[derive(Debug, Clone)]
+/// later interned via `vm.create_string()`. For userdata, a `LuaUserdata` is
+/// stored and later GC-allocated via `vm.create_userdata()`.
 pub enum AsyncReturnValue {
     /// A value that doesn't need GC allocation (integer, float, bool, nil, lightuserdata)
     Value(LuaValue),
     /// A string that needs to be interned via the VM's string pool
     String(String),
+    /// A userdata that needs to be GC-allocated via the VM
+    UserData(LuaUserdata),
 }
 
 impl AsyncReturnValue {
@@ -81,26 +83,49 @@ impl AsyncReturnValue {
     pub fn string(s: impl Into<String>) -> Self {
         AsyncReturnValue::String(s.into())
     }
+
+    /// Create a userdata return value (will be GC-allocated when passed back to Lua)
+    #[inline]
+    pub fn userdata<T: crate::lua_value::UserDataTrait>(data: T) -> Self {
+        AsyncReturnValue::UserData(LuaUserdata::new(data))
+    }
 }
 
 /// Convenience conversions
 impl From<i64> for AsyncReturnValue {
-    fn from(n: i64) -> Self { AsyncReturnValue::integer(n) }
+    fn from(n: i64) -> Self {
+        AsyncReturnValue::integer(n)
+    }
 }
 impl From<f64> for AsyncReturnValue {
-    fn from(n: f64) -> Self { AsyncReturnValue::float(n) }
+    fn from(n: f64) -> Self {
+        AsyncReturnValue::float(n)
+    }
 }
 impl From<bool> for AsyncReturnValue {
-    fn from(b: bool) -> Self { AsyncReturnValue::boolean(b) }
+    fn from(b: bool) -> Self {
+        AsyncReturnValue::boolean(b)
+    }
 }
 impl From<String> for AsyncReturnValue {
-    fn from(s: String) -> Self { AsyncReturnValue::String(s) }
+    fn from(s: String) -> Self {
+        AsyncReturnValue::String(s)
+    }
 }
 impl From<&str> for AsyncReturnValue {
-    fn from(s: &str) -> Self { AsyncReturnValue::String(s.to_string()) }
+    fn from(s: &str) -> Self {
+        AsyncReturnValue::String(s.to_string())
+    }
 }
 impl From<LuaValue> for AsyncReturnValue {
-    fn from(v: LuaValue) -> Self { AsyncReturnValue::Value(v) }
+    fn from(v: LuaValue) -> Self {
+        AsyncReturnValue::Value(v)
+    }
+}
+impl From<LuaUserdata> for AsyncReturnValue {
+    fn from(ud: LuaUserdata) -> Self {
+        AsyncReturnValue::UserData(ud)
+    }
 }
 
 // ============ Async Future type alias ============
@@ -133,7 +158,8 @@ pub fn is_async_sentinel(values: &[LuaValue]) -> bool {
         return false;
     }
     let v = &values[0];
-    v.ttislightuserdata() && v.pvalue() == &ASYNC_SENTINEL_STORAGE as *const u8 as *mut std::ffi::c_void
+    v.ttislightuserdata()
+        && v.pvalue() == &ASYNC_SENTINEL_STORAGE as *const u8 as *mut std::ffi::c_void
 }
 
 // ============ ResumeResult ============
@@ -152,16 +178,17 @@ enum ResumeResult {
 // ============ Helper: convert AsyncReturnValues to LuaValues ============
 
 /// Convert a vector of `AsyncReturnValue` to `LuaValue` using the VM for string interning.
-fn materialize_values(
-    vm: &mut LuaVM,
-    values: Vec<AsyncReturnValue>,
-) -> LuaResult<Vec<LuaValue>> {
+fn materialize_values(vm: &mut LuaVM, values: Vec<AsyncReturnValue>) -> LuaResult<Vec<LuaValue>> {
     let mut result = Vec::with_capacity(values.len());
     for v in values {
         match v {
             AsyncReturnValue::Value(lv) => result.push(lv),
             AsyncReturnValue::String(s) => {
                 let lv = vm.create_string(&s)?;
+                result.push(lv);
+            }
+            AsyncReturnValue::UserData(ud) => {
+                let lv = vm.create_userdata(ud)?;
                 result.push(lv);
             }
         }
@@ -220,11 +247,7 @@ impl AsyncThread {
     /// - `thread_val` — A `LuaValue` of type Thread (from `create_thread`)
     /// - `vm` — Raw pointer to the owning `LuaVM`
     /// - `args` — Arguments passed to the coroutine's first resume
-    pub(crate) fn new(
-        thread_val: LuaValue,
-        vm: *mut LuaVM,
-        args: Vec<LuaValue>,
-    ) -> Self {
+    pub(crate) fn new(thread_val: LuaValue, vm: *mut LuaVM, args: Vec<LuaValue>) -> Self {
         // Root the thread in the registry so GC won't collect it
         let ref_id = {
             let vm_ref = unsafe { &mut *vm };
@@ -246,10 +269,11 @@ impl AsyncThread {
     fn do_resume(&mut self, args: Vec<LuaValue>) -> ResumeResult {
         let thread_state = match self.thread_val.as_thread_mut() {
             Some(state) => state,
-            None => return ResumeResult::Finished(Err(
-                unsafe { &mut *self.vm }
-                    .error("AsyncThread: invalid thread value".to_string()),
-            )),
+            None => {
+                return ResumeResult::Finished(Err(
+                    unsafe { &mut *self.vm }.error("AsyncThread: invalid thread value".to_string())
+                ));
+            }
         };
 
         match thread_state.resume(args) {
@@ -265,10 +289,8 @@ impl AsyncThread {
                         Some(fut) => ResumeResult::AsyncYield(fut),
                         None => {
                             // Bug: yielded with sentinel but no future stored
-                            ResumeResult::Finished(Err(
-                                unsafe { &mut *self.vm }
-                                    .error("async yield without pending future".to_string()),
-                            ))
+                            ResumeResult::Finished(Err(unsafe { &mut *self.vm }
+                                .error("async yield without pending future".to_string())))
                         }
                     }
                 } else {
@@ -321,10 +343,8 @@ impl AsyncThread {
                 }
             } else {
                 // No pending future — should not reach here
-                return Poll::Ready(Err(
-                    unsafe { &mut *self.vm }
-                        .error("AsyncThread: no pending future to poll".to_string()),
-                ));
+                return Poll::Ready(Err(unsafe { &mut *self.vm }
+                    .error("AsyncThread: no pending future to poll".to_string())));
             }
         }
     }
@@ -383,7 +403,9 @@ impl Drop for AsyncThread {
 /// # Type parameters
 /// - `F`: Factory closure `Fn(Vec<LuaValue>) -> Fut`
 /// - `Fut`: The async future type `Future<Output = LuaResult<Vec<AsyncReturnValue>>>`
-pub fn wrap_async_function<F, Fut>(f: F) -> impl Fn(&mut crate::lua_vm::LuaState) -> LuaResult<usize> + 'static
+pub fn wrap_async_function<F, Fut>(
+    f: F,
+) -> impl Fn(&mut crate::lua_vm::LuaState) -> LuaResult<usize> + 'static
 where
     F: Fn(Vec<LuaValue>) -> Fut + 'static,
     Fut: Future<Output = LuaResult<Vec<AsyncReturnValue>>> + 'static,

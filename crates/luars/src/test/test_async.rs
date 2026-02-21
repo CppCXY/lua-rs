@@ -3,8 +3,10 @@
 // These tests verify that Rust async functions can be registered and called
 // from Lua code via the AsyncThread mechanism.
 
-use crate::*;
+use crate::lua_value::LuaUserdata;
 use crate::lua_vm::async_thread::AsyncReturnValue;
+use crate::*;
+use std::fmt;
 
 /// Helper: create a VM with stdlib loaded
 fn new_vm() -> Box<LuaVM> {
@@ -244,4 +246,137 @@ async fn test_create_async_thread_directly() {
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_integer(), Some(49));
+}
+
+// ============ Async UserData return tests ============
+
+/// Test struct returned from async functions
+#[derive(LuaUserData)]
+#[lua_impl(Display)]
+struct AsyncPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl fmt::Display for AsyncPoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AsyncPoint({}, {})", self.x, self.y)
+    }
+}
+
+#[lua_methods]
+impl AsyncPoint {
+    pub fn sum(&self) -> f64 {
+        self.x + self.y
+    }
+}
+
+#[tokio::test]
+async fn test_async_return_userdata() {
+    let mut vm = new_vm();
+
+    // Register an async function that returns a UserData
+    vm.register_async("make_point", |args| async move {
+        let x = args[0].as_number().unwrap_or(0.0);
+        let y = args[1].as_number().unwrap_or(0.0);
+        Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
+    })
+    .unwrap();
+
+    // Test field access on the returned userdata
+    let results = vm
+        .execute_string_async("local p = make_point(3.0, 4.0); return p.x, p.y")
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].as_number(), Some(3.0));
+    assert_eq!(results[1].as_number(), Some(4.0));
+}
+
+#[tokio::test]
+async fn test_async_return_userdata_method() {
+    let mut vm = new_vm();
+
+    vm.register_async("make_point", |args| async move {
+        let x = args[0].as_number().unwrap_or(0.0);
+        let y = args[1].as_number().unwrap_or(0.0);
+        Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
+    })
+    .unwrap();
+
+    // Test method call on the returned userdata
+    let results = vm
+        .execute_string_async("local p = make_point(10, 20); return p:sum()")
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_number(), Some(30.0));
+}
+
+#[tokio::test]
+async fn test_async_return_userdata_tostring() {
+    let mut vm = new_vm();
+
+    vm.register_async("make_point", |args| async move {
+        let x = args[0].as_number().unwrap_or(0.0);
+        let y = args[1].as_number().unwrap_or(0.0);
+        Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
+    })
+    .unwrap();
+
+    // Test __tostring metamethod
+    let results = vm
+        .execute_string_async("local p = make_point(1, 2); return tostring(p)")
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("AsyncPoint(1, 2)"));
+}
+
+#[tokio::test]
+async fn test_async_return_userdata_via_from() {
+    let mut vm = new_vm();
+
+    // Test using From<LuaUserdata> conversion
+    vm.register_async("make_point", |_args| async move {
+        let ud = LuaUserdata::new(AsyncPoint { x: 5.0, y: 6.0 });
+        Ok(vec![AsyncReturnValue::from(ud)])
+    })
+    .unwrap();
+
+    let results = vm
+        .execute_string_async("local p = make_point(); return p.x + p.y")
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_number(), Some(11.0));
+}
+
+#[tokio::test]
+async fn test_async_return_mixed_userdata_and_values() {
+    let mut vm = new_vm();
+
+    // Return userdata alongside other types
+    vm.register_async("make_result", |_args| async move {
+        Ok(vec![
+            AsyncReturnValue::userdata(AsyncPoint { x: 1.0, y: 2.0 }),
+            AsyncReturnValue::string("ok"),
+            AsyncReturnValue::integer(42),
+        ])
+    })
+    .unwrap();
+
+    let results = vm
+        .execute_string_async("local p, s, n = make_result(); return p.x, s, n")
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_number(), Some(1.0));
+    assert_eq!(results[1].as_str(), Some("ok"));
+    assert_eq!(results[2].as_integer(), Some(42));
 }

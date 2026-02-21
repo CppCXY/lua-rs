@@ -593,13 +593,36 @@ impl LuaVM {
     /// vm.register_async("fetch", |args| async move { ... })?;
     /// let results = vm.execute_string_async("return fetch('https://...')").await?;
     /// ```
-    pub async fn execute_string_async(
-        &mut self,
-        source: &str,
-    ) -> LuaResult<Vec<LuaValue>> {
+    pub async fn execute_string_async(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.compile(source)?;
         let async_thread = self.create_async_thread(chunk, vec![])?;
         async_thread.await
+    }
+
+    /// Register a Rust enum as a Lua global table of integer constants.
+    ///
+    /// Each variant becomes a key in the table with its discriminant as value.
+    /// The enum must implement `LuaEnum` (auto-derived by `#[derive(LuaUserData)]`
+    /// on C-like enums).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// #[derive(LuaUserData)]
+    /// enum Color { Red, Green, Blue }
+    ///
+    /// vm.register_enum::<Color>("Color")?;
+    /// // Lua: Color.Red == 0, Color.Green == 1, Color.Blue == 2
+    /// ```
+    pub fn register_enum<T: crate::lua_value::LuaEnum>(&mut self, name: &str) -> LuaResult<()> {
+        let variants = T::variants();
+        let table = self.create_table(0, variants.len())?;
+        for &(vname, value) in variants {
+            let key = self.create_string(vname)?;
+            let val = LuaValue::integer(value);
+            self.raw_set(&table, key, val);
+        }
+        self.set_global(name, table)
     }
 
     #[inline(always)]

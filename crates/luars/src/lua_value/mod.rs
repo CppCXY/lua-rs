@@ -11,7 +11,7 @@ use std::fmt;
 use std::rc::Rc;
 
 pub use userdata_trait::{
-    LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, UdValue, UserDataTrait,
+    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, UdValue, UserDataTrait,
     lua_value_to_udvalue, udvalue_to_lua_value,
 };
 

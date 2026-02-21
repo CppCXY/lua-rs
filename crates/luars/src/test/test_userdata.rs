@@ -747,3 +747,120 @@ fn test_register_type_equality() {
     assert_eq!(results[0].as_boolean(), Some(true));
     assert_eq!(results[1].as_boolean(), Some(false));
 }
+
+// ==================== Enum export tests ====================
+
+#[allow(unused)]
+#[derive(LuaUserData)]
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+#[allow(unused)]
+#[derive(LuaUserData)]
+enum HttpStatus {
+    Ok = 200,
+    NotFound = 404,
+    ServerError = 500,
+}
+
+#[allow(unused)]
+#[derive(LuaUserData)]
+enum MixedDisc {
+    A,      // 0
+    B = 10, // 10
+    C,      // 11
+    D = 20, // 20
+    E,      // 21
+}
+
+#[test]
+fn test_enum_basic() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_enum::<Color>("Color").unwrap();
+
+    let results = vm
+        .execute_string("return Color.Red, Color.Green, Color.Blue")
+        .unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_integer(), Some(0));
+    assert_eq!(results[1].as_integer(), Some(1));
+    assert_eq!(results[2].as_integer(), Some(2));
+}
+
+#[test]
+fn test_enum_explicit_discriminants() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_enum::<HttpStatus>("HttpStatus").unwrap();
+
+    let results = vm
+        .execute_string("return HttpStatus.Ok, HttpStatus.NotFound, HttpStatus.ServerError")
+        .unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_integer(), Some(200));
+    assert_eq!(results[1].as_integer(), Some(404));
+    assert_eq!(results[2].as_integer(), Some(500));
+}
+
+#[test]
+fn test_enum_mixed_discriminants() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_enum::<MixedDisc>("MD").unwrap();
+
+    let results = vm
+        .execute_string("return MD.A, MD.B, MD.C, MD.D, MD.E")
+        .unwrap();
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0].as_integer(), Some(0));
+    assert_eq!(results[1].as_integer(), Some(10));
+    assert_eq!(results[2].as_integer(), Some(11));
+    assert_eq!(results[3].as_integer(), Some(20));
+    assert_eq!(results[4].as_integer(), Some(21));
+}
+
+#[test]
+fn test_enum_in_lua_comparison() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_enum::<HttpStatus>("Status").unwrap();
+
+    let results = vm
+        .execute_string(
+            r#"
+        local code = 404
+        if code == Status.NotFound then
+            return "not found"
+        elseif code == Status.Ok then
+            return "ok"
+        end
+        return "unknown"
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_str(), Some("not found"));
+}
+
+#[test]
+fn test_enum_iteration_in_lua() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_enum::<Color>("Color").unwrap();
+
+    let results = vm
+        .execute_string(
+            r#"
+        local count = 0
+        for k, v in pairs(Color) do
+            count = count + 1
+        end
+        return count
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(3));
+}

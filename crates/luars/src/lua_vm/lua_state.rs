@@ -98,11 +98,7 @@ pub struct LuaState {
     /// `Option<Pin<Box<...>>>` is null-pointer-optimized: zero overhead when None.
     pub(crate) pending_future: Option<
         Pin<
-            Box<
-                dyn Future<
-                    Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
-                >,
-            >,
+            Box<dyn Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>>>,
         >,
     >,
 }
@@ -860,11 +856,7 @@ impl LuaState {
     pub fn set_pending_future(
         &mut self,
         future: Pin<
-            Box<
-                dyn Future<
-                    Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
-                >,
-            >,
+            Box<dyn Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>>>,
         >,
     ) {
         self.pending_future = Some(future);
@@ -876,11 +868,7 @@ impl LuaState {
         &mut self,
     ) -> Option<
         Pin<
-            Box<
-                dyn Future<
-                    Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
-                >,
-            >,
+            Box<dyn Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>>>,
         >,
     > {
         self.pending_future.take()
@@ -1811,7 +1799,9 @@ impl LuaState {
     pub fn register_async<F, Fut>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: Fn(Vec<LuaValue>) -> Fut + 'static,
-        Fut: std::future::Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>> + 'static,
+        Fut: std::future::Future<
+                Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
+            > + 'static,
     {
         self.vm_mut().register_async(name, f)
     }
