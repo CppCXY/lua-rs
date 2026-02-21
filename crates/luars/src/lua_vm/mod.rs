@@ -1,5 +1,6 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
+pub mod async_thread;
 pub mod call_info;
 mod const_string;
 mod execute;
@@ -27,6 +28,7 @@ use crate::{CreateResult, GcKind, ObjectAllocator, ThreadPtr, UpvaluePtr, lib_re
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
+use std::future::Future;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -516,6 +518,88 @@ impl LuaVM {
     pub fn raw_get(&self, table_value: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
         let table = table_value.as_table()?;
         table.raw_get(key)
+    }
+
+    // ============ Async Support ============
+
+    /// Register an async function as a Lua global.
+    ///
+    /// The async function factory `f` receives the Lua arguments as `Vec<LuaValue>`
+    /// and returns a `Future` that produces `LuaResult<Vec<LuaValue>>`.
+    ///
+    /// From Lua code, the function looks and behaves like a normal synchronous
+    /// function. The async yield/resume is driven transparently by `AsyncThread`.
+    ///
+    /// **Important**: The function MUST be called from within an `AsyncThread`
+    /// (i.e., the coroutine must be yieldable). Use `create_async_thread()` or
+    /// `execute_string_async()` to run Lua code that calls async functions.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// vm.register_async("sleep", |args| async move {
+    ///     let secs = args[0].as_number().unwrap_or(1.0);
+    ///     tokio::time::sleep(Duration::from_secs_f64(secs)).await;
+    ///     Ok(vec![LuaValue::boolean(true)])
+    /// })?;
+    /// ```
+    pub fn register_async<F, Fut>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: Fn(Vec<LuaValue>) -> Fut + 'static,
+        Fut: Future<Output = LuaResult<Vec<async_thread::AsyncReturnValue>>> + 'static,
+    {
+        let wrapper = async_thread::wrap_async_function(f);
+        let closure_val = self.create_closure(wrapper)?;
+        self.set_global(name, closure_val)?;
+        Ok(())
+    }
+
+    /// Create an `AsyncThread` from a pre-compiled chunk.
+    ///
+    /// The chunk is loaded into a new coroutine, and the returned `AsyncThread`
+    /// can be `.await`ed to drive execution.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let chunk = vm.compile("return async_fn()")?;
+    /// let thread = vm.create_async_thread(chunk, vec![])?;
+    /// let results = thread.await?;
+    /// ```
+    pub fn create_async_thread(
+        &mut self,
+        chunk: crate::lua_value::Chunk,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<async_thread::AsyncThread> {
+        // Main chunk needs _ENV upvalue pointing to global table
+        let env_upval = self.create_upvalue_closed(self.global)?;
+        let func_val = self.create_function(
+            Rc::new(chunk),
+            crate::lua_value::UpvalueStore::from_vec(vec![env_upval]),
+        )?;
+        let thread_val = self.create_thread(func_val)?;
+        let vm_ptr = self as *mut LuaVM;
+        Ok(async_thread::AsyncThread::new(thread_val, vm_ptr, args))
+    }
+
+    /// Compile and execute Lua source code asynchronously.
+    ///
+    /// This is the simplest way to run Lua code that may call async functions.
+    /// Internally creates a coroutine and drives it with `AsyncThread`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// vm.register_async("fetch", |args| async move { ... })?;
+    /// let results = vm.execute_string_async("return fetch('https://...')").await?;
+    /// ```
+    pub async fn execute_string_async(
+        &mut self,
+        source: &str,
+    ) -> LuaResult<Vec<LuaValue>> {
+        let chunk = self.compile(source)?;
+        let async_thread = self.create_async_thread(chunk, vec![])?;
+        async_thread.await
     }
 
     #[inline(always)]

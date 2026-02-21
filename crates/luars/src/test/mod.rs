@@ -1,4 +1,5 @@
 // Test module organization
+pub mod test_async;
 pub mod test_basic;
 pub mod test_control_flow;
 pub mod test_coroutine;

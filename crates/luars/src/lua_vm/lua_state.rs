@@ -2,6 +2,8 @@
 // Represents a single thread/coroutine execution context
 // Multiple LuaStates can share the same LuaVM (global_State)
 
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
@@ -88,6 +90,21 @@ pub struct LuaState {
     /// used by C stdlib functions like gsub that don't support continuations).
     /// `yieldable(L)` == `nny == 0`.
     pub(crate) nny: u32,
+
+    /// Pending async future — set by async CFunction wrappers before yielding.
+    /// When an async function is called from Lua, it creates the Future and stores
+    /// it here, then yields with ASYNC_SENTINEL. The AsyncThread polls this future
+    /// and resumes the coroutine when it completes.
+    /// `Option<Pin<Box<...>>>` is null-pointer-optimized: zero overhead when None.
+    pub(crate) pending_future: Option<
+        Pin<
+            Box<
+                dyn Future<
+                    Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
+                >,
+            >,
+        >,
+    >,
 }
 
 impl LuaState {
@@ -120,6 +137,7 @@ impl LuaState {
             yielded: false,
             is_closing: false,
             nny: if is_main { 1 } else { 0 },
+            pending_future: None,
         }
     }
 
@@ -835,6 +853,37 @@ impl LuaState {
     #[inline(always)]
     pub fn take_yield(&mut self) -> Vec<LuaValue> {
         std::mem::take(&mut self.yield_values)
+    }
+
+    /// Store a pending async future (called by async function wrappers before yielding)
+    #[inline(always)]
+    pub fn set_pending_future(
+        &mut self,
+        future: Pin<
+            Box<
+                dyn Future<
+                    Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
+                >,
+            >,
+        >,
+    ) {
+        self.pending_future = Some(future);
+    }
+
+    /// Take the pending async future (called by AsyncThread after detecting async yield)
+    #[inline(always)]
+    pub fn take_pending_future(
+        &mut self,
+    ) -> Option<
+        Pin<
+            Box<
+                dyn Future<
+                    Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
+                >,
+            >,
+        >,
+    > {
+        self.pending_future.take()
     }
 
     /// Close upvalues from a given stack index upwards
@@ -1752,6 +1801,19 @@ impl LuaState {
     /// Set global variable
     pub fn set_global(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
         self.vm_mut().set_global(name, value)
+    }
+
+    // ===== Async Support =====
+
+    /// Register an async function as a Lua global (convenience proxy for `LuaVM::register_async`).
+    ///
+    /// See [`LuaVM::register_async`] for details.
+    pub fn register_async<F, Fut>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: Fn(Vec<LuaValue>) -> Fut + 'static,
+        Fut: std::future::Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>> + 'static,
+    {
+        self.vm_mut().register_async(name, f)
     }
 
     // ===== Execute =====
