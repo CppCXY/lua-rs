@@ -291,6 +291,6 @@ end
 
 -- NOTE: Do not call async functions (log, sleep, etc.) at the top level here,
 -- because this script is loaded via execute_string (sync). Async functions
--- can only be called from within handle_request (which runs via execute_string_async).
+-- can only be called from within handle_request (which runs via execute_async).
 -- To see load-time messages, use print() instead:
 print("[lua] Handler script loaded successfully, routes: " .. #routes)

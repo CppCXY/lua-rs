@@ -29,10 +29,7 @@ async fn test_async_basic_return() {
     })
     .unwrap();
 
-    let results = vm
-        .execute_string_async("return async_add(10, 20)")
-        .await
-        .unwrap();
+    let results = vm.execute_async("return async_add(10, 20)").await.unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_integer(), Some(30));
@@ -47,10 +44,7 @@ async fn test_async_no_args() {
     })
     .unwrap();
 
-    let results = vm
-        .execute_string_async("return async_hello()")
-        .await
-        .unwrap();
+    let results = vm.execute_async("return async_hello()").await.unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("hello"));
@@ -69,10 +63,7 @@ async fn test_async_multiple_returns() {
     })
     .unwrap();
 
-    let results = vm
-        .execute_string_async("return async_multi()")
-        .await
-        .unwrap();
+    let results = vm.execute_async("return async_multi()").await.unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_integer(), Some(1));
@@ -91,7 +82,7 @@ async fn test_async_nil_return() {
     .unwrap();
 
     let results = vm
-        .execute_string_async(
+        .execute_async(
             r#"
         local x = async_nil()
         assert(x == nil)
@@ -117,7 +108,7 @@ async fn test_async_sequential_calls() {
     .unwrap();
 
     let results = vm
-        .execute_string_async(
+        .execute_async(
             r#"
         local a = async_double(5)
         local b = async_double(a)
@@ -147,7 +138,7 @@ async fn test_async_with_sleep() {
     .unwrap();
 
     let results = vm
-        .execute_string_async("return async_sleep_and_return(42)")
+        .execute_async("return async_sleep_and_return(42)")
         .await
         .unwrap();
 
@@ -166,7 +157,7 @@ async fn test_async_error_propagation() {
     })
     .unwrap();
 
-    let result = vm.execute_string_async("return async_fail()").await;
+    let result = vm.execute_async("return async_fail()").await;
 
     assert!(result.is_err());
 }
@@ -184,7 +175,7 @@ async fn test_async_mixed_with_sync() {
     .unwrap();
 
     let results = vm
-        .execute_string_async(
+        .execute_async(
             r#"
         local function sync_process(s)
             return string.upper(s)
@@ -211,7 +202,7 @@ async fn test_async_in_loop() {
     .unwrap();
 
     let results = vm
-        .execute_string_async(
+        .execute_async(
             r#"
         local sum = 0
         for i = 1, 5 do
@@ -285,7 +276,7 @@ async fn test_async_return_userdata() {
 
     // Test field access on the returned userdata
     let results = vm
-        .execute_string_async("local p = make_point(3.0, 4.0); return p.x, p.y")
+        .execute_async("local p = make_point(3.0, 4.0); return p.x, p.y")
         .await
         .unwrap();
 
@@ -307,7 +298,7 @@ async fn test_async_return_userdata_method() {
 
     // Test method call on the returned userdata
     let results = vm
-        .execute_string_async("local p = make_point(10, 20); return p:sum()")
+        .execute_async("local p = make_point(10, 20); return p:sum()")
         .await
         .unwrap();
 
@@ -328,7 +319,7 @@ async fn test_async_return_userdata_tostring() {
 
     // Test __tostring metamethod
     let results = vm
-        .execute_string_async("local p = make_point(1, 2); return tostring(p)")
+        .execute_async("local p = make_point(1, 2); return tostring(p)")
         .await
         .unwrap();
 
@@ -348,7 +339,7 @@ async fn test_async_return_userdata_via_from() {
     .unwrap();
 
     let results = vm
-        .execute_string_async("local p = make_point(); return p.x + p.y")
+        .execute_async("local p = make_point(); return p.x + p.y")
         .await
         .unwrap();
 
@@ -371,7 +362,7 @@ async fn test_async_return_mixed_userdata_and_values() {
     .unwrap();
 
     let results = vm
-        .execute_string_async("local p, s, n = make_result(); return p.x, s, n")
+        .execute_async("local p, s, n = make_result(); return p.x, s, n")
         .await
         .unwrap();
 

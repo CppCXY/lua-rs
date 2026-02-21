@@ -5,7 +5,7 @@ use crate::*;
 fn test_add_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}
         local b = {val = 3}
@@ -22,7 +22,7 @@ fn test_add_metamethod() {
 fn test_add_metamethod_with_number() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}
         setmetatable(a, {__add = function(x, y) 
@@ -43,7 +43,7 @@ fn test_add_metamethod_with_number() {
 fn test_sub_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 10}
         local b = {val = 3}
@@ -60,7 +60,7 @@ fn test_sub_metamethod() {
 fn test_mul_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}
         setmetatable(a, {__mul = function(x, y) return {val = x.val * y} end})
@@ -78,7 +78,7 @@ fn test_mul_metamethod() {
 fn test_div_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 20}
         setmetatable(a, {__div = function(x, y) return {val = x.val / y} end})
@@ -93,7 +93,7 @@ fn test_div_metamethod() {
 fn test_mod_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 17}
         setmetatable(a, {__mod = function(x, y) return {val = x.val % y} end})
@@ -111,7 +111,7 @@ fn test_mod_metamethod() {
 fn test_pow_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 2}
         setmetatable(a, {__pow = function(x, y) return {val = x.val ^ y} end})
@@ -126,7 +126,7 @@ fn test_pow_metamethod() {
 fn test_unm_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 10}
         setmetatable(a, {__unm = function(x) return {val = -x.val} end})
@@ -141,7 +141,7 @@ fn test_unm_metamethod() {
 fn test_idiv_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 17}
         setmetatable(a, {__idiv = function(x, y) return {val = x.val // y} end})
@@ -156,7 +156,7 @@ fn test_idiv_metamethod() {
 fn test_band_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}  -- 101
         local b = {val = 3}  -- 011
@@ -173,7 +173,7 @@ fn test_band_metamethod() {
 fn test_bor_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}  -- 101
         local b = {val = 3}  -- 011
@@ -190,7 +190,7 @@ fn test_bor_metamethod() {
 fn test_bxor_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}  -- 101
         local b = {val = 3}  -- 011
@@ -207,7 +207,7 @@ fn test_bxor_metamethod() {
 fn test_bnot_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}
         setmetatable(a, {__bnot = function(x) return {val = ~x.val} end})
@@ -222,7 +222,7 @@ fn test_bnot_metamethod() {
 fn test_shl_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}
         setmetatable(a, {__shl = function(x, n) return {val = x.val << n} end})
@@ -237,7 +237,7 @@ fn test_shl_metamethod() {
 fn test_shr_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 20}
         setmetatable(a, {__shr = function(x, n) return {val = x.val >> n} end})
@@ -252,7 +252,7 @@ fn test_shr_metamethod() {
 fn test_index_metamethod_function() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {}
         setmetatable(t, {
@@ -273,7 +273,7 @@ fn test_index_metamethod_function() {
 fn test_index_metamethod_table() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local defaults = {x = 10, y = 20}
         local t = {}
@@ -288,7 +288,7 @@ fn test_index_metamethod_table() {
 fn test_newindex_metamethod_function() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local storage = {}
         local t = {}
@@ -317,7 +317,7 @@ fn test_newindex_metamethod_function() {
 fn test_newindex_metamethod_table() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local storage = {}
         local t = {}
@@ -333,7 +333,7 @@ fn test_newindex_metamethod_table() {
 fn test_call_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {}
         setmetatable(t, {
@@ -352,7 +352,7 @@ fn test_call_metamethod() {
 fn test_tostring_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {x = 1, y = 2}
         setmetatable(t, {
@@ -370,7 +370,7 @@ fn test_tostring_metamethod() {
 fn test_len_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {a = 1, b = 2, c = 3}
         setmetatable(t, {
@@ -395,7 +395,7 @@ fn test_len_metamethod() {
 fn test_eq_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 5}
         local b = {val = 5}
@@ -419,7 +419,7 @@ fn test_eq_metamethod() {
 fn test_lt_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 3}
         local b = {val = 5}
@@ -438,7 +438,7 @@ fn test_lt_metamethod() {
 fn test_le_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {val = 3}
         local b = {val = 3}
@@ -454,7 +454,7 @@ fn test_le_metamethod() {
 fn test_concat_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = {str = "Hello"}
         local b = {str = "World"}
@@ -471,7 +471,7 @@ fn test_concat_metamethod() {
 fn test_nested_index_chain() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local level1 = {a = 1}
         local level2 = {}
@@ -488,7 +488,7 @@ fn test_nested_index_chain() {
 fn test_multiple_metamethods_same_object() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local mt = {
             __add = function(a, b) 
@@ -521,7 +521,7 @@ fn test_multiple_metamethods_same_object() {
 fn test_string_metatable_len() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "hello"
         assert(s:len() == 5)
@@ -535,7 +535,7 @@ fn test_string_metatable_len() {
 fn test_string_metatable_upper() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "hello"
         assert(s:upper() == "HELLO")
@@ -548,7 +548,7 @@ fn test_string_metatable_upper() {
 fn test_string_metatable_lower() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "HELLO"
         assert(s:lower() == "hello")
@@ -561,7 +561,7 @@ fn test_string_metatable_lower() {
 fn test_string_metatable_sub() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "hello world"
         assert(s:sub(1, 5) == "hello")
@@ -574,7 +574,7 @@ fn test_string_metatable_sub() {
 fn test_getmetatable_table() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {}
         local mt = {__index = {x = 1}}
@@ -589,7 +589,7 @@ fn test_getmetatable_table() {
 fn test_getmetatable_string() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "hello"
         local mt = getmetatable(s)
@@ -604,7 +604,7 @@ fn test_getmetatable_string() {
 fn test_arithmetic_metamethod_chain() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local mt = {
             __add = function(a, b) 
@@ -631,7 +631,7 @@ fn test_arithmetic_metamethod_chain() {
 fn test_index_with_rawget() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {real = 1}
         setmetatable(t, {
@@ -655,7 +655,7 @@ fn test_index_with_rawget() {
 fn test_newindex_with_rawset() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local storage = {}
         local t = {}
@@ -678,7 +678,7 @@ fn test_newindex_with_rawset() {
 fn test_mode_weak_tables() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {}
         setmetatable(t, {__mode = "k"})

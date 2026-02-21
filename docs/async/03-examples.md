@@ -31,7 +31,7 @@ vm.register_async("async_add", |args| async move {
     Ok(vec![AsyncReturnValue::integer(a + b)])
 })?;
 
-let results = vm.execute_string_async("return async_add(10, 20)").await?;
+let results = vm.execute_async("return async_add(10, 20)").await?;
 assert_eq!(results[0].as_integer(), Some(30));
 ```
 
@@ -43,7 +43,7 @@ vm.register_async("greet", |args| async move {
     Ok(vec![AsyncReturnValue::string(format!("Hello, {}!", name))])
 })?;
 
-let results = vm.execute_string_async(r#"return greet("Lua")"#).await?;
+let results = vm.execute_async(r#"return greet("Lua")"#).await?;
 assert_eq!(results[0].as_str(), Some("Hello, Lua!"));
 ```
 
@@ -64,7 +64,7 @@ vm.register_async("divmod", |args| async move {
 })?;
 
 // Lua side
-let results = vm.execute_string_async(r#"
+let results = vm.execute_async(r#"
     local q, r = divmod(17, 5)
     return q, r
 "#).await?;
@@ -155,7 +155,7 @@ vm.register_async("safe_divide", |args| async move {
 })?;
 
 // Catch error on the Rust side
-let result = vm.execute_string_async("return safe_divide(1, 0)").await;
+let result = vm.execute_async("return safe_divide(1, 0)").await;
 assert!(result.is_err());
 ```
 
@@ -256,7 +256,7 @@ vm.register_async("async_double", |args| async move {
     Ok(vec![AsyncReturnValue::integer(n * 2)])
 })?;
 
-let results = vm.execute_string_async(r#"
+let results = vm.execute_async(r#"
     local a = async_double(5)    -- 10
     local b = async_double(a)    -- 20
     local c = async_double(b)    -- 40
@@ -279,7 +279,7 @@ vm.register_async("async_fetch", |args| async move {
     Ok(vec![AsyncReturnValue::string(format!("data_{}", key))])
 })?;
 
-let results = vm.execute_string_async(r#"
+let results = vm.execute_async(r#"
     -- Regular Lua function
     local function transform(s)
         return string.upper(s) .. "!"
@@ -309,7 +309,7 @@ vm.register_async("async_inc", |args| async move {
     Ok(vec![AsyncReturnValue::integer(n + 1)])
 })?;
 
-let results = vm.execute_string_async(r#"
+let results = vm.execute_async(r#"
     local sum = 0
     for i = 1, 5 do
         sum = sum + async_inc(i)
@@ -332,7 +332,7 @@ vm.register_async("risky_op", |_args| async move {
     Err(luars::lua_vm::LuaError::RuntimeError)
 })?;
 
-let results = vm.execute_string_async(r#"
+let results = vm.execute_async(r#"
     local ok, err = pcall(risky_op)
     if not ok then
         return "caught: " .. tostring(err)

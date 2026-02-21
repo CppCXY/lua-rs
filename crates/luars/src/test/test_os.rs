@@ -13,7 +13,7 @@ fn test_os_time() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = os.time()
         assert(type(t) == "number")
@@ -31,7 +31,7 @@ fn test_os_time_with_table() {
 
     // Note: os.time with table argument not fully implemented
     // Just verify it doesn't crash
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = os.time()
         assert(type(t) == "number")
@@ -47,7 +47,7 @@ fn test_os_date_default() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local d = os.date()
         assert(type(d) == "string")
@@ -65,7 +65,7 @@ fn test_os_date_table() {
 
     // Note: os.date("*t") not fully implemented
     // Just verify os.date() returns a string
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local d = os.date()
         assert(type(d) == "string")
@@ -82,7 +82,7 @@ fn test_os_date_format() {
 
     // Note: os.date format strings not fully implemented
     // Just verify basic functionality
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local d = os.date()
         assert(type(d) == "string")
@@ -98,7 +98,7 @@ fn test_os_difftime() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t1 = os.time()
         local t2 = t1 + 100
@@ -115,7 +115,7 @@ fn test_os_clock() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local c1 = os.clock()
         assert(type(c1) == "number")
@@ -138,7 +138,7 @@ fn test_os_getenv() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         -- PATH should exist on most systems
         local path = os.getenv("PATH")
@@ -159,7 +159,7 @@ fn test_os_remove() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute_string(&format!(
+    let result = vm.execute(&format!(
         r#"
         local path = "{}/temp_remove.txt"
         
@@ -187,7 +187,7 @@ fn test_os_remove_nonexistent() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local ok, err = os.remove("nonexistent_file_99999.txt")
         assert(ok == nil)
@@ -204,7 +204,7 @@ fn test_os_rename() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute_string(&format!(
+    let result = vm.execute(&format!(
         r#"
         local path1 = "{}/temp_rename1.txt"
         local path2 = "{}/temp_rename2.txt"
@@ -243,7 +243,7 @@ fn test_os_tmpname() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local name = os.tmpname()
         assert(type(name) == "string")
@@ -261,7 +261,7 @@ fn test_os_exit() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(os.exit) == "function")
         "#,
@@ -275,7 +275,7 @@ fn test_os_setlocale() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         -- Query current locale
         local loc = os.setlocale(nil)

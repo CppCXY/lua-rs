@@ -144,7 +144,8 @@ fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
     let code = format!("{} = require('{}')", module, module);
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute(Rc::new(chunk)).map_err(|e| format!("{}", e))?;
+            vm.execute_chunk(Rc::new(chunk))
+                .map_err(|e| format!("{}", e))?;
             Ok(())
         }
         Err(e) => Err(format!("failed to load module '{}': {}", module, e)),
@@ -157,7 +158,7 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
 
     match vm.compile_with_name(&code, filename) {
         Ok(chunk) => {
-            match vm.execute(Rc::new(chunk)) {
+            match vm.execute_chunk(Rc::new(chunk)) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     // Generate traceback for uncaught runtime errors
@@ -179,7 +180,8 @@ fn execute_stdin(vm: &mut LuaVM) -> Result<(), String> {
 
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute(Rc::new(chunk)).map_err(|e| format!("{}", e))?;
+            vm.execute_chunk(Rc::new(chunk))
+                .map_err(|e| format!("{}", e))?;
             Ok(())
         }
         Err(e) => Err(format!("stdin: {}", e)),
@@ -235,7 +237,7 @@ fn run_repl(vm: &mut LuaVM) {
         // Try to compile and execute
         match vm.compile(&code_to_run) {
             Ok(chunk) => {
-                match vm.execute(Rc::new(chunk)) {
+                match vm.execute_chunk(Rc::new(chunk)) {
                     Ok(results) => {
                         // Print non-nil first result
                         if let Some(first) = results.into_iter().next() {
@@ -399,7 +401,7 @@ fn lua_main() -> i32 {
     for code in &opts.execute_strings {
         match vm.compile(code) {
             Ok(chunk) => {
-                if let Err(e) = vm.execute(Rc::new(chunk)) {
+                if let Err(e) = vm.execute_chunk(Rc::new(chunk)) {
                     let error_msg = vm.get_error_message(e);
                     let traceback = vm.generate_traceback(&error_msg);
                     eprintln!("lua: Runtime Error: {}", traceback);
@@ -429,7 +431,7 @@ fn lua_main() -> i32 {
                 dir = dir.replace('\\', "/")
             );
             if let Ok(chunk) = vm.compile(&set_path) {
-                let _ = vm.execute(Rc::new(chunk));
+                let _ = vm.execute_chunk(Rc::new(chunk));
             }
         }
         if let Err(e) = execute_file(&mut vm, filename) {

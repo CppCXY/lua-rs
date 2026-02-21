@@ -2,8 +2,7 @@
 resolver = "2"
 members = [
     "crates/*", 
-    "examples/http-server", 
-    "examples/luars-example"
+    "examples/*", 
 ]
 
 [workspace.dependencies]

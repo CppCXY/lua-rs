@@ -6,7 +6,7 @@ fn test_utf8_len() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(utf8.len("hello") == 5)
         assert(utf8.len("") == 0)
@@ -22,7 +22,7 @@ fn test_utf8_char() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(utf8.char(65) == "A")
         assert(utf8.char(65, 66, 67) == "ABC")
@@ -38,7 +38,7 @@ fn test_utf8_codes() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "ABC"
         local codes = {}
@@ -59,7 +59,7 @@ fn test_utf8_codepoint() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(utf8.codepoint("A") == 65)
         local a, b, c = utf8.codepoint("ABC", 1, 3)
@@ -77,7 +77,7 @@ fn test_utf8_offset() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "hello"
         assert(utf8.offset(s, 2) == 2)
@@ -97,7 +97,7 @@ fn test_utf8_charpattern() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(utf8.charpattern) == "string")
         assert(#utf8.charpattern > 0)
@@ -112,7 +112,7 @@ fn test_utf8_multibyte() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local s = "Hello 世界"
         local len = utf8.len(s)

@@ -357,7 +357,7 @@ fn setup_point_vm() -> Box<LuaVM> {
 #[test]
 fn test_vm_get_field() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string("return p.x, p.y").unwrap();
+    let results = vm.execute("return p.x, p.y").unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].as_number(), Some(3.0));
     assert_eq!(results[1].as_number(), Some(4.0));
@@ -367,7 +367,7 @@ fn test_vm_get_field() {
 fn test_vm_set_field() {
     let mut vm = setup_point_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         p.x = 10.0
         p.y = 20.0
@@ -383,7 +383,7 @@ fn test_vm_set_field() {
 #[test]
 fn test_vm_tostring() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string("return tostring(p)").unwrap();
+    let results = vm.execute("return tostring(p)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Point(3, 4)"));
 }
@@ -417,7 +417,7 @@ fn test_vm_eq() {
     state.set_global("p2", v2).unwrap();
     state.set_global("p3", v3).unwrap();
 
-    let results = vm.execute_string("return p1 == p2, p1 == p3").unwrap();
+    let results = vm.execute("return p1 == p2, p1 == p3").unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].as_boolean(), Some(true));
     assert_eq!(results[1].as_boolean(), Some(false));
@@ -445,9 +445,7 @@ fn test_vm_lt_le() {
     state.set_global("p1", v1).unwrap();
     state.set_global("p2", v2).unwrap();
 
-    let results = vm
-        .execute_string("return p1 < p2, p1 <= p2, p2 < p1")
-        .unwrap();
+    let results = vm.execute("return p1 < p2, p1 <= p2, p2 < p1").unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_boolean(), Some(true));
     assert_eq!(results[1].as_boolean(), Some(true));
@@ -457,9 +455,7 @@ fn test_vm_lt_le() {
 #[test]
 fn test_vm_concat() {
     let mut vm = setup_point_vm();
-    let results = vm
-        .execute_string(r#"return "pos=" .. tostring(p)"#)
-        .unwrap();
+    let results = vm.execute(r#"return "pos=" .. tostring(p)"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("pos=Point(3, 4)"));
 }
@@ -468,7 +464,7 @@ fn test_vm_concat() {
 fn test_vm_pass_userdata_to_function() {
     let mut vm = setup_point_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local function get_x(obj)
             return obj.x
@@ -498,7 +494,7 @@ fn test_vm_config_readonly() {
 
     // Can read name and version
     let results = vm
-        .execute_string("return cfg.name, cfg.version, cfg.count")
+        .execute("return cfg.name, cfg.version, cfg.count")
         .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_str(), Some("test"));
@@ -506,13 +502,11 @@ fn test_vm_config_readonly() {
     assert_eq!(results[2].as_integer(), Some(10));
 
     // Can set name (writable)
-    let results = vm
-        .execute_string(r#"cfg.name = "new"; return cfg.name"#)
-        .unwrap();
+    let results = vm.execute(r#"cfg.name = "new"; return cfg.name"#).unwrap();
     assert_eq!(results[0].as_str(), Some("new"));
 
     // Cannot set version (readonly) — should error
-    let result = vm.execute_string("cfg.version = 99");
+    let result = vm.execute("cfg.version = 99");
     assert!(result.is_err());
 }
 
@@ -523,7 +517,7 @@ fn test_vm_unknown_field_is_nil() {
     // and since there's no metatable, should error (attempt to index userdata)
     // Actually, looking at the code: if get_field returns None AND there's no __index,
     // it produces an error. Let's verify the error case:
-    let result = vm.execute_string("return p.nonexistent");
+    let result = vm.execute("return p.nonexistent");
     // With no metatable set, this should error since no __index metamethod exists
     assert!(result.is_err());
 }
@@ -531,7 +525,7 @@ fn test_vm_unknown_field_is_nil() {
 #[test]
 fn test_vm_type_of_userdata() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string("return type(p)").unwrap();
+    let results = vm.execute("return type(p)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("userdata"));
 }
@@ -541,7 +535,7 @@ fn test_vm_type_of_userdata() {
 #[test]
 fn test_vm_method_distance() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string("return p:distance()").unwrap();
+    let results = vm.execute("return p:distance()").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_float(), Some(5.0)); // 3-4-5 triangle
 }
@@ -550,7 +544,7 @@ fn test_vm_method_distance() {
 fn test_vm_method_translate() {
     let mut vm = setup_point_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         p:translate(10, 20)
         return p.x, p.y
@@ -566,7 +560,7 @@ fn test_vm_method_translate() {
 fn test_vm_method_scale() {
     let mut vm = setup_point_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         p:scale(2)
         return p.x, p.y
@@ -583,12 +577,12 @@ fn test_vm_method_optional_param() {
     let mut vm = setup_point_vm();
 
     // With parameter
-    let results = vm.execute_string(r#"return p:greet("Alice")"#).unwrap();
+    let results = vm.execute(r#"return p:greet("Alice")"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Hello Alice from Point(3, 4)"));
 
     // Without parameter (nil/missing → None)
-    let results = vm.execute_string("return p:greet()").unwrap();
+    let results = vm.execute("return p:greet()").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Hello from Point(3, 4)"));
 }
@@ -596,7 +590,7 @@ fn test_vm_method_optional_param() {
 #[test]
 fn test_vm_method_result_ok() {
     let mut vm = setup_point_vm();
-    let results = vm.execute_string("return p:checked_div(2)").unwrap();
+    let results = vm.execute("return p:checked_div(2)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_number(), Some(1.5)); // 3.0 / 2
 }
@@ -604,7 +598,7 @@ fn test_vm_method_result_ok() {
 #[test]
 fn test_vm_method_result_err() {
     let mut vm = setup_point_vm();
-    let result = vm.execute_string("return p:checked_div(0)");
+    let result = vm.execute("return p:checked_div(0)");
     assert!(result.is_err()); // Should raise Lua error
 }
 
@@ -612,7 +606,7 @@ fn test_vm_method_result_err() {
 fn test_vm_method_as_field_access() {
     let mut vm = setup_point_vm();
     // Methods are accessed as fields that return CFunction values
-    let results = vm.execute_string("return type(p.distance)").unwrap();
+    let results = vm.execute("return type(p.distance)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("function"));
 }
@@ -635,7 +629,7 @@ fn setup_point_class_vm() -> Box<LuaVM> {
 #[test]
 fn test_register_type_creates_global_table() {
     let mut vm = setup_point_class_vm();
-    let results = vm.execute_string("return type(Point)").unwrap();
+    let results = vm.execute("return type(Point)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("table"));
 }
@@ -643,7 +637,7 @@ fn test_register_type_creates_global_table() {
 #[test]
 fn test_register_type_new_is_function() {
     let mut vm = setup_point_class_vm();
-    let results = vm.execute_string("return type(Point.new)").unwrap();
+    let results = vm.execute("return type(Point.new)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("function"));
 }
@@ -652,7 +646,7 @@ fn test_register_type_new_is_function() {
 fn test_register_type_constructor() {
     let mut vm = setup_point_class_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local p = Point.new(3, 4)
         return p.x, p.y
@@ -668,7 +662,7 @@ fn test_register_type_constructor() {
 fn test_register_type_constructor_with_methods() {
     let mut vm = setup_point_class_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local p = Point.new(3, 4)
         return p:distance()
@@ -683,7 +677,7 @@ fn test_register_type_constructor_with_methods() {
 fn test_register_type_constructor_with_mutation() {
     let mut vm = setup_point_class_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local p = Point.new(1, 2)
         p:translate(10, 20)
@@ -700,7 +694,7 @@ fn test_register_type_constructor_with_mutation() {
 fn test_register_type_constructor_tostring() {
     let mut vm = setup_point_class_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local p = Point.new(5, 10)
         return tostring(p)
@@ -715,7 +709,7 @@ fn test_register_type_constructor_tostring() {
 fn test_register_type_multiple_instances() {
     let mut vm = setup_point_class_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local a = Point.new(1, 0)
         local b = Point.new(0, 1)
@@ -734,7 +728,7 @@ fn test_register_type_multiple_instances() {
 fn test_register_type_equality() {
     let mut vm = setup_point_class_vm();
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local a = Point.new(3, 4)
         local b = Point.new(3, 4)
@@ -783,7 +777,7 @@ fn test_enum_basic() {
     vm.register_enum::<Color>("Color").unwrap();
 
     let results = vm
-        .execute_string("return Color.Red, Color.Green, Color.Blue")
+        .execute("return Color.Red, Color.Green, Color.Blue")
         .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_integer(), Some(0));
@@ -798,7 +792,7 @@ fn test_enum_explicit_discriminants() {
     vm.register_enum::<HttpStatus>("HttpStatus").unwrap();
 
     let results = vm
-        .execute_string("return HttpStatus.Ok, HttpStatus.NotFound, HttpStatus.ServerError")
+        .execute("return HttpStatus.Ok, HttpStatus.NotFound, HttpStatus.ServerError")
         .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_integer(), Some(200));
@@ -812,9 +806,7 @@ fn test_enum_mixed_discriminants() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_enum::<MixedDisc>("MD").unwrap();
 
-    let results = vm
-        .execute_string("return MD.A, MD.B, MD.C, MD.D, MD.E")
-        .unwrap();
+    let results = vm.execute("return MD.A, MD.B, MD.C, MD.D, MD.E").unwrap();
     assert_eq!(results.len(), 5);
     assert_eq!(results[0].as_integer(), Some(0));
     assert_eq!(results[1].as_integer(), Some(10));
@@ -830,7 +822,7 @@ fn test_enum_in_lua_comparison() {
     vm.register_enum::<HttpStatus>("Status").unwrap();
 
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local code = 404
         if code == Status.NotFound then
@@ -852,7 +844,7 @@ fn test_enum_iteration_in_lua() {
     vm.register_enum::<Color>("Color").unwrap();
 
     let results = vm
-        .execute_string(
+        .execute(
             r#"
         local count = 0
         for k, v in pairs(Color) do

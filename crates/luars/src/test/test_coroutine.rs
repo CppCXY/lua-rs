@@ -5,7 +5,7 @@ use crate::*;
 fn test_coroutine_create_resume() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local co = coroutine.create(function()
             return 42
@@ -28,7 +28,7 @@ fn test_coroutine_create_resume() {
 fn test_coroutine_yield() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local co = coroutine.create(function()
             coroutine.yield(1)
@@ -58,7 +58,7 @@ fn test_coroutine_yield() {
 fn test_coroutine_status() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local co = coroutine.create(function()
             coroutine.yield()
@@ -79,7 +79,7 @@ fn test_coroutine_status() {
 fn test_coroutine_running() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local main_co = coroutine.running()
         assert(main_co ~= nil)
@@ -104,7 +104,7 @@ fn test_coroutine_running() {
 fn test_coroutine_wrap() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local f = coroutine.wrap(function()
             coroutine.yield(1)
@@ -129,7 +129,7 @@ fn test_coroutine_wrap() {
 fn test_coroutine_isyieldable() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local co = coroutine.create(function()
             assert(coroutine.isyieldable() == true)
@@ -146,7 +146,7 @@ fn test_coroutine_isyieldable() {
 fn test_coroutine_close() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local co = coroutine.create(function()
             coroutine.yield(1)
@@ -169,7 +169,7 @@ fn test_coroutine_with_loop() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     // Test that coroutine with for loop can be created and resumed
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local co = coroutine.create(function()
             local count = 0
@@ -204,7 +204,7 @@ fn test_coroutine_with_loop() {
 fn test_coroutine_error_handling() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local co = coroutine.create(function()
             error("test error")

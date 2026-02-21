@@ -8,7 +8,7 @@ fn test_xpcall_simple() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test 1: Basic xpcall without upvalues
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local function handler(err)
             return "handled"
@@ -25,7 +25,7 @@ fn test_xpcall_simple() {
     assert!(result.is_ok(), "Test 1 failed: {:?}", result);
 
     // Test 2: Handler with upvalue capture
-    let result2 = vm.execute_string(
+    let result2 = vm.execute(
         r#"
         local called = false
         local function handler2(err)
@@ -47,7 +47,7 @@ fn test_xpcall_concat() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test: Handler with string concatenation
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local flag = false
         local function handler(err)

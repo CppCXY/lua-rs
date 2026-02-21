@@ -34,7 +34,7 @@ mod tests {
             return #finalized
         "#;
 
-        match vm.execute_string(code) {
+        match vm.execute(code) {
             Ok(result) => {
                 println!("Finalized count: {:?}", result);
                 for value in result {
@@ -82,7 +82,7 @@ mod tests {
             return count_before, count_after
         "#;
 
-        match vm.execute_string(code) {
+        match vm.execute(code) {
             Ok(result) => {
                 println!("Weak keys test result: {:?}", result);
                 // count_before should be > 0, count_after should be 0 (keys collected)
@@ -125,7 +125,7 @@ mod tests {
             return count_before, count_after
         "#;
 
-        match vm.execute_string(code) {
+        match vm.execute(code) {
             Ok(result) => {
                 println!("Weak values test result: {:?}", result);
                 // count_before should be > 0, count_after should be 0 (values collected)
@@ -161,7 +161,7 @@ mod tests {
             return count
         "#;
 
-        match vm.execute_string(code) {
+        match vm.execute(code) {
             Ok(result) => {
                 println!("Weak keys+values test result: {:?}", result);
                 // Note: Full weak table support requires more complex mark phase handling
@@ -204,7 +204,7 @@ mod tests {
             return resurrected ~= nil
         "#;
 
-        match vm.execute_string(code) {
+        match vm.execute(code) {
             Ok(result) => {
                 println!("Resurrection test result: {:?}", result);
             }
@@ -247,7 +247,7 @@ mod tests {
             return #order
         "#;
 
-        match vm.execute_string(code) {
+        match vm.execute(code) {
             Ok(result) => {
                 println!("Finalizer ordering test result: {:?}", result);
             }

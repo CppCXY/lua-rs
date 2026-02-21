@@ -8,7 +8,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-luars = { version = "0.5" }
+luars = { version = "0.6" }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 ```
 
@@ -35,7 +35,7 @@ async fn main() -> LuaResult<()> {
     })?;
 
     // 3. Call it from Lua
-    let results = vm.execute_string_async(r#"
+    let results = vm.execute_async(r#"
         print("sleeping...")
         sleep(0.5)
         print("done!")
@@ -55,7 +55,7 @@ async fn main() -> LuaResult<()> {
   └──────────────┬──────────────┘
                  ▼
   ┌─────────────────────────────┐
-  │ 2. execute_string_async()   │  Execute Lua code asynchronously
+  │ 2. execute_async()   │  Execute Lua code asynchronously
   │    or create_async_thread() │
   └──────────────┬──────────────┘
                  ▼
@@ -90,7 +90,7 @@ Two equivalent approaches:
 
 ```rust
 // Approach A: Concise — compile + execute in one step
-let results = vm.execute_string_async("return read_file('config.txt')").await?;
+let results = vm.execute_async("return read_file('config.txt')").await?;
 
 // Approach B: Manual — compile first, then create AsyncThread
 let chunk = vm.compile("return read_file('config.txt')")?;
@@ -103,14 +103,14 @@ let results = thread.await?;
 `.await` returns `LuaResult<Vec<LuaValue>>` — the exact same type as synchronous `execute_string()`.
 
 ```rust
-let results = vm.execute_string_async("return read_file('config.txt')").await?;
+let results = vm.execute_async("return read_file('config.txt')").await?;
 let content = results[0].as_str().unwrap_or("(nil)");
 println!("File content: {}", content);
 ```
 
 ## Important Constraints
 
-1. **Must use async execution**: Registered async functions can only be called via `execute_string_async()` or `create_async_thread()`. Calling async functions from regular `execute_string()` will cause an error.
+1. **Must use async execution**: Registered async functions can only be called via `execute_async()` or `create_async_thread()`. Calling async functions from regular `execute_string()` will cause an error.
 
 2. **`LuaVM` is `!Send`**: Cannot be moved across threads. For multi-threading, use the thread-per-VM pattern (see [Multi-VM Patterns](./05-multi-vm.md)).
 

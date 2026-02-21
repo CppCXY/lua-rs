@@ -27,6 +27,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::lua_ref::RefId;
 use crate::lua_vm::{LuaResult, LuaVM};
@@ -86,7 +87,7 @@ impl AsyncReturnValue {
 
     /// Create a userdata return value (will be GC-allocated when passed back to Lua)
     #[inline]
-    pub fn userdata<T: crate::lua_value::UserDataTrait>(data: T) -> Self {
+    pub fn userdata<T: UserDataTrait>(data: T) -> Self {
         AsyncReturnValue::UserData(LuaUserdata::new(data))
     }
 }

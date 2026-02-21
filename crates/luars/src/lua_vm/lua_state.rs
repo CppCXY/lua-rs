@@ -1818,7 +1818,7 @@ impl LuaState {
     /// assert_eq!(results[0].as_integer(), Some(3));
     /// ```
     pub fn execute_string(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
-        self.vm_mut().execute_string(source)
+        self.vm_mut().execute(source)
     }
 
     /// Execute a pre-compiled chunk, returning results.
@@ -1828,7 +1828,7 @@ impl LuaState {
         &mut self,
         chunk: std::rc::Rc<crate::lua_value::Chunk>,
     ) -> LuaResult<Vec<LuaValue>> {
-        self.vm_mut().execute(chunk)
+        self.vm_mut().execute_chunk(chunk)
     }
 
     // ===== Type Registration =====

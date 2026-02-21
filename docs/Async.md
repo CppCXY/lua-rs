@@ -6,12 +6,12 @@ This directory contains the complete documentation for luars async features.
 
 | Document | Contents |
 |----------|----------|
-| [Getting Started](./01-getting-started.md) | 5-minute async quickstart, your first async function |
-| [API Reference](./02-api-reference.md) | Detailed description of all async types and methods |
-| [Examples](./03-examples.md) | Code examples from simple to complex |
-| [Internal Architecture](./04-architecture.md) | Coroutine↔Future bridging implementation details |
-| [Multi-VM Patterns](./05-multi-vm.md) | Design patterns for multi-LuaVM concurrent processing |
-| [HTTP Server Example](./06-http-server.md) | Complete async HTTP server walkthrough |
+| [Getting Started](async/01-getting-started.md) | 5-minute async quickstart, your first async function |
+| [API Reference](async/02-api-reference.md) | Detailed description of all async types and methods |
+| [Examples](async/03-examples.md) | Code examples from simple to complex |
+| [Internal Architecture](async/04-architecture.md) | Coroutine↔Future bridging implementation details |
+| [Multi-VM Patterns](async/05-multi-vm.md) | Design patterns for multi-LuaVM concurrent processing |
+| [HTTP Server Example](async/06-http-server.md) | Complete async HTTP server walkthrough |
 
 ## Design Document
 

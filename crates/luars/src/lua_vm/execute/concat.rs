@@ -488,7 +488,7 @@ mod tests {
         let mut vm = LuaVM::new(SafeOption::default());
 
         // Test single string
-        let result = vm.execute_string(
+        let result = vm.execute(
             r#"
             local s = "hello"
             return s
@@ -503,7 +503,7 @@ mod tests {
         vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
         // Test number concatenation
-        let result = vm.execute_string(
+        let result = vm.execute(
             r#"
             local s = "x" .. 42 .. "y"
             assert(s == "x42y")

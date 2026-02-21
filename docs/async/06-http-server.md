@@ -132,17 +132,17 @@ end
 ### Build
 
 ```bash
-cargo build --release --example http-server
+cargo build --release -p http-server
 ```
 
 ### Start
 
 ```bash
 # Default: port 8080, workers = number of CPU cores
-cargo run --release --example http-server
+cargo run --release -p http-server
 
 # Custom port and worker count
-cargo run --release --example http-server -- --port 3000 --workers 4
+cargo run --release -p http-server -- --port 3000 --workers 4
 ```
 
 ### Test
@@ -178,5 +178,5 @@ curl http://localhost:8080/fetch
 ## Related Documentation
 
 - [Multi-VM Patterns](./05-multi-vm.md) — Detailed explanation of the thread-per-VM pattern
-- [API Reference](./02-api-reference.md) — `register_async()`, `execute_string_async()`
+- [API Reference](./02-api-reference.md) — `register_async()`, `execute_async()`
 - [Architecture](./04-architecture.md) — How async bridging works internally

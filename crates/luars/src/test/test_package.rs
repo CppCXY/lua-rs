@@ -6,7 +6,7 @@ fn test_package_loaded() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(package.loaded) == "table")
         assert(package.loaded.string ~= nil)
@@ -23,7 +23,7 @@ fn test_package_preload() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(package.preload) == "table")
         
@@ -48,7 +48,7 @@ fn test_package_path() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(package.path) == "string")
         assert(#package.path > 0)
@@ -63,7 +63,7 @@ fn test_package_cpath() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(package.cpath) == "string")
         assert(#package.cpath > 0)
@@ -78,7 +78,7 @@ fn test_package_config() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(package.config) == "string")
         local lines = 0
@@ -97,7 +97,7 @@ fn test_package_searchers() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         assert(type(package.searchers) == "table")
         assert(type(package.searchers[1]) == "function")  -- preload searcher
@@ -116,7 +116,7 @@ fn test_package_searchpath() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local path, err = package.searchpath("string", package.path)
         -- Either finds a file or returns error message
@@ -132,7 +132,7 @@ fn test_require_preload() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         package.preload['mymodule'] = function()
             local M = {}
@@ -163,7 +163,7 @@ fn test_require_cache() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local load_count = 0
         package.preload['cached'] = function()
@@ -188,7 +188,7 @@ fn test_require_error() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local ok, err = pcall(require, 'nonexistent_module_xyz')
         assert(ok == false)
@@ -204,7 +204,7 @@ fn test_require_return_value() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         -- Module returning nil should store true
         package.preload['nilmod'] = function()

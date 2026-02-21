@@ -24,63 +24,16 @@ pub use crate::lua_vm::lua_ref::{LUA_NOREF, LUA_REFNIL, LuaRefValue, RefId};
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
-use crate::{CreateResult, GcKind, ObjectAllocator, ThreadPtr, UpvaluePtr, lib_registry};
+use crate::{
+    CreateResult, GcKind, LuaEnum, ObjectAllocator, RustCallback, ThreadPtr, UpvaluePtr,
+    lib_registry,
+};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
 use std::future::Future;
 use std::rc::Rc;
 use std::time::Instant;
-
-/// xoshiro256** RNG matching C Lua's implementation exactly
-#[derive(Debug, Clone)]
-pub(crate) struct LuaRng {
-    pub state: [u64; 4],
-}
-
-impl LuaRng {
-    /// Seed from two integers, matching C Lua's setseed
-    pub fn from_seed(n1: i64, n2: i64) -> Self {
-        let mut rng = LuaRng {
-            state: [n1 as u64, 0xff, n2 as u64, 0],
-        };
-        // Warm up: discard 16 values to spread the seed
-        for _ in 0..16 {
-            rng.next_rand();
-        }
-        rng
-    }
-
-    /// Seed from a time value (for default initialization)
-    pub fn from_seed_time(time: u64) -> Self {
-        Self::from_seed(time as i64, 0)
-    }
-
-    /// Generate next random u64 using xoshiro256**
-    pub fn next_rand(&mut self) -> u64 {
-        let s = &mut self.state;
-        let s0 = s[0];
-        let s1 = s[1];
-        let s2 = s[2] ^ s0;
-        let s3 = s[3] ^ s1;
-        // result = s1 * 5, rotate left 7, then * 9
-        let res = s1.wrapping_mul(5).rotate_left(7).wrapping_mul(9);
-        s[0] = s0 ^ s3;
-        s[1] = s1 ^ s2;
-        s[2] = s2 ^ (s1 << 17);
-        s[3] = s3.rotate_left(45);
-        res
-    }
-
-    /// Convert random u64 to float in [0, 1)
-    /// Takes the top 53 bits (DBL_MANT_DIG) and scales to [0,1)
-    pub fn next_float(&mut self) -> f64 {
-        let rv = self.next_rand();
-        // Take top 53 bits
-        let mantissa = rv >> (64 - 53); // = rv >> 11
-        (mantissa as f64) * f64::from_bits(0x3CA0000000000000) // 2^-53
-    }
-}
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
@@ -335,20 +288,17 @@ impl LuaVM {
     }
 
     /// Execute a chunk in the main thread
-    pub fn execute(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
+    pub fn execute_chunk(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
         // Main chunk needs _ENV upvalue pointing to global table
         // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
         let env_upval = self.create_upvalue_closed(self.global)?;
-        let func = self.create_function(
-            chunk,
-            crate::lua_value::UpvalueStore::from_vec(vec![env_upval]),
-        )?;
+        let func = self.create_function(chunk, UpvalueStore::from_vec(vec![env_upval]))?;
         self.execute_function(func, vec![])
     }
 
-    pub fn execute_string(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
+    pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.compile(source)?;
-        self.execute(Rc::new(chunk))
+        self.execute_chunk(Rc::new(chunk))
     }
 
     /// Execute a function with arguments
@@ -532,7 +482,7 @@ impl LuaVM {
     ///
     /// **Important**: The function MUST be called from within an `AsyncThread`
     /// (i.e., the coroutine must be yieldable). Use `create_async_thread()` or
-    /// `execute_string_async()` to run Lua code that calls async functions.
+    /// `execute_async()` to run Lua code that calls async functions.
     ///
     /// # Example
     ///
@@ -568,15 +518,13 @@ impl LuaVM {
     /// ```
     pub fn create_async_thread(
         &mut self,
-        chunk: crate::lua_value::Chunk,
+        chunk: Chunk,
         args: Vec<LuaValue>,
     ) -> LuaResult<async_thread::AsyncThread> {
         // Main chunk needs _ENV upvalue pointing to global table
         let env_upval = self.create_upvalue_closed(self.global)?;
-        let func_val = self.create_function(
-            Rc::new(chunk),
-            crate::lua_value::UpvalueStore::from_vec(vec![env_upval]),
-        )?;
+        let func_val =
+            self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))?;
         let thread_val = self.create_thread(func_val)?;
         let vm_ptr = self as *mut LuaVM;
         Ok(async_thread::AsyncThread::new(thread_val, vm_ptr, args))
@@ -591,9 +539,9 @@ impl LuaVM {
     ///
     /// ```ignore
     /// vm.register_async("fetch", |args| async move { ... })?;
-    /// let results = vm.execute_string_async("return fetch('https://...')").await?;
+    /// let results = vm.execute_async("return fetch('https://...')").await?;
     /// ```
-    pub async fn execute_string_async(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
+    pub async fn execute_async(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.compile(source)?;
         let async_thread = self.create_async_thread(chunk, vec![])?;
         async_thread.await
@@ -614,7 +562,7 @@ impl LuaVM {
     /// vm.register_enum::<Color>("Color")?;
     /// // Lua: Color.Red == 0, Color.Green == 1, Color.Blue == 2
     /// ```
-    pub fn register_enum<T: crate::lua_value::LuaEnum>(&mut self, name: &str) -> LuaResult<()> {
+    pub fn register_enum<T: LuaEnum>(&mut self, name: &str) -> LuaResult<()> {
         let variants = T::variants();
         let table = self.create_table(0, variants.len())?;
         for &(vname, value) in variants {
@@ -730,11 +678,7 @@ impl LuaVM {
     /// Create an RClosure from a Rust closure (Box<dyn Fn>).
     /// Unlike CFunction (bare fn pointer), this can capture arbitrary Rust state.
     #[inline]
-    pub fn create_rclosure(
-        &mut self,
-        func: crate::lua_value::RustCallback,
-        upvalues: Vec<LuaValue>,
-    ) -> CreateResult {
+    pub fn create_rclosure(&mut self, func: RustCallback, upvalues: Vec<LuaValue>) -> CreateResult {
         self.object_allocator
             .create_rclosure(&mut self.gc, func, upvalues)
     }
@@ -1316,5 +1260,55 @@ mod tests {
         assert_eq!(count.as_number(), Some(42.0));
 
         println!("✓ JSON roundtrip test passed");
+    }
+}
+
+/// xoshiro256** RNG matching C Lua's implementation exactly
+#[derive(Debug, Clone)]
+pub(crate) struct LuaRng {
+    pub state: [u64; 4],
+}
+
+impl LuaRng {
+    /// Seed from two integers, matching C Lua's setseed
+    pub fn from_seed(n1: i64, n2: i64) -> Self {
+        let mut rng = LuaRng {
+            state: [n1 as u64, 0xff, n2 as u64, 0],
+        };
+        // Warm up: discard 16 values to spread the seed
+        for _ in 0..16 {
+            rng.next_rand();
+        }
+        rng
+    }
+
+    /// Seed from a time value (for default initialization)
+    pub fn from_seed_time(time: u64) -> Self {
+        Self::from_seed(time as i64, 0)
+    }
+
+    /// Generate next random u64 using xoshiro256**
+    pub fn next_rand(&mut self) -> u64 {
+        let s = &mut self.state;
+        let s0 = s[0];
+        let s1 = s[1];
+        let s2 = s[2] ^ s0;
+        let s3 = s[3] ^ s1;
+        // result = s1 * 5, rotate left 7, then * 9
+        let res = s1.wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        s[0] = s0 ^ s3;
+        s[1] = s1 ^ s2;
+        s[2] = s2 ^ (s1 << 17);
+        s[3] = s3.rotate_left(45);
+        res
+    }
+
+    /// Convert random u64 to float in [0, 1)
+    /// Takes the top 53 bits (DBL_MANT_DIG) and scales to [0,1)
+    pub fn next_float(&mut self) -> f64 {
+        let rv = self.next_rand();
+        // Take top 53 bits
+        let mantissa = rv >> (64 - 53); // = rv >> 11
+        (mantissa as f64) * f64::from_bits(0x3CA0000000000000) // 2^-53
     }
 }

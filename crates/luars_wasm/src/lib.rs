@@ -31,7 +31,7 @@ impl LuaWasm {
     /// Execute Lua code and return the result as a string
     #[wasm_bindgen]
     pub fn execute(&mut self, code: &str) -> Result<String, JsValue> {
-        match self.vm.execute_string(code) {
+        match self.vm.execute(code) {
             Ok(results) => {
                 let result = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
                 Ok(format!("{}", result))
@@ -65,7 +65,7 @@ impl LuaWasm {
         let code = format!("return {}", expr);
 
         match self.vm.compile(&code) {
-            Ok(chunk) => match self.vm.execute(std::rc::Rc::new(chunk)) {
+            Ok(chunk) => match self.vm.execute_chunk(std::rc::Rc::new(chunk)) {
                 Ok(results) => {
                     let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
                     lua_value_to_js(&*self.vm, &value)
@@ -83,7 +83,7 @@ impl LuaWasm {
         let code = format!("return {}", expr);
 
         match self.vm.compile(&code) {
-            Ok(chunk) => match self.vm.execute(std::rc::Rc::new(chunk)) {
+            Ok(chunk) => match self.vm.execute_chunk(std::rc::Rc::new(chunk)) {
                 Ok(results) => {
                     let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
                     Ok(lua_value_to_json_string(&*self.vm, &value))

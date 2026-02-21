@@ -38,7 +38,7 @@ async fn main() {
     // All requests processed sequentially, but I/O is async
     loop {
         let request = get_next_request().await;
-        let result = vm.execute_string_async(&request).await;
+        let result = vm.execute_async(&request).await;
         send_response(result).await;
     }
 }
@@ -123,7 +123,7 @@ impl VmPool {
 
                         // Process requests
                         while let Some(req) = rx.recv().await {
-                            let result = vm.execute_string_async(&req.lua_code).await;
+                            let result = vm.execute_async(&req.lua_code).await;
                             let response = match result {
                                 Ok(vals) => {
                                     let s = vals.iter()
@@ -198,7 +198,7 @@ async fn main() {
 
         // Use spawn_local for tasks (doesn't require Send)
         let handle = tokio::task::spawn_local(async move {
-            vm.execute_string_async("sleep(1); return 42").await
+            vm.execute_async("sleep(1); return 42").await
         });
 
         let result = handle.await.unwrap();

@@ -6,7 +6,7 @@ fn test_if_else() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local x = 10
         local result = ""
@@ -29,7 +29,7 @@ fn test_if_elseif_else() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local function classify(x)
             if x > 0 then
@@ -55,7 +55,7 @@ fn test_while_loop() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local i = 0
         local sum = 0
@@ -78,7 +78,7 @@ fn test_repeat_until() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local i = 0
         
@@ -98,7 +98,7 @@ fn test_numeric_for() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local sum = 0
         for i = 1, 10 do
@@ -122,7 +122,7 @@ fn test_generic_for() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = {10, 20, 30}
         local sum = 0
@@ -143,7 +143,7 @@ fn test_break() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local i = 0
         while true do
@@ -165,7 +165,7 @@ fn test_nested_loops() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local count = 0
         
@@ -187,7 +187,7 @@ fn test_goto() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local x = 0
         ::start::
@@ -207,7 +207,7 @@ fn test_do_block() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local x = 10
         do
@@ -226,7 +226,7 @@ fn test_conditional_expressions() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local function ternary(cond, a, b)
             if cond then return a else return b end

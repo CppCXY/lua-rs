@@ -26,7 +26,7 @@ pub fn create_vm(lua_script: &str) -> LuaResult<Box<LuaVM>> {
     async_io::register_all(&mut vm)?;
 
     // Load the user's handler script (defines handle_request, routes, etc.)
-    vm.execute_string(lua_script)?;
+    vm.execute(lua_script)?;
 
     Ok(vm)
 }
@@ -62,7 +62,7 @@ pub async fn call_handler(
         body,
     );
 
-    let results = vm.execute_string_async(&source).await?;
+    let results = vm.execute_async(&source).await?;
 
     // Extract: status_code (integer), content_type (string), body (string)
     let status = results.first().and_then(|v| v.as_integer()).unwrap_or(200) as u16;

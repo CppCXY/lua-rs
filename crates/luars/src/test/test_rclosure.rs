@@ -12,7 +12,7 @@ fn test_rclosure_basic_no_return() {
         .unwrap();
     vm.set_global("myfn", func).unwrap();
 
-    let result = vm.execute_string("myfn(); return 42");
+    let result = vm.execute("myfn(); return 42");
     assert!(result.is_ok(), "RClosure call failed: {:?}", result.err());
     let vals = result.unwrap();
     assert_eq!(vals[0].as_integer(), Some(42));
@@ -31,7 +31,7 @@ fn test_rclosure_returns_value() {
         .unwrap();
     vm.set_global("myfn", func).unwrap();
 
-    let result = vm.execute_string("return myfn()");
+    let result = vm.execute("return myfn()");
     assert!(result.is_ok(), "RClosure call failed: {:?}", result.err());
     let vals = result.unwrap();
     assert_eq!(vals[0].as_integer(), Some(123));
@@ -53,7 +53,7 @@ fn test_rclosure_reads_args() {
         .unwrap();
     vm.set_global("add", func).unwrap();
 
-    let result = vm.execute_string("return add(10, 32)");
+    let result = vm.execute("return add(10, 32)");
     assert!(result.is_ok(), "{:?}", result.err());
     assert_eq!(result.unwrap()[0].as_integer(), Some(42));
 }
@@ -79,7 +79,7 @@ fn test_rclosure_captures_state() {
         .unwrap();
     vm.set_global("next_id", func).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local a = next_id()
         local b = next_id()
@@ -121,7 +121,7 @@ fn test_rclosure_with_upvalues() {
         .unwrap();
     vm.set_global("add_offset", func).unwrap();
 
-    let result = vm.execute_string("return add_offset(42)");
+    let result = vm.execute("return add_offset(42)");
     assert!(result.is_ok(), "{:?}", result.err());
     assert_eq!(result.unwrap()[0].as_integer(), Some(142));
 }
@@ -141,7 +141,7 @@ fn test_rclosure_multiple_returns() {
         .unwrap();
     vm.set_global("three", func).unwrap();
 
-    let result = vm.execute_string("return three()");
+    let result = vm.execute("return three()");
     assert!(result.is_ok(), "{:?}", result.err());
     let vals = result.unwrap();
     assert_eq!(vals.len(), 3);
@@ -164,7 +164,7 @@ fn test_rclosure_called_from_lua_closure() {
         .unwrap();
     vm.set_global("square", func).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local function apply(f, x)
             return f(x)
@@ -189,7 +189,7 @@ fn test_rclosure_in_table() {
         .unwrap();
     vm.set_global("magic", func).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local t = { fn = magic }
         return t.fn()
@@ -214,7 +214,7 @@ fn test_rclosure_tail_call() {
     vm.set_global("inc", func).unwrap();
 
     // Lua tail-calls the RClosure
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local function wrapper(x)
             return inc(x)
@@ -238,7 +238,7 @@ fn test_rclosure_error_propagation() {
         .unwrap();
     vm.set_global("fail_fn", func).unwrap();
 
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         local ok, msg = pcall(fail_fn)
         assert(not ok)
@@ -263,7 +263,7 @@ fn test_rclosure_gc_survives() {
     vm.set_global("gc_test", func).unwrap();
 
     // Force GC then call the function
-    let result = vm.execute_string(
+    let result = vm.execute(
         r#"
         collectgarbage("collect")
         collectgarbage("collect")
@@ -284,7 +284,7 @@ fn test_rclosure_type_function() {
         .unwrap();
     vm.set_global("myfn", func).unwrap();
 
-    let result = vm.execute_string("return type(myfn)");
+    let result = vm.execute("return type(myfn)");
     assert!(result.is_ok(), "{:?}", result.err());
     let vals = result.unwrap();
     assert_eq!(vals[0].as_str(), Some("function"));

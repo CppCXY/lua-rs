@@ -8,7 +8,7 @@ Complete API documentation for luars async features.
 
 - [LuaVM Methods](#luavm-methods)
   - [`register_async()`](#register_async)
-  - [`execute_string_async()`](#execute_string_async)
+  - [`execute_async()`](#execute_async)
   - [`create_async_thread()`](#create_async_thread)
   - [`register_enum()`](#register_enum)
 - [Types](#types)
@@ -83,18 +83,18 @@ vm.register_async("create_point", |args| async move {
 ```
 
 **Notes:**
-- Registered functions can only be called from an `AsyncThread` context (i.e., Lua code executed via `execute_string_async()` or `create_async_thread()`)
+- Registered functions can only be called from an `AsyncThread` context (i.e., Lua code executed via `execute_async()` or `create_async_thread()`)
 - Calling from regular `execute_string()` will produce a runtime error
 - The closure must be `'static` (cannot capture non-`'static` references)
 
 ---
 
-### `execute_string_async()`
+### `execute_async()`
 
 Compile and asynchronously execute a Lua source string. This is the simplest way to run async Lua code.
 
 ```rust
-pub async fn execute_string_async(
+pub async fn execute_async(
     &mut self,
     source: &str,
 ) -> LuaResult<Vec<LuaValue>>
@@ -112,18 +112,18 @@ pub async fn execute_string_async(
 
 ```rust
 // Simple call
-let results = vm.execute_string_async("return async_add(1, 2)").await?;
+let results = vm.execute_async("return async_add(1, 2)").await?;
 assert_eq!(results[0].as_integer(), Some(3));
 
 // Multi-line Lua code
-let results = vm.execute_string_async(r#"
+let results = vm.execute_async(r#"
     local a = async_fetch("https://example.com")
     local b = async_fetch("https://example.org")
     return a, b
 "#).await?;
 
 // No return value
-vm.execute_string_async("async_log('hello')").await?;
+vm.execute_async("async_log('hello')").await?;
 ```
 
 **Internal implementation:**
@@ -135,7 +135,7 @@ vm.execute_string_async("async_log('hello')").await?;
 
 ### `create_async_thread()`
 
-Create an `AsyncThread` from a pre-compiled Chunk. Provides lower-level control than `execute_string_async()`.
+Create an `AsyncThread` from a pre-compiled Chunk. Provides lower-level control than `execute_async()`.
 
 ```rust
 pub fn create_async_thread(
@@ -294,7 +294,7 @@ let thread = vm.create_async_thread(chunk, vec![])?;
 let results = thread.await?;  // Drive coroutine to completion
 ```
 
-Typically you don't need to work with `AsyncThread` directly — use `execute_string_async()` instead.
+Typically you don't need to work with `AsyncThread` directly — use `execute_async()` instead.
 
 ---
 
