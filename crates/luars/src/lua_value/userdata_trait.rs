@@ -478,3 +478,59 @@ pub trait LuaEnum {
     /// Return the enum's type name.
     fn enum_name() -> &'static str;
 }
+
+// ==================== OpaqueUserData ====================
+
+/// Wraps any `T: 'static` as an opaque Lua userdata.
+///
+/// No fields, methods, or metamethods are exposed — the value is a "black box"
+/// in Lua. From Rust you can recover the original type via `downcast_ref::<T>()`.
+///
+/// Use [`LuaVM::push_any`] to create one conveniently.
+///
+/// # Example
+///
+/// ```ignore
+/// // Third-party type you don't control
+/// let client = reqwest::Client::new();
+/// let ud = vm.push_any(client)?;
+/// vm.set_global("http_client", ud)?;
+///
+/// // Later, in a Rust callback:
+/// let client = ud_value.downcast_ref::<reqwest::Client>().unwrap();
+/// ```
+pub struct OpaqueUserData<T: 'static> {
+    value: T,
+}
+
+impl<T: 'static> OpaqueUserData<T> {
+    /// Wrap a value.
+    pub fn new(value: T) -> Self {
+        OpaqueUserData { value }
+    }
+
+    /// Get a reference to the inner value.
+    pub fn inner(&self) -> &T {
+        &self.value
+    }
+
+    /// Get a mutable reference to the inner value.
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T: 'static> UserDataTrait for OpaqueUserData<T> {
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        // Downcast to T (not OpaqueUserData<T>) for ergonomic access
+        &self.value
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        &mut self.value
+    }
+}

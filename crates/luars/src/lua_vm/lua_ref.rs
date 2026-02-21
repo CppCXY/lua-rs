@@ -2,7 +2,10 @@
 ///
 /// This module provides a way to store Lua values in the registry and get a stable reference to them.
 /// This is useful for keeping values alive across GC cycles and for passing values between Rust and Lua.
+use std::marker::PhantomData;
+
 use crate::lua_value::LuaValue;
+use crate::lua_value::LuaValueKind;
 
 /// A reference ID in the registry.
 /// Similar to Lua's luaL_ref return value.
@@ -178,6 +181,445 @@ impl std::fmt::Debug for LuaRefValue {
                 write!(f, "LuaRefValue::Registry(ref_id={})", ref_id)
             }
         }
+    }
+}
+
+// ============================================================================
+// User-facing Ref types (mlua-inspired)
+// ============================================================================
+
+/// Internal core shared by all user-facing Ref types.
+///
+/// Holds a registry reference ID and a raw pointer to the owning `LuaVM`.
+/// Automatically releases the registry entry on `Drop` (RAII).
+///
+/// `!Send + !Sync` by design — Lua VM is single-threaded.
+struct RefInner {
+    ref_id: RefId,
+    vm: *mut super::LuaVM,
+    /// Makes RefInner !Send + !Sync
+    _marker: PhantomData<*const ()>,
+}
+
+impl RefInner {
+    /// Create a new RefInner. The value must already be stored in the registry.
+    fn new(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+        RefInner {
+            ref_id,
+            vm,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Retrieve the LuaValue from the registry.
+    #[inline]
+    fn to_value(&self) -> LuaValue {
+        let vm = unsafe { &*self.vm };
+        vm.registry_geti(self.ref_id as i64)
+            .unwrap_or(LuaValue::nil())
+    }
+
+    /// Get a reference to the VM.
+    #[inline]
+    fn vm(&self) -> &super::LuaVM {
+        unsafe { &*self.vm }
+    }
+
+    /// Get a mutable reference to the VM.
+    #[inline]
+    fn vm_mut(&self) -> &mut super::LuaVM {
+        unsafe { &mut *self.vm }
+    }
+}
+
+impl Drop for RefInner {
+    fn drop(&mut self) {
+        if self.ref_id > 0 && !self.vm.is_null() {
+            unsafe {
+                (*self.vm).release_ref_id(self.ref_id);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for RefInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RefInner(ref_id={})", self.ref_id)
+    }
+}
+
+// ---- helper: create a registry ref for a LuaValue ---------------------------
+
+/// Store a LuaValue in the VM registry and return its RefId.
+pub(crate) fn store_in_registry(vm: &mut super::LuaVM, value: LuaValue) -> RefId {
+    let ref_id = vm.ref_manager.alloc_ref_id();
+    vm.registry_seti(ref_id as i64, value);
+    ref_id
+}
+
+// ============================================================================
+// LuaTableRef
+// ============================================================================
+
+/// A user-facing reference to a Lua table.
+///
+/// Holds the table in the VM registry so it won't be garbage-collected.
+/// The registry entry is automatically released when this value is dropped.
+///
+/// `!Send + !Sync` — cannot be transferred across threads.
+///
+/// # Example
+///
+/// ```ignore
+/// let tbl = vm.create_table_ref(0, 4)?;
+/// tbl.set("name", LuaValue::from("Alice"))?;
+/// let name: String = tbl.get_as("name")?;
+/// // tbl is automatically released here
+/// ```
+pub struct LuaTableRef {
+    inner: RefInner,
+}
+
+impl LuaTableRef {
+    /// Create from an already-registered ref id. The caller guarantees the
+    /// value at `ref_id` is a table.
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+        LuaTableRef {
+            inner: RefInner::new(ref_id, vm),
+        }
+    }
+
+    // ==================== Read ====================
+
+    /// Get a value by string key (raw access, no metamethods).
+    pub fn get(&self, key: &str) -> super::LuaResult<LuaValue> {
+        let vm = self.inner.vm_mut();
+        let table = self.inner.to_value();
+        let key_val = vm.create_string(key)?;
+        Ok(vm.raw_get(&table, &key_val).unwrap_or(LuaValue::nil()))
+    }
+
+    /// Get a value by integer key.
+    pub fn geti(&self, key: i64) -> super::LuaResult<LuaValue> {
+        let vm = self.inner.vm();
+        let table = self.inner.to_value();
+        Ok(vm.raw_geti(&table, key).unwrap_or(LuaValue::nil()))
+    }
+
+    /// Get a value by arbitrary LuaValue key.
+    pub fn get_value(&self, key: &LuaValue) -> super::LuaResult<LuaValue> {
+        let vm = self.inner.vm();
+        let table = self.inner.to_value();
+        Ok(vm.raw_get(&table, key).unwrap_or(LuaValue::nil()))
+    }
+
+    /// Get a value by string key and convert to a Rust type via `FromLua`.
+    pub fn get_as<T: crate::FromLua>(&self, key: &str) -> super::LuaResult<T> {
+        let val = self.get(key)?;
+        let vm = self.inner.vm_mut();
+        T::from_lua(val, vm.main_state())
+            .map_err(|msg| vm.error(msg))
+    }
+
+    // ==================== Write ====================
+
+    /// Set a string-keyed value.
+    pub fn set(&self, key: &str, value: LuaValue) -> super::LuaResult<()> {
+        let vm = self.inner.vm_mut();
+        let table = self.inner.to_value();
+        let key_val = vm.create_string(key)?;
+        vm.raw_set(&table, key_val, value);
+        Ok(())
+    }
+
+    /// Set an integer-keyed value.
+    pub fn seti(&self, key: i64, value: LuaValue) -> super::LuaResult<()> {
+        let vm = self.inner.vm_mut();
+        let table = self.inner.to_value();
+        vm.raw_seti(&table, key, value);
+        Ok(())
+    }
+
+    /// Set an arbitrary key-value pair.
+    pub fn set_value(&self, key: LuaValue, value: LuaValue) -> super::LuaResult<()> {
+        let vm = self.inner.vm_mut();
+        let table = self.inner.to_value();
+        vm.raw_set(&table, key, value);
+        Ok(())
+    }
+
+    // ==================== Iteration ====================
+
+    /// Get all key-value pairs (snapshot, no metamethods).
+    pub fn pairs(&self) -> super::LuaResult<Vec<(LuaValue, LuaValue)>> {
+        let vm = self.inner.vm();
+        let table = self.inner.to_value();
+        vm.table_pairs(&table)
+    }
+
+    /// Get the array length (equivalent to Lua's `#t`).
+    pub fn len(&self) -> super::LuaResult<usize> {
+        let vm = self.inner.vm();
+        let table = self.inner.to_value();
+        vm.table_length(&table)
+    }
+
+    /// Append a value to the array part (equivalent to `table.insert`).
+    pub fn push(&self, value: LuaValue) -> super::LuaResult<()> {
+        let current_len = self.len()?;
+        self.seti((current_len + 1) as i64, value)
+    }
+
+    // ==================== Conversion ====================
+
+    /// Get the underlying LuaValue (retrieved from registry).
+    pub fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
+
+    /// Get the registry reference ID.
+    pub fn ref_id(&self) -> RefId {
+        self.inner.ref_id
+    }
+}
+
+impl std::fmt::Debug for LuaTableRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LuaTableRef(ref_id={})", self.inner.ref_id)
+    }
+}
+
+// ============================================================================
+// LuaFunctionRef
+// ============================================================================
+
+/// A user-facing reference to a Lua function (Lua closure, C function, or Rust closure).
+///
+/// The function value is held in the VM registry and released on drop.
+///
+/// `!Send + !Sync`.
+///
+/// # Example
+///
+/// ```ignore
+/// let greet = vm.get_global_function("greet")?.unwrap();
+/// let result = greet.call(vec![vm.create_string("World")?])?;
+/// ```
+pub struct LuaFunctionRef {
+    inner: RefInner,
+}
+
+impl LuaFunctionRef {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+        LuaFunctionRef {
+            inner: RefInner::new(ref_id, vm),
+        }
+    }
+
+    /// Call the function synchronously.
+    pub fn call(&self, args: Vec<LuaValue>) -> super::LuaResult<Vec<LuaValue>> {
+        let vm = self.inner.vm_mut();
+        let func = self.inner.to_value();
+        vm.call(func, args)
+    }
+
+    /// Call the function and return the first result (or nil if no results).
+    pub fn call1(&self, args: Vec<LuaValue>) -> super::LuaResult<LuaValue> {
+        let results = self.call(args)?;
+        Ok(results.into_iter().next().unwrap_or(LuaValue::nil()))
+    }
+
+    /// Call the function asynchronously.
+    pub async fn call_async(&self, args: Vec<LuaValue>) -> super::LuaResult<Vec<LuaValue>> {
+        let vm = self.inner.vm_mut();
+        let func = self.inner.to_value();
+        vm.call_async(func, args).await
+    }
+
+    /// Get the underlying LuaValue.
+    pub fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
+
+    /// Get the registry reference ID.
+    pub fn ref_id(&self) -> RefId {
+        self.inner.ref_id
+    }
+}
+
+impl std::fmt::Debug for LuaFunctionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LuaFunctionRef(ref_id={})", self.inner.ref_id)
+    }
+}
+
+// ============================================================================
+// LuaStringRef
+// ============================================================================
+
+/// A user-facing reference to a Lua string.
+///
+/// `!Send + !Sync`.
+pub struct LuaStringRef {
+    inner: RefInner,
+}
+
+impl LuaStringRef {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+        LuaStringRef {
+            inner: RefInner::new(ref_id, vm),
+        }
+    }
+
+    /// Get the string content. The returned `&str` is valid as long as the
+    /// underlying GC string is alive (guaranteed by the registry ref).
+    pub fn as_str(&self) -> Option<&str> {
+        let value = self.inner.to_value();
+        // Safety: the registry ref keeps the GcString alive, and we return
+        // a reference whose lifetime is tied to `&self`.
+        // LuaValue::as_str() dereferences the GcString pointer directly.
+        // The GC won't collect it because the registry holds a reference.
+        value.as_str().map(|s| {
+            // Extend lifetime from the temporary to &self.
+            // This is safe because the GC object is pinned by the registry.
+            unsafe { &*(s as *const str) }
+        })
+    }
+
+    /// Copy the string content into an owned String.
+    pub fn to_string_lossy(&self) -> String {
+        self.as_str().unwrap_or("").to_owned()
+    }
+
+    /// Get the byte length.
+    pub fn byte_len(&self) -> usize {
+        self.as_str().map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Get the underlying LuaValue.
+    pub fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
+
+    /// Get the registry reference ID.
+    pub fn ref_id(&self) -> RefId {
+        self.inner.ref_id
+    }
+}
+
+impl std::fmt::Debug for LuaStringRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LuaStringRef(ref_id={}, {:?})",
+            self.inner.ref_id,
+            self.as_str()
+        )
+    }
+}
+
+impl std::fmt::Display for LuaStringRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str().unwrap_or(""))
+    }
+}
+
+// ============================================================================
+// LuaAnyRef
+// ============================================================================
+
+/// A generic user-facing reference to any Lua value.
+///
+/// Can be down-cast to a typed ref (`LuaTableRef`, `LuaFunctionRef`, `LuaStringRef`)
+/// when the concrete type is known.
+///
+/// `!Send + !Sync`.
+///
+/// # Example
+///
+/// ```ignore
+/// let any = vm.to_ref(some_value);
+/// if let Some(tbl) = any.as_table() {
+///     tbl.set("key", LuaValue::integer(1))?;
+/// }
+/// ```
+pub struct LuaAnyRef {
+    inner: RefInner,
+}
+
+impl LuaAnyRef {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+        LuaAnyRef {
+            inner: RefInner::new(ref_id, vm),
+        }
+    }
+
+    /// Get the underlying LuaValue.
+    pub fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
+
+    /// Try to convert to a `LuaTableRef`. Returns `None` if the value is not a table.
+    /// **Creates a new registry entry** so that both refs are independent.
+    pub fn as_table(&self) -> Option<LuaTableRef> {
+        let value = self.inner.to_value();
+        if !value.is_table() {
+            return None;
+        }
+        let vm = self.inner.vm_mut();
+        let ref_id = store_in_registry(vm, value);
+        Some(LuaTableRef::from_raw(ref_id, self.inner.vm))
+    }
+
+    /// Try to convert to a `LuaFunctionRef`.
+    pub fn as_function(&self) -> Option<LuaFunctionRef> {
+        let value = self.inner.to_value();
+        if !value.is_function() {
+            return None;
+        }
+        let vm = self.inner.vm_mut();
+        let ref_id = store_in_registry(vm, value);
+        Some(LuaFunctionRef::from_raw(ref_id, self.inner.vm))
+    }
+
+    /// Try to convert to a `LuaStringRef`.
+    pub fn as_string(&self) -> Option<LuaStringRef> {
+        let value = self.inner.to_value();
+        if !value.is_string() {
+            return None;
+        }
+        let vm = self.inner.vm_mut();
+        let ref_id = store_in_registry(vm, value);
+        Some(LuaStringRef::from_raw(ref_id, self.inner.vm))
+    }
+
+    /// Get the value's type kind.
+    pub fn kind(&self) -> LuaValueKind {
+        self.inner.to_value().kind()
+    }
+
+    /// Extract the value as a Rust type via `FromLua`.
+    pub fn get_as<T: crate::FromLua>(&self) -> super::LuaResult<T> {
+        let val = self.inner.to_value();
+        let vm = self.inner.vm_mut();
+        T::from_lua(val, vm.main_state())
+            .map_err(|msg| vm.error(msg))
+    }
+
+    /// Get the registry reference ID.
+    pub fn ref_id(&self) -> RefId {
+        self.inner.ref_id
+    }
+}
+
+impl std::fmt::Debug for LuaAnyRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LuaAnyRef(ref_id={}, kind={:?})",
+            self.inner.ref_id,
+            self.kind()
+        )
     }
 }
 

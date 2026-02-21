@@ -21,13 +21,15 @@ use crate::lua_vm::const_string::ConstString;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
-pub use crate::lua_vm::lua_ref::{LUA_NOREF, LUA_REFNIL, LuaRefValue, RefId};
+pub use crate::lua_vm::lua_ref::{
+    LUA_NOREF, LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef, RefId,
+};
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 use crate::stdlib::Stdlib;
 use crate::{
-    CreateResult, GcKind, LuaEnum, LuaRegistrable, ObjectAllocator, RustCallback, ThreadPtr,
-    UpvaluePtr, lib_registry,
+    CreateResult, GcKind, LuaEnum, LuaRegistrable, ObjectAllocator, OpaqueUserData, RustCallback,
+    TableBuilder, ThreadPtr, UpvaluePtr, lib_registry,
 };
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
@@ -427,6 +429,120 @@ impl LuaVM {
     /// ```
     pub fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()> {
         self.main_state().register_type_of::<T>(name)
+    }
+
+    // ============ User-Facing Ref API ============
+
+    /// Wrap any `LuaValue` into a `LuaAnyRef` (stored in registry, auto-released on drop).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let any = vm.to_ref(some_value);
+    /// println!("{:?}", any.kind());
+    /// // registry entry freed automatically when `any` is dropped
+    /// ```
+    pub fn to_ref(&mut self, value: LuaValue) -> LuaAnyRef {
+        let ref_id = lua_ref::store_in_registry(self, value);
+        let vm_ptr = self as *mut LuaVM;
+        LuaAnyRef::from_raw(ref_id, vm_ptr)
+    }
+
+    /// Wrap a table `LuaValue` into a `LuaTableRef`.
+    /// Returns `None` if the value is not a table.
+    pub fn to_table_ref(&mut self, value: LuaValue) -> Option<LuaTableRef> {
+        if !value.is_table() {
+            return None;
+        }
+        let ref_id = lua_ref::store_in_registry(self, value);
+        let vm_ptr = self as *mut LuaVM;
+        Some(LuaTableRef::from_raw(ref_id, vm_ptr))
+    }
+
+    /// Wrap a function `LuaValue` into a `LuaFunctionRef`.
+    /// Returns `None` if the value is not a function.
+    pub fn to_function_ref(&mut self, value: LuaValue) -> Option<LuaFunctionRef> {
+        if !value.is_function() {
+            return None;
+        }
+        let ref_id = lua_ref::store_in_registry(self, value);
+        let vm_ptr = self as *mut LuaVM;
+        Some(LuaFunctionRef::from_raw(ref_id, vm_ptr))
+    }
+
+    /// Wrap a string `LuaValue` into a `LuaStringRef`.
+    /// Returns `None` if the value is not a string.
+    pub fn to_string_ref(&mut self, value: LuaValue) -> Option<LuaStringRef> {
+        if !value.is_string() {
+            return None;
+        }
+        let ref_id = lua_ref::store_in_registry(self, value);
+        let vm_ptr = self as *mut LuaVM;
+        Some(LuaStringRef::from_raw(ref_id, vm_ptr))
+    }
+
+    /// Create a new empty table and return it as a `LuaTableRef`.
+    pub fn create_table_ref(
+        &mut self,
+        array_size: usize,
+        hash_size: usize,
+    ) -> LuaResult<LuaTableRef> {
+        let table = self.create_table(array_size, hash_size)?;
+        Ok(self.to_table_ref(table).unwrap())
+    }
+
+    /// Build a table from a `TableBuilder` and return a `LuaTableRef`.
+    pub fn build_table_ref(&mut self, builder: TableBuilder) -> LuaResult<LuaTableRef> {
+        let table = builder.build(self)?;
+        Ok(self.to_table_ref(table).unwrap())
+    }
+
+    /// Get a global variable as a `LuaTableRef`.
+    /// Returns `Ok(None)` if the global doesn't exist or is not a table.
+    pub fn get_global_table(&mut self, name: &str) -> LuaResult<Option<LuaTableRef>> {
+        match self.get_global(name)? {
+            Some(val) if val.is_table() => Ok(self.to_table_ref(val)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Get a global variable as a `LuaFunctionRef`.
+    /// Returns `Ok(None)` if the global doesn't exist or is not a function.
+    pub fn get_global_function(&mut self, name: &str) -> LuaResult<Option<LuaFunctionRef>> {
+        match self.get_global(name)? {
+            Some(val) if val.is_function() => Ok(self.to_function_ref(val)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Push any `T: 'static` into Lua as opaque userdata.
+    ///
+    /// The value cannot be accessed from Lua code directly; it is an opaque
+    /// handle. From Rust callbacks, use `downcast_ref::<T>()` to retrieve it.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let client = reqwest::Client::new();
+    /// let ud = vm.push_any(client)?;
+    /// vm.set_global("http_client", ud)?;
+    /// ```
+    pub fn push_any<T: 'static>(&mut self, value: T) -> LuaResult<LuaValue> {
+        let ud = LuaUserdata::new(OpaqueUserData::new(value));
+        self.create_userdata(ud)
+    }
+
+    /// Push any `T: 'static` with a custom metatable.
+    pub fn push_any_with_metatable<T: 'static>(
+        &mut self,
+        value: T,
+        metatable: LuaValue,
+    ) -> LuaResult<LuaValue> {
+        let mt_ptr = metatable
+            .as_table_ptr()
+            .ok_or_else(|| self.error("metatable must be a table".to_string()))?;
+        let ud = LuaUserdata::with_metatable(OpaqueUserData::new(value), mt_ptr);
+        self.create_userdata(ud)
     }
 
     /// Execute a function with arguments

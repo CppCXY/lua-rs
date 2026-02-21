@@ -4,6 +4,7 @@ pub mod chunk_serializer;
 pub mod lua_convert;
 mod lua_table;
 mod lua_value;
+pub mod userdata_builder;
 pub mod userdata_trait;
 
 use std::any::Any;
@@ -11,9 +12,10 @@ use std::fmt;
 use std::rc::Rc;
 
 pub use userdata_trait::{
-    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, UdValue, UserDataTrait,
-    lua_value_to_udvalue, udvalue_to_lua_value,
+    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData, UdValue,
+    UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value,
 };
+pub use userdata_builder::UserDataBuilder;
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;

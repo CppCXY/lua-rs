@@ -22,3 +22,4 @@ pub mod test_c_functions;
 pub mod test_functions;
 pub mod test_gc_metamethods;
 pub mod test_rclosure;
+pub mod test_user_api;
