@@ -7,7 +7,7 @@
 
 > ⚠️ **Project Notice**: This is an experimental **Lua 5.5** interpreter implementation crafted primarily through AI-assisted programming.
 
-A Lua 5.5 interpreter written in pure Rust (~49,000 lines). Faithfully ported from the official C Lua source code architecture — register-based VM, incremental/generational GC, string interning — and **passes the official Lua 5.5 test suite** (`all.lua` — 28/30 test files).
+A Lua 5.5 interpreter written in pure Rust. Faithfully ported from the official C Lua source code architecture — register-based VM, incremental/generational GC, string interning — and **passes the official Lua 5.5 test suite** (`all.lua` — 28/30 test files, 400+ unit tests).
 
 ## Highlights
 
@@ -15,7 +15,8 @@ A Lua 5.5 interpreter written in pure Rust (~49,000 lines). Faithfully ported fr
 - **Pure Rust**: No C dependencies, no `unsafe` FFI — the entire runtime is self-contained Rust
 - **Official Test Suite**: Passes 28 of 30 official Lua 5.5 test files — `all.lua` runs to `final OK` (see [Compatibility](#compatibility))
 - **UserData API**: Derive macros to expose Rust structs to Lua with fields, methods, and constructors (see [User Guide](docs/UserGuide.md))
-- **~49K lines of Rust** across compiler, VM, GC, and standard libraries
+- **Async Support**: Run async Rust functions from Lua via coroutine-based bridging (see [Async Docs](docs/async/README.md))
+- **Enum Export**: Derive macros to export Rust enums as Lua constant tables
 
 ## Architecture
 
@@ -205,8 +206,10 @@ lua_rt/
 │   ├── Guide.md             — Comprehensive usage guide (start here)
 │   │   └── guide/           — Guide sub-docs (7 files)
 │   ├── Different.md         — Full behavioral differences documentation
-│   └── UserGuide.md         — UserData API guide
-│       └── userdata/        — Detailed sub-docs (6 files)
+│   ├── UserGuide.md         — UserData API guide
+│   │   └── userdata/        — Detailed sub-docs (6 files)
+│   └── async/               — Async programming guide (7 files)
+│       └── README.md        — Async overview & table of contents
 └── libs/                    — Test helper modules
 ```
 
