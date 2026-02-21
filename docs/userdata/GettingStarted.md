@@ -61,7 +61,7 @@ fn main() {
     state.register_type_of::<Point>("Point").unwrap();
 
     // Execute Lua code
-    let results = state.execute_string(r#"
+    let results = state.execute(r#"
         local p = Point.new(3, 4)
         print(p.x, p.y)         -- 3.0  4.0
         print(p:distance())     -- 5.0

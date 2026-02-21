@@ -435,9 +435,11 @@ impl LuaVM {
         func: LuaValue,
         args: Vec<LuaValue>,
     ) -> LuaResult<Vec<LuaValue>> {
-        // Save function index - will be at current logical top
+        // Save state for recovery on error (like C Lua's lua_pcallk at top level)
         let main_state = self.main_state();
-        let func_idx = main_state.get_top();
+        let initial_depth = main_state.call_depth();
+        let saved_stack_top = main_state.get_top();
+        let func_idx = saved_stack_top;
         let nargs = args.len();
 
         // Push function onto stack (updates stack_top)
@@ -455,12 +457,50 @@ impl LuaVM {
         main_state.push_frame(&func, base, nargs, -1)?;
 
         // Run the VM execution loop
-        let results = self.run()?;
+        match self.run() {
+            Ok(results) => {
+                // Reset logical stack top for next execution
+                self.main_state().set_top(0)?;
+                Ok(results)
+            }
+            Err(e) => {
+                // Error — clean up call stack, upvalues, and TBC variables
+                // This mirrors pcall's error recovery so the VM stays usable.
+                let main_state = self.main_state();
 
-        // Reset logical stack top for next execution
-        self.main_state().set_top(0)?;
+                // Save error message before TBC __close handlers could overwrite it
+                let saved_error_msg = main_state.error_msg.clone();
 
-        Ok(results)
+                // Collect error object before closing TBC (close may modify it)
+                let err_obj = std::mem::replace(&mut main_state.error_object, LuaValue::nil());
+
+                // Get frame_base before popping frames
+                let frame_base = if main_state.call_depth() > initial_depth {
+                    main_state.call_stack.get(initial_depth).map(|f| f.base)
+                } else {
+                    None
+                };
+
+                // Pop frames back to the initial depth (like Lua 5.5: L->ci = old_ci)
+                while main_state.call_depth() > initial_depth {
+                    main_state.pop_frame();
+                }
+
+                // Close upvalues and TBC variables up to the frame base
+                if let Some(base) = frame_base {
+                    main_state.close_upvalues(base);
+                    let _ = main_state.close_tbc_with_error(base, err_obj);
+                }
+
+                // Restore stack to a clean state
+                let _ = main_state.set_top(0);
+
+                // Restore original error message in case TBC __close overwrote it
+                self.main_state().error_msg = saved_error_msg;
+
+                Err(e)
+            }
+        }
     }
 
     /// Main VM execution loop (equivalent to luaV_execute)

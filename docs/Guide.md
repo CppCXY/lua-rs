@@ -7,11 +7,11 @@ A comprehensive guide to embedding the luars Lua 5.5 runtime in your Rust applic
 | Document | Description |
 |----------|-------------|
 | [Getting Started](guide/01-GettingStarted.md) | Create a VM, load stdlib, run your first Lua script |
-| [Executing Code](guide/02-ExecutingCode.md) | `execute_string`, `execute`, compilation, return values |
+| [Executing Code](guide/02-ExecutingCode.md) | `execute`, `load`, `dofile`, `call_global`, return values |
 | [Working with Values](guide/03-WorkingWithValues.md) | `LuaValue`, globals, tables, strings |
 | [Rust Functions in Lua](guide/04-RustFunctions.md) | `CFunction`, `RClosure`, `create_closure` |
 | [FromLua / IntoLua](guide/05-FromLuaIntoLua.md) | Automatic Rust ↔ Lua type conversion traits |
-| [Error Handling](guide/06-ErrorHandling.md) | `LuaError`, `pcall`, `xpcall`, `Result` |
+| [Error Handling](guide/06-ErrorHandling.md) | `LuaError`, `LuaFullError`, `pcall`, `xpcall`, `Result` |
 | [API Reference](guide/07-APIReference.md) | Quick reference of all public methods |
 
 ## UserData (Custom Rust Types in Lua)
@@ -24,6 +24,17 @@ A comprehensive guide to embedding the luars Lua 5.5 runtime in your Rust applic
 | [register_type](userdata/RegisterType.md) | Type registration: `register_type` and `register_type_of` |
 | [Type Conversions](userdata/TypeConversions.md) | Parameter types, return types, `Option` / `Result` handling |
 | [Complete Examples](userdata/Examples.md) | End-to-end examples: Vec2, AppConfig, Calculator, and more |
+
+## Async (Rust Async Functions in Lua)
+
+| Document | Description |
+|----------|-------------|
+| [Getting Started](async/01-getting-started.md) | 5-minute async quickstart |
+| [API Reference](async/02-api-reference.md) | All async types and methods |
+| [Examples](async/03-examples.md) | Code examples from simple to complex |
+| [Architecture](async/04-architecture.md) | Coroutine↔Future bridging internals |
+| [Multi-VM Patterns](async/05-multi-vm.md) | Concurrent multi-VM design patterns |
+| [HTTP Server Example](async/06-http-server.md) | Complete async HTTP server walkthrough |
 
 ## Other
 
@@ -45,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     vm.open_stdlib(Stdlib::All)?;
 
     // 3. Execute Lua code
-    let results = vm.execute_string(r#"
+    let results = vm.execute(r#"
         local sum = 0
         for i = 1, 100 do
             sum = sum + i
@@ -62,10 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```toml
 [dependencies]
-luars = "0.4"
+luars = "0.7"
 
-# Optional: Enable JSON serialization support
-luars = { version = "0.4", features = ["serde"] }
+# With JSON support:
+luars = { version = "0.7", features = ["serde"] }
 ```
 
 The `#[derive(LuaUserData)]` and `#[lua_methods]` macros are re-exported by `luars` automatically — no need to add `luars-derive` separately.

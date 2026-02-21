@@ -19,7 +19,7 @@ let name = vm.create_string("world")?;
 vm.set_global("PLAYER_NAME", name)?;
 
 // Now accessible in Lua
-vm.execute_string(r#"
+vm.execute(r#"
     print(MAX_HEALTH)    -- 100
     print(PLAYER_NAME)   -- world
 "#)?;
@@ -37,7 +37,7 @@ state.set_global("X", LuaValue::integer(42))?;
 Read values set by Lua code:
 
 ```rust
-vm.execute_string("MY_VAR = 123")?;
+vm.execute("MY_VAR = 123")?;
 
 let val = vm.get_global("MY_VAR")?;
 if let Some(v) = val {
@@ -152,7 +152,7 @@ vm.raw_set(&config, k_title, v_title);
 
 vm.set_global("config", config)?;
 
-vm.execute_string(r#"
+vm.execute(r#"
     print(config.title)           -- My App
     print(config.window.width)    -- 800
 "#)?;

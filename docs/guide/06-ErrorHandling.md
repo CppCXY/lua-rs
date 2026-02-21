@@ -6,25 +6,30 @@ This guide covers how errors work in luars — from Rust-side error types to Lua
 
 All fallible operations return `LuaResult<T>`, which is `Result<T, LuaError>`.
 
-`LuaError` is an enum representing different error categories:
+`LuaError` is a 1-byte enum representing different error categories:
 
 ```rust
 pub enum LuaError {
-    RuntimeError,     // general runtime error (error message stored in VM)
-    CompileError,     // syntax or compilation error
-    MemoryError,      // memory allocation failure
-    StackOverflow,    // call stack overflow
-    InstructionLimit, // exceeded max_instruction_count
-    YieldError,       // yield from a non-yieldable context
+    RuntimeError,           // general runtime error
+    CompileError,           // syntax / compilation error
+    Yield,                  // coroutine yield (internal)
+    StackOverflow,          // call stack overflow
+    OutOfMemory,            // memory allocation failure
+    IndexOutOfBounds,       // stack index out of range
+    Exit,                   // top-level return (internal)
+    CloseThread,            // coroutine self-close (internal)
+    ErrorInErrorHandling,   // error inside error handler
 }
 ```
+
+The actual error message is stored inside the VM, not in the enum itself — this keeps `LuaError` just 1 byte and `Result<T, LuaError>` very cheap.
 
 ### Getting the Error Message
 
 Error messages are stored internally. Use `get_error_message` to retrieve them:
 
 ```rust
-match vm.execute_string("error('something went wrong')") {
+match vm.execute("error('something went wrong')") {
     Ok(_) => println!("Success"),
     Err(e) => {
         let msg = vm.get_error_message(e);
@@ -36,7 +41,7 @@ match vm.execute_string("error('something went wrong')") {
 On `LuaState`:
 
 ```rust
-match state.execute_string("invalid code %%%") {
+match state.execute("invalid code %%%") {
     Ok(_) => {},
     Err(e) => {
         let msg = state.get_error_msg(e);
@@ -52,6 +57,26 @@ Access the last error message without consuming the error:
 ```rust
 let msg = state.last_error_msg();  // &str
 ```
+
+## LuaFullError
+
+For contexts where you need a proper `std::error::Error` with the message included (e.g., `anyhow`, `?` operator), use `vm.into_full_error()`:
+
+```rust
+let result = vm.execute("error('boom')")
+    .map_err(|e| vm.into_full_error(e))?;
+```
+
+`LuaFullError` has two public fields:
+
+```rust
+pub struct LuaFullError {
+    pub kind: LuaError,     // the error variant
+    pub message: String,    // human-readable message with source location
+}
+```
+
+It implements `Display` and `std::error::Error`, printing the full message when displayed.
 
 ## Raising Errors from Rust
 
@@ -163,8 +188,11 @@ Lua → Rust error catch:
   state.xpcall(func, args, handler) → (bool, Vec<LuaValue>)
 
 Lua error propagation:
-  vm.execute_string(...)     → LuaResult<Vec<LuaValue>>
+  vm.execute(...)            → LuaResult<Vec<LuaValue>>
   state.call(func, args)     → LuaResult<Vec<LuaValue>> (propagates)
+
+Rich error:
+  vm.into_full_error(e)      → LuaFullError (impl std::error::Error)
 ```
 
 ## Next

@@ -119,7 +119,7 @@ impl VmPool {
                         }).unwrap();
 
                         // Load initialization script
-                        vm.execute_string(&script).unwrap();
+                        vm.execute(&script).unwrap();
 
                         // Process requests
                         while let Some(req) = rx.recv().await {

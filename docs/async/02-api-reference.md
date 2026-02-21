@@ -84,7 +84,7 @@ vm.register_async("create_point", |args| async move {
 
 **Notes:**
 - Registered functions can only be called from an `AsyncThread` context (i.e., Lua code executed via `execute_async()` or `create_async_thread()`)
-- Calling from regular `execute_string()` will produce a runtime error
+- Calling from regular `execute()` will produce a runtime error
 - The closure must be `'static` (cannot capture non-`'static` references)
 
 ---
@@ -106,7 +106,7 @@ pub async fn execute_async(
 |-----------|------|-------------|
 | `source` | `&str` | Lua source code string |
 
-**Returns:** `LuaResult<Vec<LuaValue>>` — same return type as synchronous `execute_string()`.
+**Returns:** `LuaResult<Vec<LuaValue>>` — same return type as synchronous `execute()`.
 
 **Examples:**
 

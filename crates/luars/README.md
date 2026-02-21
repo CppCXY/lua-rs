@@ -1,75 +1,122 @@
 # luars
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/luars.svg)](https://crates.io/crates/luars)
 
-A Lua 5.5 runtime implementation in Rust, providing both interpreter and embedding capabilities.
+A Lua 5.5 interpreter written in pure Rust — embeddable, async-capable, with derive macros for UserData.
 
 ## Features
 
-- **Lua 5.5 Core**: Implements Lua 5.5 language semantics
-- **Pure Rust**: Written entirely in Rust with no C dependencies
-- **Embeddable**: Designed to be embedded in Rust applications
-- **Standard Libraries**: Comprehensive coverage of Lua standard libraries
-- **UTF-8 Strings**: All Lua strings are valid UTF-8 (non-standard but safer)
-- **UserData API**: Derive macros to expose Rust structs to Lua with fields, methods, and constructors
-- **Rust Closures**: Register Rust closures (with captured state) as Lua functions via `RClosure`
-- **FromLua / IntoLua**: Automatic type conversion traits for seamless Rust ↔ Lua interop
-- **Optional Serde**: JSON serialization support for Lua values (feature-gated)
-
-## Current Status
-
-### ✅ Implemented
-- Core language features (operators, control flow, functions, tables)
-- Metatables and metamethods
-- Coroutines
-- Garbage collection
-- Most standard libraries: `string`, `table`, `math`, `io`, `os`, `coroutine`, `utf8`, `package`
-- String pack/unpack with Lua 5.4+ formats (`i[n]`, `I[n]`, `j`, `n`, `T`)
-- Lua reference mechanism (luaL_ref/luaL_unref)
-- Optional JSON serialization via serde feature
-
-### ⚠️ Known Limitations
-- **UTF-8 Only Strings**: Unlike standard Lua, strings must be valid UTF-8. Binary data should use the binary type from `string.pack`/`string.unpack`.
-- **Custom Bytecode Format**: Uses LuaRS-specific bytecode format, not compatible with standard Lua bytecode.
-- **Partial Debug Library**: Some introspection features are not yet implemented.
-
-### 🚧 Incomplete Features
-- Full debug library introspection
+- **Lua 5.5** — full language semantics: compiler, register-based VM, GC
+- **Pure Rust** — no C dependencies, no `unsafe` FFI
+- **Ergonomic API** — `call_global`, `register_function`, `load`, `dofile`, `TableBuilder`, typed getters
+- **UserData** — derive macros to expose Rust structs/enums to Lua (fields, methods, operators)
+- **Async** — run async Rust functions from Lua via transparent coroutine bridging
+- **Closures** — register Rust closures with captured state as Lua globals
+- **FromLua / IntoLua** — automatic type conversion for seamless Rust ↔ Lua interop
+- **Optional Serde** — JSON serialization via `serde` / `serde_json` (feature-gated)
+- **Standard Libraries** — `basic`, `string`, `table`, `math`, `io`, `os`, `coroutine`, `utf8`, `package`, partial `debug`
 
 ## Usage
 
-Add to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-luars = "0.4"
+luars = "0.7"
 
-# Optional: Enable JSON serialization support
-luars = { version = "0.4", features = ["serde"] }
+# With JSON support:
+luars = { version = "0.7", features = ["serde"] }
 ```
 
 ### Basic Example
 
 ```rust
-use luars::lua_vm::{LuaVM, SafeOption};
+use luars::{LuaVM, Stdlib, LuaValue};
+use luars::lua_vm::SafeOption;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(luars::Stdlib::All).unwrap();
-    let result = vm.execute_string(r#"
-        function greet(name)
-            return "Hello, " .. name .. "!"
-        end
-        
-        print(greet("World"))
-    "#);
-    
+    vm.open_stdlib(Stdlib::All)?;
+
+    // Execute Lua code
+    let results = vm.execute("return 1 + 2")?;
+    assert_eq!(results[0].as_integer(), Some(3));
+
+    // Set / get globals
+    vm.set_global("x", LuaValue::integer(42))?;
+    let x: i64 = vm.get_global_as::<i64>("x")?.unwrap();
+
+    // Call a Lua function
+    vm.execute("function add(a,b) return a+b end")?;
+    let sum = vm.call_global("add", vec![LuaValue::integer(1), LuaValue::integer(2)])?;
+    assert_eq!(sum[0].as_integer(), Some(3));
+
     Ok(())
 }
 ```
 
-### UserData Example
+### Register Rust Functions
+
+```rust
+vm.register_function("greet", |state| {
+    let name = state.get_arg(1).and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "World".into());
+    let msg = state.create_string(&format!("Hello, {}!", name))?;
+    state.push_value(msg)?;
+    Ok(1)
+})?;
+
+vm.execute("print(greet('Rust'))")?;  // Hello, Rust!
+```
+
+### Load, Dofile, Call
+
+```rust
+// Compile without executing
+let f = vm.load("return 1 + 1")?;
+let results = vm.call(f, vec![])?;
+
+// Load named source
+let f = vm.load_with_name("return 42", "my_chunk")?;
+
+// Execute a file
+vm.dofile("scripts/init.lua")?;
+```
+
+### TableBuilder
+
+```rust
+use luars::TableBuilder;
+
+let config = TableBuilder::new()
+    .set("host", vm.create_string("localhost")?)
+    .set("port", LuaValue::integer(8080))
+    .push(LuaValue::integer(1))
+    .build(&mut vm)?;
+vm.set_global("config", config)?;
+
+// Iterate
+for (k, v) in vm.table_pairs(&config)? {
+    println!("{:?} = {:?}", k, v);
+}
+let len = vm.table_length(&config)?;
+```
+
+### Rust Closures
+
+```rust
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+let counter = Arc::new(AtomicUsize::new(0));
+let counter_clone = counter.clone();
+let func = vm.create_closure(move |state| {
+    let n = counter_clone.fetch_add(1, Ordering::SeqCst);
+    state.push_value(LuaValue::integer(n as i64))?;
+    Ok(1)
+})?;
+vm.set_global("next_id", func)?;
+```
+
+### UserData
 
 ```rust
 use luars::{LuaUserData, lua_methods};
@@ -84,100 +131,74 @@ impl Point {
     pub fn distance(&self) -> f64 { (self.x * self.x + self.y * self.y).sqrt() }
 }
 
-// Register and use:
-let state = vm.main_state();
-state.register_type_of::<Point>("Point")?;
-state.execute_string(r#"
+vm.register_type_of::<Point>("Point")?;
+vm.execute(r#"
     local p = Point.new(3, 4)
     print(p.x, p:distance())   -- 3.0  5.0
 "#)?;
 ```
 
-### Rust Closures in Lua
+### Error Handling
 
 ```rust
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use luars::LuaError;
 
-let counter = Arc::new(AtomicUsize::new(0));
-let counter_clone = counter.clone();
-let func = vm.create_closure(move |state| {
-    let n = counter_clone.fetch_add(1, Ordering::SeqCst);
-    state.push_value(luars::LuaValue::integer(n as i64))?;
-    Ok(1)
+match vm.execute("error('boom')") {
+    Ok(_) => {}
+    Err(e) => {
+        // Lightweight message
+        let msg = vm.get_error_message(e);
+        eprintln!("Lua error: {}", msg);
+
+        // Rich error (implements std::error::Error)
+        let full = vm.into_full_error(e);
+        eprintln!("{}", full);
+    }
+}
+```
+
+`LuaError` is a 1-byte enum (`Runtime`, `Syntax`, `OutOfMemory`, `MessageHandler`, `IndexOutOfBounds`). For rich errors with messages and `std::error::Error` impl, use `vm.into_full_error()` → `LuaFullError`.
+
+### Selective Standard Libraries
+
+```rust
+use luars::Stdlib;
+
+vm.open_stdlib(Stdlib::All)?;                          // everything
+vm.open_stdlibs(&[Stdlib::Base, Stdlib::String])?;     // specific set
+```
+
+### Async
+
+```rust
+use luars::AsyncReturnValue;
+
+vm.register_async("fetch", |args| async move {
+    let url = args[0].as_str().unwrap_or("").to_string();
+    let body = reqwest::get(&url).await?.text().await?;
+    Ok(vec![AsyncReturnValue::string(body)])
 })?;
-vm.set_global("next_id", func)?;
+
+let results = vm.execute_async("return fetch('https://example.com')").await?;
 ```
 
-## Standard Library Coverage
+## Known Limitations
 
-| Library | Status | Notes |
-|---------|--------|-------|
-| `basic` | ✅ Complete | All core functions implemented |
-| `string` | ✅ Complete | UTF-8 strings only |
-| `table` | ✅ Complete | All table manipulation functions |
-| `math` | ✅ Complete | Full math library including random |
-| `io` | ✅ Complete | File I/O operations |
-| `os` | ✅ Complete | Operating system facilities |
-| `coroutine` | ✅ Complete | Full coroutine support |
-| `utf8` | ✅ Complete | UTF-8 string operations |
-| `package` | ✅ Complete | Module system with require |
-| `debug` | ⚠️ Partial | Some introspection features missing |
-
-## Differences from Standard Lua
-
-1. **UTF-8 Strings**: All Lua strings must be valid UTF-8. The `\xNN` escape sequences that would produce invalid UTF-8 are not supported. Use `string.pack()` for binary data.
-
-2. **Bytecode Format**: Uses a custom LuaRS bytecode format. `string.dump()` output is not compatible with standard Lua.
-
-3. **String/Binary Comparison**: String and binary values can be compared for equality, unlike standard Lua where they would be different types.
-
-## Building from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/CppCXY/lua-rs
-cd lua-rs
-
-# Build the library
-cargo build --release
-
-# Run tests
-cargo test
-
-# Build with serde support
-cargo build --release --features serde
-```
-
-## Contributing
-
-Contributions are welcome! This project is actively developed and we appreciate:
-
-- Bug reports and fixes
-- Performance improvements
-- Documentation improvements
-- Test cases for edge cases
-- Feature implementations
-
-Please open an issue before starting major work to discuss the approach.
-
-## Roadmap
-
-- [ ] Complete debug library implementation
-- [ ] Performance optimizations
+- **UTF-8 Only Strings** — unlike C Lua, strings must be valid UTF-8. Use `string.pack`/`string.unpack` for binary data.
+- **Custom Bytecode Format** — `string.dump` output is not compatible with C Lua bytecode.
+- **No C API** — pure Rust; cannot load C Lua modules.
+- **Partial Debug Library** — `debug.sethook` is a stub; `getinfo`/`getlocal`/`traceback` work.
+- **No string-to-number coercion in arithmetic** — `"3" + 1` raises an error.
 
 ## Documentation
 
-See [docs/Guide.md](../../docs/Guide.md) for the comprehensive usage guide covering:
-- VM creation and configuration
-- Executing Lua code
-- Working with values, globals, and tables
-- Registering Rust functions and closures
-- UserData (exposing Rust structs to Lua)
-- FromLua / IntoLua type conversion
-- Error handling
-- Full API reference
-
+| Document | Description |
+|----------|-------------|
+| [Guide](../../docs/Guide.md) | VM, execution, values, functions, errors, API reference |
+| [UserData Guide](../../docs/UserGuide.md) | Derive macros, fields, methods, constructors |
+| [Async Guide](../../docs/Async.md) | Async Rust functions, architecture, HTTP server example |
+| [Differences](../../docs/Different.md) | Behavioral differences from C Lua 5.5 |
 
 ## License
 
-MIT License - See [LICENSE](../../LICENSE) file for details.
+MIT — see [LICENSE](../../LICENSE).

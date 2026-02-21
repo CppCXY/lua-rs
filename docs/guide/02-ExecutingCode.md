@@ -2,26 +2,93 @@
 
 This guide covers the different ways to compile and execute Lua code.
 
-## execute_string
+## execute
 
 The simplest approach — compile and run a Lua source string in one call:
 
 ```rust
-// On LuaVM
-let results = vm.execute_string(r#"
+let results = vm.execute(r#"
     return 1 + 2, "hello"
 "#)?;
+```
 
-// On LuaState (same API available on the main state)
+Also available on `LuaState`:
+
+```rust
 let state = vm.main_state();
-let results = state.execute_string(r#"
+let results = state.execute(r#"
     return "from state"
 "#)?;
 ```
 
 Returns `LuaResult<Vec<LuaValue>>` — the values returned by the Lua chunk.
 
-## Compilation + Execution (Two Steps)
+## load / load_with_name
+
+Compile source code into a callable function value **without executing it**:
+
+```rust
+let func = vm.load("return 1 + 1")?;
+// func is a LuaValue (function) — call it later
+let results = vm.call(func, vec![])?;
+```
+
+Give the chunk a name for better error messages:
+
+```rust
+let func = vm.load_with_name("return 42", "my_script.lua")?;
+```
+
+Also available on `LuaState`:
+
+```rust
+let func = state.load("return 1 + 1")?;
+```
+
+## dofile
+
+Read, compile, and execute a Lua file from disk:
+
+```rust
+let results = vm.dofile("scripts/init.lua")?;
+```
+
+Also available on `LuaState`:
+
+```rust
+let results = state.dofile("scripts/config.lua")?;
+```
+
+## call / call_global
+
+Call a Lua function from Rust:
+
+```rust
+// Prepare a function value
+vm.execute("function add(a, b) return a + b end")?;
+
+// Look up a global by name and call it
+let results = vm.call_global("add", vec![
+    LuaValue::integer(3),
+    LuaValue::integer(4),
+])?;
+assert_eq!(results[0].as_integer(), Some(7));
+
+// Or call an arbitrary function value
+let func = vm.get_global("add")?.unwrap();
+let results = vm.call(func, vec![
+    LuaValue::integer(10),
+    LuaValue::integer(20),
+])?;
+```
+
+Also available on `LuaState` (as `call_function` / `call_global`):
+
+```rust
+let results = state.call_global("add", vec![LuaValue::integer(1), LuaValue::integer(2)])?;
+```
+
+## Compilation (Two Steps)
 
 For repeated execution of the same code, compile once and execute multiple times:
 
@@ -37,7 +104,7 @@ let chunk = vm.compile(r#"
 let chunk = Rc::new(chunk);
 
 // Step 2: Execute the compiled chunk
-let results = vm.execute(chunk.clone())?;
+let results = vm.execute_chunk(chunk.clone())?;
 ```
 
 ### compile_with_name
@@ -56,7 +123,7 @@ let chunk = vm.compile_with_name(
 Lua chunks can return multiple values. The result is always `Vec<LuaValue>`:
 
 ```rust
-let results = vm.execute_string("return 1, 'two', true, nil")?;
+let results = vm.execute("return 1, 'two', true, nil")?;
 
 assert_eq!(results.len(), 4);
 assert_eq!(results[0].as_integer(), Some(1));
@@ -68,7 +135,7 @@ assert!(results[3].is_nil());
 If the chunk doesn't return anything, the result is an empty vector:
 
 ```rust
-let results = vm.execute_string("print('hello')")?;
+let results = vm.execute("print('hello')")?;
 assert!(results.is_empty());
 ```
 
@@ -112,14 +179,26 @@ LuaValue::cfunction(my_fn)  // from a fn(&mut LuaState) -> LuaResult<usize>
 
 ## Error Handling
 
-`execute_string` returns `LuaResult<Vec<LuaValue>>`. Errors include compilation errors and runtime errors:
+`execute` returns `LuaResult<Vec<LuaValue>>`. Errors include compilation errors and runtime errors:
 
 ```rust
-match vm.execute_string("invalid lua {{{{") {
+match vm.execute("invalid lua {{{{") {
     Ok(results) => println!("Success: {} values", results.len()),
     Err(e) => {
         let msg = vm.get_error_message(e);
         eprintln!("Error: {}", msg);
+    }
+}
+```
+
+For richer errors, use `into_full_error`:
+
+```rust
+match vm.execute("error('boom')") {
+    Ok(_) => {}
+    Err(e) => {
+        let full = vm.into_full_error(e);
+        eprintln!("{}", full);  // includes source location
     }
 }
 ```

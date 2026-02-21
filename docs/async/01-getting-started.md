@@ -100,7 +100,7 @@ let results = thread.await?;
 
 ### Step 3: Handle Results
 
-`.await` returns `LuaResult<Vec<LuaValue>>` — the exact same type as synchronous `execute_string()`.
+`.await` returns `LuaResult<Vec<LuaValue>>` — the exact same type as synchronous `execute()`.
 
 ```rust
 let results = vm.execute_async("return read_file('config.txt')").await?;
@@ -110,7 +110,7 @@ println!("File content: {}", content);
 
 ## Important Constraints
 
-1. **Must use async execution**: Registered async functions can only be called via `execute_async()` or `create_async_thread()`. Calling async functions from regular `execute_string()` will cause an error.
+1. **Must use async execution**: Registered async functions can only be called via `execute_async()` or `create_async_thread()`. Calling async functions from regular `execute()` will cause an error.
 
 2. **`LuaVM` is `!Send`**: Cannot be moved across threads. For multi-threading, use the thread-per-VM pattern (see [Multi-VM Patterns](./05-multi-vm.md)).
 

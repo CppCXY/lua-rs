@@ -77,7 +77,7 @@ vm.open_stdlib(Stdlib::Math)?;
 The simplest way to run Lua code:
 
 ```rust
-let results = vm.execute_string(r#"
+let results = vm.execute(r#"
     print("Hello from Lua!")
     return 42
 "#)?;
@@ -101,7 +101,7 @@ Get the main `LuaState` from a `LuaVM`:
 let state: &mut LuaState = vm.main_state();
 ```
 
-Both `LuaVM` and `LuaState` provide overlapping APIs for convenience. For example, both have `execute_string`, `set_global`, `create_table`, etc. Use whichever you have access to.
+Both `LuaVM` and `LuaState` provide overlapping APIs for convenience. For example, both have `execute`, `set_global`, `create_table`, etc. Use whichever you have access to.
 
 ## Complete Minimal Example
 
@@ -119,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     vm.open_stdlib(Stdlib::Math)?;
 
     // Run Lua code and get results
-    let results = vm.execute_string(r#"
+    let results = vm.execute(r#"
         local function factorial(n)
             if n <= 1 then return 1 end
             return n * factorial(n - 1)

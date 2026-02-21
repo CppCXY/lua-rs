@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Register as a global function
     vm.set_global("my_add", LuaValue::cfunction(my_add))?;
 
-    vm.execute_string(r#"
+    vm.execute(r#"
         print(my_add(3, 4))    -- 7.0
     "#)?;
 
@@ -105,7 +105,7 @@ let func = vm.create_closure(move |state: &mut LuaState| {
 
 vm.set_global("next_id", func)?;
 
-vm.execute_string(r#"
+vm.execute(r#"
     print(next_id())  -- 0
     print(next_id())  -- 1
     print(next_id())  -- 2
@@ -155,7 +155,7 @@ You can call Lua functions from Rust using `call`, `pcall`, or `xpcall`:
 Calls a function directly. Errors propagate as `LuaError`:
 
 ```rust
-vm.execute_string(r#"
+vm.execute(r#"
     function greet(name)
         return "Hello, " .. name .. "!"
     end
@@ -235,7 +235,7 @@ vm.raw_set(&module, k1, LuaValue::cfunction(lib_greet));
 vm.raw_set(&module, k2, LuaValue::cfunction(lib_version));
 vm.set_global("mylib", module)?;
 
-vm.execute_string(r#"
+vm.execute(r#"
     print(mylib.greet("Lua"))  -- Hello, Lua!
     print(mylib.version())     -- 1
 "#)?;

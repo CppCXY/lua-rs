@@ -377,3 +377,115 @@ fn test_lua_state_call_global_proxy() {
     let results = vm.execute("return test_call_global()").unwrap();
     assert_eq!(results[0].as_integer(), Some(42));
 }
+
+// ========== Error Recovery Tests ==========
+
+#[test]
+fn test_execute_error_recovery() {
+    // After a runtime error in execute(), the VM should remain usable.
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    // Cause a runtime error
+    let err = vm.execute("error('boom')");
+    assert!(err.is_err());
+
+    // VM should still be usable — execute more code
+    let results = vm.execute("return 1 + 2").unwrap();
+    assert_eq!(results[0].as_integer(), Some(3));
+}
+
+#[test]
+fn test_execute_error_preserves_globals() {
+    // Globals set before an error should still be accessible after recovery.
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    vm.execute("x = 42").unwrap();
+
+    let err = vm.execute("error('fail')");
+    assert!(err.is_err());
+
+    let results = vm.execute("return x").unwrap();
+    assert_eq!(results[0].as_integer(), Some(42));
+}
+
+#[test]
+fn test_call_global_error_recovery() {
+    // call_global error should not corrupt the VM state.
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    vm.execute("function bad() error('nope') end").unwrap();
+    vm.execute("function good() return 99 end").unwrap();
+
+    let err = vm.call_global("bad", vec![]);
+    assert!(err.is_err());
+
+    // Should still work after the error
+    let results = vm.call_global("good", vec![]).unwrap();
+    assert_eq!(results[0].as_integer(), Some(99));
+}
+
+#[test]
+fn test_multiple_errors_recovery() {
+    // Multiple consecutive errors should all recover cleanly.
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    for i in 0..5 {
+        let err = vm.execute(&format!("error('error {}')", i));
+        assert!(err.is_err());
+    }
+
+    // VM should still work after many errors
+    let results = vm.execute("return 'still alive'").unwrap();
+    assert_eq!(results[0].as_str(), Some("still alive"));
+}
+
+#[test]
+fn test_error_message_available_after_recovery() {
+    // get_error_message should return the correct message after recovery.
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let err = vm.execute("error('specific error message')").unwrap_err();
+    let msg = vm.get_error_message(err);
+    assert!(
+        msg.contains("specific error message"),
+        "expected message to contain 'specific error message', got: {}",
+        msg
+    );
+
+    // VM should be usable after getting the message
+    let results = vm.execute("return true").unwrap();
+    assert_eq!(results[0].as_boolean(), Some(true));
+}
+
+#[test]
+fn test_deep_call_error_recovery() {
+    // Error in deeply nested calls should clean up all frames.
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    vm.execute(
+        r#"
+        function a() return b() end
+        function b() return c() end
+        function c() error('deep error') end
+    "#,
+    )
+    .unwrap();
+
+    let err = vm.call_global("a", vec![]);
+    assert!(err.is_err());
+
+    // After deep error, simple calls should work
+    let results = vm.execute("return 1 + 1").unwrap();
+    assert_eq!(results[0].as_integer(), Some(2));
+
+    // And function calls too
+    vm.execute("function simple() return 42 end").unwrap();
+    let results = vm.call_global("simple", vec![]).unwrap();
+    assert_eq!(results[0].as_integer(), Some(42));
+}
