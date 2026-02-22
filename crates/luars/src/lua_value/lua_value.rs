@@ -1348,8 +1348,8 @@ mod tests {
         assert!(f.ttisboolean());
         assert!(t.ttistrue());
         assert!(f.ttisfalse());
-        assert_eq!(t.bvalue(), true);
-        assert_eq!(f.bvalue(), false);
+        assert!(t.bvalue());
+        assert!(!f.bvalue());
         assert!(t.is_truthy());
         assert!(f.is_falsy());
     }
@@ -1368,11 +1368,11 @@ mod tests {
 
     #[test]
     fn test_float() {
-        let v = LuaValue::float(3.14);
+        let v = LuaValue::float(3.15);
         assert!(v.ttisnumber());
         assert!(v.ttisfloat());
-        assert!((v.fltvalue() - 3.14).abs() < f64::EPSILON);
-        assert!((v.nvalue() - 3.14).abs() < f64::EPSILON);
+        assert!((v.fltvalue() - 3.15).abs() < f64::EPSILON);
+        assert!((v.nvalue() - 3.15).abs() < f64::EPSILON);
     }
 
     #[test]

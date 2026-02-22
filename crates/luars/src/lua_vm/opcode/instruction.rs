@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(instr.get_a(), 5);
         assert_eq!(instr.get_b(), 10);
         assert_eq!(instr.get_c(), 20);
-        assert_eq!(instr.get_k(), true);
+        assert!(instr.get_k());
     }
 
     #[test]
@@ -465,7 +465,7 @@ mod tests {
         let instr2 = Instruction::create_abck(OpCode::Add, 5, 15, 25, false);
         let k2_bits = (instr2.as_u32() >> 15) & 0x1;
         assert_eq!(k2_bits, 0);
-        assert_eq!(instr2.get_k(), false);
+        assert!(!instr2.get_k());
     }
 
     #[test]
@@ -538,6 +538,6 @@ mod tests {
         assert_eq!(ret.get_a(), 12);
         assert_eq!(ret.get_b(), 2);
         assert_eq!(ret.get_c(), 1);
-        assert_eq!(ret.get_k(), true);
+        assert!(ret.get_k());
     }
 }

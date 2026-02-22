@@ -24,7 +24,7 @@ fn test_table_ref_basic() {
 
     // Set and get via LuaValue key
     let key = vm.create_string("key2").unwrap();
-    tbl.set_value(key.clone(), LuaValue::boolean(true)).unwrap();
+    tbl.set_value(key, LuaValue::boolean(true)).unwrap();
     let val = tbl.get_value(&key).unwrap();
     assert_eq!(val.as_boolean(), Some(true));
 }
@@ -38,9 +38,9 @@ fn test_table_ref_get_as() {
     let count: i64 = tbl.get_as("count").unwrap();
     assert_eq!(count, 99);
 
-    tbl.set("pi", LuaValue::float(3.14)).unwrap();
+    tbl.set("pi", LuaValue::float(3.15)).unwrap();
     let pi: f64 = tbl.get_as("pi").unwrap();
-    assert!((pi - 3.14).abs() < 1e-10);
+    assert!((pi - 3.15).abs() < 1e-10);
 }
 
 #[test]

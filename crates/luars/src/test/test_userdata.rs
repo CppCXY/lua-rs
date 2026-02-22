@@ -287,7 +287,7 @@ fn test_lua_userdata_wrapper() {
 fn test_udvalue_conversions() {
     // From impls
     assert!(matches!(UdValue::from(42i64), UdValue::Integer(42)));
-    assert!(matches!(UdValue::from(3.14f64), UdValue::Number(n) if n == 3.14));
+    assert!(matches!(UdValue::from(3.15f64), UdValue::Number(n) if n == 3.15));
     assert!(matches!(UdValue::from(true), UdValue::Boolean(true)));
     assert!(matches!(UdValue::from("hello"), UdValue::Str(s) if s == "hello"));
 
@@ -303,8 +303,8 @@ fn test_udvalue_conversions() {
     assert_eq!(UdValue::Number(3.5).to_integer(), None); // non-exact
     assert_eq!(UdValue::Integer(5).to_number(), Some(5.0));
     assert_eq!(UdValue::Str("hi".into()).to_str(), Some("hi"));
-    assert_eq!(UdValue::Nil.to_bool(), false);
-    assert_eq!(UdValue::Integer(0).to_bool(), true); // Lua truthiness
+    assert!(!UdValue::Nil.to_bool());
+    assert!(UdValue::Integer(0).to_bool()); // Lua truthiness
 }
 
 // ==================== Simple userdata trait (macro) ====================

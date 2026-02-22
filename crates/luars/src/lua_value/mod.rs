@@ -630,10 +630,10 @@ mod value_tests {
     #[test]
     fn test_as_number_unified() {
         let int_val = LuaValue::integer(42);
-        let float_val = LuaValue::number(3.14);
+        let float_val = LuaValue::number(3.15);
 
         // as_number works for both
         assert_eq!(int_val.as_number(), Some(42.0));
-        assert_eq!(float_val.as_number(), Some(3.14));
+        assert_eq!(float_val.as_number(), Some(3.15));
     }
 }

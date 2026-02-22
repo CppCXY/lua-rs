@@ -44,8 +44,8 @@ fn test_rclosure_reads_args() {
 
     let func = vm
         .create_closure(|state: &mut LuaState| -> LuaResult<usize> {
-            let a = state.get_arg(1).unwrap_or(LuaValue::nil());
-            let b = state.get_arg(2).unwrap_or(LuaValue::nil());
+            let a = state.get_arg(1).unwrap_or_default();
+            let b = state.get_arg(2).unwrap_or_default();
             let sum = a.as_integer().unwrap_or(0) + b.as_integer().unwrap_or(0);
             state.push_value(LuaValue::integer(sum))?;
             Ok(1)

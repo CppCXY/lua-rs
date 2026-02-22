@@ -644,9 +644,9 @@ mod tests {
         let nil_val = LuaValue::nil();
 
         // Test 1: Create references
-        let table_ref = vm.create_ref(table.clone());
-        let number_ref = vm.create_ref(number.clone());
-        let nil_ref = vm.create_ref(nil_val.clone());
+        let table_ref = vm.create_ref(table);
+        let number_ref = vm.create_ref(number);
+        let nil_ref = vm.create_ref(nil_val);
 
         // Verify reference types
         assert!(table_ref.is_registry_ref(), "Table should use registry");
