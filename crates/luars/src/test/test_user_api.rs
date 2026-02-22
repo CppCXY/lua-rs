@@ -268,7 +268,7 @@ fn test_any_ref_wrong_type() {
 #[test]
 fn test_push_any_basic() {
     let mut vm = LuaVM::new(SafeOption::default());
-
+    #[allow(dead_code)]
     // Push an arbitrary Rust struct as opaque userdata
     struct MyConfig {
         name: String,

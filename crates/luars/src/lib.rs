@@ -23,11 +23,11 @@ pub use luars_derive::lua_methods;
 
 // Re-export userdata trait types at crate root for convenience
 pub use lua_value::LuaUserdata;
+pub use lua_value::UserDataBuilder;
 pub use lua_value::userdata_trait::{
     LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData, UdValue,
     UserDataTrait,
 };
-pub use lua_value::UserDataBuilder;
 
 #[cfg(test)]
 use crate::lua_vm::SafeOption;

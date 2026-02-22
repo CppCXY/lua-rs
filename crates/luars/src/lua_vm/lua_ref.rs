@@ -317,8 +317,7 @@ impl LuaTableRef {
     pub fn get_as<T: crate::FromLua>(&self, key: &str) -> super::LuaResult<T> {
         let val = self.get(key)?;
         let vm = self.inner.vm_mut();
-        T::from_lua(val, vm.main_state())
-            .map_err(|msg| vm.error(msg))
+        T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     // ==================== Write ====================
@@ -602,8 +601,7 @@ impl LuaAnyRef {
     pub fn get_as<T: crate::FromLua>(&self) -> super::LuaResult<T> {
         let val = self.inner.to_value();
         let vm = self.inner.vm_mut();
-        T::from_lua(val, vm.main_state())
-            .map_err(|msg| vm.error(msg))
+        T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Get the registry reference ID.

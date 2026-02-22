@@ -150,21 +150,6 @@ pub fn setivalue(v: &mut LuaValue, i: i64) {
     *v = LuaValue::integer(i);
 }
 
-/// chgivalue - change integer value without writing tag (matching C Lua's chgivalue)
-/// Only writes 8 bytes (Value) instead of 16 bytes (full LuaValue).
-/// Caller MUST ensure tt is already LUA_VNUMINT.
-#[inline(always)]
-pub fn chgivalue(v: &mut LuaValue, i: i64) {
-    v.value.i = i;
-}
-
-/// chgfltvalue - change float value without writing tag
-/// Only writes 8 bytes. Caller MUST ensure tt is already LUA_VNUMFLT.
-#[inline(always)]
-pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
-    v.value.n = n;
-}
-
 /// setfltvalue - 设置浮点值  
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
 #[allow(unused)]
@@ -346,25 +331,6 @@ pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
 #[inline(always)]
 pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
     unsafe { ptonumberns(v as *const LuaValue, out as *mut f64) }
-}
-
-/// tonumber - 从LuaValue引用转换为浮点数 (用于常量)
-/// Only handles float and integer (NO string coercion).
-#[inline(always)]
-pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
-    if v.tt() == LUA_VNUMFLT {
-        unsafe {
-            *out = v.value.n;
-        }
-        true
-    } else if v.tt() == LUA_VNUMINT {
-        unsafe {
-            *out = v.value.i as f64;
-        }
-        true
-    } else {
-        false
-    }
 }
 
 /// tointeger - 从LuaValue引用获取整数 (用于常量)

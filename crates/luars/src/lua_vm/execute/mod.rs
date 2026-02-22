@@ -46,10 +46,10 @@ use crate::{
             },
             concat::handle_concat,
             helper::{
-                chgfltvalue, chgivalue, fltvalue, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
-                lua_imod, lua_shiftl, lua_shiftr, pfltvalue, pivalue, psetfltvalue, psetivalue,
-                ptonumberns, pttisfloat, pttisinteger, setbfvalue, setbtvalue, setfltvalue,
-                setivalue, setnilvalue, tointeger, tointegerns, tonumber, tonumberns, ttisinteger,
+                handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr,
+                pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
+                pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
+                tointeger, tointegerns, tonumberns, ttisinteger,
             },
         },
     },
@@ -145,36 +145,36 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := R[B]
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        *stack.get_unchecked_mut(base + a) = *stack.get_unchecked(base + b);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        *sp.add(base + a) = *sp.add(base + b);
                     }
                 }
                 OpCode::LoadI => {
                     // R[A] := sBx
                     let a = instr.get_a() as usize;
                     let sbx = instr.get_sbx();
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        *stack.get_unchecked_mut(base + a) = LuaValue::integer(sbx as i64);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        *sp.add(base + a) = LuaValue::integer(sbx as i64);
                     }
                 }
                 OpCode::LoadF => {
                     // R[A] := (float)sBx
                     let a = instr.get_a() as usize;
                     let sbx = instr.get_sbx();
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        *stack.get_unchecked_mut(base + a) = LuaValue::float(sbx as f64);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        *sp.add(base + a) = LuaValue::float(sbx as f64);
                     }
                 }
                 OpCode::LoadK => {
                     // R[A] := K[Bx]
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        *stack.get_unchecked_mut(base + a) = *constants.get_unchecked(bx);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        *sp.add(base + a) = *constants.as_ptr().add(bx);
                     }
                 }
                 OpCode::LoadKX => {
@@ -222,12 +222,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    // OPTIMIZATION: Use raw pointers to eliminate bounds checking and borrowing overhead
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1_ptr = stack.as_ptr().add(base + b);
-                        let v2_ptr = stack.as_ptr().add(base + c);
-                        let ra_ptr = stack.as_mut_ptr().add(base + a);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
                         // Fast path: both integers (most common case)
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
@@ -255,11 +254,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let sc = instr.get_sc();
 
-                    // OPTIMIZATION: Use raw pointers for zero-cost abstraction
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1_ptr = stack.as_ptr().add(base + b);
-                        let ra_ptr = stack.as_mut_ptr().add(base + a);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
                         // Fast path: integer (most common)
                         if pttisinteger(v1_ptr) {
@@ -282,16 +280,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1_ptr = stack.as_ptr().add(base + b);
-                        let v2_ptr = stack.as_ptr().add(base + c);
-                        let ra_ptr = stack.as_mut_ptr().add(base + a);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            let i1 = pivalue(v1_ptr);
-                            let i2 = pivalue(v2_ptr);
-                            psetivalue(ra_ptr, i1.wrapping_sub(i2));
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
@@ -309,16 +305,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
                     unsafe {
-                        let v1_ptr = stack.as_ptr().add(base + b);
-                        let v2_ptr = stack.as_ptr().add(base + c);
-                        let ra_ptr = stack.as_mut_ptr().add(base + a);
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            let i1 = pivalue(v1_ptr);
-                            let i2 = pivalue(v2_ptr);
-                            psetivalue(ra_ptr, i1.wrapping_mul(i2));
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
@@ -336,15 +330,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &stack[base + c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(&mut stack[base + a], n1 / n2);
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                            psetfltvalue(ra_ptr, n1 / n2);
+                            pc += 1;
+                        }
                     }
                 }
                 OpCode::IDiv => {
@@ -353,26 +350,31 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &stack[base + c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        if i2 != 0 {
-                            pc += 1;
-                            setivalue(&mut stack[base + a], lua_idiv(i1, i2));
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_idiv(i1, i2));
+                                pc += 1;
+                            } else {
+                                save_pc!();
+                                return Err(
+                                    lua_state.error("attempt to divide by zero".to_string())
+                                );
+                            }
                         } else {
-                            save_pc!();
-                            return Err(lua_state.error("attempt to divide by zero".to_string()));
-                        }
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(&mut stack[base + a], (n1 / n2).floor());
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, (n1 / n2).floor());
+                                pc += 1;
+                            }
                         }
                     }
                 }
@@ -382,26 +384,29 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &stack[base + c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        if i2 != 0 {
-                            pc += 1;
-                            setivalue(&mut stack[base + a], lua_imod(i1, i2));
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_imod(i1, i2));
+                                pc += 1;
+                            } else {
+                                save_pc!();
+                                return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
+                            }
                         } else {
-                            save_pc!();
-                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
-                        }
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(&mut stack[base + a], lua_fmod(n1, n2));
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, lua_fmod(n1, n2));
+                                pc += 1;
+                            }
                         }
                     }
                 }
@@ -411,15 +416,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &stack[base + c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumberns(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(&mut stack[base + a], n1.powf(n2));
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                            psetfltvalue(ra_ptr, n1.powf(n2));
+                            pc += 1;
+                        }
                     }
                 }
                 OpCode::Unm => {
@@ -465,21 +473,22 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &constants[c]; // K[C]
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        pc += 1;
-                        setivalue(&mut stack[base + a], i1.wrapping_add(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr)));
                             pc += 1;
-                            setfltvalue(&mut stack[base + a], n1 + n2);
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 + n2);
+                                pc += 1;
+                            }
                         }
                     }
                 }
@@ -489,21 +498,22 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &constants[c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        pc += 1;
-                        setivalue(&mut stack[base + a], i1.wrapping_sub(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
                             pc += 1;
-                            setfltvalue(&mut stack[base + a], n1 - n2);
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 - n2);
+                                pc += 1;
+                            }
                         }
                     }
                 }
@@ -513,21 +523,22 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &constants[c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        pc += 1;
-                        setivalue(&mut stack[base + a], i1.wrapping_mul(i2));
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
                             pc += 1;
-                            setfltvalue(&mut stack[base + a], n1 * n2);
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 * n2);
+                                pc += 1;
+                            }
                         }
                     }
                 }
@@ -537,26 +548,29 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &constants[c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        if i2 != 0 {
-                            pc += 1;
-                            setivalue(&mut stack[base + a], lua_imod(i1, i2));
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_imod(i1, i2));
+                                pc += 1;
+                            } else {
+                                save_pc!();
+                                return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
+                            }
                         } else {
-                            save_pc!();
-                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
-                        }
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(&mut stack[base + a], lua_fmod(n1, n2));
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, lua_fmod(n1, n2));
+                                pc += 1;
+                            }
                         }
                     }
                 }
@@ -566,15 +580,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &constants[c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(&mut stack[base + a], n1.powf(n2));
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                            psetfltvalue(ra_ptr, n1.powf(n2));
+                            pc += 1;
+                        }
                     }
                 }
                 OpCode::DivK => {
@@ -583,15 +600,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &constants[c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
 
-                    let mut n1 = 0.0;
-                    let mut n2 = 0.0;
-                    if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                        pc += 1;
-                        setfltvalue(&mut stack[base + a], n1 / n2);
+                        let mut n1 = 0.0;
+                        let mut n2 = 0.0;
+                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                            psetfltvalue(ra_ptr, n1 / n2);
+                            pc += 1;
+                        }
                     }
                 }
                 OpCode::IDivK => {
@@ -600,26 +620,31 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let v1 = &stack[base + b];
-                    let v2 = &constants[c];
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
 
-                    if ttisinteger(v1) && ttisinteger(v2) {
-                        let i1 = ivalue(v1);
-                        let i2 = ivalue(v2);
-                        if i2 != 0 {
-                            pc += 1;
-                            setivalue(&mut stack[base + a], lua_idiv(i1, i2));
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_idiv(i1, i2));
+                                pc += 1;
+                            } else {
+                                save_pc!();
+                                return Err(
+                                    lua_state.error("attempt to divide by zero".to_string())
+                                );
+                            }
                         } else {
-                            save_pc!();
-                            return Err(lua_state.error("attempt to divide by zero".to_string()));
-                        }
-                    } else {
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if tonumberns(v1, &mut n1) && tonumber(v2, &mut n2) {
-                            pc += 1;
-                            setfltvalue(&mut stack[base + a], (n1 / n2).floor());
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, (n1 / n2).floor());
+                                pc += 1;
+                            }
                         }
                     }
                 }
@@ -1185,27 +1210,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
 
-                    let stack = lua_state.stack_mut();
                     unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
                         let ra = base + a;
 
                         // Check if integer loop
-                        if ttisinteger(stack.get_unchecked(ra + 1)) {
+                        if pttisinteger(sp.add(ra + 1) as *const LuaValue) {
                             // Integer loop (most common for numeric loops)
                             // ra: counter (count of iterations left)
                             // ra+1: step
                             // ra+2: control variable (idx)
-                            let count = ivalue(stack.get_unchecked(ra)) as u64; // unsigned count
+                            let count = pivalue(sp.add(ra) as *const LuaValue) as u64;
                             if count > 0 {
                                 // More iterations
-                                let step = ivalue(stack.get_unchecked(ra + 1));
-                                let idx = ivalue(stack.get_unchecked(ra + 2));
+                                let step = pivalue(sp.add(ra + 1) as *const LuaValue);
+                                let idx = pivalue(sp.add(ra + 2) as *const LuaValue);
 
                                 // Update counter (decrement) - only write value, tag unchanged
-                                chgivalue(stack.get_unchecked_mut(ra), (count - 1) as i64);
+                                (*sp.add(ra)).value.i = (count - 1) as i64;
 
                                 // Update control variable: idx += step - only write value
-                                chgivalue(stack.get_unchecked_mut(ra + 2), idx.wrapping_add(step));
+                                (*sp.add(ra + 2)).value.i = idx.wrapping_add(step);
 
                                 // Jump back (no error check - validated at compile time)
                                 pc -= bx;
@@ -1216,9 +1241,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             // ra: limit
                             // ra+1: step
                             // ra+2: idx (control variable)
-                            let step = fltvalue(stack.get_unchecked(ra + 1));
-                            let limit = fltvalue(stack.get_unchecked(ra));
-                            let idx = fltvalue(stack.get_unchecked(ra + 2));
+                            let step = pfltvalue(sp.add(ra + 1) as *const LuaValue);
+                            let limit = pfltvalue(sp.add(ra) as *const LuaValue);
+                            let idx = pfltvalue(sp.add(ra + 2) as *const LuaValue);
 
                             // idx += step
                             let new_idx = idx + step;
@@ -1232,7 +1257,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                             if should_continue {
                                 // Update control variable - only write value, tag unchanged
-                                chgfltvalue(stack.get_unchecked_mut(ra + 2), new_idx);
+                                (*sp.add(ra + 2)).value.n = new_idx;
 
                                 // Jump back
                                 if bx > pc {
