@@ -384,10 +384,10 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             // Check current FuncState
             if abs_idx >= fs.first_local && abs_idx < fs.first_local + fs.actvar.len() {
                 let local_idx = abs_idx - fs.first_local;
-                if let Some(vd) = fs.actvar.get(local_idx) {
-                    if vd.kind == VarKind::GDKCONST {
-                        is_const = true;
-                    }
+                if let Some(vd) = fs.actvar.get(local_idx)
+                    && vd.kind == VarKind::GDKCONST
+                {
+                    is_const = true;
                 }
             } else {
                 // Walk up parent FuncStates to find the right one
@@ -396,10 +396,10 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                     let pfs = unsafe { &*p };
                     if abs_idx >= pfs.first_local && abs_idx < pfs.first_local + pfs.actvar.len() {
                         let local_idx = abs_idx - pfs.first_local;
-                        if let Some(vd) = pfs.actvar.get(local_idx) {
-                            if vd.kind == VarKind::GDKCONST {
-                                is_const = true;
-                            }
+                        if let Some(vd) = pfs.actvar.get(local_idx)
+                            && vd.kind == VarKind::GDKCONST
+                        {
+                            is_const = true;
                         }
                         break;
                     }
@@ -447,7 +447,7 @@ pub fn buildglobal(fs: &mut FuncState, varname: &str, var: &mut ExpDesc) -> Resu
     //   e->u.strval = s;
     // }
     // Create key as VKSTR (not VK) so indexed can track it correctly
-    let string = fs.vm.create_string(&varname).unwrap();
+    let string = fs.vm.create_string(varname).unwrap();
     let mut key = ExpDesc::new_void();
     key.kind = ExpKind::VKSTR;
     key.u = ExpUnion::Str(string);
@@ -474,7 +474,7 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
             if var.kind == ExpKind::VLOCAL {
                 // lparser.c:483: mark that this local will be used as upvalue
                 let vidx = var.u.var().vidx;
-                mark_upval(fs, vidx as u16);
+                mark_upval(fs, vidx);
             }
         }
         // lparser.c:485: else nothing else to be done (base=true, used in current scope)
@@ -516,7 +516,7 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
             // lparser.c:498-503: else it's a global or constant, don't change anything (return)
             // Don't set to VVOID - preserve VGLOBAL/VCONST from earlier initialization
         } else {
-            init_exp(var, ExpKind::VUPVAL, vidx as i32);
+            init_exp(var, ExpKind::VUPVAL, vidx);
         }
     }
 }

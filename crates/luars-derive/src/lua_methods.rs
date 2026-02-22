@@ -109,21 +109,20 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
             let mut skip = false;
             let mut lua_name_override: Option<String> = None;
             for attr in &method.attrs {
-                if attr.path().is_ident("lua") {
-                    if let Ok(list) = attr.meta.require_list() {
-                        let _ = list.parse_nested_meta(|meta| {
-                            if meta.path.is_ident("skip") {
-                                skip = true;
-                            } else if meta.path.is_ident("name") {
-                                if let Ok(value) = meta.value() {
-                                    if let Ok(lit) = value.parse::<syn::LitStr>() {
-                                        lua_name_override = Some(lit.value());
-                                    }
-                                }
-                            }
-                            Ok(())
-                        });
-                    }
+                if attr.path().is_ident("lua")
+                    && let Ok(list) = attr.meta.require_list()
+                {
+                    let _ = list.parse_nested_meta(|meta| {
+                        if meta.path.is_ident("skip") {
+                            skip = true;
+                        } else if meta.path.is_ident("name")
+                            && let Ok(value) = meta.value()
+                            && let Ok(lit) = value.parse::<syn::LitStr>()
+                        {
+                            lua_name_override = Some(lit.value());
+                        }
+                        Ok(())
+                    });
                 }
             }
 

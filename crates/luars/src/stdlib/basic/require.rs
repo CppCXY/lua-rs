@@ -83,7 +83,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
         if !success {
             // Searcher threw an error
-            let error_msg = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+            let error_msg = l.stack_get(func_idx).unwrap_or_default();
             if let Some(err) = error_msg.as_str() {
                 error_messages.push(err.to_string());
             }
@@ -99,7 +99,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         // Get first result (loader or error message)
-        let first_result = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+        let first_result = l.stack_get(func_idx).unwrap_or_default();
 
         // If result is nil or false, searcher didn't find the module
         if first_result.is_nil() || (first_result.as_boolean() == Some(false)) {
@@ -125,7 +125,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
         // Found a loader! Get loader and optional data
         let loader = first_result;
         let loader_data = if result_count >= 2 {
-            l.stack_get(func_idx + 1).unwrap_or(LuaValue::nil())
+            l.stack_get(func_idx + 1).unwrap_or_default()
         } else {
             LuaValue::nil()
         };
@@ -147,7 +147,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
         if !loader_success {
             // Loader failed
-            let error_val = l.stack_get(loader_func_idx).unwrap_or(LuaValue::nil());
+            let error_val = l.stack_get(loader_func_idx).unwrap_or_default();
             let error_msg = if let Some(err) = error_val.as_str() {
                 err.to_string()
             } else {
@@ -161,7 +161,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
 
         // Get the loader result
         let loader_result = if loader_result_count > 0 {
-            l.stack_get(loader_func_idx).unwrap_or(LuaValue::nil())
+            l.stack_get(loader_func_idx).unwrap_or_default()
         } else {
             LuaValue::nil()
         };

@@ -71,23 +71,22 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
         let mut lua_name: Option<String> = None;
 
         for attr in &field.attrs {
-            if attr.path().is_ident("lua") {
-                if let Ok(list) = attr.meta.require_list() {
-                    let _ = list.parse_nested_meta(|meta| {
-                        if meta.path.is_ident("skip") {
-                            skip = true;
-                        } else if meta.path.is_ident("readonly") {
-                            readonly = true;
-                        } else if meta.path.is_ident("name") {
-                            if let Ok(value) = meta.value() {
-                                if let Ok(lit) = value.parse::<syn::LitStr>() {
-                                    lua_name = Some(lit.value());
-                                }
-                            }
-                        }
-                        Ok(())
-                    });
-                }
+            if attr.path().is_ident("lua")
+                && let Ok(list) = attr.meta.require_list()
+            {
+                let _ = list.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("skip") {
+                        skip = true;
+                    } else if meta.path.is_ident("readonly") {
+                        readonly = true;
+                    } else if meta.path.is_ident("name")
+                        && let Ok(value) = meta.value()
+                        && let Ok(lit) = value.parse::<syn::LitStr>()
+                    {
+                        lua_name = Some(lit.value());
+                    }
+                    Ok(())
+                });
             }
         }
 
@@ -185,15 +184,15 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
 fn parse_lua_impl_attrs(input: &DeriveInput) -> Vec<String> {
     let mut impls = Vec::new();
     for attr in &input.attrs {
-        if attr.path().is_ident("lua_impl") {
-            if let Meta::List(list) = &attr.meta {
-                let _ = list.parse_nested_meta(|meta| {
-                    if let Some(ident) = meta.path.get_ident() {
-                        impls.push(ident.to_string());
-                    }
-                    Ok(())
-                });
-            }
+        if attr.path().is_ident("lua_impl")
+            && let Meta::List(list) = &attr.meta
+        {
+            let _ = list.parse_nested_meta(|meta| {
+                if let Some(ident) = meta.path.get_ident() {
+                    impls.push(ident.to_string());
+                }
+                Ok(())
+            });
         }
     }
     impls

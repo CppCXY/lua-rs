@@ -43,7 +43,7 @@ impl LuaWasm {
     /// Set a global variable in Lua
     #[wasm_bindgen(js_name = setGlobal)]
     pub fn set_global(&mut self, name: &str, value: JsValue) -> Result<(), JsValue> {
-        let lua_value = js_value_to_lua(&mut *self.vm, &value)
+        let lua_value = js_value_to_lua(&mut self.vm, &value)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         self.vm.set_global(name, lua_value).unwrap();
         Ok(())
@@ -53,7 +53,7 @@ impl LuaWasm {
     #[wasm_bindgen(js_name = getGlobal)]
     pub fn get_global(&mut self, name: &str) -> Result<JsValue, JsValue> {
         if let Some(lua_value) = self.vm.get_global(name).unwrap() {
-            lua_value_to_js(&*self.vm, &lua_value)
+            lua_value_to_js(&self.vm, &lua_value)
         } else {
             Ok(JsValue::NULL)
         }
@@ -68,7 +68,7 @@ impl LuaWasm {
             Ok(chunk) => match self.vm.execute_chunk(std::rc::Rc::new(chunk)) {
                 Ok(results) => {
                     let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
-                    lua_value_to_js(&*self.vm, &value)
+                    lua_value_to_js(&self.vm, &value)
                 }
                 Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
             },
@@ -86,7 +86,7 @@ impl LuaWasm {
             Ok(chunk) => match self.vm.execute_chunk(std::rc::Rc::new(chunk)) {
                 Ok(results) => {
                     let value = results.into_iter().next().unwrap_or(luars::LuaValue::nil());
-                    Ok(lua_value_to_json_string(&*self.vm, &value))
+                    Ok(lua_value_to_json_string(&self.vm, &value))
                 }
                 Err(e) => Err(JsValue::from_str(&format!("Runtime error: {:?}", e))),
             },

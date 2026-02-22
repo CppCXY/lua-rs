@@ -101,7 +101,7 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Get first argument without consuming it
-    let condition = l.get_arg(1).unwrap_or(LuaValue::nil());
+    let condition = l.get_arg(1).unwrap_or_default();
 
     if !condition.is_truthy() {
         // Check if second argument is present and what type
@@ -114,7 +114,7 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
                 let where_prefix = lua_where(l, 1);
                 let formatted = format!("{}{}", where_prefix, message);
                 let err_str = l.create_string(&formatted)?;
-                l.error_object = err_str.into();
+                l.error_object = err_str;
                 l.error_msg = formatted;
                 return Err(LuaError::RuntimeError);
             } else {
@@ -128,7 +128,7 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
         let where_prefix = lua_where(l, 1);
         let formatted = format!("{}assertion failed!", where_prefix);
         let err_str = l.create_string(&formatted)?;
-        l.error_object = err_str.into();
+        l.error_object = err_str;
         l.error_msg = formatted;
         return Err(LuaError::RuntimeError);
     }
@@ -152,23 +152,23 @@ fn lua_where(l: &LuaState, level: usize) -> String {
             if lvl == 0 {
                 let ci = l.get_call_info(i);
                 // Only extract info from Lua frames
-                if ci.is_lua() {
-                    if let Some(func_obj) = ci.func.as_lua_function() {
-                        let chunk = func_obj.chunk();
-                        let source = chunk.source_name.as_deref().unwrap_or("[string]");
-                        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                            chunk.line_info[ci.pc as usize - 1] as usize
-                        } else if !chunk.line_info.is_empty() {
-                            chunk.line_info[0] as usize
-                        } else {
-                            0
-                        };
-                        return if line > 0 {
-                            format!("{}:{}: ", source, line)
-                        } else {
-                            format!("{}: ", source)
-                        };
-                    }
+                if ci.is_lua()
+                    && let Some(func_obj) = ci.func.as_lua_function()
+                {
+                    let chunk = func_obj.chunk();
+                    let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                    let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+                        chunk.line_info[ci.pc as usize - 1] as usize
+                    } else if !chunk.line_info.is_empty() {
+                        chunk.line_info[0] as usize
+                    } else {
+                        0
+                    };
+                    return if line > 0 {
+                        format!("{}:{}: ", source, line)
+                    } else {
+                        format!("{}: ", source)
+                    };
                 }
                 // C frame at target level: no line info available
                 break;
@@ -184,7 +184,7 @@ fn lua_where(l: &LuaState, level: usize) -> String {
 
 /// error(message) - Raise an error
 fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
-    let arg = l.get_arg(1).unwrap_or(LuaValue::nil());
+    let arg = l.get_arg(1).unwrap_or_default();
 
     // error() with nil or no argument: Lua 5.5 raises nil as the error object
     // The error message becomes "<no error object>" when formatted
@@ -201,7 +201,7 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
 
         let formatted_msg = format!("{}{}", where_prefix, message);
         let err_str = l.create_string(&formatted_msg)?;
-        l.error_object = err_str.into();
+        l.error_object = err_str;
         // Set error_msg without adding another source prefix (we added it manually)
         l.error_msg = formatted_msg;
         Err(LuaError::RuntimeError)
@@ -221,13 +221,13 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
     let has_base = l.get_arg(2).is_some();
     let base = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(10);
 
-    if has_base && (base < 2 || base > 36) {
+    if has_base && !(2..=36).contains(&base) {
         return Err(l.error("bad argument #2 to 'tonumber' (base out of range)".to_string()));
     }
 
     let result = match value.kind() {
-        LuaValueKind::Integer if !has_base => value.clone(),
-        LuaValueKind::Float if !has_base => value.clone(),
+        LuaValueKind::Integer if !has_base => value,
+        LuaValueKind::Float if !has_base => value,
         LuaValueKind::String => {
             if let Some(s) = value.as_str() {
                 let s_str = s.trim();
@@ -362,11 +362,7 @@ fn strip_trailing_zeros(s: &str) -> String {
 /// Strip trailing zeros after decimal point, remove point if no digits follow
 fn strip_decimal_zeros(s: &str) -> String {
     let trimmed = s.trim_end_matches('0');
-    if trimmed.ends_with('.') {
-        trimmed[..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
+    trimmed.strip_suffix('.').unwrap_or(trimmed).to_string()
 }
 
 /// tostring(v) - Convert to string
@@ -507,21 +503,21 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
     // SAFETY: ipairs always provides (table, index) as args 1 and 2.
     let (table_val, index_val) = unsafe { (l.get_arg_unchecked(1), l.get_arg_unchecked(2)) };
 
-    if let Some(table) = table_val.as_table() {
-        if let Some(index) = index_val.as_integer() {
-            let next_index = index.wrapping_add(1);
-            if let Some(value) = table.raw_geti(next_index) {
-                unsafe {
-                    l.push_value_unchecked(LuaValue::integer(next_index));
-                    l.push_value_unchecked(value);
-                }
-                return Ok(2);
-            } else {
-                unsafe {
-                    l.push_value_unchecked(LuaValue::nil());
-                }
-                return Ok(1);
+    if let Some(table) = table_val.as_table()
+        && let Some(index) = index_val.as_integer()
+    {
+        let next_index = index.wrapping_add(1);
+        if let Some(value) = table.raw_geti(next_index) {
+            unsafe {
+                l.push_value_unchecked(LuaValue::integer(next_index));
+                l.push_value_unchecked(value);
             }
+            return Ok(2);
+        } else {
+            unsafe {
+                l.push_value_unchecked(LuaValue::nil());
+            }
+            return Ok(1);
         }
     }
 
@@ -551,7 +547,7 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     // arg 1 is the table (required), arg 2 is the key (optional, defaults to nil)
     let table_val = unsafe { l.get_arg_unchecked(1) };
-    let index_val = l.get_arg(2).unwrap_or(LuaValue::nil());
+    let index_val = l.get_arg(2).unwrap_or_default();
 
     let result = {
         let table = table_val
@@ -591,7 +587,7 @@ fn lua_pcall(l: &mut LuaState) -> LuaResult<usize> {
     let base = l
         .current_frame()
         .map(|f| f.base)
-        .ok_or_else(|| LuaError::RuntimeError)?;
+        .ok_or(LuaError::RuntimeError)?;
 
     // func is at base+0, args are at base+1..base+arg_count-1
     // We want to call func with arg_count-1 arguments
@@ -632,11 +628,11 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
     let base = l
         .current_frame()
         .map(|f| f.base)
-        .ok_or_else(|| LuaError::RuntimeError)?;
+        .ok_or(LuaError::RuntimeError)?;
     let xpcall_func_pos = l
         .current_frame()
         .map(|f| f.base - f.func_offset)
-        .ok_or_else(|| LuaError::RuntimeError)?;
+        .ok_or(LuaError::RuntimeError)?;
 
     // Rearrange stack for xpcall_stack_based:
     // We want [handler, f, arg1, arg2, ...] starting at xpcall_func_pos.
@@ -646,8 +642,8 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
     //
     // Currently: xpcall_func_pos=xpcall, base+0=f, base+1=msgh, base+2..=args
     // We need: xpcall_func_pos=msgh, xpcall_func_pos+1=f, xpcall_func_pos+2..=args
-    let msgh = l.stack_get(base + 1).unwrap_or(LuaValue::nil());
-    let f = l.stack_get(base).unwrap_or(LuaValue::nil());
+    let msgh = l.stack_get(base + 1).unwrap_or_default();
+    let f = l.stack_get(base).unwrap_or_default();
 
     // Store handler at xpcall_func_pos
     l.stack_set(xpcall_func_pos, msgh)?;
@@ -658,7 +654,7 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
     // Shift args to xpcall_func_pos+2..
     let call_arg_count = arg_count - 2;
     for i in 0..call_arg_count {
-        let val = l.stack_get(base + 2 + i).unwrap_or(LuaValue::nil());
+        let val = l.stack_get(base + 2 + i).unwrap_or_default();
         l.stack_set(xpcall_func_pos + 2 + i, val)?;
     }
     let func_idx = xpcall_func_pos + 1;
@@ -690,7 +686,7 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
         Ok(result_count + 1)
     } else {
         // Error — handler already called by xpcall_stack_based, result is at func_idx
-        let transformed_error = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+        let transformed_error = l.stack_get(func_idx).unwrap_or_default();
         l.push_value(LuaValue::boolean(false))?;
         l.push_value(transformed_error)?;
         Ok(2)
@@ -709,11 +705,11 @@ fn lua_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
             // Check for __metatable field - if present, return that instead
             if let Some(table) = mt_val.as_table() {
                 let key = l.create_string("__metatable")?;
-                if let Some(mm) = table.raw_get(&key) {
-                    if !mm.is_nil() {
-                        l.push_value(mm)?;
-                        return Ok(1);
-                    }
+                if let Some(mm) = table.raw_get(&key)
+                    && !mm.is_nil()
+                {
+                    l.push_value(mm)?;
+                    return Ok(1);
                 }
             }
             l.push_value(mt_val)?;
@@ -736,13 +732,13 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
 
     if let Some(table_ref) = table.as_table_mut() {
         // Check for __metatable protection on existing metatable
-        if let Some(existing_mt) = table_ref.get_metatable() {
-            if let Some(mt_table) = existing_mt.as_table() {
-                let key = l.create_string("__metatable")?;
-                let has_protection = mt_table.raw_get(&key).map_or(false, |v| !v.is_nil());
-                if has_protection {
-                    return Err(l.error("cannot change a protected metatable".to_string()));
-                }
+        if let Some(existing_mt) = table_ref.get_metatable()
+            && let Some(mt_table) = existing_mt.as_table()
+        {
+            let key = l.create_string("__metatable")?;
+            let has_protection = mt_table.raw_get(&key).is_some_and(|v| !v.is_nil());
+            if has_protection {
+                return Err(l.error("cannot change a protected metatable".to_string()));
             }
         }
 
@@ -751,7 +747,7 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
                 table_ref.set_metatable(None);
             }
             LuaValueKind::Table => {
-                table_ref.set_metatable(Some(metatable.clone()));
+                table_ref.set_metatable(Some(metatable));
             }
             _ => {
                 return Err(
@@ -786,11 +782,9 @@ fn lua_rawget(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'rawget' (value expected)".to_string()))?;
 
-    let value = if let Some(table_ref) = table.as_table() {
-        Some(table_ref.raw_get(&key).unwrap_or(LuaValue::nil()))
-    } else {
-        None
-    };
+    let value = table
+        .as_table()
+        .map(|table_ref| table_ref.raw_get(&key).unwrap_or(LuaValue::nil()));
 
     if let Some(v) = value {
         l.push_value(v)?;
@@ -813,12 +807,11 @@ fn lua_rawset(l: &mut LuaState) -> LuaResult<usize> {
 
     if table.is_table() {
         // Check for NaN key
-        if key.is_float() {
-            if let Some(f) = key.as_number() {
-                if f.is_nan() {
-                    return Err(l.error("table index is NaN".to_string()));
-                }
-            }
+        if key.is_float()
+            && let Some(f) = key.as_number()
+            && f.is_nan()
+        {
+            return Err(l.error("table index is NaN".to_string()));
         }
         l.raw_set(&table, key, value);
         l.push_value(table)?;
@@ -865,8 +858,8 @@ fn lua_rawlen(l: &mut LuaState) -> LuaResult<usize> {
 
 /// rawequal(v1, v2) - Equality without metamethods
 fn lua_rawequal(l: &mut LuaState) -> LuaResult<usize> {
-    let v1 = l.get_arg(1).unwrap_or(LuaValue::nil());
-    let v2 = l.get_arg(2).unwrap_or(LuaValue::nil());
+    let v1 = l.get_arg(1).unwrap_or_default();
+    let v2 = l.get_arg(2).unwrap_or_default();
 
     let result = v1 == v2;
     l.push_value(LuaValue::boolean(result))?;
@@ -1071,11 +1064,11 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 let old = decode_param(vm.gc.gc_params[param_idx]);
 
                 // Set new value if provided
-                if let Some(new_val) = arg3 {
-                    if let Some(new_int) = new_val.as_integer() {
-                        // Encode the new value using Lua 5.5's compressed format
-                        vm.gc.gc_params[param_idx] = code_param(new_int as u32);
-                    }
+                if let Some(new_val) = arg3
+                    && let Some(new_int) = new_val.as_integer()
+                {
+                    // Encode the new value using Lua 5.5's compressed format
+                    vm.gc.gc_params[param_idx] = code_param(new_int as u32);
                 }
 
                 old
@@ -1123,14 +1116,14 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             let result = match call_result {
                 Ok((true, result_count)) => {
                     if result_count > 0 {
-                        l.stack_get(func_idx).unwrap_or(LuaValue::nil())
+                        l.stack_get(func_idx).unwrap_or_default()
                     } else {
                         LuaValue::nil()
                     }
                 }
                 Ok((false, _)) => {
                     // Error occurred in reader function
-                    let error_val = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+                    let error_val = l.stack_get(func_idx).unwrap_or_default();
                     l.set_top(func_idx)?;
 
                     // Return nil + error message
@@ -1157,10 +1150,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             // when reading binary bytecode one byte at a time
             let bytes_opt = if let Some(b) = result.as_binary() {
                 Some(b)
-            } else if let Some(s) = result.as_str() {
-                Some(s.as_bytes())
             } else {
-                None
+                result.as_str().map(|s| s.as_bytes())
             };
 
             if let Some(bytes) = bytes_opt {
@@ -1266,8 +1257,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         let vm = l.vm_mut();
         vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
             // Get the actual error message from VM
-            let msg = vm.get_error_message(e);
-            msg
+
+            vm.get_error_message(e)
         })
     };
 
@@ -1286,7 +1277,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                     let env_upvalue_id = if let Some(env) = env {
                         l.create_upvalue_closed(env)?
                     } else {
-                        let global = l.vm_mut().global.clone();
+                        let global = l.vm_mut().global;
                         l.create_upvalue_closed(global)?
                     };
                     upvalues.push(env_upvalue_id);
@@ -1411,10 +1402,8 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             }
         };
         let vm = l.vm_mut();
-        vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
-            let msg = vm.get_error_message(e);
-            msg
-        })
+        vm.compile_with_name(&code_str, &chunkname)
+            .map_err(|e| vm.get_error_message(e))
     };
 
     match chunk_result {
@@ -1427,7 +1416,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
                     let env_upvalue_id = if let Some(env) = env_arg {
                         l.create_upvalue_closed(env)?
                     } else {
-                        let global = l.vm_mut().global.clone();
+                        let global = l.vm_mut().global;
                         l.create_upvalue_closed(global)?
                     };
                     upvalues.push(env_upvalue_id);
@@ -1514,7 +1503,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
             .map_err(|e| l.error(format!("error loading {}: {}", filename_str, e)))?
     };
 
-    let global = l.vm_mut().global.clone();
+    let global = l.vm_mut().global;
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;
     let upvalues = vec![env_upvalue];
@@ -1566,7 +1555,7 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Get current warn mode from registry ("off", "on", "store")
-    let registry = l.vm_mut().registry.clone();
+    let registry = l.vm_mut().registry;
     let mode_key = l.create_string("_WARN_MODE")?;
     let current_mode = l
         .raw_get(&registry, &mode_key)

@@ -10,7 +10,6 @@ use super::class::{element_end, singlematch};
 /// Maximum number of captures (Lua limit)
 pub const LUA_MAXCAPTURES: usize = 32;
 /// Recursion limit to prevent stack overflow
-
 /// Validate a pattern for common syntax errors before matching.
 /// Returns Ok(()) if valid, Err(message) if malformed.
 fn validate_pattern(pat: &[char]) -> Result<(), String> {
@@ -290,10 +289,11 @@ fn match_lazy(ms: &mut MatchState, si: usize, pp: usize, rp: usize) -> Option<us
 
 /// Optional repetition (?)
 fn match_optional(ms: &mut MatchState, si: usize, pp: usize, rp: usize) -> Option<usize> {
-    if si < ms.text.len() && singlematch(ms.text[si], ms.pat, pp) {
-        if let Some(end) = match_impl(ms, si + 1, rp) {
-            return Some(end);
-        }
+    if si < ms.text.len()
+        && singlematch(ms.text[si], ms.pat, pp)
+        && let Some(end) = match_impl(ms, si + 1, rp)
+    {
+        return Some(end);
     }
     match_impl(ms, si, rp)
 }
@@ -600,10 +600,10 @@ pub fn find_all_matches(
     let mut last_was_nonempty = false;
 
     while si <= text_chars.len() {
-        if let Some(max_count) = max {
-            if matches.len() >= max_count {
-                break;
-            }
+        if let Some(max_count) = max
+            && matches.len() >= max_count
+        {
+            break;
         }
 
         ms.reset();
@@ -682,10 +682,10 @@ pub fn gsub(
     let mut last_byte_end = 0usize;
 
     while si <= text_chars.len() {
-        if let Some(max_count) = max {
-            if count >= max_count {
-                break;
-            }
+        if let Some(max_count) = max
+            && count >= max_count
+        {
+            break;
         }
 
         ms.reset();

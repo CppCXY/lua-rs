@@ -14,16 +14,15 @@ pub fn objtypename(l: &mut LuaState, v: &LuaValue) -> String {
     if v.is_nil() {
         return "no value".to_string();
     }
-    if let Some(mt) = get_metatable(l, v) {
-        if let Some(mt_table) = mt.as_table() {
-            // Create a string key for __name lookup
-            if let Ok(key) = l.create_string("__name") {
-                if let Some(name_val) = mt_table.raw_get(&key) {
-                    if let Some(s) = name_val.as_str() {
-                        return s.to_string();
-                    }
-                }
-            }
+    if let Some(mt) = get_metatable(l, v)
+        && let Some(mt_table) = mt.as_table()
+    {
+        // Create a string key for __name lookup
+        if let Ok(key) = l.create_string("__name")
+            && let Some(name_val) = mt_table.raw_get(&key)
+            && let Some(s) = name_val.as_str()
+        {
+            return s.to_string();
         }
     }
     v.type_name().to_string()
@@ -131,10 +130,10 @@ fn upvalname(chunk: &Chunk, uv: usize) -> String {
 
 /// Get a constant name (if it's a string)
 fn kname(chunk: &Chunk, index: usize) -> Option<String> {
-    if index < chunk.constants.len() {
-        if let Some(s) = chunk.constants[index].as_str() {
-            return Some(s.to_string());
-        }
+    if index < chunk.constants.len()
+        && let Some(s) = chunk.constants[index].as_str()
+    {
+        return Some(s.to_string());
     }
     None
 }
@@ -235,10 +234,10 @@ fn basicgetobjname(chunk: &Chunk, pc: &mut i32, reg: u32) -> Option<(&'static st
 /// Get a register name for rname helper
 fn rname(chunk: &Chunk, pc: usize, c: u32) -> String {
     let mut ppc = pc as i32;
-    if let Some((kind, name)) = basicgetobjname(chunk, &mut ppc, c) {
-        if kind == "constant" {
-            return name;
-        }
+    if let Some((kind, name)) = basicgetobjname(chunk, &mut ppc, c)
+        && kind == "constant"
+    {
+        return name;
     }
     "?".to_string()
 }
@@ -501,10 +500,10 @@ pub fn varinfo(l: &LuaState) -> String {
         _ => None,
     };
 
-    if let Some(reg) = reg {
-        if let Some((kind, name)) = getobjname(chunk, currentpc, reg) {
-            return format!(" ({} '{}')", kind, name);
-        }
+    if let Some(reg) = reg
+        && let Some((kind, name)) = getobjname(chunk, currentpc, reg)
+    {
+        return format!(" ({} '{}')", kind, name);
     }
     String::new()
 }
@@ -540,11 +539,11 @@ fn find_global_func_name(l: &LuaState, target: &LuaValue) -> Option<String> {
     let registry_table = vm.registry.as_table()?;
     let mut loaded: Option<LuaValue> = None;
     for (key, val) in registry_table.iter_all() {
-        if let Some(s) = key.as_str() {
-            if s == "_LOADED" {
-                loaded = Some(val);
-                break;
-            }
+        if let Some(s) = key.as_str()
+            && s == "_LOADED"
+        {
+            loaded = Some(val);
+            break;
         }
     }
     let loaded = loaded?;
@@ -557,8 +556,8 @@ fn find_global_func_name(l: &LuaState, target: &LuaValue) -> Option<String> {
             if mod_val == *target {
                 let name = mod_name.to_string();
                 // Strip _G. prefix
-                return Some(if name.starts_with("_G.") {
-                    name[3..].to_string()
+                return Some(if let Some(rest) = name.strip_prefix("_G.") {
+                    rest.to_string()
                 } else {
                     name
                 });
@@ -566,16 +565,16 @@ fn find_global_func_name(l: &LuaState, target: &LuaValue) -> Option<String> {
             // Search within the module table (level 2)
             if let Some(mod_table) = mod_val.as_table() {
                 for (field_key, field_val) in mod_table.iter_all() {
-                    if let Some(field_name) = field_key.as_str() {
-                        if field_val == *target {
-                            let full_name = format!("{}.{}", mod_name, field_name);
-                            // Strip _G. prefix
-                            return Some(if full_name.starts_with("_G.") {
-                                full_name[3..].to_string()
-                            } else {
-                                full_name
-                            });
-                        }
+                    if let Some(field_name) = field_key.as_str()
+                        && field_val == *target
+                    {
+                        let full_name = format!("{}.{}", mod_name, field_name);
+                        // Strip _G. prefix
+                        return Some(if let Some(rest) = full_name.strip_prefix("_G.") {
+                            rest.to_string()
+                        } else {
+                            full_name
+                        });
                     }
                 }
             }
@@ -693,21 +692,19 @@ pub fn ordererror(l: &mut LuaState, p1: &crate::LuaValue, p2: &crate::LuaValue) 
 pub fn callerror(l: &mut LuaState, val: &crate::LuaValue) -> LuaError {
     // Look at the current frame's instruction to determine what was being called
     let ci_idx = l.call_depth().wrapping_sub(1);
-    if let Some(ci) = l.get_frame(ci_idx) {
-        if ci.is_lua() {
-            if let Some(func) = l.get_frame_func(ci_idx) {
-                if let Some(lua_func) = func.as_lua_function() {
-                    let chunk = lua_func.chunk();
-                    let pc = ci.pc.saturating_sub(1) as usize;
-                    if let Some((kind, name)) = funcnamefromcode(chunk, pc) {
-                        let t = objtypename(l, val);
-                        return l.error(format!(
-                            "attempt to call a {} value ({} '{}')",
-                            t, kind, name
-                        ));
-                    }
-                }
-            }
+    if let Some(ci) = l.get_frame(ci_idx)
+        && ci.is_lua()
+        && let Some(func) = l.get_frame_func(ci_idx)
+        && let Some(lua_func) = func.as_lua_function()
+    {
+        let chunk = lua_func.chunk();
+        let pc = ci.pc.saturating_sub(1) as usize;
+        if let Some((kind, name)) = funcnamefromcode(chunk, pc) {
+            let t = objtypename(l, val);
+            return l.error(format!(
+                "attempt to call a {} value ({} '{}')",
+                t, kind, name
+            ));
         }
     }
     // Fallback: no name info available
@@ -744,7 +741,7 @@ pub fn create_debug_lib() -> LibraryModule {
 /// debug.traceback([message [, level]]) - Get stack traceback
 fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
     // Get message argument (can be nil)
-    let message_val = l.get_arg(1).unwrap_or(LuaValue::nil());
+    let message_val = l.get_arg(1).unwrap_or_default();
     let message_str = if message_val.is_nil() {
         None
     } else if let Some(s) = message_val.as_str() {
@@ -819,11 +816,7 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                     let source = chunk.source_name.as_deref().unwrap_or("?");
 
                     // Format source name (strip @ prefix if present)
-                    let source_display = if source.starts_with('@') {
-                        &source[1..]
-                    } else {
-                        source
-                    };
+                    let source_display = source.strip_prefix('@').unwrap_or(source);
 
                     // Get line number from pc
                     let pc_idx = pc.saturating_sub(1) as usize;
@@ -860,15 +853,13 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                                 source_display, line, name_what, func_name
                             ));
                         }
+                    } else if func_name.is_empty() {
+                        trace.push_str(&format!("\n\t{}: in {}", source_display, name_what));
                     } else {
-                        if func_name.is_empty() {
-                            trace.push_str(&format!("\n\t{}: in {}", source_display, name_what));
-                        } else {
-                            trace.push_str(&format!(
-                                "\n\t{}: in {} '{}'",
-                                source_display, name_what, func_name
-                            ));
-                        }
+                        trace.push_str(&format!(
+                            "\n\t{}: in {} '{}'",
+                            source_display, name_what, func_name
+                        ));
                     }
                 } else if func.is_c_callable() {
                     // C function - try to get name from calling frame
@@ -1025,7 +1016,7 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
                 let call_depth = l.call_depth();
                 let frame_idx = call_depth - 1 - (level as usize);
                 if let Some((namewhat, name)) = getfuncname(l, frame_idx) {
-                    (l.create_string(&name)?.into(), l.create_string(namewhat)?)
+                    (l.create_string(&name)?, l.create_string(namewhat)?)
                 } else {
                     (LuaValue::nil(), l.create_string("")?)
                 }
@@ -1105,7 +1096,7 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
                 let call_depth = l.call_depth();
                 let frame_idx = call_depth - 1 - (level as usize);
                 if let Some((namewhat, name)) = getfuncname(l, frame_idx) {
-                    (l.create_string(&name)?.into(), l.create_string(namewhat)?)
+                    (l.create_string(&name)?, l.create_string(namewhat)?)
                 } else {
                     (LuaValue::nil(), l.create_string("")?)
                 }
@@ -1163,7 +1154,7 @@ fn debug_getmetatable(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("getmetatable() requires argument 1".to_string()))?;
 
     // For tables, get metatable directly
-    let v = get_metatable(l, &value).unwrap_or(LuaValue::nil());
+    let v = get_metatable(l, &value).unwrap_or_default();
     // For other types, return nil (simplified)
     l.push_value(v)?;
     Ok(1)
@@ -1222,7 +1213,7 @@ fn debug_sethook(_l: &mut LuaState) -> LuaResult<usize> {
 
 /// debug.getregistry() - Return the registry table
 fn debug_getregistry(l: &mut LuaState) -> LuaResult<usize> {
-    let registry = l.vm_mut().registry.clone();
+    let registry = l.vm_mut().registry;
     l.push_value(registry)?;
     Ok(1)
 }
@@ -1314,7 +1305,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
 
             let top = l.get_top();
             if value_idx < top {
-                let value = l.stack_get(value_idx).unwrap_or(LuaValue::nil());
+                let value = l.stack_get(value_idx).unwrap_or_default();
                 let name_str = l.create_string(name)?;
                 l.push_value(name_str)?;
                 l.push_value(value)?;
@@ -1490,10 +1481,10 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
             upval_ref.data.set_value(value);
 
             // GC barrier if needed
-            if value.is_collectable() {
-                if let Some(value_gc_ptr) = value.as_gc_ptr() {
-                    l.gc_barrier(upvalue_ptr, value_gc_ptr);
-                }
+            if value.is_collectable()
+                && let Some(value_gc_ptr) = value.as_gc_ptr()
+            {
+                l.gc_barrier(upvalue_ptr, value_gc_ptr);
             }
 
             // Return the upvalue name
@@ -1606,7 +1597,7 @@ fn debug_upvaluejoin(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Clone the upvalue from func2
-    let upvalue_to_share = upvalues2[n2 - 1].clone();
+    let upvalue_to_share = upvalues2[n2 - 1];
 
     // Replace upvalue in func1 - we need mutable access
     let lua_func1_mut = func1.as_lua_function_mut().ok_or_else(|| {

@@ -128,7 +128,7 @@ impl LibraryRegistry {
             if module.name == "string" {
                 // In Lua, all strings share a metatable where __index points to the string library
                 // This allows using string methods with : syntax (e.g., str:upper())
-                vm.set_string_metatable(lib_table.clone())?;
+                vm.set_string_metatable(lib_table)?;
             }
 
             // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)
@@ -136,15 +136,15 @@ impl LibraryRegistry {
 
             // Also register in package.loaded and package.preload (if package exists)
             // This allows require() to find standard libraries
-            if let Some(package_table) = vm.get_global("package")? {
-                if package_table.is_table() {
-                    let loaded_key = vm.create_string("loaded")?;
-                    if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
-                        && loaded_table.is_table()
-                    {
-                        let mod_key = vm.create_string(module.name)?;
-                        vm.raw_set(&loaded_table, mod_key, lib_table.clone());
-                    }
+            if let Some(package_table) = vm.get_global("package")?
+                && package_table.is_table()
+            {
+                let loaded_key = vm.create_string("loaded")?;
+                if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
+                    && loaded_table.is_table()
+                {
+                    let mod_key = vm.create_string(module.name)?;
+                    vm.raw_set(&loaded_table, mod_key, lib_table);
                 }
             }
         }

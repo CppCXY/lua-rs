@@ -437,15 +437,13 @@ pub fn leaveblock(fs: &mut FuncState) -> Result<(), String> {
         }
 
         // lparser.c:757-760: check for undefined gotos at function level
-        if !has_previous {
-            if !fs.pending_gotos.is_empty() {
-                // Report the first unresolved goto as an error
-                let gt = &fs.pending_gotos[0];
-                return Err(fs.sem_error(&format!(
-                    "no visible label '{}' for <goto> at line {}",
-                    gt.name, gt.line
-                )));
-            }
+        if !has_previous && !fs.pending_gotos.is_empty() {
+            // Report the first unresolved goto as an error
+            let gt = &fs.pending_gotos[0];
+            return Err(fs.sem_error(&format!(
+                "no visible label '{}' for <goto> at line {}",
+                gt.name, gt.line
+            )));
         }
 
         // lparser.c:761: current block now is previous one
@@ -504,15 +502,13 @@ fn retstat(fs: &mut FuncState) -> Result<(), String> {
                 }
             }
             nret = -1; // LUA_MULTRET
+        } else if nret == 1 {
+            // Only one single value - can use original slot
+            first = code::exp2anyreg(fs, &mut e);
         } else {
-            if nret == 1 {
-                // Only one single value - can use original slot
-                first = code::exp2anyreg(fs, &mut e);
-            } else {
-                // Values must go to the top of the stack
-                code::exp2nextreg(fs, &mut e);
-                // nret == fs->freereg - first
-            }
+            // Values must go to the top of the stack
+            code::exp2nextreg(fs, &mut e);
+            // nret == fs->freereg - first
         }
     }
 
@@ -1273,7 +1269,7 @@ fn localstat(fs: &mut FuncState) -> Result<(), String> {
 
     // Check for compile-time constant optimization
     // Get last variable
-    let last_vidx = (fs.nactvar + nvars - 1) as u16;
+    let last_vidx = fs.nactvar + nvars - 1;
 
     // First check if optimization is possible and get variable info for debugging
     let can_optimize = if let Some(var_desc) = fs.get_local_var_desc(last_vidx) {
@@ -1600,8 +1596,7 @@ fn restassign(fs: &mut FuncState, lh_id: LhsAssignId, nvars: usize) -> Result<()
         let prev_id = fs
             .compiler_state
             .get_lhs_assign(lh_id)
-            .map(|lh| lh.prev)
-            .flatten();
+            .and_then(|lh| lh.prev);
 
         // Build chain: new node points to a copy of current lh (updated)
         let new_prev_id = fs.compiler_state.alloc_lhs_assign(LhsAssign {
@@ -1705,7 +1700,7 @@ fn check_readonly(fs: &mut FuncState, e: &mut ExpDesc) -> Result<(), String> {
         }
         ExpKind::VLOCAL | ExpKind::VVARGVAR => {
             // Check if local variable is const, compile-time const, vararg param, or to-be-closed
-            let vidx = e.u.var().vidx as u16;
+            let vidx = e.u.var().vidx;
             if let Some(var_desc) = fs.get_local_var_desc(vidx) {
                 // RDKCONST, RDKCTC, RDKVAVAR, and RDKTOCLOSE are all readonly
                 match var_desc.kind {

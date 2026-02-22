@@ -50,7 +50,7 @@ pub fn handle_return(
     } else if b == 0 {
         // Return all values from R[A] to logical top (L->top.p)
         let top = lua_state.get_top();
-        if top > ra_pos { top - ra_pos } else { 0 }
+        top.saturating_sub(ra_pos)
     } else {
         b - 1
     };

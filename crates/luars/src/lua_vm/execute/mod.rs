@@ -94,10 +94,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Read call_status first (single field), avoids holding a borrow
         // across the mutable handle_pending_ops call.
         let call_status = lua_state.get_call_info(frame_idx).call_status;
-        if call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
-            if handle_pending_ops(lua_state, frame_idx)? {
-                continue 'startfunc;
-            }
+        if call_status & (CIST_C | CIST_PENDING_FINISH) != 0
+            && handle_pending_ops(lua_state, frame_idx)?
+        {
+            continue 'startfunc;
         }
 
         // Hot path: read CI fields for Lua function dispatch.
@@ -909,10 +909,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let upval_ptr = unsafe { *upvalue_ptrs.get_unchecked(b) };
                     upval_ptr.as_mut_ref().data.set_value(value);
                     // GC barrier (only for collectable values)
-                    if value.is_collectable() {
-                        if let Some(gc_ptr) = value.as_gc_ptr() {
-                            lua_state.gc_barrier(upval_ptr, gc_ptr);
-                        }
+                    if value.is_collectable()
+                        && let Some(gc_ptr) = value.as_gc_ptr()
+                    {
+                        lua_state.gc_barrier(upval_ptr, gc_ptr);
                     }
                 }
                 OpCode::Close => {
@@ -937,12 +937,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         0
                     };
 
-                    if k {
-                        if pc < code.len() {
-                            let extra_instr = code[pc];
-                            if extra_instr.get_opcode() == OpCode::ExtraArg {
-                                vc += extra_instr.get_ax() as usize * 1024;
-                            }
+                    if k && pc < code.len() {
+                        let extra_instr = code[pc];
+                        if extra_instr.get_opcode() == OpCode::ExtraArg {
+                            vc += extra_instr.get_ax() as usize * 1024;
                         }
                     }
 
@@ -1084,10 +1082,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if fast_path_ok {
                         // GC write barrier: if the table (BLACK) now references
                         // a new WHITE value, the GC must be notified.
-                        if value.is_collectable() {
-                            if let Some(gc_ptr) = ra.as_gc_ptr() {
-                                lua_state.gc_barrier_back(gc_ptr);
-                            }
+                        if value.is_collectable()
+                            && let Some(gc_ptr) = ra.as_gc_ptr()
+                        {
+                            lua_state.gc_barrier_back(gc_ptr);
                         }
                     } else {
                         // Slow path: metamethod or hash part
@@ -1125,10 +1123,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if fast_path_ok {
                         // GC write barrier: if the table (BLACK) now references
                         // a new WHITE value, the GC must be notified.
-                        if value.is_collectable() {
-                            if let Some(gc_ptr) = ra.as_gc_ptr() {
-                                lua_state.gc_barrier_back(gc_ptr);
-                            }
+                        if value.is_collectable()
+                            && let Some(gc_ptr) = ra.as_gc_ptr()
+                        {
+                            lua_state.gc_barrier_back(gc_ptr);
                         }
                     } else {
                         // Slow path: metamethod, new key insertion, or non-table
@@ -1316,7 +1314,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 flimit.floor()
                             };
                             // Check if the rounded float fits in i64
-                            if nl >= (i64::MIN as f64) && nl < -(i64::MIN as f64) && nl == nl {
+                            if nl >= (i64::MIN as f64) && nl < -(i64::MIN as f64) && !nl.is_nan() {
                                 let lim = nl as i64;
                                 let skip = if step > 0 { init > lim } else { init < lim };
                                 break 'forlimit (lim, skip);
@@ -1329,8 +1327,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     break 'forlimit (0, true);
                                 }
                                 // Ascending loop: truncate to MAXINTEGER
-                                let skip = init > i64::MAX; // always false, but matches pattern
-                                break 'forlimit (i64::MAX, skip);
+                                // Ascending loop with init <= MAX: never skip
+                                break 'forlimit (i64::MAX, false);
                             } else {
                                 // Negative float out of range (or -inf, NaN)
                                 if step > 0 {
@@ -1338,8 +1336,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     break 'forlimit (0, true);
                                 }
                                 // Descending loop: truncate to MININTEGER
-                                let skip = init < i64::MIN; // always false
-                                break 'forlimit (i64::MIN, skip);
+                                // Descending loop with init >= MIN: never skip
+                                break 'forlimit (i64::MIN, false);
                             }
                         };
 
@@ -1375,9 +1373,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = base + a;
 
                     // Swap control and closing variables
-                    let temp = stack[ra + 3];
-                    stack[ra + 3] = stack[ra + 2];
-                    stack[ra + 2] = temp;
+                    stack.swap(ra + 3, ra + 2);
 
                     // Mark ra+2 as to-be-closed if not nil
                     lua_state.mark_tbc(ra + 2)?;
@@ -1408,10 +1404,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // Extract C function pointer while we have the value
                         let c_func_opt = if let Some(cf) = iterator.as_cfunction() {
                             Some(cf)
-                        } else if let Some(cc) = iterator.as_cclosure() {
-                            Some(cc.func())
                         } else {
-                            None
+                            iterator.as_cclosure().map(|cc| cc.func())
                         };
 
                         (iterator, c_func_opt)
@@ -1534,7 +1528,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         stack[base + a] = val;
                     } else {
                         // Slow path: metamethod lookup
-                        let table_value = upval.get_value_ref().clone();
+                        let table_value = *upval.get_value_ref();
                         let write_pos = base + a;
                         let call_info = lua_state.get_call_info_mut(frame_idx);
                         if write_pos + 1 > call_info.top {
@@ -1582,17 +1576,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let table = unsafe { &mut *(table_value.value.ptr as *mut GcTable) };
                         let native = &mut table.data.impl_table;
                         if native.has_hash() && native.set_shortstr_unchecked(&key, value) {
-                            if value.is_collectable() {
-                                if let Some(gc_ptr) = table_value.as_gc_ptr() {
-                                    lua_state.gc_barrier_back(gc_ptr);
-                                }
+                            if value.is_collectable()
+                                && let Some(gc_ptr) = table_value.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
                             }
                             continue;
                         }
                     }
 
                     // Slow path: handle metamethods (__newindex)
-                    let table_value = upval.get_value_ref().clone();
+                    let table_value = *upval.get_value_ref();
                     save_pc!();
                     match helper::finishset(lua_state, &table_value, &key, value) {
                         Ok(_) => {
@@ -1799,11 +1793,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 // CLOSURE AND VARARG
                 // ============================================================
                 OpCode::Closure => {
-                    handle_closure(lua_state, instr, base, frame_idx, &chunk, &upvalue_ptrs, pc)?;
+                    handle_closure(lua_state, instr, base, frame_idx, chunk, upvalue_ptrs, pc)?;
                 }
 
                 OpCode::Vararg => {
-                    closure_vararg_ops::exec_vararg(lua_state, instr, base, frame_idx, &chunk)?;
+                    closure_vararg_ops::exec_vararg(lua_state, instr, base, frame_idx, chunk)?;
                 }
 
                 OpCode::GetVarg => {
@@ -1815,7 +1809,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::VarargPrep => {
-                    closure_vararg_ops::exec_varargprep(lua_state, frame_idx, &chunk, &mut base)?;
+                    closure_vararg_ops::exec_varargprep(lua_state, frame_idx, chunk, &mut base)?;
                 }
 
                 OpCode::ExtraArg => {

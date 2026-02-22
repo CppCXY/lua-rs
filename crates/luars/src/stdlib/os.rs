@@ -124,7 +124,7 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
             // Handle out-of-range months by adjusting year
             let mut adj_year = year;
             let mut adj_month = month;
-            if adj_month < 1 || adj_month > 12 {
+            if !(1..=12).contains(&adj_month) {
                 // Normalize: month 0 = December of previous year, month 13 = January of next year, etc.
                 adj_year += (adj_month - 1).div_euclid(12);
                 adj_month = (adj_month - 1).rem_euclid(12) + 1;
@@ -240,25 +240,25 @@ fn normalize_time_table(
     table_val: &LuaValue,
     dt: &DateTime<Local>,
 ) -> LuaResult<()> {
-    let year_key = LuaValue::from(l.create_string("year")?);
+    let year_key = l.create_string("year")?;
     l.raw_set(table_val, year_key, LuaValue::integer(dt.year() as i64));
-    let month_key = LuaValue::from(l.create_string("month")?);
+    let month_key = l.create_string("month")?;
     l.raw_set(table_val, month_key, LuaValue::integer(dt.month() as i64));
-    let day_key = LuaValue::from(l.create_string("day")?);
+    let day_key = l.create_string("day")?;
     l.raw_set(table_val, day_key, LuaValue::integer(dt.day() as i64));
-    let hour_key = LuaValue::from(l.create_string("hour")?);
+    let hour_key = l.create_string("hour")?;
     l.raw_set(table_val, hour_key, LuaValue::integer(dt.hour() as i64));
-    let min_key = LuaValue::from(l.create_string("min")?);
+    let min_key = l.create_string("min")?;
     l.raw_set(table_val, min_key, LuaValue::integer(dt.minute() as i64));
-    let sec_key = LuaValue::from(l.create_string("sec")?);
+    let sec_key = l.create_string("sec")?;
     l.raw_set(table_val, sec_key, LuaValue::integer(dt.second() as i64));
-    let wday_key = LuaValue::from(l.create_string("wday")?);
+    let wday_key = l.create_string("wday")?;
     l.raw_set(
         table_val,
         wday_key,
         LuaValue::integer(dt.weekday().number_from_sunday() as i64),
     );
-    let yday_key = LuaValue::from(l.create_string("yday")?);
+    let yday_key = l.create_string("yday")?;
     l.raw_set(table_val, yday_key, LuaValue::integer(dt.ordinal() as i64));
 
     Ok(())
@@ -297,8 +297,8 @@ fn os_date(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Check if UTC (starts with '!') or local time
-    let (use_utc, actual_format) = if format_str.starts_with('!') {
-        (true, &format_str[1..])
+    let (use_utc, actual_format) = if let Some(rest) = format_str.strip_prefix('!') {
+        (true, rest)
     } else {
         (false, format_str.as_str())
     };

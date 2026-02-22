@@ -28,6 +28,7 @@ fn print_version() {
     println!("{}", COPYRIGHT);
 }
 
+#[derive(Default)]
 struct Options {
     execute_strings: Vec<String>,
     interactive: bool,
@@ -36,20 +37,6 @@ struct Options {
     require_modules: Vec<String>,
     show_version: bool,
     read_stdin: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options {
-            execute_strings: Vec::new(),
-            interactive: false,
-            script_file: None,
-            script_args: Vec::new(),
-            require_modules: Vec::new(),
-            show_version: false,
-            read_stdin: false,
-        }
-    }
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -240,11 +227,11 @@ fn run_repl(vm: &mut LuaVM) {
                 match vm.execute_chunk(Rc::new(chunk)) {
                     Ok(results) => {
                         // Print non-nil first result
-                        if let Some(first) = results.into_iter().next() {
-                            if !first.is_nil() {
-                                // Use Debug format for display
-                                println!("{:?}", first);
-                            }
+                        if let Some(first) = results.into_iter().next()
+                            && !first.is_nil()
+                        {
+                            // Use Debug format for display
+                            println!("{:?}", first);
                         }
                         incomplete.clear();
                     }
@@ -439,14 +426,14 @@ fn lua_main() -> i32 {
             return 1;
         }
         // for ai debug
-        eprintln!("");
+        eprintln!();
     } else if opts.read_stdin {
         if let Err(e) = execute_stdin(&mut vm) {
             eprintln!("lua: {}", e);
             return 1;
         }
         // for ai debug
-        eprintln!("");
+        eprintln!();
     }
 
     // Enter interactive mode if requested or if no script was provided

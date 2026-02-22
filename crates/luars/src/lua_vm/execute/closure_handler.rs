@@ -36,7 +36,7 @@ pub fn handle_closure(
     let bx = instr.get_bx() as usize;
 
     // Create closure from child prototype
-    handle_closure_internal(lua_state, base, a, bx, chunk, &upvalue_ptrs)?;
+    handle_closure_internal(lua_state, base, a, bx, chunk, upvalue_ptrs)?;
 
     // Save PC for GC, then set top to ra+1 for GC scan scope (like C Lua's checkGC).
     // Use set_top_raw: stack is already grown by push_lua_frame, so no bounds check needed.

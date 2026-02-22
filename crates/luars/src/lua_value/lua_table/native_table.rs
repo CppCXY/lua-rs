@@ -1004,12 +1004,10 @@ impl NativeTable {
         for i in 0..size {
             unsafe {
                 let node = self.node.add(i);
-                if !(*node).key.is_nil() && !(*node).value.is_nil() {
-                    if (*node).key.ttisinteger() {
-                        let k = (*node).key.ivalue();
-                        if k >= 1 && k <= asize {
-                            to_migrate.push((k, (*node).value));
-                        }
+                if !(*node).key.is_nil() && !(*node).value.is_nil() && (*node).key.ttisinteger() {
+                    let k = (*node).key.ivalue();
+                    if k >= 1 && k <= asize {
+                        to_migrate.push((k, (*node).value));
                     }
                 }
             }
@@ -1180,7 +1178,7 @@ impl NativeTable {
         }
     }
 
-    /// Delete a key from hash table
+    // Delete a key from hash table
     // fn delete_node(&mut self, key: &LuaValue) {
     //     if self.sizenode() == 0 {
     //         return;
@@ -1400,10 +1398,11 @@ impl NativeTable {
         // the slot is empty. This is critical for next() iteration: after setting
         // t[k] = nil during pairs(), the slot is empty but findindex must still
         // return the index so iteration can continue past deleted entries.
-        if let Some(i) = key.as_integer() {
-            if i >= 1 && i <= self.asize as i64 {
-                return Some(i as u32);
-            }
+        if let Some(i) = key.as_integer()
+            && i >= 1
+            && i <= self.asize as i64
+        {
+            return Some(i as u32);
         }
 
         // Key must be in hash part - search for it (Lua 5.5's getgeneric with deadok=1)

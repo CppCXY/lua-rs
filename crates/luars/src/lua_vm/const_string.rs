@@ -158,8 +158,8 @@ impl ConstString {
         gc.fixed(cs.str_normal.as_gc_ptr().unwrap());
         gc.fixed(cs.str_dead.as_gc_ptr().unwrap());
 
-        gc.tm_gc = cs.tm_gc.clone();
-        gc.tm_mode = cs.tm_mode.clone();
+        gc.tm_gc = cs.tm_gc;
+        gc.tm_mode = cs.tm_mode;
         cs
     }
 

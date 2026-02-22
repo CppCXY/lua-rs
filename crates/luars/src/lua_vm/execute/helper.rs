@@ -396,17 +396,17 @@ pub fn lookup_from_metatable(
             }
         } else {
             // Non-table (string, userdata): check trait-based field access first
-            if t.ttisfulluserdata() {
-                if let Some(ud) = t.as_userdata_mut() {
-                    // Try trait-based get_field (key must be a string)
-                    // This handles both field access AND method lookup
-                    // (methods return UdValue::Function(cfunction))
-                    if let Some(key_str) = key.as_str() {
-                        if let Some(udv) = ud.get_trait().get_field(key_str) {
-                            let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
-                            return Ok(Some(result));
-                        }
-                    }
+            if t.ttisfulluserdata()
+                && let Some(ud) = t.as_userdata_mut()
+            {
+                // Try trait-based get_field (key must be a string)
+                // This handles both field access AND method lookup
+                // (methods return UdValue::Function(cfunction))
+                if let Some(key_str) = key.as_str()
+                    && let Some(udv) = ud.get_trait().get_field(key_str)
+                {
+                    let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                    return Ok(Some(result));
                 }
             }
             // Fall back to general metamethod path
@@ -429,10 +429,10 @@ pub fn lookup_from_metatable(
         // __index is a table, try to access tm[key] directly
         t = tm;
 
-        if let Some(table) = t.as_table() {
-            if let Some(value) = table.raw_get(key) {
-                return Ok(Some(value));
-            }
+        if let Some(table) = t.as_table()
+            && let Some(value) = table.raw_get(key)
+        {
+            return Ok(Some(value));
         }
 
         // If not found, loop again to check if tm has __index
@@ -455,10 +455,8 @@ fn get_metamethod_from_metatable(
         let tm_idx = tm_kind as u8;
 
         // fasttm: for cacheable TMs (Index..Eq), check bit-flag first
-        if tm_idx <= TmKind::Eq as u8 {
-            if mt.no_tm(tm_idx) {
-                return None; // Known absent — skip hash lookup entirely
-            }
+        if tm_idx <= TmKind::Eq as u8 && mt.no_tm(tm_idx) {
+            return None; // Known absent — skip hash lookup entirely
         }
 
         let vm = lua_state.vm_mut();
@@ -559,11 +557,11 @@ pub fn finishset(
 
             // Check if key already exists in the table.
             // If it does, do a raw set regardless of __newindex.
-            if let Some(existing) = table.raw_get(key) {
-                if !existing.is_nil() {
-                    lua_state.raw_set(&t, *key, value);
-                    return Ok(true);
-                }
+            if let Some(existing) = table.raw_get(key)
+                && !existing.is_nil()
+            {
+                lua_state.raw_set(&t, *key, value);
+                return Ok(true);
             }
 
             // Key does not exist - call __newindex metamethod
@@ -580,18 +578,17 @@ pub fn finishset(
             }
         } else {
             // Not a table — try trait-based set_field for userdata first
-            if t.ttisfulluserdata() {
-                if let Some(ud) = t.as_userdata_mut() {
-                    if let Some(key_str) = key.as_str() {
-                        let udv = crate::lua_value::lua_value_to_udvalue(&value);
-                        match ud.get_trait_mut().set_field(key_str, udv) {
-                            Some(Ok(())) => return Ok(true),
-                            Some(Err(msg)) => {
-                                return Err(lua_state.error(msg));
-                            }
-                            None => {} // Fall through to metatable
-                        }
+            if t.ttisfulluserdata()
+                && let Some(ud) = t.as_userdata_mut()
+                && let Some(key_str) = key.as_str()
+            {
+                let udv = crate::lua_value::lua_value_to_udvalue(&value);
+                match ud.get_trait_mut().set_field(key_str, udv) {
+                    Some(Ok(())) => return Ok(true),
+                    Some(Err(msg)) => {
+                        return Err(lua_state.error(msg));
                     }
+                    None => {} // Fall through to metatable
                 }
             }
             // Get __newindex metamethod
@@ -637,17 +634,17 @@ pub fn get_binop_metamethod(
     tm_kind: TmKind,
 ) -> Option<LuaValue> {
     // Try v1's metatable first
-    if let Some(mt) = get_metatable(lua_state, v1) {
-        if let Some(mm) = get_metamethod_from_metatable(lua_state, mt, tm_kind) {
-            return Some(mm);
-        }
+    if let Some(mt) = get_metatable(lua_state, v1)
+        && let Some(mm) = get_metamethod_from_metatable(lua_state, mt, tm_kind)
+    {
+        return Some(mm);
     }
 
     // Try v2's metatable
-    if let Some(mt) = get_metatable(lua_state, v2) {
-        if let Some(mm) = get_metamethod_from_metatable(lua_state, mt, tm_kind) {
-            return Some(mm);
-        }
+    if let Some(mt) = get_metatable(lua_state, v2)
+        && let Some(mm) = get_metamethod_from_metatable(lua_state, mt, tm_kind)
+    {
+        return Some(mm);
     }
 
     None
@@ -755,26 +752,24 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
         if has_recst {
             // Save handler before it gets overwritten (only for xpcall)
             let handler = if is_xpcall {
-                lua_state
-                    .stack_get(pcall_func_pos)
-                    .unwrap_or(LuaValue::nil())
+                lua_state.stack_get(pcall_func_pos).unwrap_or_default()
             } else {
                 LuaValue::nil()
             };
 
             // Error recovery completed (or continuing) after yield.
             // Retrieve the saved error value and try to close remaining TBC entries.
-            let error_val = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
+            let error_val = std::mem::take(&mut lua_state.error_object);
             lua_state.clear_error();
             let close_level = pcall_func_pos + 1; // body's base position
 
             // Try to close remaining TBC entries
-            let close_result = lua_state.close_tbc_with_error(close_level, error_val.clone());
+            let close_result = lua_state.close_tbc_with_error(close_level, error_val);
 
             match close_result {
                 Ok(()) => {
                     // All TBC entries closed. Set up (false, error) result.
-                    let final_err = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
+                    let final_err = std::mem::take(&mut lua_state.error_object);
                     let result_err = if !final_err.is_nil() {
                         final_err
                     } else {
@@ -785,8 +780,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                     // If xpcall, call error handler to transform the error
                     let result_err = if is_xpcall {
                         lua_state.nny += 1;
-                        let handler_result =
-                            lua_state.pcall(handler.clone(), vec![result_err.clone()]);
+                        let handler_result = lua_state.pcall(handler, vec![result_err]);
                         lua_state.nny -= 1;
                         match handler_result {
                             Ok((true, results)) => {
@@ -836,7 +830,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                 }
                 Err(LuaError::Yield) => {
                     // Another TBC close method yielded. Save cascaded error and yield.
-                    let cascaded = std::mem::replace(&mut lua_state.error_object, LuaValue::nil());
+                    let cascaded = std::mem::take(&mut lua_state.error_object);
                     lua_state.error_object = if !cascaded.is_nil() {
                         cascaded
                     } else {
@@ -855,11 +849,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
             // We need: [true, res1, res2, ...] starting at pcall_func_pos.
             let stack_top = lua_state.get_top();
             let body_results_start = pcall_func_pos + 1;
-            let body_nres = if stack_top > body_results_start {
-                stack_top - body_results_start
-            } else {
-                0
-            };
+            let body_nres = stack_top.saturating_sub(body_results_start);
 
             // Place true at pcall_func_pos (body results already at +1)
             lua_state.stack_set(pcall_func_pos, LuaValue::boolean(true))?;
@@ -904,17 +894,13 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
         // Move results from body_start to func_pos (no true/false prefix).
         let stack_top = lua_state.get_top();
         let body_results_start = pcall_func_pos + 1;
-        let body_nres = if stack_top > body_results_start {
-            stack_top - body_results_start
-        } else {
-            0
-        };
+        let body_nres = stack_top.saturating_sub(body_results_start);
 
         // Move results down to func_pos
         for i in 0..body_nres {
             let val = lua_state
                 .stack_get(body_results_start + i)
-                .unwrap_or(LuaValue::nil());
+                .unwrap_or_default();
             lua_state.stack_set(pcall_func_pos + i, val)?;
         }
 

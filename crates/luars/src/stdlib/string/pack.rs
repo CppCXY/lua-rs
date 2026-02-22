@@ -266,7 +266,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'pack' (invalid size)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
                     n
@@ -350,7 +350,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'pack' (invalid size)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
                     n
@@ -630,7 +630,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'pack' (invalid size)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
                     n
@@ -745,7 +745,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                                 || next_ch == 'L')
                         {
                             let n = size_str.parse::<usize>().unwrap_or(4);
-                            if n < 1 || n > 16 {
+                            if !(1..=16).contains(&n) {
                                 return Err(l.error(format!("({}) out of limits [1,16]", n)));
                             }
                             n
@@ -808,7 +808,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = align_str.parse().map_err(|_| {
                         l.error("bad argument to 'pack' (invalid alignment)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error("alignment out of limits [1,16]".to_string()));
                     }
                     // Check if n is a power of 2
@@ -878,7 +878,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'packsize' (invalid size)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
                     n
@@ -947,7 +947,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                                 || next_ch == 'L')
                         {
                             let n = size_str.parse::<usize>().unwrap_or(4);
-                            if n < 1 || n > 16 {
+                            if !(1..=16).contains(&n) {
                                 return Err(l.error(format!("({}) out of limits [1,16]", n)));
                             }
                             n
@@ -1022,7 +1022,7 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = align_str.parse().map_err(|_| {
                         l.error("bad argument to 'packsize' (invalid alignment)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error("alignment out of limits [1,16]".to_string()));
                     }
                     // Check if n is a power of 2
@@ -1159,7 +1159,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'unpack' (invalid size)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
                     n
@@ -1215,7 +1215,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                             }
                         }
                         let mut v: i64 = 0;
-                        let start = if size > 8 { size - 8 } else { 0 };
+                        let start = size.saturating_sub(8);
                         for i in start..size {
                             v = (v << 8) | (bytes[idx + i] as i64);
                         }
@@ -1298,7 +1298,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'unpack' (invalid size)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
                     n
@@ -1344,7 +1344,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                             }
                         }
                         let mut v: u64 = 0;
-                        let start = if size > 8 { size - 8 } else { 0 };
+                        let start = size.saturating_sub(8);
                         for i in start..size {
                             v = (v << 8) | (bytes[idx + i] as u64);
                         }
@@ -1516,7 +1516,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = size_str.parse().map_err(|_| {
                         l.error("bad argument to 'unpack' (invalid size)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error(format!("({}) out of limits [1,16]", n)));
                     }
                     n
@@ -1681,7 +1681,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     let n: usize = align_str.parse().map_err(|_| {
                         l.error("bad argument to 'unpack' (invalid alignment)".to_string())
                     })?;
-                    if n < 1 || n > 16 {
+                    if !(1..=16).contains(&n) {
                         return Err(l.error("alignment out of limits [1,16]".to_string()));
                     }
                     // Check if n is a power of 2

@@ -133,7 +133,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
                 i + 1
             )));
         };
-        if byte < 0 || byte > 255 {
+        if !(0..=255).contains(&byte) {
             return Err(l.error(format!(
                 "bad argument #{} to 'string.char' (value out of range)",
                 i + 1
@@ -172,7 +172,7 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     let chunk = func_obj.chunk();
 
     // Serialize the chunk with pool access for string constants
-    match chunk_serializer::serialize_chunk_with_pool(&chunk, strip, &vm.object_allocator) {
+    match chunk_serializer::serialize_chunk_with_pool(chunk, strip, &vm.object_allocator) {
         Ok(bytes) => {
             // Create binary value directly - no encoding needed
             let result = vm.create_binary(bytes)?;
@@ -400,14 +400,14 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| crate::stdlib::debug::argerror(l, 2, "number expected"))?;
     let i = match value_to_integer(&i_value) {
         Ok(i) => i,
-        Err(msg) => return Err(crate::stdlib::debug::argerror(l, 2, &msg)),
+        Err(msg) => return Err(crate::stdlib::debug::argerror(l, 2, msg)),
     };
 
     let j = l
         .get_arg(3)
         .map(|v| match value_to_integer(&v) {
             Ok(i) => Ok(i),
-            Err(msg) => Err(crate::stdlib::debug::argerror(l, 3, &msg)),
+            Err(msg) => Err(crate::stdlib::debug::argerror(l, 3, msg)),
         })
         .transpose()?
         .unwrap_or(-1);
@@ -500,7 +500,7 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
             return Ok(1);
         }
 
-        if let Some(pos) = s_str[start_pos..].find(&pattern) {
+        if let Some(pos) = s_str[start_pos..].find(pattern) {
             let actual_pos = start_pos + pos;
             let end_pos = actual_pos + pattern.len();
             l.push_value(LuaValue::integer((actual_pos + 1) as i64))?;
@@ -512,7 +512,7 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
         }
     } else {
         // Complex pattern matching — use pattern2 engine (no parse phase)
-        match pattern::find(&s_str, &pattern, start_pos) {
+        match pattern::find(s_str, pattern, start_pos) {
             Ok(Some((start, end, captures))) => {
                 l.push_value(LuaValue::integer((start + 1) as i64))?;
                 l.push_value(LuaValue::integer(end as i64))?;
@@ -675,7 +675,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
                 captures
             };
 
-            match l.pcall(repl_value.clone(), args) {
+            match l.pcall(repl_value, args) {
                 Ok((success, results)) => {
                     if success {
                         if results.is_empty()
@@ -700,7 +700,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
                         return Err(l.error(format!(
                             "error calling replacement function: {}",
                             results
-                                .get(0)
+                                .first()
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown error")
                         )));
@@ -828,7 +828,7 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
                 if is_empty && last_was_nonempty {
                     let rest = &s_str_owned[pos..];
                     if let Some(c) = rest.chars().next() {
-                        pos = pos + c.len_utf8();
+                        pos += c.len_utf8();
                     } else {
                         break;
                     }
@@ -873,7 +873,7 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
             }
         }
         if let Some(results_ref) = results_table.as_table_mut() {
-            results_ref.raw_seti((i + 1) as i64, entry.clone());
+            results_ref.raw_seti((i + 1) as i64, entry);
         }
         // GC barrier for entry
         if let Some(gc_ptr) = entry.as_gc_ptr() {
@@ -915,7 +915,7 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
 fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
     let func_val = l
         .current_frame()
-        .map(|frame| frame.func.clone())
+        .map(|frame| frame.func)
         .ok_or_else(|| l.error("gmatch iterator: no active call frame".to_string()))?;
 
     let state_table_value = if let Some(cclosure) = func_val.as_cclosure() {
@@ -934,12 +934,12 @@ fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
     let current_idx = state_ref
         .raw_geti(2)
         .and_then(|v| v.as_integer())
-        .unwrap_or(1) as i64;
+        .unwrap_or(1);
 
     let total = state_ref
         .raw_geti(3)
         .and_then(|v| v.as_integer())
-        .unwrap_or(0) as i64;
+        .unwrap_or(0);
 
     let num_caps = state_ref
         .raw_geti(4)

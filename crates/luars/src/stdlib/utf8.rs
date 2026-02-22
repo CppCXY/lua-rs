@@ -78,7 +78,7 @@ fn decode_utf8(s: &[u8], strict: bool) -> Result<(u32, usize), String> {
     if res > MAXUTF || res < LIMITS[count] {
         return Err("invalid UTF-8 code".to_string());
     }
-    if strict && (res > MAXUNICODE || (0xD800 <= res && res <= 0xDFFF)) {
+    if strict && (res > MAXUNICODE || (0xD800..=0xDFFF).contains(&res)) {
         return Err("invalid UTF-8 code".to_string());
     }
     Ok((res, count + 1))

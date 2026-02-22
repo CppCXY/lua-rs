@@ -113,10 +113,10 @@ impl LuaRefValue {
     /// Get the Lua value from this reference (requires VM access)
     pub fn get(&self, vm: &super::LuaVM) -> LuaValue {
         match &self.inner {
-            LuaRefInner::Direct(value) => value.clone(),
+            LuaRefInner::Direct(value) => *value,
             LuaRefInner::Registry { ref_id } => {
                 // Look up in registry
-                vm.registry_geti(*ref_id as i64).unwrap_or(LuaValue::nil())
+                vm.registry_geti(*ref_id as i64).unwrap_or_default()
             }
         }
     }
@@ -160,7 +160,7 @@ impl LuaRefValue {
 impl Clone for LuaRefValue {
     fn clone(&self) -> Self {
         match &self.inner {
-            LuaRefInner::Direct(value) => LuaRefValue::new_direct(value.clone()),
+            LuaRefInner::Direct(value) => LuaRefValue::new_direct(*value),
             LuaRefInner::Registry { ref_id } => {
                 // For registry references, we just copy the ID
                 // The caller is responsible for managing the lifecycle
@@ -226,6 +226,7 @@ impl RefInner {
     }
 
     /// Get a mutable reference to the VM.
+    #[allow(clippy::mut_from_ref)]
     #[inline]
     fn vm_mut(&self) -> &mut super::LuaVM {
         unsafe { &mut *self.vm }
@@ -296,21 +297,21 @@ impl LuaTableRef {
         let vm = self.inner.vm_mut();
         let table = self.inner.to_value();
         let key_val = vm.create_string(key)?;
-        Ok(vm.raw_get(&table, &key_val).unwrap_or(LuaValue::nil()))
+        Ok(vm.raw_get(&table, &key_val).unwrap_or_default())
     }
 
     /// Get a value by integer key.
     pub fn geti(&self, key: i64) -> super::LuaResult<LuaValue> {
         let vm = self.inner.vm();
         let table = self.inner.to_value();
-        Ok(vm.raw_geti(&table, key).unwrap_or(LuaValue::nil()))
+        Ok(vm.raw_geti(&table, key).unwrap_or_default())
     }
 
     /// Get a value by arbitrary LuaValue key.
     pub fn get_value(&self, key: &LuaValue) -> super::LuaResult<LuaValue> {
         let vm = self.inner.vm();
         let table = self.inner.to_value();
-        Ok(vm.raw_get(&table, key).unwrap_or(LuaValue::nil()))
+        Ok(vm.raw_get(&table, key).unwrap_or_default())
     }
 
     /// Get a value by string key and convert to a Rust type via `FromLua`.

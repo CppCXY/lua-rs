@@ -254,7 +254,7 @@ fn js_value_to_lua_impl(
 
     // Handle string
     if let Some(s) = value.as_string() {
-        return Ok(vm.create_string(&s)?);
+        return vm.create_string(&s);
     }
 
     // Handle Array

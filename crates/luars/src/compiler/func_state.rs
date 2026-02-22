@@ -45,6 +45,12 @@ pub struct CompilerState {
     pub lhs_assign_pool: Vec<Option<LhsAssign>>,
 }
 
+impl Default for CompilerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CompilerState {
     pub fn new() -> Self {
         CompilerState {
@@ -498,10 +504,8 @@ impl<'a> FuncState<'a> {
     pub fn newupvalue(&mut self, name: &str, v: &ExpDesc) -> i32 {
         // Port of luaY_checklimit(fs, fs->nups + 1, MAXUPVAL, "upvalues")
         // MAXUPVAL = 255
-        if self.nups as usize + 1 > 255 {
-            if self.checklimit_error.is_none() {
-                self.checklimit_error = Some(self.errorlimit(255, "upvalues"));
-            }
+        if self.nups as usize + 1 > 255 && self.checklimit_error.is_none() {
+            self.checklimit_error = Some(self.errorlimit(255, "upvalues"));
         }
 
         let prev_ptr = match &self.prev {
@@ -518,7 +522,7 @@ impl<'a> FuncState<'a> {
                 // Mark the variable in parent function as needing upvalue closure
                 if !prev_ptr.is_null() {
                     let prev = &mut *prev_ptr;
-                    crate::compiler::statement::mark_upval(prev, vidx as u16);
+                    crate::compiler::statement::mark_upval(prev, vidx);
                 }
 
                 let prev = &*prev_ptr;
@@ -553,16 +557,14 @@ impl<'a> FuncState<'a> {
 pub fn format_source(source: &str) -> String {
     // LUA_IDSIZE = 60 in luaconf.h, but includes null terminator, so max usable = 59
     const MAX_SRC: usize = 59;
-    if source.starts_with('=') {
+    if let Some(name) = source.strip_prefix('=') {
         // Remove the '=' prefix, take as display name, truncate to MAX_SRC
-        let name = &source[1..];
         if name.len() <= MAX_SRC {
             name.to_string()
         } else {
             name[..MAX_SRC].to_string()
         }
-    } else if source.starts_with('@') {
-        let name = &source[1..];
+    } else if let Some(name) = source.strip_prefix('@') {
         if name.len() <= MAX_SRC {
             name.to_string()
         } else {

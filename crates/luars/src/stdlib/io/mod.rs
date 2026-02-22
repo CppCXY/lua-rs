@@ -123,7 +123,7 @@ fn get_default_output(l: &mut LuaState) -> LuaResult<LuaValue> {
     }
 
     // Slow path: look up from registry
-    let registry = l.vm_mut().registry.clone();
+    let registry = l.vm_mut().registry;
     let key = l.create_string("_IO_output")?;
 
     let output_file = if let Some(registry_table) = registry.as_table() {
@@ -165,7 +165,7 @@ fn get_default_input(l: &mut LuaState) -> LuaResult<LuaValue> {
     }
 
     // Slow path: look up from registry
-    let registry = l.vm_mut().registry.clone();
+    let registry = l.vm_mut().registry;
     let key = l.create_string("_IO_input")?;
 
     let input_file = if let Some(registry_table) = registry.as_table() {
@@ -208,12 +208,7 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
             }
             // Write all arguments
             let mut i = 1;
-            loop {
-                let arg = match l.get_arg(i) {
-                    Some(v) => v,
-                    None => break,
-                };
-
+            while let Some(arg) = l.get_arg(i) {
                 let write_result = if let Some(s) = arg.as_str() {
                     lua_file.write(s)
                 } else if let Some(n) = arg.as_integer() {
@@ -260,11 +255,8 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
             // Collect all format arguments
             let mut formats: Vec<LuaValue> = Vec::new();
             let mut i = 1;
-            loop {
-                match l.get_arg(i) {
-                    Some(v) => formats.push(v),
-                    None => break,
-                }
+            while let Some(v) = l.get_arg(i) {
+                formats.push(v);
                 i += 1;
             }
             // Default: read a line
@@ -313,7 +305,7 @@ fn read_one_format_file(
             // read(0) returns "" if not EOF, nil if EOF
             match lua_file.is_eof() {
                 Ok(true) => return Ok(LuaValue::nil()),
-                Ok(false) => return Ok(l.create_string("")?),
+                Ok(false) => return l.create_string(""),
                 Err(_) => return Ok(LuaValue::nil()),
             }
         }
@@ -322,7 +314,7 @@ fn read_one_format_file(
                 if bytes.is_empty() {
                     return Ok(LuaValue::nil());
                 }
-                return Ok(bytes_to_lua_value(l, bytes)?);
+                return bytes_to_lua_value(l, bytes);
             }
             Err(_) => return Ok(LuaValue::nil()),
         }
@@ -357,7 +349,7 @@ fn read_one_format_file(
             Ok(None) => Ok(LuaValue::nil()),
             Err(_) => Ok(LuaValue::nil()),
         },
-        _ => Err(l.error(format!("invalid format"))),
+        _ => Err(l.error("invalid format".to_string())),
     }
 }
 
@@ -458,11 +450,8 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
     // Collect format arguments (start from arg 2)
     let mut formats: Vec<LuaValue> = Vec::new();
     let mut i = 2;
-    loop {
-        match l.get_arg(i) {
-            Some(v) => formats.push(v),
-            None => break,
-        }
+    while let Some(v) = l.get_arg(i) {
+        formats.push(v);
         i += 1;
     }
 
@@ -471,7 +460,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Check if we have a filename (not nil)
-    let has_filename = filename.as_ref().map_or(false, |v| !v.is_nil());
+    let has_filename = filename.as_ref().is_some_and(|v| !v.is_nil());
 
     if has_filename {
         let filename_val = filename.unwrap();
@@ -492,14 +481,14 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
 
                 let state_table = l.create_table(0, 4)?;
                 let file_key = l.create_string("file")?;
-                l.raw_set(&state_table, file_key, userdata.clone());
+                l.raw_set(&state_table, file_key, userdata);
                 let closed_key = l.create_string("closed")?;
                 l.raw_set(&state_table, closed_key, LuaValue::boolean(false));
 
                 // Store formats
                 let fmts_table = l.create_table(formats.len(), 0)?;
                 for (idx, fmt) in formats.iter().enumerate() {
-                    l.raw_seti(&fmts_table, (idx + 1) as i64, fmt.clone());
+                    l.raw_seti(&fmts_table, (idx + 1) as i64, *fmt);
                 }
                 let fmts_key = l.create_string("fmts")?;
                 l.raw_set(&state_table, fmts_key, fmts_table);
@@ -521,8 +510,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                 // Create C closure for the iterator (captures state table as upvalue)
                 // This allows both `for l in io.lines(file)` and `local f = io.lines(file); f()` to work
                 let vm = l.vm_mut();
-                let iterator_closure =
-                    vm.create_c_closure(io_lines_next, vec![state_table.clone()])?;
+                let iterator_closure = vm.create_c_closure(io_lines_next, vec![state_table])?;
 
                 // Return 4 values for generic for: iterator, state, nil, to-be-closed
                 l.push_value(iterator_closure)?;
@@ -535,7 +523,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
         }
     } else {
         // io.lines() or io.lines(nil, ...) - read from default input
-        let registry = l.vm_mut().registry.clone();
+        let registry = l.vm_mut().registry;
         let key = l.create_string("_IO_input")?;
         let input_file = if let Some(registry_table) = registry.as_table() {
             registry_table
@@ -556,7 +544,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
         // Store formats
         let fmts_table = l.create_table(formats.len(), 0)?;
         for (idx, fmt) in formats.iter().enumerate() {
-            l.raw_seti(&fmts_table, (idx + 1) as i64, fmt.clone());
+            l.raw_seti(&fmts_table, (idx + 1) as i64, *fmt);
         }
         let fmts_key = l.create_string("fmts")?;
         l.raw_set(&state_table, fmts_key, fmts_table);
@@ -576,7 +564,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
 
         // Create C closure for the iterator
         let vm = l.vm_mut();
-        let iterator_closure = vm.create_c_closure(io_lines_next, vec![state_table.clone()])?;
+        let iterator_closure = vm.create_c_closure(io_lines_next, vec![state_table])?;
 
         // Return 4 values for generic for: iterator, state, nil, nil
         // No to-be-closed for default input (we don't own the file)
@@ -599,8 +587,8 @@ fn io_lines_next(l: &mut LuaState) -> LuaResult<usize> {
             // Get from upvalue (standalone call)
             if let Some(frame) = l.current_frame() {
                 if let Some(cclosure) = frame.func.as_cclosure() {
-                    if let Some(upval) = cclosure.upvalues().get(0) {
-                        upval.clone()
+                    if let Some(upval) = cclosure.upvalues().first() {
+                        *upval
                     } else {
                         return Err(l.error("iterator state not found".to_string()));
                     }
@@ -631,7 +619,7 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
     // Check if already closed
     let closed_key = l.create_string("closed")?;
     let is_closed = l
-        .raw_get(&state_val, &closed_key)
+        .raw_get(state_val, &closed_key)
         .and_then(|v| v.as_boolean())
         .unwrap_or(false);
     if is_closed {
@@ -640,19 +628,19 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
 
     let file_key = l.create_string("file")?;
     let file_val = l
-        .raw_get(&state_val, &file_key)
+        .raw_get(state_val, &file_key)
         .ok_or_else(|| l.error("file not found in state".to_string()))?;
 
     // Get format count
     let nfmts_key = l.create_string("nfmts")?;
     let nfmts = l
-        .raw_get(&state_val, &nfmts_key)
+        .raw_get(state_val, &nfmts_key)
         .and_then(|v| v.as_integer())
         .unwrap_or(0) as usize;
 
     // Get formats table
     let fmts_key = l.create_string("fmts")?;
-    let fmts_table = l.raw_get(&state_val, &fmts_key).unwrap_or(LuaValue::nil());
+    let fmts_table = l.raw_get(state_val, &fmts_key).unwrap_or_default();
 
     if let Some(ud) = file_val.as_userdata_mut() {
         let data = ud.get_data_mut();
@@ -667,7 +655,7 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
                         return Ok(1);
                     }
                     Ok(None) => {
-                        return io_lines_close_on_eof(l, lua_file, &state_val, &closed_key);
+                        return io_lines_close_on_eof(l, lua_file, state_val, &closed_key);
                     }
                     Err(e) => return Err(l.error(format!("read error: {}", e))),
                 }
@@ -685,8 +673,8 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
                     results.push(result);
                 }
                 // If the first result is nil, it means EOF
-                if results.first().map_or(true, |v| v.is_nil()) {
-                    return io_lines_close_on_eof(l, lua_file, &state_val, &closed_key);
+                if results.first().is_none_or(|v| v.is_nil()) {
+                    return io_lines_close_on_eof(l, lua_file, state_val, &closed_key);
                 }
                 let nresults = results.len();
                 for r in results {
@@ -723,7 +711,6 @@ fn io_lines_close_on_eof(
 }
 
 /// Read one value from file using a format specifier
-
 /// io.input([file]) - Set or get default input file
 fn io_input(l: &mut LuaState) -> LuaResult<usize> {
     let arg = l.get_arg(1);
@@ -748,7 +735,7 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
             l.vm_mut().gc.check_finalizer(&userdata);
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry.clone();
+            let registry = l.vm_mut().registry;
             let key = l.create_string("_IO_input")?;
             l.raw_set(&registry, key, userdata);
             l.vm_mut().io_default_input = Some(userdata);
@@ -762,7 +749,7 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry.clone();
+            let registry = l.vm_mut().registry;
             let key = l.create_string("_IO_input")?;
             l.raw_set(&registry, key, arg_val);
             l.vm_mut().io_default_input = Some(arg_val);
@@ -785,10 +772,10 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
         // Set new output file
         if let Some(filename) = arg_val.as_str() {
             // Create parent directories if they don't exist
-            if let Some(parent) = std::path::Path::new(filename).parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+            if let Some(parent) = std::path::Path::new(filename).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(parent);
             }
 
             // Open file for writing
@@ -810,7 +797,7 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
             l.vm_mut().gc.check_finalizer(&userdata);
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry.clone();
+            let registry = l.vm_mut().registry;
             let key = l.create_string("_IO_output")?;
             l.raw_set(&registry, key, userdata);
             l.vm_mut().io_default_output = Some(userdata);
@@ -824,7 +811,7 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry.clone();
+            let registry = l.vm_mut().registry;
             let key = l.create_string("_IO_output")?;
             l.raw_set(&registry, key, arg_val);
             l.vm_mut().io_default_output = Some(arg_val);
@@ -845,19 +832,19 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
 fn io_type(l: &mut LuaState) -> LuaResult<usize> {
     let obj = l.get_arg(1);
 
-    if let Some(val) = obj {
-        if let Some(ud) = val.as_userdata_mut() {
-            let data = ud.get_data_mut();
-            if let Some(lua_file) = data.downcast_ref::<LuaFile>() {
-                if lua_file.is_closed() {
-                    let result = l.create_string("closed file")?;
-                    l.push_value(result)?;
-                    return Ok(1);
-                } else {
-                    let result = l.create_string("file")?;
-                    l.push_value(result)?;
-                    return Ok(1);
-                }
+    if let Some(val) = obj
+        && let Some(ud) = val.as_userdata_mut()
+    {
+        let data = ud.get_data_mut();
+        if let Some(lua_file) = data.downcast_ref::<LuaFile>() {
+            if lua_file.is_closed() {
+                let result = l.create_string("closed file")?;
+                l.push_value(result)?;
+                return Ok(1);
+            } else {
+                let result = l.create_string("file")?;
+                l.push_value(result)?;
+                return Ok(1);
             }
         }
     }

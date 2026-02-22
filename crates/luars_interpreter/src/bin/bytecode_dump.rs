@@ -248,7 +248,7 @@ fn dump_chunk(
             // Return0/Return1 format per luac.c:610-613
             // RETURN0: no operands
             // RETURN1: only A field
-            OpCode::Return0 => format!("RETURN0"),
+            OpCode::Return0 => "RETURN0".to_string(),
             OpCode::Return1 => format!("RETURN1 {}", a),
             OpCode::Closure => format!("CLOSURE {} {}", a, bx),
             OpCode::Jmp => format!("JMP {}", instr.get_sj()),
@@ -464,11 +464,8 @@ fn dump_chunk(
             }
             OpCode::GetUpval => {
                 // Show upvalue name
-                if b < chunk.upvalue_descs.len() as u32 {
-                    String::new() // TODO: add upvalue name when available
-                } else {
-                    String::new()
-                }
+                // TODO: add upvalue name when available
+                String::new()
             }
             // All K-suffix arithmetic operations show constant value
             OpCode::AddK
@@ -665,7 +662,7 @@ fn dump_chunk(
             OpCode::Vararg => {
                 // VARARG: show return count
                 if c == 0 {
-                    format!(" ; all out")
+                    " ; all out".to_string()
                 } else {
                     format!(" ; {} out", c - 1)
                 }
@@ -673,7 +670,7 @@ fn dump_chunk(
             OpCode::GetVarg => {
                 // GETVARG: access named vararg parameter
                 // A = destination register, B = vararg param register, C = key register
-                format!("")
+                String::new()
             }
             _ => String::new(),
         };
@@ -709,7 +706,7 @@ fn dump_chunk(
 
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
-        for (_i, child) in chunk.child_protos.iter().enumerate() {
+        for child in chunk.child_protos.iter() {
             dump_chunk(
                 child,
                 filename,
@@ -720,5 +717,5 @@ fn dump_chunk(
             );
         }
     }
-    println!("") // for debug
+    println!() // for debug
 }

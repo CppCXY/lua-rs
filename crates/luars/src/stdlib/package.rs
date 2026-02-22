@@ -67,7 +67,7 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
     // Add package itself to package.loaded (normally lib_registry does this,
     // but package.loaded doesn't exist yet when the package module is first loaded)
     let package_mod_key = l.create_string("package")?;
-    l.raw_set(&loaded_table, package_mod_key, package_table.clone());
+    l.raw_set(&loaded_table, package_mod_key, package_table);
 
     // Store loaded table and package table in registry for use by require
     // This matches standard Lua's LUA_LOADED_TABLE ("_LOADED") and upvalue approach
@@ -149,7 +149,7 @@ fn searcher_lua(l: &mut LuaState) -> LuaResult<usize> {
 
     // Search for the file, using platform directory separator
     let dirsep = std::path::MAIN_SEPARATOR_STR;
-    let result = search_path(&modname, &path_str, ".", dirsep)?;
+    let result = search_path(modname, path_str, ".", dirsep)?;
 
     match result {
         Some(filepath) => {
@@ -189,12 +189,12 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("file path must be a string".to_string()));
     };
 
-    if !std::fs::metadata(&filepath_str).is_ok() {
+    if std::fs::metadata(filepath_str).is_err() {
         return Ok(0);
     }
 
     // Read the file
-    let source = match std::fs::read_to_string(&filepath_str) {
+    let source = match std::fs::read_to_string(filepath_str) {
         Ok(s) => s,
         Err(e) => {
             return Err(l.error(format!("cannot open file '{}': {}", filepath_str, e)));
@@ -219,13 +219,13 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
     // Pass modname and filepath as arguments so the module can access them via ...
     l.push_value(func)?;
     l.push_value(modname_val)?;
-    l.push_value(filepath_val.clone())?;
+    l.push_value(filepath_val)?;
     let func_idx = l.get_top() - 3;
     let (success, result_count) = l.pcall_stack_based(func_idx, 2)?;
 
     if !success {
         // Module threw an error
-        let error_val = l.stack_get(func_idx).unwrap_or(LuaValue::nil());
+        let error_val = l.stack_get(func_idx).unwrap_or_default();
         let error_msg = if let Some(err) = error_val.as_str() {
             err.to_string()
         } else {
@@ -397,14 +397,14 @@ fn package_searchpath(l: &mut LuaState) -> LuaResult<usize> {
         default_rep
     };
 
-    match search_path(&name_str, &path_str, &sep, &rep)? {
+    match search_path(name_str, path_str, sep, rep)? {
         Some(filepath) => {
             let filepath_str = l.create_string(&filepath)?;
             l.push_value(filepath_str)?;
             Ok(1)
         }
         None => {
-            let searchname = name_str.replace(&sep, &rep);
+            let searchname = name_str.replace(sep, rep);
             let err = format!(
                 "\n\tno file '{}'",
                 path_str

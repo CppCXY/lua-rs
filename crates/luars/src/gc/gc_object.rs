@@ -398,6 +398,7 @@ impl<T: HasGcHeader> GcPtr<T> {
         self.ptr as *mut T
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_mut_ref(&self) -> &mut T {
         if cfg!(debug_assertions) {

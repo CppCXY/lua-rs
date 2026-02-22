@@ -143,7 +143,7 @@ pub fn parse_int_token_value(num_text: &str) -> Result<NumberResult, String> {
                     }
                 }
 
-                Err(format!("malformed number",))
+                Err("malformed number".to_string())
             } else {
                 Err(format!(
                     "Failed to parse integer literal '{}': {}",
@@ -221,7 +221,7 @@ pub fn parse_string_token_value(text: &str, kind: LuaTokenKind) -> Result<Vec<u8
 
 fn long_string_value(text: &str) -> Result<Vec<u8>, String> {
     if text.len() < 4 {
-        return Err(format!("String too short"));
+        return Err("String too short".to_string());
     }
 
     let mut equal_num = 0;
@@ -237,7 +237,7 @@ fn long_string_value(text: &str) -> Result<Vec<u8>, String> {
             ));
         }
     } else {
-        return Err(format!("Invalid long string start"));
+        return Err("Invalid long string start".to_string());
     }
 
     for (idx, c) in chars.by_ref() {
@@ -257,7 +257,7 @@ fn long_string_value(text: &str) -> Result<Vec<u8>, String> {
 
     // check string len is enough
     if text.len() < i + equal_num + 2 {
-        return Err(format!("Long string too short"));
+        return Err("Long string too short".to_string());
     }
 
     // lua special rule for long string
@@ -348,7 +348,7 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                     result.push(value);
                                 }
                             } else {
-                                return Err(format!("hexadecimal digit expected",));
+                                return Err("hexadecimal digit expected".to_string());
                             }
                         }
                         'u' => {
@@ -375,11 +375,11 @@ fn normal_string_value(text: &str) -> Result<Vec<u8>, String> {
                                                 result.extend_from_slice(&utf8_bytes);
                                             }
                                         } else {
-                                            return Err(format!("UTF-8 value too large"));
+                                            return Err("UTF-8 value too large".to_string());
                                         }
                                     }
                                     Err(_) => {
-                                        return Err(format!("UTF-8 value too large"));
+                                        return Err("UTF-8 value too large".to_string());
                                     }
                                 }
                             }

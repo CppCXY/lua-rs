@@ -201,10 +201,10 @@ fn is_concat_convertible(value: &LuaValue) -> bool {
         return true;
     }
     // Userdata with lua_tostring can be concat-converted
-    if value.ttisfulluserdata() {
-        if let Some(ud) = value.as_userdata_mut() {
-            return ud.get_trait().lua_tostring().is_some();
-        }
+    if value.ttisfulluserdata()
+        && let Some(ud) = value.as_userdata_mut()
+    {
+        return ud.get_trait().lua_tostring().is_some();
     }
     false
 }
@@ -240,11 +240,11 @@ fn value_to_bytes_write(value: &LuaValue, buf: &mut Vec<u8>) -> Option<bool> {
         Some(false)
     } else if value.ttisfulluserdata() {
         // Userdata with lua_tostring can be used in concatenation
-        if let Some(ud) = value.as_userdata_mut() {
-            if let Some(s) = ud.get_trait().lua_tostring() {
-                buf.extend_from_slice(s.as_bytes());
-                return Some(false);
-            }
+        if let Some(ud) = value.as_userdata_mut()
+            && let Some(s) = ud.get_trait().lua_tostring()
+        {
+            buf.extend_from_slice(s.as_bytes());
+            return Some(false);
         }
         None
     } else {
@@ -317,44 +317,44 @@ pub fn concat_strings(
         }
 
         // Fast path: string + integer (very common: "key" .. i)
-        if let Some(s1) = v1.as_str() {
-            if let Some(i2) = v2.as_integer_strict() {
-                let mut buf = [0u8; STACK_BUF_SIZE];
-                let s1_bytes = s1.as_bytes();
-                let mut itoa_buf = itoa::Buffer::new();
-                let num_str = itoa_buf.format(i2);
-                let total_len = s1_bytes.len() + num_str.len();
-                if total_len <= STACK_BUF_SIZE {
-                    buf[..s1_bytes.len()].copy_from_slice(s1_bytes);
-                    buf[s1_bytes.len()..total_len].copy_from_slice(num_str.as_bytes());
-                    let s = unsafe { std::str::from_utf8_unchecked(&buf[..total_len]) };
-                    return lua_state.create_string(s);
-                }
-                let mut result = String::with_capacity(total_len);
-                result.push_str(s1);
-                result.push_str(num_str);
-                return lua_state.create_string_owned(result);
+        if let Some(s1) = v1.as_str()
+            && let Some(i2) = v2.as_integer_strict()
+        {
+            let mut buf = [0u8; STACK_BUF_SIZE];
+            let s1_bytes = s1.as_bytes();
+            let mut itoa_buf = itoa::Buffer::new();
+            let num_str = itoa_buf.format(i2);
+            let total_len = s1_bytes.len() + num_str.len();
+            if total_len <= STACK_BUF_SIZE {
+                buf[..s1_bytes.len()].copy_from_slice(s1_bytes);
+                buf[s1_bytes.len()..total_len].copy_from_slice(num_str.as_bytes());
+                let s = unsafe { std::str::from_utf8_unchecked(&buf[..total_len]) };
+                return lua_state.create_string(s);
             }
+            let mut result = String::with_capacity(total_len);
+            result.push_str(s1);
+            result.push_str(num_str);
+            return lua_state.create_string_owned(result);
         }
         // Fast path: integer + string
-        if let Some(i1) = v1.as_integer_strict() {
-            if let Some(s2) = v2.as_str() {
-                let mut buf = [0u8; STACK_BUF_SIZE];
-                let mut itoa_buf = itoa::Buffer::new();
-                let num_str = itoa_buf.format(i1);
-                let s2_bytes = s2.as_bytes();
-                let total_len = num_str.len() + s2_bytes.len();
-                if total_len <= STACK_BUF_SIZE {
-                    buf[..num_str.len()].copy_from_slice(num_str.as_bytes());
-                    buf[num_str.len()..total_len].copy_from_slice(s2_bytes);
-                    let s = unsafe { std::str::from_utf8_unchecked(&buf[..total_len]) };
-                    return lua_state.create_string(s);
-                }
-                let mut result = String::with_capacity(total_len);
-                result.push_str(num_str);
-                result.push_str(s2);
-                return lua_state.create_string_owned(result);
+        if let Some(i1) = v1.as_integer_strict()
+            && let Some(s2) = v2.as_str()
+        {
+            let mut buf = [0u8; STACK_BUF_SIZE];
+            let mut itoa_buf = itoa::Buffer::new();
+            let num_str = itoa_buf.format(i1);
+            let s2_bytes = s2.as_bytes();
+            let total_len = num_str.len() + s2_bytes.len();
+            if total_len <= STACK_BUF_SIZE {
+                buf[..num_str.len()].copy_from_slice(num_str.as_bytes());
+                buf[num_str.len()..total_len].copy_from_slice(s2_bytes);
+                let s = unsafe { std::str::from_utf8_unchecked(&buf[..total_len]) };
+                return lua_state.create_string(s);
             }
+            let mut result = String::with_capacity(total_len);
+            result.push_str(num_str);
+            result.push_str(s2);
+            return lua_state.create_string_owned(result);
         }
     }
 
@@ -404,16 +404,16 @@ pub fn concat_strings(
             buf[pos..new_pos].copy_from_slice(s.as_bytes());
             pos = new_pos;
         } else if value.ttisfulluserdata() {
-            if let Some(ud) = value.as_userdata_mut() {
-                if let Some(s) = ud.get_trait().lua_tostring() {
-                    let new_pos = pos + s.len();
-                    if new_pos > STACK_BUF_SIZE {
-                        return concat_large(lua_state, start, n);
-                    }
-                    buf[pos..new_pos].copy_from_slice(s.as_bytes());
-                    pos = new_pos;
-                    continue;
+            if let Some(ud) = value.as_userdata_mut()
+                && let Some(s) = ud.get_trait().lua_tostring()
+            {
+                let new_pos = pos + s.len();
+                if new_pos > STACK_BUF_SIZE {
+                    return concat_large(lua_state, start, n);
                 }
+                buf[pos..new_pos].copy_from_slice(s.as_bytes());
+                pos = new_pos;
+                continue;
             }
             return Err(crate::stdlib::debug::typeerror(
                 lua_state,

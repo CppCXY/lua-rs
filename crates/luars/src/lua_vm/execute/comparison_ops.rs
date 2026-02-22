@@ -444,7 +444,8 @@ pub fn exec_le(
             let vb = *rb;
 
             lua_state.set_frame_pc(frame_idx, *pc as u32);
-            let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
+
+            match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
                 Ok(Some(result)) => result,
                 Ok(None) => {
                     return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
@@ -456,8 +457,7 @@ pub fn exec_le(
                     return Err(LuaError::Yield);
                 }
                 Err(e) => return Err(e),
-            };
-            result
+            }
         }
     };
 

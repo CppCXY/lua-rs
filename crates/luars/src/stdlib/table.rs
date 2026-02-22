@@ -192,10 +192,8 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
     let pos = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(len);
 
     // Only validate pos if explicitly given (C Lua: "if (pos != size)")
-    if has_pos_arg && pos != len {
-        if pos < 1 || pos > len.wrapping_add(1) {
-            return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
-        }
+    if has_pos_arg && pos != len && (pos < 1 || pos > len.wrapping_add(1)) {
+        return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
     }
 
     // Get the value at pos
@@ -275,25 +273,21 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
     // Handle overlap correctly (C Lua: backward only when f < t <= e, same table)
     if f <= e {
         // Fast path: both tables have no metatables → use raw access
-        let use_raw = src_val.as_table().map_or(false, |t| !t.has_metatable())
-            && dst_value.as_table().map_or(false, |t| !t.has_metatable());
+        let use_raw = src_val.as_table().is_some_and(|t| !t.has_metatable())
+            && dst_value.as_table().is_some_and(|t| !t.has_metatable());
 
         if use_raw {
             // Raw access path: no metamethods, much faster
             if t > f && t <= e && src_val.as_gc_ptr() == dst_value.as_gc_ptr() {
                 // Overlapping forward move on same table: iterate backwards
                 for i in (0..=(e - f)).rev() {
-                    let val = l
-                        .raw_geti(&src_val, f.wrapping_add(i))
-                        .unwrap_or(LuaValue::nil());
+                    let val = l.raw_geti(&src_val, f.wrapping_add(i)).unwrap_or_default();
                     l.raw_seti(&dst_value, t.wrapping_add(i), val);
                 }
             } else {
                 // No overlap or different tables: iterate forwards
                 for i in 0..=(e - f) {
-                    let val = l
-                        .raw_geti(&src_val, f.wrapping_add(i))
-                        .unwrap_or(LuaValue::nil());
+                    let val = l.raw_geti(&src_val, f.wrapping_add(i)).unwrap_or_default();
                     l.raw_seti(&dst_value, t.wrapping_add(i), val);
                 }
             }
@@ -332,7 +326,7 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     for (i, arg) in args.iter().enumerate() {
-        l.raw_seti(&table, i as i64 + 1, arg.clone());
+        l.raw_seti(&table, i as i64 + 1, *arg);
     }
 
     l.raw_set(&table, n_key, LuaValue::integer(args.len() as i64));

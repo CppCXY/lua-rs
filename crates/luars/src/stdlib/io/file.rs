@@ -38,17 +38,17 @@ fn parse_lua_float(s: &str) -> Option<f64> {
         return Some(n);
     }
     // Hex float: 0xHHH[.HHH][pEXP]
-    let (neg, rest) = if s.starts_with('-') {
-        (true, &s[1..])
-    } else if s.starts_with('+') {
-        (false, &s[1..])
+    let (neg, rest) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (false, rest)
     } else {
         (false, s)
     };
     if rest.starts_with("0x") || rest.starts_with("0X") {
         let hex = &rest[2..];
         // Split at 'p' or 'P'
-        let (mantissa_str, exp_str) = if let Some(p) = hex.find(|c: char| c == 'p' || c == 'P') {
+        let (mantissa_str, exp_str) = if let Some(p) = hex.find(['p', 'P']) {
             (&hex[..p], Some(&hex[p + 1..]))
         } else {
             (hex, None)
@@ -136,7 +136,6 @@ impl LuaFile {
 
     pub fn open_append(path: &str) -> io::Result<Self> {
         let file = std::fs::OpenOptions::new()
-            .write(true)
             .append(true)
             .create(true)
             .open(path)?;
@@ -150,6 +149,7 @@ impl LuaFile {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
         Ok(LuaFile {
             inner: FileInner::ReadWrite(BufReader::new(file)),
@@ -160,7 +160,6 @@ impl LuaFile {
     pub fn open_append_read(path: &str) -> io::Result<Self> {
         let file = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
             .append(true)
             .create(true)
             .open(path)?;
@@ -257,10 +256,7 @@ impl LuaFile {
                     Ok(Some(line))
                 }
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "File not opened for reading",
-            )),
+            _ => Err(io::Error::other("File not opened for reading")),
         }
     }
 
@@ -281,10 +277,7 @@ impl LuaFile {
                 let n = stdin.lock().read_line(&mut line)?;
                 if n == 0 { Ok(None) } else { Ok(Some(line)) }
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "File not opened for reading",
-            )),
+            _ => Err(io::Error::other("File not opened for reading")),
         }
     }
 
@@ -328,7 +321,7 @@ impl LuaFile {
                             Ok(Some(byte_buf[0]))
                         }
                     }
-                    _ => Err(io::Error::new(io::ErrorKind::Other, "not readable")),
+                    _ => Err(io::Error::other("not readable")),
                 }
             };
 
@@ -540,10 +533,7 @@ impl LuaFile {
                 io::stdin().lock().read_to_end(&mut content)?;
                 Ok(content)
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "File not opened for reading",
-            )),
+            _ => Err(io::Error::other("File not opened for reading")),
         }
     }
 
@@ -560,10 +550,7 @@ impl LuaFile {
                 FileInner::ReadWrite(reader) => reader.read(&mut buffer[total_read..])?,
                 FileInner::Stdin => io::stdin().lock().read(&mut buffer[total_read..])?,
                 _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "File not opened for reading",
-                    ));
+                    return Err(io::Error::other("File not opened for reading"));
                 }
             };
             if bytes_read == 0 {
@@ -635,10 +622,7 @@ impl LuaFile {
                 io::stderr().write_all(data)?;
                 Ok(())
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "File not opened for writing",
-            )),
+            _ => Err(io::Error::other("File not opened for writing")),
         }
     }
 
@@ -756,11 +740,8 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
     // Collect all format arguments
     let mut formats: Vec<LuaValue> = Vec::new();
     let mut i = 2;
-    loop {
-        match l.get_arg(i) {
-            Some(v) => formats.push(v),
-            None => break,
-        }
+    while let Some(v) = l.get_arg(i) {
+        formats.push(v);
         i += 1;
     }
     // Default: read a line
@@ -896,16 +877,11 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             // Write all arguments (starting from arg 2)
             let mut i = 2;
-            loop {
-                let val = match l.get_arg(i) {
-                    Some(v) => v,
-                    None => break,
-                };
-
+            while let Some(val) = l.get_arg(i) {
                 let write_result = match val.kind() {
                     LuaValueKind::String => {
                         if let Some(s) = val.as_str() {
-                            lua_file.write(&s)
+                            lua_file.write(s)
                         } else {
                             return Err(l.error("write expects strings or numbers".to_string()));
                         }
@@ -1092,11 +1068,8 @@ fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
     // Collect format arguments (start from arg 2)
     let mut formats: Vec<LuaValue> = Vec::new();
     let mut i = 2;
-    loop {
-        match l.get_arg(i) {
-            Some(v) => formats.push(v),
-            None => break,
-        }
+    while let Some(v) = l.get_arg(i) {
+        formats.push(v);
         i += 1;
     }
 
@@ -1113,7 +1086,7 @@ fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
     // Store formats
     let fmts_table = l.create_table(formats.len(), 0)?;
     for (idx, fmt) in formats.iter().enumerate() {
-        l.raw_seti(&fmts_table, (idx + 1) as i64, fmt.clone());
+        l.raw_seti(&fmts_table, (idx + 1) as i64, *fmt);
     }
     let fmts_key = l.create_string("fmts")?;
     l.raw_set(&state_table, fmts_key, fmts_table);

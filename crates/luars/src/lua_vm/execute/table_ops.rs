@@ -150,11 +150,11 @@ pub fn exec_settable(
         }
         // Has metatable: if key already exists with non-nil value,
         // __newindex is NOT consulted (Lua semantics). Try a fast check.
-        if let Some(existing) = table.impl_table.raw_get(&rb) {
-            if !existing.is_nil() {
-                lua_state.raw_set(&ra, rb, val);
-                return Ok(());
-            }
+        if let Some(existing) = table.impl_table.raw_get(&rb)
+            && !existing.is_nil()
+        {
+            lua_state.raw_set(&ra, rb, val);
+            return Ok(());
         }
     }
 
@@ -486,11 +486,11 @@ pub fn exec_setfield(
         }
         // Has metatable: if key already exists with non-nil value,
         // __newindex is NOT consulted (Lua semantics). Try fast path.
-        if let Some(existing) = table.impl_table.raw_get(&key) {
-            if !existing.is_nil() {
-                lua_state.raw_set(&ra, key, value);
-                return Ok(());
-            }
+        if let Some(existing) = table.impl_table.raw_get(&key)
+            && !existing.is_nil()
+        {
+            lua_state.raw_set(&ra, key, value);
+            return Ok(());
         }
     }
 

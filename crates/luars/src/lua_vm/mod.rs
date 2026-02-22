@@ -254,7 +254,7 @@ impl LuaVM {
         if ref_id <= 0 {
             return LuaValue::nil();
         }
-        self.registry_geti(ref_id as i64).unwrap_or(LuaValue::nil())
+        self.registry_geti(ref_id as i64).unwrap_or_default()
     }
 
     pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
@@ -559,7 +559,7 @@ impl LuaVM {
         let nargs = args.len();
 
         // Push function onto stack (updates stack_top)
-        main_state.push_value(func.clone())?;
+        main_state.push_value(func)?;
 
         // Push arguments (each updates stack_top)
         for arg in args {
@@ -588,7 +588,7 @@ impl LuaVM {
                 let saved_error_msg = main_state.error_msg.clone();
 
                 // Collect error object before closing TBC (close may modify it)
-                let err_obj = std::mem::replace(&mut main_state.error_object, LuaValue::nil());
+                let err_obj = std::mem::take(&mut main_state.error_object);
 
                 // Get frame_base before popping frames
                 let frame_base = if main_state.call_depth() > initial_depth {
@@ -1029,7 +1029,7 @@ impl LuaVM {
         let Some(table) = table_value.as_table_mut() else {
             return false;
         };
-        table.raw_seti(key, value.clone());
+        table.raw_seti(key, value);
 
         // GC backward barrier (luaC_barrierback)
         // Tables use backward barrier since they may be modified many times
@@ -1325,12 +1325,11 @@ impl LuaVM {
             let (success, results) =
                 self.protected_call(traceback_func, vec![msg_val, level_val])?;
 
-            if success {
-                if let Some(result) = results.first() {
-                    if let Some(s) = result.as_str() {
-                        return Ok(s.to_string());
-                    }
-                }
+            if success
+                && let Some(result) = results.first()
+                && let Some(s) = result.as_str()
+            {
+                return Ok(s.to_string());
             }
 
             Ok(String::new())
@@ -1418,16 +1417,16 @@ impl LuaVM {
     pub fn get_basic_metatables(&self) -> Vec<LuaValue> {
         let mut mts = Vec::new();
         if let Some(mt) = &self.string_mt {
-            mts.push(mt.clone());
+            mts.push(*mt);
         }
         if let Some(mt) = &self.number_mt {
-            mts.push(mt.clone());
+            mts.push(*mt);
         }
         if let Some(mt) = &self.bool_mt {
-            mts.push(mt.clone());
+            mts.push(*mt);
         }
         if let Some(mt) = &self.nil_mt {
-            mts.push(mt.clone());
+            mts.push(*mt);
         }
         mts
     }

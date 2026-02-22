@@ -20,10 +20,10 @@ fn checknumber(l: &mut LuaState, n: usize, fname: &str) -> Result<f64, LuaError>
     if let Some(f) = v.as_number() {
         return Ok(f);
     }
-    if let Some(s) = v.as_str() {
-        if let Ok(f) = s.trim().parse::<f64>() {
-            return Ok(f);
-        }
+    if let Some(s) = v.as_str()
+        && let Ok(f) = s.trim().parse::<f64>()
+    {
+        return Ok(f);
     }
     let t = crate::stdlib::debug::objtypename(l, &v);
     Err(l.error(format!(
@@ -500,7 +500,7 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
     use crate::lua_vm::LuaRng;
     let argc = l.arg_count();
 
-    let (n1, n2) = if argc == 0 || (argc >= 1 && l.get_arg(1).map_or(true, |v| v.is_nil())) {
+    let (n1, n2) = if argc == 0 || (argc >= 1 && l.get_arg(1).is_none_or(|v| v.is_nil())) {
         // No argument or nil: use time-based seed
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -602,7 +602,7 @@ fn float_to_integer(f: f64) -> LuaValue {
     // i64::MAX + 1 = 9223372036854775808 which is exactly representable as f64
     const MAX_PLUS_ONE: f64 = 9223372036854775808.0; // 2^63
 
-    if f >= MIN_F && f < MAX_PLUS_ONE {
+    if (MIN_F..MAX_PLUS_ONE).contains(&f) {
         let i = f as i64;
         // Verify the conversion is exact
         if i as f64 == f {

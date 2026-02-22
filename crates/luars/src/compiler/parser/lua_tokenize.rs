@@ -114,7 +114,7 @@ impl<'a> LuaTokenize<'a> {
                     return LuaTokenKind::TkLeftBracket;
                 }
                 if self.reader.current_char() != '[' {
-                    self.error(|| format!("invalid long string delimiter"));
+                    self.error(|| "invalid long string delimiter".to_string());
                     return LuaTokenKind::TkLongString;
                 }
 
@@ -138,7 +138,7 @@ impl<'a> LuaTokenize<'a> {
                     }
                     '<' => {
                         if !self.lexer_config.support_integer_operation() {
-                            self.error(|| format!("bitwise operation is not supported"));
+                            self.error(|| "bitwise operation is not supported".to_string());
                         }
 
                         self.reader.bump();
@@ -156,7 +156,7 @@ impl<'a> LuaTokenize<'a> {
                     }
                     '>' => {
                         if !self.lexer_config.support_integer_operation() {
-                            self.error(|| format!("bitwise operation is not supported"));
+                            self.error(|| "bitwise operation is not supported".to_string());
                         }
 
                         self.reader.bump();
@@ -169,7 +169,7 @@ impl<'a> LuaTokenize<'a> {
                 self.reader.bump();
                 if self.reader.current_char() != '=' {
                     if !self.lexer_config.support_integer_operation() {
-                        self.error(|| format!("bitwise operation is not supported"));
+                        self.error(|| "bitwise operation is not supported".to_string());
                     }
                     return LuaTokenKind::TkBitXor;
                 }
@@ -213,7 +213,7 @@ impl<'a> LuaTokenize<'a> {
                     _ if current_char != '/' => LuaTokenKind::TkDiv,
                     _ => {
                         if !self.lexer_config.support_integer_operation() {
-                            self.error(|| format!("integer division is not supported"));
+                            self.error(|| "integer division is not supported".to_string());
                         }
 
                         self.reader.bump();
@@ -254,14 +254,14 @@ impl<'a> LuaTokenize<'a> {
             '&' => {
                 self.reader.bump();
                 if !self.lexer_config.support_integer_operation() {
-                    self.error(|| format!("bitwise operation is not supported"));
+                    self.error(|| "bitwise operation is not supported".to_string());
                 }
                 LuaTokenKind::TkBitAnd
             }
             '|' => {
                 self.reader.bump();
                 if !self.lexer_config.support_integer_operation() {
-                    self.error(|| format!("bitwise operation is not supported"));
+                    self.error(|| "bitwise operation is not supported".to_string());
                 }
                 LuaTokenKind::TkBitOr
             }
@@ -545,17 +545,17 @@ impl<'a> LuaTokenize<'a> {
                     }
 
                     // Validate range (0-255)
-                    if let Ok(val) = digits.parse::<u16>() {
-                        if val > 255 {
-                            // Include next char in error context if it's not special
-                            let mut ctx = format!("\\{}", digits);
-                            let next_ch = self.reader.current_char();
-                            if next_ch != '\0' && next_ch != '\n' && next_ch != '\r' {
-                                ctx.push(next_ch);
-                            }
-                            self.error(|| format!("decimal escape too large near '{}'", ctx));
-                            return LuaTokenKind::TkString;
+                    if let Ok(val) = digits.parse::<u16>()
+                        && val > 255
+                    {
+                        // Include next char in error context if it's not special
+                        let mut ctx = format!("\\{}", digits);
+                        let next_ch = self.reader.current_char();
+                        if next_ch != '\0' && next_ch != '\n' && next_ch != '\r' {
+                            ctx.push(next_ch);
                         }
+                        self.error(|| format!("decimal escape too large near '{}'", ctx));
+                        return LuaTokenKind::TkString;
                     }
                 }
                 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v' | '\\' | '\'' | '\"' => {
@@ -572,7 +572,7 @@ impl<'a> LuaTokenize<'a> {
         }
 
         if self.reader.current_char() != quote {
-            self.error(|| format!("unfinished string near <eof>"));
+            self.error(|| "unfinished string near <eof>".to_string());
             return LuaTokenKind::TkString;
         }
 
@@ -603,7 +603,7 @@ impl<'a> LuaTokenize<'a> {
         }
 
         if !end {
-            self.error(|| format!("unfinished long string or comment near <eof>"));
+            self.error(|| "unfinished long string or comment near <eof>".to_string());
         }
 
         LuaTokenKind::TkLongString

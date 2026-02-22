@@ -83,7 +83,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         pos += 1;
 
         // Validate format specifier and flags combination
-        validate_format(&flags, fmt_char, l)?;
+        validate_format(flags, fmt_char, l)?;
 
         // Get argument
         let arg = args.get(arg_index).ok_or_else(|| {
@@ -96,22 +96,22 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
 
         // Format based on type
         match fmt_char {
-            'c' => format_char(&mut result, arg, &flags, l)?,
-            'd' | 'i' => format_int(&mut result, arg, &flags, l)?,
-            'o' => format_octal(&mut result, arg, &flags, l)?,
-            'u' => format_uint(&mut result, arg, &flags, l)?,
-            'x' => format_hex(&mut result, arg, &flags, false, l)?,
-            'X' => format_hex(&mut result, arg, &flags, true, l)?,
-            'a' => format_hex_float(&mut result, arg, &flags, false, l)?,
-            'A' => format_hex_float(&mut result, arg, &flags, true, l)?,
-            'e' => format_sci(&mut result, arg, &flags, false, l)?,
-            'E' => format_sci(&mut result, arg, &flags, true, l)?,
-            'f' => format_float(&mut result, arg, &flags, l)?,
-            'g' => format_auto(&mut result, arg, &flags, false, l)?,
-            'G' => format_auto(&mut result, arg, &flags, true, l)?,
-            's' => format_string(&mut result, arg, &flags, l)?,
+            'c' => format_char(&mut result, arg, flags, l)?,
+            'd' | 'i' => format_int(&mut result, arg, flags, l)?,
+            'o' => format_octal(&mut result, arg, flags, l)?,
+            'u' => format_uint(&mut result, arg, flags, l)?,
+            'x' => format_hex(&mut result, arg, flags, false, l)?,
+            'X' => format_hex(&mut result, arg, flags, true, l)?,
+            'a' => format_hex_float(&mut result, arg, flags, false, l)?,
+            'A' => format_hex_float(&mut result, arg, flags, true, l)?,
+            'e' => format_sci(&mut result, arg, flags, false, l)?,
+            'E' => format_sci(&mut result, arg, flags, true, l)?,
+            'f' => format_float(&mut result, arg, flags, l)?,
+            'g' => format_auto(&mut result, arg, flags, false, l)?,
+            'G' => format_auto(&mut result, arg, flags, true, l)?,
+            's' => format_string(&mut result, arg, flags, l)?,
             'q' => format_quoted(&mut result, arg, l)?,
-            'p' => format_pointer(&mut result, arg, &flags)?,
+            'p' => format_pointer(&mut result, arg, flags)?,
             'F' => {
                 return Err(
                     l.error("invalid option '%F' to 'format' (invalid conversion)".to_string())
@@ -147,25 +147,21 @@ fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<(
 
     // Parse flags properly
     let has_zero_flag = flags.starts_with('0')
-        || flags
-            .chars()
-            .skip_while(|c| matches!(c, '-' | '+' | ' ' | '#'))
-            .next()
-            == Some('0');
+        || flags.chars().find(|c| !matches!(c, '-' | '+' | ' ' | '#')) == Some('0');
     let has_hash = flags.contains('#');
 
     let (width, precision) = parse_width_precision(flags);
 
     // Check width/precision limits (max 99)
-    if let Some(w) = width {
-        if w > 99 {
-            return Err(l.error("invalid format (invalid conversion)".to_string()));
-        }
+    if let Some(w) = width
+        && w > 99
+    {
+        return Err(l.error("invalid format (invalid conversion)".to_string()));
     }
-    if let Some(p) = precision {
-        if p > 99 {
-            return Err(l.error("invalid format (invalid conversion)".to_string()));
-        }
+    if let Some(p) = precision
+        && p > 99
+    {
+        return Err(l.error("invalid format (invalid conversion)".to_string()));
     }
 
     // Format-specific validation
@@ -283,9 +279,9 @@ fn format_char(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) 
         if w > 1 {
             if left_align {
                 buf.push(ch);
-                buf.extend(std::iter::repeat(' ').take(w - 1));
+                buf.extend(std::iter::repeat_n(' ', w - 1));
             } else {
-                buf.extend(std::iter::repeat(' ').take(w - 1));
+                buf.extend(std::iter::repeat_n(' ', w - 1));
                 buf.push(ch);
             }
         } else {
@@ -316,8 +312,8 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
     let mut width = 0;
     let mut parsing_width = false;
 
-    let mut chars = flags.chars().peekable();
-    while let Some(ch) = chars.next() {
+    let chars = flags.chars().peekable();
+    for ch in chars {
         match ch {
             '-' if !parsing_width => left_align = true,
             '+' if !parsing_width => plus_sign = true,
@@ -383,13 +379,13 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
         if left_align {
             buf.push_str(sign);
             buf.push_str(&num_str);
-            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.extend(std::iter::repeat_n(' ', padding));
         } else if zero_pad {
             buf.push_str(sign);
-            buf.extend(std::iter::repeat('0').take(padding));
+            buf.extend(std::iter::repeat_n('0', padding));
             buf.push_str(&num_str);
         } else {
-            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.extend(std::iter::repeat_n(' ', padding));
             buf.push_str(sign);
             buf.push_str(&num_str);
         }
@@ -442,12 +438,12 @@ fn format_octal(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState)
         let padding = width - num_len;
         if left_align {
             buf.push_str(&octal_str);
-            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.extend(std::iter::repeat_n(' ', padding));
         } else if zero_pad {
-            buf.extend(std::iter::repeat('0').take(padding));
+            buf.extend(std::iter::repeat_n('0', padding));
             buf.push_str(&octal_str);
         } else {
-            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.extend(std::iter::repeat_n(' ', padding));
             buf.push_str(&octal_str);
         }
     } else {
@@ -537,13 +533,13 @@ fn format_hex(
         if left_align {
             buf.push_str(prefix);
             buf.push_str(&hex_str);
-            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.extend(std::iter::repeat_n(' ', padding));
         } else if zero_pad {
             buf.push_str(prefix);
-            buf.extend(std::iter::repeat('0').take(padding));
+            buf.extend(std::iter::repeat_n('0', padding));
             buf.push_str(&hex_str);
         } else {
-            buf.extend(std::iter::repeat(' ').take(padding));
+            buf.extend(std::iter::repeat_n(' ', padding));
             buf.push_str(prefix);
             buf.push_str(&hex_str);
         }
@@ -610,7 +606,7 @@ fn format_hex_float(
             buf.push_str(if upper { "0X0" } else { "0x0" });
             if prec > 0 {
                 buf.push('.');
-                buf.extend(std::iter::repeat('0').take(prec));
+                buf.extend(std::iter::repeat_n('0', prec));
             }
             buf.push(if upper { 'P' } else { 'p' });
             buf.push_str("+0");
@@ -696,7 +692,7 @@ fn format_hex_fraction(
             }
             // Pad with zeros if needed
             if prec > hex_str.len() {
-                buf.extend(std::iter::repeat('0').take(prec - hex_str.len()));
+                buf.extend(std::iter::repeat_n('0', prec - hex_str.len()));
             }
         }
     } else {
@@ -751,12 +747,10 @@ fn format_sci(
         } else {
             format!("{:.prec$e}", num, prec = prec)
         }
+    } else if upper {
+        format!("{:E}", num)
     } else {
-        if upper {
-            format!("{:E}", num)
-        } else {
-            format!("{:e}", num)
-        }
+        format!("{:e}", num)
     };
 
     // Fix exponent format: ensure it has sign and at least 2 digits (ISO C requirement)
@@ -846,26 +840,26 @@ fn format_float(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState)
     }
 
     // Apply width
-    if let Some(w) = width {
-        if result.len() < w {
-            let padding = w - result.len();
-            if left_align {
-                result.push_str(&" ".repeat(padding));
-            } else if zero_pad {
-                let sign_char = if result.starts_with('-') || result.starts_with('+') {
-                    Some(result.remove(0))
-                } else {
-                    None
-                };
-                if let Some(sign) = sign_char {
-                    result.insert(0, sign);
-                    result.insert_str(1, &"0".repeat(padding));
-                } else {
-                    result.insert_str(0, &"0".repeat(padding));
-                }
+    if let Some(w) = width
+        && result.len() < w
+    {
+        let padding = w - result.len();
+        if left_align {
+            result.push_str(&" ".repeat(padding));
+        } else if zero_pad {
+            let sign_char = if result.starts_with('-') || result.starts_with('+') {
+                Some(result.remove(0))
             } else {
-                result.insert_str(0, &" ".repeat(padding));
+                None
+            };
+            if let Some(sign) = sign_char {
+                result.insert(0, sign);
+                result.insert_str(1, &"0".repeat(padding));
+            } else {
+                result.insert_str(0, &"0".repeat(padding));
             }
+        } else {
+            result.insert_str(0, &" ".repeat(padding));
         }
     }
 
@@ -935,13 +929,13 @@ fn format_auto(
 
             let mut res = format!("{}{}{}{}", mantissa, exp_char, sign, formatted_exp);
             // Remove trailing zeros from mantissa
-            if res.contains('.') {
-                if let Some(e_pos) = res.find(exp_char) {
-                    let mantissa_part = &res[..e_pos];
-                    let exp_part = &res[e_pos..];
-                    let trimmed = mantissa_part.trim_end_matches('0').trim_end_matches('.');
-                    res = format!("{}{}", trimmed, exp_part);
-                }
+            if res.contains('.')
+                && let Some(e_pos) = res.find(exp_char)
+            {
+                let mantissa_part = &res[..e_pos];
+                let exp_part = &res[e_pos..];
+                let trimmed = mantissa_part.trim_end_matches('0').trim_end_matches('.');
+                res = format!("{}{}", trimmed, exp_part);
             }
             res
         } else {
@@ -1151,10 +1145,10 @@ fn apply_width_format(buf: &mut String, s: &str, flags: &str) {
             if left_align {
                 // Left align: string then spaces
                 buf.push_str(s);
-                buf.extend(std::iter::repeat(' ').take(padding));
+                buf.extend(std::iter::repeat_n(' ', padding));
             } else {
                 // Right align (default): spaces then string
-                buf.extend(std::iter::repeat(' ').take(padding));
+                buf.extend(std::iter::repeat_n(' ', padding));
                 buf.push_str(s);
             }
         } else {

@@ -7,10 +7,10 @@ pub fn parse_lua_number(s: &str) -> LuaValue {
     }
 
     // Handle sign
-    let (sign, rest) = if s.starts_with('-') {
-        (-1i64, &s[1..])
-    } else if s.starts_with('+') {
-        (1i64, &s[1..])
+    let (sign, rest) = if let Some(rest) = s.strip_prefix('-') {
+        (-1i64, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (1i64, rest)
     } else {
         (1i64, s)
     };
@@ -63,17 +63,17 @@ pub fn parse_lua_number(s: &str) -> LuaValue {
 
     // Try as float (either has '.'/e' or integer parse failed due to overflow)
     // Reject inf/nan which Rust's parse accepts but Lua doesn't
-    if let Ok(f) = s.parse::<f64>() {
-        if f.is_finite() || s.contains('.') || has_exponent {
-            // Only accept inf/nan if they came from a valid numeric expression
-            // (e.g., overflow), not from the literal strings "inf"/"nan"
-            let lower = s.to_lowercase();
-            let stripped = lower.trim_start_matches(['+', '-']);
-            if stripped.starts_with("inf") || stripped.starts_with("nan") {
-                return LuaValue::nil();
-            }
-            return LuaValue::float(f);
+    if let Ok(f) = s.parse::<f64>()
+        && (f.is_finite() || s.contains('.') || has_exponent)
+    {
+        // Only accept inf/nan if they came from a valid numeric expression
+        // (e.g., overflow), not from the literal strings "inf"/"nan"
+        let lower = s.to_lowercase();
+        let stripped = lower.trim_start_matches(['+', '-']);
+        if stripped.starts_with("inf") || stripped.starts_with("nan") {
+            return LuaValue::nil();
         }
+        return LuaValue::float(f);
     }
 
     LuaValue::nil()

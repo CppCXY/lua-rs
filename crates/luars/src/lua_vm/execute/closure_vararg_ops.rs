@@ -83,12 +83,10 @@ pub fn exec_vararg(
     // Calculate how many to copy
     let touse = if wanted < 0 {
         nargs // Get all
+    } else if (wanted as usize) > nargs {
+        nargs
     } else {
-        if (wanted as usize) > nargs {
-            nargs
-        } else {
-            wanted as usize
-        }
+        wanted as usize
     };
 
     // Always update stack_top and frame.top to accommodate the results
@@ -170,13 +168,13 @@ pub fn exec_varargprep(
     if chunk.needs_vararg_table {
         // Create table with size 'nextra'
         // Collect arguments first to avoid borrow conflicts
-        let mut args = Vec::with_capacity(nextra as usize);
+        let mut args = Vec::with_capacity(nextra);
         {
             let stack = lua_state.stack();
             let args_start = func_pos + 1 + nfixparams;
             for i in 0..nextra {
-                if args_start + (i as usize) < stack.len() {
-                    args.push(stack[args_start + (i as usize)].clone());
+                if args_start + i < stack.len() {
+                    args.push(stack[args_start + i]);
                 } else {
                     args.push(LuaValue::nil());
                 }
@@ -186,7 +184,7 @@ pub fn exec_varargprep(
         // Create table
         // Use 0 for hash part to encourage ValueArray creation for efficient named varargs
         // ValueArray now supports "n" key natively
-        let table_val = lua_state.create_table(nextra as usize, 0)?;
+        let table_val = lua_state.create_table(nextra, 0)?;
         let n_str = lua_state.create_string("n")?;
         let n_val = LuaValue::integer(nextra as i64);
 
@@ -255,16 +253,14 @@ pub fn exec_setlist(
     let k = instr.get_k();
 
     // Check for EXTRAARG for larger starting indices
-    if k {
-        if *pc < code.len() {
-            let extra_instr = code[*pc];
+    if k && *pc < code.len() {
+        let extra_instr = code[*pc];
 
-            if extra_instr.get_opcode() == OpCode::ExtraArg {
-                *pc += 1; // Consume EXTRAARG
-                let extra = extra_instr.get_ax() as usize;
-                // Add extra to starting index
-                vc += extra * 1024;
-            }
+        if extra_instr.get_opcode() == OpCode::ExtraArg {
+            *pc += 1; // Consume EXTRAARG
+            let extra = extra_instr.get_ax() as usize;
+            // Add extra to starting index
+            vc += extra * 1024;
         }
     }
 

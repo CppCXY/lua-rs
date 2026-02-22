@@ -16,7 +16,7 @@ impl Default for SafeOption {
             max_stack_size: 1000000, // LUAI_MAXSTACK (Lua 5.5)
             max_call_depth: 256,
             base_call_depth: 256,
-            max_memory_limit: std::isize::MAX,
+            max_memory_limit: isize::MAX,
         }
     }
 }

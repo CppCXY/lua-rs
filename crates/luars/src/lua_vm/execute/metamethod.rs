@@ -25,24 +25,24 @@ pub fn try_unary_tm(
             stack[result_pos] = LuaValue::float(-n);
             return Ok(());
         }
-    } else if tm_kind == TmKind::Bnot {
-        if let Some(i) = try_to_integer(&operand) {
-            let stack = lua_state.stack_mut();
-            stack[result_pos] = LuaValue::integer(!i);
-            return Ok(());
-        }
+    } else if tm_kind == TmKind::Bnot
+        && let Some(i) = try_to_integer(&operand)
+    {
+        let stack = lua_state.stack_mut();
+        stack[result_pos] = LuaValue::integer(!i);
+        return Ok(());
     }
 
     // Try trait-based __unm for userdata
-    if tm_kind == TmKind::Unm && operand.ttisfulluserdata() {
-        if let Some(ud) = operand.as_userdata_mut() {
-            if let Some(udv) = ud.get_trait().lua_unm() {
-                let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
-                let stack = lua_state.stack_mut();
-                stack[result_pos] = result;
-                return Ok(());
-            }
-        }
+    if tm_kind == TmKind::Unm
+        && operand.ttisfulluserdata()
+        && let Some(ud) = operand.as_userdata_mut()
+        && let Some(udv) = ud.get_trait().lua_unm()
+    {
+        let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+        let stack = lua_state.stack_mut();
+        stack[result_pos] = result;
+        return Ok(());
     }
 
     // Try to get metamethod from operand
@@ -331,7 +331,6 @@ pub fn handle_mmbink(
 ///   }
 /// }
 /// ```
-
 /// Try to convert a LuaValue to integer (NO string coercion).
 /// Returns Some(i64) if the value is an integer or an integral float.
 fn value_to_integer(v: &LuaValue) -> Option<i64> {
@@ -476,12 +475,13 @@ fn try_to_integer(v: &LuaValue) -> Option<i64> {
     if let Some(i) = v.as_integer() {
         return Some(i);
     }
-    if let Some(f) = v.as_number() {
-        if f == f.floor() && f.is_finite() {
-            // Check f is within i64 range before casting
-            if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
-                return Some(f as i64);
-            }
+    if let Some(f) = v.as_number()
+        && f == f.floor()
+        && f.is_finite()
+    {
+        // Check f is within i64 range before casting
+        if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+            return Some(f as i64);
         }
     }
     None
@@ -543,7 +543,7 @@ pub fn call_tm_res(
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
         let param_count = chunk.param_count;
-        let max_stack_size = chunk.max_stack_size as usize;
+        let max_stack_size = chunk.max_stack_size;
 
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
@@ -619,7 +619,7 @@ pub fn call_tm(
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
         let param_count = chunk.param_count;
-        let max_stack_size = chunk.max_stack_size as usize;
+        let max_stack_size = chunk.max_stack_size;
 
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
@@ -647,18 +647,17 @@ pub fn try_comp_tm(
     tm_kind: TmKind,
 ) -> LuaResult<Option<bool>> {
     // Try trait-based comparison for userdata
-    if p1.ttisfulluserdata() {
-        if let Some(ud1) = p1.as_userdata_mut() {
-            if let Some(ud2) = p2.as_userdata_mut() {
-                let result = match tm_kind {
-                    TmKind::Lt => ud1.get_trait().lua_lt(ud2.get_trait()),
-                    TmKind::Le => ud1.get_trait().lua_le(ud2.get_trait()),
-                    _ => None,
-                };
-                if let Some(b) = result {
-                    return Ok(Some(b));
-                }
-            }
+    if p1.ttisfulluserdata()
+        && let Some(ud1) = p1.as_userdata_mut()
+        && let Some(ud2) = p2.as_userdata_mut()
+    {
+        let result = match tm_kind {
+            TmKind::Lt => ud1.get_trait().lua_lt(ud2.get_trait()),
+            TmKind::Le => ud1.get_trait().lua_le(ud2.get_trait()),
+            _ => None,
+        };
+        if let Some(b) = result {
+            return Ok(Some(b));
         }
     }
 
@@ -690,18 +689,17 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
 
     if t1.ttisfulluserdata() {
         // Userdata: first check identity
-        if let (Some(u_ptr1), Some(u_ptr2)) = (t1.as_userdata_ptr(), t2.as_userdata_ptr()) {
-            if u_ptr1 == u_ptr2 {
-                return Ok(true);
-            }
+        if let (Some(u_ptr1), Some(u_ptr2)) = (t1.as_userdata_ptr(), t2.as_userdata_ptr())
+            && u_ptr1 == u_ptr2
+        {
+            return Ok(true);
         }
         // Try trait-based lua_eq before metatable
-        if let Some(ud1) = t1.as_userdata_mut() {
-            if let Some(ud2) = t2.as_userdata_mut() {
-                if let Some(result) = ud1.get_trait().lua_eq(ud2.get_trait()) {
-                    return Ok(result);
-                }
-            }
+        if let Some(ud1) = t1.as_userdata_mut()
+            && let Some(ud2) = t2.as_userdata_mut()
+            && let Some(result) = ud1.get_trait().lua_eq(ud2.get_trait())
+        {
+            return Ok(result);
         }
         // Different userdata - try __eq metamethod
         let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
@@ -716,10 +714,10 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
 
     if t1.ttistable() {
         // Tables: first check identity
-        if let (Some(t_ptr1), Some(t_ptr2)) = (t1.as_table_ptr(), t2.as_table_ptr()) {
-            if t_ptr1 == t_ptr2 {
-                return Ok(true);
-            }
+        if let (Some(t_ptr1), Some(t_ptr2)) = (t1.as_table_ptr(), t2.as_table_ptr())
+            && t_ptr1 == t_ptr2
+        {
+            return Ok(true);
         }
         // Different tables - try __eq metamethod
         let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);

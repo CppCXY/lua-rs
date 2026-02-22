@@ -91,7 +91,7 @@ impl LuaUpvalue {
     /// Open ⟺ `v` does NOT point to our own `closed_value` field.
     #[inline(always)]
     pub fn is_open(&self) -> bool {
-        self.v != &self.closed_value as *const LuaValue as *mut LuaValue
+        !std::ptr::eq(self.v, &self.closed_value)
     }
 
     /// Get the stack index (only meaningful when open).
@@ -336,6 +336,12 @@ pub struct Chunk {
     pub linedefined: usize,           // Line where function starts (0 for main)
     pub lastlinedefined: usize,       // Line where function ends (0 for main)
     pub proto_data_size: u32,         // Cached size for GC (code+constants+children+lines)
+}
+
+impl Default for Chunk {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Chunk {

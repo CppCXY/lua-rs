@@ -61,7 +61,7 @@ pub fn handle_call(
         let lua_func = unsafe { func.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
         let param_count = chunk.param_count;
-        let max_stack_size = chunk.max_stack_size as usize;
+        let max_stack_size = chunk.max_stack_size;
 
         let new_base = func_idx + 1;
         lua_state.push_lua_frame(
@@ -83,7 +83,7 @@ pub fn handle_call(
         Ok(FrameAction::Call)
     } else if func.is_c_callable() {
         call_c_function(lua_state, func_idx, nargs, nresults)?;
-        return Ok(FrameAction::Continue);
+        Ok(FrameAction::Continue)
     } else {
         // Handle __call metamethod
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
@@ -98,9 +98,7 @@ pub fn handle_call(
             // Shift arguments to make room for original func as first arg
             let first_arg = func_idx + 1;
             for i in (0..nargs).rev() {
-                let val = lua_state
-                    .stack_get(first_arg + i)
-                    .unwrap_or(LuaValue::nil());
+                let val = lua_state.stack_get(first_arg + i).unwrap_or_default();
                 lua_state.stack_set(first_arg + i + 1, val)?;
             }
 
@@ -119,7 +117,7 @@ pub fn handle_call(
 
             // Recursively call with adjusted parameters
             let new_b = if b == 0 { 0 } else { b + 1 };
-            return handle_call(lua_state, base, a, new_b, c, new_status);
+            handle_call(lua_state, base, a, new_b, c, new_status)
         } else {
             Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
         }
@@ -162,9 +160,7 @@ pub fn resolve_call_chain(
             // Stack: [func, arg1, arg2, ...] -> [mm, func, arg1, arg2, ...]
             let first_arg = func_idx + 1;
             for i in (0..current_arg_count).rev() {
-                let val = lua_state
-                    .stack_get(first_arg + i)
-                    .unwrap_or(LuaValue::nil());
+                let val = lua_state.stack_get(first_arg + i).unwrap_or_default();
                 lua_state.stack_set(first_arg + i + 1, val)?;
             }
 
@@ -430,11 +426,7 @@ pub fn handle_tailcall(
         let func_idx = base + a;
         let first_arg = func_idx + 1;
 
-        if actual_stack_top > first_arg {
-            actual_stack_top - first_arg
-        } else {
-            0
-        }
+        actual_stack_top.saturating_sub(first_arg)
     } else {
         b - 1
     };
@@ -487,7 +479,7 @@ pub fn handle_tailcall(
 
         // Pad missing parameters with nil if needed
         let chunk = moved_func_body.chunk();
-        let numparams = chunk.param_count as usize;
+        let numparams = chunk.param_count;
         let mut current_nargs = nargs;
 
         // Pad fixed parameters with nil if needed
@@ -553,7 +545,7 @@ pub fn handle_tailcall(
             let delta = actual_nargs - nargs;
             b + delta
         };
-        return handle_tailcall(lua_state, base, a, new_b);
+        handle_tailcall(lua_state, base, a, new_b)
     }
 }
 

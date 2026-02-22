@@ -115,7 +115,7 @@ pub fn code_param(p: u32) -> u8 {
     }
 
     // p' = (p * 128 + 99) / 100 (round up the division)
-    let p_scaled = ((p as u64) * 128 + 99) / 100;
+    let p_scaled = ((p as u64) * 128).div_ceil(100);
 
     if p_scaled < 0x10 {
         // Subnormal number: exponent bits are already zero
@@ -125,7 +125,7 @@ pub fn code_param(p: u32) -> u8 {
         // Preserve 5 bits in 'p'
         let log = ceil_log2((p_scaled + 1) as u32).saturating_sub(5);
         let mantissa = ((p_scaled >> log) - 0x10) as u8;
-        let exponent = ((log as u8) + 1) << 4;
+        let exponent = (log + 1) << 4;
         mantissa | exponent
     }
 }
@@ -391,7 +391,7 @@ impl GC {
             stats: GcStats::default(),
             tm_gc: LuaValue::nil(),
             tm_mode: LuaValue::nil(),
-            max_memory_limit: option.max_memory_limit as isize,
+            max_memory_limit: option.max_memory_limit,
             tmp_max_memory_limit: None,
             gc_error_msg: None,
             gc_memory_check: true,
@@ -935,8 +935,8 @@ impl GC {
             let key_ptr = k.as_gc_ptr();
             let val_ptr = v.as_gc_ptr();
 
-            let key_is_cleared = key_ptr.map_or(false, |ptr| self.is_cleared(l, ptr));
-            let val_is_white = val_ptr.map_or(false, |ptr| self.is_white(ptr));
+            let key_is_cleared = key_ptr.is_some_and(|ptr| self.is_cleared(l, ptr));
+            let val_is_white = val_ptr.is_some_and(|ptr| self.is_white(ptr));
 
             if key_is_cleared {
                 has_white_keys = true;
@@ -983,10 +983,10 @@ impl GC {
         let mut keys_to_remove = Vec::new();
 
         for key in entries {
-            if let Some(key_ptr) = key.as_gc_ptr() {
-                if self.is_cleared(l, key_ptr) {
-                    keys_to_remove.push(key);
-                }
+            if let Some(key_ptr) = key.as_gc_ptr()
+                && self.is_cleared(l, key_ptr)
+            {
+                keys_to_remove.push(key);
             }
         }
 
@@ -1020,10 +1020,10 @@ impl GC {
         let mut keys_to_remove = Vec::new();
 
         for (k, value) in &entries {
-            if let Some(val_ptr) = value.as_gc_ptr() {
-                if self.is_cleared(l, val_ptr) {
-                    keys_to_remove.push(k.clone());
-                }
+            if let Some(val_ptr) = value.as_gc_ptr()
+                && self.is_cleared(l, val_ptr)
+            {
+                keys_to_remove.push(*k);
             }
         }
 
@@ -1290,7 +1290,7 @@ impl GC {
         // markbeingfnz(g): mark any object pending finalization from previous cycle
         if !self.tobefnz.is_empty() {
             for obj_ptr in self.tobefnz.clone() {
-                self.mark_object(l, obj_ptr.into());
+                self.mark_object(l, obj_ptr);
             }
         }
     }
@@ -1298,7 +1298,7 @@ impl GC {
     fn mark_mt(&mut self, l: &mut LuaState) {
         for mt in l.vm_mut().get_basic_metatables() {
             if let Some(mt_ptr) = mt.as_gc_ptr() {
-                self.mark_object(l, mt_ptr.into());
+                self.mark_object(l, mt_ptr);
             }
         }
     }
@@ -1588,18 +1588,18 @@ impl GC {
 
         for gc_owner in old1_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
-            if let Some(header) = gc_ptr.header_mut() {
-                if header.age() == G_OLD1 {
-                    // OLD1 → OLD, and re-mark if black
-                    debug_assert!(!header.is_white(), "OLD1 object should not be white");
-                    header.set_age(G_OLD);
-                    if header.is_black() {
-                        self.really_mark_object(l, gc_ptr);
-                    }
+            if let Some(header) = gc_ptr.header_mut()
+                && header.age() == G_OLD1
+            {
+                // OLD1 → OLD, and re-mark if black
+                debug_assert!(!header.is_white(), "OLD1 object should not be white");
+                header.set_age(G_OLD);
+                if header.is_black() {
+                    self.really_mark_object(l, gc_ptr);
                 }
-                // else: age was changed (e.g., to TOUCHED1 by barrier_back),
-                // just move to old list - it will be handled by correctgraylists
             }
+            // else: age was changed (e.g., to TOUCHED1 by barrier_back),
+            // just move to old list - it will be handled by correctgraylists
             to_old.push(gc_owner);
         }
 
@@ -1609,12 +1609,12 @@ impl GC {
         // Mark OLD1 objects in finobj list
         let finobj_list = self.finobj.clone();
         for gc_ptr in finobj_list {
-            if let Some(header) = gc_ptr.header_mut() {
-                if header.age() == G_OLD1 {
-                    header.set_age(G_OLD);
-                    if header.is_black() {
-                        self.really_mark_object(l, gc_ptr);
-                    }
+            if let Some(header) = gc_ptr.header_mut()
+                && header.age() == G_OLD1
+            {
+                header.set_age(G_OLD);
+                if header.is_black() {
+                    self.really_mark_object(l, gc_ptr);
                 }
             }
         }
@@ -1622,12 +1622,12 @@ impl GC {
         // Mark OLD1 objects in tobefnz list
         let tobefnz_list = self.tobefnz.clone();
         for gc_ptr in tobefnz_list {
-            if let Some(header) = gc_ptr.header_mut() {
-                if header.age() == G_OLD1 {
-                    header.set_age(G_OLD);
-                    if header.is_black() {
-                        self.really_mark_object(l, gc_ptr);
-                    }
+            if let Some(header) = gc_ptr.header_mut()
+                && header.age() == G_OLD1
+            {
+                header.set_age(G_OLD);
+                if header.is_black() {
+                    self.really_mark_object(l, gc_ptr);
                 }
             }
         }
@@ -1667,13 +1667,12 @@ impl GC {
         let mut marked = false;
         // Mark all array entries
         for i in 1..=array_len {
-            if let Some(value) = table.raw_geti(i as i64) {
-                if let Some(gc_ptr) = value.as_gc_ptr() {
-                    if self.is_white(gc_ptr) {
-                        marked = true;
-                        self.mark_object(l, gc_ptr);
-                    }
-                }
+            if let Some(value) = table.raw_geti(i as i64)
+                && let Some(gc_ptr) = value.as_gc_ptr()
+                && self.is_white(gc_ptr)
+            {
+                marked = true;
+                self.mark_object(l, gc_ptr);
             }
         }
 
@@ -1784,7 +1783,7 @@ impl GC {
             self.grayagain.push(table_ptr.into());
         } else if has_clears {
             // In atomic phase, if has white values, add to weak list for clearing
-            self.weak.push(table_ptr.into());
+            self.weak.push(table_ptr);
         } else {
             // Otherwise, genlink to check age
             self.gen_link(table_ptr.into());
@@ -1852,8 +1851,8 @@ impl GC {
             let val_ptr = v.as_gc_ptr();
 
             // Check if key is cleared (iscleared will mark strings)
-            let key_is_cleared = key_ptr.map_or(false, |ptr| self.is_cleared(l, ptr));
-            let val_is_white = val_ptr.map_or(false, |ptr| self.is_white(ptr));
+            let key_is_cleared = key_ptr.is_some_and(|ptr| self.is_cleared(l, ptr));
+            let val_is_white = val_ptr.is_some_and(|ptr| self.is_white(ptr));
             if key_is_cleared {
                 has_clears = true;
                 if val_is_white {
@@ -1872,10 +1871,10 @@ impl GC {
             self.grayagain.push(table_ptr.into());
         } else if has_ww {
             // In atomic phase, if has white->white entries, add to ephemeron list
-            self.ephemeron.push(table_ptr.into());
+            self.ephemeron.push(table_ptr);
         } else if has_clears {
             // If has cleared keys, add to allweak list for clearing
-            self.allweak.push(table_ptr.into());
+            self.allweak.push(table_ptr);
         } else {
             // Otherwise, genlink to check age
             self.gen_link(table_ptr.into());
@@ -1916,7 +1915,7 @@ impl GC {
                     self.grayagain.push(table_ptr.into());
                 } else {
                     // In atomic phase, add to allweak list for clearing
-                    self.allweak.push(table_ptr.into());
+                    self.allweak.push(table_ptr);
                 }
             }
         }
@@ -1937,13 +1936,13 @@ impl GC {
         count += upvalues.len();
         // Mark upvalues
         for upval_ptr in upvalues {
-            self.mark_object(l, upval_ptr.clone().into());
+            self.mark_object(l, (*upval_ptr).into());
         }
 
         // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
         count += self.mark_chunk_constants(l, gc_func.data.chunk());
 
-        count as usize // Estimate of work done
+        count // Estimate of work done
     }
 
     fn traverse_cclosure(&mut self, l: &mut LuaState, closure_ptr: CClosurePtr) -> usize {
@@ -1959,7 +1958,7 @@ impl GC {
             self.mark_value(l, upval);
         }
 
-        count as usize // Estimate of work done
+        count // Estimate of work done
     }
 
     fn traverse_rclosure(&mut self, l: &mut LuaState, closure_ptr: RClosurePtr) -> usize {
@@ -1975,7 +1974,7 @@ impl GC {
             self.mark_value(l, upval);
         }
 
-        count as usize // Estimate of work done
+        count // Estimate of work done
     }
 
     fn traverse_thread(&mut self, l: &mut LuaState, thread_ptr: ThreadPtr) -> usize {
@@ -2029,7 +2028,7 @@ impl GC {
             }
 
             for open_upval_ptr in state.open_upvalues() {
-                self.mark_object(l, open_upval_ptr.clone().into());
+                self.mark_object(l, (*open_upval_ptr).into());
             }
         } // Drop immutable borrow of gc_thread.data
 
@@ -2368,7 +2367,7 @@ impl GC {
             self.sweep_list(
                 l,
                 if fast {
-                    std::usize::MAX
+                    usize::MAX
                 } else {
                     GCSWEEPMAX as usize
                 },
@@ -3019,7 +3018,6 @@ impl GC {
     /// - old: Only G_OLD1 are processed by mark_old, others are skipped
     ///
     /// Returns: bytes promoted to OLD1 generation
-
     /// DEBUG: Collect all raw pointers from all thread stacks.
     /// Used to validate that sweep never frees a stack-referenced object.
     #[cfg(debug_assertions)]
@@ -3315,10 +3313,10 @@ impl GC {
                             header_mut.set_age(new_age);
 
                             // Track bytes becoming OLD1
-                            if new_age == G_OLD1 {
-                                if let Some(h) = gc_ptr.header() {
-                                    added_old1 += h.size as isize;
-                                }
+                            if new_age == G_OLD1
+                                && let Some(h) = gc_ptr.header()
+                            {
+                                added_old1 += h.size as isize;
                             }
                         }
                     }
@@ -3340,10 +3338,10 @@ impl GC {
                     let new_age = Self::next_age(age);
                     header.set_age(new_age);
 
-                    if new_age == G_OLD1 {
-                        if let Some(h) = gc_ptr.header() {
-                            added_old1 += h.size as isize;
-                        }
+                    if new_age == G_OLD1
+                        && let Some(h) = gc_ptr.header()
+                    {
+                        added_old1 += h.size as isize;
                     }
                 }
             }
@@ -3386,17 +3384,15 @@ impl GC {
             self.mark_object(l, v_ptr);
 
             // Generational invariant: if 'o' is old, make 'v' OLD0
-            if o_old {
-                if let Some(header) = v_ptr.header_mut() {
-                    header.make_old0();
-                }
+            if o_old && let Some(header) = v_ptr.header_mut() {
+                header.make_old0();
             }
         } else if self.gc_state.is_sweep_phase() {
             // In incremental sweep: make 'o' white to avoid repeated barriers
-            if self.gc_kind != GcKind::GenMinor {
-                if let Some(header) = o_ptr.header_mut() {
-                    header.make_white(self.current_white);
-                }
+            if self.gc_kind != GcKind::GenMinor
+                && let Some(header) = o_ptr.header_mut()
+            {
+                header.make_white(self.current_white);
             }
         }
     }
@@ -3450,10 +3446,10 @@ impl GC {
         }
 
         // If old in generational mode: mark as TOUCHED1
-        if age >= G_OLD0 {
-            if let Some(header) = o_ptr.header_mut() {
-                header.make_touched1();
-            }
+        if age >= G_OLD0
+            && let Some(header) = o_ptr.header_mut()
+        {
+            header.make_touched1();
         }
     }
 
@@ -3652,7 +3648,7 @@ impl GC {
         self.gc_stopem = old_stopem;
 
         // If error occurred, warn but don't propagate
-        if let Err(_) = result {
+        if result.is_err() {
             let msg = l.get_error_msg(LuaError::RuntimeError);
             eprintln!("[GC] WARNING: error in __gc: {}", msg);
         }
@@ -3713,11 +3709,7 @@ impl GC {
     }
 
     pub fn get_error_message(&mut self) -> String {
-        if let Some(msg) = std::mem::take(&mut self.gc_error_msg) {
-            msg
-        } else {
-            String::new()
-        }
+        std::mem::take(&mut self.gc_error_msg).unwrap_or_default()
     }
 
     pub fn disable_memory_check(&mut self) {

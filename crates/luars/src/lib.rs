@@ -1,6 +1,22 @@
 // Lua Runtime
 // A compact Lua VM implementation with bytecode compiler and GC
 
+// Crate-level clippy allows for design choices
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::len_without_is_empty)]
+#![allow(clippy::module_inception)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::wrong_self_convention)]
+#![allow(clippy::result_unit_err)]
+#![allow(clippy::if_same_then_else)]
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::same_item_push)]
+
 // Allow the derive macro to use `luars::...` paths even inside this crate
 extern crate self as luars;
 

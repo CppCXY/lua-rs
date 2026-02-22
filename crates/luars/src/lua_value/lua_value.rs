@@ -673,7 +673,7 @@ impl LuaValue {
             Some(unsafe {
                 let ptr = self.value.ptr;
                 let s: &GcString = &*(ptr as *const GcString);
-                &s.data.as_str()
+                s.data.as_str()
             })
         } else {
             None
@@ -686,7 +686,7 @@ impl LuaValue {
             Some(unsafe {
                 let ptr = self.value.ptr;
                 let v: &GcBinary = &*(ptr as *const GcBinary);
-                &v.data.as_slice()
+                v.data.as_slice()
             })
         } else {
             None
@@ -703,6 +703,7 @@ impl LuaValue {
         }
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_table_mut(&self) -> Option<&mut LuaTable> {
         if self.ttistable() {
@@ -732,6 +733,7 @@ impl LuaValue {
         &func.data
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_lua_function_mut(&self) -> Option<&mut LuaFunction> {
         if self.ttisluafunction() {
@@ -761,6 +763,7 @@ impl LuaValue {
         }
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_cclosure_mut(&self) -> Option<&mut CClosureFunction> {
         if self.is_cclosure() {
@@ -781,6 +784,7 @@ impl LuaValue {
         }
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_rclosure_mut(&self) -> Option<&mut RClosureFunction> {
         if self.is_rclosure() {
@@ -802,6 +806,7 @@ impl LuaValue {
         }
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_userdata_mut(&self) -> Option<&mut LuaUserdata> {
         if self.ttisfulluserdata() {
@@ -812,6 +817,7 @@ impl LuaValue {
         }
     }
 
+    #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_thread_mut(&self) -> Option<&mut LuaState> {
         if self.ttisthread() {

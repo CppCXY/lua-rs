@@ -1,6 +1,5 @@
 use ahash::RandomState;
 use smol_str::SmolStr;
-use std::hash::{BuildHasher, Hash, Hasher};
 
 use crate::lua_value::LuaString;
 use crate::{CreateResult, GC, GcObjectOwner, GcString, LuaValue, StringPtr};
@@ -20,6 +19,12 @@ pub struct StringInterner {
     nuse: usize,
     /// Hash builder (ahash for speed)
     hashbuilder: RandomState,
+}
+
+impl Default for StringInterner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StringInterner {
@@ -160,9 +165,7 @@ impl StringInterner {
     /// Fast hash function - uses ahash for speed
     #[inline(always)]
     fn hash_string(&self, s: &str) -> u64 {
-        let mut hasher = self.hashbuilder.build_hasher();
-        s.hash(&mut hasher);
-        hasher.finish()
+        self.hashbuilder.hash_one(s)
     }
 
     /// Remove a dead short string from the intern table.

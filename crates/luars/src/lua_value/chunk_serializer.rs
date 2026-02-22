@@ -62,7 +62,7 @@ pub fn deserialize_chunk(data: &[u8]) -> Result<Chunk, String> {
     cursor
         .read_exact(&mut magic)
         .map_err(|e| format!("failed to read magic: {}", e))?;
-    if &magic != LUARS_MAGIC {
+    if magic != LUARS_MAGIC {
         return Err("not a lua-rs bytecode file".to_string());
     }
 
@@ -97,7 +97,7 @@ pub fn deserialize_chunk_with_strings_vm(data: &[u8], vm: &mut LuaVM) -> Result<
     cursor
         .read_exact(&mut magic)
         .map_err(|e| format!("failed to read magic: {}", e))?;
-    if &magic != LUARS_MAGIC {
+    if magic != LUARS_MAGIC {
         return Err("not a lua-rs bytecode file".to_string());
     }
 
@@ -135,7 +135,7 @@ pub fn deserialize_chunk_with_strings(
     cursor
         .read_exact(&mut magic)
         .map_err(|e| format!("failed to read magic: {}", e))?;
-    if &magic != LUARS_MAGIC {
+    if magic != LUARS_MAGIC {
         return Err("not a lua-rs bytecode file".to_string());
     }
 

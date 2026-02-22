@@ -30,13 +30,17 @@ pub struct ObjectAllocator {
     strings: StringInterner, // Private - use create_string() to intern
 }
 
+impl Default for ObjectAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ObjectAllocator {
     pub fn new() -> Self {
-        let pool = Self {
+        Self {
             strings: StringInterner::new(),
-        };
-
-        pool
+        }
     }
 
     // ==================== String Operations ====================

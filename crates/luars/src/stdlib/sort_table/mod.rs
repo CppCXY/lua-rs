@@ -38,7 +38,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
 
     // Sort in-place on the Lua table using an insertion sort + quicksort
     // that calls comparison through unprotected Lua calls
-    let result = sort_range(l, &table_val, &comp_func, has_comp, 1, len as i64);
+    let result = sort_range(l, &table_val, &comp_func, has_comp, 1, len);
 
     // Restore yieldability before returning (even on error)
     l.nny -= 1;
@@ -93,11 +93,11 @@ fn sort_range(
         // Small range: use insertion sort (no invalid order detection needed for <=3)
         for i in (lo + 1)..=hi {
             let t = table.as_table().unwrap();
-            let key = t.raw_geti(i).unwrap_or(LuaValue::nil());
+            let key = t.raw_geti(i).unwrap_or_default();
             let mut j = i - 1;
             loop {
                 let t = table.as_table().unwrap();
-                let val_j = t.raw_geti(j).unwrap_or(LuaValue::nil());
+                let val_j = t.raw_geti(j).unwrap_or_default();
                 if sort_compare(l, key, val_j, comp_func, has_comp)? {
                     let t = table.as_table_mut().unwrap();
                     t.raw_seti(j + 1, val_j);
@@ -122,8 +122,8 @@ fn sort_range(
     // Sort lo, mid, hi
     {
         let t = table.as_table().unwrap();
-        let v_lo = t.raw_geti(lo).unwrap_or(LuaValue::nil());
-        let v_mid = t.raw_geti(mid).unwrap_or(LuaValue::nil());
+        let v_lo = t.raw_geti(lo).unwrap_or_default();
+        let v_mid = t.raw_geti(mid).unwrap_or_default();
         if sort_compare(l, v_mid, v_lo, comp_func, has_comp)? {
             let t = table.as_table_mut().unwrap();
             t.raw_seti(lo, v_mid);
@@ -132,15 +132,15 @@ fn sort_range(
     }
     {
         let t = table.as_table().unwrap();
-        let v_mid = t.raw_geti(mid).unwrap_or(LuaValue::nil());
-        let v_hi = t.raw_geti(hi).unwrap_or(LuaValue::nil());
+        let v_mid = t.raw_geti(mid).unwrap_or_default();
+        let v_hi = t.raw_geti(hi).unwrap_or_default();
         if sort_compare(l, v_hi, v_mid, comp_func, has_comp)? {
             let t = table.as_table_mut().unwrap();
             t.raw_seti(mid, v_hi);
             t.raw_seti(hi, v_mid);
             let t = table.as_table().unwrap();
-            let v_lo = t.raw_geti(lo).unwrap_or(LuaValue::nil());
-            let v_mid = t.raw_geti(mid).unwrap_or(LuaValue::nil());
+            let v_lo = t.raw_geti(lo).unwrap_or_default();
+            let v_mid = t.raw_geti(mid).unwrap_or_default();
             if sort_compare(l, v_mid, v_lo, comp_func, has_comp)? {
                 let t = table.as_table_mut().unwrap();
                 t.raw_seti(lo, v_mid);
@@ -154,11 +154,11 @@ fn sort_range(
 
     // Pivot is now at mid
     let t = table.as_table().unwrap();
-    let pivot = t.raw_geti(mid).unwrap_or(LuaValue::nil());
+    let pivot = t.raw_geti(mid).unwrap_or_default();
 
     // Move pivot to hi-1
     let t = table.as_table().unwrap();
-    let v_hi_1 = t.raw_geti(hi - 1).unwrap_or(LuaValue::nil());
+    let v_hi_1 = t.raw_geti(hi - 1).unwrap_or_default();
     let t = table.as_table_mut().unwrap();
     t.raw_seti(hi - 1, pivot);
     t.raw_seti(mid, v_hi_1);
@@ -170,7 +170,7 @@ fn sort_range(
         loop {
             i += 1;
             let t = table.as_table().unwrap();
-            let v_i = t.raw_geti(i).unwrap_or(LuaValue::nil());
+            let v_i = t.raw_geti(i).unwrap_or_default();
             if !sort_compare(l, v_i, pivot, comp_func, has_comp)? {
                 break;
             }
@@ -183,7 +183,7 @@ fn sort_range(
         loop {
             j -= 1;
             let t = table.as_table().unwrap();
-            let v_j = t.raw_geti(j).unwrap_or(LuaValue::nil());
+            let v_j = t.raw_geti(j).unwrap_or_default();
             if !sort_compare(l, pivot, v_j, comp_func, has_comp)? {
                 break;
             }
@@ -197,8 +197,8 @@ fn sort_range(
         }
         // Swap
         let t = table.as_table().unwrap();
-        let v_i = t.raw_geti(i).unwrap_or(LuaValue::nil());
-        let v_j = t.raw_geti(j).unwrap_or(LuaValue::nil());
+        let v_i = t.raw_geti(i).unwrap_or_default();
+        let v_j = t.raw_geti(j).unwrap_or_default();
         let t = table.as_table_mut().unwrap();
         t.raw_seti(i, v_j);
         t.raw_seti(j, v_i);
@@ -206,7 +206,7 @@ fn sort_range(
 
     // Restore pivot
     let t = table.as_table().unwrap();
-    let v_i = t.raw_geti(i).unwrap_or(LuaValue::nil());
+    let v_i = t.raw_geti(i).unwrap_or_default();
     let t = table.as_table_mut().unwrap();
     t.raw_seti(hi - 1, v_i);
     t.raw_seti(i, pivot);
