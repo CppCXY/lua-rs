@@ -13,6 +13,7 @@ use crate::lua_vm::call_info::call_status::{
 };
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
+use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, EXTRA_CI, EXTRA_STACK};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 use crate::{
@@ -105,9 +106,6 @@ pub struct LuaState {
 }
 
 impl LuaState {
-    /// Basic stack size (similar to BASIC_STACK_SIZE in Lua = 2*LUA_MINSTACK = 40)
-    const BASIC_STACK_SIZE: usize = 40;
-
     /// Create a new execution state
     pub fn new(
         call_stack_size: usize,
@@ -117,7 +115,7 @@ impl LuaState {
     ) -> Self {
         Self {
             vm,
-            stack: Vec::with_capacity(Self::BASIC_STACK_SIZE),
+            stack: Vec::with_capacity(BASIC_STACK_SIZE),
             thread: ThreadPtr::null(),
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
             call_stack: Vec::with_capacity(call_stack_size),
@@ -257,9 +255,9 @@ impl LuaState {
 
         let frame_top = base + maxstacksize;
 
-        // Ensure physical stack has EXTRA_STACK (5) slots above frame_top
+        // Ensure physical stack has EXTRA_STACK slots above frame_top
         // for metamethod arguments (matching Lua 5.5's EXTRA_STACK guarantee)
-        let needed_physical = frame_top + 5;
+        let needed_physical = frame_top + EXTRA_STACK;
         if needed_physical > self.stack.len() {
             self.resize(needed_physical)?;
         }
@@ -337,7 +335,7 @@ impl LuaState {
         // Covers exact match AND extra args (common in metamethods like __len
         // which receives 2 args but declares 1 param).
         if nparams >= param_count
-            && frame_top + 5 <= self.stack.len()
+            && frame_top + EXTRA_STACK <= self.stack.len()
             && self.call_depth < self.call_stack.len()
         {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
@@ -421,7 +419,7 @@ impl LuaState {
             }
         }
 
-        let needed_physical = frame_top + 5;
+        let needed_physical = frame_top + EXTRA_STACK;
         if needed_physical > self.stack.len() {
             self.resize(needed_physical)?;
         }
@@ -488,8 +486,8 @@ impl LuaState {
         // For C functions: maxstacksize = nargs, numparams = nargs (no nil filling needed)
         let frame_top = base + nargs;
 
-        // Ensure physical stack has EXTRA_STACK (5) slots above frame_top
-        let needed_physical = frame_top + 5;
+        // Ensure physical stack has EXTRA_STACK slots above frame_top
+        let needed_physical = frame_top + EXTRA_STACK;
         if needed_physical > self.stack.len() {
             self.resize(needed_physical)?;
         }
@@ -2780,7 +2778,7 @@ impl LuaState {
 
                 // Temporarily increase max_call_depth for error handler
                 let saved_max_depth = self.safe_option.max_call_depth;
-                self.safe_option.max_call_depth = saved_max_depth + 30;
+                self.safe_option.max_call_depth = saved_max_depth + EXTRA_CI;
 
                 // Call error handler WITH ALL ERROR FRAMES STILL ON STACK.
                 // C Lua's luaG_errormsg recursively calls the handler when the
@@ -3105,7 +3103,7 @@ impl LuaState {
                 // (like CLua's EXTRA_STACK — allows error handlers to run
                 // even after stack overflow)
                 let saved_max_depth = self.safe_option.max_call_depth;
-                self.safe_option.max_call_depth = saved_max_depth + 30;
+                self.safe_option.max_call_depth = saved_max_depth + EXTRA_CI;
 
                 // Call error handler with error value.
                 // C Lua's luaG_errormsg recursively calls the handler when the

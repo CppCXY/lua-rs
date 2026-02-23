@@ -600,16 +600,16 @@ fn math_type(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'type' (value expected)".to_string()))?;
 
-    let type_str = match val.kind() {
-        LuaValueKind::Integer => "integer",
-        LuaValueKind::Float => "float",
+    let cs = &l.vm_mut().const_strings;
+    let result = match val.kind() {
+        LuaValueKind::Integer => cs.str_integer,
+        LuaValueKind::Float => cs.str_float,
         _ => {
             l.push_value(LuaValue::nil())?;
             return Ok(1);
         }
     };
 
-    let result = l.create_string(type_str)?;
     l.push_value(result)?;
     Ok(1)
 }

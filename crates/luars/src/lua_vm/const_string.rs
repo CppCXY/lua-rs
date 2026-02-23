@@ -40,6 +40,20 @@ pub struct ConstString {
     pub str_running: LuaValue,   // "running"
     pub str_normal: LuaValue,    // "normal"
     pub str_dead: LuaValue,      // "dead"
+
+    // Pre-cached type name strings for type() / tostring() / math.type()
+    pub str_nil: LuaValue,      // "nil"
+    pub str_boolean: LuaValue,  // "boolean"
+    pub str_number: LuaValue,   // "number"
+    pub str_string: LuaValue,   // "string"
+    pub str_table: LuaValue,    // "table"
+    pub str_function: LuaValue, // "function"
+    pub str_userdata: LuaValue, // "userdata"
+    pub str_thread: LuaValue,   // "thread"
+    pub str_true: LuaValue,     // "true"
+    pub str_false: LuaValue,    // "false"
+    pub str_integer: LuaValue,  // "integer" (for math.type)
+    pub str_float: LuaValue,    // "float"   (for math.type)
 }
 
 impl ConstString {
@@ -80,6 +94,18 @@ impl ConstString {
             str_running: LuaValue::nil(),
             str_normal: LuaValue::nil(),
             str_dead: LuaValue::nil(),
+            str_nil: LuaValue::nil(),
+            str_boolean: LuaValue::nil(),
+            str_number: LuaValue::nil(),
+            str_string: LuaValue::nil(),
+            str_table: LuaValue::nil(),
+            str_function: LuaValue::nil(),
+            str_userdata: LuaValue::nil(),
+            str_thread: LuaValue::nil(),
+            str_true: LuaValue::nil(),
+            str_false: LuaValue::nil(),
+            str_integer: LuaValue::nil(),
+            str_float: LuaValue::nil(),
         };
 
         // Pre-create all metamethod name strings (like Lua's luaT_init)
@@ -121,6 +147,20 @@ impl ConstString {
         cs.str_normal = allocator.create_string(gc, "normal").unwrap();
         cs.str_dead = allocator.create_string(gc, "dead").unwrap();
 
+        // Pre-create type name strings (for type(), tostring(), math.type())
+        cs.str_nil = allocator.create_string(gc, "nil").unwrap();
+        cs.str_boolean = allocator.create_string(gc, "boolean").unwrap();
+        cs.str_number = allocator.create_string(gc, "number").unwrap();
+        cs.str_string = allocator.create_string(gc, "string").unwrap();
+        cs.str_table = allocator.create_string(gc, "table").unwrap();
+        cs.str_function = allocator.create_string(gc, "function").unwrap();
+        cs.str_userdata = allocator.create_string(gc, "userdata").unwrap();
+        cs.str_thread = allocator.create_string(gc, "thread").unwrap();
+        cs.str_true = allocator.create_string(gc, "true").unwrap();
+        cs.str_false = allocator.create_string(gc, "false").unwrap();
+        cs.str_integer = allocator.create_string(gc, "integer").unwrap();
+        cs.str_float = allocator.create_string(gc, "float").unwrap();
+
         // Fix all metamethod name strings - they should never be collected
         // (like Lua's luaC_fix in luaT_init)
         gc.fixed(cs.tm_index.as_gc_ptr().unwrap());
@@ -157,6 +197,18 @@ impl ConstString {
         gc.fixed(cs.str_running.as_gc_ptr().unwrap());
         gc.fixed(cs.str_normal.as_gc_ptr().unwrap());
         gc.fixed(cs.str_dead.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_nil.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_boolean.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_number.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_string.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_table.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_function.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_userdata.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_thread.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_true.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_false.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_integer.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_float.as_gc_ptr().unwrap());
 
         gc.tm_gc = cs.tm_gc;
         gc.tm_mode = cs.tm_mode;

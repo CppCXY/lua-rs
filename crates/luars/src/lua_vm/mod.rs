@@ -5,6 +5,7 @@ pub mod call_info;
 mod const_string;
 mod execute;
 pub mod lua_error;
+pub mod lua_limits;
 mod lua_ref;
 mod lua_state;
 pub mod opcode;

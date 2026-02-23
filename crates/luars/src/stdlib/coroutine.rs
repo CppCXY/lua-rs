@@ -134,35 +134,37 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Check if thread exists and get status
-    let status_str = if let Some(thread) = thread_val.as_thread_mut() {
+    // Pre-read const strings before mutable borrow of thread
+    let cs = &l.vm_mut().const_strings;
+    let str_running = cs.str_running;
+    let str_suspended = cs.str_suspended;
+    let str_normal = cs.str_normal;
+    let str_dead = cs.str_dead;
+
+    let status_val = if let Some(thread) = thread_val.as_thread_mut() {
         if thread.is_main_thread() {
             // Main thread is always running
-            let status_val = l.create_string("running")?;
-            l.push_value(status_val)?;
-            return Ok(1);
-        }
-
-        if thread.call_depth() > 0 {
+            str_running
+        } else if thread.call_depth() > 0 {
             if thread.is_yielded() {
-                "suspended"
+                str_suspended
             } else {
                 // Thread has frames and is not yielded — it's either running
                 // or normal (resumed another coroutine and waiting).
                 // Compare identity: if calling thread IS this thread, it's "running".
                 let is_self = std::ptr::eq(l as *const LuaState, thread as *const LuaState);
-                if is_self { "running" } else { "normal" }
+                if is_self { str_running } else { str_normal }
             }
         } else if !thread.stack().is_empty() {
             // Has stack but no frames - initial state
-            "suspended"
+            str_suspended
         } else {
-            "dead"
+            str_dead
         }
     } else {
-        "dead"
+        str_dead
     };
 
-    let status_val = l.create_string(status_str)?;
     l.push_value(status_val)?;
     Ok(1)
 }
@@ -297,27 +299,28 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
     if let Some(thread) = thread_val.as_thread_mut() {
         // Determine status (matches C Lua's auxstatus)
         let is_self = std::ptr::eq(l as *const LuaState, thread as *const LuaState);
-        let status = if is_self {
-            "running" // COS_RUN: L == co
+        // 0 = dead, 1 = suspended, 2 = normal, 3 = running
+        let status: u8 = if is_self {
+            3 // COS_RUN: L == co
         } else if thread.is_yielded() {
-            "suspended" // COS_YIELD
+            1 // COS_YIELD
         } else if thread.call_depth() > 0 {
-            "normal" // COS_NORM: has active frames, not yielded, not self
+            2 // COS_NORM: has active frames, not yielded, not self
         } else if !thread.stack().is_empty() {
-            "suspended" // Initial state (not started)
+            1 // Initial state (not started)
         } else {
-            "dead" // COS_DEAD
+            0 // COS_DEAD
         };
 
         match status {
-            "dead" | "suspended" => {
+            0 | 1 => {
                 // OK to close dead or suspended coroutines.
                 // For dead-by-error coroutines, preserve the error.
             }
-            "normal" => {
-                return Err(l.error(format!("cannot close a {} coroutine", status)));
+            2 => {
+                return Err(l.error("cannot close a normal coroutine".to_string()));
             }
-            "running" => {
+            3 => {
                 if thread.is_main_thread() {
                     return Err(l.error("cannot close main thread".to_string()));
                 }

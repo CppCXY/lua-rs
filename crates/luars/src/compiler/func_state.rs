@@ -1,4 +1,5 @@
 use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
+use crate::lua_vm::lua_limits::{MAX_SRC_LEN, MAXCCALLS, MAXUPVAL, MAXVARS};
 use crate::{Chunk, LuaVM};
 use crate::{LuaValue, compiler::parser::LuaLexer};
 
@@ -258,7 +259,7 @@ impl<'a> FuncState<'a> {
     // Tracks recursion depth during parsing; MAXCCALLS = 200
     pub fn enter_level(&mut self) -> Result<(), String> {
         self.lexer.nesting_level += 1;
-        if self.lexer.nesting_level >= 200 {
+        if self.lexer.nesting_level >= MAXCCALLS {
             return Err(self.syntax_error("chunk has too many syntax levels"));
         }
         Ok(())
@@ -376,9 +377,9 @@ impl<'a> FuncState<'a> {
             if let Some(var) = self.actvar.get_mut(vidx as usize) {
                 var.ridx = reglevel as i16;
                 reglevel += 1;
-                // Check limit: MAXVARS = 200
-                if reglevel as usize > 200 {
-                    return Err(self.errorlimit(200, "local variables"));
+                // Check limit: MAXVARS
+                if reglevel as usize > MAXVARS {
+                    return Err(self.errorlimit(MAXVARS, "local variables"));
                 }
                 // Add variable debug info (LocVar) to chunk
                 let pidx = self.chunk.locals.len();
@@ -503,9 +504,8 @@ impl<'a> FuncState<'a> {
     // Port of newupvalue from lparser.c (lines 364-382)
     pub fn newupvalue(&mut self, name: &str, v: &ExpDesc) -> i32 {
         // Port of luaY_checklimit(fs, fs->nups + 1, MAXUPVAL, "upvalues")
-        // MAXUPVAL = 255
-        if self.nups as usize + 1 > 255 && self.checklimit_error.is_none() {
-            self.checklimit_error = Some(self.errorlimit(255, "upvalues"));
+        if self.nups as usize + 1 > MAXUPVAL && self.checklimit_error.is_none() {
+            self.checklimit_error = Some(self.errorlimit(MAXUPVAL, "upvalues"));
         }
 
         let prev_ptr = match &self.prev {
@@ -556,7 +556,7 @@ impl<'a> FuncState<'a> {
 /// - other → [string "first_line..."] (wrap in [string "..."], truncate)
 pub fn format_source(source: &str) -> String {
     // LUA_IDSIZE = 60 in luaconf.h, but includes null terminator, so max usable = 59
-    const MAX_SRC: usize = 59;
+    const MAX_SRC: usize = MAX_SRC_LEN;
     if let Some(name) = source.strip_prefix('=') {
         // Remove the '=' prefix, take as display name, truncate to MAX_SRC
         if name.len() <= MAX_SRC {

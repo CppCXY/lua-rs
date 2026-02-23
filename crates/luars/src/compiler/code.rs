@@ -6,6 +6,7 @@ use crate::compiler::func_state::FuncState;
 use crate::compiler::parser::BinaryOperator;
 use crate::compiler::{ExpUnion, IndVars};
 use crate::lua_value::LuaValueKind;
+use crate::lua_vm::lua_limits::{MAXINDEXRK, NO_REG};
 use crate::lua_vm::{Instruction, OpCode, TmKind};
 
 // Port of int2sC from lcode.c (macro)
@@ -776,11 +777,11 @@ pub fn free_regs(fs: &mut FuncState, r1: u8, r2: u8) {
 // Check register-stack level, keeping track of its maximum size in field 'maxstacksize'
 pub fn checkstack(fs: &mut FuncState, n: u8) {
     let newstack = (fs.freereg as usize) + (n as usize);
-    if newstack > 255 {
+    if newstack > MAXINDEXRK {
         // MAX_FSTACK = MAXARG_A = 255
         // Port of luaY_checklimit(fs, newstack, MAX_FSTACK, "registers")
         if fs.checklimit_error.is_none() {
-            fs.checklimit_error = Some(fs.errorlimit(255, "registers"));
+            fs.checklimit_error = Some(fs.errorlimit(MAXINDEXRK, "registers"));
         }
     }
     if newstack > fs.chunk.max_stack_size {
@@ -886,8 +887,6 @@ fn tonumeral(e: &ExpDesc, _v: Option<&mut f64>) -> bool {
     }
     matches!(e.kind, ExpKind::VKINT | ExpKind::VKFLT)
 }
-
-const MAXINDEXRK: usize = 255; // Maximum index for R/K operands
 
 // Add boolean true to constants
 // Port of boolT from lcode.c:636-640
@@ -1201,8 +1200,6 @@ fn remove_last_instruction(fs: &mut FuncState) {
         fs.chunk.line_info.pop(); // Must also remove line info!
     }
 }
-
-const NO_REG: u32 = 255;
 
 // Port of jumponcond from lcode.c:1118-1130
 // static int jumponcond (FuncState *fs, expdesc *e, int cond)

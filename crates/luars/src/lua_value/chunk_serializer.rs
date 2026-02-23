@@ -5,6 +5,7 @@ use super::{Chunk, LocVar, LuaValue, UpvalueDesc};
 use crate::Instruction;
 use crate::gc::ObjectAllocator;
 use crate::lua_vm::LuaVM;
+use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::rc::Rc;
@@ -644,9 +645,8 @@ fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), S
         buf.push(TAG_FLOAT);
         write_f64(buf, f);
     } else if let Some(lua_string) = value.as_str() {
-        // Use short string tag for strings <= 40 bytes, long string otherwise
-        // This matches Lua 5.5's LUAI_MAXSHORTLEN
-        if lua_string.len() <= 40 {
+        // Use short string tag for strings <= LUAI_MAXSHORTLEN bytes, long string otherwise
+        if lua_string.len() <= LUAI_MAXSHORTLEN {
             buf.push(TAG_SHORT_STRING);
         } else {
             buf.push(TAG_LONG_STRING);
@@ -674,9 +674,8 @@ fn write_constant_with_dedup(
         buf.push(TAG_FLOAT);
         write_f64(buf, f);
     } else if let Some(lua_string) = value.as_str() {
-        // Use short string tag for strings <= 40 bytes, long string otherwise
-        // This matches Lua 5.5's LUAI_MAXSHORTLEN
-        if lua_string.len() <= 40 {
+        // Use short string tag for strings <= LUAI_MAXSHORTLEN bytes, long string otherwise
+        if lua_string.len() <= LUAI_MAXSHORTLEN {
             buf.push(TAG_SHORT_STRING);
         } else {
             buf.push(TAG_LONG_STRING);

@@ -17,15 +17,16 @@ use crate::{
     lua_vm::{
         LuaResult, LuaState, TmKind,
         execute::{helper, metamethod},
+        lua_limits::{CONCAT_STACK_BUF_SIZE, LUAI_MAXSHORTLEN},
     },
 };
 
 /// Stack buffer size for small concatenations (covers most Lua concat ops)
-const STACK_BUF_SIZE: usize = 256;
+const STACK_BUF_SIZE: usize = CONCAT_STACK_BUF_SIZE;
 
 /// Short string limit matching StringInterner::SHORT_STRING_LIMIT.
 /// Strings ≤ this length are interned (hash table dedup).
-const SHORT_STR_LIMIT: usize = 40;
+const SHORT_STR_LIMIT: usize = LUAI_MAXSHORTLEN;
 
 #[inline(never)]
 pub fn handle_concat(

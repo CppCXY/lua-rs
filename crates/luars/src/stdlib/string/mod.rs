@@ -7,6 +7,7 @@ mod string_format;
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
+use crate::lua_vm::lua_limits::MAX_STRING_SIZE;
 use crate::lua_vm::{LuaResult, LuaState};
 
 /// Mirrors luaL_checkinteger: convert a LuaValue to integer, producing
@@ -287,7 +288,6 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
 
     // Check for result size overflow
     // Lua limits string size to avoid memory issues
-    const MAX_STRING_SIZE: i64 = 1 << 30; // 1GB limit
     let s_len = s_bytes.len() as i64;
 
     // Check for overflow before multiplying

@@ -5,6 +5,7 @@ use crate::{
         LuaError, LuaState, TmKind,
         call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL},
         execute,
+        lua_limits::{EXTRA_STACK, MAXTAGLOOP},
     },
 };
 
@@ -33,7 +34,7 @@ pub fn buildhiddenargs(
     let new_base = new_func_pos + 1;
 
     // Ensure enough stack space for new base + registers + EXTRA_STACK
-    let new_needed_size = new_base + chunk.max_stack_size + 5; // +5 = EXTRA_STACK
+    let new_needed_size = new_base + chunk.max_stack_size + EXTRA_STACK;
     if new_needed_size > lua_state.stack_len() {
         lua_state.grow_stack(new_needed_size)?;
     }
@@ -374,7 +375,6 @@ pub fn lookup_from_metatable(
     obj: &LuaValue,
     key: &LuaValue,
 ) -> LuaResult<Option<LuaValue>> {
-    const MAXTAGLOOP: usize = 2000;
     const TM_INDEX_BIT: u8 = TmKind::Index as u8; // = 0
 
     let mut t = *obj;
@@ -529,7 +529,6 @@ pub fn finishset(
     key: &LuaValue,
     value: LuaValue,
 ) -> LuaResult<bool> {
-    const MAXTAGLOOP: usize = 2000;
     const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8; // = 1
 
     let mut t = *obj;

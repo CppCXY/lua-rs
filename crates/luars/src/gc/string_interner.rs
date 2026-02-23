@@ -2,6 +2,7 @@ use ahash::RandomState;
 use smol_str::SmolStr;
 
 use crate::lua_value::LuaString;
+use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use crate::{CreateResult, GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
 /// Lua 5.5-style string table — flat bucket array with intrusive separate chaining.
@@ -28,7 +29,7 @@ impl Default for StringInterner {
 }
 
 impl StringInterner {
-    pub const SHORT_STRING_LIMIT: usize = 40;
+    pub const SHORT_STRING_LIMIT: usize = LUAI_MAXSHORTLEN;
     /// Initial bucket count (power of 2, same as C Lua)
     const INITIAL_SIZE: usize = 128;
 

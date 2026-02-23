@@ -52,6 +52,7 @@ use crate::{
                 tointeger, tointegerns, tonumberns, ttisinteger,
             },
         },
+        lua_limits::EXTRA_STACK,
     },
 };
 pub use helper::{get_metamethod_event, get_metatable};
@@ -112,7 +113,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let upvalue_ptrs = lua_func.upvalues();
         // Stack already grown by push_lua_frame — no need for grow_stack here.
         // Only the very first entry (top-level chunk) needs this check.
-        debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + 5);
+        debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
 
         // Cache pointers
         let constants = &chunk.constants;

@@ -92,7 +92,7 @@ impl BinaryOperator {
     }
 }
 
-pub const UNARY_PRIORITY: i32 = 12; // priority for unary operators
+pub use crate::lua_vm::lua_limits::UNARY_PRIORITY;
 
 pub fn to_unary_operator(kind: LuaTokenKind) -> UnaryOperator {
     match kind {

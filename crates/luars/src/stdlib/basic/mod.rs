@@ -71,22 +71,22 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    let type_name = match value.kind() {
-        LuaValueKind::Nil => "nil",
-        LuaValueKind::Boolean => "boolean",
-        LuaValueKind::Integer | LuaValueKind::Float => "number",
-        LuaValueKind::String => "string",
-        LuaValueKind::Binary => "string", // Binary is also a string type
-        LuaValueKind::Table => "table",
+    let cs = &l.vm_mut().const_strings;
+    let result = match value.kind() {
+        LuaValueKind::Nil => cs.str_nil,
+        LuaValueKind::Boolean => cs.str_boolean,
+        LuaValueKind::Integer | LuaValueKind::Float => cs.str_number,
+        LuaValueKind::String => cs.str_string,
+        LuaValueKind::Binary => cs.str_string, // Binary is also a string type
+        LuaValueKind::Table => cs.str_table,
         LuaValueKind::Function
         | LuaValueKind::CFunction
         | LuaValueKind::CClosure
-        | LuaValueKind::RClosure => "function",
-        LuaValueKind::Userdata => "userdata",
-        LuaValueKind::Thread => "thread",
+        | LuaValueKind::RClosure => cs.str_function,
+        LuaValueKind::Userdata => cs.str_userdata,
+        LuaValueKind::Thread => cs.str_thread,
     };
 
-    let result = l.create_string(type_name)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -396,14 +396,15 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    // Fast path: nil / bool — static strings
+    // Fast path: nil / bool — pre-interned strings
     if value.is_nil() {
-        let result_value = l.create_string("nil")?;
+        let result_value = l.vm_mut().const_strings.str_nil;
         l.push_value(result_value)?;
         return Ok(1);
     }
     if let Some(b) = value.as_boolean() {
-        let result_value = l.create_string(if b { "true" } else { "false" })?;
+        let cs = &l.vm_mut().const_strings;
+        let result_value = if b { cs.str_true } else { cs.str_false };
         l.push_value(result_value)?;
         return Ok(1);
     }

@@ -9,6 +9,7 @@
 use crate::{
     LuaValue,
     lua_vm::call_info::call_status,
+    lua_vm::lua_limits::EXTRA_STACK,
     lua_vm::{CFunction, LuaError, LuaResult, LuaState, TmKind, get_metamethod_event},
 };
 
@@ -508,7 +509,7 @@ pub fn handle_tailcall(
         let frame_top = func_pos + 1 + chunk.max_stack_size;
         // Ensure physical stack is large enough for the new function.
         // The tailcalled function may need more stack space than the caller.
-        let needed_physical = frame_top + 5; // +5 = EXTRA_STACK
+        let needed_physical = frame_top + EXTRA_STACK;
         if needed_physical > lua_state.stack_len() {
             lua_state.grow_stack(needed_physical)?;
         }

@@ -64,14 +64,18 @@ pub const GCPARAM_COUNT: usize = 6;
 
 // Default GC parameters (from Lua 5.5 lgc.h)
 // MUST match Lua 5.5 exactly for debugging consistency
-const DEFAULT_PAUSE: i32 = 250; // 250% (LUAI_GCPAUSE in lgc.h)
-const DEFAULT_STEPMUL: i32 = 200; // 200% (LUAI_GCMUL in lgc.h)
-const DEFAULT_STEPSIZE: i32 = 200 * std::mem::size_of::<LuaTable>() as i32; // ~13KB
-const DEFAULT_MINORMUL: i32 = 200; // 200% - balanced threshold for minor GC
-const DEFAULT_MINORMAJOR: i32 = 70; // 70%
-const DEFAULT_MAJORMINOR: i32 = 50; // 50%
+use crate::lua_vm::lua_limits::{
+    DEFAULT_GC_MAJORMINOR, DEFAULT_GC_MINORMAJOR, DEFAULT_GC_MINORMUL, DEFAULT_GC_PAUSE,
+    DEFAULT_GC_STEPMUL, GC_SWEEPMAX,
+};
+const DEFAULT_PAUSE: i32 = DEFAULT_GC_PAUSE;
+const DEFAULT_STEPMUL: i32 = DEFAULT_GC_STEPMUL;
+const DEFAULT_STEPSIZE: i32 = DEFAULT_GC_STEPMUL * std::mem::size_of::<LuaTable>() as i32; // ~13KB
+const DEFAULT_MINORMUL: i32 = DEFAULT_GC_MINORMUL;
+const DEFAULT_MINORMAJOR: i32 = DEFAULT_GC_MINORMAJOR;
+const DEFAULT_MAJORMINOR: i32 = DEFAULT_GC_MAJORMINOR;
 
-const GCSWEEPMAX: isize = 20; // Max steps per sweep call
+const GCSWEEPMAX: isize = GC_SWEEPMAX;
 
 /// Maximum l_mem value (like MAX_LMEM in Lua 5.5)
 const MAX_LMEM: isize = isize::MAX;

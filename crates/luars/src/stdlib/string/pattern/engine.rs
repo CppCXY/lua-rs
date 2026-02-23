@@ -6,9 +6,8 @@
 // - Fixed capture slots (no heap alloc during matching)
 
 use super::class::{element_end, singlematch};
+use crate::lua_vm::lua_limits::{LUA_MAXCAPTURES, MAXCCALLS_PATTERN};
 
-/// Maximum number of captures (Lua limit)
-pub const LUA_MAXCAPTURES: usize = 32;
 /// Recursion limit to prevent stack overflow
 /// Validate a pattern for common syntax errors before matching.
 /// Returns Ok(()) if valid, Err(message) if malformed.
@@ -87,7 +86,7 @@ fn validate_set(pat: &[char], i: usize) -> Result<usize, String> {
     }
     Ok(j + 1) // past ']'
 }
-const MAXCCALLS: usize = 200;
+const MAXCCALLS: usize = MAXCCALLS_PATTERN;
 
 /// Capture kind
 #[derive(Debug, Clone, Copy)]

@@ -12,7 +12,7 @@
 
 use crate::{
     lua_value::{Chunk, LuaValue},
-    lua_vm::{Instruction, LuaResult, LuaState, OpCode},
+    lua_vm::{Instruction, LuaResult, LuaState, OpCode, lua_limits::EXTRA_STACK},
 };
 
 use super::helper::{buildhiddenargs, setnilvalue};
@@ -220,8 +220,9 @@ pub fn exec_varargprep(
     }
     // Implement buildhiddenargs if there are extra args (and no table needed)
     else if nextra > 0 {
-        // Ensure stack has enough space (+5 = EXTRA_STACK)
-        let required_size = func_pos + totalargs + 1 + nfixparams + chunk.max_stack_size + 5;
+        // Ensure stack has enough space
+        let required_size =
+            func_pos + totalargs + 1 + nfixparams + chunk.max_stack_size + EXTRA_STACK;
         if lua_state.stack_len() < required_size {
             lua_state.grow_stack(required_size)?;
         }

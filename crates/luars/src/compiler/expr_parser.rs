@@ -13,9 +13,7 @@ use crate::compiler::statement::{self, mark_upval};
 use crate::compiler::{VarDesc, VarKind, binary_k, code, string_k};
 use crate::lua_value::UpvalueDesc;
 use crate::lua_vm::OpCode;
-
-// From lopcodes.h - maximum list items per flush
-const LFIELDS_PER_FLUSH: u32 = 50;
+use crate::lua_vm::lua_limits::LFIELDS_PER_FLUSH;
 
 // Port of init_exp from lparser.c
 fn init_exp(e: &mut ExpDesc, kind: ExpKind, info: i32) {

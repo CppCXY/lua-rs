@@ -1,3 +1,5 @@
+use super::lua_limits::{LUAI_MAXSTACK, MAX_CALL_DEPTH};
+
 #[derive(Debug, Clone)]
 pub struct SafeOption {
     pub max_stack_size: usize,
@@ -13,9 +15,9 @@ pub struct SafeOption {
 impl Default for SafeOption {
     fn default() -> Self {
         Self {
-            max_stack_size: 1000000, // LUAI_MAXSTACK (Lua 5.5)
-            max_call_depth: 256,
-            base_call_depth: 256,
+            max_stack_size: LUAI_MAXSTACK,
+            max_call_depth: MAX_CALL_DEPTH,
+            base_call_depth: MAX_CALL_DEPTH,
             max_memory_limit: isize::MAX,
         }
     }
