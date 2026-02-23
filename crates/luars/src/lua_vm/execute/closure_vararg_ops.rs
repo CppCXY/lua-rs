@@ -280,18 +280,34 @@ pub fn exec_setlist(
     let table_val = lua_state.stack_mut()[base + a];
     let mut is_collectable = false;
     if let Some(table) = table_val.as_table_mut() {
-        // Direct pointer access - no object_pool needed
         unsafe {
             let stack_ptr = lua_state.stack_mut().as_mut_ptr();
+            let impl_table = &mut table.impl_table;
 
-            // Set elements: table[vc+i] = R[A+i] for i=1..vb
-            for i in 1..=vb {
-                let val = *stack_ptr.add(base + a + i);
-                if val.iscollectable() {
-                    is_collectable = true;
+            // Fast path: all indices fit in the pre-allocated array.
+            // NewTable already allocated the array with the right size,
+            // so for the common case ({1,2,3,4,5}) we can write directly
+            // without bounds checks or set_int's push/rehash logic.
+            let last_index = (vc + vb) as i64;
+            if last_index >= 1 && last_index <= impl_table.asize as i64 {
+                for i in 1..=vb {
+                    let val = *stack_ptr.add(base + a + i);
+                    if val.iscollectable() {
+                        is_collectable = true;
+                    }
+                    let lua_idx = (vc + i) as i64;
+                    impl_table.write_array(lua_idx, val);
                 }
-                let index = (vc + i) as i64;
-                table.raw_seti(index, val);
+            } else {
+                // Slow path: some indices outside array, use full set_int
+                for i in 1..=vb {
+                    let val = *stack_ptr.add(base + a + i);
+                    if val.iscollectable() {
+                        is_collectable = true;
+                    }
+                    let index = (vc + i) as i64;
+                    table.raw_seti(index, val);
+                }
             }
         }
 

@@ -954,13 +954,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let stack = lua_state.stack_mut();
                     stack[base + a] = value;
 
+                    // Lua 5.5's OP_NEWTABLE: lower top to ra+1 then checkGC,
+                    // so the GC only scans up to the table (excludes stale
+                    // registers above). Then restore top to ci->top.
+                    // Use set_top_raw: stack was already grown by push_lua_frame.
                     let new_top = base + a + 1;
                     save_pc!();
-                    lua_state.set_top(new_top)?;
+                    lua_state.set_top_raw(new_top);
                     lua_state.check_gc()?;
-
                     let frame_top = lua_state.get_call_info(frame_idx).top;
-                    lua_state.set_top(frame_top)?;
+                    lua_state.set_top_raw(frame_top);
                 }
                 OpCode::GetTable => {
                     // GETTABLE: R[A] := R[B][R[C]]
@@ -1067,7 +1070,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::SetTable => {
                     // SETTABLE: R[A][R[B]] := RK(C)
-                    // HOT PATH: inline no-metatable fast path
+                    // HOT PATH: inline fast path for integer keys + no-metatable
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
@@ -1078,22 +1081,52 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = stack[base + b];
                     let val = if k { constants[c] } else { stack[base + c] };
 
-                    if let Some(table) = ra.as_table() {
-                        if !table.has_metatable() {
-                            // Validate key — nil and NaN are not valid table keys
+                    if let Some(table_ref) = ra.as_table_mut() {
+                        if !table_ref.has_metatable() {
+                            // No metatable: try integer fast path first (t[i] = v)
+                            if rb.ttisinteger() {
+                                if table_ref.impl_table.fast_seti(rb.ivalue(), val) {
+                                    // GC write barrier
+                                    if val.is_collectable()
+                                        && let Some(gc_ptr) = ra.as_gc_ptr()
+                                    {
+                                        lua_state.gc_barrier_back(gc_ptr);
+                                    }
+                                    continue;
+                                }
+                                // Key outside array — skip redundant fast_seti in set_int
+                                table_ref.impl_table.set_int_slow(rb.ivalue(), val);
+                                if val.is_collectable()
+                                    && let Some(gc_ptr) = ra.as_gc_ptr()
+                                {
+                                    lua_state.gc_barrier_back(gc_ptr);
+                                }
+                                continue;
+                            }
+                            // Non-integer key: validate then raw_set
                             if rb.is_nil() {
                                 return Err(lua_state.error("table index is nil".to_string()));
                             }
                             if rb.ttisfloat() && rb.fltvalue().is_nan() {
                                 return Err(lua_state.error("table index is NaN".to_string()));
                             }
-                            // No metatable — direct set, no __newindex check needed
                             lua_state.raw_set(&ra, rb, val);
                             continue;
                         }
-                        // Has metatable: if key already exists with non-nil value,
-                        // __newindex is NOT consulted (Lua semantics)
-                        if let Some(existing) = table.impl_table.raw_get(&rb)
+                        // Has metatable: if integer key with existing non-nil value
+                        // in array, __newindex is NOT consulted
+                        if rb.ttisinteger()
+                            && table_ref.impl_table.fast_seti_existing(rb.ivalue(), val)
+                        {
+                            if val.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
+                        }
+                        // Generic non-integer existing key check
+                        if let Some(existing) = table_ref.impl_table.raw_get(&rb)
                             && !existing.is_nil()
                         {
                             lua_state.raw_set(&ra, rb, val);
@@ -1122,32 +1155,41 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Without metatable: any in-range array write is fine.
                     // With metatable: only overwrite existing non-nil values
                     // (nil slots require __newindex check).
-                    let fast_path_ok = if let Some(table_ref) = ra.as_table_mut() {
+                    if let Some(table_ref) = ra.as_table_mut() {
                         if !table_ref.has_metatable() {
-                            table_ref.impl_table.fast_seti(b as i64, value)
-                        } else {
-                            table_ref.impl_table.fast_seti_existing(b as i64, value)
+                            if table_ref.impl_table.fast_seti(b as i64, value) {
+                                // GC write barrier
+                                if value.is_collectable()
+                                    && let Some(gc_ptr) = ra.as_gc_ptr()
+                                {
+                                    lua_state.gc_barrier_back(gc_ptr);
+                                }
+                                continue;
+                            }
+                            // No metatable: use set_int_slow (skip redundant fast_seti)
+                            table_ref.impl_table.set_int_slow(b as i64, value);
+                            if value.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
                         }
-                    } else {
-                        false
-                    };
-
-                    if fast_path_ok {
-                        // GC write barrier: if the table (BLACK) now references
-                        // a new WHITE value, the GC must be notified.
-                        if value.is_collectable()
-                            && let Some(gc_ptr) = ra.as_gc_ptr()
-                        {
-                            lua_state.gc_barrier_back(gc_ptr);
+                        if table_ref.impl_table.fast_seti_existing(b as i64, value) {
+                            // GC write barrier
+                            if value.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
                         }
-                    } else {
-                        // Slow path: metamethod or hash part
-                        save_pc!();
-                        table_ops::exec_seti(
-                            lua_state, instr, constants, base, frame_idx, &mut pc,
-                        )?;
-                        restore_state!();
                     }
+
+                    // Slow path: metamethod or non-table
+                    save_pc!();
+                    table_ops::exec_seti(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                    restore_state!();
                 }
                 OpCode::SetField => {
                     // SETFIELD: R[A][K[B]:string] := RK(C)

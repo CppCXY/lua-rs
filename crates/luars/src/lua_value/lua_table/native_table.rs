@@ -232,7 +232,7 @@ impl NativeTable {
 
     /// Write value to array at Lua index (1-based)
     #[inline(always)]
-    unsafe fn write_array(&mut self, lua_index: i64, luaval: LuaValue) {
+    pub unsafe fn write_array(&mut self, lua_index: i64, luaval: LuaValue) {
         if lua_index < 1 || lua_index > self.asize as i64 {
             return;
         }
@@ -314,25 +314,16 @@ impl NativeTable {
         // Set array pointer to point at lenhint position
         let new_array = unsafe { start_ptr.add(values_size) };
 
-        // Initialize lenhint
+        // Initialize lenhint to 0
         unsafe {
             *(new_array as *mut u32) = 0;
         }
 
-        // Initialize all tags to nil
+        // Initialize all tags to LUA_VNIL (0) and all values to 0 — single memset
+        // Since tags are at new_array+4 and values at start_ptr, and LUA_VNIL == 0,
+        // we can zero the entire allocation in one shot.
         unsafe {
-            let tags_start = new_array.add(lenhint_size);
-            for i in 0..new_size as usize {
-                *tags_start.add(i) = LUA_VNIL;
-            }
-        }
-
-        // Initialize all values to zero
-        unsafe {
-            let values_start = start_ptr as *mut Value;
-            for i in 0..new_size as usize {
-                ptr::write(values_start.add(i), Value { i: 0 });
-            }
+            ptr::write_bytes(start_ptr, 0, total_size);
         }
 
         // Copy old data if exists
@@ -793,10 +784,19 @@ impl NativeTable {
             return;
         }
 
+        self.set_int_slow(key, value);
+    }
+
+    /// Slow path of set_int — called when fast_seti already failed.
+    /// Handles resize/push and hash fallback.
+    #[inline(always)]
+    pub fn set_int_slow(&mut self, key: i64, value: LuaValue) {
         // Key outside array range: push optimization for sequential insertion
         if key >= 1 && !value.is_nil() {
-            let current_len = self.len() as i64;
-            if key == current_len + 1 {
+            // Fast check: key == asize + 1 means appending right after array end.
+            // This covers the vast majority of sequential push cases (t[i] = i in a loop).
+            let asize = self.asize as i64;
+            if key == asize + 1 || (key > asize && key == self.len() as i64 + 1) {
                 // This is a push operation, expand array
                 let new_size = ((key as u32).next_power_of_two()).max(4);
                 self.resize_array(new_size);
@@ -807,7 +807,10 @@ impl NativeTable {
                 // fit in the new array range. Without this, keys already in hash
                 // (e.g., r[3]=true; r[5]=true; r[1]=true) would become invisible
                 // to raw_get since it checks array first for in-range keys.
-                self.migrate_hash_int_keys_to_array();
+                // Skip when hash is empty (common case for sequential insertion).
+                if !self.node.is_null() {
+                    self.migrate_hash_int_keys_to_array();
+                }
                 return;
             }
         }
