@@ -352,13 +352,40 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
 
     // Format the absolute number using itoa (no heap allocation)
     let mut itoa_buf = itoa::Buffer::new();
-    let mut num_str = itoa_buf.format(abs_num).to_string();
+    let num_str = itoa_buf.format(abs_num);
 
-    // Apply precision (minimum digits)
+    // Apply precision (minimum digits) — needs owned buffer only if formatting needed
     if let Some(prec) = precision {
         if num_str.len() < prec {
+            // Need to prepend zeros — use a small stack buffer
             let padding = prec - num_str.len();
-            num_str.insert_str(0, &"0".repeat(padding));
+            let sign = if is_negative {
+                "-"
+            } else if plus_sign {
+                "+"
+            } else {
+                ""
+            };
+            let total_len = sign.len() + prec;
+            if width > total_len {
+                let w_padding = width - total_len;
+                if left_align {
+                    buf.push_str(sign);
+                    buf.extend(std::iter::repeat_n('0', padding));
+                    buf.push_str(num_str);
+                    buf.extend(std::iter::repeat_n(' ', w_padding));
+                } else {
+                    buf.extend(std::iter::repeat_n(' ', w_padding));
+                    buf.push_str(sign);
+                    buf.extend(std::iter::repeat_n('0', padding));
+                    buf.push_str(num_str);
+                }
+            } else {
+                buf.push_str(sign);
+                buf.extend(std::iter::repeat_n('0', padding));
+                buf.push_str(num_str);
+            }
+            return Ok(());
         }
         zero_pad = false; // Precision overrides zero-padding
     }
@@ -378,20 +405,20 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
         let padding = width - total_len;
         if left_align {
             buf.push_str(sign);
-            buf.push_str(&num_str);
+            buf.push_str(num_str);
             buf.extend(std::iter::repeat_n(' ', padding));
         } else if zero_pad {
             buf.push_str(sign);
             buf.extend(std::iter::repeat_n('0', padding));
-            buf.push_str(&num_str);
+            buf.push_str(num_str);
         } else {
             buf.extend(std::iter::repeat_n(' ', padding));
             buf.push_str(sign);
-            buf.push_str(&num_str);
+            buf.push_str(num_str);
         }
     } else {
         buf.push_str(sign);
-        buf.push_str(&num_str);
+        buf.push_str(num_str);
     }
 
     Ok(())
@@ -966,6 +993,27 @@ fn format_auto(
 
 #[inline]
 fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+    // Fast path: no flags (most common: bare %s)
+    if flags.is_empty() {
+        if let Some(s) = arg.as_str() {
+            buf.push_str(s);
+            return Ok(());
+        }
+        if let Some(n) = arg.as_integer() {
+            let mut itoa_buf = itoa::Buffer::new();
+            buf.push_str(itoa_buf.format(n));
+            return Ok(());
+        }
+        if let Some(n) = arg.as_number() {
+            write!(buf, "{}", n).unwrap();
+            return Ok(());
+        }
+        let s_content = l.to_string(arg)?;
+        buf.push_str(&s_content);
+        return Ok(());
+    }
+
+    // Slow path: has width/precision modifiers
     let s_content = if let Some(s) = arg.as_str() {
         s.to_string()
     } else if let Some(n) = arg.as_integer() {

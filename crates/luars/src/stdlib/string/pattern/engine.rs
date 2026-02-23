@@ -8,6 +8,23 @@
 use super::class::{element_end, singlematch};
 use crate::lua_vm::lua_limits::{LUA_MAXCAPTURES, MAXCCALLS_PATTERN};
 
+/// Byte offset map: ASCII identity (c2b[i]=i) or precomputed map
+#[derive(Clone, Copy)]
+pub enum ByteMap<'a> {
+    Ascii,
+    Map(&'a [usize]),
+}
+
+impl ByteMap<'_> {
+    #[inline(always)]
+    pub fn get(&self, i: usize) -> usize {
+        match self {
+            ByteMap::Ascii => i,
+            ByteMap::Map(m) => m[i],
+        }
+    }
+}
+
 /// Recursion limit to prevent stack overflow
 /// Validate a pattern for common syntax errors before matching.
 /// Returns Ok(()) if valid, Err(message) if malformed.
@@ -119,13 +136,13 @@ pub struct MatchState<'a> {
     pub captures: [Capture; LUA_MAXCAPTURES],
     pub num_captures: usize,
     pub depth: usize, // recursion counter
-    // byte offsets for each char (text_bytes[i] = byte offset of text[i], text_bytes[len] = total bytes)
-    pub text_bytes: &'a [usize],
+    // byte offsets for each char: ASCII identity or precomputed map
+    pub text_bytes: ByteMap<'a>,
     pub error: Option<String>, // error message if matching fails with a hard error
 }
 
 impl<'a> MatchState<'a> {
-    pub fn new(text: &'a [char], pat: &'a [char], text_bytes: &'a [usize]) -> Self {
+    pub fn new(text: &'a [char], pat: &'a [char], text_bytes: ByteMap<'a>) -> Self {
         Self {
             text,
             pat,
@@ -453,8 +470,8 @@ fn match_backref(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
 /// A capture value returned to callers
 #[derive(Debug, Clone)]
 pub enum CaptureValue {
-    String(String),
-    Position(usize), // 1-based byte position
+    Substring(usize, usize), // byte start, byte end in source text
+    Position(usize),         // 1-based byte position
 }
 
 /// Information about a single match
@@ -512,17 +529,18 @@ fn check_captures(ms: &MatchState) -> Result<(), String> {
 
 /// Extract captures from MatchState into CaptureValue vec
 fn extract_captures(ms: &MatchState) -> Vec<CaptureValue> {
-    let mut caps = Vec::new();
+    let mut caps = Vec::with_capacity(ms.num_captures);
     for i in 0..ms.num_captures {
         let cap = &ms.captures[i];
         match cap.len {
             CaptureLen::Position => {
                 // 1-based byte position
-                caps.push(CaptureValue::Position(ms.text_bytes[cap.start] + 1));
+                caps.push(CaptureValue::Position(ms.text_bytes.get(cap.start) + 1));
             }
             CaptureLen::Len(len) => {
-                let s: String = ms.text[cap.start..cap.start + len].iter().collect();
-                caps.push(CaptureValue::String(s));
+                let byte_start = ms.text_bytes.get(cap.start);
+                let byte_end = ms.text_bytes.get(cap.start + len);
+                caps.push(CaptureValue::Substring(byte_start, byte_end));
             }
             CaptureLen::Unfinished => {
                 // shouldn't happen after check_captures, but handle gracefully
@@ -534,6 +552,7 @@ fn extract_captures(ms: &MatchState) -> Vec<CaptureValue> {
 
 /// Find pattern in text. `init` is a 0-based byte offset.
 /// Returns `(byte_start, byte_end, captures)`.
+/// OPTIMIZED: stack buffers for small ASCII strings, ByteMap for c2b
 pub fn find(
     text: &str,
     pat_str: &str,
@@ -543,11 +562,50 @@ pub fn find(
         return Ok(None);
     }
 
-    let text_chars = text_to_chars(text);
-    let pat_chars = text_to_chars(pat_str);
-    validate_pattern(&pat_chars)?;
-    let c2b = char_to_byte_map(text);
-    let init_ci = byte_to_char_index(text, init);
+    let text_is_ascii = text.is_ascii();
+
+    // Text chars: stack buffer for small ASCII, heap for others
+    let text_heap: Vec<char>;
+    let mut text_stack = ['\0'; 256];
+    let text_chars: &[char] = if text_is_ascii && text.len() <= 256 {
+        for (i, &b) in text.as_bytes().iter().enumerate() {
+            text_stack[i] = b as char;
+        }
+        &text_stack[..text.len()]
+    } else {
+        text_heap = text_to_chars(text);
+        &text_heap
+    };
+
+    // Pattern chars: stack buffer for small ASCII, heap for others
+    let pat_heap: Vec<char>;
+    let mut pat_stack = ['\0'; 64];
+    let pat_chars: &[char] = if pat_str.is_ascii() && pat_str.len() <= 64 {
+        for (i, &b) in pat_str.as_bytes().iter().enumerate() {
+            pat_stack[i] = b as char;
+        }
+        &pat_stack[..pat_str.len()]
+    } else {
+        pat_heap = text_to_chars(pat_str);
+        &pat_heap
+    };
+
+    validate_pattern(pat_chars)?;
+
+    // Byte map: ASCII identity or precomputed
+    let c2b_vec: Vec<usize>;
+    let byte_map = if text_is_ascii {
+        ByteMap::Ascii
+    } else {
+        c2b_vec = char_to_byte_map(text);
+        ByteMap::Map(&c2b_vec)
+    };
+
+    let init_ci = if text_is_ascii {
+        init
+    } else {
+        byte_to_char_index(text, init)
+    };
 
     let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
         1
@@ -556,16 +614,20 @@ pub fn find(
     };
     let anchored = pp_start == 1;
 
-    let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
+    let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
     let mut si = init_ci;
     loop {
         ms.reset();
         if let Some(end_ci) = match_impl(&mut ms, si, pp_start) {
             check_captures(&ms)?;
             let caps = extract_captures(&ms);
-            return Ok(Some((c2b[si], c2b[end_ci], caps)));
+            return Ok(Some((
+                ms.text_bytes.get(si),
+                ms.text_bytes.get(end_ci),
+                caps,
+            )));
         }
-        if let Some(err) = ms.error {
+        if let Some(err) = ms.error.take() {
             return Err(err);
         }
         if anchored || si >= text_chars.len() {
@@ -576,15 +638,48 @@ pub fn find(
 }
 
 /// Find all matches of pattern in text (for gmatch/gsub).
+/// OPTIMIZED: stack buffers for small ASCII strings, ByteMap for c2b
 pub fn find_all_matches(
     text: &str,
     pat_str: &str,
+    init: usize,
     max: Option<usize>,
 ) -> Result<Vec<MatchInfo>, String> {
-    let text_chars = text_to_chars(text);
-    let pat_chars = text_to_chars(pat_str);
-    validate_pattern(&pat_chars)?;
-    let c2b = char_to_byte_map(text);
+    let text_is_ascii = text.is_ascii();
+
+    let text_heap: Vec<char>;
+    let mut text_stack = ['\0'; 256];
+    let text_chars: &[char] = if text_is_ascii && text.len() <= 256 {
+        for (i, &b) in text.as_bytes().iter().enumerate() {
+            text_stack[i] = b as char;
+        }
+        &text_stack[..text.len()]
+    } else {
+        text_heap = text_to_chars(text);
+        &text_heap
+    };
+
+    let pat_heap: Vec<char>;
+    let mut pat_stack = ['\0'; 64];
+    let pat_chars: &[char] = if pat_str.is_ascii() && pat_str.len() <= 64 {
+        for (i, &b) in pat_str.as_bytes().iter().enumerate() {
+            pat_stack[i] = b as char;
+        }
+        &pat_stack[..pat_str.len()]
+    } else {
+        pat_heap = text_to_chars(pat_str);
+        &pat_heap
+    };
+
+    validate_pattern(pat_chars)?;
+
+    let c2b_vec: Vec<usize>;
+    let byte_map = if text_is_ascii {
+        ByteMap::Ascii
+    } else {
+        c2b_vec = char_to_byte_map(text);
+        ByteMap::Map(&c2b_vec)
+    };
 
     let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
         1
@@ -594,8 +689,13 @@ pub fn find_all_matches(
     let anchored = pp_start == 1;
 
     let mut matches = Vec::new();
-    let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
-    let mut si = 0usize;
+    let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
+    let init_ci = if text_is_ascii {
+        init
+    } else {
+        byte_to_char_index(text, init)
+    };
+    let mut si = init_ci;
     let mut last_was_nonempty = false;
 
     while si <= text_chars.len() {
@@ -621,8 +721,8 @@ pub fn find_all_matches(
 
             let caps = extract_captures(&ms);
             matches.push(MatchInfo {
-                start: c2b[si],
-                end: c2b[end_ci],
+                start: ms.text_bytes.get(si),
+                end: ms.text_bytes.get(end_ci),
                 captures: caps,
             });
 
@@ -638,7 +738,7 @@ pub fn find_all_matches(
                 last_was_nonempty = true;
             }
         } else {
-            if let Some(err) = ms.error {
+            if let Some(err) = ms.error.take() {
                 return Err(err);
             }
             if anchored || si >= text_chars.len() {
@@ -653,16 +753,48 @@ pub fn find_all_matches(
 }
 
 /// Global substitution with string replacement.
+/// OPTIMIZED: stack buffers, ByteMap, pass text to substitute_captures
 pub fn gsub(
     text: &str,
     pat_str: &str,
     replacement: &str,
     max: Option<usize>,
 ) -> Result<(String, usize), String> {
-    let text_chars = text_to_chars(text);
-    let pat_chars = text_to_chars(pat_str);
-    validate_pattern(&pat_chars)?;
-    let c2b = char_to_byte_map(text);
+    let text_is_ascii = text.is_ascii();
+
+    let text_heap: Vec<char>;
+    let mut text_stack = ['\0'; 256];
+    let text_chars: &[char] = if text_is_ascii && text.len() <= 256 {
+        for (i, &b) in text.as_bytes().iter().enumerate() {
+            text_stack[i] = b as char;
+        }
+        &text_stack[..text.len()]
+    } else {
+        text_heap = text_to_chars(text);
+        &text_heap
+    };
+
+    let pat_heap: Vec<char>;
+    let mut pat_stack = ['\0'; 64];
+    let pat_chars: &[char] = if pat_str.is_ascii() && pat_str.len() <= 64 {
+        for (i, &b) in pat_str.as_bytes().iter().enumerate() {
+            pat_stack[i] = b as char;
+        }
+        &pat_stack[..pat_str.len()]
+    } else {
+        pat_heap = text_to_chars(pat_str);
+        &pat_heap
+    };
+
+    validate_pattern(pat_chars)?;
+
+    let c2b_vec: Vec<usize>;
+    let byte_map = if text_is_ascii {
+        ByteMap::Ascii
+    } else {
+        c2b_vec = char_to_byte_map(text);
+        ByteMap::Map(&c2b_vec)
+    };
 
     let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
         1
@@ -674,7 +806,7 @@ pub fn gsub(
 
     let mut result = String::new();
     let mut count = 0usize;
-    let mut ms = MatchState::new(&text_chars, &pat_chars, &c2b);
+    let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
     let mut si = 0usize;
     let mut last_was_nonempty = false;
     // Track last byte position for copying unmatched text
@@ -695,7 +827,7 @@ pub fn gsub(
             if is_empty && last_was_nonempty {
                 if si < text_chars.len() {
                     result.push(text_chars[si]);
-                    last_byte_end = c2b[si + 1];
+                    last_byte_end = ms.text_bytes.get(si + 1);
                 }
                 si += 1;
                 last_was_nonempty = false;
@@ -703,15 +835,15 @@ pub fn gsub(
             }
 
             // Copy text between last match end and this match start
-            let match_byte_start = c2b[si];
-            let match_byte_end = c2b[end_ci];
+            let match_byte_start = ms.text_bytes.get(si);
+            let match_byte_end = ms.text_bytes.get(end_ci);
             result.push_str(&text[last_byte_end..match_byte_start]);
 
             count += 1;
 
             if needs_substitution {
                 let matched_text = &text[match_byte_start..match_byte_end];
-                let replaced = substitute_captures(replacement, matched_text, &ms)?;
+                let replaced = substitute_captures(replacement, matched_text, text, &ms)?;
                 result.push_str(&replaced);
             } else {
                 result.push_str(replacement);
@@ -722,7 +854,7 @@ pub fn gsub(
             if is_empty {
                 if si < text_chars.len() {
                     result.push(text_chars[si]);
-                    last_byte_end = c2b[si + 1];
+                    last_byte_end = ms.text_bytes.get(si + 1);
                 }
                 si += 1;
                 last_was_nonempty = false;
@@ -731,7 +863,7 @@ pub fn gsub(
                 last_was_nonempty = true;
             }
         } else {
-            if let Some(err) = ms.error {
+            if let Some(err) = ms.error.take() {
                 return Err(err);
             }
             if anchored || si >= text_chars.len() {
@@ -749,36 +881,39 @@ pub fn gsub(
 }
 
 /// Substitute %0-%9 and %% in replacement string using MatchState captures
+/// OPTIMIZED: work on bytes instead of Vec<char>, use byte ranges from source text
 fn substitute_captures(
     replacement: &str,
     full_match: &str,
+    text: &str,
     ms: &MatchState,
 ) -> Result<String, String> {
     let mut result = String::new();
-    let repl_chars: Vec<char> = replacement.chars().collect();
+    let repl = replacement.as_bytes();
     let mut i = 0;
 
-    while i < repl_chars.len() {
-        if repl_chars[i] == '%' {
-            if i + 1 < repl_chars.len() {
-                let next = repl_chars[i + 1];
-                if next == '%' {
+    while i < repl.len() {
+        if repl[i] == b'%' {
+            if i + 1 < repl.len() {
+                let next = repl[i + 1];
+                if next == b'%' {
                     result.push('%');
                     i += 2;
                 } else if next.is_ascii_digit() {
-                    let n = (next as u8 - b'0') as usize;
+                    let n = (next - b'0') as usize;
                     if n == 0 {
                         result.push_str(full_match);
                     } else if n <= ms.num_captures {
                         let cap = &ms.captures[n - 1];
                         match cap.len {
                             CaptureLen::Len(len) => {
-                                let s: String =
-                                    ms.text[cap.start..cap.start + len].iter().collect();
-                                result.push_str(&s);
+                                let byte_start = ms.text_bytes.get(cap.start);
+                                let byte_end = ms.text_bytes.get(cap.start + len);
+                                result.push_str(&text[byte_start..byte_end]);
                             }
                             CaptureLen::Position => {
-                                result.push_str(&(ms.text_bytes[cap.start] + 1).to_string());
+                                use std::fmt::Write;
+                                write!(result, "{}", ms.text_bytes.get(cap.start) + 1).unwrap();
                             }
                             CaptureLen::Unfinished => {}
                         }
@@ -797,8 +932,12 @@ fn substitute_captures(
                 i += 1;
             }
         } else {
-            result.push(repl_chars[i]);
-            i += 1;
+            // Find next '%' and push the whole segment at once
+            let start = i;
+            while i < repl.len() && repl[i] != b'%' {
+                i += 1;
+            }
+            result.push_str(&replacement[start..i]);
         }
     }
 
