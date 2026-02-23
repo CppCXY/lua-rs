@@ -9,13 +9,14 @@
 use luars::lua_vm::{LuaVM, SafeOption};
 use luars::{LuaResult, LuaUserData, LuaUserdata, Stdlib, lua_methods};
 use std::fmt;
+use std::ops;
 
 // ---------------------------------------------------------------------------
 // Example 1: Vec2 — 2D vector
 // ---------------------------------------------------------------------------
 
-#[derive(LuaUserData, PartialEq, PartialOrd)]
-#[lua_impl(Display, PartialEq)]
+#[derive(LuaUserData, Clone, PartialEq, PartialOrd)]
+#[lua_impl(Display, PartialEq, Add, Sub, Neg)]
 struct Vec2 {
     pub x: f64,
     pub y: f64,
@@ -24,6 +25,36 @@ struct Vec2 {
 impl fmt::Display for Vec2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Vec2({}, {})", self.x, self.y)
+    }
+}
+
+impl ops::Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
+    }
+}
+
+impl ops::Sub for Vec2 {
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
+    }
+}
+
+impl ops::Neg for Vec2 {
+    type Output = Vec2;
+    fn neg(self) -> Vec2 {
+        Vec2 {
+            x: -self.x,
+            y: -self.y,
+        }
     }
 }
 
@@ -251,6 +282,27 @@ fn example_vec2() -> LuaResult<()> {
         local b = Vec2.new(1, 2)
         print("a == b:", a == b)              -- true
 
+        -- Arithmetic operators (via __add, __sub, __unm metamethods)
+        local v1 = Vec2.new(1, 2)
+        local v2 = Vec2.new(3, 4)
+
+        local sum = v1 + v2
+        print("v1 + v2 =", tostring(sum))    -- Vec2(4, 6)
+        assert(sum.x == 4 and sum.y == 6)
+
+        local diff = v2 - v1
+        print("v2 - v1 =", tostring(diff))   -- Vec2(2, 2)
+        assert(diff.x == 2 and diff.y == 2)
+
+        local neg = -v1
+        print("-v1 =", tostring(neg))         -- Vec2(-1, -2)
+        assert(neg.x == -1 and neg.y == -2)
+
+        -- Chained arithmetic
+        local result = (v1 + v2) - Vec2.new(1, 1)
+        print("(v1+v2) - (1,1) =", tostring(result))  -- Vec2(3, 5)
+        assert(result.x == 3 and result.y == 5)
+
         return v.x
     "#,
     )?;
@@ -433,7 +485,10 @@ fn example_borrowed_ref() -> LuaResult<()> {
     // A Rust-owned object that we want to share with Lua temporarily
     let mut player_pos = Vec2 { x: 100.0, y: 200.0 };
 
-    println!("Before Lua: player_pos = ({}, {})", player_pos.x, player_pos.y);
+    println!(
+        "Before Lua: player_pos = ({}, {})",
+        player_pos.x, player_pos.y
+    );
 
     {
         let state = vm.main_state();
@@ -456,7 +511,10 @@ fn example_borrowed_ref() -> LuaResult<()> {
     }
 
     // Back in Rust — mutations from Lua are visible!
-    println!("After Lua:  player_pos = ({}, {})", player_pos.x, player_pos.y);
+    println!(
+        "After Lua:  player_pos = ({}, {})",
+        player_pos.x, player_pos.y
+    );
     assert_eq!(player_pos.x, 300.0);
     assert_eq!(player_pos.y, 400.0);
 

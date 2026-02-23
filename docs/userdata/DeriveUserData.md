@@ -107,16 +107,37 @@ struct GameEntity {
 Use `#[lua_impl(...)]` to automatically map Rust standard traits to Lua metamethods:
 
 ```rust
-#[derive(LuaUserData, PartialEq, PartialOrd)]
-#[lua_impl(Display, PartialEq, PartialOrd)]
-struct Point {
+#[derive(LuaUserData, Clone, PartialEq, PartialOrd)]
+#[lua_impl(Display, PartialEq, PartialOrd, Add, Sub, Neg)]
+struct Vec2 {
     pub x: f64,
     pub y: f64,
 }
 
-impl std::fmt::Display for Point {
+impl std::fmt::Display for Vec2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Point({}, {})", self.x, self.y)
+        write!(f, "Vec2({}, {})", self.x, self.y)
+    }
+}
+
+impl std::ops::Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x + rhs.x, y: self.y + rhs.y }
+    }
+}
+
+impl std::ops::Sub for Vec2 {
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x - rhs.x, y: self.y - rhs.y }
+    }
+}
+
+impl std::ops::Neg for Vec2 {
+    type Output = Vec2;
+    fn neg(self) -> Vec2 {
+        Vec2 { x: -self.x, y: -self.y }
     }
 }
 ```
@@ -128,8 +149,19 @@ impl std::fmt::Display for Point {
 | `Display` | `__tostring` | `tostring(obj)` / `print(obj)` |
 | `PartialEq` | `__eq` | `obj1 == obj2` |
 | `PartialOrd` | `__lt` / `__le` | `obj1 < obj2` / `obj1 <= obj2` |
+| `Add` | `__add` | `obj1 + obj2` |
+| `Sub` | `__sub` | `obj1 - obj2` |
+| `Mul` | `__mul` | `obj1 * obj2` |
+| `Div` | `__div` | `obj1 / obj2` |
+| `Rem` | `__mod` | `obj1 % obj2` |
+| `Neg` | `__unm` | `-obj` |
 
-**Note:** You must derive the corresponding Rust trait on the struct (e.g. `PartialEq`) *and* list it in `#[lua_impl(...)]`.
+**Requirements for arithmetic operators:**
+- The struct must derive `Clone` (needed for the operation — originals are not consumed)
+- You must implement the corresponding `std::ops` trait (e.g. `impl Add for MyType`)
+- List the trait name in `#[lua_impl(...)]`
+
+**Note:** Arithmetic operators work on same-type operands (e.g. `Vec2 + Vec2`). The result is a new GC-managed userdata with full field access and method calls.
 
 ### Example: Object with Metamethods
 

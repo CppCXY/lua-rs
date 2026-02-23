@@ -415,6 +415,7 @@ fn try_bin_tm(
 
     // Try trait-based arithmetic for userdata
     if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
+        // Try p1's trait methods first
         let trait_result = if let Some(ud) = p1.as_userdata_mut() {
             let other = crate::lua_value::lua_value_to_udvalue(&p2);
             match tm_kind {
@@ -429,6 +430,24 @@ fn try_bin_tm(
             None
         };
         if let Some(udv) = trait_result {
+            return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
+        }
+        // If p1 didn't handle it, try p2's trait methods (mirroring Lua's
+        // convention: `3 + vec` tries vec's __add with the number as arg).
+        let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
+            let other = crate::lua_value::lua_value_to_udvalue(&p1);
+            match tm_kind {
+                TmKind::Add => ud.get_trait().lua_add(&other),
+                TmKind::Sub => ud.get_trait().lua_sub(&other),
+                TmKind::Mul => ud.get_trait().lua_mul(&other),
+                TmKind::Div => ud.get_trait().lua_div(&other),
+                TmKind::Mod => ud.get_trait().lua_mod(&other),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(udv) = trait_result2 {
             return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
         }
     }

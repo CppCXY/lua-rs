@@ -214,6 +214,17 @@ impl LuaUserdata {
         }
     }
 
+    /// Create a userdata from an already-boxed trait object.
+    ///
+    /// Used by the VM to convert `UdValue::UserdataOwned` results from
+    /// arithmetic trait methods into GC-managed userdata.
+    pub fn from_boxed(data: Box<dyn UserDataTrait>) -> Self {
+        LuaUserdata {
+            data,
+            metatable: TablePtr::null(),
+        }
+    }
+
     /// Create a borrowed userdata from a mutable reference.
     ///
     /// The resulting userdata forwards all field/method/metamethod access through

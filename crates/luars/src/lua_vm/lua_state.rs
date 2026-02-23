@@ -6,8 +6,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 use crate::lua_value::userdata_trait::UserDataTrait;
+use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
 };

@@ -856,3 +856,188 @@ fn test_enum_iteration_in_lua() {
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(3));
 }
+
+// ==================== Arithmetic operator tests ====================
+
+/// Test type for arithmetic operators
+#[derive(LuaUserData, Clone, PartialEq)]
+#[lua_impl(Display, PartialEq, Add, Sub, Mul, Neg)]
+struct Vec2 {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl fmt::Display for Vec2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Vec2({}, {})", self.x, self.y)
+    }
+}
+
+impl std::ops::Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
+    }
+}
+
+impl std::ops::Sub for Vec2 {
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
+    }
+}
+
+impl std::ops::Mul for Vec2 {
+    type Output = Vec2;
+    fn mul(self, rhs: Vec2) -> Vec2 {
+        Vec2 {
+            x: self.x * rhs.x,
+            y: self.y * rhs.y,
+        }
+    }
+}
+
+impl std::ops::Neg for Vec2 {
+    type Output = Vec2;
+    fn neg(self) -> Vec2 {
+        Vec2 {
+            x: -self.x,
+            y: -self.y,
+        }
+    }
+}
+
+#[lua_methods]
+impl Vec2 {
+    pub fn new(x: f64, y: f64) -> Self {
+        Vec2 { x, y }
+    }
+}
+
+#[test]
+fn test_userdata_add() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Vec2>("Vec2").unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local a = Vec2.new(1, 2)
+        local b = Vec2.new(3, 4)
+        local c = a + b
+        return c.x, c.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_number(), Some(4.0));
+    assert_eq!(results[1].as_number(), Some(6.0));
+}
+
+#[test]
+fn test_userdata_sub() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Vec2>("Vec2").unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local a = Vec2.new(5, 7)
+        local b = Vec2.new(2, 3)
+        local c = a - b
+        return c.x, c.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_number(), Some(3.0));
+    assert_eq!(results[1].as_number(), Some(4.0));
+}
+
+#[test]
+fn test_userdata_mul() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Vec2>("Vec2").unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local a = Vec2.new(2, 3)
+        local b = Vec2.new(4, 5)
+        local c = a * b
+        return c.x, c.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_number(), Some(8.0));
+    assert_eq!(results[1].as_number(), Some(15.0));
+}
+
+#[test]
+fn test_userdata_neg() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Vec2>("Vec2").unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local a = Vec2.new(3, -4)
+        local b = -a
+        return b.x, b.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_number(), Some(-3.0));
+    assert_eq!(results[1].as_number(), Some(4.0));
+}
+
+#[test]
+fn test_userdata_chained_arithmetic() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Vec2>("Vec2").unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local a = Vec2.new(1, 2)
+        local b = Vec2.new(3, 4)
+        local c = Vec2.new(10, 10)
+        local d = (a + b) - c
+        return d.x, d.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_number(), Some(-6.0));
+    assert_eq!(results[1].as_number(), Some(-4.0));
+}
+
+#[test]
+fn test_userdata_arithmetic_preserves_type() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Vec2>("Vec2").unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local a = Vec2.new(1, 2)
+        local b = Vec2.new(3, 4)
+        local c = a + b
+        -- Result should be a full userdata with field access and tostring
+        return tostring(c), c.x, c.y
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_str(), Some("Vec2(4, 6)"));
+    assert_eq!(results[1].as_number(), Some(4.0));
+    assert_eq!(results[2].as_number(), Some(6.0));
+}

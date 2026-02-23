@@ -129,7 +129,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     let field_name_strs: Vec<&String> = field_infos.iter().map(|f| &f.lua_name).collect();
 
     // Generate metamethod impls based on #[lua_impl(...)]
-    let (tostring_impl, eq_impl, ord_impl) = gen_metamethods(name, &trait_impls);
+    let metamethod_impls = gen_metamethods(name, &trait_impls);
 
     let type_name_str = name.to_string();
 
@@ -161,9 +161,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
                 &[#(#field_name_strs),*]
             }
 
-            #tostring_impl
-            #eq_impl
-            #ord_impl
+            #metamethod_impls
 
             fn as_any(&self) -> &dyn std::any::Any {
                 self
@@ -201,36 +199,41 @@ fn parse_lua_impl_attrs(input: &DeriveInput) -> Vec<String> {
 // ==================== Metamethod generation ====================
 
 /// Generate metamethod implementations from #[lua_impl(...)] traits.
-fn gen_metamethods(
-    name: &Ident,
-    trait_impls: &[String],
-) -> (
-    proc_macro2::TokenStream,
-    proc_macro2::TokenStream,
-    proc_macro2::TokenStream,
-) {
-    let tostring_impl = if trait_impls.contains(&"Display".to_string()) {
-        quote! {
+///
+/// Supported traits:
+/// - `Display`    → `lua_tostring`
+/// - `PartialEq`  → `lua_eq`
+/// - `PartialOrd`  → `lua_lt`, `lua_le`
+/// - `Add`        → `lua_add`  (same-type addition via `std::ops::Add`)
+/// - `Sub`        → `lua_sub`  (same-type subtraction via `std::ops::Sub`)
+/// - `Mul`        → `lua_mul`  (same-type multiplication via `std::ops::Mul`)
+/// - `Div`        → `lua_div`  (same-type division via `std::ops::Div`)
+/// - `Rem`        → `lua_mod`  (same-type modulo via `std::ops::Rem`)
+/// - `Neg`        → `lua_unm`  (unary negation via `std::ops::Neg`)
+fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenStream {
+    let mut methods = Vec::new();
+
+    // Display → lua_tostring
+    if trait_impls.contains(&"Display".to_string()) {
+        methods.push(quote! {
             fn lua_tostring(&self) -> Option<String> {
                 Some(format!("{}", self))
             }
-        }
-    } else {
-        quote! {}
-    };
+        });
+    }
 
-    let eq_impl = if trait_impls.contains(&"PartialEq".to_string()) {
-        quote! {
+    // PartialEq → lua_eq
+    if trait_impls.contains(&"PartialEq".to_string()) {
+        methods.push(quote! {
             fn lua_eq(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
                 other.as_any().downcast_ref::<#name>().map(|o| self == o)
             }
-        }
-    } else {
-        quote! {}
-    };
+        });
+    }
 
-    let ord_impl = if trait_impls.contains(&"PartialOrd".to_string()) {
-        quote! {
+    // PartialOrd → lua_lt, lua_le
+    if trait_impls.contains(&"PartialOrd".to_string()) {
+        methods.push(quote! {
             fn lua_lt(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
                 other.as_any().downcast_ref::<#name>()
                     .and_then(|o| self.partial_cmp(o))
@@ -241,12 +244,56 @@ fn gen_metamethods(
                     .and_then(|o| self.partial_cmp(o))
                     .map(|c| c != std::cmp::Ordering::Greater)
             }
-        }
-    } else {
-        quote! {}
-    };
+        });
+    }
 
-    (tostring_impl, eq_impl, ord_impl)
+    // Binary arithmetic operators: Add, Sub, Mul, Div, Rem
+    // Each generates a lua_XXX method that downcasts the other operand
+    // to the same type, performs the Rust operation, and returns the result
+    // as UdValue::UserdataOwned.
+    let binop_mapping: &[(&str, &str)] = &[
+        ("Add", "lua_add"),
+        ("Sub", "lua_sub"),
+        ("Mul", "lua_mul"),
+        ("Div", "lua_div"),
+        ("Rem", "lua_mod"),
+    ];
+
+    for (trait_name, method_name) in binop_mapping {
+        if trait_impls.contains(&trait_name.to_string()) {
+            let method_ident = syn::Ident::new(method_name, name.span());
+            // We need the specific op trait path
+            let op_expr = match *trait_name {
+                "Add" => quote! { std::ops::Add::add(self.clone(), o.clone()) },
+                "Sub" => quote! { std::ops::Sub::sub(self.clone(), o.clone()) },
+                "Mul" => quote! { std::ops::Mul::mul(self.clone(), o.clone()) },
+                "Div" => quote! { std::ops::Div::div(self.clone(), o.clone()) },
+                "Rem" => quote! { std::ops::Rem::rem(self.clone(), o.clone()) },
+                _ => unreachable!(),
+            };
+
+            methods.push(quote! {
+                fn #method_ident(&self, other: &luars::lua_value::userdata_trait::UdValue) -> Option<luars::lua_value::userdata_trait::UdValue> {
+                    other.as_userdata_ref::<#name>().map(|o| {
+                        let result: #name = #op_expr;
+                        luars::lua_value::userdata_trait::UdValue::from_userdata(result)
+                    })
+                }
+            });
+        }
+    }
+
+    // Neg → lua_unm (unary negation)
+    if trait_impls.contains(&"Neg".to_string()) {
+        methods.push(quote! {
+            fn lua_unm(&self) -> Option<luars::lua_value::userdata_trait::UdValue> {
+                let result: #name = std::ops::Neg::neg(self.clone());
+                Some(luars::lua_value::userdata_trait::UdValue::from_userdata(result))
+            }
+        });
+    }
+
+    quote! { #(#methods)* }
 }
 
 // ==================== Minimal impl for tuple/unit structs ====================
@@ -256,7 +303,7 @@ fn gen_metamethods(
 /// No field access — only type_name, method lookup, metamethods, and as_any.
 fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
     let type_name_str = name.to_string();
-    let (tostring_impl, eq_impl, ord_impl) = gen_metamethods(name, trait_impls);
+    let metamethod_impls = gen_metamethods(name, trait_impls);
 
     let expanded = quote! {
         impl luars::lua_value::userdata_trait::UserDataTrait for #name {
@@ -270,9 +317,7 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
                     .map(luars::lua_value::userdata_trait::UdValue::Function)
             }
 
-            #tostring_impl
-            #eq_impl
-            #ord_impl
+            #metamethod_impls
 
             fn as_any(&self) -> &dyn std::any::Any {
                 self

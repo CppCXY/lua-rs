@@ -17,9 +17,10 @@ A complete 2D vector type with constructors, methods, and metamethods.
 ```rust
 use luars::{LuaUserData, lua_methods};
 use std::fmt;
+use std::ops;
 
-#[derive(LuaUserData, PartialEq, PartialOrd)]
-#[lua_impl(Display, PartialEq)]
+#[derive(LuaUserData, Clone, PartialEq, PartialOrd)]
+#[lua_impl(Display, PartialEq, Add, Sub, Neg)]
 struct Vec2 {
     pub x: f64,
     pub y: f64,
@@ -28,6 +29,27 @@ struct Vec2 {
 impl fmt::Display for Vec2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Vec2({}, {})", self.x, self.y)
+    }
+}
+
+impl ops::Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x + rhs.x, y: self.y + rhs.y }
+    }
+}
+
+impl ops::Sub for Vec2 {
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 { x: self.x - rhs.x, y: self.y - rhs.y }
+    }
+}
+
+impl ops::Neg for Vec2 {
+    type Output = Vec2;
+    fn neg(self) -> Vec2 {
+        Vec2 { x: -self.x, y: -self.y }
     }
 }
 
@@ -104,6 +126,17 @@ print(v:length())       -- 1.0 (approx)
 local a = Vec2.new(1, 2)
 local b = Vec2.new(1, 2)
 print(a == b)           -- true
+
+-- Arithmetic operators
+local v1 = Vec2.new(1, 2)
+local v2 = Vec2.new(3, 4)
+print(v1 + v2)          -- Vec2(4, 6)
+print(v2 - v1)          -- Vec2(2, 2)
+print(-v1)              -- Vec2(-1, -2)
+
+-- Chained arithmetic
+local r = (v1 + v2) - Vec2.new(1, 1)
+print(r)                -- Vec2(3, 5)
 
 -- tostring
 print(tostring(v))      -- Vec2(0.6, 0.8)

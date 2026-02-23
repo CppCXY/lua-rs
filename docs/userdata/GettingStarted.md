@@ -94,7 +94,7 @@ Rust got back: Some(13.0)
 | Macro / API | Purpose |
 |------------|---------|
 | `#[derive(LuaUserData)]` | Auto-generates `UserDataTrait`, exposing `pub` fields to Lua for reading/writing |
-| `#[lua_impl(Display, PartialEq)]` | Maps Rust `Display` → `__tostring`, `PartialEq` → `__eq` |
+| `#[lua_impl(Display, PartialEq)]` | Maps Rust traits to Lua metamethods (also supports `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `PartialOrd`) |
 | `#[lua_methods]` | Wraps `pub fn` items as Lua-callable C functions |
 | `pub fn new(...) -> Self` | No `self` parameter → associated function → registered as a static method |
 | `pub fn distance(&self)` | `&self` → instance method → called via `p:distance()` |
