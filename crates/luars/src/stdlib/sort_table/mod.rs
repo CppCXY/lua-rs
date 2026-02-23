@@ -54,6 +54,7 @@ pub fn table_sort(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// Compare two values using the comparison function or default < operator.
+#[inline]
 fn sort_compare(
     l: &mut LuaState,
     a: LuaValue,
@@ -62,8 +63,8 @@ fn sort_compare(
     has_comp: bool,
 ) -> LuaResult<bool> {
     if has_comp {
-        let results = l.call(*comp_func, vec![a, b])?;
-        Ok(results.first().map(|v| v.is_truthy()).unwrap_or(false))
+        // Fast path: avoids Vec allocations for args and results
+        l.call_compare(*comp_func, a, b)
     } else {
         // Default comparison: use < operator
         default_less_than(l, &a, &b)

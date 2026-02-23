@@ -2129,6 +2129,83 @@ impl LuaState {
         Ok(results)
     }
 
+    /// Fast comparison call for sort — avoids Vec allocations entirely.
+    /// Calls `func(a, b)` and returns whether the result is truthy.
+    ///
+    /// This is a specialized hot-path for `table.sort` with a custom comparator.
+    /// Instead of going through `call()` which allocates two `Vec<LuaValue>` per
+    /// invocation (~10,000 comparisons per 1000-element sort = ~20,000 heap allocs),
+    /// this writes func+args directly on the stack and reads the boolean result
+    /// in-place.
+    #[inline]
+    pub(crate) fn call_compare(
+        &mut self,
+        func: LuaValue,
+        a: LuaValue,
+        b: LuaValue,
+    ) -> LuaResult<bool> {
+        let initial_depth = self.call_depth();
+        let func_idx = self.stack_top;
+        let needed = func_idx + 3;
+
+        // Ensure stack has room for func + 2 args
+        if needed > self.stack.len() {
+            self.resize(needed)?;
+        }
+
+        // Place func, a, b directly on stack (zero allocation)
+        self.stack[func_idx] = func;
+        self.stack[func_idx + 1] = a;
+        self.stack[func_idx + 2] = b;
+        self.stack_top = needed;
+
+        if func.is_lua_function() {
+            // Lua function fast path — skip resolve_call_chain, skip Vec alloc
+            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let chunk = lua_func.chunk();
+            let base = func_idx + 1;
+
+            self.push_lua_frame(
+                &func,
+                base,
+                2, // nparams
+                1, // nresults — we only need the boolean
+                chunk.param_count,
+                chunk.max_stack_size,
+            )?;
+
+            self.inc_n_ccalls()?;
+            let r = lua_execute(self, initial_depth);
+            self.dec_n_ccalls();
+            r?;
+        } else if func.is_c_callable() {
+            // C function path
+            call_c_function(self, func_idx, 2, 1)?;
+        } else {
+            // Fallback for __call metamethods — rare in sort comparators
+            let results = self.call(func, vec![a, b])?;
+            return Ok(results.first().map(|v| v.is_truthy()).unwrap_or(false));
+        }
+
+        // Result is at stack[func_idx] (placed there by RETURN handler / call_c_function)
+        let result = self.stack[func_idx].is_truthy();
+
+        // Clean up: nil out the slot, restore stack_top
+        self.stack[func_idx] = LuaValue::nil();
+        self.stack_top = func_idx;
+
+        // Restore caller frame top if needed
+        if self.call_depth() > 0 {
+            let ci_idx = self.call_depth() - 1;
+            let frame_top = self.get_call_info(ci_idx).top;
+            if self.stack_top < frame_top {
+                self.stack_top = frame_top;
+            }
+        }
+
+        Ok(result)
+    }
+
     // ===== Protected Call (pcall/xpcall) =====
 
     /// Protected call - execute function with error handling (pcall semantics)
