@@ -821,10 +821,6 @@ impl NativeTable {
     /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
     #[inline(always)]
     pub fn fast_getfield(&self, key: &LuaValue) -> Option<LuaValue> {
-        if self.node.is_null() {
-            return None;
-        }
-
         // GETFIELD only uses short string keys (interned)
         if key.is_short_string() {
             return self.get_shortstr_fast(key);
@@ -930,10 +926,15 @@ impl NativeTable {
         }
     }
 
-    /// Fast path for short string lookup - mimics luaH_Hgetshortstr
-    /// OPTIMIZED: Reduced branches in hot loop
+    /// Fast path for short string lookup - mimics luaH_Hgetshortstr.
+    /// Public so metatable TM lookups can bypass raw_get's float normalization.
+    /// OPTIMIZED: Reduced branches in hot loop, pointer-equality for interned strings.
+    /// Safe to call on empty hash tables (returns None).
     #[inline(always)]
-    fn get_shortstr_fast(&self, key: &LuaValue) -> Option<LuaValue> {
+    pub fn get_shortstr_fast(&self, key: &LuaValue) -> Option<LuaValue> {
+        if self.node.is_null() {
+            return None;
+        }
         let mut node = self.mainposition_string(key);
         let key_ptr = unsafe { key.value.i };
 

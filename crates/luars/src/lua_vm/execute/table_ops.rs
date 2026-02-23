@@ -19,7 +19,8 @@ use crate::{
 
 use super::helper;
 
-/// GETTABLE: R[A] := R[B][R[C]]
+/// GETTABLE slow path: only called when key not found and table has metatable, or value is not a table.
+/// The main loop already handled: fast path success and no-metatable nil cases.
 pub fn exec_gettable(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -27,72 +28,32 @@ pub fn exec_gettable(
     frame_idx: usize,
     pc: &mut usize,
 ) -> LuaResult<()> {
-    use super::helper::{pivalue, pttisinteger};
-
     let a = instr.get_a() as usize;
     let b = instr.get_b() as usize;
     let c = instr.get_c() as usize;
 
-    // Read operands FIRST before any stack manipulation
     let rb = lua_state.stack_mut()[base + b];
     let rc = lua_state.stack_mut()[base + c];
 
-    let result = if let Some(table) = rb.as_table_mut() {
-        // Fast path for table - OPTIMIZED: Direct pointer access
-        let direct_result = unsafe {
-            if pttisinteger(&rc as *const LuaValue) {
-                let key = pivalue(&rc as *const LuaValue);
-                table.raw_geti(key)
-            } else {
-                table.raw_get(&rc)
+    // Go directly to metamethod lookup — the fast table path was already tried inline
+    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top(call_info_top)?;
+    lua_state.set_frame_pc(frame_idx, *pc as u32);
+    let result = match helper::lookup_from_metatable(lua_state, &rb, &rc) {
+        Ok(result) => {
+            let new_base = lua_state.get_frame_base(frame_idx);
+            if new_base != base {
+                return Err(lua_state.error("base changed in GETTABLE".to_string()));
             }
-        };
-
-        if direct_result.is_some() {
-            direct_result
-        } else {
-            // Key not found in table, try __index metamethod
-            let call_info_top = lua_state.get_call_info(frame_idx).top;
-            lua_state.set_top(call_info_top)?;
-            lua_state.set_frame_pc(frame_idx, *pc as u32);
-            match helper::lookup_from_metatable(lua_state, &rb, &rc) {
-                Ok(result) => {
-                    let new_base = lua_state.get_frame_base(frame_idx);
-                    if new_base != base {
-                        return Err(lua_state.error("base changed in GETTABLE".to_string()));
-                    }
-                    result
-                }
-                Err(LuaError::Yield) => {
-                    let ci = lua_state.get_call_info_mut(frame_idx);
-                    ci.pending_finish_get = a as i32;
-                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                    return Err(LuaError::Yield);
-                }
-                Err(e) => return Err(e),
-            }
+            result
         }
-    } else {
-        // Not a table, try __index metamethod
-        let call_info_top = lua_state.get_call_info(frame_idx).top;
-        lua_state.set_top(call_info_top)?;
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match helper::lookup_from_metatable(lua_state, &rb, &rc) {
-            Ok(result) => {
-                let new_base = lua_state.get_frame_base(frame_idx);
-                if new_base != base {
-                    return Err(lua_state.error("base changed in GETTABLE".to_string()));
-                }
-                result
-            }
-            Err(LuaError::Yield) => {
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = a as i32;
-                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
+        Err(LuaError::Yield) => {
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = a as i32;
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            return Err(LuaError::Yield);
         }
+        Err(e) => return Err(e),
     };
 
     lua_state.stack_mut()[base + a] = result.unwrap_or(LuaValue::nil());
@@ -192,7 +153,8 @@ pub fn exec_settable(
     Ok(())
 }
 
-/// GETI: R[A] := R[B][C] (integer key)
+/// GETI slow path: only called when key not found and table has metatable, or value is not a table.
+/// The main loop already handled: fast_geti success and no-metatable nil cases.
 pub fn exec_geti(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -204,64 +166,31 @@ pub fn exec_geti(
     let b = instr.get_b() as usize;
     let c = instr.get_c() as usize;
 
-    let stack = lua_state.stack_mut();
-    let rb = stack[base + b];
+    let rb = lua_state.stack_mut()[base + b];
+    let key = LuaValue::integer(c as i64);
 
-    let result = if let Some(table) = rb.as_table_mut() {
-        // Fast path: try direct table access - OPTIMIZED: Direct pointer
-        let direct_result = table.raw_geti(c as i64);
-
-        if direct_result.is_some() {
-            direct_result
-        } else {
-            // Key not found, try __index metamethod
-            let call_info_top = lua_state.get_call_info(frame_idx).top;
-            lua_state.set_top(call_info_top)?;
-            let key = LuaValue::integer(c as i64);
-            lua_state.set_frame_pc(frame_idx, *pc as u32);
-            match helper::lookup_from_metatable(lua_state, &rb, &key) {
-                Ok(result) => {
-                    let new_base = lua_state.get_frame_base(frame_idx);
-                    if new_base != base {
-                        return Err(lua_state.error("base changed in GETI".to_string()));
-                    }
-                    result
-                }
-                Err(LuaError::Yield) => {
-                    let ci = lua_state.get_call_info_mut(frame_idx);
-                    ci.pending_finish_get = a as i32;
-                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                    return Err(LuaError::Yield);
-                }
-                Err(e) => return Err(e),
+    // Go directly to metamethod lookup — the fast table path was already tried inline
+    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top(call_info_top)?;
+    lua_state.set_frame_pc(frame_idx, *pc as u32);
+    let result = match helper::lookup_from_metatable(lua_state, &rb, &key) {
+        Ok(result) => {
+            let new_base = lua_state.get_frame_base(frame_idx);
+            if new_base != base {
+                return Err(lua_state.error("base changed in GETI".to_string()));
             }
+            result
         }
-    } else {
-        // Not a table, try __index metamethod
-        let call_info_top = lua_state.get_call_info(frame_idx).top;
-        lua_state.set_top(call_info_top)?;
-        let key = LuaValue::integer(c as i64);
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match helper::lookup_from_metatable(lua_state, &rb, &key) {
-            Ok(result) => {
-                let new_base = lua_state.get_frame_base(frame_idx);
-                if new_base != base {
-                    return Err(lua_state.error("base changed in GETI".to_string()));
-                }
-                result
-            }
-            Err(LuaError::Yield) => {
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = a as i32;
-                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
+        Err(LuaError::Yield) => {
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = a as i32;
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            return Err(LuaError::Yield);
         }
+        Err(e) => return Err(e),
     };
 
-    let stack = lua_state.stack_mut();
-    stack[base + a] = result.unwrap_or(LuaValue::nil());
+    lua_state.stack_mut()[base + a] = result.unwrap_or(LuaValue::nil());
     Ok(())
 }
 
@@ -363,6 +292,8 @@ pub fn exec_seti(
 }
 
 /// GETFIELD: R[A] := R[B][K[C]:string]
+/// GETFIELD slow path: only called when key not found and table has metatable, or value is not a table.
+/// The main loop already handled: fast_getfield success and no-metatable nil cases.
 pub fn exec_getfield(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -375,68 +306,31 @@ pub fn exec_getfield(
     let b = instr.get_b() as usize;
     let c = instr.get_c() as usize;
 
-    if c >= constants.len() {
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        return Err(lua_state.error(format!("GETFIELD: invalid constant index {}", c)));
-    }
+    let rb = lua_state.stack_mut()[base + b];
+    let key = unsafe { constants.get_unchecked(c) };
 
-    let stack = lua_state.stack_mut();
-    let rb = stack[base + b];
-    let key = &constants[c];
-
-    let result = if let Some(table) = rb.as_table_mut() {
-        // Fast path: try direct table access - OPTIMIZED: Direct pointer
-        let direct_result = table.raw_get(key);
-
-        if direct_result.is_some() {
-            direct_result
-        } else {
-            // Key not found, try __index metamethod
-            let call_info_top = lua_state.get_call_info(frame_idx).top;
-            lua_state.set_top(call_info_top)?;
-            lua_state.set_frame_pc(frame_idx, *pc as u32);
-            match helper::lookup_from_metatable(lua_state, &rb, key) {
-                Ok(result) => {
-                    let new_base = lua_state.get_frame_base(frame_idx);
-                    if new_base != base {
-                        return Err(lua_state.error("base changed in GETFIELD".to_string()));
-                    }
-                    result
-                }
-                Err(LuaError::Yield) => {
-                    let ci = lua_state.get_call_info_mut(frame_idx);
-                    ci.pending_finish_get = a as i32;
-                    ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                    return Err(LuaError::Yield);
-                }
-                Err(e) => return Err(e),
+    // Go directly to metamethod lookup — the fast table path was already tried inline
+    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top(call_info_top)?;
+    lua_state.set_frame_pc(frame_idx, *pc as u32);
+    let result = match helper::lookup_from_metatable(lua_state, &rb, key) {
+        Ok(result) => {
+            let new_base = lua_state.get_frame_base(frame_idx);
+            if new_base != base {
+                return Err(lua_state.error("base changed in GETFIELD".to_string()));
             }
+            result
         }
-    } else {
-        // Not a table, try metatable lookup
-        let call_info_top = lua_state.get_call_info(frame_idx).top;
-        lua_state.set_top(call_info_top)?;
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match helper::lookup_from_metatable(lua_state, &rb, key) {
-            Ok(result) => {
-                let new_base = lua_state.get_frame_base(frame_idx);
-                if new_base != base {
-                    return Err(lua_state.error("base changed in GETFIELD".to_string()));
-                }
-                result
-            }
-            Err(LuaError::Yield) => {
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = a as i32;
-                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
+        Err(LuaError::Yield) => {
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = a as i32;
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            return Err(LuaError::Yield);
         }
+        Err(e) => return Err(e),
     };
 
-    let stack = lua_state.stack_mut();
-    stack[base + a] = result.unwrap_or(LuaValue::nil());
+    lua_state.stack_mut()[base + a] = result.unwrap_or(LuaValue::nil());
     Ok(())
 }
 

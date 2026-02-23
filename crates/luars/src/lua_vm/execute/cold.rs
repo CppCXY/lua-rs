@@ -255,7 +255,7 @@ pub fn handle_len(
             const TM_LEN_BIT: u8 = TmKind::Len as u8;
             if !mt.no_tm(TM_LEN_BIT) {
                 let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
-                if let Some(mm) = mt.raw_get(&event_key) {
+                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
                     lua_state.set_frame_pc(frame_idx, pc as u32);
                     let result = match metamethod::call_tm_res(lua_state, mm, rb, rb) {
                         Ok(r) => r,

@@ -391,10 +391,10 @@ pub fn lookup_from_metatable(
             if mt.no_tm(TM_INDEX_BIT) {
                 return Ok(None); // __index known absent
             }
-            // Slow path: hash lookup
+            // Slow path: hash lookup (use get_shortstr_fast — TM keys are always interned strings)
             let vm = lua_state.vm_mut();
             let event_key = vm.const_strings.get_tm_value(TmKind::Index);
-            match mt.raw_get(&event_key) {
+            match mt.impl_table.get_shortstr_fast(&event_key) {
                 Some(v) => v,
                 None => {
                     mt.set_tm_absent(TM_INDEX_BIT); // Cache absence
@@ -436,10 +436,18 @@ pub fn lookup_from_metatable(
         // __index is a table, try to access tm[key] directly
         t = tm;
 
-        if let Some(table) = t.as_table()
-            && let Some(value) = table.raw_get(key)
-        {
-            return Ok(Some(value));
+        if let Some(table) = t.as_table() {
+            // Use fast_geti for integer keys to avoid raw_get's float normalization
+            let value = if key.ttisinteger() {
+                table.impl_table.fast_geti(key.ivalue())
+            } else if key.is_short_string() {
+                table.impl_table.get_shortstr_fast(key)
+            } else {
+                table.raw_get(key)
+            };
+            if let Some(value) = value {
+                return Ok(Some(value));
+            }
         }
 
         // If not found, loop again to check if tm has __index
@@ -468,7 +476,9 @@ fn get_metamethod_from_metatable(
 
         let vm = lua_state.vm_mut();
         let event_key = vm.const_strings.get_tm_value(tm_kind);
-        let result = mt.raw_get(&event_key);
+        // TM keys are always interned short strings — use get_shortstr_fast
+        // to skip float normalization and integer check in raw_get
+        let result = mt.impl_table.get_shortstr_fast(&event_key);
 
         if result.is_none() && tm_idx <= TmKind::Eq as u8 {
             // Cache that this TM is absent (luaT_gettm pattern)
@@ -547,7 +557,8 @@ pub fn finishset(
                 } else {
                     let vm = lua_state.vm_mut();
                     let event_key = vm.const_strings.get_tm_value(TmKind::NewIndex);
-                    let result = mt.raw_get(&event_key);
+                    // TM keys are always interned short strings
+                    let result = mt.impl_table.get_shortstr_fast(&event_key);
                     if result.is_none() {
                         mt.set_tm_absent(TM_NEWINDEX_BIT);
                     }

@@ -720,7 +720,9 @@ impl LuaVM {
         let mt_value = self.create_table(0, 1)?;
 
         // Set __index to point to the string library
-        let index_key = self.const_strings.tm_index;
+        let index_key = self
+            .const_strings
+            .get_tm_value(crate::lua_vm::TmKind::Index);
         self.raw_set(&mt_value, index_key, string_lib_table);
 
         // Store in the VM
@@ -1009,13 +1011,11 @@ impl LuaVM {
         let new_key = table.raw_set(&key, value);
 
         // GC backward barrier (luaC_barrierback)
-        // Only needed when:
-        // 1. New key is inserted AND key is collectable, OR
-        // 2. Value is collectable
-        // Use branchless style for better performance
         let need_barrier = (new_key && key.iscollectable()) || value.iscollectable();
         if need_barrier {
-            self.gc.barrier_back(table_value.as_gc_ptr().unwrap());
+            if let Some(gc_ptr) = table_value.as_gc_ptr() {
+                self.gc.barrier_back(gc_ptr);
+            }
         }
         true
     }
@@ -1032,10 +1032,11 @@ impl LuaVM {
         };
         table.raw_seti(key, value);
 
-        // GC backward barrier (luaC_barrierback)
-        // Tables use backward barrier since they may be modified many times
+        // GC backward barrier
         if value.is_collectable() {
-            self.gc.barrier_back(table_value.as_gc_ptr().unwrap());
+            if let Some(gc_ptr) = table_value.as_gc_ptr() {
+                self.gc.barrier_back(gc_ptr);
+            }
         }
         true
     }

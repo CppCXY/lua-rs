@@ -970,7 +970,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = unsafe { *stack.get_unchecked(base + b) };
                     let rc = unsafe { *stack.get_unchecked(base + c) };
 
-                    // Inline fast path: table[integer_key]
+                    // Inline fast path: table[key]
                     if let Some(table_ref) = rb.as_table() {
                         let result = if rc.ttisinteger() {
                             table_ref.impl_table.fast_geti(rc.ivalue())
@@ -980,6 +980,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if let Some(val) = result {
                             unsafe {
                                 *stack.get_unchecked_mut(base + a) = val;
+                            }
+                            continue;
+                        }
+                        // Key not found — if no metatable, result is nil (skip exec_gettable)
+                        if !table_ref.has_metatable() {
+                            unsafe {
+                                *stack.get_unchecked_mut(base + a) = LuaValue::nil();
                             }
                             continue;
                         }
@@ -999,23 +1006,26 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = unsafe { *stack.get_unchecked(base + b) };
 
                     // Try fast path via inline fast_geti
-                    let result = if let Some(table_ref) = rb.as_table() {
-                        table_ref.impl_table.fast_geti(c)
-                    } else {
-                        None
-                    };
-
-                    if let Some(val) = result {
-                        // Fast path succeeded - write directly, no second stack_mut() needed
-                        unsafe {
-                            *stack.get_unchecked_mut(base + a) = val;
+                    if let Some(table_ref) = rb.as_table() {
+                        if let Some(val) = table_ref.impl_table.fast_geti(c) {
+                            unsafe {
+                                *stack.get_unchecked_mut(base + a) = val;
+                            }
+                            continue;
                         }
-                    } else {
-                        // Slow path: metamethod lookup
-                        save_pc!();
-                        table_ops::exec_geti(lua_state, instr, base, frame_idx, &mut pc)?;
-                        restore_state!();
+                        // Key not found — if no metatable, result is nil (skip exec_geti)
+                        if !table_ref.has_metatable() {
+                            unsafe {
+                                *stack.get_unchecked_mut(base + a) = LuaValue::nil();
+                            }
+                            continue;
+                        }
                     }
+
+                    // Slow path: metamethod lookup
+                    save_pc!();
+                    table_ops::exec_geti(lua_state, instr, base, frame_idx, &mut pc)?;
+                    restore_state!();
                 }
                 OpCode::GetField => {
                     // GETFIELD: R[A] := R[B][K[C]:string]
@@ -1029,27 +1039,66 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let key = unsafe { constants.get_unchecked(c) };
 
                     // Try fast path: table with string key
-                    let result = if let Some(table_ref) = rb.as_table() {
-                        table_ref.impl_table.fast_getfield(key)
-                    } else {
-                        None
-                    };
-
-                    if let Some(val) = result {
-                        // Fast path succeeded - no second stack_mut()
-                        unsafe {
-                            *stack.get_unchecked_mut(base + a) = val;
+                    if let Some(table_ref) = rb.as_table() {
+                        if let Some(val) = table_ref.impl_table.fast_getfield(key) {
+                            unsafe {
+                                *stack.get_unchecked_mut(base + a) = val;
+                            }
+                            continue;
                         }
-                    } else {
-                        // Slow path: metamethod lookup
-                        save_pc!();
-                        table_ops::exec_getfield(
-                            lua_state, instr, constants, base, frame_idx, &mut pc,
-                        )?;
-                        restore_state!();
+                        // Key not found — if no metatable, result is nil (skip exec_getfield)
+                        if !table_ref.has_metatable() {
+                            unsafe {
+                                *stack.get_unchecked_mut(base + a) = LuaValue::nil();
+                            }
+                            continue;
+                        }
                     }
+
+                    // Slow path: metamethod lookup
+                    save_pc!();
+                    table_ops::exec_getfield(
+                        lua_state, instr, constants, base, frame_idx, &mut pc,
+                    )?;
+                    restore_state!();
                 }
                 OpCode::SetTable => {
+                    // SETTABLE: R[A][R[B]] := RK(C)
+                    // HOT PATH: inline no-metatable fast path
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+                    let k = instr.get_k();
+
+                    let stack = lua_state.stack();
+                    let ra = stack[base + a];
+                    let rb = stack[base + b];
+                    let val = if k { constants[c] } else { stack[base + c] };
+
+                    if let Some(table) = ra.as_table() {
+                        if !table.has_metatable() {
+                            // Validate key — nil and NaN are not valid table keys
+                            if rb.is_nil() {
+                                return Err(lua_state.error("table index is nil".to_string()));
+                            }
+                            if rb.ttisfloat() && rb.fltvalue().is_nan() {
+                                return Err(lua_state.error("table index is NaN".to_string()));
+                            }
+                            // No metatable — direct set, no __newindex check needed
+                            lua_state.raw_set(&ra, rb, val);
+                            continue;
+                        }
+                        // Has metatable: if key already exists with non-nil value,
+                        // __newindex is NOT consulted (Lua semantics)
+                        if let Some(existing) = table.impl_table.raw_get(&rb)
+                            && !existing.is_nil()
+                        {
+                            lua_state.raw_set(&ra, rb, val);
+                            continue;
+                        }
+                    }
+
+                    // Slow path: metamethod or non-table
                     table_ops::exec_settable(
                         lua_state, instr, constants, base, frame_idx, &mut pc,
                     )?;
@@ -1608,6 +1657,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 // LENGTH AND CONCATENATION
                 // ============================================================
                 OpCode::Len => {
+                    // HOT PATH: inline table length for no-metatable case
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let rb = lua_state.stack_mut()[base + b];
+                    if let Some(table) = rb.as_table() {
+                        if !table.has_metatable() {
+                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                            continue;
+                        }
+                    } else if let Some(s) = rb.as_str() {
+                        setivalue(&mut lua_state.stack_mut()[base + a], s.len() as i64);
+                        continue;
+                    }
                     handle_len(lua_state, instr, &mut base, frame_idx, pc)?;
                 }
 
