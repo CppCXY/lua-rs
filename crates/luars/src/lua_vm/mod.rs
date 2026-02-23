@@ -1012,10 +1012,8 @@ impl LuaVM {
 
         // GC backward barrier (luaC_barrierback)
         let need_barrier = (new_key && key.iscollectable()) || value.iscollectable();
-        if need_barrier {
-            if let Some(gc_ptr) = table_value.as_gc_ptr() {
-                self.gc.barrier_back(gc_ptr);
-            }
+        if need_barrier && let Some(gc_ptr) = table_value.as_gc_ptr() {
+            self.gc.barrier_back(gc_ptr);
         }
         true
     }
@@ -1033,10 +1031,10 @@ impl LuaVM {
         table.raw_seti(key, value);
 
         // GC backward barrier
-        if value.is_collectable() {
-            if let Some(gc_ptr) = table_value.as_gc_ptr() {
-                self.gc.barrier_back(gc_ptr);
-            }
+        if value.is_collectable()
+            && let Some(gc_ptr) = table_value.as_gc_ptr()
+        {
+            self.gc.barrier_back(gc_ptr);
         }
         true
     }
