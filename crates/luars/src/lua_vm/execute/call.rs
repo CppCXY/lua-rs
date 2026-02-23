@@ -72,6 +72,7 @@ pub fn handle_call(
             nresults,
             param_count,
             max_stack_size,
+            chunk as *const _,
         )?;
 
         // Update call_status with __call count if status is non-zero
@@ -524,6 +525,9 @@ pub fn handle_tailcall(
 
         // Reset PC to 0 to start executing the new function from beginning
         lua_state.set_frame_pc(current_frame_idx, 0);
+
+        // Update cached chunk pointer for the new function
+        lua_state.get_call_info_mut(current_frame_idx).chunk_ptr = chunk as *const _;
 
         // Return FrameAction::TailCall - main loop will load new chunk and continue
         Ok(FrameAction::TailCall)

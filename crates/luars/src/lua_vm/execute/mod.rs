@@ -106,10 +106,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let func_value = ci.func;
         let mut pc = ci.pc as usize;
         let mut base = ci.base;
+        let chunk_ptr = ci.chunk_ptr;
 
         let lua_func = unsafe { func_value.as_lua_function_unchecked() };
 
-        let chunk = lua_func.chunk();
+        // Use cached chunk_ptr from CI (avoids Rc deref on every startfunc entry).
+        // chunk_ptr is set by push_lua_frame/push_frame/handle_tailcall for all Lua frames.
+        let chunk = unsafe { &*chunk_ptr };
         let upvalue_ptrs = lua_func.upvalues();
         // Stack already grown by push_lua_frame — no need for grow_stack here.
         // Only the very first entry (top-level chunk) needs this check.
@@ -1195,16 +1198,50 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
+                    let func_idx = base + a;
 
+                    // Hot path: inline Lua function call
+                    // Avoids handle_call overhead (FrameAction enum, set_top_raw,
+                    // cold C/__call code in instruction cache)
+                    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                    if func.is_lua_function() {
+                        // Compute nargs without set_top_raw
+                        // (push_lua_frame handles stack_top directly)
+                        let nargs = if b != 0 {
+                            b - 1
+                        } else {
+                            let current_top = lua_state.get_top();
+                            if current_top > func_idx + 1 {
+                                current_top - func_idx - 1
+                            } else {
+                                0
+                            }
+                        };
+                        let nresults = if c == 0 { -1 } else { (c - 1) as i32 };
+
+                        let lua_func = unsafe { func.as_lua_function_unchecked() };
+                        let chunk = lua_func.chunk();
+
+                        save_pc!();
+                        lua_state.push_lua_frame(
+                            &func,
+                            func_idx + 1,
+                            nargs,
+                            nresults,
+                            chunk.param_count,
+                            chunk.max_stack_size,
+                            chunk as *const _,
+                        )?;
+                        continue 'startfunc;
+                    }
+
+                    // Cold path: C function or __call metamethod
                     save_pc!();
                     match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {
                             restore_state!();
                         }
-                        Ok(FrameAction::Call) => {
-                            continue 'startfunc;
-                        }
-                        Ok(FrameAction::TailCall) => {
+                        Ok(FrameAction::Call) | Ok(FrameAction::TailCall) => {
                             continue 'startfunc;
                         }
                         Err(e) => return Err(e),

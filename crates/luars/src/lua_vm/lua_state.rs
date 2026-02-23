@@ -211,7 +211,7 @@ impl LuaState {
         // This single call replaces multiple is_c_function/as_lua_function checks
 
         // Determine function type and extract metadata in one pass
-        let (call_status, maxstacksize, numparams, nextraargs) =
+        let (call_status, maxstacksize, numparams, nextraargs, chunk_raw) =
             if let Some(func_obj) = func.as_lua_function() {
                 let chunk = func_obj.chunk();
                 // Lua function with chunk
@@ -221,10 +221,17 @@ impl LuaState {
                 } else {
                     0
                 };
-                (CIST_LUA, chunk.max_stack_size, numparams, nextraargs)
+                let chunk_ptr: *const crate::lua_value::Chunk = chunk;
+                (
+                    CIST_LUA,
+                    chunk.max_stack_size,
+                    numparams,
+                    nextraargs,
+                    chunk_ptr,
+                )
             } else if func.is_c_callable() {
                 // Light C function
-                (CIST_C, nparams, nparams, 0)
+                (CIST_C, nparams, nparams, 0, std::ptr::null())
             } else {
                 // Not callable - this should be prevented by caller
                 debug_assert!(false, "push_frame called with non-callable value");
@@ -276,6 +283,7 @@ impl LuaState {
                 nextraargs,
                 saved_nres: 0,
                 pending_finish_get: -1,
+                chunk_ptr: chunk_raw,
             };
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
@@ -290,6 +298,7 @@ impl LuaState {
                 nextraargs,
                 saved_nres: 0,
                 pending_finish_get: -1,
+                chunk_ptr: chunk_raw,
             };
             self.call_stack.push(ci);
         }
@@ -321,6 +330,7 @@ impl LuaState {
         nresults: i32,
         param_count: usize,
         max_stack_size: usize,
+        chunk_ptr: *const crate::lua_value::Chunk,
     ) -> LuaResult<()> {
         // Check stack depth (cold — almost never triggers)
         if self.call_depth >= self.safe_option.max_call_depth {
@@ -347,6 +357,7 @@ impl LuaState {
             ci.nresults = nresults;
             ci.call_status = CIST_LUA;
             ci.nextraargs = (nparams - param_count) as i32;
+            ci.chunk_ptr = chunk_ptr;
 
             self.call_depth += 1;
 
@@ -367,6 +378,7 @@ impl LuaState {
             param_count,
             max_stack_size,
             frame_top,
+            chunk_ptr,
         )
     }
 
@@ -396,6 +408,7 @@ impl LuaState {
         param_count: usize,
         _max_stack_size: usize,
         frame_top: usize,
+        chunk_ptr: *const crate::lua_value::Chunk,
     ) -> LuaResult<()> {
         let nextraargs = if nparams > param_count {
             (nparams - param_count) as i32
@@ -435,6 +448,7 @@ impl LuaState {
             ci.nresults = nresults;
             ci.call_status = CIST_LUA;
             ci.nextraargs = nextraargs;
+            ci.chunk_ptr = chunk_ptr;
         } else {
             self.call_stack.push(CallInfo {
                 func: *func,
@@ -447,6 +461,7 @@ impl LuaState {
                 nextraargs,
                 saved_nres: 0,
                 pending_finish_get: -1,
+                chunk_ptr,
             });
         }
 
@@ -506,6 +521,7 @@ impl LuaState {
                 nextraargs: 0,
                 saved_nres: 0,
                 pending_finish_get: -1,
+                chunk_ptr: std::ptr::null(),
             };
         } else {
             self.call_stack.push(CallInfo {
@@ -519,6 +535,7 @@ impl LuaState {
                 nextraargs: 0,
                 saved_nres: 0,
                 pending_finish_get: -1,
+                chunk_ptr: std::ptr::null(),
             });
         }
 
@@ -2197,6 +2214,7 @@ impl LuaState {
                 1, // nresults — we only need the boolean
                 chunk.param_count,
                 chunk.max_stack_size,
+                chunk as *const _,
             )?;
 
             self.inc_n_ccalls()?;

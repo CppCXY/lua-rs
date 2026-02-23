@@ -1,7 +1,7 @@
 // CallInfo - Information about a single function call
 // Equivalent to CallInfo structure in Lua C API (lstate.h)
 
-use crate::lua_value::LuaValue;
+use crate::lua_value::{Chunk, LuaValue};
 
 /// Call status flags (equivalent to Lua's CIST_* flags)
 pub mod call_status {
@@ -106,6 +106,12 @@ pub struct CallInfo {
     /// -1 = no pending operation (default).
     /// -2 = pending SET operation (just restore top, no result to copy).
     pub pending_finish_get: i32,
+
+    /// Cached raw pointer to the Chunk for Lua functions.
+    /// Avoids Rc deref in the startfunc header (hot path).
+    /// Null for C function frames.
+    /// Safety: valid as long as the frame is active (func keeps the Rc alive).
+    pub chunk_ptr: *const Chunk,
 }
 
 impl CallInfo {
@@ -122,6 +128,7 @@ impl CallInfo {
             nextraargs: 0,
             saved_nres: 0,
             pending_finish_get: -1,
+            chunk_ptr: std::ptr::null(),
         }
     }
 
@@ -138,6 +145,7 @@ impl CallInfo {
             nextraargs: 0,
             saved_nres: 0,
             pending_finish_get: -1,
+            chunk_ptr: std::ptr::null(),
         }
     }
 
@@ -179,6 +187,7 @@ impl Default for CallInfo {
             nextraargs: 0,
             saved_nres: 0,
             pending_finish_get: -1,
+            chunk_ptr: std::ptr::null(),
         }
     }
 }
