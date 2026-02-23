@@ -41,8 +41,8 @@ pub use luars_derive::lua_methods;
 pub use lua_value::LuaUserdata;
 pub use lua_value::UserDataBuilder;
 pub use lua_value::userdata_trait::{
-    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData, UdValue,
-    UserDataTrait,
+    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData,
+    RefUserData, UdValue, UserDataTrait,
 };
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
+use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
 };
@@ -1736,6 +1737,35 @@ impl LuaState {
     /// Create userdata
     pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.vm_mut().create_userdata(data)
+    }
+
+    /// Create a GC-managed userdata that **borrows** an external Rust object.
+    ///
+    /// The object stays on the Rust side; Lua gets a full userdata with field access,
+    /// method calls, and metamethods — all forwarded through a raw pointer.
+    ///
+    /// # Safety
+    /// The referenced object **must** outlive all Lua accesses to this userdata.
+    /// Typical safe patterns:
+    /// - Set the global, run Lua code, then clear/overwrite the global before the
+    ///   Rust object is dropped.
+    /// - Use scoped execution: create → execute → drop the Lua state / global.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut player = Player::new("Alice", 100);
+    /// let ud = unsafe { state.create_userdata_ref(&mut player)? };
+    /// state.set_global("player", ud)?;
+    /// state.execute_string(r#"player:take_damage(10)"#)?;
+    /// assert_eq!(player.hp, 90); // Lua mutations visible in Rust
+    /// ```
+    #[inline]
+    pub unsafe fn create_userdata_ref<T: UserDataTrait>(
+        &mut self,
+        reference: &mut T,
+    ) -> CreateResult {
+        let ud = unsafe { LuaUserdata::from_ref(reference) };
+        self.vm_mut().create_userdata(ud)
     }
 
     /// Create an RClosure from any `Fn(&mut LuaState) -> LuaResult<usize> + 'static`.

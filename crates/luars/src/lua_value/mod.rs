@@ -28,7 +28,7 @@ pub use lua_value::{
 };
 
 use crate::lua_vm::CFunction;
-use crate::{Instruction, StringInterner, TablePtr, UpvaluePtr};
+use crate::{Instruction, RefUserData, StringInterner, TablePtr, UpvaluePtr};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LuaValuePtr {
@@ -210,6 +210,35 @@ impl LuaUserdata {
     pub fn new<T: UserDataTrait>(data: T) -> Self {
         LuaUserdata {
             data: Box::new(data),
+            metatable: TablePtr::null(),
+        }
+    }
+
+    /// Create a borrowed userdata from a mutable reference.
+    ///
+    /// The resulting userdata forwards all field/method/metamethod access through
+    /// a raw pointer — zero overhead, no ownership transfer.
+    ///
+    /// # Safety
+    /// The referenced object **must** outlive all Lua accesses to this userdata.
+    /// Accessing the userdata after the Rust object is dropped is **undefined behavior**.
+    #[inline]
+    pub unsafe fn from_ref<T: UserDataTrait>(reference: &mut T) -> Self {
+        LuaUserdata {
+            data: Box::new(unsafe { RefUserData::new(reference) }),
+            metatable: TablePtr::null(),
+        }
+    }
+
+    /// Create a borrowed userdata from a raw pointer.
+    ///
+    /// # Safety
+    /// The pointer must be valid and properly aligned for the entire duration
+    /// that Lua can access this userdata.
+    #[inline]
+    pub unsafe fn from_raw_ptr<T: UserDataTrait>(ptr: *mut T) -> Self {
+        LuaUserdata {
+            data: Box::new(unsafe { RefUserData::from_raw(ptr) }),
             metatable: TablePtr::null(),
         }
     }

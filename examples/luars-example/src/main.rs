@@ -209,6 +209,7 @@ fn main() {
     example_calculator().expect("Calculator example failed");
     example_multi_type().expect("Multi-type example failed");
     example_push_existing().expect("Push existing example failed");
+    example_borrowed_ref().expect("Borrowed ref example failed");
     println!("\nAll examples completed successfully!");
 }
 
@@ -418,6 +419,47 @@ fn example_push_existing() -> LuaResult<()> {
         print("origin:length() =", origin:length())   -- 42.0
     "#,
     )?;
+    println!();
+    Ok(())
+}
+
+/// Example 6: Borrowed reference — Rust object lent to Lua without ownership transfer
+fn example_borrowed_ref() -> LuaResult<()> {
+    println!("=== Example 6: Borrowed Reference ===");
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All)?;
+
+    // A Rust-owned object that we want to share with Lua temporarily
+    let mut player_pos = Vec2 { x: 100.0, y: 200.0 };
+
+    println!("Before Lua: player_pos = ({}, {})", player_pos.x, player_pos.y);
+
+    {
+        let state = vm.main_state();
+
+        // Lend to Lua by reference — no ownership transfer, zero overhead
+        // Safety: player_pos outlives the execute_string call below
+        let ud_val = unsafe { state.create_userdata_ref(&mut player_pos)? };
+        state.set_global("pos", ud_val)?;
+
+        state.execute(
+            r#"
+            -- Lua can read and write fields, call methods
+            print("pos =", tostring(pos))           -- Vec2(100, 200)
+            print("length =", pos:length())          -- ~223.6
+            pos.x = 300
+            pos.y = 400
+            print("updated pos =", tostring(pos))   -- Vec2(300, 400)
+        "#,
+        )?;
+    }
+
+    // Back in Rust — mutations from Lua are visible!
+    println!("After Lua:  player_pos = ({}, {})", player_pos.x, player_pos.y);
+    assert_eq!(player_pos.x, 300.0);
+    assert_eq!(player_pos.y, 400.0);
+
     println!();
     Ok(())
 }

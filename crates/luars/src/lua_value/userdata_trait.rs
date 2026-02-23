@@ -534,3 +534,166 @@ impl<T: 'static> UserDataTrait for OpaqueUserData<T> {
         &mut self.value
     }
 }
+
+// ==================== RefUserData — zero-cost borrowed reference ====================
+
+/// A userdata wrapper that holds a raw pointer to an external `T: UserDataTrait`.
+///
+/// This enables passing Rust objects to Lua **by reference** without transferring
+/// ownership. The object lives on the Rust side; Lua sees a full userdata with
+/// field access, method calls, and metamethods — all forwarded through the pointer.
+///
+/// # Performance
+/// Zero overhead compared to owned userdata — no `Rc`, no `RefCell`, no
+/// atomic operations. The pointer is dereferenced directly on every access.
+///
+/// # Safety
+/// The caller **must** guarantee that the pointee outlives every Lua access.
+/// Accessing the userdata after the Rust object is dropped is undefined behavior.
+/// This is deliberately an `unsafe` API — the same contract as C Lua's light
+/// userdata, but with full trait-based dispatch.
+///
+/// # Example
+/// ```ignore
+/// let mut player = Player::new("Alice", 100);
+///
+/// // Lend to Lua (no ownership transfer)
+/// let ud_val = state.create_userdata_ref(&mut player)?;
+/// state.set_global("player", ud_val)?;
+///
+/// // Lua can read/write fields, call methods — all forwarded to `player`
+/// state.execute_string(r#"
+///     print(player.name)      -- "Alice"
+///     player:take_damage(10)
+///     print(player.hp)        -- 90
+/// "#)?;
+///
+/// // Back in Rust, `player` reflects the mutations
+/// assert_eq!(player.hp, 90);
+/// ```
+pub struct RefUserData<T: UserDataTrait> {
+    ptr: *mut T,
+}
+
+impl<T: UserDataTrait> RefUserData<T> {
+    /// Create a `RefUserData` from a mutable reference.
+    ///
+    /// # Safety
+    /// The referenced object must outlive all Lua accesses to this userdata.
+    #[inline]
+    pub unsafe fn new(reference: &mut T) -> Self {
+        RefUserData {
+            ptr: reference as *mut T,
+        }
+    }
+
+    /// Create from a raw pointer.
+    ///
+    /// # Safety
+    /// The pointer must be valid and properly aligned for the entire duration
+    /// that Lua can access this userdata.
+    #[inline]
+    pub unsafe fn from_raw(ptr: *mut T) -> Self {
+        RefUserData { ptr }
+    }
+
+    #[inline]
+    fn inner(&self) -> &T {
+        unsafe { &*self.ptr }
+    }
+
+    #[inline]
+    fn inner_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.ptr }
+    }
+}
+
+/// Forward every `UserDataTrait` method to the pointee.
+///
+/// This is intentionally not `'static` on `T` alone — the `'static` bound
+/// comes from `UserDataTrait: 'static`. The raw pointer erases the lifetime;
+/// correctness relies on the caller's safety guarantee.
+impl<T: UserDataTrait> UserDataTrait for RefUserData<T> {
+    #[inline]
+    fn type_name(&self) -> &'static str {
+        self.inner().type_name()
+    }
+
+    #[inline]
+    fn get_field(&self, key: &str) -> Option<UdValue> {
+        self.inner().get_field(key)
+    }
+
+    #[inline]
+    fn set_field(&mut self, key: &str, value: UdValue) -> Option<Result<(), String>> {
+        self.inner_mut().set_field(key, value)
+    }
+
+    fn lua_tostring(&self) -> Option<String> {
+        self.inner().lua_tostring()
+    }
+
+    fn lua_eq(&self, other: &dyn UserDataTrait) -> Option<bool> {
+        self.inner().lua_eq(other)
+    }
+
+    fn lua_lt(&self, other: &dyn UserDataTrait) -> Option<bool> {
+        self.inner().lua_lt(other)
+    }
+
+    fn lua_le(&self, other: &dyn UserDataTrait) -> Option<bool> {
+        self.inner().lua_le(other)
+    }
+
+    fn lua_len(&self) -> Option<UdValue> {
+        self.inner().lua_len()
+    }
+
+    fn lua_unm(&self) -> Option<UdValue> {
+        self.inner().lua_unm()
+    }
+
+    fn lua_add(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_add(other)
+    }
+
+    fn lua_sub(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_sub(other)
+    }
+
+    fn lua_mul(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_mul(other)
+    }
+
+    fn lua_div(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_div(other)
+    }
+
+    fn lua_mod(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_mod(other)
+    }
+
+    fn lua_concat(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_concat(other)
+    }
+
+    fn lua_gc(&mut self) {
+        // Intentionally a no-op: we don't own the data, so GC must not drop it.
+    }
+
+    fn lua_close(&mut self) {
+        // Same: no-op for borrowed references.
+    }
+
+    fn field_names(&self) -> &'static [&'static str] {
+        self.inner().field_names()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self.inner().as_any()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self.inner_mut().as_any_mut()
+    }
+}
