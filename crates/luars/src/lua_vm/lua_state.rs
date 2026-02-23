@@ -1851,20 +1851,17 @@ impl LuaState {
     ///
     /// # Example
     /// ```ignore
-    /// let results = state.execute_string("return 1 + 2")?;
+    /// let results = state.execute("return 1 + 2")?;
     /// assert_eq!(results[0].as_integer(), Some(3));
     /// ```
-    pub fn execute_string(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
+    pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         self.vm_mut().execute(source)
     }
 
     /// Execute a pre-compiled chunk, returning results.
     ///
     /// This is a convenience proxy for `LuaVM::execute`.
-    pub fn execute(
-        &mut self,
-        chunk: std::rc::Rc<crate::lua_value::Chunk>,
-    ) -> LuaResult<Vec<LuaValue>> {
+    pub fn execute_chunk(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
         self.vm_mut().execute_chunk(chunk)
     }
 

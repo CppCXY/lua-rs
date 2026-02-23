@@ -222,7 +222,7 @@ fn example_vec2() -> LuaResult<()> {
     let state = vm.main_state();
     state.register_type_of::<Vec2>("Vec2")?;
 
-    let results = state.execute_string(
+    let results = state.execute(
         r#"
         -- Create vectors via constructors
         local v = Vec2.new(3, 4)
@@ -270,7 +270,7 @@ fn example_config() -> LuaResult<()> {
     let state = vm.main_state();
     state.register_type_of::<AppConfig>("AppConfig")?;
 
-    state.execute_string(
+    state.execute(
         r#"
         local cfg = AppConfig.new("MyApp", 3, 100)
 
@@ -312,7 +312,7 @@ fn example_calculator() -> LuaResult<()> {
     let state = vm.main_state();
     state.register_type_of::<Calculator>("Calculator")?;
 
-    state.execute_string(
+    state.execute(
         r#"
         local calc = Calculator.new()
 
@@ -357,7 +357,7 @@ fn example_multi_type() -> LuaResult<()> {
     state.register_type_of::<Vec2>("Vec2")?;
     state.register_type_of::<Color>("Color")?;
 
-    state.execute_string(
+    state.execute(
         r#"
         -- Create objects of different types
         local pos = Vec2.new(100, 200)
@@ -408,7 +408,7 @@ fn example_push_existing() -> LuaResult<()> {
     let ud_val = state.create_userdata(ud)?;
     state.set_global("origin", ud_val)?;
 
-    state.execute_string(
+    state.execute(
         r#"
         -- Use the pre-created instance directly
         print("origin =", tostring(origin))          -- Vec2(0, 0)
