@@ -240,7 +240,6 @@ pub fn call_c_function(
     } else {
         call_base
     };
-    let callee_extent = stack_top;
 
     // Pop frame (lean path, no call_status bit check)
     lua_state.pop_c_frame();
@@ -279,11 +278,10 @@ pub fn call_c_function(
     let final_nresults = if nresults == -1 { n } else { nresults as usize };
     let new_top = func_idx + final_nresults;
 
-    // Clear stale references (only if there's a significant range to clear)
-    // For small calls (ipairs_next returning 2 values), callee_extent - new_top
-    // is typically small. We keep this for GC correctness.
+    // Clear stale references above new_top to prevent dead objects from being
+    // kept alive when stack_top is later raised (e.g. by push_lua_frame).
     {
-        let clear_end = callee_extent.min(lua_state.stack_len());
+        let clear_end = stack_top.min(lua_state.stack_len());
         if clear_end > new_top {
             let stack = lua_state.stack_mut();
             for i in new_top..clear_end {

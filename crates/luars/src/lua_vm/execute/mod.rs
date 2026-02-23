@@ -47,7 +47,7 @@ use crate::{
             concat::handle_concat,
             helper::{
                 handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr,
-                pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
+                luai_numpow, pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
                 pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
                 tointeger, tointegerns, tonumberns, ttisinteger,
             },
@@ -425,7 +425,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                            psetfltvalue(ra_ptr, n1.powf(n2));
+                            psetfltvalue(ra_ptr, luai_numpow(n1, n2));
                             pc += 1;
                         }
                     }
@@ -589,7 +589,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let mut n1 = 0.0;
                         let mut n2 = 0.0;
                         if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                            psetfltvalue(ra_ptr, n1.powf(n2));
+                            psetfltvalue(ra_ptr, luai_numpow(n1, n2));
                             pc += 1;
                         }
                     }

@@ -150,6 +150,13 @@ pub fn setivalue(v: &mut LuaValue, i: i64) {
     *v = LuaValue::integer(i);
 }
 
+/// luai_numpow - Power operation matching Lua 5.5's luai_numpow macro
+/// Special-cases b==2 to a*a (single multiply instead of costly pow())
+#[inline(always)]
+pub fn luai_numpow(a: f64, b: f64) -> f64 {
+    if b == 2.0 { a * a } else { a.powf(b) }
+}
+
 /// setfltvalue - 设置浮点值  
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
 #[allow(unused)]
