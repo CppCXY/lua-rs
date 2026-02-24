@@ -460,7 +460,8 @@ impl NativeTable {
         let mut totaluse = na as usize;
 
         // Count integer keys in hash part
-        totaluse += self.numusehash(&mut nums, &mut na);
+        let (hash_use, has_deleted) = self.numusehash(&mut nums, &mut na);
+        totaluse += hash_use;
 
         // Count the extra key (the key being inserted)
         if extra_key.ttisinteger() {
@@ -484,7 +485,14 @@ impl NativeTable {
         let (optimal_asize, na_in_array) = Self::computesizes(&nums, na);
 
         // Number of entries for hash part
-        let hash_entries = totaluse - na_in_array as usize;
+        let mut hash_entries = totaluse - na_in_array as usize;
+
+        // Lua 5.5 optimization: if dead keys were found (insertion-deletion
+        // pattern), give hash part 25% extra capacity to avoid repeated
+        // rehashes. Matches C Lua 5.5's `nsize += nsize >> 2`.
+        if has_deleted {
+            hash_entries += hash_entries >> 2;
+        }
 
         // Resize both parts
         self.resize(optimal_asize, hash_entries as u32);
@@ -535,35 +543,45 @@ impl NativeTable {
 
     /// Port of Lua 5.5's numusehash
     /// Count total entries in hash part, and for integer keys, add to nums[].
-    fn numusehash(&self, nums: &mut [u32], na: &mut u32) -> usize {
+    /// Returns (totaluse, has_deleted) — has_deleted is true if any dead keys exist
+    /// (key non-nil but value nil), matching C Lua 5.5's `ct.deleted` flag.
+    fn numusehash(&self, nums: &mut [u32], na: &mut u32) -> (usize, bool) {
         let size = self.sizenode();
         let mut totaluse = 0usize;
+        let mut has_deleted = false;
 
         for i in 0..size {
             unsafe {
                 let node = self.node.add(i);
-                if !(*node).key.is_nil() && !(*node).value.is_nil() {
-                    totaluse += 1;
-                    // Check if key is a positive integer
-                    if (*node).key.ttisinteger() {
-                        let k = (*node).key.ivalue();
-                        if k >= 1 && (k as u64) <= (1u64 << 30) {
-                            *na += 1;
-                            let bin = if k == 1 {
-                                0
-                            } else {
-                                64 - ((k - 1) as u64).leading_zeros() as usize
-                            };
-                            if bin < nums.len() {
-                                nums[bin] += 1;
-                            }
+                let key = &(*node).key;
+                if key.is_nil() {
+                    continue;
+                }
+                if (*node).value.is_nil() {
+                    // Dead key: key is non-nil but value is nil
+                    has_deleted = true;
+                    continue;
+                }
+                totaluse += 1;
+                // Check if key is a positive integer
+                if key.ttisinteger() {
+                    let k = key.ivalue();
+                    if k >= 1 && (k as u64) <= (1u64 << 30) {
+                        *na += 1;
+                        let bin = if k == 1 {
+                            0
+                        } else {
+                            64 - ((k - 1) as u64).leading_zeros() as usize
+                        };
+                        if bin < nums.len() {
+                            nums[bin] += 1;
                         }
                     }
                 }
             }
         }
 
-        totaluse
+        (totaluse, has_deleted)
     }
 
     /// Port of Lua 5.5's computesizes
