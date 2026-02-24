@@ -1041,3 +1041,310 @@ fn test_userdata_arithmetic_preserves_type() {
     assert_eq!(results[1].as_number(), Some(4.0));
     assert_eq!(results[2].as_number(), Some(6.0));
 }
+
+// ==================== #[lua(iter)] tests ====================
+
+/// A simple list wrapper — demonstrates `#[lua(iter)]` for Vec iteration via pairs()
+#[derive(LuaUserData)]
+struct NumberList {
+    pub name: String,
+    #[lua(iter)]
+    items: Vec<i64>,
+}
+
+#[lua_methods]
+impl NumberList {
+    pub fn new(name: String) -> Self {
+        NumberList {
+            name,
+            items: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, val: i64) {
+        self.items.push(val);
+    }
+
+    pub fn size(&self) -> i64 {
+        self.items.len() as i64
+    }
+}
+
+fn setup_number_list_vm() -> Box<LuaVM> {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+    vm.open_stdlib(stdlib::Stdlib::String).unwrap();
+
+    let list = NumberList {
+        name: "test".into(),
+        items: vec![10, 20, 30, 40, 50],
+    };
+    let ud = LuaUserdata::new(list);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("mylist", ud_val).unwrap();
+    vm
+}
+
+#[test]
+fn test_userdata_pairs_iteration() {
+    let mut vm = setup_number_list_vm();
+    // pairs(mylist) should iterate over the Vec elements
+    let results = vm
+        .execute(
+            r#"
+        local keys = {}
+        local vals = {}
+        for k, v in pairs(mylist) do
+            keys[#keys + 1] = k
+            vals[#vals + 1] = v
+        end
+        return #keys, keys[1], keys[5], vals[1], vals[3], vals[5]
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(5)); // 5 entries
+    assert_eq!(results[1].as_integer(), Some(1)); // first key = 1
+    assert_eq!(results[2].as_integer(), Some(5)); // last key = 5
+    assert_eq!(results[3].as_integer(), Some(10)); // first value
+    assert_eq!(results[4].as_integer(), Some(30)); // third value
+    assert_eq!(results[5].as_integer(), Some(50)); // last value
+}
+
+#[test]
+fn test_userdata_pairs_empty() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let list = NumberList {
+        name: "empty".into(),
+        items: vec![],
+    };
+    let ud = LuaUserdata::new(list);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("mylist", ud_val).unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local count = 0
+        for k, v in pairs(mylist) do
+            count = count + 1
+        end
+        return count
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(0));
+}
+
+#[test]
+fn test_userdata_len_from_iter() {
+    let mut vm = setup_number_list_vm();
+    // #[lua(iter)] generates lua_len automatically
+    let results = vm.execute("return #mylist").unwrap();
+    assert_eq!(results[0].as_integer(), Some(5));
+}
+
+#[test]
+fn test_userdata_iter_with_field_access() {
+    let mut vm = setup_number_list_vm();
+    // Field access (name) should still work alongside iteration
+    let results = vm
+        .execute(
+            r#"
+        local sum = 0
+        for _, v in pairs(mylist) do
+            sum = sum + v
+        end
+        return mylist.name, sum
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_str(), Some("test"));
+    assert_eq!(results[1].as_integer(), Some(150)); // 10+20+30+40+50
+}
+
+/// String list — tests Vec<String> iteration
+#[derive(LuaUserData)]
+struct StringList {
+    #[lua(iter)]
+    items: Vec<String>,
+}
+
+#[test]
+fn test_userdata_pairs_string_vec() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+    vm.open_stdlib(stdlib::Stdlib::String).unwrap();
+
+    let list = StringList {
+        items: vec!["hello".into(), "world".into(), "lua".into()],
+    };
+    let ud = LuaUserdata::new(list);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("slist", ud_val).unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local result = ""
+        for _, v in pairs(slist) do
+            result = result .. v .. " "
+        end
+        return result
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_str(), Some("hello world lua "));
+}
+
+// ==================== __call tests ====================
+
+/// A callable userdata — acts like a function when called from Lua
+struct Adder {
+    pub base: i64,
+}
+
+impl Adder {
+    fn lua_call_impl(l: &mut crate::lua_vm::LuaState) -> crate::lua_vm::LuaResult<usize> {
+        // arg1 = self (userdata), arg2 = value to add
+        let ud = l.get_arg(1).unwrap();
+        let ud_ref = ud.as_userdata_mut().unwrap();
+        let adder = ud_ref.get_trait().as_any().downcast_ref::<Adder>().unwrap();
+        let base = adder.base;
+
+        let val = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(0);
+
+        l.push_value(crate::lua_value::LuaValue::integer(base + val))?;
+        Ok(1)
+    }
+}
+
+impl UserDataTrait for Adder {
+    fn type_name(&self) -> &'static str {
+        "Adder"
+    }
+
+    fn get_field(&self, key: &str) -> Option<UdValue> {
+        match key {
+            "base" => Some(UdValue::Integer(self.base)),
+            _ => None,
+        }
+    }
+
+    fn lua_call(&self) -> Option<crate::lua_vm::CFunction> {
+        Some(Adder::lua_call_impl)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn test_userdata_call_basic() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let adder = Adder { base: 100 };
+    let ud = LuaUserdata::new(adder);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("add100", ud_val).unwrap();
+
+    let results = vm.execute("return add100(42)").unwrap();
+    assert_eq!(results[0].as_integer(), Some(142));
+}
+
+#[test]
+fn test_userdata_call_multiple_args() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let adder = Adder { base: 10 };
+    let ud = LuaUserdata::new(adder);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("add10", ud_val).unwrap();
+
+    // Can use field access and call on the same userdata
+    let results = vm
+        .execute(
+            r#"
+        local base = add10.base
+        local result = add10(5)
+        return base, result
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(10));
+    assert_eq!(results[1].as_integer(), Some(15));
+}
+
+#[test]
+fn test_userdata_call_in_expression() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let adder = Adder { base: 1 };
+    let ud = LuaUserdata::new(adder);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("inc", ud_val).unwrap();
+
+    // Use callable userdata in expressions
+    let results = vm.execute("return inc(10) + inc(20)").unwrap();
+    assert_eq!(results[0].as_integer(), Some(32)); // (1+10) + (1+20)
+}
+
+/// A multi-return callable userdata
+struct Splitter;
+
+impl Splitter {
+    fn lua_call_impl(l: &mut crate::lua_vm::LuaState) -> crate::lua_vm::LuaResult<usize> {
+        // arg1 = self, arg2 = number to split into quotient and remainder by 10
+        let val = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(0);
+        l.push_value(crate::lua_value::LuaValue::integer(val / 10))?;
+        l.push_value(crate::lua_value::LuaValue::integer(val % 10))?;
+        Ok(2)
+    }
+}
+
+impl UserDataTrait for Splitter {
+    fn type_name(&self) -> &'static str {
+        "Splitter"
+    }
+
+    fn lua_call(&self) -> Option<crate::lua_vm::CFunction> {
+        Some(Splitter::lua_call_impl)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn test_userdata_call_multi_return() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
+
+    let splitter = Splitter;
+    let ud = LuaUserdata::new(splitter);
+    let state = vm.main_state();
+    let ud_val = state.create_userdata(ud).unwrap();
+    state.set_global("split10", ud_val).unwrap();
+
+    let results = vm.execute("return split10(47)").unwrap();
+    assert_eq!(results[0].as_integer(), Some(4)); // 47 / 10
+    assert_eq!(results[1].as_integer(), Some(7)); // 47 % 10
+}

@@ -110,3 +110,37 @@ pub fn udvalue_to_field(
         }
     }
 }
+
+/// Generate code to convert a `&T` reference to `UdValue`.
+///
+/// Used for iterating over collection elements (e.g., `Vec<T>`).
+/// The `accessor` expression should evaluate to a `&T`.
+pub fn ref_to_udvalue(
+    ty: &syn::Type,
+    accessor: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let type_str = normalize_type(ty);
+
+    match type_str.as_str() {
+        // Integers → dereference then cast
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+            quote! { luars::lua_value::userdata_trait::UdValue::Integer(*#accessor as i64) }
+        }
+        // Floats
+        "f32" | "f64" => {
+            quote! { luars::lua_value::userdata_trait::UdValue::Number(*#accessor as f64) }
+        }
+        // Bool
+        "bool" => {
+            quote! { luars::lua_value::userdata_trait::UdValue::Boolean(*#accessor) }
+        }
+        // String → clone the reference
+        "String" => {
+            quote! { luars::lua_value::userdata_trait::UdValue::Str(#accessor.clone()) }
+        }
+        // Fallback: clone and convert via From/Into
+        _ => {
+            quote! { luars::lua_value::userdata_trait::UdValue::from(#accessor.clone()) }
+        }
+    }
+}

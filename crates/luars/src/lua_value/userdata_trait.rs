@@ -256,6 +256,61 @@ pub trait UserDataTrait: 'static {
     /// `__close`: Called when a to-be-closed variable goes out of scope.
     fn lua_close(&mut self) {}
 
+    /// `__call`: Makes the userdata callable like a function.
+    ///
+    /// Return `Some(cfunction)` to make `obj(args...)` work from Lua.
+    /// The CFunction receives `self` (the userdata) as arg 1, followed by
+    /// the caller's arguments.
+    ///
+    /// This is checked before the metatable `__call` fallback.
+    ///
+    /// # Example
+    /// ```ignore
+    /// fn lua_call(&self) -> Option<CFunction> {
+    ///     fn call_impl(l: &mut LuaState) -> LuaResult<usize> {
+    ///         let ud = l.get_arg(1).unwrap();
+    ///         let x = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(0);
+    ///         l.push_value(LuaValue::integer(x * 2))?;
+    ///         Ok(1)
+    ///     }
+    ///     Some(call_impl)
+    /// }
+    /// ```
+    fn lua_call(&self) -> Option<crate::lua_vm::CFunction> {
+        None
+    }
+
+    // ==================== Iteration ====================
+
+    /// Stateless iterator: given the current control variable, return the next
+    /// `(control, value)` pair, or `None` to stop.
+    ///
+    /// This follows Lua's generic-for protocol:
+    /// ```lua
+    /// for k, v in pairs(ud) do ... end
+    /// ```
+    ///
+    /// The control variable starts as `UdValue::Nil`. Implementors decide
+    /// what it represents (e.g., an integer index for sequences).
+    ///
+    /// # Example (Vec-like)
+    /// ```ignore
+    /// fn lua_next(&self, control: &UdValue) -> Option<(UdValue, UdValue)> {
+    ///     let idx = match control {
+    ///         UdValue::Nil => 0,
+    ///         UdValue::Integer(i) => *i as usize,
+    ///         _ => return None,
+    ///     };
+    ///     self.items.get(idx).map(|v| (
+    ///         UdValue::Integer((idx + 1) as i64),
+    ///         UdValue::Integer(*v as i64),
+    ///     ))
+    /// }
+    /// ```
+    fn lua_next(&self, _control: &UdValue) -> Option<(UdValue, UdValue)> {
+        None
+    }
+
     // ==================== Reflection ====================
 
     /// List available field names (for debugging, iteration, auto-completion).

@@ -526,21 +526,61 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// pairs(t) - Return iterator for all key-value pairs
+/// Supports both tables and userdata. For userdata, calls `lua_next()` on the trait.
 fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
-    let table_val = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("bad argument #1 to 'pairs' (table expected)".to_string()))?;
+    let val = l.get_arg(1).ok_or_else(|| {
+        l.error("bad argument #1 to 'pairs' (table or userdata expected)".to_string())
+    })?;
 
-    if !table_val.is_table() {
-        return Err(l.error("bad argument #1 to 'pairs' (table expected)".to_string()));
+    if val.is_table() {
+        // Return next, table, nil (3 values)
+        let next_func = LuaValue::cfunction(lua_next);
+        l.push_value(next_func)?;
+        l.push_value(val)?;
+        l.push_value(LuaValue::nil())?;
+        Ok(3)
+    } else if val.is_userdata() {
+        // Return userdata_next, userdata, nil (3 values)
+        let next_func = LuaValue::cfunction(lua_userdata_next);
+        l.push_value(next_func)?;
+        l.push_value(val)?;
+        l.push_value(LuaValue::nil())?;
+        Ok(3)
+    } else {
+        Err(l.error("bad argument #1 to 'pairs' (table or userdata expected)".to_string()))
     }
+}
 
-    // Return next, table, nil (3 values)
-    let next_func = LuaValue::cfunction(lua_next);
-    l.push_value(next_func)?;
-    l.push_value(table_val)?;
-    l.push_value(LuaValue::nil())?;
-    Ok(3)
+/// Iterator function for userdata pairs().
+/// Delegates to `UserDataTrait::lua_next(control)` — a stateless Rust iterator.
+/// Returns (next_control, value) or nil when exhausted.
+fn lua_userdata_next(l: &mut LuaState) -> LuaResult<usize> {
+    let ud_val = unsafe { l.get_arg_unchecked(1) };
+    let key_val = l.get_arg(2).unwrap_or_default();
+
+    let ud = ud_val.as_userdata_mut().ok_or_else(|| {
+        l.error("bad argument #1 to userdata iterator (userdata expected)".to_string())
+    })?;
+
+    // Convert the Lua control variable to UdValue for the trait call
+    let control = crate::lua_value::userdata_trait::lua_value_to_udvalue(&key_val);
+
+    match ud.get_trait().lua_next(&control) {
+        Some((next_control, value)) => {
+            let k = crate::lua_value::userdata_trait::udvalue_to_lua_value(l, next_control)?;
+            let v = crate::lua_value::userdata_trait::udvalue_to_lua_value(l, value)?;
+            l.push_value(k)?;
+            l.push_value(v)?;
+            Ok(2)
+        }
+        None => {
+            // Iteration exhausted
+            unsafe {
+                l.push_value_unchecked(LuaValue::nil());
+            }
+            Ok(1)
+        }
+    }
 }
 
 /// next(table [, index]) - Return next key-value pair

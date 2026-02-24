@@ -15,7 +15,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, Ident, Meta};
 
-use crate::type_utils::{field_to_udvalue, udvalue_to_field};
+use crate::type_utils::{field_to_udvalue, ref_to_udvalue, udvalue_to_field};
 
 /// Internal field metadata collected during parsing.
 struct FieldInfo {
@@ -23,6 +23,26 @@ struct FieldInfo {
     ty: syn::Type,
     lua_name: String,
     readonly: bool,
+}
+
+/// Info about a `#[lua(iter)]` field — used to generate `lua_next` + `lua_len`.
+struct IterFieldInfo {
+    ident: Ident,
+    element_type: syn::Type,
+}
+
+/// Extract the element type `T` from a `Vec<T>` type.
+/// Returns `None` if the type is not `Vec<...>`.
+fn extract_vec_element_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(type_path) = ty {
+        let segment = type_path.path.segments.last()?;
+        if segment.ident == "Vec"
+            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                    return Some(inner_ty);
+                }
+    }
+    None
 }
 
 /// Entry point for `#[derive(LuaUserData)]`.
@@ -60,6 +80,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
 
     // Collect field info
     let mut field_infos: Vec<FieldInfo> = Vec::new();
+    let mut iter_field: Option<IterFieldInfo> = None;
     for field in fields.iter() {
         let ident = field.ident.as_ref().unwrap();
         let ty = &field.ty;
@@ -69,6 +90,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
         let mut skip = false;
         let mut readonly = false;
         let mut lua_name: Option<String> = None;
+        let mut is_iter = false;
 
         for attr in &field.attrs {
             if attr.path().is_ident("lua")
@@ -79,6 +101,8 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
                         skip = true;
                     } else if meta.path.is_ident("readonly") {
                         readonly = true;
+                    } else if meta.path.is_ident("iter") {
+                        is_iter = true;
                     } else if meta.path.is_ident("name")
                         && let Ok(value) = meta.value()
                         && let Ok(lit) = value.parse::<syn::LitStr>()
@@ -87,6 +111,28 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
                     }
                     Ok(())
                 });
+            }
+        }
+
+        // Handle #[lua(iter)] — works on any field, even private/skipped
+        if is_iter {
+            if iter_field.is_some() {
+                return syn::Error::new_spanned(ident, "only one field can have #[lua(iter)]")
+                    .to_compile_error()
+                    .into();
+            }
+            match extract_vec_element_type(ty) {
+                Some(elem_ty) => {
+                    iter_field = Some(IterFieldInfo {
+                        ident: ident.clone(),
+                        element_type: elem_ty.clone(),
+                    });
+                }
+                None => {
+                    return syn::Error::new_spanned(ident, "#[lua(iter)] requires a Vec<T> field")
+                        .to_compile_error()
+                        .into();
+                }
             }
         }
 
@@ -131,6 +177,31 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     // Generate metamethod impls based on #[lua_impl(...)]
     let metamethod_impls = gen_metamethods(name, &trait_impls);
 
+    // Generate lua_next + lua_len if #[lua(iter)] is present
+    let iter_impls = if let Some(ref iter_info) = iter_field {
+        let field_ident = &iter_info.ident;
+        let elem_conversion = ref_to_udvalue(&iter_info.element_type, quote!(__elem));
+        quote! {
+            fn lua_next(&self, __control: &luars::lua_value::userdata_trait::UdValue) -> Option<(luars::lua_value::userdata_trait::UdValue, luars::lua_value::userdata_trait::UdValue)> {
+                let __idx = match __control {
+                    luars::lua_value::userdata_trait::UdValue::Nil => 0usize,
+                    luars::lua_value::userdata_trait::UdValue::Integer(__i) => *__i as usize,
+                    _ => return None,
+                };
+                self.#field_ident.get(__idx).map(|__elem| (
+                    luars::lua_value::userdata_trait::UdValue::Integer((__idx + 1) as i64),
+                    #elem_conversion,
+                ))
+            }
+
+            fn lua_len(&self) -> Option<luars::lua_value::userdata_trait::UdValue> {
+                Some(luars::lua_value::userdata_trait::UdValue::Integer(self.#field_ident.len() as i64))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let type_name_str = name.to_string();
 
     let expanded = quote! {
@@ -162,6 +233,8 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
             }
 
             #metamethod_impls
+
+            #iter_impls
 
             fn as_any(&self) -> &dyn std::any::Any {
                 self
