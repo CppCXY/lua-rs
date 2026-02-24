@@ -38,9 +38,10 @@ fn extract_vec_element_type(ty: &syn::Type) -> Option<&syn::Type> {
         let segment = type_path.path.segments.last()?;
         if segment.ident == "Vec"
             && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                    return Some(inner_ty);
-                }
+            && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+        {
+            return Some(inner_ty);
+        }
     }
     None
 }

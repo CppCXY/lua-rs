@@ -90,24 +90,25 @@ pub fn handle_call(
         // Check userdata lua_call trait method first
         if func.ttisfulluserdata()
             && let Some(ud) = func.as_userdata_mut()
-                && let Some(call_fn) = ud.get_trait().lua_call() {
-                    // Replace the userdata with the CFunction on stack, shift userdata as arg1
-                    let first_arg = func_idx + 1;
-                    for i in (0..nargs).rev() {
-                        let val = lua_state.stack_get(first_arg + i).unwrap_or_default();
-                        lua_state.stack_set(first_arg + i + 1, val)?;
-                    }
-                    // Set userdata as first argument
-                    lua_state.stack_set(first_arg, func)?;
-                    // Set CFunction as the function to call
-                    lua_state.stack_set(func_idx, LuaValue::cfunction(call_fn))?;
-                    // Update stack top
-                    let new_top = first_arg + nargs + 1;
-                    lua_state.set_top(new_top)?;
-                    // Recurse with adjusted args
-                    let new_b = if b == 0 { 0 } else { b + 1 };
-                    return handle_call(lua_state, base, a, new_b, c, status);
-                }
+            && let Some(call_fn) = ud.get_trait().lua_call()
+        {
+            // Replace the userdata with the CFunction on stack, shift userdata as arg1
+            let first_arg = func_idx + 1;
+            for i in (0..nargs).rev() {
+                let val = lua_state.stack_get(first_arg + i).unwrap_or_default();
+                lua_state.stack_set(first_arg + i + 1, val)?;
+            }
+            // Set userdata as first argument
+            lua_state.stack_set(first_arg, func)?;
+            // Set CFunction as the function to call
+            lua_state.stack_set(func_idx, LuaValue::cfunction(call_fn))?;
+            // Update stack top
+            let new_top = first_arg + nargs + 1;
+            lua_state.set_top(new_top)?;
+            // Recurse with adjusted args
+            let new_b = if b == 0 { 0 } else { b + 1 };
+            return handle_call(lua_state, base, a, new_b, c, status);
+        }
 
         // Handle __call metamethod
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
@@ -174,19 +175,20 @@ pub fn resolve_call_chain(
         // Try userdata lua_call trait method first
         if func.ttisfulluserdata()
             && let Some(ud) = func.as_userdata_mut()
-                && let Some(call_fn) = ud.get_trait().lua_call() {
-                    let first_arg = func_idx + 1;
-                    for i in (0..current_arg_count).rev() {
-                        let val = lua_state.stack_get(first_arg + i).unwrap_or_default();
-                        lua_state.stack_set(first_arg + i + 1, val)?;
-                    }
-                    lua_state.stack_set(first_arg, func)?;
-                    lua_state.stack_set(func_idx, LuaValue::cfunction(call_fn))?;
-                    current_arg_count += 1;
-                    lua_state.set_top(first_arg + current_arg_count)?;
-                    // CFunction is callable — will match on next iteration
-                    continue;
-                }
+            && let Some(call_fn) = ud.get_trait().lua_call()
+        {
+            let first_arg = func_idx + 1;
+            for i in (0..current_arg_count).rev() {
+                let val = lua_state.stack_get(first_arg + i).unwrap_or_default();
+                lua_state.stack_set(first_arg + i + 1, val)?;
+            }
+            lua_state.stack_set(first_arg, func)?;
+            lua_state.stack_set(func_idx, LuaValue::cfunction(call_fn))?;
+            current_arg_count += 1;
+            lua_state.set_top(first_arg + current_arg_count)?;
+            // CFunction is callable — will match on next iteration
+            continue;
+        }
 
         // Try to get __call metamethod
         if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
