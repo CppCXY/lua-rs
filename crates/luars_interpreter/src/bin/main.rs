@@ -422,8 +422,8 @@ fn lua_main() -> i32 {
     }
 
     // Handle LUA_INIT (unless -E)
-    if !opts.ignore_env {
-        if let Some(init) = env::var("LUA_INIT_5_5")
+    if !opts.ignore_env
+        && let Some(init) = env::var("LUA_INIT_5_5")
             .ok()
             .or_else(|| env::var("LUA_INIT").ok())
         {
@@ -450,14 +450,12 @@ fn lua_main() -> i32 {
                 }
             }
         }
-    }
 
     // Handle -W: turn warnings on
-    if opts.warnings_on {
-        if let Ok(chunk) = vm.compile("warn('@on')") {
+    if opts.warnings_on
+        && let Ok(chunk) = vm.compile("warn('@on')") {
             let _ = vm.execute_chunk(Rc::new(chunk));
         }
-    }
 
     // Setup arg table
     let exe_path = env::args().next().unwrap_or_else(|| "lua".to_string());
