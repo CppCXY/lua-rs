@@ -162,6 +162,13 @@ impl LuaState {
         }
     }
 
+    /// Get current frame's top without Option wrapping (for hot paths where we know a frame exists)
+    #[inline(always)]
+    pub(crate) fn current_frame_top_unchecked(&self) -> usize {
+        debug_assert!(self.call_depth > 0);
+        unsafe { self.call_stack.get_unchecked(self.call_depth - 1).top }
+    }
+
     /// Get mutable current call frame
     #[inline(always)]
     pub fn current_frame_mut(&mut self) -> Option<&mut CallInfo> {

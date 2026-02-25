@@ -354,101 +354,100 @@ fn try_bin_tm(
     p1_reg: u32,
     p2_reg: u32,
 ) -> LuaResult<LuaValue> {
-    // Arithmetic string-to-number coercion (matches C Lua's luaT_trybinassocTM → luaO_arith).
-    // Immediate/constant opcodes (AddI, ShlI, etc.) only check native numeric types
-    // in their slow paths. When they fall through to MMBINI/MMBINK, we must still
-    // try string-to-number coercion before looking for metamethods.
-    match tm_kind {
-        TmKind::Add | TmKind::Sub | TmKind::Mul | TmKind::Mod | TmKind::IDiv => {
-            // Try integer-preserving path first (like C Lua's intarith_aux)
-            if let (Some(i1), Some(i2)) = (value_to_integer(&p1), value_to_integer(&p2)) {
-                let result = match tm_kind {
-                    TmKind::Add => i1.wrapping_add(i2),
-                    TmKind::Sub => i1.wrapping_sub(i2),
-                    TmKind::Mul => i1.wrapping_mul(i2),
-                    TmKind::Mod => {
-                        if i2 == 0 {
-                            return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
+    // Fast path: if BOTH values are tables (most common metamethod case),
+    // skip string coercion and userdata checks — go straight to metamethod lookup.
+    let is_table_p1 = p1.ttistable();
+    let is_table_p2 = p2.ttistable();
+    if !(is_table_p1 || is_table_p2) {
+        // Neither is a table — try string-to-number coercion
+        match tm_kind {
+            TmKind::Add | TmKind::Sub | TmKind::Mul | TmKind::Mod | TmKind::IDiv => {
+                if let (Some(i1), Some(i2)) = (value_to_integer(&p1), value_to_integer(&p2)) {
+                    let result = match tm_kind {
+                        TmKind::Add => i1.wrapping_add(i2),
+                        TmKind::Sub => i1.wrapping_sub(i2),
+                        TmKind::Mul => i1.wrapping_mul(i2),
+                        TmKind::Mod => {
+                            if i2 == 0 {
+                                return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
+                            }
+                            lua_imod(i1, i2)
                         }
-                        lua_imod(i1, i2)
-                    }
-                    TmKind::IDiv => {
-                        if i2 == 0 {
-                            return Err(lua_state.error("attempt to divide by zero".to_string()));
+                        TmKind::IDiv => {
+                            if i2 == 0 {
+                                return Err(
+                                    lua_state.error("attempt to divide by zero".to_string())
+                                );
+                            }
+                            lua_idiv(i1, i2)
                         }
-                        lua_idiv(i1, i2)
-                    }
-                    _ => unreachable!(),
-                };
-                return Ok(LuaValue::integer(result));
+                        _ => unreachable!(),
+                    };
+                    return Ok(LuaValue::integer(result));
+                }
+                let mut n1 = 0.0f64;
+                let mut n2 = 0.0f64;
+                if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
+                    let result = match tm_kind {
+                        TmKind::Add => n1 + n2,
+                        TmKind::Sub => n1 - n2,
+                        TmKind::Mul => n1 * n2,
+                        TmKind::Mod => crate::lua_vm::execute::helper::lua_fmod(n1, n2),
+                        TmKind::IDiv => (n1 / n2).floor(),
+                        _ => unreachable!(),
+                    };
+                    return Ok(LuaValue::number(result));
+                }
             }
-            // Fall through to float path
-            let mut n1 = 0.0f64;
-            let mut n2 = 0.0f64;
-            if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
-                let result = match tm_kind {
-                    TmKind::Add => n1 + n2,
-                    TmKind::Sub => n1 - n2,
-                    TmKind::Mul => n1 * n2,
-                    TmKind::Mod => crate::lua_vm::execute::helper::lua_fmod(n1, n2),
-                    TmKind::IDiv => (n1 / n2).floor(),
-                    _ => unreachable!(),
-                };
-                return Ok(LuaValue::number(result));
+            TmKind::Div | TmKind::Pow => {
+                let mut n1 = 0.0f64;
+                let mut n2 = 0.0f64;
+                if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
+                    let result = match tm_kind {
+                        TmKind::Div => n1 / n2,
+                        TmKind::Pow => n1.powf(n2),
+                        _ => unreachable!(),
+                    };
+                    return Ok(LuaValue::number(result));
+                }
             }
+            _ => {}
         }
-        TmKind::Div | TmKind::Pow => {
-            // These always produce float results
-            let mut n1 = 0.0f64;
-            let mut n2 = 0.0f64;
-            if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
-                let result = match tm_kind {
-                    TmKind::Div => n1 / n2,
-                    TmKind::Pow => n1.powf(n2),
-                    _ => unreachable!(),
-                };
-                return Ok(LuaValue::number(result));
-            }
-        }
-        _ => {}
-    }
 
-    // Try trait-based arithmetic for userdata
-    if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
-        // Try p1's trait methods first
-        let trait_result = if let Some(ud) = p1.as_userdata_mut() {
-            let other = crate::lua_value::lua_value_to_udvalue(&p2);
-            match tm_kind {
-                TmKind::Add => ud.get_trait().lua_add(&other),
-                TmKind::Sub => ud.get_trait().lua_sub(&other),
-                TmKind::Mul => ud.get_trait().lua_mul(&other),
-                TmKind::Div => ud.get_trait().lua_div(&other),
-                TmKind::Mod => ud.get_trait().lua_mod(&other),
-                _ => None,
+        // Try trait-based arithmetic for userdata
+        if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
+            let trait_result = if let Some(ud) = p1.as_userdata_mut() {
+                let other = crate::lua_value::lua_value_to_udvalue(&p2);
+                match tm_kind {
+                    TmKind::Add => ud.get_trait().lua_add(&other),
+                    TmKind::Sub => ud.get_trait().lua_sub(&other),
+                    TmKind::Mul => ud.get_trait().lua_mul(&other),
+                    TmKind::Div => ud.get_trait().lua_div(&other),
+                    TmKind::Mod => ud.get_trait().lua_mod(&other),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(udv) = trait_result {
+                return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
             }
-        } else {
-            None
-        };
-        if let Some(udv) = trait_result {
-            return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
-        }
-        // If p1 didn't handle it, try p2's trait methods (mirroring Lua's
-        // convention: `3 + vec` tries vec's __add with the number as arg).
-        let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
-            let other = crate::lua_value::lua_value_to_udvalue(&p1);
-            match tm_kind {
-                TmKind::Add => ud.get_trait().lua_add(&other),
-                TmKind::Sub => ud.get_trait().lua_sub(&other),
-                TmKind::Mul => ud.get_trait().lua_mul(&other),
-                TmKind::Div => ud.get_trait().lua_div(&other),
-                TmKind::Mod => ud.get_trait().lua_mod(&other),
-                _ => None,
+            let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
+                let other = crate::lua_value::lua_value_to_udvalue(&p1);
+                match tm_kind {
+                    TmKind::Add => ud.get_trait().lua_add(&other),
+                    TmKind::Sub => ud.get_trait().lua_sub(&other),
+                    TmKind::Mul => ud.get_trait().lua_mul(&other),
+                    TmKind::Div => ud.get_trait().lua_div(&other),
+                    TmKind::Mod => ud.get_trait().lua_mod(&other),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(udv) = trait_result2 {
+                return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
             }
-        } else {
-            None
-        };
-        if let Some(udv) = trait_result2 {
-            return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
         }
     }
 
@@ -534,35 +533,31 @@ pub fn call_tm_res(
     arg1: LuaValue,
     arg2: LuaValue,
 ) -> LuaResult<LuaValue> {
-    // Sync top to ci_top — ensures metamethod args are pushed above current frame
-    if let Some(frame) = lua_state.current_frame() {
-        let ci_top = frame.top;
-        if lua_state.get_top() != ci_top {
+    // Sync top to ci_top — callers in the inline hot path already did set_top_raw(ci_top),
+    // so the comparison is almost always true. We still check for safety in other callers.
+    let func_pos = {
+        let ci_top = lua_state.current_frame_top_unchecked();
+        let top = lua_state.get_top();
+        if top != ci_top {
             lua_state.set_top_raw(ci_top);
         }
-    }
+        ci_top
+    };
 
-    let func_pos = lua_state.get_top();
-
-    // Direct stack write — like Lua 5.5's setobj2s, no bounds checking.
-    // The EXTRA_STACK (5 slots) guarantees space above ci->top.
-    {
-        let stack = lua_state.stack_mut();
-        stack[func_pos] = metamethod; // push function
-        stack[func_pos + 1] = arg1; // 1st argument
-        stack[func_pos + 2] = arg2; // 2nd argument
+    // Direct stack write using raw pointers — like Lua 5.5's setobj2s.
+    // EXTRA_STACK (5 slots) guarantees space above ci->top.
+    unsafe {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        *sp.add(func_pos) = metamethod;
+        *sp.add(func_pos + 1) = arg1;
+        *sp.add(func_pos + 2) = arg2;
     }
-    // L->top.p += 3
     lua_state.set_top_raw(func_pos + 3);
 
     // Call the metamethod with nresults=1
-    // Check Lua function first (most common for metamethods)
     if metamethod.is_lua_function() {
-        // Use specialized push_lua_frame — avoids redundant type dispatch in generic push_frame
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
-        let param_count = chunk.param_count;
-        let max_stack_size = chunk.max_stack_size;
 
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
@@ -572,8 +567,8 @@ pub fn call_tm_res(
             new_base,
             2,
             1,
-            param_count,
-            max_stack_size,
+            chunk.param_count,
+            chunk.max_stack_size,
             chunk as *const _,
         )?;
         lua_state.inc_n_ccalls()?;
@@ -586,9 +581,7 @@ pub fn call_tm_res(
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
 
-    // Lua 5.5: setobjs2s(L, res, --L->top.p)
-    // Return value is at func_pos after call returns, then L->top.p = func_pos
-    let result_val = lua_state.stack_mut()[func_pos];
+    let result_val = unsafe { *lua_state.stack_mut().as_ptr().add(func_pos) };
     lua_state.set_top_raw(func_pos);
 
     Ok(result_val)
@@ -619,34 +612,30 @@ pub fn call_tm(
     arg2: LuaValue,
     arg3: LuaValue,
 ) -> LuaResult<()> {
-    // savestate: L->top.p = ci->top.p
-    if let Some(frame) = lua_state.current_frame() {
-        let ci_top = frame.top;
-        if lua_state.get_top() != ci_top {
+    // Sync top to ci_top
+    let func_pos = {
+        let ci_top = lua_state.current_frame_top_unchecked();
+        let top = lua_state.get_top();
+        if top != ci_top {
             lua_state.set_top_raw(ci_top);
         }
-    }
+        ci_top
+    };
 
-    let func_pos = lua_state.get_top();
-
-    // Direct stack write — like Lua 5.5's setobj2s
-    {
-        let stack = lua_state.stack_mut();
-        stack[func_pos] = metamethod; // push function
-        stack[func_pos + 1] = arg1; // 1st argument
-        stack[func_pos + 2] = arg2; // 2nd argument
-        stack[func_pos + 3] = arg3; // 3rd argument
+    // Direct stack write using raw pointers
+    unsafe {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        *sp.add(func_pos) = metamethod;
+        *sp.add(func_pos + 1) = arg1;
+        *sp.add(func_pos + 2) = arg2;
+        *sp.add(func_pos + 3) = arg3;
     }
-    // L->top.p = func + 4
     lua_state.set_top_raw(func_pos + 4);
 
     // Call with 0 results (nresults=0)
     if metamethod.is_lua_function() {
-        // Use specialized push_lua_frame
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
-        let param_count = chunk.param_count;
-        let max_stack_size = chunk.max_stack_size;
 
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
@@ -656,8 +645,8 @@ pub fn call_tm(
             new_base,
             3,
             0,
-            param_count,
-            max_stack_size,
+            chunk.param_count,
+            chunk.max_stack_size,
             chunk as *const _,
         )?;
         lua_state.inc_n_ccalls()?;
