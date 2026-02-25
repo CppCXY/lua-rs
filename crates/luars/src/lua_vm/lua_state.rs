@@ -2104,6 +2104,20 @@ impl LuaState {
         self.vm_mut().raw_seti(table, index, value)
     }
 
+    /// Get element from table by integer key with __index metamethod support.
+    /// Like C Lua's lua_geti. Returns nil if not found.
+    pub fn table_geti(&mut self, table: &LuaValue, key: i64) -> LuaResult<LuaValue> {
+        let k = LuaValue::integer(key);
+        Ok(self.table_get(table, &k)?.unwrap_or(LuaValue::nil()))
+    }
+
+    /// Set element in table by integer key with __newindex metamethod support.
+    /// Like C Lua's lua_seti.
+    pub fn table_seti(&mut self, table: &LuaValue, key: i64, value: LuaValue) -> LuaResult<()> {
+        let k = LuaValue::integer(key);
+        self.table_set(table, k, value)
+    }
+
     pub fn get_error_msg(&mut self, e: LuaError) -> String {
         match e {
             LuaError::OutOfMemory => {

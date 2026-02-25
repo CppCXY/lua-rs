@@ -4,34 +4,30 @@ This document records all known behavioral differences between luars (Rust imple
 
 ---
 
-## 1. table library does not trigger metamethods
+## 1. ~~table library does not trigger metamethods~~ (RESOLVED)
 
-The following functions use raw access (`rawget` / `rawset` / `rawlen`) and do NOT trigger `__index`, `__newindex`, or `__len` metamethods:
+The table library functions now use generic table access and properly trigger `__index`, `__newindex`, and `__len` metamethods, matching C Lua 5.5 behavior:
 
-- `table.insert`
-- `table.remove`
-- `table.sort`
-- `table.concat`
-- `table.move`
-- `table.unpack`
-
-**C Lua 5.5**: These functions operate via the generic API and can trigger the corresponding metamethods.
+- `table.insert` - uses `obj_len` for `__len`, `table_geti`/`table_seti` for `__index`/`__newindex`
+- `table.remove` - uses `obj_len` for `__len`, `table_geti`/`table_seti` for `__index`/`__newindex`
+- `table.sort` - uses `obj_len` for `__len`, `table_geti`/`table_seti` for `__index`/`__newindex`
+- `table.concat` - uses `obj_len` for `__len`, `table_geti` for `__index`
+- `table.move` - uses `table_get`/`table_set` for `__index`/`__newindex` (with raw fast path when no metatable)
+- `table.unpack` - uses `obj_len` for `__len`, `table_geti` for `__index`
 
 ---
 
-## 2. `pairs()` does not support `__pairs` metamethod
+## 2. ~~`pairs()` does not support `__pairs` metamethod~~ (RESOLVED)
 
-**C Lua 5.5**: `pairs(t)` checks for the `__pairs` metamethod; if present, it calls it and may return up to 4 values (including a to-be-closed variable).
+`pairs(t)` now checks for the `__pairs` metamethod; if present, it calls `__pairs(t)` and returns up to 4 values (including a to-be-closed variable), matching C Lua 5.5 behavior. Without `__pairs`, `pairs` returns `(next, t, nil, nil)` — 4 values.
 
-**luars**: `pairs(t)` always returns `next, t, nil` (3 values), does not check `__pairs`, and does not support a 4th to-be-closed return value.
+**Note**: Yielding inside `__pairs` is not yet supported.
 
 ---
 
-## 3. `ipairs()` does not trigger `__index` metamethod
+## 3. ~~`ipairs()` does not trigger `__index` metamethod~~ (RESOLVED)
 
-**C Lua 5.5**: `ipairs` iterator accesses values via the generic table API and may trigger `__index`.
-
-**luars**: `ipairs` iterator uses `raw_geti()` to read the array directly and does not trigger `__index`.
+`ipairs` iterator now accesses values via the generic table API (`table_geti`) and correctly triggers `__index`, matching C Lua 5.5 behavior.
 
 ---
 
@@ -150,13 +146,15 @@ There is a known compiler bug in bytecode generation involving negative table in
 
 ## 16. Skipped sections in nextvar.lua
 
-In `test.lua` (a copy of `nextvar.lua`), the following five test sections are skipped via `if false then ... end`:
+In `nextvar.lua`, the following test section is skipped via `if false then ... end`:
 
-1. Table-library metamethod tests (~line 609) — table.insert/sort/concat/remove/unpack using `__len` / `__index` / `__newindex` proxies
-2. table.insert overflow test (~line 658) — `__len` returns `math.maxinteger`
-3. `__pairs` metamethod test (~line 912) — pairs triggers custom iterator + to-be-closed
-4. ipairs + `__index` metamethod test (~line 930) — ipairs reads virtual elements via `__index`
-5. yield inside `__pairs` test (~line 943) — yielding inside iterator returned by `__pairs`
+1. yield inside `__pairs` test (~line 943) — yielding inside iterator returned by `__pairs`
+
+Previously skipped sections that are now enabled:
+- ~~Table-library metamethod tests~~ (RESOLVED in §1)
+- ~~table.insert overflow test~~ (RESOLVED in §1)
+- ~~`__pairs` metamethod test~~ (RESOLVED in §2)
+- ~~ipairs + `__index` metamethod test~~ (RESOLVED in §3)
 
 ---
 

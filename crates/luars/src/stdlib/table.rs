@@ -80,13 +80,12 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'concat' (table expected)".to_string()));
     }
 
-    let table = table_val.as_table().unwrap();
-
     let i = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j = l
-        .get_arg(4)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(table.len() as i64);
+    // Use obj_len to respect __len metamethod
+    let j = match l.get_arg(4).and_then(|v| v.as_integer()) {
+        Some(j) => j,
+        None => l.obj_len(&table_val)?,
+    };
 
     // If i > j, return empty string immediately
     if i > j {
@@ -97,7 +96,8 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
 
     let mut parts = Vec::new();
     for idx in i..=j {
-        let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+        // Use table_geti to respect __index metamethod
+        let value = l.table_geti(&table_val, idx)?;
         if let Some(s) = value.as_str() {
             parts.push(s.to_string());
         } else if let Some(ival) = value.as_integer() {
@@ -138,12 +138,8 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         let value = l
             .get_arg(2)
             .ok_or_else(|| l.error("bad argument #2 to 'insert' (value expected)".to_string()))?;
-        let table = table_val.as_table_mut().unwrap();
-        table.raw_seti(len.wrapping_add(1), value);
-        // GC write barrier: table was modified directly, bypass LuaVM::raw_seti barrier
-        if let Some(gc_ptr) = table_val.as_gc_ptr() {
-            l.gc_barrier_back(gc_ptr);
-        }
+        // Use table_seti to respect __newindex metamethod
+        l.table_seti(&table_val, len.wrapping_add(1), value)?;
     } else if argc == 3 {
         // table.insert(list, pos, value)
         let pos = l
@@ -161,12 +157,15 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         // Shift elements up: t[i+1] = t[i] for i = len down to pos
-        let table = table_val.as_table_mut().unwrap();
-        table.insert_array_at(pos, value)?;
-        // GC write barrier: table was modified directly
-        if let Some(gc_ptr) = table_val.as_gc_ptr() {
-            l.gc_barrier_back(gc_ptr);
+        // Use table_geti/table_seti to respect metamethods
+        let mut i = len;
+        while i >= pos {
+            let val = l.table_geti(&table_val, i)?;
+            l.table_seti(&table_val, i + 1, val)?;
+            i -= 1;
         }
+        // Set value at pos
+        l.table_seti(&table_val, pos, value)?;
     } else {
         return Err(l.error("wrong number of arguments to 'insert'".to_string()));
     }
@@ -184,8 +183,8 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
     }
 
-    let table = table_val.as_table_mut().unwrap();
-    let len = table.len() as i64;
+    // Use obj_len to respect __len metamethod
+    let len = l.obj_len(&table_val)?;
 
     // Default pos = #t (like C Lua: luaL_optinteger(L, 2, size))
     let has_pos_arg = l.get_arg(2).is_some();
@@ -196,24 +195,19 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
     }
 
-    // Get the value at pos
-    let removed = table.raw_geti(pos).unwrap_or(LuaValue::nil());
+    // Get the value at pos using table_geti to respect __index
+    let removed = l.table_geti(&table_val, pos)?;
 
     // Shift elements down: t[i] = t[i+1] for i = pos to len-1
     let mut i = pos;
     while i < len {
-        let next_val = table.raw_geti(i.wrapping_add(1)).unwrap_or(LuaValue::nil());
-        table.raw_seti(i, next_val);
+        let next_val = l.table_geti(&table_val, i.wrapping_add(1))?;
+        l.table_seti(&table_val, i, next_val)?;
         i += 1;
     }
 
     // Remove the last entry: t[len] = nil
-    table.raw_seti(i, LuaValue::nil());
-
-    // GC write barrier: table was modified directly (shifted elements may be collectable)
-    if let Some(gc_ptr) = table_val.as_gc_ptr() {
-        l.gc_barrier_back(gc_ptr);
-    }
+    l.table_seti(&table_val, i, LuaValue::nil())?;
 
     l.push_value(removed)?;
     Ok(1)
@@ -364,7 +358,6 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// table.unpack(list [, i [, j]]) - Unpack table into values
-/// OPTIMIZED: Direct push without intermediate Vec, unchecked stack writes
 fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     let table_val = l
         .get_arg(1)
@@ -374,13 +367,12 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'unpack' (table expected)".to_string()));
     }
 
-    let table = table_val.as_table().unwrap();
-
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
-    let j = l
-        .get_arg(3)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(table.len() as i64);
+    // Use obj_len to respect __len metamethod
+    let j = match l.get_arg(3).and_then(|v| v.as_integer()) {
+        Some(j) => j,
+        None => l.obj_len(&table_val)?,
+    };
 
     // Handle empty range
     if i > j {
@@ -394,15 +386,13 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     }
     let count = (n + 1) as usize;
 
-    // Ensure physical stack has room, then use unchecked push
+    // Ensure physical stack has room
     l.ensure_stack_capacity(count)?;
 
-    // Push values directly without intermediate Vec allocation
+    // Push values using table_geti to respect __index metamethod
     for idx in i..=j {
-        let val = table.raw_geti(idx).unwrap_or(LuaValue::nil());
-        unsafe {
-            l.push_value_unchecked(val);
-        }
+        let val = l.table_geti(&table_val, idx)?;
+        l.push_value(val)?;
     }
 
     Ok(count)

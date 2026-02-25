@@ -490,38 +490,34 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// ipairs(t) - Return iterator for array part of table
+/// Like C Lua 5.5: accepts any value with metatable, uses lua_geti (triggers __index)
 fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
-    let table_val = l
+    let _table_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'ipairs' (value expected)".to_string()))?;
 
-    if !table_val.is_table() {
-        return Err(l.error("bad argument #1 to 'ipairs' (table expected)".to_string()));
-    }
-
     // Return iterator function, table, and 0 (3 values)
+    // Note: C Lua 5.5 does NOT require arg1 to be a table (luaL_checkany)
     let iter_func = LuaValue::cfunction(ipairs_next);
     l.push_value(iter_func)?;
-    l.push_value(table_val)?;
+    l.push_value(_table_val)?;
     l.push_value(LuaValue::integer(0))?;
     Ok(3)
 }
 
-/// Iterator function for ipairs - Optimized for performance
+/// Iterator function for ipairs - uses generic table access (respects __index)
 #[inline]
 fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
-    // SAFETY: ipairs always provides (table, index) as args 1 and 2.
-    let (table_val, index_val) = unsafe { (l.get_arg_unchecked(1), l.get_arg_unchecked(2)) };
+    let table_val = unsafe { l.get_arg_unchecked(1) };
+    let index_val = unsafe { l.get_arg_unchecked(2) };
 
-    if let Some(table) = table_val.as_table()
-        && let Some(index) = index_val.as_integer()
-    {
+    if let Some(index) = index_val.as_integer() {
         let next_index = index.wrapping_add(1);
-        if let Some(value) = table.raw_geti(next_index) {
-            unsafe {
-                l.push_value_unchecked(LuaValue::integer(next_index));
-                l.push_value_unchecked(value);
-            }
+        // Use table_geti to respect __index metamethod (like C Lua's lua_geti)
+        let value = l.table_geti(&table_val, next_index)?;
+        if !value.is_nil() {
+            l.push_value(LuaValue::integer(next_index))?;
+            l.push_value(value)?;
             return Ok(2);
         } else {
             unsafe {
@@ -531,30 +527,55 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    Err(l.error("ipairs iterator: invalid table or index".to_string()))
+    Err(l.error("ipairs iterator: invalid index".to_string()))
 }
 
 /// pairs(t) - Return iterator for all key-value pairs
-/// Supports both tables and userdata. For userdata, calls `lua_next()` on the trait.
+/// Supports __pairs metamethod (C Lua 5.5), tables, and userdata.
+/// Returns up to 4 values: iterator, state, initial, to-be-closed variable.
 fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
     let val = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'pairs' (table or userdata expected)".to_string())
     })?;
 
+    // Check for __pairs metamethod first (like C Lua 5.5)
+    if val.is_table() || val.is_userdata() {
+        let pairs_key = l.vm_mut().const_strings.tm_pairs;
+        if let Some(mt) = get_metatable(l, &val) {
+            if let Some(mt_table) = mt.as_table() {
+                if let Some(mm) = mt_table.raw_get(&pairs_key) {
+                    // Call __pairs(t) and return its results (up to 4)
+                    let results = l.call_function(mm, vec![val])?;
+                    let nresults = results.len().min(4);
+                    for i in 0..nresults {
+                        l.push_value(results[i])?;
+                    }
+                    // Pad with nil if fewer than 4 results
+                    for _ in nresults..4 {
+                        l.push_value(LuaValue::nil())?;
+                    }
+                    return Ok(4);
+                }
+            }
+        }
+    }
+
     if val.is_table() {
-        // Return next, table, nil (3 values)
+        // Return next, table, nil, nil (4 values, matching C Lua 5.5)
         let next_func = LuaValue::cfunction(lua_next);
         l.push_value(next_func)?;
         l.push_value(val)?;
         l.push_value(LuaValue::nil())?;
-        Ok(3)
+        l.push_value(LuaValue::nil())?;
+        Ok(4)
     } else if val.is_userdata() {
-        // Return userdata_next, userdata, nil (3 values)
+        // Return userdata_next, userdata, nil, nil (4 values)
         let next_func = LuaValue::cfunction(lua_userdata_next);
         l.push_value(next_func)?;
         l.push_value(val)?;
         l.push_value(LuaValue::nil())?;
-        Ok(3)
+        l.push_value(LuaValue::nil())?;
+        Ok(4)
     } else {
         Err(l.error("bad argument #1 to 'pairs' (table or userdata expected)".to_string()))
     }

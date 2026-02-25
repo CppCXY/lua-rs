@@ -605,8 +605,7 @@ assert(a[#a] == 30)
 assert(table.remove(a, 2) == 20)
 assert(a[#a] == 30 and #a == 2)
 
-do   -- testing table library with metamethods (SKIPPED: no metamethod support in table lib)
-if false then
+do   -- testing table library with metamethods
   local function test (proxy, t)
     for i = 1, 10 do
       table.insert(proxy, 1, i)
@@ -650,18 +649,15 @@ if false then
     __len = function (_) return 5 end})
   assert(table.concat(t, ";") == "2;3;4;5;6")
 
-end -- if false
 end
 
 
-do   -- testing overflow in table.insert (SKIPPED: no __len in table.insert)
-if false then
+do   -- testing overflow in table.insert
   local t = setmetatable({},
             {__len = function () return math.maxinteger end})
   table.insert(t, 20)
   local k, v = next(t)
   assert(k == math.mininteger and v == 20)
-end -- if false
 end
 
 if not T then
@@ -911,7 +907,6 @@ local function foo1 (e,i)
 end
 
 local closed = false
-if false then -- SKIPPED: no __pairs support
 setmetatable(a, {__pairs = function (x)
   local tbc = setmetatable({}, {__close = function () closed = true end})
   return foo, x, 0, tbc
@@ -922,14 +917,12 @@ for k,v in pairs(a) do
   i = i + 1
   assert(k == i and v == k+1)
 end
-assert(closed or true)   -- 'tbc' has been closed (SKIPPED)
-end -- if false (__pairs)
+assert(closed)   -- 'tbc' has been closed
 
 a.n = 5
 a[3] = 30
 
--- testing ipairs with metamethods (SKIPPED: no __index in ipairs)
-if false then
+-- testing ipairs with metamethods
 a = {n=10}
 setmetatable(a, { __index = function (t,k)
                      if k <= t.n then return k * 10 end
@@ -940,7 +933,6 @@ for k,v in ipairs(a) do
   assert(k == i and v == i * 10)
 end
 assert(i == a.n)
-end -- if false (ipairs metamethods)
 -- testing yield inside __pairs (SKIPPED: no __pairs + yield support)
 if false then
   local t = setmetatable({10, 20, 30}, {__pairs = function (t)

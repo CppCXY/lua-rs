@@ -689,3 +689,185 @@ fn test_mode_weak_tables() {
     );
     assert!(result.is_ok());
 }
+
+// ===== ipairs / pairs metamethod tests =====
+
+#[test]
+fn test_ipairs_with_index_metamethod() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- ipairs should trigger __index metamethod
+        local a = {n = 10}
+        setmetatable(a, {
+            __index = function(t, k)
+                if k <= t.n then return k * 10 end
+            end
+        })
+
+        local count = 0
+        for k, v in ipairs(a) do
+            count = count + 1
+            assert(k == count, "ipairs key mismatch")
+            assert(v == count * 10, "ipairs value mismatch")
+        end
+        assert(count == a.n, "ipairs should iterate " .. a.n .. " times, got " .. count)
+    "#,
+    );
+
+    assert!(
+        result.is_ok(),
+        "ipairs with __index failed: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_ipairs_with_index_table() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- ipairs with __index pointing to another table
+        local backing = {100, 200, 300, 400, 500}
+        local proxy = setmetatable({}, { __index = backing })
+
+        local sum = 0
+        local count = 0
+        for _, v in ipairs(proxy) do
+            sum = sum + v
+            count = count + 1
+        end
+        assert(count == 5, "expected 5 iterations, got " .. count)
+        assert(sum == 1500, "expected sum 1500, got " .. sum)
+    "#,
+    );
+
+    assert!(result.is_ok(), "ipairs with __index table failed: {:?}", result);
+}
+
+#[test]
+fn test_ipairs_stops_at_nil() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- ipairs with __index that returns nil at index 4
+        local a = setmetatable({}, {
+            __index = function(_, k)
+                if k <= 3 then return k * 100 end
+                -- returns nil for k > 3
+            end
+        })
+
+        local count = 0
+        for k, v in ipairs(a) do
+            count = count + 1
+        end
+        assert(count == 3, "ipairs should stop at nil, got " .. count)
+    "#,
+    );
+
+    assert!(result.is_ok(), "ipairs stops at nil failed: {:?}", result);
+}
+
+#[test]
+fn test_pairs_with_pairs_metamethod() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- Custom iterator via __pairs
+        local data = {10, 20, 30}
+        local t = setmetatable({}, {
+            __pairs = function(self)
+                local i = 0
+                return function()
+                    i = i + 1
+                    if i <= #data then return i, data[i] end
+                end, self, nil
+            end
+        })
+
+        local sum = 0
+        local count = 0
+        for k, v in pairs(t) do
+            sum = sum + v
+            count = count + 1
+        end
+        assert(count == 3, "pairs metamethod: expected 3, got " .. count)
+        assert(sum == 60, "pairs metamethod: expected sum 60, got " .. sum)
+    "#,
+    );
+
+    assert!(
+        result.is_ok(),
+        "pairs with __pairs failed: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_pairs_with_tbc_variable() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- __pairs returns a to-be-closed variable (4th return value)
+        local closed = false
+        local t = setmetatable({}, {
+            __pairs = function(self)
+                local tbc = setmetatable({}, {
+                    __close = function() closed = true end
+                })
+                local i = 0
+                return function()
+                    i = i + 1
+                    if i <= 3 then return i, i * 10 end
+                end, self, nil, tbc
+            end
+        })
+
+        for k, v in pairs(t) do end
+        assert(closed, "to-be-closed variable should have been closed")
+    "#,
+    );
+
+    assert!(
+        result.is_ok(),
+        "pairs with TBC variable failed: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_pairs_without_metamethod_returns_4_values() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- pairs without __pairs should still work (returns next, t, nil, nil)
+        local t = {a = 1, b = 2}
+        local x, y, z = pairs(t)
+        assert(type(x) == "function", "pairs should return function as 1st value")
+        assert(y == t, "pairs should return table as 2nd value")
+        assert(z == nil, "pairs should return nil as 3rd value")
+
+        -- Verify standard iteration still works
+        local keys = {}
+        for k, v in pairs(t) do
+            keys[k] = v
+        end
+        assert(keys.a == 1 and keys.b == 2)
+    "#,
+    );
+
+    assert!(result.is_ok(), "pairs without metamethod failed: {:?}", result);
+}

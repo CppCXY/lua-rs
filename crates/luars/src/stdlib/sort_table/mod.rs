@@ -93,24 +93,19 @@ fn sort_range(
     if n <= 3 {
         // Small range: use insertion sort (no invalid order detection needed for <=3)
         for i in (lo + 1)..=hi {
-            let t = table.as_table().unwrap();
-            let key = t.raw_geti(i).unwrap_or_default();
+            let key = l.table_geti(table, i)?;
             let mut j = i - 1;
             loop {
-                let t = table.as_table().unwrap();
-                let val_j = t.raw_geti(j).unwrap_or_default();
+                let val_j = l.table_geti(table, j)?;
                 if sort_compare(l, key, val_j, comp_func, has_comp)? {
-                    let t = table.as_table_mut().unwrap();
-                    t.raw_seti(j + 1, val_j);
+                    l.table_seti(table, j + 1, val_j)?;
                     if j <= lo {
-                        let t = table.as_table_mut().unwrap();
-                        t.raw_seti(lo, key);
+                        l.table_seti(table, lo, key)?;
                         break;
                     }
                     j -= 1;
                 } else {
-                    let t = table.as_table_mut().unwrap();
-                    t.raw_seti(j + 1, key);
+                    l.table_seti(table, j + 1, key)?;
                     break;
                 }
             }
@@ -122,30 +117,24 @@ fn sort_range(
     let mid = lo + (hi - lo) / 2;
     // Sort lo, mid, hi
     {
-        let t = table.as_table().unwrap();
-        let v_lo = t.raw_geti(lo).unwrap_or_default();
-        let v_mid = t.raw_geti(mid).unwrap_or_default();
+        let v_lo = l.table_geti(table, lo)?;
+        let v_mid = l.table_geti(table, mid)?;
         if sort_compare(l, v_mid, v_lo, comp_func, has_comp)? {
-            let t = table.as_table_mut().unwrap();
-            t.raw_seti(lo, v_mid);
-            t.raw_seti(mid, v_lo);
+            l.table_seti(table, lo, v_mid)?;
+            l.table_seti(table, mid, v_lo)?;
         }
     }
     {
-        let t = table.as_table().unwrap();
-        let v_mid = t.raw_geti(mid).unwrap_or_default();
-        let v_hi = t.raw_geti(hi).unwrap_or_default();
+        let v_mid = l.table_geti(table, mid)?;
+        let v_hi = l.table_geti(table, hi)?;
         if sort_compare(l, v_hi, v_mid, comp_func, has_comp)? {
-            let t = table.as_table_mut().unwrap();
-            t.raw_seti(mid, v_hi);
-            t.raw_seti(hi, v_mid);
-            let t = table.as_table().unwrap();
-            let v_lo = t.raw_geti(lo).unwrap_or_default();
-            let v_mid = t.raw_geti(mid).unwrap_or_default();
+            l.table_seti(table, mid, v_hi)?;
+            l.table_seti(table, hi, v_mid)?;
+            let v_lo = l.table_geti(table, lo)?;
+            let v_mid = l.table_geti(table, mid)?;
             if sort_compare(l, v_mid, v_lo, comp_func, has_comp)? {
-                let t = table.as_table_mut().unwrap();
-                t.raw_seti(lo, v_mid);
-                t.raw_seti(mid, v_lo);
+                l.table_seti(table, lo, v_mid)?;
+                l.table_seti(table, mid, v_lo)?;
             }
         }
     }
@@ -154,15 +143,12 @@ fn sort_range(
     }
 
     // Pivot is now at mid
-    let t = table.as_table().unwrap();
-    let pivot = t.raw_geti(mid).unwrap_or_default();
+    let pivot = l.table_geti(table, mid)?;
 
     // Move pivot to hi-1
-    let t = table.as_table().unwrap();
-    let v_hi_1 = t.raw_geti(hi - 1).unwrap_or_default();
-    let t = table.as_table_mut().unwrap();
-    t.raw_seti(hi - 1, pivot);
-    t.raw_seti(mid, v_hi_1);
+    let v_hi_1 = l.table_geti(table, hi - 1)?;
+    l.table_seti(table, hi - 1, pivot)?;
+    l.table_seti(table, mid, v_hi_1)?;
 
     let mut i = lo;
     let mut j = hi - 1;
@@ -170,8 +156,7 @@ fn sort_range(
         // Find element >= pivot from left
         loop {
             i += 1;
-            let t = table.as_table().unwrap();
-            let v_i = t.raw_geti(i).unwrap_or_default();
+            let v_i = l.table_geti(table, i)?;
             if !sort_compare(l, v_i, pivot, comp_func, has_comp)? {
                 break;
             }
@@ -183,8 +168,7 @@ fn sort_range(
         // Find element <= pivot from right
         loop {
             j -= 1;
-            let t = table.as_table().unwrap();
-            let v_j = t.raw_geti(j).unwrap_or_default();
+            let v_j = l.table_geti(table, j)?;
             if !sort_compare(l, pivot, v_j, comp_func, has_comp)? {
                 break;
             }
@@ -197,20 +181,16 @@ fn sort_range(
             break;
         }
         // Swap
-        let t = table.as_table().unwrap();
-        let v_i = t.raw_geti(i).unwrap_or_default();
-        let v_j = t.raw_geti(j).unwrap_or_default();
-        let t = table.as_table_mut().unwrap();
-        t.raw_seti(i, v_j);
-        t.raw_seti(j, v_i);
+        let v_i = l.table_geti(table, i)?;
+        let v_j = l.table_geti(table, j)?;
+        l.table_seti(table, i, v_j)?;
+        l.table_seti(table, j, v_i)?;
     }
 
     // Restore pivot
-    let t = table.as_table().unwrap();
-    let v_i = t.raw_geti(i).unwrap_or_default();
-    let t = table.as_table_mut().unwrap();
-    t.raw_seti(hi - 1, v_i);
-    t.raw_seti(i, pivot);
+    let v_i = l.table_geti(table, i)?;
+    l.table_seti(table, hi - 1, v_i)?;
+    l.table_seti(table, i, pivot)?;
 
     // Recurse on smaller partition first (tail-call optimization for larger)
     if i - lo < hi - i {
