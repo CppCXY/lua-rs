@@ -37,6 +37,8 @@ struct Options {
     require_modules: Vec<String>,
     show_version: bool,
     read_stdin: bool,
+    ignore_env: bool,
+    warnings_on: bool,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -71,10 +73,10 @@ fn parse_args() -> Result<Options, String> {
                     opts.show_version = true;
                 }
                 "-E" => {
-                    // Ignore environment variables (not implemented)
+                    opts.ignore_env = true;
                 }
                 "-W" => {
-                    // Turn warnings on (not implemented)
+                    opts.warnings_on = true;
                 }
                 "--" => {
                     stop_options = true;
@@ -256,6 +258,29 @@ fn run_repl(vm: &mut LuaVM) {
     }
 }
 
+/// Resolve a LUA_PATH/LUA_CPATH env var value.
+/// Replaces ";;" with the default path (like standard Lua).
+fn resolve_env_path(env_value: &str, default: &str) -> String {
+    if let Some(pos) = env_value.find(";;") {
+        // Replace ";;" with ";default;"
+        let prefix = &env_value[..pos];
+        let suffix = &env_value[pos + 2..];
+        let mut result = String::new();
+        if !prefix.is_empty() {
+            result.push_str(prefix);
+            result.push(';');
+        }
+        result.push_str(default);
+        if !suffix.is_empty() {
+            result.push(';');
+            result.push_str(suffix);
+        }
+        result
+    } else {
+        env_value.to_string()
+    }
+}
+
 fn main() {
     // Install crash handler on Windows to capture crash address
     #[cfg(windows)]
@@ -367,6 +392,73 @@ fn lua_main() -> i32 {
     if cfg!(debug_assertions) {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));
     }
+
+    // Handle -E: apply environment variables to package.path/cpath BEFORE -E blocks them
+    if !opts.ignore_env {
+        // Override package.path from LUA_PATH_5_5 or LUA_PATH
+        if let Some(env_path) = env::var("LUA_PATH_5_5")
+            .ok()
+            .or_else(|| env::var("LUA_PATH").ok())
+        {
+            let default_path = "./?.lua;./?/init.lua";
+            let resolved = resolve_env_path(&env_path, default_path);
+            let code = format!("package.path = '{}'", resolved.replace('\\', "\\\\").replace('\'', "\\'"));
+            if let Ok(chunk) = vm.compile(&code) {
+                let _ = vm.execute_chunk(Rc::new(chunk));
+            }
+        }
+        // Override package.cpath from LUA_CPATH_5_5 or LUA_CPATH
+        if let Some(env_cpath) = env::var("LUA_CPATH_5_5")
+            .ok()
+            .or_else(|| env::var("LUA_CPATH").ok())
+        {
+            let default_cpath = "./?.so;./?.dll;./?.dylib";
+            let resolved = resolve_env_path(&env_cpath, default_cpath);
+            let code = format!("package.cpath = '{}'", resolved.replace('\\', "\\\\").replace('\'', "\\'"));
+            if let Ok(chunk) = vm.compile(&code) {
+                let _ = vm.execute_chunk(Rc::new(chunk));
+            }
+        }
+    }
+
+    // Handle LUA_INIT (unless -E)
+    if !opts.ignore_env {
+        if let Some(init) = env::var("LUA_INIT_5_5")
+            .ok()
+            .or_else(|| env::var("LUA_INIT").ok())
+        {
+            if let Some(filename) = init.strip_prefix('@') {
+                // Execute file
+                if let Err(e) = execute_file(&mut vm, filename) {
+                    eprintln!("lua: {}", e);
+                    return 1;
+                }
+            } else {
+                // Execute string
+                match vm.compile(&init) {
+                    Ok(chunk) => {
+                        if let Err(e) = vm.execute_chunk(Rc::new(chunk)) {
+                            let error_msg = vm.get_error_message(e);
+                            eprintln!("lua: {}", error_msg);
+                            return 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("lua: {}", e);
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle -W: turn warnings on
+    if opts.warnings_on {
+        if let Ok(chunk) = vm.compile("warn('@on')") {
+            let _ = vm.execute_chunk(Rc::new(chunk));
+        }
+    }
+
     // Setup arg table
     let exe_path = env::args().next().unwrap_or_else(|| "lua".to_string());
     setup_arg_table(
