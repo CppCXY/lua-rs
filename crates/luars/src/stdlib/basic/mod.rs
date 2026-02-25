@@ -417,6 +417,8 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// select(index, ...) - Return subset of arguments
+/// select(index, ...) - Return subset of arguments
+/// OPTIMIZED: Use ensure_stack_capacity + push_value_unchecked, cache base
 fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
     let index_arg = l
         .get_arg(1)
@@ -459,21 +461,28 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(0);
     }
 
-    // Return values from start_idx onward (arg 2, 3, ...)
-    // Need to PUSH the values to the stack (C function results must be on stack)
     let result_count = vararg_count - start_idx;
 
-    // Argument indices: arg 1 is at base (index parameter)
-    // arg 2, 3, ... are at base+1, base+2, ...
-    // We want to return from arg (2+start_idx) onwards
-    let first_arg_idx = 2 + start_idx; // This is 1-based argument index
+    // Ensure stack has room for all results at once, then use unchecked push
+    l.ensure_stack_capacity(result_count)?;
 
-    // Push each result value onto the stack
+    // Cache base to avoid repeated frame lookups
+    let frame = &l.call_stack[l.call_depth() - 1];
+    let base = frame.base;
+    let top = frame.top;
+
+    // first_arg_idx is 1-based: arg 2 + start_idx → stack offset = base + 1 + start_idx
+    let stack_start = base + 1 + start_idx;
+
     for i in 0..result_count {
-        if let Some(val) = l.get_arg(first_arg_idx + i) {
-            l.push_value(val)?;
+        let stack_idx = stack_start + i;
+        let val = if stack_idx < top && stack_idx < l.stack.len() {
+            l.stack[stack_idx]
         } else {
-            l.push_value(LuaValue::nil())?;
+            LuaValue::nil()
+        };
+        unsafe {
+            l.push_value_unchecked(val);
         }
     }
 

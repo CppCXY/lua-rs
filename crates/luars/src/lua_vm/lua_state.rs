@@ -579,6 +579,33 @@ impl LuaState {
         self.stack_top + n <= self.safe_option.max_stack_size
     }
 
+    /// Ensure the physical stack has room for `additional` more values beyond stack_top.
+    /// Checks both the logical limit (max_stack_size) and physical capacity (Vec length).
+    /// After this call, `push_value_unchecked` can be safely used `additional` times.
+    #[inline]
+    pub fn ensure_stack_capacity(&mut self, additional: usize) -> LuaResult<()> {
+        let needed = self.stack_top + additional;
+        if needed > self.safe_option.max_stack_size {
+            return Err(LuaError::StackOverflow);
+        }
+        if needed > self.stack.len() {
+            self.resize(needed)?;
+        }
+        Ok(())
+    }
+
+    /// Get a raw slice view of current frame arguments on the stack.
+    /// Returns args[0..n] where arg(1) = slice[0], arg(2) = slice[1], etc.
+    #[inline]
+    pub fn arg_slice(&self) -> &[LuaValue] {
+        if self.call_depth == 0 {
+            return &[];
+        }
+        let frame = &self.call_stack[self.call_depth - 1];
+        let end = frame.top.min(self.stack.len());
+        &self.stack[frame.base..end]
+    }
+
     /// Set logical stack top (L->top.p = L->stack + new_top in Lua)
     /// This is an internal VM operation — just moves the pointer.
     /// GC safety for stale slots above top is handled by the GC atomic phase

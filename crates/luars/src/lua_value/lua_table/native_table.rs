@@ -275,7 +275,7 @@ impl NativeTable {
     }
 
     /// Resize array part
-    fn resize_array(&mut self, new_size: u32) {
+    pub(crate) fn resize_array(&mut self, new_size: u32) {
         if new_size == 0 {
             if !self.array.is_null() && self.asize > 0 {
                 // Free old array

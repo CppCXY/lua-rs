@@ -315,27 +315,58 @@ fn table_move(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// table.pack(...) - Pack values into table
+/// OPTIMIZED: Direct array writes, single GC barrier, no intermediate allocation
 fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
-    let args = l.get_args();
-    let table = l.create_table(args.len(), 1)?;
+    let n = l.arg_count();
+    let table = l.create_table(n, 1)?;
 
     // Set 'n' field
     let n_key = l.create_string("n")?;
-    if !table.is_table() {
-        return Err(l.error("failed to create table".to_string()));
-    };
 
-    for (i, arg) in args.iter().enumerate() {
-        l.raw_seti(&table, i as i64 + 1, *arg);
+    // Get raw table pointer — safe because table is on GC heap, not on stack.
+    // This avoids per-element vm_mut() → as_table_mut() → set_int indirection.
+    let table_mut = table
+        .as_table_mut()
+        .expect("create_table must return a table");
+    let impl_table = &mut table_mut.impl_table;
+
+    let mut has_collectable = false;
+    // Cache stack base for direct reads
+    let frame_base = l.call_stack[l.call_depth() - 1].base;
+
+    for i in 0..n {
+        let stack_idx = frame_base + i;
+        let arg = if stack_idx < l.stack.len() {
+            l.stack[stack_idx]
+        } else {
+            LuaValue::nil()
+        };
+        if arg.iscollectable() {
+            has_collectable = true;
+        }
+        // Direct array write — table was created with array size = n,
+        // so indices 1..n are guaranteed in-bounds
+        unsafe {
+            impl_table.write_array((i + 1) as i64, arg);
+        }
     }
 
-    l.raw_set(&table, n_key, LuaValue::integer(args.len() as i64));
+    // Set "n" field through the LuaTable (needs to invalidate TM cache)
+    table_mut.raw_set(&n_key, LuaValue::integer(n as i64));
+
+    // Single GC barrier for the whole batch
+    if has_collectable {
+        if let Some(gc_ptr) = table.as_gc_ptr() {
+            l.gc_barrier_back(gc_ptr);
+        }
+    }
+
     l.push_value(table)?;
     Ok(1)
 }
 
 /// table.unpack(list [, i [, j]]) - Unpack table into values
-/// OPTIMIZED: Pre-allocate Vec and use direct array access when possible
+/// OPTIMIZED: Direct push without intermediate Vec, unchecked stack writes
 fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     let table_val = l
         .get_arg(1)
@@ -359,24 +390,21 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Check for excessive range (Lua 5.5: "too many results to unpack")
-    // Port of tunpack (ltablib.c): n = e - i (elements minus 1, avoids overflow)
-    // then check n >= INT_MAX before incrementing
     let n = (j as u64).wrapping_sub(i as u64); // count - 1 (wrapping is OK)
     if n >= i32::MAX as u64 || !l.check_stack((n as usize).wrapping_add(1)) {
         return Err(l.error("too many results to unpack".to_string()));
     }
     let count = (n + 1) as usize;
 
-    // Collect all values using raw access
-    let mut values = Vec::with_capacity(count);
+    // Ensure physical stack has room, then use unchecked push
+    l.ensure_stack_capacity(count)?;
+
+    // Push values directly without intermediate Vec allocation
     for idx in i..=j {
         let val = table.raw_geti(idx).unwrap_or(LuaValue::nil());
-        values.push(val);
-    }
-
-    // Push values
-    for val in values {
-        l.push_value(val)?;
+        unsafe {
+            l.push_value_unchecked(val);
+        }
     }
 
     Ok(count)

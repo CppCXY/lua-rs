@@ -298,15 +298,35 @@ pub fn exec_setlist(
                     let lua_idx = (vc + i) as i64;
                     impl_table.write_array(lua_idx, val);
                 }
-            } else {
-                // Slow path: some indices outside array, use full set_int
-                for i in 1..=vb {
-                    let val = *stack_ptr.add(base + a + i);
-                    if val.iscollectable() {
-                        is_collectable = true;
+            } else if vb > 0 {
+                // Pre-resize: ensure array is large enough for all elements at once,
+                // avoiding incremental resizes (e.g., {…} starts with asize=0)
+                if last_index > impl_table.asize as i64 {
+                    let needed = (last_index as u32).next_power_of_two().max(4);
+                    if needed > impl_table.asize {
+                        impl_table.resize_array(needed);
                     }
-                    let index = (vc + i) as i64;
-                    table.raw_seti(index, val);
+                }
+                // Now try fast path again after resize
+                if last_index >= 1 && last_index <= impl_table.asize as i64 {
+                    for i in 1..=vb {
+                        let val = *stack_ptr.add(base + a + i);
+                        if val.iscollectable() {
+                            is_collectable = true;
+                        }
+                        let lua_idx = (vc + i) as i64;
+                        impl_table.write_array(lua_idx, val);
+                    }
+                } else {
+                    // Truly slow path: indices outside valid range
+                    for i in 1..=vb {
+                        let val = *stack_ptr.add(base + a + i);
+                        if val.iscollectable() {
+                            is_collectable = true;
+                        }
+                        let index = (vc + i) as i64;
+                        table.raw_seti(index, val);
+                    }
                 }
             }
         }
