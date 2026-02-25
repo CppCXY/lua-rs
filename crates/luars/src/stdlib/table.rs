@@ -355,10 +355,8 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
     table_mut.raw_set(&n_key, LuaValue::integer(n as i64));
 
     // Single GC barrier for the whole batch
-    if has_collectable {
-        if let Some(gc_ptr) = table.as_gc_ptr() {
-            l.gc_barrier_back(gc_ptr);
-        }
+    if has_collectable && let Some(gc_ptr) = table.as_gc_ptr() {
+        l.gc_barrier_back(gc_ptr);
     }
 
     l.push_value(table)?;
