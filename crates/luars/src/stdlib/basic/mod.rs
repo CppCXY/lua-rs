@@ -541,22 +541,31 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
     // Check for __pairs metamethod first (like C Lua 5.5)
     if val.is_table() || val.is_userdata() {
         let pairs_key = l.vm_mut().const_strings.tm_pairs;
-        if let Some(mt) = get_metatable(l, &val) {
-            if let Some(mt_table) = mt.as_table() {
-                if let Some(mm) = mt_table.raw_get(&pairs_key) {
-                    // Call __pairs(t) and return its results (up to 4)
-                    let results = l.call_function(mm, vec![val])?;
-                    let nresults = results.len().min(4);
-                    for i in 0..nresults {
-                        l.push_value(results[i])?;
-                    }
-                    // Pad with nil if fewer than 4 results
-                    for _ in nresults..4 {
-                        l.push_value(LuaValue::nil())?;
-                    }
-                    return Ok(4);
+        if let Some(mt) = get_metatable(l, &val)
+            && let Some(mt_table) = mt.as_table()
+            && let Some(mm) = mt_table.raw_get(&pairs_key)
+        {
+            // Use stack-based call for yield support (equivalent to
+            // C Lua's lua_insert + lua_callk pattern).
+            // Place __pairs at call_base and the table arg right after it,
+            // so that finish_c_frame(CIST_YCALL) moves results correctly
+            // on yield-resume (body_results_start == call_base).
+            let call_base = l.current_frame().unwrap().base;
+            l.stack_set(call_base, mm)?;
+            l.stack_set(call_base + 1, val)?;
+            l.set_top(call_base + 2)?;
+
+            let num_results = l.call_stack_based(call_base, 1)?;
+
+            // Pad to exactly 4 results (pairscont equivalent)
+            if num_results < 4 {
+                for _ in num_results..4 {
+                    l.push_value(LuaValue::nil())?;
                 }
+            } else if num_results > 4 {
+                l.set_top(call_base + 4)?;
             }
+            return Ok(4);
         }
     }
 

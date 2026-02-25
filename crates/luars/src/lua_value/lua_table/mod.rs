@@ -124,12 +124,6 @@ impl LuaTable {
         self.impl_table.next(input_key)
     }
 
-    /// Insert value at array index i (1-based)
-    /// return true if new key inserted, false if updated existing key
-    pub(crate) fn insert_array_at(&mut self, i: i64, value: LuaValue) -> LuaResult<bool> {
-        Ok(self.impl_table.insert_at(i, value))
-    }
-
     pub fn remove_array_at(&mut self, i: i64) -> LuaResult<LuaValue> {
         self.impl_table
             .remove_at(i)

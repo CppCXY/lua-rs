@@ -717,11 +717,7 @@ fn test_ipairs_with_index_metamethod() {
     "#,
     );
 
-    assert!(
-        result.is_ok(),
-        "ipairs with __index failed: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "ipairs with __index failed: {:?}", result);
 }
 
 #[test]
@@ -746,7 +742,11 @@ fn test_ipairs_with_index_table() {
     "#,
     );
 
-    assert!(result.is_ok(), "ipairs with __index table failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "ipairs with __index table failed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -805,11 +805,7 @@ fn test_pairs_with_pairs_metamethod() {
     "#,
     );
 
-    assert!(
-        result.is_ok(),
-        "pairs with __pairs failed: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "pairs with __pairs failed: {:?}", result);
 }
 
 #[test]
@@ -869,5 +865,87 @@ fn test_pairs_without_metamethod_returns_4_values() {
     "#,
     );
 
-    assert!(result.is_ok(), "pairs without metamethod failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "pairs without metamethod failed: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_pairs_yield_inside_pairs_metamethod() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- __pairs metamethod that yields before returning the iterator
+        local t = setmetatable({10, 20, 30}, {__pairs = function(t)
+            local inc = coroutine.yield()   -- yield inside __pairs!
+            return function(t, i)
+                if i > 1 then return i - inc, t[i - inc] else return nil end
+            end, t, #t + 1
+        end})
+
+        local res = {}
+        local co = coroutine.wrap(function()
+            for i, p in pairs(t) do res[#res + 1] = p end
+        end)
+
+        co()     -- start: __pairs runs, hits yield
+        co(1)    -- resume with inc=1, iteration proceeds
+
+        assert(res[1] == 30, "expected 30, got " .. tostring(res[1]))
+        assert(res[2] == 20, "expected 20, got " .. tostring(res[2]))
+        assert(res[3] == 10, "expected 10, got " .. tostring(res[3]))
+        assert(#res == 3, "expected 3 results, got " .. #res)
+    "#,
+    );
+
+    assert!(result.is_ok(), "yield inside __pairs failed: {:?}", result);
+}
+
+#[test]
+fn test_pairs_yield_multiple_times_in_pairs_metamethod() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        -- __pairs yields twice: once to get the step, once to get the start
+        local t = setmetatable({100, 200, 300}, {__pairs = function(t)
+            local step = coroutine.yield("need step")
+            local start = coroutine.yield("need start")
+            local i = start
+            return function()
+                if i >= 1 then
+                    local idx = i
+                    i = i - step
+                    return idx, t[idx]
+                end
+            end, t, nil
+        end})
+
+        local res = {}
+        local co = coroutine.create(function()
+            for k, v in pairs(t) do res[#res + 1] = v end
+        end)
+
+        local ok, msg = coroutine.resume(co)           -- start
+        assert(ok and msg == "need step")
+        ok, msg = coroutine.resume(co, 1)               -- provide step=1
+        assert(ok and msg == "need start")
+        ok = coroutine.resume(co, 3)                     -- provide start=3
+        assert(ok)
+
+        assert(#res == 3, "expected 3, got " .. #res)
+        assert(res[1] == 300 and res[2] == 200 and res[3] == 100)
+    "#,
+    );
+
+    assert!(
+        result.is_ok(),
+        "multiple yields inside __pairs failed: {:?}",
+        result
+    );
 }

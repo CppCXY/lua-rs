@@ -209,7 +209,11 @@ fn test_table_insert_with_metamethods() {
     "#,
     );
 
-    assert!(result.is_ok(), "table.insert with metamethods failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "table.insert with metamethods failed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -234,7 +238,11 @@ fn test_table_remove_with_metamethods() {
     "#,
     );
 
-    assert!(result.is_ok(), "table.remove with metamethods failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "table.remove with metamethods failed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -258,7 +266,11 @@ fn test_table_sort_with_metamethods() {
     "#,
     );
 
-    assert!(result.is_ok(), "table.sort with metamethods failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "table.sort with metamethods failed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -279,7 +291,11 @@ fn test_table_concat_with_metamethods() {
     "#,
     );
 
-    assert!(result.is_ok(), "table.concat with metamethods failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "table.concat with metamethods failed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -301,7 +317,11 @@ fn test_table_unpack_with_metamethods() {
     "#,
     );
 
-    assert!(result.is_ok(), "table.unpack with metamethods failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "table.unpack with metamethods failed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -322,7 +342,11 @@ fn test_table_move_with_metamethods() {
     "#,
     );
 
-    assert!(result.is_ok(), "table.move with metamethods failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "table.move with metamethods failed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -341,7 +365,11 @@ fn test_table_insert_overflow_with_len_metamethod() {
     "#,
     );
 
-    assert!(result.is_ok(), "table.insert overflow with __len failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "table.insert overflow with __len failed: {:?}",
+        result
+    );
 }
 
 #[test]

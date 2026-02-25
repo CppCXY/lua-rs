@@ -1440,57 +1440,6 @@ impl NativeTable {
         self.sizenode()
     }
 
-    /// Insert value at lua_index (1-based), shifting elements forward
-    /// This is the efficient implementation for table.insert(t, pos, value)
-    pub fn insert_at(&mut self, lua_index: i64, value: LuaValue) -> bool {
-        if lua_index < 1 {
-            return false;
-        }
-
-        let len = self.len() as i64;
-
-        // If inserting beyond current length, just set it
-        if lua_index > len {
-            self.set_int(lua_index, value);
-            return true;
-        }
-
-        // Need to shift elements - ensure array is large enough
-        let needed_size = (len + 1) as u32;
-        if needed_size > self.asize {
-            let new_size = needed_size.next_power_of_two().max(4);
-            self.resize_array(new_size);
-        }
-
-        // Shift elements from lua_index to len forward by 1
-        unsafe {
-            for j in (lua_index..=len).rev() {
-                // Always read and shift, even if nil
-                let k = (j - 1) as usize;
-                let tt = *self.get_arr_tag(k);
-                let val_ptr = self.get_arr_val(k);
-                let val = *val_ptr;
-
-                // Write to next position
-                let k_next = j as usize;
-                *self.get_arr_tag(k_next) = tt;
-                *self.get_arr_val(k_next) = val;
-            }
-
-            // Insert at position
-            self.write_array(lua_index, value);
-
-            // Update lenhint if we extended the array
-            if lua_index <= len {
-                // We shifted elements, so length increased by 1
-                let new_len = (len + 1) as u32;
-                *self.lenhint_ptr() = new_len;
-            }
-        }
-
-        true
-    }
-
     /// Remove value at lua_index (1-based), shifting elements backward
     /// This is the efficient implementation for table.remove(t, pos)
     pub fn remove_at(&mut self, lua_index: i64) -> Option<LuaValue> {

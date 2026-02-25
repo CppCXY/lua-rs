@@ -330,20 +330,20 @@ assert(#{nil, nil, nil, nil} == 0)
 assert(#{1, 2, 3, nil, nil} == 3)
 print'+'
 
-print("skipping tests for length operator on sparse tables")
--- do
---   local s1, s2 = math.randomseed()
---   print(string.format(
---     "testing length for some random tables (seeds 0X%x:%x)", s1, s2))
---   local N = 130
---   for i = 1, 1e3 do   -- create that many random tables
---     local a = table.create(math.random(N))   -- initiate with random size
---     for j = 1, math.random(N) do   -- add random number of random entries
---       a[math.random(N)] = true
---     end
---     assert(#a == 0 or a[#a] and not a[#a + 1])
---   end
--- end
+-- print("skipping tests for length operator on sparse tables")
+do
+  local s1, s2 = math.randomseed()
+  print(string.format(
+    "testing length for some random tables (seeds 0X%x:%x)", s1, s2))
+  local N = 130
+  for i = 1, 1e3 do   -- create that many random tables
+    local a = table.create(math.random(N))   -- initiate with random size
+    for j = 1, math.random(N) do   -- add random number of random entries
+      a[math.random(N)] = true
+    end
+    assert(#a == 0 or a[#a] and not a[#a + 1])
+  end
+end
 
 
 do  print("testing attack on table length")
@@ -933,8 +933,8 @@ for k,v in ipairs(a) do
   assert(k == i and v == i * 10)
 end
 assert(i == a.n)
--- testing yield inside __pairs (SKIPPED: no __pairs + yield support)
-if false then
+-- testing yield inside __pairs
+do
   local t = setmetatable({10, 20, 30}, {__pairs = function (t)
     local inc = coroutine.yield()
     return function (t, i)
@@ -951,6 +951,6 @@ if false then
   co(1)    -- continue after yield
   assert(res[1] == 30 and res[2] == 20 and res[3] == 10 and #res == 3)
 
-end -- if false (yield inside __pairs)
+end -- yield inside __pairs
 
 print"OK"
