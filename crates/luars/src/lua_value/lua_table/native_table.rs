@@ -1293,15 +1293,145 @@ impl NativeTable {
         !key_exists && !value.is_nil()
     }
 
-    /// Get length (#t) — simplified: returns the lenhint maintained by write_array.
-    /// This tracks the highest consecutive index from 1 that has a non-nil value.
-    /// Differs from C Lua which can search hash continuation — we only count array part.
-    #[inline(always)]
+    /// Get length (#t) — Lua 5.5 boundary algorithm (luaH_getn).
+    ///
+    /// A "boundary" is an integer index i such that t[i] is present and t[i+1]
+    /// is absent, or 0 if t[1] is absent.
+    ///
+    /// Uses lenhint as a starting hint, searches the vicinity first,
+    /// then falls back to binary search. If the array's last element is
+    /// non-empty, also searches the hash part for integer-key continuation.
     pub fn len(&self) -> usize {
-        if self.array.is_null() || self.asize == 0 {
-            return 0;
+        let asize = self.asize;
+        if asize > 0 && !self.array.is_null() {
+            const MAX_VICINITY: u32 = 4;
+            let mut limit = unsafe { *self.lenhint_ptr() };
+            if limit == 0 {
+                limit = 1; // make limit a valid array index
+            }
+
+            if self.array_key_is_empty(limit) {
+                // t[limit] is empty — border must be before limit
+                // Look in the vicinity first
+                let mut i = 0;
+                while i < MAX_VICINITY && limit > 1 {
+                    limit -= 1;
+                    if !self.array_key_is_empty(limit) {
+                        return self.newhint(limit) as usize;
+                    }
+                    i += 1;
+                }
+                // Still empty — binary search in [0, limit)
+                return self.newhint(self.binsearch(0, limit)) as usize;
+            } else {
+                // t[limit] is present — look for border after it
+                let mut i = 0;
+                while i < MAX_VICINITY && limit < asize {
+                    limit += 1;
+                    if self.array_key_is_empty(limit) {
+                        return self.newhint(limit - 1) as usize;
+                    }
+                    i += 1;
+                }
+                if self.array_key_is_empty(asize) {
+                    // t[limit] not empty but t[asize] empty — binary search
+                    return self.newhint(self.binsearch(limit, asize)) as usize;
+                }
+            }
+            // Last array element is non-empty — set hint to asize
+            unsafe {
+                *self.lenhint_ptr() = asize;
+            }
         }
-        unsafe { *self.lenhint_ptr() as usize }
+        // No array part, or t[asize] is not empty — check hash part
+        debug_assert!(asize == 0 || self.array.is_null() || !self.array_key_is_empty(asize));
+        if self.is_dummy() || self.hash_key_is_empty(asize as u64 + 1) {
+            return asize as usize; // asize + 1 is empty
+        }
+        // asize + 1 is also non-empty — search hash part
+        self.hash_search(asize) as usize
+    }
+
+    /// Check if array key (1-based) is empty (nil or uninitialized)
+    #[inline(always)]
+    fn array_key_is_empty(&self, key: u32) -> bool {
+        if key < 1 || key > self.asize {
+            return true;
+        }
+        unsafe {
+            let tag = *self.get_arr_tag((key - 1) as usize);
+            tag == LUA_VNIL || tag == LUA_VEMPTY
+        }
+    }
+
+    /// Check if an integer key is absent from the hash part
+    #[inline(always)]
+    fn hash_key_is_empty(&self, key: u64) -> bool {
+        if self.is_dummy() {
+            return true;
+        }
+        let lookup_key = LuaValue::integer(key as i64);
+        self.get_from_hash(&lookup_key).is_none()
+    }
+
+    /// Binary search for a boundary in the array part.
+    /// Precondition: t[i] is present (or i==0), t[j] is absent.
+    /// Returns a boundary index.
+    fn binsearch(&self, mut i: u32, mut j: u32) -> u32 {
+        debug_assert!(i <= j);
+        while j - i > 1 {
+            let m = (i + j) / 2;
+            if self.array_key_is_empty(m) {
+                j = m;
+            } else {
+                i = m;
+            }
+        }
+        i
+    }
+
+    /// Search the hash part for a boundary, knowing that t[asize+1] is present
+    /// in the hash. Uses doubling + binary search.
+    fn hash_search(&self, asize: u32) -> u64 {
+        let mut i: u64 = asize as u64 + 1; // caller ensures t[i] is present
+        let mut j: u64 = i * 2;
+
+        // Find an absent key by doubling
+        while !self.hash_key_is_empty(j) {
+            i = j;
+            if j < u64::MAX / 2 {
+                j *= 2;
+            } else {
+                j = i64::MAX as u64;
+                if self.hash_key_is_empty(j) {
+                    break;
+                } else {
+                    return j; // max integer is a boundary
+                }
+            }
+        }
+        // Binary search between i (present) and j (absent)
+        while j - i > 1 {
+            let m = (i + j) / 2;
+            if self.hash_key_is_empty(m) {
+                j = m;
+            } else {
+                i = m;
+            }
+        }
+        i
+    }
+
+    /// Save a new hint and return it
+    #[inline(always)]
+    fn newhint(&self, hint: u32) -> u32 {
+        debug_assert!(hint <= self.asize);
+        if !self.array.is_null() {
+            unsafe {
+                *self.lenhint_ptr() = hint;
+            }
+        }
+        hint
     }
 
     /// Get hash size
