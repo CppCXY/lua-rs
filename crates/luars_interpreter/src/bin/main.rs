@@ -402,7 +402,10 @@ fn lua_main() -> i32 {
         {
             let default_path = "./?.lua;./?/init.lua";
             let resolved = resolve_env_path(&env_path, default_path);
-            let code = format!("package.path = '{}'", resolved.replace('\\', "\\\\").replace('\'', "\\'"));
+            let code = format!(
+                "package.path = '{}'",
+                resolved.replace('\\', "\\\\").replace('\'', "\\'")
+            );
             if let Ok(chunk) = vm.compile(&code) {
                 let _ = vm.execute_chunk(Rc::new(chunk));
             }
@@ -414,7 +417,10 @@ fn lua_main() -> i32 {
         {
             let default_cpath = "./?.so;./?.dll;./?.dylib";
             let resolved = resolve_env_path(&env_cpath, default_cpath);
-            let code = format!("package.cpath = '{}'", resolved.replace('\\', "\\\\").replace('\'', "\\'"));
+            let code = format!(
+                "package.cpath = '{}'",
+                resolved.replace('\\', "\\\\").replace('\'', "\\'")
+            );
             if let Ok(chunk) = vm.compile(&code) {
                 let _ = vm.execute_chunk(Rc::new(chunk));
             }
@@ -426,36 +432,37 @@ fn lua_main() -> i32 {
         && let Some(init) = env::var("LUA_INIT_5_5")
             .ok()
             .or_else(|| env::var("LUA_INIT").ok())
-        {
-            if let Some(filename) = init.strip_prefix('@') {
-                // Execute file
-                if let Err(e) = execute_file(&mut vm, filename) {
-                    eprintln!("lua: {}", e);
-                    return 1;
-                }
-            } else {
-                // Execute string
-                match vm.compile(&init) {
-                    Ok(chunk) => {
-                        if let Err(e) = vm.execute_chunk(Rc::new(chunk)) {
-                            let error_msg = vm.get_error_message(e);
-                            eprintln!("lua: {}", error_msg);
-                            return 1;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("lua: {}", e);
+    {
+        if let Some(filename) = init.strip_prefix('@') {
+            // Execute file
+            if let Err(e) = execute_file(&mut vm, filename) {
+                eprintln!("lua: {}", e);
+                return 1;
+            }
+        } else {
+            // Execute string
+            match vm.compile(&init) {
+                Ok(chunk) => {
+                    if let Err(e) = vm.execute_chunk(Rc::new(chunk)) {
+                        let error_msg = vm.get_error_message(e);
+                        eprintln!("lua: {}", error_msg);
                         return 1;
                     }
                 }
+                Err(e) => {
+                    eprintln!("lua: {}", e);
+                    return 1;
+                }
             }
         }
+    }
 
     // Handle -W: turn warnings on
     if opts.warnings_on
-        && let Ok(chunk) = vm.compile("warn('@on')") {
-            let _ = vm.execute_chunk(Rc::new(chunk));
-        }
+        && let Ok(chunk) = vm.compile("warn('@on')")
+    {
+        let _ = vm.execute_chunk(Rc::new(chunk));
+    }
 
     // Setup arg table
     let exe_path = env::args().next().unwrap_or_else(|| "lua".to_string());
