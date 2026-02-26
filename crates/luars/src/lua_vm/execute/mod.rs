@@ -1518,6 +1518,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let stack = lua_state.stack_mut();
                     let ra = base + a;
 
+                    // Convert string values to numbers (Lua 5.5 allows string for-loop params)
+                    for offset in 0..3 {
+                        let val = stack[ra + offset];
+                        if val.is_string() {
+                            let num = crate::stdlib::basic::parse_number::parse_lua_number(
+                                val.as_str().unwrap_or(""),
+                            );
+                            if !num.is_nil() {
+                                stack[ra + offset] = num;
+                            }
+                            // If conversion fails, leave the string — error will be reported below
+                        }
+                    }
+
                     if ttisinteger(&stack[ra]) && ttisinteger(&stack[ra + 2]) {
                         // Integer loop (init and step are integers)
                         let init = ivalue(&stack[ra]);

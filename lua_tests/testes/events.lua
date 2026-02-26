@@ -55,9 +55,7 @@ a = setmetatable({}, t)
 function f(t, i, v) rawset(t, i, v-3) end
 setmetatable(t, t)   -- causes a bug in 5.1 !
 t.__newindex = f
--- luars: string-to-number coercion in arithmetic not supported;
--- changed "101" to 101 to avoid implicit string→number conversion
-a[1] = 30; a.x = 101; a[5] = 200
+a[1] = 30; a.x = "101"; a[5] = 200
 assert(a[1] == 27 and a.x == 98 and a[5] == 197)
 
 do    -- bug in Lua 5.3.2
@@ -463,7 +461,7 @@ mt = {__index = function (a,b) return a+b end,
 debug.setmetatable(10, mt)
 assert(getmetatable(-2) == mt)
 assert((10)[3] == 13)
--- assert((10)["3"] == 13)  -- [lua-rs] no string arithmetic coercion
+assert((10)["3"] == 13)
 assert(#3.45 == 3)
 debug.setmetatable(23, nil)
 assert(getmetatable(-2) == nil)
