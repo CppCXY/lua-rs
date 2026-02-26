@@ -2840,9 +2840,14 @@ impl LuaState {
                     None
                 };
 
-                // Temporarily increase max_c_stack_depth for error handler
+                // Temporarily increase max_c_stack_depth and max_call_depth
+                // for error handler, so it can run even after stack overflow.
+                // This mirrors C Lua's approach of allowing extra headroom
+                // during error handling.
                 let saved_max_c_depth = self.safe_option.max_c_stack_depth;
+                let saved_max_call_depth = self.safe_option.max_call_depth;
                 self.safe_option.max_c_stack_depth = saved_max_c_depth + CSTACKERR;
+                self.safe_option.max_call_depth = saved_max_call_depth + CSTACKERR;
 
                 // Call error handler WITH ALL ERROR FRAMES STILL ON STACK.
                 // C Lua's luaG_errormsg recursively calls the handler when the
@@ -2933,8 +2938,9 @@ impl LuaState {
                     }
                 }
 
-                // Restore max_c_stack_depth
+                // Restore max_c_stack_depth and max_call_depth
                 self.safe_option.max_c_stack_depth = saved_max_c_depth;
+                self.safe_option.max_call_depth = saved_max_call_depth;
 
                 // NOW pop error frames (after handler has seen them)
                 while self.call_depth() > initial_depth {

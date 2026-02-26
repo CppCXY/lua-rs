@@ -1116,7 +1116,24 @@ impl NativeTable {
                 return;
             }
             if (*mp).value.is_nil() {
-                // Dead key: reuse slot, preserve chain linkage
+                // Dead key: main position slot is available for reuse.
+                // BUT we must first check if this key already exists alive
+                // somewhere in the chain — otherwise we create a duplicate.
+                // Walk the chain starting from mp's next link.
+                let mut scan = mp;
+                loop {
+                    let next_off = (*scan).next;
+                    if next_off == 0 {
+                        break;
+                    }
+                    scan = scan.offset(next_off as isize);
+                    if !(*scan).value.is_nil() && (*scan).key == key {
+                        // Key exists alive in chain — just update value
+                        (*scan).value = value;
+                        return;
+                    }
+                }
+                // Key not found in chain — safe to reuse this dead slot
                 (*mp).key = key;
                 (*mp).value = value;
                 // Keep (*mp).next as-is — other chains may pass through here
