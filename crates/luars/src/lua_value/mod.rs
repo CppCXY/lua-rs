@@ -417,9 +417,94 @@ impl Chunk {
     }
 }
 
+/// Internal string storage for Lua strings.
+///
+/// SmolStr 0.3 `from(String)` always converts via `&str → Arc::from(&str)`, causing
+/// an unnecessary copy for long strings. This enum avoids that:
+/// - Short strings (≤40 bytes, interned): use SmolStr for inline optimization (≤23 bytes
+///   stored directly in the struct, no heap allocation).
+/// - Long strings (>40 bytes, not interned): use `Box<str>` which can be created from
+///   an owned `String` via `into_boxed_str()` with **zero copy**.
+///
+/// C Lua stores string data inline at the end of the TString struct (single allocation).
+/// This enum approximates that efficiency for our layered GC design.
+#[derive(Clone)]
+pub enum LuaStrRepr {
+    /// SmolStr: ≤23 bytes inline, >23 bytes via Arc<str>. Used for short strings.
+    Smol(smol_str::SmolStr),
+    /// Owned heap string. Used for long strings to avoid SmolStr's Arc double-copy.
+    Owned(Box<str>),
+}
+
+impl LuaStrRepr {
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Smol(s) => s.as_str(),
+            Self::Owned(s) => s,
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Smol(s) => s.len(),
+            Self::Owned(s) => s.len(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.as_str().as_bytes()
+    }
+}
+
+impl std::ops::Deref for LuaStrRepr {
+    type Target = str;
+    #[inline(always)]
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq for LuaStrRepr {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<str> for LuaStrRepr {
+    #[inline(always)]
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for LuaStrRepr {
+    #[inline(always)]
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl Eq for LuaStrRepr {}
+
+impl std::fmt::Debug for LuaStrRepr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+impl std::fmt::Display for LuaStrRepr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[derive(Clone)]
 pub struct LuaString {
-    pub str: smol_str::SmolStr,
+    pub str: LuaStrRepr,
     pub hash: u64,
     /// Intrusive chain pointer for the string intern table (short strings only).
     /// Forms a singly-linked list of strings sharing the same bucket.
@@ -437,7 +522,7 @@ impl std::fmt::Debug for LuaString {
 }
 
 impl LuaString {
-    pub fn new(s: smol_str::SmolStr, hash: u64) -> Self {
+    pub fn new(s: LuaStrRepr, hash: u64) -> Self {
         Self {
             str: s,
             hash,
@@ -446,7 +531,7 @@ impl LuaString {
     }
 
     pub fn as_str(&self) -> &str {
-        &self.str
+        self.str.as_str()
     }
 
     pub fn is_short(&self) -> bool {

@@ -359,61 +359,35 @@ pub fn concat_strings(
         }
     }
 
-    // ===== General path: N values (single-pass into stack buffer) =====
+    // ===== General path: N values (two-pass: estimate then allocate) =====
     let start = base + a;
-    let mut buf = [0u8; STACK_BUF_SIZE];
-    let mut pos = 0;
+
+    // Phase 1: scan all values to estimate total length and detect types.
+    // This avoids the old "try stack buffer, restart if overflow" pattern.
+    let mut total_len: usize = 0;
     let mut has_binary = false;
+    let mut all_strings = true; // true if all values are already strings (no binary, no numbers)
 
     for i in 0..n {
         let value = lua_state.stack[start + i];
-
         if let Some(s) = value.as_str() {
-            let bytes = s.as_bytes();
-            let new_pos = pos + bytes.len();
-            if new_pos > STACK_BUF_SIZE {
-                return concat_large(lua_state, start, n);
-            }
-            buf[pos..new_pos].copy_from_slice(bytes);
-            pos = new_pos;
+            total_len += s.len();
         } else if let Some(b) = value.as_binary() {
-            let new_pos = pos + b.len();
-            if new_pos > STACK_BUF_SIZE {
-                return concat_large(lua_state, start, n);
-            }
-            buf[pos..new_pos].copy_from_slice(b);
-            pos = new_pos;
+            total_len += b.len();
             has_binary = true;
+            all_strings = false;
         } else if value.is_integer() {
-            let ival = unsafe { value.as_integer_strict().unwrap_unchecked() };
-            let mut itoa_buf = itoa::Buffer::new();
-            let num_str = itoa_buf.format(ival);
-            let new_pos = pos + num_str.len();
-            if new_pos > STACK_BUF_SIZE {
-                return concat_large(lua_state, start, n);
-            }
-            buf[pos..new_pos].copy_from_slice(num_str.as_bytes());
-            pos = new_pos;
+            total_len += 20; // i64 max display width
+            all_strings = false;
         } else if value.is_float() {
-            let f = unsafe { value.as_number().unwrap_unchecked() };
-            use crate::stdlib::basic::lua_float_to_string;
-            let s = lua_float_to_string(f);
-            let new_pos = pos + s.len();
-            if new_pos > STACK_BUF_SIZE {
-                return concat_large(lua_state, start, n);
-            }
-            buf[pos..new_pos].copy_from_slice(s.as_bytes());
-            pos = new_pos;
+            total_len += 24; // float max display width (%.17g + sign + exponent)
+            all_strings = false;
         } else if value.ttisfulluserdata() {
             if let Some(ud) = value.as_userdata_mut()
                 && let Some(s) = ud.get_trait().lua_tostring()
             {
-                let new_pos = pos + s.len();
-                if new_pos > STACK_BUF_SIZE {
-                    return concat_large(lua_state, start, n);
-                }
-                buf[pos..new_pos].copy_from_slice(s.as_bytes());
-                pos = new_pos;
+                total_len += s.len();
+                all_strings = false;
                 continue;
             }
             return Err(crate::stdlib::debug::typeerror(
@@ -430,38 +404,94 @@ pub fn concat_strings(
         }
     }
 
-    if has_binary {
-        // Binary data may not be valid UTF-8
-        match std::str::from_utf8(&buf[..pos]) {
-            Ok(s) => lua_state.create_string(s),
-            Err(_) => lua_state.create_binary(buf[..pos].to_vec()),
-        }
-    } else {
-        // All inputs are valid UTF-8 (strings + number formatting)
-        let s = unsafe { std::str::from_utf8_unchecked(&buf[..pos]) };
-        lua_state.create_string(s)
-    }
-}
+    // Phase 2: build result with optimal allocation strategy
+    if total_len <= STACK_BUF_SIZE {
+        // Small result: stack buffer (no heap allocation)
+        let mut buf = [0u8; STACK_BUF_SIZE];
+        let mut pos = 0;
 
-/// Large concat fallback — total bytes exceed STACK_BUF_SIZE (256).
-/// Cold path: most Lua concat results are short.
-#[cold]
-#[inline(never)]
-fn concat_large(lua_state: &mut LuaState, start: usize, n: usize) -> LuaResult<LuaValue> {
-    let mut result: Vec<u8> = Vec::with_capacity(512);
-    for i in 0..n {
-        let value = lua_state.stack[start + i];
-        if value_to_bytes_write(&value, &mut result).is_none() {
-            return Err(crate::stdlib::debug::typeerror(
-                lua_state,
-                &value,
-                "concatenate",
-            ));
+        for i in 0..n {
+            let value = lua_state.stack[start + i];
+            if let Some(s) = value.as_str() {
+                let bytes = s.as_bytes();
+                buf[pos..pos + bytes.len()].copy_from_slice(bytes);
+                pos += bytes.len();
+            } else if let Some(b) = value.as_binary() {
+                buf[pos..pos + b.len()].copy_from_slice(b);
+                pos += b.len();
+            } else if value.is_integer() {
+                let ival = unsafe { value.as_integer_strict().unwrap_unchecked() };
+                let mut itoa_buf = itoa::Buffer::new();
+                let num_str = itoa_buf.format(ival);
+                buf[pos..pos + num_str.len()].copy_from_slice(num_str.as_bytes());
+                pos += num_str.len();
+            } else if value.is_float() {
+                let f = unsafe { value.as_number().unwrap_unchecked() };
+                use crate::stdlib::basic::lua_float_to_string;
+                let s = lua_float_to_string(f);
+                buf[pos..pos + s.len()].copy_from_slice(s.as_bytes());
+                pos += s.len();
+            } else if value.ttisfulluserdata()
+                && let Some(ud) = value.as_userdata_mut()
+                && let Some(s) = ud.get_trait().lua_tostring()
+            {
+                buf[pos..pos + s.len()].copy_from_slice(s.as_bytes());
+                pos += s.len();
+            }
         }
-    }
-    match String::from_utf8(result) {
-        Ok(s) => lua_state.create_string_owned(s),
-        Err(e) => lua_state.create_binary(e.into_bytes()),
+
+        if has_binary {
+            match std::str::from_utf8(&buf[..pos]) {
+                Ok(s) => lua_state.create_string(s),
+                Err(_) => lua_state.create_binary(buf[..pos].to_vec()),
+            }
+        } else {
+            let s = unsafe { std::str::from_utf8_unchecked(&buf[..pos]) };
+            lua_state.create_string(s)
+        }
+    } else if has_binary {
+        // Large result with binary data: Vec<u8> buffer → try UTF-8
+        let mut buf: Vec<u8> = Vec::with_capacity(total_len);
+        for i in 0..n {
+            let value = lua_state.stack[start + i];
+            value_to_bytes_write(&value, &mut buf);
+        }
+        match String::from_utf8(buf) {
+            Ok(s) => lua_state.create_string_owned(s),
+            Err(e) => lua_state.create_binary(e.into_bytes()),
+        }
+    } else if all_strings {
+        // Large result, all strings: single String allocation, zero-copy writes
+        // total_len is exact (no number estimates), capacity is perfect
+        let mut result = String::with_capacity(total_len);
+        for i in 0..n {
+            let value = lua_state.stack[start + i];
+            result.push_str(unsafe { value.as_str().unwrap_unchecked() });
+        }
+        lua_state.create_string_owned(result)
+    } else {
+        // Large result, strings + numbers (no binary): String with estimated capacity
+        let mut result = String::with_capacity(total_len);
+        for i in 0..n {
+            let value = lua_state.stack[start + i];
+            if let Some(s) = value.as_str() {
+                result.push_str(s);
+            } else if value.is_integer() {
+                let mut itoa_buf = itoa::Buffer::new();
+                let ival = unsafe { value.as_integer_strict().unwrap_unchecked() };
+                result.push_str(itoa_buf.format(ival));
+            } else if value.is_float() {
+                use crate::stdlib::basic::lua_float_to_string;
+                let f = unsafe { value.as_number().unwrap_unchecked() };
+                result.push_str(&lua_float_to_string(f));
+            } else if value.ttisfulluserdata()
+                && let Some(ud) = value.as_userdata_mut()
+                && let Some(s) = ud.get_trait().lua_tostring()
+            {
+                result.push_str(&s);
+            }
+        }
+        lua_state.create_string_owned(result)
     }
 }
 

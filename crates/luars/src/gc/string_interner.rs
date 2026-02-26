@@ -1,7 +1,7 @@
 use ahash::RandomState;
 use smol_str::SmolStr;
 
-use crate::lua_value::LuaString;
+use crate::lua_value::{LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use crate::{CreateResult, GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
@@ -63,7 +63,7 @@ impl StringInterner {
         // Use hash=0 (lazy hash — computed on demand when used as table key)
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
-            let lua_string = LuaString::new(SmolStr::new(s), 0);
+            let lua_string = LuaString::new(LuaStrRepr::Owned(Box::from(s)), 0);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
@@ -95,16 +95,19 @@ impl StringInterner {
         self.create_short_string(SmolStr::new(s), hash, slen, current_white, gc)
     }
 
-    /// Intern an owned string - avoids extra allocation when string is already owned
+    /// Intern an owned string - avoids extra allocation when string is already owned.
+    /// For long strings (>40 bytes), uses `into_boxed_str()` to avoid SmolStr's Arc copy.
     #[inline]
     pub fn intern_owned(&mut self, s: String, gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
         let slen = s.len();
 
         // Long strings are not interned — lazy hash (hash=0)
+        // Key optimization: `into_boxed_str()` reuses the String allocation (zero copy)
+        // instead of SmolStr::from(String) which copies through Arc::from(&str).
         if slen > Self::SHORT_STRING_LIMIT {
             let size = (std::mem::size_of::<GcString>() + slen) as u32;
-            let lua_string = LuaString::new(SmolStr::from(s), 0);
+            let lua_string = LuaString::new(LuaStrRepr::Owned(s.into_boxed_str()), 0);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
@@ -148,7 +151,7 @@ impl StringInterner {
         gc: &mut GC,
     ) -> CreateResult {
         let size = (std::mem::size_of::<GcString>() + slen) as u32;
-        let lua_string = LuaString::new(s, hash);
+        let lua_string = LuaString::new(LuaStrRepr::Smol(s), hash);
         let gc_string =
             GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();

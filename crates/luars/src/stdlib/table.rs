@@ -4,6 +4,7 @@
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
+use crate::stdlib::basic::lua_float_to_string;
 use crate::stdlib::sort_table::table_sort;
 
 pub fn create_table_lib() -> LibraryModule {
@@ -57,23 +58,30 @@ fn table_create(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// table.concat(list [, sep [, i [, j]]]) - Concatenate table elements
+///
+/// Optimized with three-tier fast paths:
+/// 1. All-strings (no binary, no numbers): single allocation, direct &str copies
+/// 2. Strings + numbers (no binary): single String allocation, itoa/float formatting
+/// 3. Has binary: Vec<u8> buffer, try UTF-8 conversion at the end
 fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     let table_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'concat' (table expected)".to_string()))?;
 
     let sep_value = l.get_arg(2);
-    let sep = match sep_value {
+    let sep_owned: String;
+    let sep: &str = match &sep_value {
         Some(v) => {
             if v.is_nil() {
-                "".to_string()
+                ""
             } else if let Some(s) = v.as_str() {
-                s.to_string()
+                sep_owned = s.to_string();
+                &sep_owned
             } else {
                 return Err(l.error("bad argument #2 to 'concat' (string expected)".to_string()));
             }
         }
-        None => "".to_string(),
+        None => "",
     };
 
     if !table_val.is_table() {
@@ -107,51 +115,159 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     let count = (j - i + 1) as usize;
 
     if !has_meta {
-        // Fast path: raw access, no metamethod overhead
+        // ---- Fast path: raw access, no metamethod overhead ----
         let table = table_val.as_table_mut().unwrap();
-        let mut parts: Vec<String> = Vec::with_capacity(count);
+        let sep_total = sep.len().saturating_mul(count.saturating_sub(1));
+
+        // Phase 1: scan types + compute exact string length
+        let mut total_len: usize = sep_total;
+        let mut has_binary = false;
+        let mut has_numbers = false;
+
         for idx in i..=j {
             let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
             if let Some(s) = value.as_str() {
-                parts.push(s.to_string());
-            } else if let Some(ival) = value.as_integer() {
-                parts.push(format!("{}", ival));
-            } else if let Some(f) = value.as_number() {
-                if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
-                    parts.push(format!("{:.1}", f));
-                } else {
-                    parts.push(format!("{}", f));
-                }
-            } else {
-                let msg = format!("invalid value (at index {}) in table for 'concat'", idx);
-                return Err(l.error(msg));
-            }
-        }
-        let result = l.create_string(&parts.join(&sep))?;
-        l.push_value(result)?;
-    } else {
-        // Metamethod path
-        let mut parts = Vec::new();
-        for idx in i..=j {
-            let value = l.table_geti(&table_val, idx)?;
-            if let Some(s) = value.as_str() {
-                parts.push(s.to_string());
-            } else if let Some(ival) = value.as_integer() {
-                parts.push(format!("{}", ival));
-            } else if let Some(f) = value.as_number() {
-                if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
-                    parts.push(format!("{:.1}", f));
-                } else {
-                    parts.push(format!("{}", f));
-                }
+                total_len += s.len();
+            } else if let Some(b) = value.as_binary() {
+                total_len += b.len();
+                has_binary = true;
+            } else if value.as_integer().is_some() {
+                total_len += 20; // max i64 string width
+                has_numbers = true;
+            } else if value.as_number().is_some() {
+                total_len += 24; // generous float estimate
+                has_numbers = true;
             } else {
                 let msg = format!("invalid value (at index {}) in table for 'concat'", idx);
                 return Err(l.error(msg));
             }
         }
 
-        let result = l.create_string(&parts.join(&sep))?;
-        l.push_value(result)?;
+        // Phase 2: build result with a single allocation
+        let table = table_val.as_table_mut().unwrap();
+
+        if has_binary {
+            // Binary path: concatenate as raw bytes
+            let mut buf: Vec<u8> = Vec::with_capacity(total_len);
+            for idx in i..=j {
+                if idx > i {
+                    buf.extend_from_slice(sep.as_bytes());
+                }
+                let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+                if let Some(s) = value.as_str() {
+                    buf.extend_from_slice(s.as_bytes());
+                } else if let Some(b) = value.as_binary() {
+                    buf.extend_from_slice(b);
+                } else if let Some(ival) = value.as_integer() {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    buf.extend_from_slice(itoa_buf.format(ival).as_bytes());
+                } else if let Some(f) = value.as_number() {
+                    buf.extend_from_slice(lua_float_to_string(f).as_bytes());
+                }
+            }
+            // Try converting to UTF-8 string; if not valid, keep as binary
+            let result = match String::from_utf8(buf) {
+                Ok(s) => l.create_string_owned(s)?,
+                Err(e) => l.create_binary(e.into_bytes())?,
+            };
+            l.push_value(result)?;
+        } else if !has_numbers {
+            // Ultra-fast path: all strings — zero intermediate allocations
+            let mut result = String::with_capacity(total_len);
+            for idx in i..=j {
+                if idx > i {
+                    result.push_str(sep);
+                }
+                let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+                result.push_str(unsafe { value.as_str().unwrap_unchecked() });
+            }
+            let result = l.create_string_owned(result)?;
+            l.push_value(result)?;
+        } else {
+            // Strings + numbers path: single allocation, itoa for integers
+            let mut result = String::with_capacity(total_len);
+            for idx in i..=j {
+                if idx > i {
+                    result.push_str(sep);
+                }
+                let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+                if let Some(s) = value.as_str() {
+                    result.push_str(s);
+                } else if let Some(ival) = value.as_integer() {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    result.push_str(itoa_buf.format(ival));
+                } else if let Some(f) = value.as_number() {
+                    result.push_str(&lua_float_to_string(f));
+                }
+            }
+            let result = l.create_string_owned(result)?;
+            l.push_value(result)?;
+        }
+    } else {
+        // ---- Metamethod path: uses table_geti / obj_len ----
+        // Still two-pass for pre-sizing optimization
+        let mut total_len: usize = sep.len().saturating_mul(count.saturating_sub(1));
+        let mut has_binary = false;
+
+        for idx in i..=j {
+            let value = l.table_geti(&table_val, idx)?;
+            if let Some(s) = value.as_str() {
+                total_len += s.len();
+            } else if let Some(b) = value.as_binary() {
+                total_len += b.len();
+                has_binary = true;
+            } else if value.as_integer().is_some() {
+                total_len += 20;
+            } else if value.as_number().is_some() {
+                total_len += 24;
+            } else {
+                let msg = format!("invalid value (at index {}) in table for 'concat'", idx);
+                return Err(l.error(msg));
+            }
+        }
+
+        if has_binary {
+            let mut buf: Vec<u8> = Vec::with_capacity(total_len);
+            for idx in i..=j {
+                if idx > i {
+                    buf.extend_from_slice(sep.as_bytes());
+                }
+                let value = l.table_geti(&table_val, idx)?;
+                if let Some(s) = value.as_str() {
+                    buf.extend_from_slice(s.as_bytes());
+                } else if let Some(b) = value.as_binary() {
+                    buf.extend_from_slice(b);
+                } else if let Some(ival) = value.as_integer() {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    buf.extend_from_slice(itoa_buf.format(ival).as_bytes());
+                } else if let Some(f) = value.as_number() {
+                    buf.extend_from_slice(lua_float_to_string(f).as_bytes());
+                }
+            }
+            let result = match String::from_utf8(buf) {
+                Ok(s) => l.create_string_owned(s)?,
+                Err(e) => l.create_binary(e.into_bytes())?,
+            };
+            l.push_value(result)?;
+        } else {
+            let mut result = String::with_capacity(total_len);
+            for idx in i..=j {
+                if idx > i {
+                    result.push_str(sep);
+                }
+                let value = l.table_geti(&table_val, idx)?;
+                if let Some(s) = value.as_str() {
+                    result.push_str(s);
+                } else if let Some(ival) = value.as_integer() {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    result.push_str(itoa_buf.format(ival));
+                } else if let Some(f) = value.as_number() {
+                    result.push_str(&lua_float_to_string(f));
+                }
+            }
+            let result = l.create_string_owned(result)?;
+            l.push_value(result)?;
+        }
     }
 
     Ok(1)
