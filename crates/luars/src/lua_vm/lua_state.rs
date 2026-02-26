@@ -13,7 +13,7 @@ use crate::lua_vm::call_info::call_status::{
 };
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
-use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, EXTRA_CI, EXTRA_STACK};
+use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 use crate::{
@@ -202,12 +202,8 @@ impl LuaState {
         nparams: usize,
         nresults: i32,
     ) -> LuaResult<()> {
-        // Fast path: check stack depth (branch predictor friendly - usually succeeds)
+        // Fast path: check Lua call-stack depth
         if self.call_depth >= self.safe_option.max_call_depth {
-            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
-                // In error handler extra zone - C Lua's stackerror behavior
-                return Err(LuaError::ErrorInErrorHandling);
-            }
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -393,10 +389,6 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     fn push_lua_frame_overflow(&mut self) -> LuaResult<()> {
-        if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
-            // In error handler extra zone - C Lua's stackerror behavior
-            return Err(LuaError::ErrorInErrorHandling);
-        }
         Err(self.error(format!(
             "stack overflow (Lua stack depth: {})",
             self.call_depth
@@ -493,12 +485,8 @@ impl LuaState {
         nargs: usize,
         nresults: i32,
     ) -> LuaResult<()> {
-        // Check stack depth
+        // Check Lua call-stack depth
         if self.call_depth >= self.safe_option.max_call_depth {
-            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
-                // In error handler extra zone - C Lua's stackerror behavior
-                return Err(LuaError::ErrorInErrorHandling);
-            }
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -1555,16 +1543,16 @@ impl LuaState {
     /// Lua 5.5-style ccall depth tracking: increment shared n_ccalls before
     /// a recursive `lua_execute` call.  Returns `Err("C stack overflow")` if
     /// the limit is reached.  The limit is checked against this thread's
-    /// `safe_option.max_call_depth` so that xpcall's EXTRA_STACK increase
+    /// `safe_option.max_c_stack_depth` so that xpcall's EXTRA zone increase
     /// takes effect.
     #[inline(always)]
     pub(crate) fn inc_n_ccalls(&mut self) -> LuaResult<()> {
         let vm = unsafe { &mut *self.vm };
         vm.n_ccalls += 1;
-        if vm.n_ccalls >= self.safe_option.max_call_depth {
+        if vm.n_ccalls >= self.safe_option.max_c_stack_depth {
             vm.n_ccalls -= 1;
-            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
-                // In error handler extra zone - C Lua's stackerror behavior
+            if self.safe_option.max_c_stack_depth > self.safe_option.base_c_stack_depth {
+                // In error handler extra zone — C Lua's stackerror behavior
                 return Err(LuaError::ErrorInErrorHandling);
             }
             Err(self.error("C stack overflow".to_string()))
@@ -2852,9 +2840,9 @@ impl LuaState {
                     None
                 };
 
-                // Temporarily increase max_call_depth for error handler
-                let saved_max_depth = self.safe_option.max_call_depth;
-                self.safe_option.max_call_depth = saved_max_depth + EXTRA_CI;
+                // Temporarily increase max_c_stack_depth for error handler
+                let saved_max_c_depth = self.safe_option.max_c_stack_depth;
+                self.safe_option.max_c_stack_depth = saved_max_c_depth + CSTACKERR;
 
                 // Call error handler WITH ALL ERROR FRAMES STILL ON STACK.
                 // C Lua's luaG_errormsg recursively calls the handler when the
@@ -2869,8 +2857,8 @@ impl LuaState {
                 // Budget: how many retries before we hit the depth limit.
                 // In C Lua, each recursive handler call adds ~1 to nCcalls.
                 // At MAXCCALLS (200), "C stack overflow" fires.
-                // At MAXCCALLS*1.1 (220), hard "error in error handling" fires.
-                let depth_budget = saved_max_depth.saturating_sub(initial_depth);
+                // At MAXCCALLS+CSTACKERR (230), hard "error in error handling" fires.
+                let depth_budget = saved_max_c_depth.saturating_sub(initial_depth);
                 let hard_limit = depth_budget + 30; // extra room for error handling
                 let mut retry_count: usize = 0;
 
@@ -2945,8 +2933,8 @@ impl LuaState {
                     }
                 }
 
-                // Restore max_call_depth
-                self.safe_option.max_call_depth = saved_max_depth;
+                // Restore max_c_stack_depth
+                self.safe_option.max_c_stack_depth = saved_max_c_depth;
 
                 // NOW pop error frames (after handler has seen them)
                 while self.call_depth() > initial_depth {
@@ -3175,11 +3163,11 @@ impl LuaState {
                     None
                 };
 
-                // Temporarily increase max_call_depth for error handler
-                // (like CLua's EXTRA_STACK — allows error handlers to run
+                // Temporarily increase max_c_stack_depth for error handler
+                // (like CLua's CSTACKERR — allows error handlers to run
                 // even after stack overflow)
-                let saved_max_depth = self.safe_option.max_call_depth;
-                self.safe_option.max_call_depth = saved_max_depth + EXTRA_CI;
+                let saved_max_c_depth = self.safe_option.max_c_stack_depth;
+                self.safe_option.max_c_stack_depth = saved_max_c_depth + CSTACKERR;
 
                 // Call error handler with error value.
                 // C Lua's luaG_errormsg recursively calls the handler when the
@@ -3262,8 +3250,8 @@ impl LuaState {
                     }
                 }
 
-                // Restore max_call_depth after error handler completes
-                self.safe_option.max_call_depth = saved_max_depth;
+                // Restore max_c_stack_depth after error handler completes
+                self.safe_option.max_c_stack_depth = saved_max_c_depth;
 
                 // NOW pop the error frames (after handler has seen them)
                 while self.call_depth() > initial_depth {

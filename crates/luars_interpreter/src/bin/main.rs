@@ -380,13 +380,13 @@ fn lua_main() -> i32 {
     }
 
     // Create VM
-    let mut vm = LuaVM::new(SafeOption {
-        max_stack_size: 1000000, // LUAI_MAXSTACK (Lua 5.5)
-        // 问就是rust在debug版本递归限制太小了
-        max_call_depth: if cfg!(debug_assertions) { 25 } else { 1024 },
-        base_call_depth: if cfg!(debug_assertions) { 25 } else { 256 },
-        max_memory_limit: 1024 * 1024 * 1024, // 1 GB
-    });
+    let mut safe_option = SafeOption::default();
+    safe_option.max_stack_size = 1000000; // LUAI_MAXSTACK (Lua 5.5)
+    // 问就是rust在debug版本递归限制太小了
+    safe_option.max_call_depth = if cfg!(debug_assertions) { 25 } else { 1024 };
+    safe_option.max_c_stack_depth = if cfg!(debug_assertions) { 25 } else { 200 };
+    safe_option.max_memory_limit = 4096 * 1024 * 1024; // 4 GB
+    let mut vm = LuaVM::new(safe_option);
     vm.open_stdlib(stdlib::Stdlib::All).unwrap();
     if cfg!(debug_assertions) {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));

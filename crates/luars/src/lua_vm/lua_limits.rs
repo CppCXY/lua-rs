@@ -22,14 +22,21 @@ pub const LUA_MINSTACK: usize = 20;
 /// Matches Lua 5.5's LUAI_MAXSTACK.
 pub const LUAI_MAXSTACK: usize = 1_000_000;
 
-/// Default maximum function call nesting depth.
-/// Matches C Lua's LUAI_MAXCCALLS (200). We use 256 as a round number.
-pub const MAX_CALL_DEPTH: usize = 256;
+/// Default maximum Lua call-stack depth (number of call frames).
+/// This limits how deep pure-Lua calls can nest.
+/// Set high by default — the real recursion guard is `LUAI_MAXCSTACK`.
+pub const MAX_CALL_DEPTH: usize = 1024;
 
-/// Extra call depth allowance granted during error-handler execution.
+/// Default maximum C-stack depth (Rust recursion depth).
+/// Matches C Lua 5.5's `LUAI_MAXCSTACK` (200).
+/// Limits how many times we can recursively enter `lua_execute`,
+/// call metamethods, or call C functions.
+pub const LUAI_MAXCSTACK: usize = 200;
+
+/// Extra C-stack depth allowance granted during error-handler execution.
 /// Allows error handlers and `__close` metamethods to run even after
-/// a stack overflow.
-pub const EXTRA_CI: usize = 30;
+/// a C-stack overflow.
+pub const CSTACKERR: usize = 30;
 
 // ===== Strings =====
 
