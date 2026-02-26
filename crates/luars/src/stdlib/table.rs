@@ -189,9 +189,10 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
             table.raw_seti(len + 1, value);
             // GC barrier for collectable values
             if value.iscollectable()
-                && let Some(gc_ptr) = table_val.as_gc_ptr() {
-                    l.gc_barrier_back(gc_ptr);
-                }
+                && let Some(gc_ptr) = table_val.as_gc_ptr()
+            {
+                l.gc_barrier_back(gc_ptr);
+            }
         }
     } else if argc == 3 {
         // table.insert(list, pos, value)
@@ -238,9 +239,10 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
             }
             table.raw_seti(pos, value);
             if value.iscollectable()
-                && let Some(gc_ptr) = table_val.as_gc_ptr() {
-                    l.gc_barrier_back(gc_ptr);
-                }
+                && let Some(gc_ptr) = table_val.as_gc_ptr()
+            {
+                l.gc_barrier_back(gc_ptr);
+            }
         }
     } else {
         return Err(l.error("wrong number of arguments to 'insert'".to_string()));
