@@ -1608,9 +1608,18 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     )?;
 
     // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
-    // Push the function onto the stack at the current top.
-    let func_idx = l.get_top();
+    // C Lua does lua_settop(L, 1) to keep only the filename, then pushes the chunk at slot 2.
+    // After yield, dofilecont returns gettop-1 (skipping the filename).
+    // Our finish_c_frame/CIST_YCALL uses pcall_func_pos+1 as result start,
+    // so we must clear all args and place the chunk right after the C function slot.
+    let func_pos = l
+        .current_frame()
+        .map(|f| f.base - f.func_offset)
+        .unwrap_or(0);
+    let clear_to = func_pos + 1; // right after the dofile function slot
+    l.set_top(clear_to)?;
     l.push_value(func)?;
+    let func_idx = clear_to; // chunk is at this position
     let num_results = l.call_stack_based(func_idx, 0)?;
 
     Ok(num_results)

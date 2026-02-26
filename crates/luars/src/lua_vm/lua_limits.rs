@@ -23,6 +23,7 @@ pub const LUA_MINSTACK: usize = 20;
 pub const LUAI_MAXSTACK: usize = 1_000_000;
 
 /// Default maximum function call nesting depth.
+/// Matches C Lua's LUAI_MAXCCALLS (200). We use 256 as a round number.
 pub const MAX_CALL_DEPTH: usize = 256;
 
 /// Extra call depth allowance granted during error-handler execution.

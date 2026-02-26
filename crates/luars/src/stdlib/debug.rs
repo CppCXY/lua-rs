@@ -778,9 +778,13 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
     const LEVELS1: usize = 10;
     const LEVELS2: usize = 11;
 
-    // Collect frame indices (most-recent first, matching C Lua's level ordering)
-    if start_level < call_depth {
-        let frames: Vec<usize> = (start_level..call_depth).rev().collect();
+    // C Lua semantics: level counts from the TOP (most-recent frame).
+    // level=0 → include current function (most recent)
+    // level=1 → skip most-recent frame, start from its caller
+    // So we include frames from index 0 up to (call_depth - 1 - level).
+    let top_frame = call_depth.saturating_sub(start_level);
+    if top_frame > 0 {
+        let frames: Vec<usize> = (0..top_frame).rev().collect();
         let total = frames.len();
         let limit2show: isize = if total > LEVELS1 + LEVELS2 {
             LEVELS1 as isize
@@ -830,8 +834,8 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                     let (name_what, func_name) = if chunk.linedefined == 0 {
                         // Main chunk (linedefined == 0 means top-level code)
                         ("main chunk", String::new())
-                    } else if i == call_depth - 1 {
-                        // Also main chunk if at bottom of stack
+                    } else if i == 0 {
+                        // Also main chunk if at bottom of stack (frame index 0)
                         ("main chunk", String::new())
                     } else {
                         // Use getfuncname to resolve function name from calling frame

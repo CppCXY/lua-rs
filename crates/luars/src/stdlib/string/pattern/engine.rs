@@ -11,8 +11,8 @@ use crate::lua_vm::lua_limits::{LUA_MAXCAPTURES, MAXCCALLS_PATTERN};
 /// Check if pattern has no special characters (can be matched as plain text).
 /// Mirrors C Lua's `nospecials()` in lstrlib.c.
 #[inline]
-pub fn is_plain_pattern(pat: &str) -> bool {
-    !pat.bytes().any(|c| {
+pub fn is_plain_pattern(pat: &[u8]) -> bool {
+    !pat.iter().any(|&c| {
         matches!(
             c,
             b'%' | b'.' | b'[' | b'*' | b'+' | b'-' | b'?' | b'^' | b'$' | b'('
@@ -24,6 +24,7 @@ pub fn is_plain_pattern(pat: &str) -> bool {
 #[derive(Clone, Copy)]
 pub enum ByteMap<'a> {
     Ascii,
+    #[allow(unused)]
     Map(&'a [usize]),
 }
 
@@ -545,41 +546,6 @@ pub struct MatchInfo {
     pub captures: CaptureResults,
 }
 
-/// Build char-to-byte offset map. Returns vec of len `chars.len() + 1`.
-fn char_to_byte_map(text: &str) -> Vec<usize> {
-    if text.is_ascii() {
-        // ASCII fast path: byte offset == char index
-        (0..=text.len()).collect()
-    } else {
-        text.char_indices()
-            .map(|(i, _)| i)
-            .chain(std::iter::once(text.len()))
-            .collect()
-    }
-}
-
-/// Convert text to Vec<char>, with ASCII fast path.
-#[inline]
-fn text_to_chars(text: &str) -> Vec<char> {
-    if text.is_ascii() {
-        // ASCII fast path: skip UTF-8 decoding
-        text.as_bytes().iter().map(|&b| b as char).collect()
-    } else {
-        text.chars().collect()
-    }
-}
-
-/// Convert byte offset to char index
-#[inline]
-fn byte_to_char_index(text: &str, byte_pos: usize) -> usize {
-    if text.is_ascii() {
-        byte_pos.min(text.len())
-    } else {
-        let clamped = byte_pos.min(text.len());
-        text[..clamped].chars().count()
-    }
-}
-
 /// Check that all captures in a successful match are finished
 fn check_captures(ms: &MatchState) -> Result<(), String> {
     for i in 0..ms.num_captures {
@@ -616,71 +582,57 @@ fn extract_captures(ms: &MatchState) -> CaptureResults {
 
 /// Find pattern in text. `init` is a 0-based byte offset.
 /// Returns `(byte_start, byte_end, captures)`.
-/// OPTIMIZED: stack buffers for small ASCII strings, ByteMap for c2b
+/// Operates on raw bytes (Lua semantics: each byte is a "character").
 pub fn find(
-    text: &str,
-    pat_str: &str,
+    text: &[u8],
+    pat_bytes: &[u8],
     init: usize,
 ) -> Result<Option<(usize, usize, CaptureResults)>, String> {
     if init > text.len() {
         return Ok(None);
     }
 
-    // FAST PATH: plain pattern — use Rust's SIMD-optimized str::find
-    if is_plain_pattern(pat_str) {
-        if let Some(pos) = text[init..].find(pat_str) {
+    // FAST PATH: plain pattern — use byte slice search
+    if is_plain_pattern(pat_bytes) {
+        if let Some(pos) = find_bytes_in_slice(&text[init..], pat_bytes) {
             let start = init + pos;
-            let end = start + pat_str.len();
+            let end = start + pat_bytes.len();
             return Ok(Some((start, end, CaptureResults::new())));
         } else {
             return Ok(None);
         }
     }
 
-    let text_is_ascii = text.is_ascii();
-
-    // Text chars: stack buffer for small ASCII, heap for others
+    // Convert bytes to chars (byte-as-char identity mapping — Lua semantics)
     let text_heap: Vec<char>;
     let mut text_stack = ['\0'; 256];
-    let text_chars: &[char] = if text_is_ascii && text.len() <= 256 {
-        for (i, &b) in text.as_bytes().iter().enumerate() {
+    let text_chars: &[char] = if text.len() <= 256 {
+        for (i, &b) in text.iter().enumerate() {
             text_stack[i] = b as char;
         }
         &text_stack[..text.len()]
     } else {
-        text_heap = text_to_chars(text);
+        text_heap = text.iter().map(|&b| b as char).collect();
         &text_heap
     };
 
-    // Pattern chars: stack buffer for small ASCII, heap for others
     let pat_heap: Vec<char>;
     let mut pat_stack = ['\0'; 64];
-    let pat_chars: &[char] = if pat_str.is_ascii() && pat_str.len() <= 64 {
-        for (i, &b) in pat_str.as_bytes().iter().enumerate() {
+    let pat_chars: &[char] = if pat_bytes.len() <= 64 {
+        for (i, &b) in pat_bytes.iter().enumerate() {
             pat_stack[i] = b as char;
         }
-        &pat_stack[..pat_str.len()]
+        &pat_stack[..pat_bytes.len()]
     } else {
-        pat_heap = text_to_chars(pat_str);
+        pat_heap = pat_bytes.iter().map(|&b| b as char).collect();
         &pat_heap
     };
 
     validate_pattern(pat_chars)?;
 
-    // Byte map: ASCII identity or precomputed
-    let c2b_vec: Vec<usize>;
-    let byte_map = if text_is_ascii {
-        ByteMap::Ascii
-    } else {
-        c2b_vec = char_to_byte_map(text);
-        ByteMap::Map(&c2b_vec)
-    };
-
-    let init_ci = if text_is_ascii {
-        init
-    } else {
-        byte_to_char_index(text, init)
-    };
+    // Byte-as-char: identity mapping (1 byte = 1 char)
+    let byte_map = ByteMap::Ascii;
+    let init_ci = init;
 
     let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
         1
@@ -713,53 +665,45 @@ pub fn find(
 }
 
 /// Find all matches of pattern in text (for gmatch/gsub).
-/// OPTIMIZED: stack buffers for small ASCII strings, ByteMap for c2b
+/// Operates on raw bytes (Lua semantics: each byte is a "character").
 pub fn find_all_matches(
-    text: &str,
-    pat_str: &str,
+    text: &[u8],
+    pat_bytes: &[u8],
     init: usize,
     max: Option<usize>,
 ) -> Result<Vec<MatchInfo>, String> {
-    // FAST PATH: plain non-empty pattern — use str::find loop
-    if is_plain_pattern(pat_str) && !pat_str.is_empty() {
-        return find_all_matches_plain(text, pat_str, init, max);
+    // FAST PATH: plain non-empty pattern — use byte slice search loop
+    if is_plain_pattern(pat_bytes) && !pat_bytes.is_empty() {
+        return find_all_matches_plain(text, pat_bytes, init, max);
     }
-
-    let text_is_ascii = text.is_ascii();
 
     let text_heap: Vec<char>;
     let mut text_stack = ['\0'; 256];
-    let text_chars: &[char] = if text_is_ascii && text.len() <= 256 {
-        for (i, &b) in text.as_bytes().iter().enumerate() {
+    let text_chars: &[char] = if text.len() <= 256 {
+        for (i, &b) in text.iter().enumerate() {
             text_stack[i] = b as char;
         }
         &text_stack[..text.len()]
     } else {
-        text_heap = text_to_chars(text);
+        text_heap = text.iter().map(|&b| b as char).collect();
         &text_heap
     };
 
     let pat_heap: Vec<char>;
     let mut pat_stack = ['\0'; 64];
-    let pat_chars: &[char] = if pat_str.is_ascii() && pat_str.len() <= 64 {
-        for (i, &b) in pat_str.as_bytes().iter().enumerate() {
+    let pat_chars: &[char] = if pat_bytes.len() <= 64 {
+        for (i, &b) in pat_bytes.iter().enumerate() {
             pat_stack[i] = b as char;
         }
-        &pat_stack[..pat_str.len()]
+        &pat_stack[..pat_bytes.len()]
     } else {
-        pat_heap = text_to_chars(pat_str);
+        pat_heap = pat_bytes.iter().map(|&b| b as char).collect();
         &pat_heap
     };
 
     validate_pattern(pat_chars)?;
 
-    let c2b_vec: Vec<usize>;
-    let byte_map = if text_is_ascii {
-        ByteMap::Ascii
-    } else {
-        c2b_vec = char_to_byte_map(text);
-        ByteMap::Map(&c2b_vec)
-    };
+    let byte_map = ByteMap::Ascii;
 
     let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
         1
@@ -770,12 +714,7 @@ pub fn find_all_matches(
 
     let mut matches = Vec::new();
     let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
-    let init_ci = if text_is_ascii {
-        init
-    } else {
-        byte_to_char_index(text, init)
-    };
-    let mut si = init_ci;
+    let mut si = init;
     let mut last_was_nonempty = false;
 
     while si <= text_chars.len() {
@@ -833,53 +772,46 @@ pub fn find_all_matches(
 }
 
 /// Global substitution with string replacement.
-/// OPTIMIZED: stack buffers, ByteMap, pass text to substitute_captures
+/// Operates on raw bytes (Lua semantics: each byte is a "character").
+/// Returns (result_bytes, substitution_count).
 pub fn gsub(
-    text: &str,
-    pat_str: &str,
-    replacement: &str,
+    text: &[u8],
+    pat_bytes: &[u8],
+    replacement: &[u8],
     max: Option<usize>,
-) -> Result<(String, usize), String> {
-    // FAST PATH: plain non-empty pattern — use str::find loop
-    if is_plain_pattern(pat_str) && !pat_str.is_empty() {
-        return gsub_plain(text, pat_str, replacement, max);
+) -> Result<(Vec<u8>, usize), String> {
+    // FAST PATH: plain non-empty pattern — use byte slice search loop
+    if is_plain_pattern(pat_bytes) && !pat_bytes.is_empty() {
+        return gsub_plain(text, pat_bytes, replacement, max);
     }
-
-    let text_is_ascii = text.is_ascii();
 
     let text_heap: Vec<char>;
     let mut text_stack = ['\0'; 256];
-    let text_chars: &[char] = if text_is_ascii && text.len() <= 256 {
-        for (i, &b) in text.as_bytes().iter().enumerate() {
+    let text_chars: &[char] = if text.len() <= 256 {
+        for (i, &b) in text.iter().enumerate() {
             text_stack[i] = b as char;
         }
         &text_stack[..text.len()]
     } else {
-        text_heap = text_to_chars(text);
+        text_heap = text.iter().map(|&b| b as char).collect();
         &text_heap
     };
 
     let pat_heap: Vec<char>;
     let mut pat_stack = ['\0'; 64];
-    let pat_chars: &[char] = if pat_str.is_ascii() && pat_str.len() <= 64 {
-        for (i, &b) in pat_str.as_bytes().iter().enumerate() {
+    let pat_chars: &[char] = if pat_bytes.len() <= 64 {
+        for (i, &b) in pat_bytes.iter().enumerate() {
             pat_stack[i] = b as char;
         }
-        &pat_stack[..pat_str.len()]
+        &pat_stack[..pat_bytes.len()]
     } else {
-        pat_heap = text_to_chars(pat_str);
+        pat_heap = pat_bytes.iter().map(|&b| b as char).collect();
         &pat_heap
     };
 
     validate_pattern(pat_chars)?;
 
-    let c2b_vec: Vec<usize>;
-    let byte_map = if text_is_ascii {
-        ByteMap::Ascii
-    } else {
-        c2b_vec = char_to_byte_map(text);
-        ByteMap::Map(&c2b_vec)
-    };
+    let byte_map = ByteMap::Ascii;
 
     let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
         1
@@ -887,9 +819,9 @@ pub fn gsub(
         0
     };
     let anchored = pp_start == 1;
-    let needs_substitution = replacement.contains('%');
+    let needs_substitution = replacement.contains(&b'%');
 
-    let mut result = String::new();
+    let mut result = Vec::new();
     let mut count = 0usize;
     let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
     let mut si = 0usize;
@@ -911,7 +843,7 @@ pub fn gsub(
 
             if is_empty && last_was_nonempty {
                 if si < text_chars.len() {
-                    result.push(text_chars[si]);
+                    result.push(text_chars[si] as u8);
                     last_byte_end = ms.text_bytes.get(si + 1);
                 }
                 si += 1;
@@ -922,23 +854,23 @@ pub fn gsub(
             // Copy text between last match end and this match start
             let match_byte_start = ms.text_bytes.get(si);
             let match_byte_end = ms.text_bytes.get(end_ci);
-            result.push_str(&text[last_byte_end..match_byte_start]);
+            result.extend_from_slice(&text[last_byte_end..match_byte_start]);
 
             count += 1;
 
             if needs_substitution {
                 let matched_text = &text[match_byte_start..match_byte_end];
-                let replaced = substitute_captures(replacement, matched_text, text, &ms)?;
-                result.push_str(&replaced);
+                let replaced = substitute_captures_bytes(replacement, matched_text, text, &ms)?;
+                result.extend_from_slice(&replaced);
             } else {
-                result.push_str(replacement);
+                result.extend_from_slice(replacement);
             }
 
             last_byte_end = match_byte_end;
 
             if is_empty {
                 if si < text_chars.len() {
-                    result.push(text_chars[si]);
+                    result.push(text_chars[si] as u8);
                     last_byte_end = ms.text_bytes.get(si + 1);
                 }
                 si += 1;
@@ -960,21 +892,20 @@ pub fn gsub(
     }
 
     // Copy remaining text
-    result.push_str(&text[last_byte_end..]);
+    result.extend_from_slice(&text[last_byte_end..]);
 
     Ok((result, count))
 }
 
-/// Substitute %0-%9 and %% in replacement string using MatchState captures
-/// OPTIMIZED: work on bytes instead of Vec<char>, use byte ranges from source text
-fn substitute_captures(
-    replacement: &str,
-    full_match: &str,
-    text: &str,
+/// Substitute %0-%9 and %% in replacement bytes using MatchState captures
+fn substitute_captures_bytes(
+    replacement: &[u8],
+    full_match: &[u8],
+    text: &[u8],
     ms: &MatchState,
-) -> Result<String, String> {
-    let mut result = String::new();
-    let repl = replacement.as_bytes();
+) -> Result<Vec<u8>, String> {
+    let mut result = Vec::new();
+    let repl = replacement;
     let mut i = 0;
 
     while i < repl.len() {
@@ -982,29 +913,29 @@ fn substitute_captures(
             if i + 1 < repl.len() {
                 let next = repl[i + 1];
                 if next == b'%' {
-                    result.push('%');
+                    result.push(b'%');
                     i += 2;
                 } else if next.is_ascii_digit() {
                     let n = (next - b'0') as usize;
                     if n == 0 {
-                        result.push_str(full_match);
+                        result.extend_from_slice(full_match);
                     } else if n <= ms.num_captures {
                         let cap = &ms.captures[n - 1];
                         match cap.len {
                             CaptureLen::Len(len) => {
                                 let byte_start = ms.text_bytes.get(cap.start);
                                 let byte_end = ms.text_bytes.get(cap.start + len);
-                                result.push_str(&text[byte_start..byte_end]);
+                                result.extend_from_slice(&text[byte_start..byte_end]);
                             }
                             CaptureLen::Position => {
-                                use std::fmt::Write;
-                                write!(result, "{}", ms.text_bytes.get(cap.start) + 1).unwrap();
+                                let pos_str = format!("{}", ms.text_bytes.get(cap.start) + 1);
+                                result.extend_from_slice(pos_str.as_bytes());
                             }
                             CaptureLen::Unfinished => {}
                         }
                     } else if ms.num_captures == 0 && n == 1 {
                         // Lua special case: no captures, %1 = whole match
-                        result.push_str(full_match);
+                        result.extend_from_slice(full_match);
                     } else {
                         return Err(format!("invalid capture index %{}", n));
                     }
@@ -1013,7 +944,7 @@ fn substitute_captures(
                     return Err("invalid use of '%' in replacement string".to_string());
                 }
             } else {
-                result.push('%');
+                result.push(b'%');
                 i += 1;
             }
         } else {
@@ -1022,7 +953,7 @@ fn substitute_captures(
             while i < repl.len() && repl[i] != b'%' {
                 i += 1;
             }
-            result.push_str(&replacement[start..i]);
+            result.extend_from_slice(&replacement[start..i]);
         }
     }
 
@@ -1031,16 +962,27 @@ fn substitute_captures(
 
 // ======================== Plain Pattern Fast Paths ========================
 
-/// Fast plain-text gsub using str::find (SIMD-optimized).
-/// Only called for patterns without special characters.
+/// Find a byte pattern in a byte slice (replaces str::find for &[u8]).
+#[inline]
+fn find_bytes_in_slice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Fast plain-text gsub using byte slice search.
 fn gsub_plain(
-    text: &str,
-    pattern: &str,
-    replacement: &str,
+    text: &[u8],
+    pattern: &[u8],
+    replacement: &[u8],
     max: Option<usize>,
-) -> Result<(String, usize), String> {
-    let needs_subst = replacement.as_bytes().contains(&b'%');
-    let mut result = String::with_capacity(text.len());
+) -> Result<(Vec<u8>, usize), String> {
+    let needs_subst = replacement.contains(&b'%');
+    let mut result = Vec::with_capacity(text.len());
     let mut count = 0usize;
     let mut pos = 0;
 
@@ -1050,14 +992,13 @@ fn gsub_plain(
         {
             break;
         }
-        if let Some(found) = text[pos..].find(pattern) {
-            // Copy text before match
-            result.push_str(&text[pos..pos + found]);
+        if let Some(found) = find_bytes_in_slice(&text[pos..], pattern) {
+            result.extend_from_slice(&text[pos..pos + found]);
             if needs_subst {
                 let matched = &text[pos + found..pos + found + pattern.len()];
-                substitute_plain(&mut result, replacement, matched)?;
+                substitute_plain_bytes(&mut result, replacement, matched)?;
             } else {
-                result.push_str(replacement);
+                result.extend_from_slice(replacement);
             }
             pos += found + pattern.len();
             count += 1;
@@ -1065,14 +1006,14 @@ fn gsub_plain(
             break;
         }
     }
-    result.push_str(&text[pos..]);
+    result.extend_from_slice(&text[pos..]);
     Ok((result, count))
 }
 
-/// Fast plain-text find_all_matches using str::find.
+/// Fast plain-text find_all_matches using byte slice search.
 fn find_all_matches_plain(
-    text: &str,
-    pattern: &str,
+    text: &[u8],
+    pattern: &[u8],
     init: usize,
     max: Option<usize>,
 ) -> Result<Vec<MatchInfo>, String> {
@@ -1084,7 +1025,7 @@ fn find_all_matches_plain(
         {
             break;
         }
-        if let Some(found) = text[pos..].find(pattern) {
+        if let Some(found) = find_bytes_in_slice(&text[pos..], pattern) {
             let start = pos + found;
             let end = start + pattern.len();
             matches.push(MatchInfo {
@@ -1100,30 +1041,29 @@ fn find_all_matches_plain(
     Ok(matches)
 }
 
-/// Handle %0 and %% substitution for plain patterns (no numbered captures).
+/// Handle %0 and %% substitution for plain patterns (bytes version).
 #[inline]
-fn substitute_plain(
-    result: &mut String,
-    replacement: &str,
-    full_match: &str,
+fn substitute_plain_bytes(
+    result: &mut Vec<u8>,
+    replacement: &[u8],
+    full_match: &[u8],
 ) -> Result<(), String> {
-    let repl = replacement.as_bytes();
+    let repl = replacement;
     let mut i = 0;
     while i < repl.len() {
         if repl[i] == b'%' {
             if i + 1 < repl.len() {
                 match repl[i + 1] {
                     b'%' => {
-                        result.push('%');
+                        result.push(b'%');
                         i += 2;
                     }
                     b'0' => {
-                        result.push_str(full_match);
+                        result.extend_from_slice(full_match);
                         i += 2;
                     }
                     b'1' => {
-                        // Lua special case: no captures, %1 = whole match
-                        result.push_str(full_match);
+                        result.extend_from_slice(full_match);
                         i += 2;
                     }
                     c if c.is_ascii_digit() => {
@@ -1134,7 +1074,7 @@ fn substitute_plain(
                     }
                 }
             } else {
-                result.push('%');
+                result.push(b'%');
                 i += 1;
             }
         } else {
@@ -1142,7 +1082,7 @@ fn substitute_plain(
             while i < repl.len() && repl[i] != b'%' {
                 i += 1;
             }
-            result.push_str(&replacement[start..i]);
+            result.extend_from_slice(&replacement[start..i]);
         }
     }
     Ok(())

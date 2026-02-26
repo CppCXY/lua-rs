@@ -59,6 +59,16 @@ pub fn create_string_lib() -> LibraryModule {
     })
 }
 
+/// Create a LuaValue from a byte slice: string if valid UTF-8, binary otherwise.
+#[inline]
+fn create_string_or_binary(l: &mut LuaState, bytes: &[u8]) -> LuaResult<LuaValue> {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        l.create_string(s)
+    } else {
+        l.create_binary(bytes.to_vec())
+    }
+}
+
 /// string.byte(s [, i [, j]]) - Return byte values
 /// Supports both string and binary types
 fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
@@ -549,8 +559,8 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'find' (string expected)".to_string()))?;
 
     // Get string data - handle both string and binary types
-    let s_str = if let Some(s) = s_value.as_str() {
-        s
+    let s_bytes = if let Some(b) = s_value.as_str_bytes() {
+        b
     } else {
         return Err(l.error("bad argument #1 to 'find' (string expected)".to_string()));
     };
@@ -560,8 +570,8 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #2 to 'find' (string expected)".to_string()))?;
 
     // Get pattern data - handle both string and binary types
-    let pattern = if let Some(p) = pattern_value.as_str() {
-        p
+    let pat_bytes = if let Some(b) = pattern_value.as_str_bytes() {
+        b
     } else {
         return Err(l.error("bad argument #2 to 'find' (string expected)".to_string()));
     };
@@ -575,34 +585,38 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
     } else if init < 0 {
         // Negative index: count from end
         let abs_init = (-init) as usize;
-        if abs_init > s_str.len() {
+        if abs_init > s_bytes.len() {
             0
         } else {
-            s_str.len() - abs_init
+            s_bytes.len() - abs_init
         }
     } else {
         // init == 0, treat as 1
         0
     };
 
-    // Fast path: check if pattern contains special characters
-    let has_special = pattern.bytes().any(|c| {
-        matches!(
-            c,
-            b'%' | b'.' | b'[' | b']' | b'*' | b'+' | b'-' | b'?' | b'^' | b'$' | b'(' | b')'
-        )
-    });
-
-    if plain || !has_special {
-        // Plain string search - NO ALLOCATION!
-        if start_pos > s_str.len() {
+    if plain || pattern::is_plain_pattern(pat_bytes) {
+        // Plain string search
+        if start_pos > s_bytes.len() {
             l.push_value(LuaValue::nil())?;
             return Ok(1);
         }
 
-        if let Some(pos) = s_str[start_pos..].find(pattern) {
+        if pat_bytes.is_empty() {
+            if start_pos <= s_bytes.len() {
+                l.push_value(LuaValue::integer((start_pos + 1) as i64))?;
+                l.push_value(LuaValue::integer(start_pos as i64))?;
+                Ok(2)
+            } else {
+                l.push_value(LuaValue::nil())?;
+                Ok(1)
+            }
+        } else if let Some(pos) = s_bytes[start_pos..]
+            .windows(pat_bytes.len())
+            .position(|w| w == pat_bytes)
+        {
             let actual_pos = start_pos + pos;
-            let end_pos = actual_pos + pattern.len();
+            let end_pos = actual_pos + pat_bytes.len();
             l.push_value(LuaValue::integer((actual_pos + 1) as i64))?;
             l.push_value(LuaValue::integer(end_pos as i64))?;
             Ok(2)
@@ -611,8 +625,8 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
     } else {
-        // Complex pattern matching — use pattern2 engine (no parse phase)
-        match pattern::find(s_str, pattern, start_pos) {
+        // Complex pattern matching
+        match pattern::find(s_bytes, pat_bytes, start_pos) {
             Ok(Some((start, end, captures))) => {
                 l.push_value(LuaValue::integer((start + 1) as i64))?;
                 l.push_value(LuaValue::integer(end as i64))?;
@@ -620,9 +634,9 @@ fn string_find(l: &mut LuaState) -> LuaResult<usize> {
                 // Add captures
                 for cap in &captures {
                     match cap {
-                        pattern::CaptureValue::Substring(start, end) => {
-                            let cap_str = l.create_string(&s_str[*start..*end])?;
-                            l.push_value(cap_str)?;
+                        pattern::CaptureValue::Substring(s, e) => {
+                            let cap_val = create_string_or_binary(l, &s_bytes[*s..*e])?;
+                            l.push_value(cap_val)?;
                         }
                         pattern::CaptureValue::Position(p) => {
                             l.push_value(LuaValue::integer(*p as i64))?;
@@ -645,14 +659,14 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'match' (string expected)".to_string()))?;
-    let Some(s_str) = s_value.as_str() else {
+    let Some(s_bytes) = s_value.as_str_bytes() else {
         return Err(l.error("bad argument #1 to 'match' (string expected)".to_string()));
     };
 
     let pattern_value = l
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'match' (string expected)".to_string()))?;
-    let Some(pattern_str) = pattern_value.as_str() else {
+    let Some(pat_bytes) = pattern_value.as_str_bytes() else {
         return Err(l.error("bad argument #2 to 'match' (string expected)".to_string()));
     };
 
@@ -661,29 +675,29 @@ fn string_match(l: &mut LuaState) -> LuaResult<usize> {
         (init - 1) as usize
     } else if init < 0 {
         let abs_init = (-init) as usize;
-        if abs_init > s_str.len() {
+        if abs_init > s_bytes.len() {
             0
         } else {
-            s_str.len() - abs_init
+            s_bytes.len() - abs_init
         }
     } else {
         0
     };
 
-    match pattern::find(s_str, pattern_str, start_pos) {
+    match pattern::find(s_bytes, pat_bytes, start_pos) {
         Ok(Some((start, end, captures))) => {
             if captures.is_empty() {
                 // No captures, return the matched portion
-                let matched_str = l.create_string(&s_str[start..end])?;
-                l.push_value(matched_str)?;
+                let matched_val = create_string_or_binary(l, &s_bytes[start..end])?;
+                l.push_value(matched_val)?;
                 Ok(1)
             } else {
                 let ncaps = captures.len();
                 for cap in &captures {
                     match cap {
-                        pattern::CaptureValue::Substring(start, end) => {
-                            let cap_str = l.create_string(&s_str[*start..*end])?;
-                            l.push_value(cap_str)?;
+                        pattern::CaptureValue::Substring(s, e) => {
+                            let cap_val = create_string_or_binary(l, &s_bytes[*s..*e])?;
+                            l.push_value(cap_val)?;
                         }
                         pattern::CaptureValue::Position(p) => {
                             l.push_value(LuaValue::integer(*p as i64))?;
@@ -709,24 +723,16 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'gsub' (string expected)".to_string()))?;
 
-    // Get string data - handle both string and binary types
-    let s_str: String;
-    let s_ref = if let Some(s) = s_value.as_str() {
-        s
-    } else if let Some(bytes) = s_value.as_binary() {
-        // For binary data, map each byte to a Latin-1 char (preserves byte identity)
-        s_str = bytes.iter().map(|&b| b as char).collect();
-        &s_str
-    } else {
-        return Err(l.error("bad argument #1 to 'gsub' (string expected)".to_string()));
-    };
+    let s_bytes = s_value
+        .as_str_bytes()
+        .ok_or_else(|| l.error("bad argument #1 to 'gsub' (string expected)".to_string()))?;
 
     let pattern_value = l
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'gsub' (string expected)".to_string()))?;
-    let Some(pattern_str) = pattern_value.as_str() else {
-        return Err(l.error("bad argument #2 to 'gsub' (string expected)".to_string()));
-    };
+    let pat_bytes = pattern_value
+        .as_str_bytes()
+        .ok_or_else(|| l.error("bad argument #2 to 'gsub' (string expected)".to_string()))?;
 
     let repl_value = l
         .get_arg(3)
@@ -738,10 +744,10 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
         .map(|n| n as usize);
 
     // String replacement
-    if let Some(repl_str) = repl_value.as_str() {
-        match pattern::gsub(s_ref, pattern_str, repl_str, max) {
-            Ok((result_str, count)) => {
-                let result = l.create_string(&result_str)?;
+    if let Some(repl_bytes) = repl_value.as_str_bytes() {
+        match pattern::gsub(s_bytes, pat_bytes, repl_bytes, max) {
+            Ok((result_bytes, count)) => {
+                let result = create_string_or_binary(l, &result_bytes)?;
                 l.push_value(result)?;
                 l.push_value(LuaValue::integer(count as i64))?;
                 Ok(2)
@@ -749,25 +755,25 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             Err(e) => Err(l.error(e)),
         }
     } else if repl_value.is_function() {
-        let matches = match pattern::find_all_matches(s_ref, pattern_str, 0, max) {
+        let matches = match pattern::find_all_matches(s_bytes, pat_bytes, 0, max) {
             Ok(m) => m,
             Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
         };
-        let mut result = String::new();
+        let mut result: Vec<u8> = Vec::new();
         let mut last_end = 0;
         let mut count = 0;
 
         for m in &matches {
-            result.push_str(&s_ref[last_end..m.start]);
+            result.extend_from_slice(&s_bytes[last_end..m.start]);
 
             let args = if m.captures.is_empty() {
-                vec![l.create_string(&s_ref[m.start..m.end])?]
+                vec![create_string_or_binary(l, &s_bytes[m.start..m.end])?]
             } else {
                 let mut captures = vec![];
                 for cap in &m.captures {
                     match cap {
                         pattern::CaptureValue::Substring(start, end) => {
-                            captures.push(l.create_string(&s_ref[*start..*end])?)
+                            captures.push(create_string_or_binary(l, &s_bytes[*start..*end])?)
                         }
                         pattern::CaptureValue::Position(p) => {
                             captures.push(LuaValue::integer(*p as i64))
@@ -785,13 +791,13 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
                             || results[0] == LuaValue::boolean(false)
                         {
                             // No return value, nil, or false: use original match
-                            result.push_str(&s_ref[m.start..m.end]);
-                        } else if let Some(s) = results[0].as_str() {
-                            result.push_str(s);
+                            result.extend_from_slice(&s_bytes[m.start..m.end]);
+                        } else if let Some(s) = results[0].as_str_bytes() {
+                            result.extend_from_slice(s);
                         } else if let Some(n) = results[0].as_integer() {
-                            result.push_str(&n.to_string());
+                            result.extend_from_slice(n.to_string().as_bytes());
                         } else if let Some(n) = results[0].as_number() {
-                            result.push_str(&n.to_string());
+                            result.extend_from_slice(n.to_string().as_bytes());
                         } else {
                             return Err(l.error(format!(
                                 "invalid replacement value (a {})",
@@ -815,67 +821,66 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
             count += 1;
         }
 
-        result.push_str(&s_ref[last_end..]);
+        result.extend_from_slice(&s_bytes[last_end..]);
 
-        let result_val = l.create_string(&result)?;
+        let result_val = create_string_or_binary(l, &result)?;
         l.push_value(result_val)?;
         l.push_value(LuaValue::integer(count as i64))?;
         Ok(2)
     } else if repl_value.is_table() {
         // Table replacement
-        let matches = match pattern::find_all_matches(s_ref, pattern_str, 0, max) {
+        let matches = match pattern::find_all_matches(s_bytes, pat_bytes, 0, max) {
             Ok(m) => m,
             Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
         };
-        let mut result = String::new();
+        let mut result: Vec<u8> = Vec::new();
         let mut last_end = 0;
         let mut count = 0;
 
         for m in &matches {
             // Copy text before match
-            result.push_str(&s_ref[last_end..m.start]);
+            result.extend_from_slice(&s_bytes[last_end..m.start]);
 
             // Table lookup
             let key = if m.captures.is_empty() {
                 // No captures, use whole match as key
-                l.create_string(&s_ref[m.start..m.end])?
+                create_string_or_binary(l, &s_bytes[m.start..m.end])?
             } else {
                 // Use first capture as key
                 match m.captures.get(0).unwrap() {
                     pattern::CaptureValue::Substring(start, end) => {
-                        l.create_string(&s_ref[*start..*end])?
+                        create_string_or_binary(l, &s_bytes[*start..*end])?
                     }
                     pattern::CaptureValue::Position(p) => LuaValue::integer(*p as i64),
                 }
             };
 
-            let result_val = l.table_get(&repl_value, &key)?.unwrap_or(LuaValue::nil());
+            let lookup_result = l.table_get(&repl_value, &key)?.unwrap_or(LuaValue::nil());
 
-            let replacement = if result_val.is_nil() || result_val == LuaValue::boolean(false) {
+            if lookup_result.is_nil() || lookup_result == LuaValue::boolean(false) {
                 // nil or false means no replacement, use original match
-                s_ref[m.start..m.end].to_string()
-            } else if let Some(s) = result_val.as_str() {
-                s.to_string()
-            } else if let Some(n) = result_val.as_integer() {
-                n.to_string()
-            } else if let Some(n) = result_val.as_number() {
-                n.to_string()
+                result.extend_from_slice(&s_bytes[m.start..m.end]);
+            } else if let Some(s) = lookup_result.as_str_bytes() {
+                result.extend_from_slice(s);
+            } else if let Some(n) = lookup_result.as_integer() {
+                result.extend_from_slice(n.to_string().as_bytes());
+            } else if let Some(n) = lookup_result.as_number() {
+                result.extend_from_slice(n.to_string().as_bytes());
             } else {
                 return Err(l.error(format!(
                     "invalid replacement value (a {})",
-                    result_val.type_name()
+                    lookup_result.type_name()
                 )));
-            };
+            }
 
-            result.push_str(&replacement);
             last_end = m.end;
             count += 1;
         }
 
         // Copy remaining text
-        result.push_str(&s_ref[last_end..]);
+        result.extend_from_slice(&s_bytes[last_end..]);
 
-        let result_val = l.create_string(&result)?;
+        let result_val = create_string_or_binary(l, &result)?;
         l.push_value(result_val)?;
         l.push_value(LuaValue::integer(count as i64))?;
         Ok(2)
@@ -897,11 +902,11 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
 
     // Validate args
-    let s_str = s_value
-        .as_str()
+    let s_bytes = s_value
+        .as_str_bytes()
         .ok_or_else(|| l.error("bad argument #1 to 'gmatch' (string expected)".to_string()))?;
-    let _pattern_str = pattern_value
-        .as_str()
+    let _pat_bytes = pattern_value
+        .as_str_bytes()
         .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
 
     // Handle init parameter (3rd arg, default 1, can be negative)
@@ -910,10 +915,10 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         (init - 1) as usize
     } else if init < 0 {
         let abs_init = (-init) as usize;
-        if abs_init > s_str.len() {
+        if abs_init > s_bytes.len() {
             0
         } else {
-            s_str.len() - abs_init
+            s_bytes.len() - abs_init
         }
     } else {
         0
@@ -957,11 +962,11 @@ fn gmatch_iterator_lazy(l: &mut LuaState) -> LuaResult<usize> {
     let current_pos = upvalues[2].as_integer().unwrap_or(0) as usize;
     let lastmatch = upvalues[3].as_integer().unwrap_or(-1); // -1 = no previous match
 
-    let Some(s_str) = s_val.as_str() else {
+    let Some(s_bytes) = s_val.as_str_bytes() else {
         l.push_value(LuaValue::nil())?;
         return Ok(1);
     };
-    let Some(pattern_str) = pat_val.as_str() else {
+    let Some(pat_bytes) = pat_val.as_str_bytes() else {
         l.push_value(LuaValue::nil())?;
         return Ok(1);
     };
@@ -969,11 +974,11 @@ fn gmatch_iterator_lazy(l: &mut LuaState) -> LuaResult<usize> {
     // Search for next match, skipping matches that end at lastmatch
     let mut search_pos = current_pos;
     loop {
-        if search_pos > s_str.len() {
+        if search_pos > s_bytes.len() {
             break; // past end of string
         }
 
-        match pattern::find(s_str, pattern_str, search_pos) {
+        match pattern::find(s_bytes, pat_bytes, search_pos) {
             Ok(Some((start, end, captures))) => {
                 // Skip if match end equals lastmatch (C Lua: e != gm->lastmatch)
                 if lastmatch >= 0 && end == lastmatch as usize {
@@ -991,7 +996,7 @@ fn gmatch_iterator_lazy(l: &mut LuaState) -> LuaResult<usize> {
 
                 // Return captures
                 if captures.is_empty() {
-                    let matched = l.create_string(&s_str[start..end])?;
+                    let matched = create_string_or_binary(l, &s_bytes[start..end])?;
                     l.push_value(matched)?;
                     return Ok(1);
                 } else {
@@ -999,7 +1004,7 @@ fn gmatch_iterator_lazy(l: &mut LuaState) -> LuaResult<usize> {
                     for cap in &captures {
                         match cap {
                             pattern::CaptureValue::Substring(s, e) => {
-                                let val = l.create_string(&s_str[*s..*e])?;
+                                let val = create_string_or_binary(l, &s_bytes[*s..*e])?;
                                 l.push_value(val)?;
                             }
                             pattern::CaptureValue::Position(p) => {

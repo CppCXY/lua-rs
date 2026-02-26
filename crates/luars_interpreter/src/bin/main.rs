@@ -150,10 +150,10 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
             match vm.execute_chunk(Rc::new(chunk)) {
                 Ok(_) => Ok(()),
                 Err(e) => {
-                    // Generate traceback for uncaught runtime errors
+                    // execute_chunk already generates traceback before unwinding,
+                    // so just retrieve the stored error message (which includes traceback).
                     let error_msg = vm.get_error_message(e);
-                    let traceback = vm.generate_traceback(&error_msg);
-                    Err(traceback.to_string())
+                    Err(error_msg)
                 }
             }
         }
@@ -343,7 +343,6 @@ fn main() {
 
     // Spawn a thread with a larger stack to handle deep pcall/lua_execute recursion.
     // Each pcall calls lua_execute recursively, and lua_execute has a large stack frame.
-    // With max_call_depth=256, we need ~16MB to avoid native stack overflow.
     let stack_size = 16 * 1024 * 1024; // 16 MB
     let builder = std::thread::Builder::new()
         .name("lua-main".into())
@@ -384,7 +383,7 @@ fn lua_main() -> i32 {
     let mut vm = LuaVM::new(SafeOption {
         max_stack_size: 1000000, // LUAI_MAXSTACK (Lua 5.5)
         // 问就是rust在debug版本递归限制太小了
-        max_call_depth: if cfg!(debug_assertions) { 25 } else { 256 },
+        max_call_depth: if cfg!(debug_assertions) { 25 } else { 1024 },
         base_call_depth: if cfg!(debug_assertions) { 25 } else { 256 },
         max_memory_limit: 1024 * 1024 * 1024, // 1 GB
     });
@@ -487,8 +486,7 @@ fn lua_main() -> i32 {
             Ok(chunk) => {
                 if let Err(e) = vm.execute_chunk(Rc::new(chunk)) {
                     let error_msg = vm.get_error_message(e);
-                    let traceback = vm.generate_traceback(&error_msg);
-                    eprintln!("lua: Runtime Error: {}", traceback);
+                    eprintln!("lua: Runtime Error: {}", error_msg);
                     return 1;
                 }
             }

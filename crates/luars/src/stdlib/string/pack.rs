@@ -1467,9 +1467,13 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx >= bytes.len() {
                     return Err(l.error("unfinished string for format 'z'".to_string()));
                 }
-                // Create binary value for the extracted bytes
-                let binary_val = l.create_binary(bytes[start..idx].to_vec())?;
-                results.push(binary_val);
+                // Create string if valid UTF-8, otherwise binary
+                let str_bytes = &bytes[start..idx];
+                let val = match std::str::from_utf8(str_bytes) {
+                    Ok(valid_str) => l.create_string(valid_str)?,
+                    Err(_) => l.create_binary(str_bytes.to_vec())?,
+                };
+                results.push(val);
                 idx += 1; // Skip null terminator
             }
 
@@ -1493,9 +1497,13 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + size > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                // Create binary value for the fixed-length data
-                let binary_val = l.create_binary(bytes[idx..idx + size].to_vec())?;
-                results.push(binary_val);
+                // Create string if valid UTF-8, otherwise binary
+                let str_bytes = &bytes[idx..idx + size];
+                let val = match std::str::from_utf8(str_bytes) {
+                    Ok(valid_str) => l.create_string(valid_str)?,
+                    Err(_) => l.create_binary(str_bytes.to_vec())?,
+                };
+                results.push(val);
                 idx += size;
             }
 
@@ -1575,8 +1583,13 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("data string too short".to_string()));
                 }
 
-                let binary_val = l.create_binary(bytes[idx..idx + str_len].to_vec())?;
-                results.push(binary_val);
+                // Create string if valid UTF-8, otherwise binary
+                let str_bytes = &bytes[idx..idx + str_len];
+                let val = match std::str::from_utf8(str_bytes) {
+                    Ok(valid_str) => l.create_string(valid_str)?,
+                    Err(_) => l.create_binary(str_bytes.to_vec())?,
+                };
+                results.push(val);
                 idx += str_len;
             }
 

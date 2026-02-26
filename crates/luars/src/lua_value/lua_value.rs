@@ -693,6 +693,30 @@ impl LuaValue {
         }
     }
 
+    /// Get raw bytes from either a string or binary value.
+    /// Returns `None` for non-string types.
+    /// In Lua, all strings are byte sequences — this method provides
+    /// unified access regardless of whether the value is internally
+    /// stored as UTF-8 string or raw binary.
+    #[inline(always)]
+    pub fn as_str_bytes(&self) -> Option<&[u8]> {
+        if self.ttisstring() && !self.ttisbinary() {
+            Some(unsafe {
+                let ptr = self.value.ptr;
+                let s: &GcString = &*(ptr as *const GcString);
+                s.data.as_str().as_bytes()
+            })
+        } else if self.ttisbinary() {
+            Some(unsafe {
+                let ptr = self.value.ptr;
+                let v: &GcBinary = &*(ptr as *const GcBinary);
+                v.data.as_slice()
+            })
+        } else {
+            None
+        }
+    }
+
     #[inline(always)]
     pub fn as_table(&self) -> Option<&LuaTable> {
         if self.ttistable() {

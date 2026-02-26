@@ -584,6 +584,15 @@ impl LuaVM {
             Err(e) => {
                 // Error — clean up call stack, upvalues, and TBC variables
                 // This mirrors pcall's error recovery so the VM stays usable.
+
+                // Generate traceback BEFORE unwinding call frames (like C Lua's
+                // msghandler which runs before lua_pcall unwinds).
+                let error_msg = self.main_state().get_error_msg(e);
+                let traceback = self.generate_traceback(&error_msg);
+                if !traceback.is_empty() {
+                    self.main_state().error_msg = traceback;
+                }
+
                 let main_state = self.main_state();
 
                 // Save error message before TBC __close handlers could overwrite it
@@ -1336,10 +1345,11 @@ impl LuaVM {
             };
 
             // Create arguments: message and level
-            // Use level=0 to include the full traceback from error point
+            // Use level=1 to skip the debug.traceback call itself,
+            // matching C Lua's msghandler which uses luaL_traceback(L,L,msg,1)
             let state = self.main_state();
             let msg_val = state.create_string(error_msg)?;
-            let level_val = LuaValue::integer(0);
+            let level_val = LuaValue::integer(1);
 
             // Call debug.traceback using protected_call
             let (success, results) =

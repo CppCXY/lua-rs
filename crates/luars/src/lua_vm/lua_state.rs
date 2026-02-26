@@ -547,6 +547,16 @@ impl LuaState {
         }
 
         self.call_depth += 1;
+
+        // Raise stack_top to cover the frame's arguments (like push_lua_frame).
+        // C functions use push_value_unchecked which writes to stack_top,
+        // so stack_top must be at least frame_top to avoid overwriting
+        // caller's registers that happen to sit above the old stack_top.
+        // This matches C Lua's `L->top.p = cb + 3` before calling C iterators.
+        if frame_top > self.stack_top {
+            self.stack_top = frame_top;
+        }
+
         Ok(())
     }
 

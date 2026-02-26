@@ -15,12 +15,12 @@ pub fn create_utf8_lib() -> LibraryModule {
         "offset" => utf8_offset,
     });
 
-    // Add charpattern constant
+    // Add charpattern constant - the byte-level pattern matching a single UTF-8 character
+    // Equivalent to: "[\0-\x7F\xC2-\xFD][\x80-\xBF]*"
     module = module.with_value("charpattern", |vm| {
-        // With our UTF-8 char-based pattern matching, each character is a
-        // Unicode codepoint, so '.' already matches any single character.
-        // This is the correct equivalent of Lua's byte-based charpattern.
-        vm.create_string(".")
+        vm.create_binary(vec![
+            b'[', 0x00, b'-', 0x7F, 0xC2, b'-', 0xFD, b']', b'[', 0x80, b'-', 0xBF, b']', b'*',
+        ])
     });
 
     module
@@ -144,16 +144,16 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     let mut n: i64 = 0;
-    let mut pos = posi as usize;
-    let end = posj as usize;
-
-    while pos <= end {
+    // Keep posi/posj as i64 for the loop comparison (C Lua uses signed lua_Integer).
+    // Casting a negative posj to usize would wrap to usize::MAX, breaking empty-range detection.
+    while posi <= posj {
+        let pos = posi as usize;
         if pos >= bytes.len() {
             break;
         }
         match decode_utf8(&bytes[pos..], !lax) {
             Ok((_code, char_len)) => {
-                pos += char_len;
+                posi += char_len as i64;
                 n += 1;
             }
             Err(_) => {
