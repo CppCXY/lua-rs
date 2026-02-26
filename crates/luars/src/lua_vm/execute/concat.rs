@@ -61,7 +61,8 @@ pub fn handle_concat(
 
         if all_strings {
             let result = if total_len <= SHORT_STR_LIMIT {
-                // Short result: small stack buffer, will be interned
+                // Short result: must intern for correct string equality semantics.
+                // C Lua also interns short concat results (luaS_newlstr).
                 let mut buf = [0u8; SHORT_STR_LIMIT];
                 let mut pos = 0;
                 let stack = lua_state.stack();
@@ -74,7 +75,8 @@ pub fn handle_concat(
                 let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..pos]) };
                 lua_state.create_string(result_str)?
             } else {
-                // Long result: single heap alloc with exact capacity, no interning
+                // Long result: skip interning (like C Lua's luaS_createlngstrobj).
+                // Long strings use content comparison, so equality still works.
                 let mut result_buf = String::with_capacity(total_len);
                 let stack = lua_state.stack();
                 for i in 0..n {
@@ -310,7 +312,7 @@ pub fn concat_strings(
                 let s = unsafe { std::str::from_utf8_unchecked(&buf[..total_len]) };
                 return lua_state.create_string(s);
             }
-            // Longer strings: single heap allocation with exact capacity
+            // Longer strings: single heap allocation with exact capacity, skip interning
             let mut result = String::with_capacity(total_len);
             result.push_str(s1);
             result.push_str(s2);

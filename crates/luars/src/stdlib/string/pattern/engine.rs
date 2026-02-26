@@ -1045,10 +1045,10 @@ fn gsub_plain(
     let mut pos = 0;
 
     while pos <= text.len() {
-        if let Some(max_n) = max {
-            if count >= max_n {
-                break;
-            }
+        if let Some(max_n) = max
+            && count >= max_n
+        {
+            break;
         }
         if let Some(found) = text[pos..].find(pattern) {
             // Copy text before match
@@ -1079,10 +1079,10 @@ fn find_all_matches_plain(
     let mut matches = Vec::new();
     let mut pos = init;
     while pos <= text.len() {
-        if let Some(max_n) = max {
-            if matches.len() >= max_n {
-                break;
-            }
+        if let Some(max_n) = max
+            && matches.len() >= max_n
+        {
+            break;
         }
         if let Some(found) = text[pos..].find(pattern) {
             let start = pos + found;
