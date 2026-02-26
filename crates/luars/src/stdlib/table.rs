@@ -80,11 +80,21 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'concat' (table expected)".to_string()));
     }
 
+    let has_meta = table_val
+        .as_table_mut()
+        .map(|t| t.has_metatable())
+        .unwrap_or(true);
+
     let i = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
-    // Use obj_len to respect __len metamethod
     let j = match l.get_arg(4).and_then(|v| v.as_integer()) {
         Some(j) => j,
-        None => l.obj_len(&table_val)?,
+        None => {
+            if has_meta {
+                l.obj_len(&table_val)?
+            } else {
+                table_val.as_table_mut().unwrap().len() as i64
+            }
+        }
     };
 
     // If i > j, return empty string immediately
@@ -94,28 +104,56 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(1);
     }
 
-    let mut parts = Vec::new();
-    for idx in i..=j {
-        // Use table_geti to respect __index metamethod
-        let value = l.table_geti(&table_val, idx)?;
-        if let Some(s) = value.as_str() {
-            parts.push(s.to_string());
-        } else if let Some(ival) = value.as_integer() {
-            parts.push(format!("{}", ival));
-        } else if let Some(f) = value.as_number() {
-            if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
-                parts.push(format!("{:.1}", f));
+    let count = (j - i + 1) as usize;
+
+    if !has_meta {
+        // Fast path: raw access, no metamethod overhead
+        let table = table_val.as_table_mut().unwrap();
+        let mut parts: Vec<String> = Vec::with_capacity(count);
+        for idx in i..=j {
+            let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+            if let Some(s) = value.as_str() {
+                parts.push(s.to_string());
+            } else if let Some(ival) = value.as_integer() {
+                parts.push(format!("{}", ival));
+            } else if let Some(f) = value.as_number() {
+                if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
+                    parts.push(format!("{:.1}", f));
+                } else {
+                    parts.push(format!("{}", f));
+                }
             } else {
-                parts.push(format!("{}", f));
+                let msg = format!("invalid value (at index {}) in table for 'concat'", idx);
+                return Err(l.error(msg));
             }
-        } else {
-            let msg = format!("invalid value (at index {}) in table for 'concat'", idx);
-            return Err(l.error(msg));
         }
+        let result = l.create_string(&parts.join(&sep))?;
+        l.push_value(result)?;
+    } else {
+        // Metamethod path
+        let mut parts = Vec::new();
+        for idx in i..=j {
+            let value = l.table_geti(&table_val, idx)?;
+            if let Some(s) = value.as_str() {
+                parts.push(s.to_string());
+            } else if let Some(ival) = value.as_integer() {
+                parts.push(format!("{}", ival));
+            } else if let Some(f) = value.as_number() {
+                if f == f.floor() && f.abs() < 1e15 && !f.is_infinite() {
+                    parts.push(format!("{:.1}", f));
+                } else {
+                    parts.push(format!("{}", f));
+                }
+            } else {
+                let msg = format!("invalid value (at index {}) in table for 'concat'", idx);
+                return Err(l.error(msg));
+            }
+        }
+
+        let result = l.create_string(&parts.join(&sep))?;
+        l.push_value(result)?;
     }
 
-    let result = l.create_string(&parts.join(&sep))?;
-    l.push_value(result)?;
     Ok(1)
 }
 
@@ -130,16 +168,31 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'insert' (table expected)".to_string()));
     }
 
-    // Use obj_len to respect __len metamethod (like C Lua's aux_getn / luaL_len)
-    let len = l.obj_len(&table_val)?;
+    // Fast path: no metatable → use raw operations (avoids obj_len overhead)
+    let has_meta = table_val
+        .as_table_mut()
+        .map(|t| t.has_metatable())
+        .unwrap_or(true);
 
     if argc == 2 {
         // table.insert(list, value) - append at end
         let value = l
             .get_arg(2)
             .ok_or_else(|| l.error("bad argument #2 to 'insert' (value expected)".to_string()))?;
-        // Use table_seti to respect __newindex metamethod
-        l.table_seti(&table_val, len.wrapping_add(1), value)?;
+        if has_meta {
+            let len = l.obj_len(&table_val)?;
+            l.table_seti(&table_val, len.wrapping_add(1), value)?;
+        } else {
+            // Fast path: raw len + raw set (no metamethod overhead)
+            let table = table_val.as_table_mut().unwrap();
+            let len = table.len() as i64;
+            table.raw_seti(len + 1, value);
+            // GC barrier for collectable values
+            if value.iscollectable()
+                && let Some(gc_ptr) = table_val.as_gc_ptr() {
+                    l.gc_barrier_back(gc_ptr);
+                }
+        }
     } else if argc == 3 {
         // table.insert(list, pos, value)
         let pos = l
@@ -152,20 +205,43 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
             .get_arg(3)
             .ok_or_else(|| l.error("bad argument #3 to 'insert' (value expected)".to_string()))?;
 
-        if pos < 1 || pos > len + 1 {
-            return Err(l.error("bad argument #2 to 'insert' (position out of bounds)".to_string()));
+        if has_meta {
+            let len = l.obj_len(&table_val)?;
+            if pos < 1 || pos > len + 1 {
+                return Err(
+                    l.error("bad argument #2 to 'insert' (position out of bounds)".to_string())
+                );
+            }
+            // Shift elements up
+            let mut i = len;
+            while i >= pos {
+                let val = l.table_geti(&table_val, i)?;
+                l.table_seti(&table_val, i + 1, val)?;
+                i -= 1;
+            }
+            l.table_seti(&table_val, pos, value)?;
+        } else {
+            // Fast path: raw operations
+            let table = table_val.as_table_mut().unwrap();
+            let len = table.len() as i64;
+            if pos < 1 || pos > len + 1 {
+                return Err(
+                    l.error("bad argument #2 to 'insert' (position out of bounds)".to_string())
+                );
+            }
+            // Shift elements up using raw access
+            let mut i = len;
+            while i >= pos {
+                let val = table.raw_geti(i).unwrap_or(LuaValue::nil());
+                table.raw_seti(i + 1, val);
+                i -= 1;
+            }
+            table.raw_seti(pos, value);
+            if value.iscollectable()
+                && let Some(gc_ptr) = table_val.as_gc_ptr() {
+                    l.gc_barrier_back(gc_ptr);
+                }
         }
-
-        // Shift elements up: t[i+1] = t[i] for i = len down to pos
-        // Use table_geti/table_seti to respect metamethods
-        let mut i = len;
-        while i >= pos {
-            let val = l.table_geti(&table_val, i)?;
-            l.table_seti(&table_val, i + 1, val)?;
-            i -= 1;
-        }
-        // Set value at pos
-        l.table_seti(&table_val, pos, value)?;
     } else {
         return Err(l.error("wrong number of arguments to 'insert'".to_string()));
     }
@@ -183,33 +259,54 @@ fn table_remove(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'remove' (table expected)".to_string()));
     }
 
-    // Use obj_len to respect __len metamethod
-    let len = l.obj_len(&table_val)?;
+    let has_meta = table_val
+        .as_table_mut()
+        .map(|t| t.has_metatable())
+        .unwrap_or(true);
 
-    // Default pos = #t (like C Lua: luaL_optinteger(L, 2, size))
     let has_pos_arg = l.get_arg(2).is_some();
-    let pos = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(len);
 
-    // Only validate pos if explicitly given (C Lua: "if (pos != size)")
-    if has_pos_arg && pos != len && (pos < 1 || pos > len.wrapping_add(1)) {
-        return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
+    if has_meta {
+        // Metamethod path: use obj_len + table_geti/table_seti
+        let len = l.obj_len(&table_val)?;
+        let pos = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(len);
+
+        if has_pos_arg && pos != len && (pos < 1 || pos > len.wrapping_add(1)) {
+            return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
+        }
+
+        let removed = l.table_geti(&table_val, pos)?;
+        let mut i = pos;
+        while i < len {
+            let next_val = l.table_geti(&table_val, i.wrapping_add(1))?;
+            l.table_seti(&table_val, i, next_val)?;
+            i += 1;
+        }
+        l.table_seti(&table_val, i, LuaValue::nil())?;
+        l.push_value(removed)?;
+    } else {
+        // Fast path: raw operations
+        let table = table_val.as_table_mut().unwrap();
+        let len = table.len() as i64;
+        let pos = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(len);
+
+        if has_pos_arg && pos != len && (pos < 1 || pos > len.wrapping_add(1)) {
+            return Err(l.error("bad argument #2 to 'remove' (position out of bounds)".to_string()));
+        }
+
+        let removed = table.raw_geti(pos).unwrap_or(LuaValue::nil());
+
+        // Shift elements down using raw access
+        let mut i = pos;
+        while i < len {
+            let next_val = table.raw_geti(i + 1).unwrap_or(LuaValue::nil());
+            table.raw_seti(i, next_val);
+            i += 1;
+        }
+        table.raw_seti(i, LuaValue::nil());
+        l.push_value(removed)?;
     }
 
-    // Get the value at pos using table_geti to respect __index
-    let removed = l.table_geti(&table_val, pos)?;
-
-    // Shift elements down: t[i] = t[i+1] for i = pos to len-1
-    let mut i = pos;
-    while i < len {
-        let next_val = l.table_geti(&table_val, i.wrapping_add(1))?;
-        l.table_seti(&table_val, i, next_val)?;
-        i += 1;
-    }
-
-    // Remove the last entry: t[len] = nil
-    l.table_seti(&table_val, i, LuaValue::nil())?;
-
-    l.push_value(removed)?;
     Ok(1)
 }
 
@@ -367,11 +464,21 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'unpack' (table expected)".to_string()));
     }
 
+    let has_meta = table_val
+        .as_table_mut()
+        .map(|t| t.has_metatable())
+        .unwrap_or(true);
+
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
-    // Use obj_len to respect __len metamethod
     let j = match l.get_arg(3).and_then(|v| v.as_integer()) {
         Some(j) => j,
-        None => l.obj_len(&table_val)?,
+        None => {
+            if has_meta {
+                l.obj_len(&table_val)?
+            } else {
+                table_val.as_table_mut().unwrap().len() as i64
+            }
+        }
     };
 
     // Handle empty range
@@ -389,10 +496,19 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     // Ensure physical stack has room
     l.ensure_stack_capacity(count)?;
 
-    // Push values using table_geti to respect __index metamethod
-    for idx in i..=j {
-        let val = l.table_geti(&table_val, idx)?;
-        l.push_value(val)?;
+    if !has_meta {
+        // Fast path: raw access, no metamethod overhead
+        let table = table_val.as_table_mut().unwrap();
+        for idx in i..=j {
+            let val = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+            l.push_value(val)?;
+        }
+    } else {
+        // Metamethod path: use table_geti to respect __index
+        for idx in i..=j {
+            let val = l.table_geti(&table_val, idx)?;
+            l.push_value(val)?;
+        }
     }
 
     Ok(count)

@@ -513,8 +513,23 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
 
     if let Some(index) = index_val.as_integer() {
         let next_index = index.wrapping_add(1);
-        // Use table_geti to respect __index metamethod (like C Lua's lua_geti)
-        let value = l.table_geti(&table_val, next_index)?;
+
+        // Fast path: no metatable → raw access avoids metamethod dispatch
+        let has_meta = table_val
+            .as_table_mut()
+            .map(|t| t.has_metatable())
+            .unwrap_or(true);
+
+        let value = if !has_meta {
+            table_val
+                .as_table_mut()
+                .unwrap()
+                .raw_geti(next_index)
+                .unwrap_or(LuaValue::nil())
+        } else {
+            l.table_geti(&table_val, next_index)?
+        };
+
         if !value.is_nil() {
             l.push_value(LuaValue::integer(next_index))?;
             l.push_value(value)?;
