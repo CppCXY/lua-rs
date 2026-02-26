@@ -199,41 +199,54 @@ fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<(
     Ok(())
 }
 
-// Parse width and precision from flags string
+// Parse width and precision from flags string — zero allocation
 fn parse_width_precision(flags: &str) -> (Option<usize>, Option<usize>) {
+    let bytes = flags.as_bytes();
     let mut width = None;
     let mut precision = None;
 
     if let Some(dot_pos) = flags.find('.') {
-        // Parse width before dot
-        let width_str: String = flags[..dot_pos]
-            .chars()
-            .skip_while(|c| !c.is_ascii_digit())
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if !width_str.is_empty() {
-            width = width_str.parse().ok();
+        // Parse width before dot: skip non-digits, then read digits
+        let before_dot = &bytes[..dot_pos];
+        let mut i = 0;
+        while i < before_dot.len() && !before_dot[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < before_dot.len() {
+            let mut n = 0usize;
+            while i < before_dot.len() && before_dot[i].is_ascii_digit() {
+                n = n * 10 + (before_dot[i] - b'0') as usize;
+                i += 1;
+            }
+            width = Some(n);
         }
 
         // Parse precision after dot
-        let prec_str: String = flags[dot_pos + 1..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if !prec_str.is_empty() {
-            precision = prec_str.parse().ok();
+        let after_dot = &bytes[dot_pos + 1..];
+        if !after_dot.is_empty() && after_dot[0].is_ascii_digit() {
+            let mut n = 0usize;
+            let mut j = 0;
+            while j < after_dot.len() && after_dot[j].is_ascii_digit() {
+                n = n * 10 + (after_dot[j] - b'0') as usize;
+                j += 1;
+            }
+            precision = Some(n);
         } else {
             precision = Some(0); // "." without digits means precision 0
         }
     } else {
-        // No dot, only width
-        let width_str: String = flags
-            .chars()
-            .skip_while(|c| !c.is_ascii_digit())
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if !width_str.is_empty() {
-            width = width_str.parse().ok();
+        // No dot, only width: skip non-digits, then read digits
+        let mut i = 0;
+        while i < bytes.len() && !bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() {
+            let mut n = 0usize;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                n = n * 10 + (bytes[i] - b'0') as usize;
+                i += 1;
+            }
+            width = Some(n);
         }
     }
 

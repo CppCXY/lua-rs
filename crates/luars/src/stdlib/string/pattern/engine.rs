@@ -8,6 +8,18 @@
 use super::class::{element_end, singlematch};
 use crate::lua_vm::lua_limits::{LUA_MAXCAPTURES, MAXCCALLS_PATTERN};
 
+/// Check if pattern has no special characters (can be matched as plain text).
+/// Mirrors C Lua's `nospecials()` in lstrlib.c.
+#[inline]
+pub fn is_plain_pattern(pat: &str) -> bool {
+    !pat.bytes().any(|c| {
+        matches!(
+            c,
+            b'%' | b'.' | b'[' | b'*' | b'+' | b'-' | b'?' | b'^' | b'$' | b'('
+        )
+    })
+}
+
 /// Byte offset map: ASCII identity (c2b[i]=i) or precomputed map
 #[derive(Clone, Copy)]
 pub enum ByteMap<'a> {
@@ -468,10 +480,61 @@ fn match_backref(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
 // ======================== Public API ========================
 
 /// A capture value returned to callers
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum CaptureValue {
     Substring(usize, usize), // byte start, byte end in source text
     Position(usize),         // 1-based byte position
+}
+
+/// Fixed-size capture results — avoids Vec allocation on every match
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureResults {
+    data: [CaptureValue; LUA_MAXCAPTURES],
+    count: usize,
+}
+
+impl CaptureResults {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self {
+            data: [CaptureValue::Substring(0, 0); LUA_MAXCAPTURES],
+            count: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    #[inline(always)]
+    pub fn iter(&self) -> std::slice::Iter<'_, CaptureValue> {
+        self.data[..self.count].iter()
+    }
+
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> Option<&CaptureValue> {
+        if index < self.count {
+            Some(&self.data[index])
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a CaptureResults {
+    type Item = &'a CaptureValue;
+    type IntoIter = std::slice::Iter<'a, CaptureValue>;
+
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.data[..self.count].iter()
+    }
 }
 
 /// Information about a single match
@@ -479,7 +542,7 @@ pub enum CaptureValue {
 pub struct MatchInfo {
     pub start: usize, // byte offset
     pub end: usize,   // byte offset
-    pub captures: Vec<CaptureValue>,
+    pub captures: CaptureResults,
 }
 
 /// Build char-to-byte offset map. Returns vec of len `chars.len() + 1`.
@@ -527,27 +590,28 @@ fn check_captures(ms: &MatchState) -> Result<(), String> {
     Ok(())
 }
 
-/// Extract captures from MatchState into CaptureValue vec
-fn extract_captures(ms: &MatchState) -> Vec<CaptureValue> {
-    let mut caps = Vec::with_capacity(ms.num_captures);
+/// Extract captures from MatchState into fixed-size CaptureResults (no heap alloc)
+#[inline]
+fn extract_captures(ms: &MatchState) -> CaptureResults {
+    let mut result = CaptureResults::new();
     for i in 0..ms.num_captures {
         let cap = &ms.captures[i];
         match cap.len {
             CaptureLen::Position => {
-                // 1-based byte position
-                caps.push(CaptureValue::Position(ms.text_bytes.get(cap.start) + 1));
+                result.data[result.count] =
+                    CaptureValue::Position(ms.text_bytes.get(cap.start) + 1);
+                result.count += 1;
             }
             CaptureLen::Len(len) => {
                 let byte_start = ms.text_bytes.get(cap.start);
                 let byte_end = ms.text_bytes.get(cap.start + len);
-                caps.push(CaptureValue::Substring(byte_start, byte_end));
+                result.data[result.count] = CaptureValue::Substring(byte_start, byte_end);
+                result.count += 1;
             }
-            CaptureLen::Unfinished => {
-                // shouldn't happen after check_captures, but handle gracefully
-            }
+            CaptureLen::Unfinished => {}
         }
     }
-    caps
+    result
 }
 
 /// Find pattern in text. `init` is a 0-based byte offset.
@@ -557,9 +621,20 @@ pub fn find(
     text: &str,
     pat_str: &str,
     init: usize,
-) -> Result<Option<(usize, usize, Vec<CaptureValue>)>, String> {
+) -> Result<Option<(usize, usize, CaptureResults)>, String> {
     if init > text.len() {
         return Ok(None);
+    }
+
+    // FAST PATH: plain pattern — use Rust's SIMD-optimized str::find
+    if is_plain_pattern(pat_str) {
+        if let Some(pos) = text[init..].find(pat_str) {
+            let start = init + pos;
+            let end = start + pat_str.len();
+            return Ok(Some((start, end, CaptureResults::new())));
+        } else {
+            return Ok(None);
+        }
     }
 
     let text_is_ascii = text.is_ascii();
@@ -645,6 +720,11 @@ pub fn find_all_matches(
     init: usize,
     max: Option<usize>,
 ) -> Result<Vec<MatchInfo>, String> {
+    // FAST PATH: plain non-empty pattern — use str::find loop
+    if is_plain_pattern(pat_str) && !pat_str.is_empty() {
+        return find_all_matches_plain(text, pat_str, init, max);
+    }
+
     let text_is_ascii = text.is_ascii();
 
     let text_heap: Vec<char>;
@@ -760,6 +840,11 @@ pub fn gsub(
     replacement: &str,
     max: Option<usize>,
 ) -> Result<(String, usize), String> {
+    // FAST PATH: plain non-empty pattern — use str::find loop
+    if is_plain_pattern(pat_str) && !pat_str.is_empty() {
+        return gsub_plain(text, pat_str, replacement, max);
+    }
+
     let text_is_ascii = text.is_ascii();
 
     let text_heap: Vec<char>;
@@ -942,4 +1027,123 @@ fn substitute_captures(
     }
 
     Ok(result)
+}
+
+// ======================== Plain Pattern Fast Paths ========================
+
+/// Fast plain-text gsub using str::find (SIMD-optimized).
+/// Only called for patterns without special characters.
+fn gsub_plain(
+    text: &str,
+    pattern: &str,
+    replacement: &str,
+    max: Option<usize>,
+) -> Result<(String, usize), String> {
+    let needs_subst = replacement.as_bytes().contains(&b'%');
+    let mut result = String::with_capacity(text.len());
+    let mut count = 0usize;
+    let mut pos = 0;
+
+    while pos <= text.len() {
+        if let Some(max_n) = max {
+            if count >= max_n {
+                break;
+            }
+        }
+        if let Some(found) = text[pos..].find(pattern) {
+            // Copy text before match
+            result.push_str(&text[pos..pos + found]);
+            if needs_subst {
+                let matched = &text[pos + found..pos + found + pattern.len()];
+                substitute_plain(&mut result, replacement, matched)?;
+            } else {
+                result.push_str(replacement);
+            }
+            pos += found + pattern.len();
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    result.push_str(&text[pos..]);
+    Ok((result, count))
+}
+
+/// Fast plain-text find_all_matches using str::find.
+fn find_all_matches_plain(
+    text: &str,
+    pattern: &str,
+    init: usize,
+    max: Option<usize>,
+) -> Result<Vec<MatchInfo>, String> {
+    let mut matches = Vec::new();
+    let mut pos = init;
+    while pos <= text.len() {
+        if let Some(max_n) = max {
+            if matches.len() >= max_n {
+                break;
+            }
+        }
+        if let Some(found) = text[pos..].find(pattern) {
+            let start = pos + found;
+            let end = start + pattern.len();
+            matches.push(MatchInfo {
+                start,
+                end,
+                captures: CaptureResults::new(),
+            });
+            pos = end;
+        } else {
+            break;
+        }
+    }
+    Ok(matches)
+}
+
+/// Handle %0 and %% substitution for plain patterns (no numbered captures).
+#[inline]
+fn substitute_plain(
+    result: &mut String,
+    replacement: &str,
+    full_match: &str,
+) -> Result<(), String> {
+    let repl = replacement.as_bytes();
+    let mut i = 0;
+    while i < repl.len() {
+        if repl[i] == b'%' {
+            if i + 1 < repl.len() {
+                match repl[i + 1] {
+                    b'%' => {
+                        result.push('%');
+                        i += 2;
+                    }
+                    b'0' => {
+                        result.push_str(full_match);
+                        i += 2;
+                    }
+                    b'1' => {
+                        // Lua special case: no captures, %1 = whole match
+                        result.push_str(full_match);
+                        i += 2;
+                    }
+                    c if c.is_ascii_digit() => {
+                        return Err(format!("invalid capture index %{}", c as char));
+                    }
+                    _ => {
+                        return Err("invalid use of '%' in replacement string".to_string());
+                    }
+                }
+            } else {
+                result.push('%');
+                i += 1;
+            }
+        } else {
+            let start = i;
+            while i < repl.len() && repl[i] != b'%' {
+                i += 1;
+            }
+            result.push_str(&replacement[start..i]);
+        }
+    }
+    Ok(())
 }

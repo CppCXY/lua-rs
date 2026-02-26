@@ -123,7 +123,7 @@ fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// string.char(...) - Convert bytes to string
-/// OPTIMIZED: Avoid clone by consuming Vec in from_utf8
+/// OPTIMIZED: Skip UTF-8 validation when all bytes are ASCII (0-127)
 fn string_char(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
     let nargs = args.len();
@@ -131,6 +131,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
     // Stack buffer for small argument counts (most common: string.char(65,66,67))
     if nargs <= 256 {
         let mut buf = [0u8; 256];
+        let mut all_ascii = true;
         for (i, arg) in args.iter().enumerate() {
             let Some(byte) = arg.as_integer() else {
                 return Err(l.error(format!(
@@ -144,12 +145,22 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
                     i + 1
                 )));
             }
-            buf[i] = byte as u8;
+            let b = byte as u8;
+            buf[i] = b;
+            if b > 127 {
+                all_ascii = false;
+            }
         }
 
-        let result = match std::str::from_utf8(&buf[..nargs]) {
-            Ok(s) => l.vm_mut().create_string(s)?,
-            Err(_) => l.vm_mut().create_binary(buf[..nargs].to_vec())?,
+        let result = if all_ascii {
+            // SAFETY: all bytes are 0-127, which is valid single-byte UTF-8
+            l.vm_mut()
+                .create_string(unsafe { std::str::from_utf8_unchecked(&buf[..nargs]) })?
+        } else {
+            match std::str::from_utf8(&buf[..nargs]) {
+                Ok(s) => l.vm_mut().create_string(s)?,
+                Err(_) => l.vm_mut().create_binary(buf[..nargs].to_vec())?,
+            }
         };
         l.push_value(result)?;
         return Ok(1);
@@ -157,6 +168,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
 
     // Fallback for many arguments
     let mut bytes = Vec::with_capacity(nargs);
+    let mut all_ascii = true;
     for (i, arg) in args.iter().enumerate() {
         let Some(byte) = arg.as_integer() else {
             return Err(l.error(format!(
@@ -170,13 +182,22 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
                 i + 1
             )));
         }
-        bytes.push(byte as u8);
+        let b = byte as u8;
+        bytes.push(b);
+        if b > 127 {
+            all_ascii = false;
+        }
     }
 
-    // Consume Vec — no clone needed
-    let result = match String::from_utf8(bytes) {
-        Ok(s) => l.vm_mut().create_string_owned(s)?,
-        Err(e) => l.vm_mut().create_binary(e.into_bytes())?,
+    let result = if all_ascii {
+        // SAFETY: all bytes are 0-127, valid single-byte UTF-8
+        l.vm_mut()
+            .create_string_owned(unsafe { String::from_utf8_unchecked(bytes) })?
+    } else {
+        match String::from_utf8(bytes) {
+            Ok(s) => l.vm_mut().create_string_owned(s)?,
+            Err(e) => l.vm_mut().create_binary(e.into_bytes())?,
+        }
     };
     l.push_value(result)?;
     Ok(1)
@@ -400,7 +421,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// string.reverse(s) - Reverse string
-/// OPTIMIZED: Avoid unnecessary clone by consuming Vec in from_utf8
+/// OPTIMIZED: Skip UTF-8 validation for ASCII strings (reversed ASCII is still valid UTF-8)
 fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
@@ -428,17 +449,27 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         for i in 0..len {
             buf[i] = s_bytes[len - 1 - i];
         }
-        // Byte-reversed UTF-8 may not be valid UTF-8, must check
-        match std::str::from_utf8(&buf[..len]) {
-            Ok(s) => vm.create_string(s)?,
-            Err(_) => vm.create_binary(buf[..len].to_vec())?,
+        if s_bytes.is_ascii() {
+            // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
+            vm.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..len]) })?
+        } else {
+            // Non-ASCII: reversed bytes may not be valid UTF-8
+            match std::str::from_utf8(&buf[..len]) {
+                Ok(s) => vm.create_string(s)?,
+                Err(_) => vm.create_binary(buf[..len].to_vec())?,
+            }
         }
     } else {
         let mut reversed = s_bytes.to_vec();
         reversed.reverse();
-        match String::from_utf8(reversed) {
-            Ok(s) => vm.create_string_owned(s)?,
-            Err(e) => vm.create_binary(e.into_bytes())?,
+        if s_bytes.is_ascii() {
+            // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
+            vm.create_string_owned(unsafe { String::from_utf8_unchecked(reversed) })?
+        } else {
+            match String::from_utf8(reversed) {
+                Ok(s) => vm.create_string_owned(s)?,
+                Err(e) => vm.create_binary(e.into_bytes())?,
+            }
         }
     };
 
@@ -810,7 +841,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
                 l.create_string(&s_ref[m.start..m.end])?
             } else {
                 // Use first capture as key
-                match &m.captures[0] {
+                match m.captures.get(0).unwrap() {
                     pattern::CaptureValue::Substring(start, end) => {
                         l.create_string(&s_ref[*start..*end])?
                     }
@@ -855,6 +886,7 @@ fn string_gsub(l: &mut LuaState) -> LuaResult<usize> {
 
 /// string.gmatch(s, pattern [, init]) - Returns an iterator function
 /// Usage: for capture in string.gmatch(s, pattern) do ... end
+/// OPTIMIZED: Lazy iterator — matches one at a time instead of pre-computing all
 fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
@@ -864,10 +896,15 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
 
-    // Handle init parameter (3rd arg, default 1, can be negative)
+    // Validate args
     let s_str = s_value
         .as_str()
         .ok_or_else(|| l.error("bad argument #1 to 'gmatch' (string expected)".to_string()))?;
+    let _pattern_str = pattern_value
+        .as_str()
+        .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
+
+    // Handle init parameter (3rd arg, default 1, can be negative)
     let init = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(1);
     let start_pos = if init > 0 {
         (init - 1) as usize
@@ -882,155 +919,103 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
         0
     };
 
-    let pattern_str = pattern_value
-        .as_str()
-        .ok_or_else(|| l.error("bad argument #2 to 'gmatch' (string expected)".to_string()))?;
-
-    // Pre-compute all matches in one shot using find_all_matches
-    // (avoids repeated Vec<char>/c2b allocation that find() would do per call)
-    let all_matches = match pattern::find_all_matches(s_str, pattern_str, start_pos, None) {
-        Ok(m) => m,
-        Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
-    };
-
-    // Store pre-computed results as a table of tables
-    let results_table = l.create_table(all_matches.len(), 0)?;
-    for (i, m) in all_matches.iter().enumerate() {
-        let entry = l.create_table(m.captures.len().max(1), 0)?;
-        if let Some(entry_ref) = entry.as_table_mut() {
-            if m.captures.is_empty() {
-                let matched = l.create_string(&s_str[m.start..m.end])?;
-                entry_ref.raw_seti(1, matched);
-            } else {
-                for (j, cap) in m.captures.iter().enumerate() {
-                    match cap {
-                        pattern::CaptureValue::Substring(start, end) => {
-                            let val = l.create_string(&s_str[*start..*end])?;
-                            entry_ref.raw_seti((j + 1) as i64, val);
-                        }
-                        pattern::CaptureValue::Position(p) => {
-                            entry_ref.raw_seti((j + 1) as i64, LuaValue::integer(*p as i64));
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(results_ref) = results_table.as_table_mut() {
-            results_ref.raw_seti((i + 1) as i64, entry);
-        }
-        // GC barrier for entry
-        if let Some(gc_ptr) = entry.as_gc_ptr() {
-            l.gc_barrier_back(gc_ptr);
-        }
-    }
-
-    // GC barrier for results table
-    if let Some(gc_ptr) = results_table.as_gc_ptr() {
-        l.gc_barrier_back(gc_ptr);
-    }
-
-    // State: {results_table, current_index, total_count, num_captures_per_entry}
-    let num_caps_per_entry = if let Some(m) = all_matches.first() {
-        if m.captures.is_empty() {
-            1
-        } else {
-            m.captures.len()
-        }
-    } else {
-        1
-    };
-
-    let state_table = l.create_table(4, 0)?;
-    if let Some(state_ref) = state_table.as_table_mut() {
-        state_ref.raw_seti(1, results_table);
-        state_ref.raw_seti(2, LuaValue::integer(1)); // current index (1-based)
-        state_ref.raw_seti(3, LuaValue::integer(all_matches.len() as i64));
-        state_ref.raw_seti(4, LuaValue::integer(num_caps_per_entry as i64));
-    }
-
-    if let Some(gc_ptr) = state_table.as_gc_ptr() {
-        l.gc_barrier_back(gc_ptr);
-    }
-
+    // State upvalues: [source_string, pattern_string, search_pos (0-based), lastmatch (-1=none)]
+    // Mirrors C Lua's gm->src and gm->lastmatch behavior
     let vm = l.vm_mut();
-    let closure = vm.create_c_closure(gmatch_iterator, vec![state_table])?;
+    let closure = vm.create_c_closure(
+        gmatch_iterator_lazy,
+        vec![
+            s_value,
+            pattern_value,
+            LuaValue::integer(start_pos as i64),
+            LuaValue::integer(-1), // lastmatch = -1 (no previous match)
+        ],
+    )?;
     l.push_value(closure)?;
     Ok(1)
 }
 
-/// Iterator function for string.gmatch — returns pre-computed results
-fn gmatch_iterator(l: &mut LuaState) -> LuaResult<usize> {
+/// Lazy iterator for string.gmatch — finds one match per call.
+/// Mirrors C Lua's gmatch_aux: skips matches whose end == lastmatch
+/// to avoid infinite loops with empty patterns.
+fn gmatch_iterator_lazy(l: &mut LuaState) -> LuaResult<usize> {
     let func_val = l
         .current_frame()
         .map(|frame| frame.func)
         .ok_or_else(|| l.error("gmatch iterator: no active call frame".to_string()))?;
 
-    let state_table_value = if let Some(cclosure) = func_val.as_cclosure() {
-        if cclosure.upvalues().is_empty() {
-            return Err(l.error("gmatch iterator: no upvalues".to_string()));
-        }
-        cclosure.upvalues()[0]
-    } else {
-        return Err(l.error("gmatch iterator: not a function".to_string()));
-    };
-
-    let Some(state_ref) = state_table_value.as_table() else {
-        return Err(l.error("gmatch iterator: state is not a table".to_string()));
-    };
-
-    let current_idx = state_ref
-        .raw_geti(2)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(1);
-
-    let total = state_ref
-        .raw_geti(3)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(0);
-
-    let num_caps = state_ref
-        .raw_geti(4)
-        .and_then(|v| v.as_integer())
-        .unwrap_or(1) as usize;
-
-    if current_idx > total {
-        l.push_value(LuaValue::nil())?;
-        return Ok(1);
+    let cclosure = func_val
+        .as_cclosure()
+        .ok_or_else(|| l.error("gmatch iterator: not a closure".to_string()))?;
+    let upvalues = cclosure.upvalues();
+    if upvalues.len() < 4 {
+        return Err(l.error("gmatch iterator: missing upvalues".to_string()));
     }
 
-    // Get results table
-    let Some(results_val) = state_ref.raw_geti(1) else {
+    let s_val = upvalues[0];
+    let pat_val = upvalues[1];
+    let current_pos = upvalues[2].as_integer().unwrap_or(0) as usize;
+    let lastmatch = upvalues[3].as_integer().unwrap_or(-1); // -1 = no previous match
+
+    let Some(s_str) = s_val.as_str() else {
+        l.push_value(LuaValue::nil())?;
+        return Ok(1);
+    };
+    let Some(pattern_str) = pat_val.as_str() else {
         l.push_value(LuaValue::nil())?;
         return Ok(1);
     };
 
-    let Some(results_ref) = results_val.as_table() else {
-        l.push_value(LuaValue::nil())?;
-        return Ok(1);
-    };
+    // Search for next match, skipping matches that end at lastmatch
+    let mut search_pos = current_pos;
+    loop {
+        if search_pos > s_str.len() {
+            break; // past end of string
+        }
 
-    // Get entry at current index
-    let Some(entry_val) = results_ref.raw_geti(current_idx) else {
-        l.push_value(LuaValue::nil())?;
-        return Ok(1);
-    };
+        match pattern::find(s_str, pattern_str, search_pos) {
+            Ok(Some((start, end, captures))) => {
+                // Skip if match end equals lastmatch (C Lua: e != gm->lastmatch)
+                if lastmatch >= 0 && end == lastmatch as usize {
+                    // Advance past this position and retry
+                    search_pos = start + 1;
+                    continue;
+                }
 
-    let Some(entry_ref) = entry_val.as_table() else {
-        l.push_value(LuaValue::nil())?;
-        return Ok(1);
-    };
+                // Valid match — update upvalues: search_pos = end, lastmatch = end
+                if let Some(cc_mut) = func_val.as_cclosure_mut() {
+                    let uvs = cc_mut.upvalues_mut();
+                    uvs[2] = LuaValue::integer(end as i64);
+                    uvs[3] = LuaValue::integer(end as i64);
+                }
 
-    // Increment index for next call
-    l.raw_seti(&state_table_value, 2, LuaValue::integer(current_idx + 1));
-
-    // Push all captures from the entry
-    for j in 1..=num_caps {
-        if let Some(val) = entry_ref.raw_geti(j as i64) {
-            l.push_value(val)?;
-        } else {
-            l.push_value(LuaValue::nil())?;
+                // Return captures
+                if captures.is_empty() {
+                    let matched = l.create_string(&s_str[start..end])?;
+                    l.push_value(matched)?;
+                    return Ok(1);
+                } else {
+                    let ncaps = captures.len();
+                    for cap in &captures {
+                        match cap {
+                            pattern::CaptureValue::Substring(s, e) => {
+                                let val = l.create_string(&s_str[*s..*e])?;
+                                l.push_value(val)?;
+                            }
+                            pattern::CaptureValue::Position(p) => {
+                                l.push_value(LuaValue::integer(*p as i64))?;
+                            }
+                        }
+                    }
+                    return Ok(ncaps);
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(l.error(format!("invalid pattern: {}", e))),
         }
     }
 
-    Ok(num_caps)
+    // No more matches
+    l.push_value(LuaValue::nil())?;
+    Ok(1)
 }

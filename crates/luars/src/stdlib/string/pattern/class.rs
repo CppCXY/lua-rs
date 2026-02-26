@@ -4,19 +4,21 @@
 
 /// Check if a character matches a Lua character class letter.
 /// `cl` is the class letter (lowercase): 'a','c','d','g','l','p','s','u','w','x'
+/// Uses ASCII-only classification to match C Lua's C-locale behavior.
 #[inline(always)]
 pub fn match_class(c: char, cl: char) -> bool {
+    let b = c as u32;
     match cl {
-        'a' => c.is_alphabetic(),
-        'c' => c.is_control(),
-        'd' => c.is_ascii_digit(),
-        'g' => c.is_ascii_graphic(),
-        'l' => c.is_lowercase(),
-        'p' => c.is_ascii_punctuation(),
-        's' => c.is_whitespace(),
-        'u' => c.is_uppercase(),
-        'w' => c.is_alphanumeric(),
-        'x' => c.is_ascii_hexdigit(),
+        'a' => b < 128 && (b as u8).is_ascii_alphabetic(),
+        'c' => b < 128 && (b as u8).is_ascii_control(),
+        'd' => b < 128 && (b as u8).is_ascii_digit(),
+        'g' => b < 128 && (b as u8).is_ascii_graphic(),
+        'l' => b < 128 && (b as u8).is_ascii_lowercase(),
+        'p' => b < 128 && (b as u8).is_ascii_punctuation(),
+        's' => b < 128 && (b as u8).is_ascii_whitespace(),
+        'u' => b < 128 && (b as u8).is_ascii_uppercase(),
+        'w' => b < 128 && (b as u8).is_ascii_alphanumeric(),
+        'x' => b < 128 && (b as u8).is_ascii_hexdigit(),
         'z' => c == '\0',
         _ => c == cl, // not a class letter, match literally
     }
