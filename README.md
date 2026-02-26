@@ -218,11 +218,9 @@ For the full list of behavioral differences, see [docs/Different.md](docs/Differ
 ### Key Differences from C Lua
 
 - **No C API / C module loading** — pure Rust, no `lua_State*` interface
-- **No string-to-number coercion in arithmetic** — `"3" + 1` raises an error
 - **No debug hooks** — `debug.sethook` is a stub; `getinfo` / `getlocal` / `traceback` work
 - **Own bytecode format** — `string.dump` output is not compatible with C Lua
 - **UTF-8 strings** — no arbitrary binary bytes (use the separate `binary` type)
-- **Deterministic `#t`** — length operator uses array lenhint, not hash-part search
 
 ## Building
 
