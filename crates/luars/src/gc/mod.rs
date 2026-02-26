@@ -326,6 +326,10 @@ pub struct GC {
     /// Threads with open upvalues
     twups: Vec<ThreadPtr>,
 
+    /// Dead threads with open upvalues, collected during remark_upvalues
+    /// for efficient close_dead_threads_upvalues processing
+    dead_threads_with_upvalues: Vec<ThreadPtr>,
+
     /// Finalizers called during GC
     finobj: Vec<GcObjectPtr>,
 
@@ -390,6 +394,7 @@ impl GC {
             ephemeron: Vec::new(),
             allweak: Vec::new(),
             twups: Vec::new(),
+            dead_threads_with_upvalues: Vec::new(),
             finobj: Vec::new(),
             sweepgc: SweepGc::AllGc(0),
             stats: GcStats::default(),
@@ -1043,23 +1048,13 @@ impl GC {
     /// Main GC step function (like luaC_step in Lua 5.5)
     /// Actions are accumulated in pending_actions, retrieve with take_pending_actions()
     pub fn step(&mut self, l: &mut LuaState) {
-        // Lua 5.5 luaC_step:
-        // if (!gcrunning(g)) {
-        //   if (g->gcstp & GCSTPUSR) luaE_setdebt(g, 20000);
-        // } else { ... }
-
         // Check if GC is stopped by user (unless forced)
         if self.gc_stopped {
-            // Lua 5.5: set reasonable debt to avoid being called at every check
             self.set_debt(20000);
             return;
         }
 
         // BUG FIX: Prevent GC reentrancy during finalization or single_step.
-        // In Lua 5.5, gcrunning(g) checks (g->gcstp == 0), which includes GCSTPGC.
-        // Without this check, check_gc() during a finalizer's pcall can trigger
-        // recursive GC steps → recursive young_collection → stack overflow or
-        // state corruption → hangs and use-after-free.
         if self.gc_stopem {
             self.set_debt(20000);
             return;
@@ -1307,22 +1302,63 @@ impl GC {
         }
     }
 
+    /// Port of Lua 5.5's checkminormajor:
+    /// Decide whether to shift to major mode. It shifts if the accumulated
+    /// number of added old1 bytes (counted in 'GCmarked') is larger than
+    /// 'minormajor'% of the number of lived bytes after the last major
+    /// collection. (This number is kept in 'GCmajorminor'.)
+    ///
+    /// ```c
+    /// static int checkminormajor (global_State *g) {
+    ///   l_mem limit = applygcparam(g, MINORMAJOR, g->GCmajorminor);
+    ///   if (limit == 0)
+    ///     return 0;  /* special case: 'minormajor' 0 stops major collections */
+    ///   return (g->GCmarked >= limit);
+    /// }
+    /// ```
+    fn check_minor_major(&self) -> bool {
+        let limit = self.apply_param(MINORMAJOR, self.gc_majorminor);
+        if limit == 0 {
+            return false;
+        }
+        self.gc_marked >= limit
+    }
+
+    /// Port of Lua 5.5's checkmajorminor:
+    /// After a major (incremental) collection's atomic step, check whether
+    /// to go back to minor (generational) mode. This shifts if the number
+    /// of bytes to be collected is greater than MAJORMINOR% of the newly
+    /// added bytes since the last major collection.
+    ///
+    /// ```c
+    /// static int checkmajorminor (lua_State *L, global_State *g) {
+    ///   if (g->gckind == KGC_GENMAJOR) {
+    ///     l_mem numbytes = gettotalbytes(g);
+    ///     l_mem addedbytes = numbytes - g->GCmajorminor;
+    ///     l_mem limit = applygcparam(g, MAJORMINOR, addedbytes);
+    ///     l_mem tobecollected = numbytes - g->GCmarked;
+    ///     if (tobecollected > limit) {
+    ///       atomic2gen(L, g);
+    ///       setminordebt(g);
+    ///       return 1;
+    ///     }
+    ///   }
+    ///   g->GCmajorminor = g->GCmarked;
+    ///   return 0;
+    /// }
+    /// ```
     fn check_major_minor(&mut self, l: &mut LuaState) -> bool {
-        if self.gc_kind == GcKind::GenMinor {
+        if self.gc_kind == GcKind::GenMajor {
             let num_bytes = self.get_total_bytes();
             let added_bytes = num_bytes - self.gc_majorminor;
             let limit = self.apply_param(MAJORMINOR, added_bytes);
             let to_be_collected = num_bytes - self.gc_marked;
-
-            if to_be_collected >= limit {
-                // atomic2gen(L, g);  /* return to generational mode */
-                // setminordebt(g);
+            if to_be_collected > limit {
                 self.atomic2gen(l);
-
+                self.set_minor_debt();
                 return true;
             }
         }
-
         self.gc_majorminor = self.gc_marked;
         false
     }
@@ -1418,7 +1454,15 @@ impl GC {
         self.old.add_all(old1_survivors);
 
         self.gc_kind = GcKind::GenMinor;
-        self.gc_majorminor = self.gc_marked;
+        // BUG FIX: gc_majorminor must be the total live bytes, not accumulated
+        // old1 bytes. In C Lua, atomic2gen runs after a full incremental major
+        // cycle where GCmarked = total live bytes from full mark. In our code,
+        // we call atomic2gen after sweep_gen, so gc_marked only has accumulated
+        // old1 bytes (small). Using total_bytes - gc_debt as an approximation
+        // of total real memory gives the correct debt base, preventing
+        // pathologically frequent collections.
+        let real_bytes = (self.total_bytes - self.gc_debt).max(0);
+        self.gc_majorminor = real_bytes;
         self.gc_marked = 0;
 
         // After sweep2old + move, allgc, survival and old1 should be empty
@@ -1506,34 +1550,52 @@ impl GC {
         self.grayagain.extend(ephemeron_list);
     }
 
-    // ** Correct a list of gray objects. Return a pointer to the last element
-    // ** left on the list, so that we can link another list to the end of
-    // ** this one.
+    // ** Correct a list of gray objects.
+    // **
+    // ** Port of Lua 5.5's correctgraylist (lgc.c):
     // ** Because this correction is done after sweeping, young objects might
     // ** be turned white and still be in the list. They are only removed.
     // ** 'TOUCHED1' objects are advanced to 'TOUCHED2' and remain on the list;
     // ** Non-white threads also remain on the list. 'TOUCHED2' objects and
     // ** anything else become regular old, are marked black, and are removed
     // ** from the list.
+    // **
+    // ** ```c
+    // ** static GCObject **correctgraylist (GCObject **p) {
+    // **   GCObject *curr;
+    // **   while ((curr = *p) != NULL) {
+    // **     GCObject **next = getgclist(curr);
+    // **     if (iswhite(curr))
+    // **       goto remove;  /* remove all white objects */
+    // **     else if (getage(curr) == G_TOUCHED1) {
+    // **       nw2black(curr);
+    // **       setage(curr, G_TOUCHED2);
+    // **       goto remain;
+    // **     }
+    // **     else if (curr->tt == LUA_VTHREAD) {
+    // **       lua_assert(isgray(curr));
+    // **       goto remain;  /* keep non-white threads on the list */
+    // **     }
+    // **     else {
+    // **       if (getage(curr) == G_TOUCHED2)
+    // **         setage(curr, G_OLD);
+    // **       nw2black(curr);
+    // **       goto remove;
+    // **     }
+    // **     remove: *p = *next; continue;
+    // **     remain: p = next; continue;
+    // **   }
+    // ** }
+    // ** ```
     fn correct_gray_list(&mut self, list: &mut Vec<GcObjectPtr>) {
         let original_list = std::mem::take(list);
 
         for gc_ptr in original_list {
             if let Some(header) = gc_ptr.header_mut() {
                 if header.is_white() {
-                    // CRITICAL FIX: Don't remove WHITE threads from grayagain!
-                    // OLD threads that become unreachable survive minor collections
-                    // (old list is not swept). But their stack may reference young
-                    // objects in allgc/survival that WILL be swept. If the thread
-                    // is removed from grayagain, its stack won't be scanned, and
-                    // those young objects are freed while still referenced → crash.
-                    // Keep WHITE threads in grayagain so their stacks are always
-                    // traversed. They'll be properly collected in a major GC.
-                    if gc_ptr.kind() == GcObjectKind::Thread {
-                        list.push(gc_ptr);
-                        continue;
-                    }
-                    // Object turned white during sweep - remove from list
+                    // Remove ALL white objects (including threads).
+                    // After atomic + sweep, white objects are dead (unreachable).
+                    // Matches C Lua 5.5: "if (iswhite(curr)) goto remove;"
                     continue;
                 }
 
@@ -1548,16 +1610,15 @@ impl GC {
                     list.push(gc_ptr);
                 } else {
                     if age == G_TOUCHED2 {
-                        // Other ages: become old and black, remove from list
+                        // Advance from TOUCHED2 to OLD
                         header.set_age(G_OLD);
                     }
                     header.make_black();
+                    // Remove from list
                 }
             }
         }
     }
-
-    /// Mark OLD1 objects for young collection (port of Lua 5.5's markold).
     /// In generational mode, OLD1 objects are those that just became old in the
     /// previous cycle. They need to be traversed because they might reference
     /// young objects that need to be marked.
@@ -1987,9 +2048,6 @@ impl GC {
         gc_thread.header.make_black();
 
         let mut count = 1; // Estimate of work done
-        if gc_thread.header.is_old() || self.gc_state == GcState::Propagate {
-            self.grayagain.push(thread_ptr.into());
-        }
 
         {
             let state = &gc_thread.data;
@@ -1999,8 +2057,26 @@ impl GC {
 
             // Guard: if stack is not yet built (empty), skip marking.
             // Matches C Lua: "if (o == NULL) return 0;"
+            //
+            // OPTIMIZATION: Dead coroutines (returned/errored) have empty stacks
+            // (Vec cleared by handle_resume_result). We mark the error_object
+            // defensively but do NOT re-add the thread to grayagain. This prevents
+            // dead threads from accumulating in grayagain and being needlessly
+            // re-traversed every cycle, which was causing O(n²) behavior with
+            // many coroutines (e.g., 1M coroutine recursion test).
             if stack.is_empty() {
+                // Still mark error_object if present (safety)
+                let err_obj = &state.error_object;
+                if !err_obj.is_nil() {
+                    self.mark_value(l, err_obj);
+                }
                 return 1;
+            }
+
+            // ALIVE thread: add to grayagain for re-traversal in next cycle
+            // (old threads must be re-checked; young threads during Propagate too)
+            if gc_thread.header.is_old() || self.gc_state == GcState::Propagate {
+                self.grayagain.push(thread_ptr.into());
             }
 
             // Mark stack values from 0..top, matching C Lua's traversethread.
@@ -2239,22 +2315,34 @@ impl GC {
     /// - Dead threads are identifiable (have other_white color)
     /// - ALL objects are still in memory (sweep hasn't started)
     /// - Upvalue objects are safely accessible
-    ///
-    /// We close ALL open upvalues on dead threads (both alive and dead upvalues).
-    /// Alive upvalues NEED closing (live closures still reference them).
-    /// Dead upvalues don't need closing but it's harmless and simpler than filtering.
     fn close_dead_threads_upvalues(&mut self) {
         let other_white = GcHeader::otherwhite(self.current_white);
 
-        // Helper closure to process one GC list
+        // Process dead threads with open upvalues collected during remark_upvalues
+        for thread_ptr in std::mem::take(&mut self.dead_threads_with_upvalues) {
+            let gc_thread = thread_ptr.as_mut_ref();
+            for upval_ptr in gc_thread.data.open_upvalues() {
+                let upval_data = &mut upval_ptr.as_mut_ref().data;
+                if upval_data.is_open() {
+                    let stack_idx = upval_data.get_stack_index();
+                    let value = gc_thread
+                        .data
+                        .stack()
+                        .get(stack_idx)
+                        .copied()
+                        .unwrap_or(LuaValue::nil());
+                    upval_data.close(value);
+                }
+            }
+        }
+
+        // Scan young lists for dead threads with open upvalues
         let process_list = |list: &GcList| {
             for obj in list.iter() {
                 if let GcObjectOwner::Thread(thread_box) = obj {
                     let thread = thread_box.as_ref();
-                    let is_dead = thread.header.is_dead(other_white);
-                    // Check if thread is dead (has the old white color)
-                    if is_dead && !thread.data.open_upvalues().is_empty() {
-                        // Close all open upvalues on this dead thread
+                    if thread.header.is_dead(other_white) && !thread.data.open_upvalues().is_empty()
+                    {
                         for upval_ptr in thread.data.open_upvalues() {
                             let upval_data = &mut upval_ptr.as_mut_ref().data;
                             if upval_data.is_open() {
@@ -2275,8 +2363,6 @@ impl GC {
 
         process_list(&self.allgc);
         process_list(&self.survival);
-        process_list(&self.old1);
-        process_list(&self.old);
     }
 
     fn propagate_all(&mut self, l: &mut LuaState) {
@@ -2318,7 +2404,12 @@ impl GC {
             // Gray thread with open upvalues = keep in list for later remarking.
             // Otherwise (black or no upvalues) = remove and remark its upvalues.
             if thread.header.is_white() {
-                // Thread is dead, just remove from list
+                // Thread is dead, remove from twups list.
+                // Track it if it has open upvalues so close_dead_threads_upvalues
+                // can close them efficiently without scanning all GC lists.
+                if !thread.data.open_upvalues().is_empty() {
+                    self.dead_threads_with_upvalues.push(thread_ptr);
+                }
                 self.twups.swap_remove(i);
                 continue;
             }
@@ -2635,6 +2726,15 @@ impl GC {
                 if let Some(header_mut) = gc_ptr.header_mut() {
                     header_mut.set_age(G_OLD);
                     if gc_ptr.kind() == GcObjectKind::Thread {
+                        // BUG FIX: Threads added to grayagain must NOT be white.
+                        // After sweep_gen, surviving G_NEW threads are white(current).
+                        // If left white, correctgraylist will remove them as "dead",
+                        // but they're actually alive. This causes use-after-free crashes.
+                        // C Lua avoids this because sweep2old runs after a full incremental
+                        // cycle (not after sweep_gen), so threads are already non-white.
+                        if header_mut.is_white() {
+                            header_mut.make_gray();
+                        }
                         grayagain.push(gc_ptr);
                     } else if let GcObjectPtr::Upvalue(upval_ptr) = gc_ptr {
                         let gc_upval = upval_ptr.as_mut_ref();
@@ -2980,7 +3080,6 @@ impl GC {
         if self.gc_state != GcState::Propagate {
             self.restart_collection(l);
             self.gc_state = GcState::Propagate;
-            // No need to rebuild young_objects - we use generation lists now
         }
 
         // Phase 1: Mark OLD1 objects (including finobj and tobefnz)
@@ -2994,17 +3093,27 @@ impl GC {
         let added_old1 = self.sweep_gen(l);
 
         // Phase 4: Update gc_marked with promoted bytes
+        // gc_marked accumulates addedold1 bytes across minor cycles
+        // (like C Lua 5.5's g->GCmarked = marked + addedold1)
         self.gc_marked = marked + added_old1;
 
         // Phase 5: Check if need to switch to major mode
-        // Skip this check on first generation (gc_majorminor == 0 means first time)
+        // Port of Lua 5.5's youngcollection decision logic:
+        // - First gen: initialize gc_majorminor as base
+        // - checkminormajor: if accumulated old1 bytes >= MINORMAJOR% of gc_majorminor
+        //   → transition to major (via atomic2gen)
+        // - Otherwise: finish minor cycle
         let is_first_gen = self.gc_majorminor == 0;
         if is_first_gen {
             self.gc_majorminor = self.gc_marked; // Initialize for next cycle
             self.finish_gen_cycle(l);
-        } else if self.check_major_minor(l) {
-            // self.minor_to_incremental(l, KGC_GENMAJOR);
-            self.gc_marked = 0; // Avoid pause in first major cycle
+        } else if self.check_minor_major() {
+            // Transition to major collection:
+            // C Lua calls minor2inc(L, g, KGC_GENMAJOR) which enters incremental
+            // mode for a full sweep. We use atomic2gen which does a full
+            // sweep-to-old + finishgencycle in one step.
+            self.atomic2gen(l);
+            self.gc_marked = 0; // Reset accumulated old1 bytes
         } else {
             self.finish_gen_cycle(l); // Still in minor mode; finish it
         }
@@ -3405,6 +3514,24 @@ impl GC {
     /// Called when a black object 'o' is modified to point to white object
     /// Instead of marking the white object, we mark 'o' as gray again
     /// Used for tables and other objects that may have many modifications
+    /// Backward barrier (luaC_barrierback_)
+    /// Called when a black object 'o' is modified to point to white object
+    /// Instead of marking the white object, we mark 'o' as gray again
+    /// Used for tables and other objects that may have many modifications
+    ///
+    /// Port of Lua 5.5 lgc.c:
+    /// ```c
+    /// void luaC_barrierback_ (lua_State *L, GCObject *o) {
+    ///   global_State *g = G(L);
+    ///   lua_assert(isblack(o) && !isdead(g, o));
+    ///   if (getage(o) == G_TOUCHED2)  /* already in gray list? */
+    ///     set2gray(o);  /* make it gray to become touched1 */
+    ///   else  /* link it in 'grayagain' and paint it gray */
+    ///     linkobjgclist(o, g->grayagain);
+    ///   if (isold(o))
+    ///     setage(o, G_TOUCHED1);
+    /// }
+    /// ```
     pub fn barrier_back(&mut self, o_ptr: GcObjectPtr) {
         let (is_black, age) = if let Some(o) = o_ptr.header() {
             (o.is_black(), o.age())
@@ -3426,23 +3553,24 @@ impl GC {
             }
         }
 
-        // If TOUCHED2: just make gray (will become TOUCHED1 at end of cycle)
+        // If TOUCHED2: already in gray list from correctgraylist, just make gray
         if age == G_TOUCHED2 {
             if let Some(header) = o_ptr.header_mut() {
                 header.make_gray();
             }
         } else {
-            // In propagate/atomic phase: link into grayagain for re-traversal in current cycle
-            // In pause/sweep phase: link into gray for next cycle
+            // Link into grayagain (or gray during pause/sweep).
+            // No need for contains() check: the is_black() guard at the top
+            // prevents duplicates because we make the object gray below.
+            // After make_gray(), is_black() returns false, so subsequent
+            // barrier_back calls on the same object will exit early.
             let target_list = if self.gc_state == GcState::Pause || self.gc_state.is_sweep_phase() {
                 &mut self.gray
             } else {
                 &mut self.grayagain
             };
 
-            if !target_list.contains(&o_ptr) {
-                target_list.push(o_ptr);
-            }
+            target_list.push(o_ptr);
 
             if let Some(header) = o_ptr.header_mut() {
                 header.make_gray();

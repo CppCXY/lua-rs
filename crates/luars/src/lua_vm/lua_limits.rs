@@ -111,7 +111,9 @@ pub const DEFAULT_GC_PAUSE: i32 = 250;
 pub const DEFAULT_GC_STEPMUL: i32 = 200;
 
 /// Default minor GC collection multiplier (percentage).
-pub const DEFAULT_GC_MINORMUL: i32 = 200;
+/// Matches C Lua 5.5's LUAI_GENMINORMUL = 20.
+/// A young (minor) collection will run after creating GENMINORMUL% new bytes.
+pub const DEFAULT_GC_MINORMUL: i32 = 20;
 
 /// Minor-to-major GC transition threshold (percentage).
 pub const DEFAULT_GC_MINORMAJOR: i32 = 70;
