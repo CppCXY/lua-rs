@@ -13,6 +13,10 @@ pub struct SafeOption {
     /// When a C-stack overflow occurs above this limit, it means we're in
     /// the extra zone for error handlers → produce "error in error handling".
     pub(crate) base_c_stack_depth: usize,
+    /// The *original* `max_call_depth` before any error-handler increase.
+    /// When a Lua call-stack overflow occurs above this limit, it means
+    /// we're in the extra zone for error handlers → produce "error in error handling".
+    pub base_call_depth: usize,
     /// Maximum memory limit in bytes
     pub max_memory_limit: isize,
 }
@@ -24,6 +28,7 @@ impl Default for SafeOption {
             max_call_depth: MAX_CALL_DEPTH,
             max_c_stack_depth: LUAI_MAXCSTACK,
             base_c_stack_depth: LUAI_MAXCSTACK,
+            base_call_depth: MAX_CALL_DEPTH,
             max_memory_limit: isize::MAX,
         }
     }

@@ -204,6 +204,11 @@ impl LuaState {
     ) -> LuaResult<()> {
         // Fast path: check Lua call-stack depth
         if self.call_depth >= self.safe_option.max_call_depth {
+            // If max_call_depth was elevated for error handling, produce
+            // ErrorInErrorHandling (like C Lua's stackerror).
+            if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+                return Err(LuaError::ErrorInErrorHandling);
+            }
             return Err(self.error(format!(
                 "stack overflow (Lua stack depth: {})",
                 self.call_depth
@@ -389,6 +394,11 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     fn push_lua_frame_overflow(&mut self) -> LuaResult<()> {
+        // If max_call_depth was elevated for error handling, produce
+        // ErrorInErrorHandling (like C Lua's stackerror).
+        if self.safe_option.max_call_depth > self.safe_option.base_call_depth {
+            return Err(LuaError::ErrorInErrorHandling);
+        }
         Err(self.error(format!(
             "stack overflow (Lua stack depth: {})",
             self.call_depth

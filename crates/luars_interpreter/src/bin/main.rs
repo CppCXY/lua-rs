@@ -384,6 +384,7 @@ fn lua_main() -> i32 {
     safe_option.max_stack_size = 1000000; // LUAI_MAXSTACK (Lua 5.5)
     // 问就是rust在debug版本递归限制太小了
     safe_option.max_call_depth = if cfg!(debug_assertions) { 25 } else { 1024 };
+    safe_option.base_call_depth = safe_option.max_call_depth;
     safe_option.max_c_stack_depth = if cfg!(debug_assertions) { 25 } else { 200 };
     safe_option.max_memory_limit = 4096 * 1024 * 1024; // 4 GB
     let mut vm = LuaVM::new(safe_option);
