@@ -1,6 +1,6 @@
 [package]
 name = "luars"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 authors = ["CppCXY"]
 description = "A library for lua 5.5 runtime implementation in Rust"
@@ -20,7 +20,6 @@ luars-derive.workspace = true
 
 # external
 ahash.workspace = true
-rand.workspace = true
 chrono.workspace = true
 itoa.workspace = true
 smol_str.workspace = true
