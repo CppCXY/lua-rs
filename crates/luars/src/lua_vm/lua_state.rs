@@ -13,7 +13,7 @@ use crate::lua_vm::call_info::call_status::{
 };
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
-use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK};
+use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_MAXCSTACK};
 use crate::lua_vm::safe_option::SafeOption;
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 use crate::{
@@ -2870,11 +2870,20 @@ impl LuaState {
                 let mut transformed_error = LuaValue::nil();
 
                 // Budget: how many retries before we hit the depth limit.
-                // In C Lua, each recursive handler call adds ~1 to nCcalls.
+                // In C Lua, each recursive handler call adds ~1 to nCcalls
+                // (truly recursive via luaG_errormsg).
                 // At MAXCCALLS (200), "C stack overflow" fires.
                 // At MAXCCALLS+CSTACKERR (230), hard "error in error handling" fires.
-                let depth_budget = saved_max_c_depth.saturating_sub(initial_depth);
-                let hard_limit = depth_budget + 30; // extra room for error handling
+                //
+                // Our handler loop does NOT actually recurse (each handler call
+                // is a single lua_execute that returns), so we don't consume
+                // real Rust stack depth across iterations.  Use LUAI_MAXCSTACK
+                // (the C Lua standard 200) for the budget simulation, NOT the
+                // runtime max_c_stack_depth which may be reduced (e.g. 25 in
+                // debug builds for Rust stack safety).
+                let current_n_ccalls = unsafe { (*self.vm).n_ccalls };
+                let depth_budget = LUAI_MAXCSTACK.saturating_sub(current_n_ccalls);
+                let hard_limit = depth_budget + CSTACKERR; // extra room for error handling
                 let mut retry_count: usize = 0;
 
                 loop {

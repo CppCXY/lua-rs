@@ -1851,7 +1851,8 @@ fn globalnames(fs: &mut FuncState, defkind: VarKind) -> Result<(), String> {
         // Initialize globals: calls initglobal recursively
         // lastidx points to the last variable, so first variable is at (lastidx - nvars + 1)
         let line = fs.lexer.line; // Current line number for error reporting
-        initglobal(fs, nvars, (lastidx - nvars as u16 + 1) as usize, 0, line)?;
+        let firstidx = (lastidx as i32 - nvars + 1) as usize;
+        initglobal(fs, nvars, firstidx, 0, line)?;
     }
 
     // Activate all declared globals

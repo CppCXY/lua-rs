@@ -1878,6 +1878,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::Concat => {
+                    // Match C Lua: set L->top.p = ra + n before concat/checkGC.
+                    // This ensures the GC marks all registers up to the concat
+                    // range, preventing atomic-phase clearing from nil'ing out
+                    // temp registers (like a function copy) below the operands.
+                    let a = instr.get_a() as usize;
+                    let n = instr.get_b() as usize;
+                    let concat_top = base + a + n;
+                    if concat_top > lua_state.get_top() {
+                        lua_state.set_top_raw(concat_top);
+                    }
                     handle_concat(lua_state, instr, &mut base, frame_idx, pc)?;
                 }
 

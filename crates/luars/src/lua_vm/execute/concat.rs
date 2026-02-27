@@ -87,7 +87,16 @@ pub fn handle_concat(
             };
             lua_state.stack_mut()[start] = result;
             lua_state.set_frame_pc(frame_idx, pc as u32);
+            // Match C Lua: set top to cover concat operands before checkGC,
+            // then restore to frame_top. This prevents the GC atomic phase
+            // from clearing temp registers below the concat range.
+            let concat_top = start + n;
+            if concat_top > lua_state.get_top() {
+                lua_state.set_top_raw(concat_top);
+            }
             lua_state.check_gc()?;
+            let frame_top = lua_state.get_call_info(frame_idx).top;
+            lua_state.set_top_raw(frame_top);
             return Ok(());
         }
     }
@@ -96,6 +105,11 @@ pub fn handle_concat(
     if let Ok(result) = concat_strings(lua_state, *base, a, n) {
         lua_state.stack_mut()[start] = result;
         lua_state.set_frame_pc(frame_idx, pc as u32);
+        // Match C Lua: set top to cover concat operands before checkGC
+        let concat_top = start + n;
+        if concat_top > lua_state.get_top() {
+            lua_state.set_top_raw(concat_top);
+        }
         lua_state.check_gc()?;
         let frame_top = lua_state.get_call_info(frame_idx).top;
         lua_state.set_top_raw(frame_top);

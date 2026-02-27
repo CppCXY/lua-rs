@@ -544,9 +544,12 @@ impl<'a> FuncState<'a> {
             kind,
         });
         self.chunk.upvalue_count = self.upvalues.len();
-        self.nups = self.upvalues.len() as u8;
+        // Cap nups at MAXUPVAL to avoid u8 overflow in debug builds.
+        // The checklimit_error above already recorded the "too many upvalues"
+        // error; compilation continues (deferred error, matching C Lua).
+        self.nups = self.upvalues.len().min(MAXUPVAL) as u8;
 
-        (self.nups - 1) as i32
+        (self.upvalues.len() - 1) as i32
     }
 }
 

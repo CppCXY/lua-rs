@@ -1494,7 +1494,10 @@ impl GC {
         // lives in ObjectAllocator (in LuaVM), not accessible from GC directly.
         // The shrink is automatically handled during remove_dead_intern calls.
 
-        // 3. Set state to Propagate (skip restart in next cycle)
+        // 3. Set state to Propagate for next cycle
+        // In our implementation, young_collection always runs as a complete
+        // mark-sweep, so we stay in Propagate to preserve grayagain contents
+        // (TOUCHED objects and threads) across minor collection boundaries.
         self.gc_state = GcState::Propagate;
 
         // 4. Call pending finalizers if not in emergency mode
@@ -2404,10 +2407,21 @@ impl GC {
             // Gray thread with open upvalues = keep in list for later remarking.
             // Otherwise (black or no upvalues) = remove and remark its upvalues.
             if thread.header.is_white() {
-                // Thread is dead, remove from twups list.
-                // Track it if it has open upvalues so close_dead_threads_upvalues
-                // can close them efficiently without scanning all GC lists.
+                // Thread is dead (white), remove from twups list.
+                // But FIRST: re-mark open upvalue values so that objects
+                // only reachable through this thread's open upvalues are
+                // kept alive. This is needed because sweep_gen makes
+                // surviving objects white (unlike C Lua's nw2black), so
+                // a dead-white thread might still have live closures
+                // referencing its open upvalues.
                 if !thread.data.open_upvalues().is_empty() {
+                    for upval_ptr in thread.data.open_upvalues() {
+                        let upval = upval_ptr.as_ref();
+                        if !upval.header.is_white() {
+                            let value = upval.data.get_value();
+                            self.mark_value(l, &value);
+                        }
+                    }
                     self.dead_threads_with_upvalues.push(thread_ptr);
                 }
                 self.twups.swap_remove(i);
@@ -3326,7 +3340,6 @@ impl GC {
                     self.release_object(gc_owner);
                 }
             } else {
-                // Alive: promote to G_SURVIVAL and make white
                 gc_owner.header_mut().set_age(G_SURVIVAL);
                 gc_owner.header_mut().make_white(self.current_white);
                 new_survival.push(gc_owner);
@@ -3365,10 +3378,8 @@ impl GC {
                     self.release_object(gc_owner);
                 }
             } else {
-                // Alive: promote to G_OLD1 and KEEP COLOR (don't make white)
                 let size = header.size as isize;
                 gc_owner.header_mut().set_age(G_OLD1);
-                // Track bytes becoming OLD1
                 added_old1 += size;
                 new_old1.push(gc_owner);
             }
@@ -3405,12 +3416,9 @@ impl GC {
                         self.tobefnz.push(gc_ptr);
                         self.finobj.swap_remove(i);
                         continue;
-                    } else {
-                        // Alive: promote to G_SURVIVAL and make white
-                        if let Some(header_mut) = gc_ptr.header_mut() {
-                            header_mut.set_age(Self::next_age(age));
-                            header_mut.make_white(self.current_white);
-                        }
+                    } else if let Some(header_mut) = gc_ptr.header_mut() {
+                        header_mut.set_age(Self::next_age(age));
+                        header_mut.make_white(self.current_white);
                     }
                 } else if age == G_SURVIVAL || age == G_OLD0 {
                     if header.is_dead(other_white) {
@@ -3418,19 +3426,16 @@ impl GC {
                         self.tobefnz.push(gc_ptr);
                         self.finobj.swap_remove(i);
                         continue;
-                    } else {
-                        // Alive: promote to G_OLD1 and keep color
-                        if let Some(header_mut) = gc_ptr.header_mut() {
-                            let old_age = header_mut.age();
-                            let new_age = Self::next_age(old_age);
-                            header_mut.set_age(new_age);
+                    } else if let Some(header_mut) = gc_ptr.header_mut() {
+                        let old_age = header_mut.age();
+                        let new_age = Self::next_age(old_age);
+                        header_mut.set_age(new_age);
 
-                            // Track bytes becoming OLD1
-                            if new_age == G_OLD1
-                                && let Some(h) = gc_ptr.header()
-                            {
-                                added_old1 += h.size as isize;
-                            }
+                        // Track bytes becoming OLD1
+                        if new_age == G_OLD1
+                            && let Some(h) = gc_ptr.header()
+                        {
+                            added_old1 += h.size as isize;
                         }
                     }
                 }
@@ -3834,9 +3839,26 @@ impl GC {
         }
     }
 
+    /// Port of Lua 5.5's markbeingfnz:
+    /// ```c
+    /// static void markbeingfnz (global_State *g) {
+    ///   GCObject *o;
+    ///   for (o = g->tobefnz; o != NULL; o = o->next) {
+    ///     makewhite(g, o);
+    ///     reallymarkobject(g, o);
+    ///   }
+    /// }
+    /// ```
+    /// CRITICAL: Must make objects white first, then re-mark. This forces
+    /// re-traversal of objects that may already be black (e.g., from a
+    /// previous cycle's atomic2gen protection), ensuring their transitive
+    /// references (metatables, etc.) are properly marked in this cycle.
     fn mark_being_finalized(&mut self, l: &mut LuaState) {
         for gc_ptr in self.tobefnz.clone() {
-            self.mark_object(l, gc_ptr);
+            if let Some(header) = gc_ptr.header_mut() {
+                header.make_white(self.current_white); // Force white
+            }
+            self.really_mark_object(l, gc_ptr); // Then re-mark
         }
     }
 
