@@ -12,7 +12,7 @@ pub struct SafeOption {
     /// The *original* `max_c_stack_depth` before any error-handler increase.
     /// When a C-stack overflow occurs above this limit, it means we're in
     /// the extra zone for error handlers → produce "error in error handling".
-    pub(crate) base_c_stack_depth: usize,
+    pub base_c_stack_depth: usize,
     /// The *original* `max_call_depth` before any error-handler increase.
     /// When a Lua call-stack overflow occurs above this limit, it means
     /// we're in the extra zone for error handlers → produce "error in error handling".
