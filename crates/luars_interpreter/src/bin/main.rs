@@ -145,7 +145,7 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
     let code =
         fs::read_to_string(filename).map_err(|e| format!("cannot open {}: {}", filename, e))?;
 
-    match vm.compile_with_name(&code, filename) {
+    match vm.compile_with_name(&code, &format!("@{}", filename)) {
         Ok(chunk) => {
             match vm.execute_chunk(Rc::new(chunk)) {
                 Ok(_) => Ok(()),

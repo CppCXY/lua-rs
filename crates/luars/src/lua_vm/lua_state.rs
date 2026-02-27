@@ -849,7 +849,7 @@ impl LuaState {
                     let source = chunk.source_name.as_deref().unwrap_or("[string]");
 
                     // Format source name (strip @ prefix if present)
-                    let source_display = source.strip_prefix('@').unwrap_or(source);
+                    let source_display = crate::compiler::format_source(source);
 
                     // Get current line number from PC
                     let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
@@ -860,11 +860,13 @@ impl LuaState {
                         0
                     };
 
-                    // Determine if this is the main chunk
+                    // Determine function description
                     // Main chunk has linedefined == 0
-                    // Also check if this is at the bottom of the valid call stack
-                    let is_main = chunk.linedefined == 0 || level == valid_frames.len() - 1;
-                    let what = if is_main { "main chunk" } else { "function" };
+                    let what = if chunk.linedefined == 0 {
+                        "main chunk".to_string()
+                    } else {
+                        format!("function <{}:{}>", source_display, chunk.linedefined)
+                    };
 
                     if line > 0 {
                         result.push_str(&format!("\t{}:{}: in {}\n", source_display, line, what));
@@ -1496,6 +1498,179 @@ impl LuaState {
         } else {
             None
         }
+    }
+
+    // ========================================================================
+    // Debug info (port of lua_getinfo / auxgetinfo from ldebug.c)
+    // ========================================================================
+
+    /// Get debug info for a stack frame at the given level.
+    /// Level 0 = most-recent frame (top of stack), level 1 = its caller, etc.
+    /// `what` controls which fields are filled (same options as C Lua's lua_getinfo).
+    /// Returns `None` if the level is out of range.
+    pub fn get_info_by_level(
+        &self,
+        level: usize,
+        what: &str,
+    ) -> Option<crate::lua_vm::debug_info::DebugInfo> {
+        let call_depth = self.call_depth();
+        if level >= call_depth {
+            return None;
+        }
+        let frame_idx = call_depth - 1 - level;
+        let func = self.get_frame_func(frame_idx)?;
+        let ci = self.get_frame(frame_idx);
+        Some(self.fill_debug_info(&func, ci, Some(frame_idx), what))
+    }
+
+    /// Get debug info for a function value (not on the call stack).
+    /// Only fields that don't require a stack frame are meaningful
+    /// ('n' and 'l' will return empty/defaults).
+    pub fn get_info_for_func(
+        &self,
+        func: &LuaValue,
+        what: &str,
+    ) -> crate::lua_vm::debug_info::DebugInfo {
+        self.fill_debug_info(func, None, None, what)
+    }
+
+    /// Core implementation: fill a DebugInfo struct based on the 'what' options.
+    /// Port of auxgetinfo from ldebug.c.
+    fn fill_debug_info(
+        &self,
+        func: &LuaValue,
+        ci: Option<&CallInfo>,
+        frame_idx: Option<usize>,
+        what: &str,
+    ) -> crate::lua_vm::debug_info::DebugInfo {
+        use crate::lua_vm::call_info::call_status;
+        let mut info = crate::lua_vm::debug_info::DebugInfo::new();
+
+        if let Some(lua_func) = func.as_lua_function() {
+            let chunk = lua_func.chunk();
+
+            for ch in what.chars() {
+                match ch {
+                    'S' => {
+                        info.fill_source(
+                            chunk.source_name.as_deref(),
+                            chunk.linedefined as i32,
+                            chunk.lastlinedefined as i32,
+                        );
+                    }
+                    'l' => {
+                        let currentline = if let Some(ci) = ci {
+                            if ci.is_lua() {
+                                let pc_idx = ci.pc.saturating_sub(1) as usize;
+                                if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
+                                    chunk.line_info[pc_idx] as i32
+                                } else {
+                                    -1
+                                }
+                            } else {
+                                -1
+                            }
+                        } else {
+                            -1
+                        };
+                        info.fill_currentline(currentline);
+                    }
+                    'u' => {
+                        info.fill_upvalues(
+                            chunk.upvalue_count as u8,
+                            chunk.param_count as u8,
+                            chunk.is_vararg,
+                        );
+                    }
+                    'n' => {
+                        if let Some(fidx) = frame_idx {
+                            if let Some((namewhat, name)) =
+                                crate::stdlib::debug::pub_getfuncname(self, fidx)
+                            {
+                                info.fill_name(namewhat, &name);
+                            } else {
+                                info.fill_name_empty();
+                            }
+                        } else {
+                            info.fill_name_empty();
+                        }
+                    }
+                    't' => {
+                        let (istailcall, extraargs) = if let Some(ci) = ci {
+                            (ci.is_tail(), call_status::get_ccmt_count(ci.call_status))
+                        } else {
+                            (false, 0)
+                        };
+                        info.fill_tail(istailcall, extraargs);
+                    }
+                    'r' => {
+                        // Transfer info — only meaningful inside hooks (CIST_HOOKED).
+                        // We don't support hooks that set transferinfo, so always 0.
+                        info.fill_transfer(0, 0);
+                    }
+                    'L' => {
+                        info.fill_activelines(&chunk.line_info, chunk.is_vararg);
+                    }
+                    'f' => {
+                        info.fill_func(*func);
+                    }
+                    _ => {} // ignore unknown options
+                }
+            }
+        } else if func.is_c_callable() {
+            // C function
+            for ch in what.chars() {
+                match ch {
+                    'S' => {
+                        info.fill_source_c();
+                    }
+                    'l' => {
+                        info.fill_currentline(-1);
+                    }
+                    'u' => {
+                        // C functions: nups from the closure, params=0, isvararg=true
+                        let nups = func
+                            .as_cclosure()
+                            .map(|c| c.upvalues().len() as u8)
+                            .unwrap_or(0);
+                        info.fill_upvalues_c(nups);
+                    }
+                    'n' => {
+                        if let Some(fidx) = frame_idx {
+                            if let Some((namewhat, name)) =
+                                crate::stdlib::debug::pub_getfuncname(self, fidx)
+                            {
+                                info.fill_name(namewhat, &name);
+                            } else {
+                                info.fill_name_empty();
+                            }
+                        } else {
+                            info.fill_name_empty();
+                        }
+                    }
+                    't' => {
+                        let (istailcall, extraargs) = if let Some(ci) = ci {
+                            (ci.is_tail(), call_status::get_ccmt_count(ci.call_status))
+                        } else {
+                            (false, 0)
+                        };
+                        info.fill_tail(istailcall, extraargs);
+                    }
+                    'r' => {
+                        info.fill_transfer(0, 0);
+                    }
+                    'L' => {
+                        info.fill_activelines_nil();
+                    }
+                    'f' => {
+                        info.fill_func(*func);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        info
     }
 
     /// Get all open upvalues (for GC root collection)

@@ -2,6 +2,7 @@
 // Implements: traceback, getinfo, getlocal, getmetatable, getupvalue, etc.
 
 use crate::Instruction;
+use crate::compiler::format_source;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{Chunk, LuaValue};
 use crate::lua_vm::opcode::OpCode;
@@ -820,7 +821,7 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                     let source = chunk.source_name.as_deref().unwrap_or("?");
 
                     // Format source name (strip @ prefix if present)
-                    let source_display = source.strip_prefix('@').unwrap_or(source);
+                    let source_display = format_source(source);
 
                     // Get line number from pc
                     let pc_idx = pc.saturating_sub(1) as usize;
@@ -831,39 +832,25 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
                     };
 
                     // Determine function name and type
-                    let (name_what, func_name) = if chunk.linedefined == 0 {
-                        // Main chunk (linedefined == 0 means top-level code)
-                        ("main chunk", String::new())
-                    } else if i == 0 {
-                        // Also main chunk if at bottom of stack (frame index 0)
-                        ("main chunk", String::new())
+                    // Port of pushfuncname from lauxlib.c:
+                    // 1. If getfuncname returns a name from the caller → use it
+                    // 2. If linedefined == 0 (top-level code) → "main chunk"
+                    // 3. Otherwise → "function <source:line>"
+                    let func_desc = if let Some((kind, name)) = getfuncname(l, i) {
+                        format!("{} '{}'", kind, name)
+                    } else if chunk.linedefined == 0 {
+                        "main chunk".to_string()
                     } else {
-                        // Use getfuncname to resolve function name from calling frame
-                        match getfuncname(l, i) {
-                            Some((kind, name)) => (kind, name),
-                            None => ("function '?'", String::new()),
-                        }
+                        format!("function <{}:{}>", source_display, chunk.linedefined)
                     };
 
                     if line > 0 {
-                        if func_name.is_empty() {
-                            trace.push_str(&format!(
-                                "\n\t{}:{}: in {}",
-                                source_display, line, name_what
-                            ));
-                        } else {
-                            trace.push_str(&format!(
-                                "\n\t{}:{}: in {} '{}'",
-                                source_display, line, name_what, func_name
-                            ));
-                        }
-                    } else if func_name.is_empty() {
-                        trace.push_str(&format!("\n\t{}: in {}", source_display, name_what));
-                    } else {
                         trace.push_str(&format!(
-                            "\n\t{}: in {} '{}'",
-                            source_display, name_what, func_name
+                            "\n\t{}:{}: in {}",
+                            source_display, line, func_desc
                         ));
+                    } else {
+                        trace.push_str(&format!("\n\t{}: in {}", source_display, func_desc));
                     }
                 } else if func.is_c_callable() {
                     // C function - try to get name from calling frame
@@ -888,6 +875,8 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// debug.getinfo([thread,] f [, what]) - Get function info
+/// Thin wrapper: delegates to LuaState::get_info_by_level / get_info_for_func,
+/// then converts the DebugInfo struct to a Lua table.
 fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
     // Parse arguments
     let arg1 = l
@@ -895,256 +884,135 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("getinfo requires at least 1 argument".to_string()))?;
     let arg2 = l.get_arg(2);
 
-    // Determine if arg1 is a function or a stack level
-    let (func, what_str) = if arg1.is_function() {
-        // arg1 is a function, arg2 is what
-        let what = if let Some(w) = arg2 {
-            if let Some(s) = w.as_str() {
-                s.to_string()
-            } else {
-                "flnSrtu".to_string() // Default what
-            }
-        } else {
-            "flnSrtu".to_string()
-        };
-        (arg1, what)
+    let default_what = "flnSrtu";
+
+    let what_str = arg2
+        .as_ref()
+        .and_then(|w| w.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| default_what.to_string());
+
+    // Get DebugInfo from core method on LuaState
+    let info = if arg1.is_function() {
+        l.get_info_for_func(&arg1, &what_str)
     } else if let Some(level) = arg1.as_integer() {
-        // arg1 is a stack level, arg2 is what
-        let what = if let Some(w) = arg2 {
-            if let Some(s) = w.as_str() {
-                s.to_string()
-            } else {
-                "flnSrtu".to_string()
-            }
-        } else {
-            "flnSrtu".to_string()
-        };
-
-        // Get function at stack level
-        // Level mapping: level 0 = current function (getinfo itself)
-        //                level 1 = caller of current function
-        //                level n = n steps up the call stack
-        // Frame index mapping: frame call_depth-1 = top of stack (most recent)
-        //                      frame 0 = bottom of stack (oldest)
-        // So: frame_idx = call_depth - 1 - level
-        let call_depth = l.call_depth();
-        if level < 0 || level as usize >= call_depth {
-            // Level out of range
-            return Ok(0);
+        if level < 0 {
+            return Ok(0); // out of range
         }
-
-        let frame_idx = call_depth - 1 - (level as usize);
-        let func = l
-            .get_frame_func(frame_idx)
-            .ok_or_else(|| l.error("invalid stack level".to_string()))?;
-        (func, what)
+        match l.get_info_by_level(level as usize, &what_str) {
+            Some(info) => info,
+            None => return Ok(0), // level out of range → return nothing (falsy)
+        }
     } else {
         return Err(
             l.error("bad argument #1 to 'getinfo' (function or number expected)".to_string())
         );
     };
 
-    // Create result table
-    let info_table = l.create_table(0, 8)?;
+    // Convert DebugInfo to Lua table
+    let info_table = l.create_table(0, 12)?;
 
-    // Process function info based on 'what' parameter
-    if let Some(lua_func) = func.as_lua_function() {
-        let chunk = lua_func.chunk();
-        // Lua function
-        if what_str.contains('S') {
-            // Source info
-            let source = chunk.source_name.as_deref().unwrap_or("?");
-            let source_key = l.create_string("source")?;
-            let source_val = l.create_string(source)?;
-            l.raw_set(&info_table, source_key, source_val);
+    // 'S' fields
+    if let Some(ref source) = info.source {
+        let k = l.create_string("source")?;
+        let v = l.create_string(source)?;
+        l.raw_set(&info_table, k, v);
+    }
+    if let Some(ref short_src) = info.short_src {
+        let k = l.create_string("short_src")?;
+        let v = l.create_string(short_src)?;
+        l.raw_set(&info_table, k, v);
+    }
+    if let Some(linedefined) = info.linedefined {
+        let k = l.create_string("linedefined")?;
+        l.raw_set(&info_table, k, LuaValue::integer(linedefined as i64));
+    }
+    if let Some(lastlinedefined) = info.lastlinedefined {
+        let k = l.create_string("lastlinedefined")?;
+        l.raw_set(&info_table, k, LuaValue::integer(lastlinedefined as i64));
+    }
+    if let Some(what) = info.what {
+        let k = l.create_string("what")?;
+        let v = l.create_string(what)?;
+        l.raw_set(&info_table, k, v);
+    }
 
-            let short_src_key = l.create_string("short_src")?;
-            let short_src_val = l.create_string(source)?;
-            l.raw_set(&info_table, short_src_key, short_src_val);
+    // 'l' field
+    if let Some(currentline) = info.currentline {
+        let k = l.create_string("currentline")?;
+        l.raw_set(&info_table, k, LuaValue::integer(currentline as i64));
+    }
 
-            let linedefined_key = l.create_string("linedefined")?;
-            let linedefined_val = LuaValue::integer(chunk.linedefined as i64);
-            l.raw_set(&info_table, linedefined_key, linedefined_val);
+    // 'u' fields
+    if let Some(nups) = info.nups {
+        let k = l.create_string("nups")?;
+        l.raw_set(&info_table, k, LuaValue::integer(nups as i64));
+    }
+    if let Some(nparams) = info.nparams {
+        let k = l.create_string("nparams")?;
+        l.raw_set(&info_table, k, LuaValue::integer(nparams as i64));
+    }
+    if let Some(isvararg) = info.isvararg {
+        let k = l.create_string("isvararg")?;
+        l.raw_set(&info_table, k, LuaValue::boolean(isvararg));
+    }
 
-            let lastlinedefined_key = l.create_string("lastlinedefined")?;
-            let lastlinedefined_val = LuaValue::integer(chunk.lastlinedefined as i64);
-            l.raw_set(&info_table, lastlinedefined_key, lastlinedefined_val);
+    // 'n' fields
+    if info.namewhat.is_some() {
+        let k = l.create_string("name")?;
+        let v = if let Some(ref name) = info.name {
+            l.create_string(name)?
+        } else {
+            LuaValue::nil()
+        };
+        l.raw_set(&info_table, k, v);
 
-            let what_key = l.create_string("what")?;
-            let what_val = l.create_string("Lua")?;
-            l.raw_set(&info_table, what_key, what_val);
-        }
+        let k2 = l.create_string("namewhat")?;
+        let v2 = l.create_string(info.namewhat.as_deref().unwrap_or(""))?;
+        l.raw_set(&info_table, k2, v2);
+    }
 
-        if what_str.contains('l') {
-            // Current line (only meaningful for stack level)
-            let currentline_key = l.create_string("currentline")?;
-            let currentline_val = if let Some(level) = arg1.as_integer() {
-                // Get PC from the specified call frame
-                // Use same frame_idx calculation as above
-                let call_depth = l.call_depth();
-                let frame_idx = call_depth - 1 - (level as usize);
-                let pc = l.get_frame_pc(frame_idx);
-                // Get line number from pc
-                let pc_idx = pc.saturating_sub(1) as usize;
-                let line = if !chunk.line_info.is_empty() && pc_idx < chunk.line_info.len() {
-                    chunk.line_info[pc_idx] as i64
-                } else {
-                    -1
-                };
-                LuaValue::integer(line)
-            } else {
-                // Direct function reference - no current line
-                LuaValue::integer(-1)
-            };
-            l.raw_set(&info_table, currentline_key, currentline_val);
-        }
+    // 't' fields
+    if let Some(istailcall) = info.istailcall {
+        let k = l.create_string("istailcall")?;
+        l.raw_set(&info_table, k, LuaValue::boolean(istailcall));
+    }
+    if let Some(extraargs) = info.extraargs {
+        let k = l.create_string("extraargs")?;
+        l.raw_set(&info_table, k, LuaValue::integer(extraargs as i64));
+    }
 
-        if what_str.contains('u') {
-            // Upvalue info
-            let nups_key = l.create_string("nups")?;
-            let nups_val = LuaValue::integer(chunk.upvalue_count as i64);
-            l.raw_set(&info_table, nups_key, nups_val);
+    // 'r' fields
+    if let Some(ftransfer) = info.ftransfer {
+        let k = l.create_string("ftransfer")?;
+        l.raw_set(&info_table, k, LuaValue::integer(ftransfer as i64));
+    }
+    if let Some(ntransfer) = info.ntransfer {
+        let k = l.create_string("ntransfer")?;
+        l.raw_set(&info_table, k, LuaValue::integer(ntransfer as i64));
+    }
 
-            let nparams_key = l.create_string("nparams")?;
-            let nparams_val = LuaValue::integer(chunk.param_count as i64);
-            l.raw_set(&info_table, nparams_key, nparams_val);
-
-            let isvararg_key = l.create_string("isvararg")?;
-            let isvararg_val = LuaValue::boolean(chunk.is_vararg);
-            l.raw_set(&info_table, isvararg_key, isvararg_val);
-        }
-
-        if what_str.contains('n') {
-            // Name resolution: look at the calling frame's bytecode
-            let (name_val, namewhat_val) = if let Some(level) = arg1.as_integer() {
-                let call_depth = l.call_depth();
-                let frame_idx = call_depth - 1 - (level as usize);
-                if let Some((namewhat, name)) = getfuncname(l, frame_idx) {
-                    (l.create_string(&name)?, l.create_string(namewhat)?)
-                } else {
-                    (LuaValue::nil(), l.create_string("")?)
-                }
-            } else {
-                (LuaValue::nil(), l.create_string("")?)
-            };
-
-            let name_key = l.create_string("name")?;
-            l.raw_set(&info_table, name_key, name_val);
-
-            let namewhat_key = l.create_string("namewhat")?;
-            l.raw_set(&info_table, namewhat_key, namewhat_val);
-        }
-
-        if what_str.contains('t') {
-            // Tail call info
-            let istailcall_key = l.create_string("istailcall")?;
-            let istailcall_val = LuaValue::boolean(false);
-            l.raw_set(&info_table, istailcall_key, istailcall_val);
-
-            // extraargs: number of __call metamethods in the call chain
-            // Extract from call_status bits 8-11 (CIST_CCMT)
-            let extraargs_opt = if let Some(level) = arg1.as_integer() {
-                use crate::lua_vm::call_info::call_status;
-                // Convert relative level to absolute frame index
-                // level 0 = debug.getinfo itself
-                // level 1 = caller of debug.getinfo
-                // level n = call_depth - 1 - n
-                let current_depth = l.call_depth();
-                let frame_idx = current_depth.checked_sub(1 + level as usize);
-                frame_idx
-                    .and_then(|idx| l.get_frame(idx))
-                    .map(|f| call_status::get_ccmt_count(f.call_status))
-            } else {
-                None
-            };
-
-            if let Some(extraargs) = extraargs_opt {
-                let extraargs_key = l.create_string("extraargs")?;
-                let extraargs_val = LuaValue::integer(extraargs as i64);
-                l.raw_set(&info_table, extraargs_key, extraargs_val);
+    // 'L' field
+    if what_str.contains('L') {
+        let k = l.create_string("activelines")?;
+        if let Some(ref lines) = info.activelines {
+            let lines_table = l.create_table(0, lines.len())?;
+            for &line in lines {
+                l.raw_set(
+                    &lines_table,
+                    LuaValue::integer(line as i64),
+                    LuaValue::boolean(true),
+                );
             }
+            l.raw_set(&info_table, k, lines_table);
+        } else {
+            l.raw_set(&info_table, k, LuaValue::nil());
         }
+    }
 
-        if what_str.contains('f') {
-            // Function itself
-            let func_key = l.create_string("func")?;
-            l.raw_set(&info_table, func_key, func);
-        }
-    } else if func.is_c_callable() {
-        // C function
-        if what_str.contains('S') {
-            let source_key = l.create_string("source")?;
-            let source_val = l.create_string("=[C]")?;
-            l.raw_set(&info_table, source_key, source_val);
-
-            let short_src_key = l.create_string("short_src")?;
-            let short_src_val = l.create_string("[C]")?;
-            l.raw_set(&info_table, short_src_key, short_src_val);
-
-            let linedefined_key = l.create_string("linedefined")?;
-            let linedefined_val = LuaValue::integer(-1);
-            l.raw_set(&info_table, linedefined_key, linedefined_val);
-
-            let lastlinedefined_key = l.create_string("lastlinedefined")?;
-            let lastlinedefined_val = LuaValue::integer(-1);
-            l.raw_set(&info_table, lastlinedefined_key, lastlinedefined_val);
-
-            let what_key = l.create_string("what")?;
-            let what_val = l.create_string("C")?;
-            l.raw_set(&info_table, what_key, what_val);
-        }
-
-        if what_str.contains('n') {
-            // Name resolution for C functions: look at calling frame
-            let (name_val, namewhat_val) = if let Some(level) = arg1.as_integer() {
-                let call_depth = l.call_depth();
-                let frame_idx = call_depth - 1 - (level as usize);
-                if let Some((namewhat, name)) = getfuncname(l, frame_idx) {
-                    (l.create_string(&name)?, l.create_string(namewhat)?)
-                } else {
-                    (LuaValue::nil(), l.create_string("")?)
-                }
-            } else {
-                (LuaValue::nil(), l.create_string("")?)
-            };
-
-            let name_key = l.create_string("name")?;
-            l.raw_set(&info_table, name_key, name_val);
-
-            let namewhat_key = l.create_string("namewhat")?;
-            l.raw_set(&info_table, namewhat_key, namewhat_val);
-        }
-
-        if what_str.contains('f') {
-            let func_key = l.create_string("func")?;
-            l.raw_set(&info_table, func_key, func);
-        }
-
-        if what_str.contains('t') {
-            // Tail call info for C functions
-            let istailcall_key = l.create_string("istailcall")?;
-            let istailcall_val = LuaValue::boolean(false);
-            l.raw_set(&info_table, istailcall_key, istailcall_val);
-
-            // extraargs for C functions
-            let extraargs_opt = if let Some(level) = arg1.as_integer() {
-                use crate::lua_vm::call_info::call_status;
-                // Convert relative level to absolute frame index
-                let current_depth = l.call_depth();
-                let frame_idx = current_depth.checked_sub(1 + level as usize);
-                frame_idx
-                    .and_then(|idx| l.get_frame(idx))
-                    .map(|f| call_status::get_ccmt_count(f.call_status))
-            } else {
-                None
-            };
-
-            if let Some(extraargs) = extraargs_opt {
-                let extraargs_key = l.create_string("extraargs")?;
-                let extraargs_val = LuaValue::integer(extraargs as i64);
-                l.raw_set(&info_table, extraargs_key, extraargs_val);
-            }
-        }
+    // 'f' field
+    if let Some(func) = info.func {
+        let k = l.create_string("func")?;
+        l.raw_set(&info_table, k, func);
     }
 
     l.push_value(info_table)?;

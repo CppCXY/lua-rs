@@ -3,6 +3,7 @@
 pub mod async_thread;
 pub mod call_info;
 mod const_string;
+pub mod debug_info;
 mod execute;
 pub mod lua_error;
 pub mod lua_limits;
@@ -19,6 +20,7 @@ use crate::lua_value::{
 };
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
+pub use crate::lua_vm::debug_info::DebugInfo;
 use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
