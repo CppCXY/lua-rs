@@ -46,8 +46,6 @@ pub struct GcHeader {
     pub marked: u8,   // Color and age bits combined
     pub size: u32,    // Size of the object in bytes (for memory tracking)
     pub index: usize, // Index in the GC pool
-    #[cfg(debug_assertions)]
-    released: bool,
 }
 
 impl Default for GcHeader {
@@ -60,8 +58,6 @@ impl Default for GcHeader {
             marked: G_NEW, // Age 0, no color bits set (gray state - WRONG for new objects!)
             size: 0,
             index: 0,
-            #[cfg(debug_assertions)]
-            released: false,
         }
     }
 }
@@ -83,8 +79,6 @@ impl GcHeader {
             marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
             size,
             index: 0,
-            #[cfg(debug_assertions)]
-            released: false,
         }
     }
 
@@ -282,31 +276,6 @@ impl GcHeader {
         !self.is_white()
     }
 
-    #[allow(unused)]
-    pub fn mark_released(&mut self) {
-        #[cfg(debug_assertions)]
-        {
-            self.released = true;
-        }
-    }
-
-    #[allow(unused)]
-    pub fn mark_unreleased(&mut self) {
-        #[cfg(debug_assertions)]
-        {
-            self.released = false;
-        }
-    }
-
-    #[allow(unused)]
-    pub fn is_released(&self) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            return self.released;
-        }
-
-        false
-    }
 }
 
 pub trait HasGcHeader {
@@ -401,30 +370,12 @@ impl<T: HasGcHeader> GcPtr<T> {
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_mut_ref(&self) -> &mut T {
-        if cfg!(debug_assertions) {
-            let ref_ = unsafe { &mut *(self.as_mut_ptr()) };
-            debug_assert!(
-                !ref_.header().is_released(),
-                "Accessing released GC object (as_mut_ref)!"
-            );
-            ref_
-        } else {
-            unsafe { &mut *(self.as_mut_ptr()) }
-        }
+        unsafe { &mut *(self.as_mut_ptr()) }
     }
 
     #[inline(always)]
     pub fn as_ref(&self) -> &T {
-        if cfg!(debug_assertions) {
-            let ref_ = unsafe { &*(self.as_ptr()) };
-            debug_assert!(
-                !ref_.header().is_released(),
-                "Accessing released GC object (as_ref)!"
-            );
-            ref_
-        } else {
-            unsafe { &*(self.as_ptr()) }
-        }
+        unsafe { &*(self.as_ptr()) }
     }
 
     pub fn is_null(&self) -> bool {
@@ -605,11 +556,6 @@ impl GcObjectOwner {
             GcObjectOwner::Binary(b) => &b.header,
         };
 
-        debug_assert!(
-            !header.is_released(),
-            "GC object is marked released but still accessed",
-        );
-
         header
     }
 
@@ -639,11 +585,6 @@ impl GcObjectOwner {
             GcObjectOwner::Userdata(u) => &mut u.header,
             GcObjectOwner::Binary(b) => &mut b.header,
         };
-
-        debug_assert!(
-            !header.is_released(),
-            "GC object is marked released but still accessed",
-        );
 
         header
     }
@@ -844,9 +785,6 @@ impl GcList {
     pub fn add(&mut self, mut value: GcObjectOwner) {
         let index = self.gc_list.len();
         value.header_mut_unchecked().index = index;
-        #[cfg(debug_assertions)]
-        value.header_mut_unchecked().mark_unreleased(); // Mark as unreleased for debug assertions
-
         self.gc_list.push(value);
     }
 
@@ -863,13 +801,7 @@ impl GcList {
         }
 
         // swap_remove: O(1) removal by moving last element to this position
-        if cfg!(debug_assertions) {
-            let mut removed_obj = self.gc_list.swap_remove(index);
-            removed_obj.header_mut().mark_released(); // Mark as released for debug assertions
-            removed_obj
-        } else {
-            self.gc_list.swap_remove(index)
-        }
+        self.gc_list.swap_remove(index)
     }
 
     /// Current number of live objects (always equals Vec length, no holes!)

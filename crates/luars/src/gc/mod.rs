@@ -352,6 +352,7 @@ pub struct GC {
     gc_error_msg: Option<String>,
 
     gc_memory_check: bool,
+
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2321,21 +2322,46 @@ impl GC {
     fn close_dead_threads_upvalues(&mut self) {
         let other_white = GcHeader::otherwhite(self.current_white);
 
+        // Helper: close an upvalue properly (matching C Lua 5.5's luaF_closethread)
+        // Must make_black + set value OLD0 to maintain GC invariant, because the
+        // upvalue may be referenced by a LIVE closure on another thread.
+        // remark_upvalues already marked the value; we just need to:
+        // 1. make the upvalue BLACK (prevent GRAY OLD upvalue from being skipped)
+        // 2. make the value G_OLD0 if upvalue is old (so sweep_gen keeps its color)
+        let close_upvalue_proper =
+            |upval_ptr: crate::gc::gc_object::UpvaluePtr, stack: &[crate::LuaValue]| {
+                let gc_upval = upval_ptr.as_mut_ref();
+                if gc_upval.data.is_open() {
+                    let stack_idx = gc_upval.data.get_stack_index();
+                    let value = stack.get(stack_idx).copied().unwrap_or(crate::LuaValue::nil());
+                    gc_upval.data.close(value);
+
+                    // Match C Lua's luaF_closethread: nw2black(uv) + luaC_barrier
+                    if !gc_upval.header.is_white() {
+                        gc_upval.header.make_black();
+                        // If upvalue is old, make value OLD0 too (like barrier's make_old0).
+                        // This prevents sweep_gen from resetting the value to
+                        // G_SURVIVAL + WHITE, which would cause it to be freed
+                        // even though the old upvalue references it.
+                        if gc_upval.header.is_old() {
+                            if let Some(value_gc) = value.as_gc_ptr() {
+                                if let Some(vh) = value_gc.header_mut() {
+                                    if !vh.is_old() {
+                                        vh.make_old0();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
         // Process dead threads with open upvalues collected during remark_upvalues
         for thread_ptr in std::mem::take(&mut self.dead_threads_with_upvalues) {
             let gc_thread = thread_ptr.as_mut_ref();
+            let stack = gc_thread.data.stack();
             for upval_ptr in gc_thread.data.open_upvalues() {
-                let upval_data = &mut upval_ptr.as_mut_ref().data;
-                if upval_data.is_open() {
-                    let stack_idx = upval_data.get_stack_index();
-                    let value = gc_thread
-                        .data
-                        .stack()
-                        .get(stack_idx)
-                        .copied()
-                        .unwrap_or(LuaValue::nil());
-                    upval_data.close(value);
-                }
+                close_upvalue_proper(*upval_ptr, stack);
             }
         }
 
@@ -2346,18 +2372,9 @@ impl GC {
                     let thread = thread_box.as_ref();
                     if thread.header.is_dead(other_white) && !thread.data.open_upvalues().is_empty()
                     {
+                        let stack = thread.data.stack();
                         for upval_ptr in thread.data.open_upvalues() {
-                            let upval_data = &mut upval_ptr.as_mut_ref().data;
-                            if upval_data.is_open() {
-                                let stack_idx = upval_data.get_stack_index();
-                                let value = thread
-                                    .data
-                                    .stack()
-                                    .get(stack_idx)
-                                    .copied()
-                                    .unwrap_or(LuaValue::nil());
-                                upval_data.close(value);
-                            }
+                            close_upvalue_proper(*upval_ptr, stack);
                         }
                     }
                 }
@@ -3079,6 +3096,283 @@ impl GC {
         }
     }
 
+    /// DEBUG: Post-atomic invariant check.
+    /// After atomic() and before sweep_gen(), verify that no alive object
+    /// references a dead (other_white) object. If this fires, the mark phase
+    /// missed a reference — the root cause of USE-AFTER-FREE.
+    #[cfg(debug_assertions)]
+    fn check_post_atomic_invariant(&self, _l: &LuaState) {
+        let other_white = 1 - self.current_white;
+
+        // Helper: check if a GC pointer points to a dead object
+        let is_dead_ptr = |gc_ptr: GcObjectPtr| -> bool {
+            gc_ptr
+                .header()
+                .map(|h| h.is_dead(other_white))
+                .unwrap_or(false)
+        };
+
+        // Helper: check if a LuaValue references a dead GC object
+        let check_value = |val: &LuaValue,
+                           container_kind: &str,
+                           container_ptr: u64,
+                           container_age: u8,
+                           container_marked: u8,
+                           context: &str| {
+            if let Some(ref_ptr) = val.as_gc_ptr() {
+                if is_dead_ptr(ref_ptr) {
+                    let ref_header = ref_ptr.header().unwrap();
+                    panic!(
+                        "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
+                         references DEAD {:?} at {:#x} (age={}, marked=0x{:02X}) via {}. \
+                         current_white={}",
+                        container_kind,
+                        container_ptr,
+                        container_age,
+                        container_marked,
+                        ref_ptr.kind(),
+                        ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
+                        ref_header.age(),
+                        ref_header.marked,
+                        context,
+                        self.current_white,
+                    );
+                }
+            }
+        };
+
+        // Process all GC lists
+        let lists: [(&str, &GcList); 4] = [
+            ("allgc", &self.allgc),
+            ("survival", &self.survival),
+            ("old1", &self.old1),
+            ("old", &self.old),
+        ];
+
+        for (list_name, list) in &lists {
+            for obj in list.iter() {
+                let gc_ptr = obj.as_gc_ptr();
+
+                // Skip dead objects — they're about to be swept
+                if is_dead_ptr(gc_ptr) {
+                    continue;
+                }
+
+                let header = obj.header();
+                let container_ptr = gc_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0);
+                let container_age = header.age();
+                let container_marked = header.marked;
+                let container_kind = format!("{:?}({})", gc_ptr.kind(), list_name);
+
+                match obj {
+                    GcObjectOwner::Table(t) => {
+                        // Check metatable
+                        if let Some(mt) = t.data.get_metatable() {
+                            check_value(
+                                &mt,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                "metatable",
+                            );
+                        }
+                        // Check all table entries (array + hash)
+                        t.data.for_each_entry(|k, v| {
+                            check_value(
+                                &k,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                "table_key",
+                            );
+                            check_value(
+                                &v,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                "table_value",
+                            );
+                        });
+                    }
+                    GcObjectOwner::Function(f) => {
+                        // Check upvalue pointers (they point to GcUpvalue objects)
+                        for (i, upval_ptr) in f.data.upvalues().iter().enumerate() {
+                            let uv_gc: GcObjectPtr = (*upval_ptr).into();
+                            if is_dead_ptr(uv_gc) {
+                                let ref_header = uv_gc.header().unwrap();
+                                panic!(
+                                    "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
+                                     references DEAD Upvalue at {:#x} (age={}, marked=0x{:02X}) via upvalue[{}]. \
+                                     current_white={}",
+                                    container_kind,
+                                    container_ptr,
+                                    container_age,
+                                    container_marked,
+                                    uv_gc.header().map(|h| h as *const _ as u64).unwrap_or(0),
+                                    ref_header.age(),
+                                    ref_header.marked,
+                                    i,
+                                    self.current_white,
+                                );
+                            }
+                            // Also check the upvalue's value
+                            let uv_val = upval_ptr.as_ref().data.get_value();
+                            check_value(
+                                &uv_val,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                &format!("upvalue[{}].value", i),
+                            );
+                        }
+                    }
+                    GcObjectOwner::CClosure(c) => {
+                        for (i, upval) in c.data.upvalues().iter().enumerate() {
+                            check_value(
+                                upval,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                &format!("cclosure_upvalue[{}]", i),
+                            );
+                        }
+                    }
+                    GcObjectOwner::RClosure(r) => {
+                        for (i, upval) in r.data.upvalues().iter().enumerate() {
+                            check_value(
+                                upval,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                &format!("rclosure_upvalue[{}]", i),
+                            );
+                        }
+                    }
+                    GcObjectOwner::Upvalue(u) => {
+                        let uv_val = u.data.get_value();
+                        let uv_kind = if u.data.is_open() { "open" } else { "closed" };
+                        if let Some(ref_ptr) = uv_val.as_gc_ptr() {
+                            if is_dead_ptr(ref_ptr) {
+                                // Find the closure that owns this upvalue
+                                let upval_raw = u.as_ref() as *const _ as u64;
+                                let mut owner_info = String::from("owner_closure=UNKNOWN");
+                                for (olist_name, olist) in &lists {
+                                    for oobj in olist.iter() {
+                                        if let GcObjectOwner::Function(f) = oobj {
+                                            for (ui, uptr) in f.data.upvalues().iter().enumerate() {
+                                                if uptr.as_ref() as *const _ as u64 == upval_raw {
+                                                    let fh = f.header();
+                                                    owner_info = format!(
+                                                        "owner_closure=Function({})[uv#{}] age={} marked=0x{:02X}",
+                                                        olist_name, ui, fh.age(), fh.marked
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let ref_header = ref_ptr.header().unwrap();
+                                panic!(
+                                    "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
+                                     references DEAD {:?} at {:#x} (age={}, marked=0x{:02X}) via upvalue_value({}). \
+                                     current_white={}, {}",
+                                    container_kind,
+                                    container_ptr,
+                                    container_age,
+                                    container_marked,
+                                    ref_ptr.kind(),
+                                    ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
+                                    ref_header.age(),
+                                    ref_header.marked,
+                                    uv_kind,
+                                    self.current_white,
+                                    owner_info,
+                                );
+                            }
+                        }
+                    }
+                    GcObjectOwner::Thread(t) => {
+                        let state = &t.data;
+                        let stack = state.stack();
+                        // Check ALL stack slots (not just up to top)
+                        for i in 0..stack.len() {
+                            check_value(
+                                &stack[i],
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                &format!("stack[{}] (top={})", i, state.get_top()),
+                            );
+                        }
+                        // Check error_object
+                        let err = &state.error_object;
+                        if !err.is_nil() {
+                            check_value(
+                                err,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                "error_object",
+                            );
+                        }
+                        // Check open upvalues
+                        for (i, upval_ptr) in state.open_upvalues().iter().enumerate() {
+                            let uv_gc: GcObjectPtr = (*upval_ptr).into();
+                            if is_dead_ptr(uv_gc) {
+                                let ref_header = uv_gc.header().unwrap();
+                                panic!(
+                                    "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
+                                     references DEAD open Upvalue at {:#x} (age={}, marked=0x{:02X}) via open_upvalue[{}]. \
+                                     current_white={}",
+                                    container_kind,
+                                    container_ptr,
+                                    container_age,
+                                    container_marked,
+                                    uv_gc.header().map(|h| h as *const _ as u64).unwrap_or(0),
+                                    ref_header.age(),
+                                    ref_header.marked,
+                                    i,
+                                    self.current_white,
+                                );
+                            }
+                        }
+                    }
+                    GcObjectOwner::Userdata(u) => {
+                        if let Some(mt) = u.data.get_metatable() {
+                            check_value(
+                                &mt,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                "userdata_metatable",
+                            );
+                        }
+                    }
+                    // String/Binary have no GC references
+                    GcObjectOwner::String(_) | GcObjectOwner::Binary(_) => {}
+                }
+            }
+        }
+
+        // Also check finobj and tobefnz lists
+        for gc_ptr in &self.finobj {
+            if !is_dead_ptr(*gc_ptr) {
+                // Alive finobj — check its references
+                // We can only check via header since we don't have the owner
+                // Skip for now (the main lists cover most cases)
+            }
+        }
+    }
+
     fn young_collection(&mut self, l: &mut LuaState) {
         self.stats.minor_collections += 1;
 
@@ -3101,6 +3395,10 @@ impl GC {
 
         // Phase 2: Atomic phase
         self.atomic(l);
+
+        // DEBUG: Verify GC invariant — no alive object references a dead object
+        #[cfg(debug_assertions)]
+        self.check_post_atomic_invariant(l);
 
         // Phase 3: Sweep young generation and track promoted bytes
         self.gc_state = GcState::SwpAllGc;
@@ -3165,9 +3463,9 @@ impl GC {
              ptrs: &mut HashMap<u64, (String, usize, usize, u8)>| {
                 let stack = state.stack();
                 let top = state.get_top();
-                // Only scan 0..top — values above top are stale and will be
-                // cleared to nil by atomic phase (matching C Lua's traversethread).
-                let scan_end = top.min(stack.len());
+                // Scan ENTIRE stack (including above top) to detect stale references
+                // that atomic should have cleared but didn't.
+                let scan_end = stack.len();
                 for i in 0..scan_end {
                     let v = &stack[i];
                     if v.is_collectable() {
@@ -3308,8 +3606,10 @@ impl GC {
 
         // Phase 1: Sweep allgc list (G_NEW objects)
         // Dead objects are freed, survivors are promoted to survival (G_SURVIVAL)
+        // Objects with ages changed by barrier (e.g., G_OLD0) go to old1.
         let allgc_objects = self.allgc.take_all();
         let mut new_survival: Vec<GcObjectOwner> = Vec::new();
+        let mut new_old1: Vec<GcObjectOwner> = Vec::new();
 
         for mut gc_owner in allgc_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
@@ -3340,16 +3640,42 @@ impl GC {
                     self.release_object(gc_owner);
                 }
             } else {
-                gc_owner.header_mut().set_age(G_SURVIVAL);
-                gc_owner.header_mut().make_white(self.current_white);
-                new_survival.push(gc_owner);
+                // BUG FIX: Match C Lua 5.5's sweepgen age-dependent logic.
+                // Forward barrier can change an allgc object from G_NEW to G_OLD0
+                // (via make_old0) while it stays in the allgc list. If we blindly
+                // reset to G_SURVIVAL + WHITE, we destroy the barrier's work:
+                // the object would become young+white, but its OLD container won't
+                // be re-traversed in the next minor cycle → reference is lost →
+                // USE-AFTER-FREE.
+                //
+                // C Lua 5.5 sweepgen:
+                //   if (getage == G_NEW) → G_SURVIVAL + make_white
+                //   else → nextage[age], keep color (BLACK)
+                let age = header.age();
+                if age == G_NEW {
+                    // Normal G_NEW path: promote to SURVIVAL, make white
+                    gc_owner.header_mut().set_age(G_SURVIVAL);
+                    gc_owner.header_mut().make_white(self.current_white);
+                    new_survival.push(gc_owner);
+                } else {
+                    // Age changed by barrier (e.g., G_OLD0). Use next_age and
+                    // keep current color (BLACK) so mark_old can re-traverse.
+                    let new_age = Self::next_age(age);
+                    gc_owner.header_mut().set_age(new_age);
+                    if new_age >= G_OLD1 {
+                        let size = gc_owner.header().size as isize;
+                        added_old1 += size;
+                        new_old1.push(gc_owner);
+                    } else {
+                        new_survival.push(gc_owner);
+                    }
+                }
             }
         }
 
         // Phase 2: Sweep survival list (G_SURVIVAL objects)
         // Dead objects are freed, survivors are promoted to old1 (G_OLD1)
         let survival_objects = self.survival.take_all();
-        let mut new_old1: Vec<GcObjectOwner> = Vec::new();
 
         for mut gc_owner in survival_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
