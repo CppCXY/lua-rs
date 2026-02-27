@@ -352,7 +352,6 @@ pub struct GC {
     gc_error_msg: Option<String>,
 
     gc_memory_check: bool,
-
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2328,33 +2327,34 @@ impl GC {
         // remark_upvalues already marked the value; we just need to:
         // 1. make the upvalue BLACK (prevent GRAY OLD upvalue from being skipped)
         // 2. make the value G_OLD0 if upvalue is old (so sweep_gen keeps its color)
-        let close_upvalue_proper =
-            |upval_ptr: crate::gc::gc_object::UpvaluePtr, stack: &[crate::LuaValue]| {
-                let gc_upval = upval_ptr.as_mut_ref();
-                if gc_upval.data.is_open() {
-                    let stack_idx = gc_upval.data.get_stack_index();
-                    let value = stack.get(stack_idx).copied().unwrap_or(crate::LuaValue::nil());
-                    gc_upval.data.close(value);
+        let close_upvalue_proper = |upval_ptr: crate::gc::gc_object::UpvaluePtr,
+                                    stack: &[crate::LuaValue]| {
+            let gc_upval = upval_ptr.as_mut_ref();
+            if gc_upval.data.is_open() {
+                let stack_idx = gc_upval.data.get_stack_index();
+                let value = stack
+                    .get(stack_idx)
+                    .copied()
+                    .unwrap_or(crate::LuaValue::nil());
+                gc_upval.data.close(value);
 
-                    // Match C Lua's luaF_closethread: nw2black(uv) + luaC_barrier
-                    if !gc_upval.header.is_white() {
-                        gc_upval.header.make_black();
-                        // If upvalue is old, make value OLD0 too (like barrier's make_old0).
-                        // This prevents sweep_gen from resetting the value to
-                        // G_SURVIVAL + WHITE, which would cause it to be freed
-                        // even though the old upvalue references it.
-                        if gc_upval.header.is_old() {
-                            if let Some(value_gc) = value.as_gc_ptr() {
-                                if let Some(vh) = value_gc.header_mut() {
-                                    if !vh.is_old() {
-                                        vh.make_old0();
-                                    }
-                                }
-                            }
-                        }
+                // Match C Lua's luaF_closethread: nw2black(uv) + luaC_barrier
+                if !gc_upval.header.is_white() {
+                    gc_upval.header.make_black();
+                    // If upvalue is old, make value OLD0 too (like barrier's make_old0).
+                    // This prevents sweep_gen from resetting the value to
+                    // G_SURVIVAL + WHITE, which would cause it to be freed
+                    // even though the old upvalue references it.
+                    if gc_upval.header.is_old()
+                        && let Some(value_gc) = value.as_gc_ptr()
+                        && let Some(vh) = value_gc.header_mut()
+                        && !vh.is_old()
+                    {
+                        vh.make_old0();
                     }
                 }
-            };
+            }
+        };
 
         // Process dead threads with open upvalues collected during remark_upvalues
         for thread_ptr in std::mem::take(&mut self.dead_threads_with_upvalues) {
@@ -3119,25 +3119,25 @@ impl GC {
                            container_age: u8,
                            container_marked: u8,
                            context: &str| {
-            if let Some(ref_ptr) = val.as_gc_ptr() {
-                if is_dead_ptr(ref_ptr) {
-                    let ref_header = ref_ptr.header().unwrap();
-                    panic!(
-                        "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
+            if let Some(ref_ptr) = val.as_gc_ptr()
+                && is_dead_ptr(ref_ptr)
+            {
+                let ref_header = ref_ptr.header().unwrap();
+                panic!(
+                    "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
                          references DEAD {:?} at {:#x} (age={}, marked=0x{:02X}) via {}. \
                          current_white={}",
-                        container_kind,
-                        container_ptr,
-                        container_age,
-                        container_marked,
-                        ref_ptr.kind(),
-                        ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
-                        ref_header.age(),
-                        ref_header.marked,
-                        context,
-                        self.current_white,
-                    );
-                }
+                    container_kind,
+                    container_ptr,
+                    container_age,
+                    container_marked,
+                    ref_ptr.kind(),
+                    ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
+                    ref_header.age(),
+                    ref_header.marked,
+                    context,
+                    self.current_white,
+                );
             }
         };
 
@@ -3257,44 +3257,47 @@ impl GC {
                     GcObjectOwner::Upvalue(u) => {
                         let uv_val = u.data.get_value();
                         let uv_kind = if u.data.is_open() { "open" } else { "closed" };
-                        if let Some(ref_ptr) = uv_val.as_gc_ptr() {
-                            if is_dead_ptr(ref_ptr) {
-                                // Find the closure that owns this upvalue
-                                let upval_raw = u.as_ref() as *const _ as u64;
-                                let mut owner_info = String::from("owner_closure=UNKNOWN");
-                                for (olist_name, olist) in &lists {
-                                    for oobj in olist.iter() {
-                                        if let GcObjectOwner::Function(f) = oobj {
-                                            for (ui, uptr) in f.data.upvalues().iter().enumerate() {
-                                                if uptr.as_ref() as *const _ as u64 == upval_raw {
-                                                    let fh = f.header();
-                                                    owner_info = format!(
-                                                        "owner_closure=Function({})[uv#{}] age={} marked=0x{:02X}",
-                                                        olist_name, ui, fh.age(), fh.marked
-                                                    );
-                                                }
+                        if let Some(ref_ptr) = uv_val.as_gc_ptr()
+                            && is_dead_ptr(ref_ptr)
+                        {
+                            // Find the closure that owns this upvalue
+                            let upval_raw = u.as_ref() as *const _ as u64;
+                            let mut owner_info = String::from("owner_closure=UNKNOWN");
+                            for (olist_name, olist) in &lists {
+                                for oobj in olist.iter() {
+                                    if let GcObjectOwner::Function(f) = oobj {
+                                        for (ui, uptr) in f.data.upvalues().iter().enumerate() {
+                                            if uptr.as_ref() as *const _ as u64 == upval_raw {
+                                                let fh = f.header();
+                                                owner_info = format!(
+                                                    "owner_closure=Function({})[uv#{}] age={} marked=0x{:02X}",
+                                                    olist_name,
+                                                    ui,
+                                                    fh.age(),
+                                                    fh.marked
+                                                );
                                             }
                                         }
                                     }
                                 }
-                                let ref_header = ref_ptr.header().unwrap();
-                                panic!(
-                                    "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
+                            }
+                            let ref_header = ref_ptr.header().unwrap();
+                            panic!(
+                                "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
                                      references DEAD {:?} at {:#x} (age={}, marked=0x{:02X}) via upvalue_value({}). \
                                      current_white={}, {}",
-                                    container_kind,
-                                    container_ptr,
-                                    container_age,
-                                    container_marked,
-                                    ref_ptr.kind(),
-                                    ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
-                                    ref_header.age(),
-                                    ref_header.marked,
-                                    uv_kind,
-                                    self.current_white,
-                                    owner_info,
-                                );
-                            }
+                                container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                ref_ptr.kind(),
+                                ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
+                                ref_header.age(),
+                                ref_header.marked,
+                                uv_kind,
+                                self.current_white,
+                                owner_info,
+                            );
                         }
                     }
                     GcObjectOwner::Thread(t) => {

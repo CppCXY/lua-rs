@@ -275,7 +275,6 @@ impl GcHeader {
     pub fn is_marked(&self) -> bool {
         !self.is_white()
     }
-
 }
 
 pub trait HasGcHeader {
@@ -544,7 +543,7 @@ impl GcObjectOwner {
     }
 
     pub fn header(&self) -> &GcHeader {
-        let header = match self {
+        (match self {
             GcObjectOwner::String(s) => &s.header,
             GcObjectOwner::Table(t) => &t.header,
             GcObjectOwner::Function(f) => &f.header,
@@ -554,9 +553,7 @@ impl GcObjectOwner {
             GcObjectOwner::Thread(t) => &t.header,
             GcObjectOwner::Userdata(u) => &u.header,
             GcObjectOwner::Binary(b) => &b.header,
-        };
-
-        header
+        }) as _
     }
 
     pub(crate) fn header_unchecked(&self) -> &GcHeader {
@@ -574,7 +571,7 @@ impl GcObjectOwner {
     }
 
     pub fn header_mut(&mut self) -> &mut GcHeader {
-        let header = match self {
+        (match self {
             GcObjectOwner::String(s) => &mut s.header,
             GcObjectOwner::Table(t) => &mut t.header,
             GcObjectOwner::Function(f) => &mut f.header,
@@ -584,9 +581,7 @@ impl GcObjectOwner {
             GcObjectOwner::Thread(t) => &mut t.header,
             GcObjectOwner::Userdata(u) => &mut u.header,
             GcObjectOwner::Binary(b) => &mut b.header,
-        };
-
-        header
+        }) as _
     }
 
     pub(crate) fn header_mut_unchecked(&mut self) -> &mut GcHeader {
