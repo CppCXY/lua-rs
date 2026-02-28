@@ -669,12 +669,6 @@ impl GC {
         drop(obj);
     }
 
-    /// Static version of release_object for use in closures that can't borrow `self`.
-    #[inline]
-    fn release_object_static(obj: GcObjectOwner) {
-        drop(obj);
-    }
-
     // Debug accessors for list lengths
     pub fn allgc_len(&self) -> usize {
         self.allgc.len()
@@ -2577,7 +2571,7 @@ impl GC {
 
                                 let obj = self.allgc.remove(gc_ptr);
                                 self.total_bytes -= obj.size() as isize;
-                                GC::release_object_static(obj);
+                                drop(obj);
                             }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW
@@ -2622,7 +2616,7 @@ impl GC {
 
                                 let obj = self.survival.remove(gc_ptr);
                                 self.total_bytes -= obj.size() as isize;
-                                GC::release_object_static(obj);
+                                drop(obj);
                             }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW，移回 allgc
@@ -2667,7 +2661,7 @@ impl GC {
 
                                 let obj = self.old.remove(gc_ptr);
                                 self.total_bytes -= obj.size() as isize;
-                                GC::release_object_static(obj);
+                                drop(obj);
                             }
                         } else {
                             // 存活对象：重置为当前白色 + G_NEW，移回 allgc
@@ -3047,7 +3041,7 @@ impl GC {
                             GC::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                         }
                         *total_bytes -= gc_owner.size() as isize;
-                        GC::release_object_static(gc_owner);
+                        drop(gc_owner);
                     }
                 } else {
                     gc_owner.header_mut().set_age(G_OLD);

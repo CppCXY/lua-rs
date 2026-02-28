@@ -1718,6 +1718,7 @@ impl LuaState {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
         unsafe { &mut *self.vm }
     }
@@ -1929,6 +1930,7 @@ impl LuaState {
     // ===== Object Creation =====
 
     /// Create table
+    #[inline(always)]
     pub fn create_table(&mut self, narr: usize, nrec: usize) -> CreateResult {
         self.vm_mut().create_table(narr, nrec)
     }

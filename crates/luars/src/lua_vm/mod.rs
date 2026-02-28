@@ -1122,6 +1122,7 @@ impl LuaVM {
     }
 
     /// Create a new table
+    #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> CreateResult {
         self.object_allocator
             .create_table(&mut self.gc, array_size, hash_size)

@@ -322,27 +322,15 @@ impl NativeTable {
         let tags_size = new_size as usize; // Each tag is 1 byte
         let total_size = values_size + lenhint_size + tags_size;
 
-        // Allocate new memory
+        // Allocate new memory — zeroed, since LUA_VNIL==0 and Value::nil()==0
         let layout = Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
-        let start_ptr = unsafe { alloc::alloc(layout) };
+        let start_ptr = unsafe { alloc::alloc_zeroed(layout) };
         if start_ptr.is_null() {
             panic!("Failed to allocate array");
         }
 
         // Set array pointer to point at lenhint position
         let new_array = unsafe { start_ptr.add(values_size) };
-
-        // Initialize lenhint to 0
-        unsafe {
-            *(new_array as *mut u32) = 0;
-        }
-
-        // Initialize all tags to LUA_VNIL (0) and all values to 0 — single memset
-        // Since tags are at new_array+4 and values at start_ptr, and LUA_VNIL == 0,
-        // we can zero the entire allocation in one shot.
-        unsafe {
-            ptr::write_bytes(start_ptr, 0, total_size);
-        }
 
         // Copy old data if exists
         if !self.array.is_null() && old_size > 0 {
@@ -421,26 +409,11 @@ impl NativeTable {
             return Self::hash_mem_bytes(0) - old_bytes + extra_delta;
         }
 
-        // Allocate new hash array
+        // Allocate new hash array — zeroed, since Node{nil,nil,0} is all-zero bytes
         let layout = Layout::array::<Node>(new_size).unwrap();
-        let new_node = unsafe { alloc::alloc(layout) as *mut Node };
+        let new_node = unsafe { alloc::alloc_zeroed(layout) as *mut Node };
         if new_node.is_null() {
             panic!("Failed to allocate hash nodes");
-        }
-
-        // Initialize all nodes
-        unsafe {
-            for i in 0..new_size {
-                let node = new_node.add(i);
-                ptr::write(
-                    node,
-                    Node {
-                        value: LuaValue::nil(),
-                        key: LuaValue::nil(),
-                        next: 0,
-                    },
-                );
-            }
         }
 
         self.node = new_node;
