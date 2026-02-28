@@ -104,9 +104,7 @@ pub struct LuaVM {
 }
 
 impl LuaVM {
-    pub fn new(mut option: SafeOption) -> Box<Self> {
-        // Ensure base_c_stack_depth matches initial max_c_stack_depth
-        option.base_c_stack_depth = option.max_c_stack_depth;
+    pub fn new(option: SafeOption) -> Box<Self> {
         let mut gc = GC::new(option.clone());
         gc.set_temporary_memory_limit(isize::MAX / 2);
         let mut object_allocator = ObjectAllocator::new();
