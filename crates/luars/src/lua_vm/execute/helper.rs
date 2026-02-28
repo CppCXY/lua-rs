@@ -458,7 +458,7 @@ pub fn lookup_from_metatable(
 }
 
 /// Get a metamethod from a metatable value — implements Lua 5.5's fasttm/luaT_gettm pattern.
-/// For TmKind <= Eq (first 6 metamethods), uses bit-flag cache to skip hash lookups
+/// Uses bit-flag cache (u32, covering all 26 TmKind values) to skip hash lookups
 /// when the metamethod is known absent.
 #[inline]
 fn get_metamethod_from_metatable(
@@ -469,8 +469,8 @@ fn get_metamethod_from_metatable(
     if let Some(mt) = metatable.as_table_mut() {
         let tm_idx = tm_kind as u8;
 
-        // fasttm: for cacheable TMs (Index..Eq), check bit-flag first
-        if tm_idx <= TmKind::Eq as u8 && mt.no_tm(tm_idx) {
+        // fasttm: check bit-flag cache — now covers all 26 TmKind values
+        if mt.no_tm(tm_idx) {
             return None; // Known absent — skip hash lookup entirely
         }
 
@@ -480,7 +480,7 @@ fn get_metamethod_from_metatable(
         // to skip float normalization and integer check in raw_get
         let result = mt.impl_table.get_shortstr_fast(&event_key);
 
-        if result.is_none() && tm_idx <= TmKind::Eq as u8 {
+        if result.is_none() {
             // Cache that this TM is absent (luaT_gettm pattern)
             mt.set_tm_absent(tm_idx);
         }

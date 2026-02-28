@@ -1444,7 +1444,100 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         continue;
                     }
 
-                    // Cold path: C function or __call metamethod
+                    // Semi-hot path: __call metamethod on table — inline the common case
+                    // where the metamethod is a Lua function, avoiding handle_call overhead
+                    // and using unsafe pointer ops for argument shifting.
+                    if func.ttistable() {
+                        let table = unsafe { &mut *(func.value.ptr as *mut GcTable) };
+                        let meta = table.data.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            const TM_CALL_BIT: u8 = TmKind::Call as u8;
+                            if !mt.no_tm(TM_CALL_BIT) {
+                                let event_key =
+                                    lua_state.vm_mut().const_strings.get_tm_value(TmKind::Call);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                    if mm.is_lua_function() {
+                                        // Compute nargs
+                                        let nargs = if b != 0 {
+                                            b - 1
+                                        } else {
+                                            let current_top = lua_state.get_top();
+                                            if current_top > func_idx + 1 {
+                                                current_top - func_idx - 1
+                                            } else {
+                                                0
+                                            }
+                                        };
+
+                                        // Shift arguments right by 1 using unsafe ptr copy
+                                        // Layout: [func, arg1, ..., argN]
+                                        // After:  [mm, func, arg1, ..., argN]
+                                        unsafe {
+                                            let sp = lua_state.stack_mut().as_mut_ptr();
+                                            let src = sp.add(func_idx + 1);
+                                            std::ptr::copy(src, src.add(1), nargs);
+                                            *src = func; // original callable → 1st arg
+                                            *sp.add(func_idx) = mm; // metamethod → func slot
+                                        }
+
+                                        let new_nargs = nargs + 1;
+                                        let nresults = if c == 0 { -1 } else { (c - 1) as i32 };
+
+                                        // For b==0 case, stack_top needs +1 for shifted arg
+                                        if b == 0 {
+                                            let top = lua_state.get_top();
+                                            lua_state.set_top_raw(top + 1);
+                                        }
+
+                                        let lua_func = unsafe { mm.as_lua_function_unchecked() };
+                                        let new_chunk = lua_func.chunk();
+
+                                        save_pc!();
+                                        lua_state.push_lua_frame(
+                                            &mm,
+                                            func_idx + 1,
+                                            new_nargs,
+                                            nresults,
+                                            new_chunk.param_count,
+                                            new_chunk.max_stack_size,
+                                            new_chunk as *const _,
+                                        )?;
+
+                                        // Track __call depth for debug.getinfo extraargs
+                                        {
+                                            use crate::lua_vm::call_info::call_status;
+                                            let new_fi = lua_state.call_depth() - 1;
+                                            let ci = lua_state.get_call_info_mut(new_fi);
+                                            ci.call_status =
+                                                call_status::set_ccmt_count(ci.call_status, 1);
+                                        }
+
+                                        // Inline callee entry
+                                        frame_idx = lua_state.call_depth() - 1;
+                                        let ci = lua_state.get_call_info(frame_idx);
+                                        pc = ci.pc as usize;
+                                        base = ci.base;
+                                        chunk_ptr = ci.chunk_ptr;
+                                        chunk = unsafe { &*chunk_ptr };
+                                        upvalue_ptrs = unsafe {
+                                            let lf: *const _ = ci.func.as_lua_function_unchecked();
+                                            (&*lf).upvalues()
+                                        };
+                                        constants = &chunk.constants;
+                                        code = &chunk.code;
+                                        continue;
+                                    }
+                                    // __call is not a Lua function — fall to cold path
+                                } else {
+                                    // __call absent — cache it
+                                    mt.set_tm_absent(TM_CALL_BIT);
+                                }
+                            }
+                        }
+                    }
+
+                    // Cold path: C function or non-table __call metamethod
                     save_pc!();
                     match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {
@@ -1775,7 +1868,95 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    // Protect metamethod call
+                    // Fast path: v1 is a table with a Lua metamethod.
+                    // Non-recursive: push the metamethod frame and continue
+                    // the main loop instead of call_tm_res → lua_execute recursion.
+                    // Result is delivered via handle_pending_ops on RETURN.
+                    let base_mm = lua_state.get_frame_base(frame_idx);
+                    let v1 = unsafe { *lua_state.stack().get_unchecked(base_mm + a) };
+                    if v1.ttistable() {
+                        let table = unsafe { &mut *(v1.value.ptr as *mut GcTable) };
+                        let meta = table.data.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            let tm_idx = c as u8;
+                            if !mt.no_tm(tm_idx) {
+                                let tm_kind = unsafe { TmKind::from_u8_unchecked(tm_idx) };
+                                let event_key =
+                                    lua_state.vm_mut().const_strings.get_tm_value(tm_kind);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                    let v2 =
+                                        unsafe { *lua_state.stack().get_unchecked(base_mm + b) };
+
+                                    if mm.is_lua_function() {
+                                        // Non-recursive Lua metamethod call:
+                                        // Push [mm, v1, v2] above ci_top, push frame,
+                                        // mark caller PENDING_FINISH, continue main loop.
+                                        let func_pos = lua_state.current_frame_top_unchecked();
+                                        let top = lua_state.get_top();
+                                        if top != func_pos {
+                                            lua_state.set_top_raw(func_pos);
+                                        }
+                                        unsafe {
+                                            let sp = lua_state.stack_mut().as_mut_ptr();
+                                            *sp.add(func_pos) = mm;
+                                            *sp.add(func_pos + 1) = v1;
+                                            *sp.add(func_pos + 2) = v2;
+                                        }
+                                        lua_state.set_top_raw(func_pos + 3);
+
+                                        let lua_func = unsafe { mm.as_lua_function_unchecked() };
+                                        let chunk_mm = lua_func.chunk();
+                                        save_pc!();
+                                        lua_state.push_lua_frame(
+                                            &mm,
+                                            func_pos + 1,
+                                            2,
+                                            1,
+                                            chunk_mm.param_count,
+                                            chunk_mm.max_stack_size,
+                                            chunk_mm as *const _,
+                                        )?;
+                                        // Mark caller for pending result
+                                        {
+                                            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                                            let ci = lua_state.get_call_info_mut(frame_idx);
+                                            ci.call_status |= CIST_PENDING_FINISH;
+                                        }
+                                        continue 'startfunc;
+                                    }
+
+                                    // C function metamethod — use call_tm_res
+                                    let pi = unsafe { *code.get_unchecked(pc - 2) };
+                                    let result_reg = pi.get_a() as usize;
+                                    save_pc!();
+                                    let result = match call_tm_res(lua_state, mm, v1, v2) {
+                                        Ok(r) => r,
+                                        Err(LuaError::Yield) => {
+                                            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                                            let ci = lua_state.get_call_info_mut(frame_idx);
+                                            ci.pending_finish_get = result_reg as i32;
+                                            ci.call_status |= CIST_PENDING_FINISH;
+                                            return Err(LuaError::Yield);
+                                        }
+                                        Err(e) => return Err(e),
+                                    };
+                                    let cur_base = lua_state.get_frame_base(frame_idx);
+                                    unsafe {
+                                        *lua_state
+                                            .stack_mut()
+                                            .get_unchecked_mut(cur_base + result_reg) = result
+                                    };
+                                    restore_state!();
+                                    continue;
+                                } else {
+                                    mt.set_tm_absent(tm_idx);
+                                }
+                            }
+                        }
+                    }
+
+                    // Slow path: string coercion, userdata, v2 metamethods
                     save_pc!();
                     metamethod::handle_mmbin(lua_state, base, a, b, c, pc, code, frame_idx)?;
                     restore_state!();
@@ -1921,8 +2102,64 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let rb = lua_state.stack_mut()[base + b];
-                    if let Some(table) = rb.as_table() {
-                        if !table.has_metatable() {
+                    if rb.ttistable() {
+                        let table_gc = unsafe { &mut *(rb.value.ptr as *mut GcTable) };
+                        let table = &mut table_gc.data;
+                        let meta = table.meta_ptr();
+                        if meta.is_null() {
+                            // No metatable — raw len
+                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                            continue;
+                        }
+                        // Has metatable — inline fasttm check for __len
+                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                        const TM_LEN_BIT: u8 = TmKind::Len as u8;
+                        if mt.no_tm(TM_LEN_BIT) {
+                            // __len cached absent — raw len
+                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                            continue;
+                        }
+                        let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
+                        if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                            if mm.is_lua_function() {
+                                // Non-recursive __len: push metamethod frame,
+                                // result via handle_pending_ops on RETURN.
+                                let func_pos = lua_state.current_frame_top_unchecked();
+                                let top = lua_state.get_top();
+                                if top != func_pos {
+                                    lua_state.set_top_raw(func_pos);
+                                }
+                                unsafe {
+                                    let sp = lua_state.stack_mut().as_mut_ptr();
+                                    *sp.add(func_pos) = mm;
+                                    *sp.add(func_pos + 1) = rb;
+                                    *sp.add(func_pos + 2) = rb;
+                                }
+                                lua_state.set_top_raw(func_pos + 3);
+
+                                let lua_func = unsafe { mm.as_lua_function_unchecked() };
+                                let chunk_mm = lua_func.chunk();
+                                save_pc!();
+                                lua_state.push_lua_frame(
+                                    &mm,
+                                    func_pos + 1,
+                                    2,
+                                    1,
+                                    chunk_mm.param_count,
+                                    chunk_mm.max_stack_size,
+                                    chunk_mm as *const _,
+                                )?;
+                                {
+                                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+                                    let ci = lua_state.get_call_info_mut(frame_idx);
+                                    ci.call_status |= CIST_PENDING_FINISH;
+                                }
+                                continue 'startfunc;
+                            }
+                            // __len is not Lua function — fall to handle_len
+                        } else {
+                            // __len absent — cache and use raw len
+                            mt.set_tm_absent(TM_LEN_BIT);
                             setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
                             continue;
                         }

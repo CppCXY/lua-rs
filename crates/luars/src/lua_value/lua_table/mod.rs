@@ -5,15 +5,16 @@ use super::lua_value::LuaValue;
 use crate::{LuaResult, TablePtr, lua_vm::LuaError};
 use native_table::NativeTable;
 
-/// Mask covering TM_INDEX through TM_EQ (bits 0-5) — matches Lua 5.5's maskflags
-const MASK_FLAGS: u8 = (1u8 << 6) - 1; // 0x3F
+/// Mask covering all TM flags — any bit set to 1 represents a cacheable TM.
+/// With u32, we cover all 26 TmKind values (bits 0-25).
+const MASK_FLAGS: u32 = (1u32 << 26) - 1;
 
 pub struct LuaTable {
     meta: TablePtr,
     /// Bit-flag cache for absent metamethods (fasttm).
     /// Bit i set ⇒ TmKind(i) is known absent in this table (when used as a metatable).
-    /// Only bits 0..5 (Index..Eq) are cached, matching Lua 5.5's maskflags.
-    flags: u8,
+    /// Covers all 26 TmKind values.
+    flags: u32,
     pub(crate) impl_table: NativeTable,
 }
 
@@ -38,13 +39,13 @@ impl LuaTable {
     /// Returns true if the metamethod is definitely NOT present (skip hash lookup).
     #[inline(always)]
     pub(crate) fn no_tm(&self, tm: u8) -> bool {
-        self.flags & (1u8 << tm) != 0
+        self.flags & (1u32 << tm) != 0
     }
 
     /// Cache that TmKind `tm` is absent from this table.
     #[inline(always)]
     pub(crate) fn set_tm_absent(&mut self, tm: u8) {
-        self.flags |= 1u8 << tm;
+        self.flags |= 1u32 << tm;
     }
 
     /// Get the raw metatable pointer (avoids LuaValue allocation for fasttm checks)
