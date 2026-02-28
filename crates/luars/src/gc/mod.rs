@@ -580,6 +580,20 @@ impl GC {
         self.stats.bytes_allocated += size;
     }
 
+    /// Track memory delta from a table resize.
+    /// Mirrors Lua 5.5's `luaM_realloc_` which adjusts GCdebt by the size delta.
+    /// Also updates `header.size` to reflect the new total object size.
+    #[inline]
+    pub fn track_resize(&mut self, table_ptr: TablePtr, delta: isize) {
+        if delta != 0 {
+            self.gc_debt -= delta; // allocation grows debt, deallocation shrinks it
+            // Update stored size in the GC header
+            let header = &mut table_ptr.as_mut_ref().header;
+            let old_header_size = header.size as isize;
+            header.size = (old_header_size + delta).max(0) as u32;
+        }
+    }
+
     pub fn fixed(&mut self, gc_ptr: GcObjectPtr) {
         // Find which list the object is in and remove it
         let gc_owner = if let Some(header) = gc_ptr.header() {
@@ -794,12 +808,12 @@ impl GC {
     /// Check if an object needs finalization (__gc metamethod)
     /// Only tables, userdata, and threads can have __gc
     fn needs_finalization(&self, gc_ptr: GcObjectPtr) -> bool {
-        let metatable = match gc_ptr {
-            GcObjectPtr::Table(table_ptr) => table_ptr.as_ref().data.get_metatable(),
-            GcObjectPtr::Userdata(ud_ptr) => ud_ptr.as_ref().data.get_metatable(),
-            _ => {
-                return false;
-            }
+        let metatable = if gc_ptr.is_table() {
+            gc_ptr.as_table_ptr().as_ref().data.get_metatable()
+        } else if gc_ptr.is_userdata() {
+            gc_ptr.as_userdata_ptr().as_ref().data.get_metatable()
+        } else {
+            return false;
         };
 
         if let Some(metatable) = metatable {
@@ -826,9 +840,8 @@ impl GC {
             return;
         };
 
-        match gc_ptr {
-            GcObjectPtr::Table(_) | GcObjectPtr::Userdata(_) | GcObjectPtr::Thread(_) => {}
-            _ => return,
+        if !gc_ptr.is_table() && !gc_ptr.is_userdata() && !gc_ptr.is_thread() {
+            return;
         }
 
         let Some(header) = gc_ptr.header_mut() else {
@@ -1397,8 +1410,8 @@ impl GC {
             }
 
             for gc_ptr in to_clear_hash_set {
-                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                    Self::remove_dead_string_from_intern(l, str_ptr);
+                if gc_ptr.is_string() {
+                    Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                 }
                 // Remove from the appropriate generation list
                 if let Some(header) = gc_ptr.header() {
@@ -1525,7 +1538,7 @@ impl GC {
 
         let mut weak_list = std::mem::take(&mut self.weak)
             .iter()
-            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .map(|ptr| GcObjectPtr::from(*ptr))
             .collect::<Vec<_>>();
         self.weak.clear();
         // Process weak list: handle TOUCHED objects
@@ -1534,7 +1547,7 @@ impl GC {
 
         let mut allweak_list = std::mem::take(&mut self.allweak)
             .iter()
-            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .map(|ptr| GcObjectPtr::from(*ptr))
             .collect::<Vec<_>>();
         self.allweak.clear();
 
@@ -1544,7 +1557,7 @@ impl GC {
 
         let mut ephemeron_list = std::mem::take(&mut self.ephemeron)
             .iter()
-            .map(|ptr| GcObjectPtr::Table(*ptr))
+            .map(|ptr| GcObjectPtr::from(*ptr))
             .collect::<Vec<_>>();
         self.ephemeron.clear();
 
@@ -2206,26 +2219,31 @@ impl GC {
     /// Like Lua 5.5's propagatemark: "nw2black(o);" then traverse
     /// Sets object to BLACK before traversing children
     fn propagate_mark_one(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) -> usize {
-        match gc_ptr {
-            GcObjectPtr::Table(table_ptr) => self.traverse_table(l, table_ptr),
-            GcObjectPtr::Function(func_ptr) => self.traverse_function(l, func_ptr),
-            GcObjectPtr::CClosure(closure_ptr) => self.traverse_cclosure(l, closure_ptr),
-            GcObjectPtr::RClosure(closure_ptr) => self.traverse_rclosure(l, closure_ptr),
-            GcObjectPtr::Userdata(userdata_ptr) => {
-                // Userdata: mark the userdata itself and its metatable if any
-                let gc_ud = userdata_ptr.as_mut_ref();
-                gc_ud.header.make_black();
-                if let Some(metatable) = gc_ud.data.get_metatable() {
-                    // Mark metatable if exists (it's a LuaValue, could be table)
-                    self.mark_value(l, &metatable);
-                }
-
-                self.gen_link(gc_ptr);
-
-                1 // Estimate of work done
+        if gc_ptr.is_table() {
+            self.traverse_table(l, gc_ptr.as_table_ptr())
+        } else if gc_ptr.is_function() {
+            self.traverse_function(l, gc_ptr.as_function_ptr())
+        } else if gc_ptr.is_cclosure() {
+            self.traverse_cclosure(l, gc_ptr.as_cclosure_ptr())
+        } else if gc_ptr.is_rclosure() {
+            self.traverse_rclosure(l, gc_ptr.as_rclosure_ptr())
+        } else if gc_ptr.is_userdata() {
+            // Userdata: mark the userdata itself and its metatable if any
+            let ud_ptr = gc_ptr.as_userdata_ptr();
+            let gc_ud = ud_ptr.as_mut_ref();
+            gc_ud.header.make_black();
+            if let Some(metatable) = gc_ud.data.get_metatable() {
+                // Mark metatable if exists (it's a LuaValue, could be table)
+                self.mark_value(l, &metatable);
             }
-            GcObjectPtr::Thread(thread_ptr) => self.traverse_thread(l, thread_ptr),
-            _ => 0,
+
+            self.gen_link(gc_ptr);
+
+            1 // Estimate of work done
+        } else if gc_ptr.is_thread() {
+            self.traverse_thread(l, gc_ptr.as_thread_ptr())
+        } else {
+            0
         }
     }
 
@@ -2553,8 +2571,8 @@ impl GC {
                                 }
                                 *index += 1;
                             } else {
-                                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                                    Self::remove_dead_string_from_intern(l, str_ptr);
+                                if gc_ptr.is_string() {
+                                    Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                                 }
 
                                 let obj = self.allgc.remove(gc_ptr);
@@ -2598,8 +2616,8 @@ impl GC {
                                 }
                                 *index += 1;
                             } else {
-                                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                                    Self::remove_dead_string_from_intern(l, str_ptr);
+                                if gc_ptr.is_string() {
+                                    Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                                 }
 
                                 let obj = self.survival.remove(gc_ptr);
@@ -2643,8 +2661,8 @@ impl GC {
                                 }
                                 *index += 1;
                             } else {
-                                if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                                    Self::remove_dead_string_from_intern(l, str_ptr);
+                                if gc_ptr.is_string() {
+                                    Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                                 }
 
                                 let obj = self.old.remove(gc_ptr);
@@ -2767,8 +2785,9 @@ impl GC {
                             header_mut.make_gray();
                         }
                         grayagain.push(gc_ptr);
-                    } else if let GcObjectPtr::Upvalue(upval_ptr) = gc_ptr {
-                        let gc_upval = upval_ptr.as_mut_ref();
+                    } else if gc_ptr.is_upvalue() {
+                        let uv_ptr = gc_ptr.as_upvalue_ptr();
+                        let gc_upval = uv_ptr.as_mut_ref();
                         if gc_upval.data.is_open() {
                             header_mut.make_gray();
                         } else {
@@ -3024,8 +3043,8 @@ impl GC {
                         tobefnz.push(gc_ptr);
                         survivors.push(gc_owner);
                     } else {
-                        if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                            GC::remove_dead_string_from_intern(l, str_ptr);
+                        if gc_ptr.is_string() {
+                            GC::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                         }
                         *total_bytes -= gc_owner.size() as isize;
                         GC::release_object_static(gc_owner);
@@ -3134,7 +3153,7 @@ impl GC {
                     ref_ptr.kind(),
                     ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
                     ref_header.age(),
-                    ref_header.marked,
+                    ref_header.marked(),
                     context,
                     self.current_white,
                 );
@@ -3161,7 +3180,7 @@ impl GC {
                 let header = obj.header();
                 let container_ptr = gc_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0);
                 let container_age = header.age();
-                let container_marked = header.marked;
+                let container_marked = header.marked();
                 let container_kind = format!("{:?}({})", gc_ptr.kind(), list_name);
 
                 match obj {
@@ -3213,7 +3232,7 @@ impl GC {
                                     container_marked,
                                     uv_gc.header().map(|h| h as *const _ as u64).unwrap_or(0),
                                     ref_header.age(),
-                                    ref_header.marked,
+                                    ref_header.marked(),
                                     i,
                                     self.current_white,
                                 );
@@ -3274,7 +3293,7 @@ impl GC {
                                                     olist_name,
                                                     ui,
                                                     fh.age(),
-                                                    fh.marked
+                                                    fh.marked()
                                                 );
                                             }
                                         }
@@ -3293,7 +3312,7 @@ impl GC {
                                 ref_ptr.kind(),
                                 ref_ptr.header().map(|h| h as *const _ as u64).unwrap_or(0),
                                 ref_header.age(),
-                                ref_header.marked,
+                                ref_header.marked(),
                                 uv_kind,
                                 self.current_white,
                                 owner_info,
@@ -3341,7 +3360,7 @@ impl GC {
                                     container_marked,
                                     uv_gc.header().map(|h| h as *const _ as u64).unwrap_or(0),
                                     ref_header.age(),
-                                    ref_header.marked,
+                                    ref_header.marked(),
                                     i,
                                     self.current_white,
                                 );
@@ -3499,7 +3518,7 @@ impl GC {
                         continue;
                     }
                     let name = format!("thread_{}_{}", list_name, idx);
-                    collect_from_thread(&name, &t.data, t.header.marked, &mut ptrs);
+                    collect_from_thread(&name, &t.data, t.header.marked(), &mut ptrs);
                 }
             }
         }
@@ -3589,7 +3608,7 @@ impl GC {
                 slot,
                 top,
                 above_top,
-                header.marked,
+                header.marked(),
                 header.age(),
                 thread_marked,
                 thread_info
@@ -3634,8 +3653,8 @@ impl GC {
                     new_survival.push(gc_owner);
                 } else {
                     // No finalizer: safe to free
-                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    if gc_ptr.is_string() {
+                        Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                     }
                     #[cfg(debug_assertions)]
                     Self::validate_not_on_stack(&gc_owner, &stack_ptrs, &self.old);
@@ -3666,7 +3685,7 @@ impl GC {
                     let new_age = Self::next_age(age);
                     gc_owner.header_mut().set_age(new_age);
                     if new_age >= G_OLD1 {
-                        let size = gc_owner.header().size as isize;
+                        let size = gc_owner.size() as isize;
                         added_old1 += size;
                         new_old1.push(gc_owner);
                     } else {
@@ -3693,13 +3712,13 @@ impl GC {
                     gc_owner.header_mut().make_white(self.current_white);
                     gc_owner.header_mut().set_age(G_OLD1);
                     self.tobefnz.push(gc_ptr);
-                    let size = gc_owner.header().size as isize;
+                    let size = gc_owner.size() as isize;
                     added_old1 += size;
                     new_old1.push(gc_owner);
                 } else {
                     // No finalizer: safe to free
-                    if let GcObjectPtr::String(str_ptr) = gc_ptr {
-                        Self::remove_dead_string_from_intern(l, str_ptr);
+                    if gc_ptr.is_string() {
+                        Self::remove_dead_string_from_intern(l, gc_ptr.as_string_ptr());
                     }
                     #[cfg(debug_assertions)]
                     Self::validate_not_on_stack(&gc_owner, &stack_ptrs, &self.old);
@@ -3707,7 +3726,7 @@ impl GC {
                     self.release_object(gc_owner);
                 }
             } else {
-                let size = header.size as isize;
+                let size = gc_owner.size() as isize;
                 gc_owner.header_mut().set_age(G_OLD1);
                 added_old1 += size;
                 new_old1.push(gc_owner);
@@ -3761,10 +3780,9 @@ impl GC {
                         header_mut.set_age(new_age);
 
                         // Track bytes becoming OLD1
-                        if new_age == G_OLD1
-                            && let Some(h) = gc_ptr.header()
-                        {
-                            added_old1 += h.size as isize;
+                        // Note: size estimate (GcHeader no longer stores size)
+                        if new_age == G_OLD1 {
+                            added_old1 += 64; // fixed estimate; exact size unavailable from GcObjectPtr
                         }
                     }
                 }
@@ -3785,10 +3803,8 @@ impl GC {
                     let new_age = Self::next_age(age);
                     header.set_age(new_age);
 
-                    if new_age == G_OLD1
-                        && let Some(h) = gc_ptr.header()
-                    {
-                        added_old1 += h.size as isize;
+                    if new_age == G_OLD1 {
+                        added_old1 += 64; // fixed estimate; exact size unavailable from GcObjectPtr
                     }
                 }
             }
@@ -3948,37 +3964,34 @@ impl GC {
     /// }
     /// ```.
     fn really_mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
-        self.gc_marked += gc_ptr.header().map(|it| it.size as isize).unwrap_or(0);
-        match gc_ptr {
-            GcObjectPtr::String(_) | GcObjectPtr::Binary(_) => {
-                gc_ptr.header_mut().unwrap().make_black(); // Leaves become black immediately
+        self.gc_marked += 64; // fixed estimate; exact size unavailable from GcObjectPtr
+        if gc_ptr.is_string() || gc_ptr.is_binary() {
+            gc_ptr.header_mut().unwrap().make_black(); // Leaves become black immediately
+        } else if gc_ptr.is_upvalue() {
+            let uv_ptr = gc_ptr.as_upvalue_ptr();
+            let uv = uv_ptr.as_mut_ref();
+            if uv.data.is_open() {
+                uv.header.make_gray();
+            } else {
+                uv.header.make_black();
             }
-            GcObjectPtr::Upvalue(upval_ptr) => {
-                let uv = upval_ptr.as_mut_ref();
-                if uv.data.is_open() {
-                    uv.header.make_gray();
-                } else {
-                    uv.header.make_black();
-                }
 
-                let value = &uv.data.get_value();
-                self.mark_value(l, value);
+            let value = &uv.data.get_value();
+            self.mark_value(l, value);
+        } else if gc_ptr.is_userdata() {
+            let ud_ptr = gc_ptr.as_userdata_ptr();
+            let ud = ud_ptr.as_mut_ref();
+            ud.header.make_black();
+            if let Some(metatable) = ud.data.get_metatable() {
+                self.mark_object(l, metatable.as_gc_ptr().unwrap());
             }
-            GcObjectPtr::Userdata(u_ptr) => {
-                let ud = u_ptr.as_mut_ref();
-                ud.header.make_black();
-                if let Some(metatable) = ud.data.get_metatable() {
-                    self.mark_object(l, metatable.as_gc_ptr().unwrap());
-                }
-            }
-            _ => {
-                let header = gc_ptr.header_mut().unwrap();
-                //  Only add to gray list if not already gray
-                // This prevents infinite loops in converge_ephemerons
-                if !header.is_gray() {
-                    header.make_gray(); // Others become gray
-                    self.gray.push(gc_ptr);
-                }
+        } else {
+            let header = gc_ptr.header_mut().unwrap();
+            //  Only add to gray list if not already gray
+            // This prevents infinite loops in converge_ephemerons
+            if !header.is_gray() {
+                header.make_gray(); // Others become gray
+                self.gray.push(gc_ptr);
             }
         }
     }
@@ -4080,14 +4093,15 @@ impl GC {
         };
 
         // Convert GcObjectPtr to LuaValue
-        let obj_value = match gc_ptr {
-            GcObjectPtr::Table(ptr) => LuaValue::table(ptr),
-            GcObjectPtr::Userdata(ptr) => LuaValue::userdata(ptr),
-            GcObjectPtr::Thread(ptr) => LuaValue::thread(ptr),
+        let obj_value = if gc_ptr.is_table() {
+            LuaValue::table(gc_ptr.as_table_ptr())
+        } else if gc_ptr.is_userdata() {
+            LuaValue::userdata(gc_ptr.as_userdata_ptr())
+        } else if gc_ptr.is_thread() {
+            LuaValue::thread(gc_ptr.as_thread_ptr())
+        } else {
             // Other types don't support __gc
-            _ => {
-                return;
-            }
+            return;
         };
 
         // Get __gc metamethod

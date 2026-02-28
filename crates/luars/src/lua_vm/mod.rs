@@ -1039,7 +1039,14 @@ impl LuaVM {
         let Some(table) = table_value.as_table_mut() else {
             return false;
         };
-        let new_key = table.raw_set(&key, value);
+        let (new_key, delta) = table.raw_set(&key, value);
+
+        // Track table resize delta in GC
+        if delta != 0
+            && let Some(table_ptr) = table_value.as_table_ptr()
+        {
+            self.gc.track_resize(table_ptr, delta);
+        }
 
         // GC backward barrier (luaC_barrierback)
         let need_barrier = (new_key && key.iscollectable()) || value.iscollectable();
@@ -1059,7 +1066,14 @@ impl LuaVM {
         let Some(table) = table_value.as_table_mut() else {
             return false;
         };
-        table.raw_seti(key, value);
+        let delta = table.raw_seti(key, value);
+
+        // Track table resize delta in GC
+        if delta != 0
+            && let Some(table_ptr) = table_value.as_table_ptr()
+        {
+            self.gc.track_resize(table_ptr, delta);
+        }
 
         // GC backward barrier
         if value.is_collectable()

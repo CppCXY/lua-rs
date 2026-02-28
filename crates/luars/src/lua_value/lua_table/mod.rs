@@ -86,6 +86,13 @@ impl LuaTable {
         self.impl_table.hash_size()
     }
 
+    /// Current data memory footprint (array + hash allocations, not including GcTable header).
+    /// Used by GC to track resize deltas.
+    #[inline]
+    pub fn compute_mem_size(&self) -> usize {
+        self.impl_table.compute_mem_size()
+    }
+
     pub fn is_array(&self) -> bool {
         // NativeTable always has both array and hash parts
         self.impl_table.hash_size() == 0
@@ -97,8 +104,8 @@ impl LuaTable {
     }
 
     #[inline(always)]
-    pub(crate) fn raw_seti(&mut self, key: i64, value: LuaValue) {
-        self.impl_table.set_int(key, value);
+    pub(crate) fn raw_seti(&mut self, key: i64, value: LuaValue) -> isize {
+        self.impl_table.set_int(key, value)
     }
 
     #[inline(always)]
@@ -106,16 +113,16 @@ impl LuaTable {
         self.impl_table.raw_get(key)
     }
 
-    /// return true if new key inserted, false if updated existing key
+    /// return (new_key_inserted, mem_delta)
     #[inline(always)]
-    pub(crate) fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
-        let new_key = self.impl_table.raw_set(key, value);
+    pub(crate) fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> (bool, isize) {
+        let (new_key, delta) = self.impl_table.raw_set(key, value);
         if new_key {
             // New key inserted — invalidate TM cache (this table might be a metatable)
             // Matches Lua 5.5: invalidateTMcache(t) in luaH_finishset
             self.invalidate_tm_cache();
         }
-        new_key
+        (new_key, delta)
     }
 
     /// Returns Ok(Some((key, value))) for next entry, Ok(None) for end of table,

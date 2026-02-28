@@ -90,6 +90,23 @@ impl NativeTable {
         lsize
     }
 
+    /// Compute memory bytes for an array part of given size.
+    #[inline(always)]
+    fn array_mem_bytes(asize: u32) -> isize {
+        if asize == 0 {
+            0
+        } else {
+            (asize as usize * (std::mem::size_of::<Value>() + 1) + std::mem::size_of::<u32>())
+                as isize
+        }
+    }
+
+    /// Compute memory bytes for a hash part of given node count.
+    #[inline(always)]
+    fn hash_mem_bytes(sizenode: usize) -> isize {
+        (sizenode * std::mem::size_of::<Node>()) as isize
+    }
+
     /// Get hash size (number of nodes)
     #[inline(always)]
     fn sizenode(&self) -> usize {
@@ -274,8 +291,9 @@ impl NativeTable {
         }
     }
 
-    /// Resize array part
-    pub(crate) fn resize_array(&mut self, new_size: u32) {
+    /// Resize array part. Returns memory delta (new_bytes - old_bytes).
+    pub(crate) fn resize_array(&mut self, new_size: u32) -> isize {
+        let old_bytes = Self::array_mem_bytes(self.asize);
         if new_size == 0 {
             if !self.array.is_null() && self.asize > 0 {
                 // Free old array
@@ -293,7 +311,7 @@ impl NativeTable {
             }
             self.array = ptr::null_mut();
             self.asize = 0;
-            return;
+            return Self::array_mem_bytes(0) - old_bytes;
         }
 
         let old_size = self.asize;
@@ -361,10 +379,11 @@ impl NativeTable {
 
         self.array = new_array;
         self.asize = new_size;
+        Self::array_mem_bytes(self.asize) - old_bytes
     }
 
-    /// Resize hash part
-    fn resize_hash(&mut self, new_lsize: u8) {
+    /// Resize hash part. Returns memory delta (new_bytes - old_bytes).
+    fn resize_hash(&mut self, new_lsize: u8) -> isize {
         let old_size = self.sizenode();
         let new_size = if new_lsize == 0 {
             0
@@ -372,18 +391,34 @@ impl NativeTable {
             1usize << new_lsize
         };
 
+        let old_bytes = Self::hash_mem_bytes(old_size);
         let old_node = self.node;
         let was_dummy = self.is_dummy();
 
         if new_size == 0 {
-            // Switch to dummy
-            if !was_dummy && old_size > 0 {
-                let layout = Layout::array::<Node>(old_size).unwrap();
-                unsafe { alloc::dealloc(old_node as *mut u8, layout) };
-            }
+            // Shrink hash to empty — but must still reinsert old live entries
+            // so integer keys can migrate to the array via raw_set.
             self.node = ptr::null_mut();
             self.lsizenode = 0;
-            return;
+            self.lastfree = ptr::null_mut();
+
+            let mut extra_delta: isize = 0;
+            if !was_dummy && old_size > 0 {
+                for i in 0..old_size {
+                    unsafe {
+                        let old_n = old_node.add(i);
+                        if !(*old_n).key.is_nil() && !(*old_n).value.is_nil() {
+                            let key = (*old_n).key;
+                            let value = (*old_n).value;
+                            let (_, rd) = self.raw_set(&key, value);
+                            extra_delta += rd;
+                        }
+                    }
+                }
+                let old_layout = Layout::array::<Node>(old_size).unwrap();
+                unsafe { alloc::dealloc(old_node as *mut u8, old_layout) };
+            }
+            return Self::hash_mem_bytes(0) - old_bytes + extra_delta;
         }
 
         // Allocate new hash array
@@ -421,6 +456,7 @@ impl NativeTable {
         // 2. Those strings may have been collected (freed)
         // 3. Hashing a freed string → use-after-free → crash (0xC0000005)
         // This matches C Lua 5.5's reinserthash: `if (!isempty(gval(old)))`
+        let mut extra_delta: isize = 0;
         if !was_dummy && old_size > 0 {
             for i in 0..old_size {
                 unsafe {
@@ -431,7 +467,8 @@ impl NativeTable {
                         let value = (*old_n).value;
                         // Must use raw_set here, not set_node!
                         // raw_set will put integer keys in [1..asize] into array part only
-                        self.raw_set(&key, value);
+                        let (_, rd) = self.raw_set(&key, value);
+                        extra_delta += rd;
                     }
                 }
             }
@@ -439,6 +476,7 @@ impl NativeTable {
             let old_layout = Layout::array::<Node>(old_size).unwrap();
             unsafe { alloc::dealloc(old_node as *mut u8, old_layout) };
         }
+        Self::hash_mem_bytes(self.sizenode()) - old_bytes + extra_delta
     }
 
     /// Port of Lua 5.5's rehash from ltable.c
@@ -448,7 +486,7 @@ impl NativeTable {
     /// This ensures integer keys are properly distributed between array and
     /// hash parts, even when the table is sparse (e.g., after GC clearing
     /// entries from a weak table).
-    fn rehash(&mut self, extra_key: &LuaValue) {
+    fn rehash(&mut self, extra_key: &LuaValue) -> isize {
         const MAXABITS: usize = 30; // max bits for array index (Lua 5.5 uses 26-31)
 
         // nums[i] = number of integer keys k where 2^(i-1) < k <= 2^i
@@ -495,7 +533,7 @@ impl NativeTable {
         }
 
         // Resize both parts
-        self.resize(optimal_asize, hash_entries as u32);
+        self.resize(optimal_asize, hash_entries as u32)
     }
 
     /// Port of Lua 5.5's numusearray
@@ -617,19 +655,22 @@ impl NativeTable {
 
     /// Resize both array and hash parts. Port of Lua 5.5's luaH_resize.
     /// Moves integer keys to array and non-integer keys to hash.
-    fn resize(&mut self, new_asize: u32, new_hash_count: u32) {
+    /// Returns memory delta (new - old).
+    fn resize(&mut self, new_asize: u32, new_hash_count: u32) -> isize {
         let old_asize = self.asize;
+        let mut delta: isize = 0;
+
+        let new_lsize = if new_hash_count > 0 {
+            Self::compute_lsizenode(new_hash_count)
+        } else {
+            0
+        };
 
         // Shrink array if needed: move excess array entries to hash
         // (not common but Lua 5.5 supports it)
         if new_asize < old_asize {
             // First, resize hash to accommodate new entries
-            let new_lsize = if new_hash_count > 0 {
-                Self::compute_lsizenode(new_hash_count)
-            } else {
-                0
-            };
-            self.resize_hash(new_lsize);
+            delta += self.resize_hash(new_lsize);
 
             // Move array entries [new_asize+1..old_asize] to hash
             for i in (new_asize + 1)..=old_asize {
@@ -640,72 +681,17 @@ impl NativeTable {
                     }
                 }
             }
-            self.resize_array(new_asize);
+            delta += self.resize_array(new_asize);
         } else {
             // Grow or keep array the same
             if new_asize > old_asize {
-                self.resize_array(new_asize);
+                delta += self.resize_array(new_asize);
             }
 
-            // Resize hash
-            let new_lsize = if new_hash_count > 0 {
-                Self::compute_lsizenode(new_hash_count)
-            } else {
-                0
-            };
-
-            // Save old hash data
-            let save_node = self.node;
-            let save_size = self.sizenode();
-            let save_dummy = self.is_dummy();
-
-            // Allocate new hash
-            if new_lsize > 0 {
-                let new_size = 1usize << new_lsize;
-                let layout = Layout::array::<Node>(new_size).unwrap();
-                let new_node = unsafe { alloc::alloc(layout) as *mut Node };
-                if new_node.is_null() {
-                    panic!("Failed to allocate hash nodes");
-                }
-                unsafe {
-                    for i in 0..new_size {
-                        let node = new_node.add(i);
-                        ptr::write(
-                            node,
-                            Node {
-                                value: LuaValue::nil(),
-                                key: LuaValue::nil(),
-                                next: 0,
-                            },
-                        );
-                    }
-                }
-                self.node = new_node;
-                self.lsizenode = new_lsize;
-                self.lastfree = unsafe { new_node.add(new_size) };
-            } else {
-                self.node = ptr::null_mut();
-                self.lsizenode = 0;
-                self.lastfree = ptr::null_mut();
-            }
-
-            // Re-insert old hash entries
-            if !save_dummy && save_size > 0 {
-                for i in 0..save_size {
-                    unsafe {
-                        let old_n = save_node.add(i);
-                        if !(*old_n).key.is_nil() && !(*old_n).value.is_nil() {
-                            let key = (*old_n).key;
-                            let value = (*old_n).value;
-                            // Use raw_set: integer keys in [1..new_asize] go to array
-                            self.raw_set(&key, value);
-                        }
-                    }
-                }
-                let old_layout = Layout::array::<Node>(save_size).unwrap();
-                unsafe { alloc::dealloc(save_node as *mut u8, old_layout) };
-            }
+            // Resize hash (handles save/reinsert/dealloc internally)
+            delta += self.resize_hash(new_lsize);
         }
+        delta
     }
 
     /// Get main position for a key (hash index)
@@ -794,21 +780,22 @@ impl NativeTable {
         false
     }
 
-    /// Set value in array part
+    /// Set value in array part. Returns memory delta from any resize.
     #[inline(always)]
-    pub fn set_int(&mut self, key: i64, value: LuaValue) {
+    pub fn set_int(&mut self, key: i64, value: LuaValue) -> isize {
         // Try fast path first
         if self.fast_seti(key, value) {
-            return;
+            return 0;
         }
 
-        self.set_int_slow(key, value);
+        self.set_int_slow(key, value)
     }
 
     /// Slow path of set_int — called when fast_seti already failed.
     /// Handles resize/push and hash fallback.
+    /// Returns memory delta from resize operations.
     #[inline(always)]
-    pub fn set_int_slow(&mut self, key: i64, value: LuaValue) {
+    pub fn set_int_slow(&mut self, key: i64, value: LuaValue) -> isize {
         // Key outside array range: push optimization for sequential insertion
         if key >= 1 && !value.is_nil() {
             // Fast check: key == asize + 1 means appending right after array end.
@@ -817,7 +804,7 @@ impl NativeTable {
             if key == asize + 1 || (key > asize && key == self.len() as i64 + 1) {
                 // This is a push operation, expand array
                 let new_size = ((key as u32).next_power_of_two()).max(4);
-                self.resize_array(new_size);
+                let delta = self.resize_array(new_size);
                 unsafe {
                     self.write_array(key, value);
                 }
@@ -829,13 +816,13 @@ impl NativeTable {
                 if !self.node.is_null() {
                     self.migrate_hash_int_keys_to_array();
                 }
-                return;
+                return delta;
             }
         }
 
         // Put in hash part (rehash will rebalance later if needed)
         let key_val = LuaValue::integer(key);
-        self.set_node(key_val, value);
+        self.set_node(key_val, value)
     }
 
     /// Fast GETFIELD path - for short string keys (most common in field access)
@@ -1071,11 +1058,11 @@ impl NativeTable {
         ((to as isize - from as isize) / std::mem::size_of::<Node>() as isize) as i32
     }
 
-    fn set_node(&mut self, key: LuaValue, value: LuaValue) {
+    fn set_node(&mut self, key: LuaValue, value: LuaValue) -> isize {
         // If setting to nil, find existing node and only clear value (keep key for next() iteration)
         if value.is_nil() {
             if self.sizenode() == 0 {
-                return;
+                return 0;
             }
             unsafe {
                 let mp = self.mainposition(&key);
@@ -1084,11 +1071,11 @@ impl NativeTable {
                     // Skip dead keys (value nil) - avoid UAF on freed strings
                     if !(*node).value.is_nil() && (*node).key == key {
                         (*node).value = LuaValue::nil();
-                        return;
+                        return 0;
                     }
                     let next = (*node).next;
                     if next == 0 {
-                        return; // Key not found, nothing to do
+                        return 0; // Key not found, nothing to do
                     }
                     node = node.offset(next as isize);
                 }
@@ -1097,7 +1084,15 @@ impl NativeTable {
 
         if self.sizenode() == 0 {
             // Need to allocate hash part
-            self.resize_hash(2); // Start with 4 nodes
+            let delta = self.resize_hash(2); // Start with 4 nodes
+            // Fall through to insert below — hash is now allocated
+            let mp = self.mainposition(&key);
+            unsafe {
+                (*mp).key = key;
+                (*mp).value = value;
+                (*mp).next = 0;
+            }
+            return delta;
         }
 
         let mp = self.mainposition(&key);
@@ -1113,7 +1108,7 @@ impl NativeTable {
                 (*mp).key = key;
                 (*mp).value = value;
                 (*mp).next = 0;
-                return;
+                return 0;
             }
             if (*mp).value.is_nil() {
                 // Dead key: main position slot is available for reuse.
@@ -1130,14 +1125,14 @@ impl NativeTable {
                     if !(*scan).value.is_nil() && (*scan).key == key {
                         // Key exists alive in chain — just update value
                         (*scan).value = value;
-                        return;
+                        return 0;
                     }
                 }
                 // Key not found in chain — safe to reuse this dead slot
                 (*mp).key = key;
                 (*mp).value = value;
                 // Keep (*mp).next as-is — other chains may pass through here
-                return;
+                return 0;
             }
 
             // Main position is occupied by a LIVE entry.
@@ -1167,7 +1162,7 @@ impl NativeTable {
                     (*mp).key = key;
                     (*mp).value = value;
                     (*mp).next = 0;
-                    return;
+                    return 0;
                 }
                 // No free position - fall through to resize
             } else {
@@ -1180,7 +1175,7 @@ impl NativeTable {
                     // Skip dead keys (value nil) to avoid UAF on freed strings
                     if !(*node).value.is_nil() && (*node).key == key {
                         (*node).value = value;
-                        return;
+                        return 0;
                     }
                     let next = (*node).next;
                     if next == 0 {
@@ -1202,7 +1197,7 @@ impl NativeTable {
                         (*free_node).next = 0;
                     }
                     (*mp).next = Self::node_offset(mp, free_node);
-                    return;
+                    return 0;
                 }
                 // No free position - fall through to resize
             }
@@ -1211,9 +1206,11 @@ impl NativeTable {
             // This rebalances integer keys between array and hash parts,
             // which is critical when GC has cleared weak table entries
             // and corrupted lenhint, causing integer keys to end up in hash.
-            self.rehash(&key);
+            let mut delta = self.rehash(&key);
             // After rehash, use raw_set to insert with the new layout
-            self.raw_set(&key, value);
+            let (_, rd) = self.raw_set(&key, value);
+            delta += rd;
+            delta
         }
     }
 
@@ -1247,11 +1244,11 @@ impl NativeTable {
     //     }
     // }
 
-    /// Generic set - returns true if new key was inserted
+    /// Generic set - returns (new_key_inserted, mem_delta)
     #[inline(always)]
     /// Port of lua5.5's newcheckedkey logic in luaH_set/luaH_setint
     /// CRITICAL INVARIANT: integer keys in [1..asize] must ONLY exist in array part!
-    pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+    pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> (bool, isize) {
         // Normalize float keys to integer if they have no fractional part
         // This ensures t[3.0] and t[3] refer to the same slot
         // Only check actual float type (ttisfloat), not integers
@@ -1281,7 +1278,7 @@ impl NativeTable {
                 if value.is_nil() {
                     self.set_node(key, LuaValue::nil());
                 }
-                return was_nil && !value.is_nil();
+                return (was_nil && !value.is_nil(), 0);
             }
 
             // Integer key outside current array range
@@ -1293,12 +1290,12 @@ impl NativeTable {
                 let current_len = self.len() as i64;
                 if i == current_len + 1 {
                     let new_size = ((i as u32).next_power_of_two()).max(4);
-                    self.resize_array(new_size);
+                    let delta = self.resize_array(new_size);
                     unsafe {
                         self.write_array(i, value);
                     }
                     self.migrate_hash_int_keys_to_array();
-                    return true;
+                    return (true, delta);
                 }
             }
         }
@@ -1306,8 +1303,8 @@ impl NativeTable {
         // Not in array range - use hash part
         // lua5.5's insertkey/newcheckedkey logic
         let key_exists = self.get_from_hash(&key).is_some();
-        self.set_node(key, value);
-        !key_exists && !value.is_nil()
+        let delta = self.set_node(key, value);
+        (!key_exists && !value.is_nil(), delta)
     }
 
     /// Get length (#t) — Lua 5.5 boundary algorithm (luaH_getn).
@@ -1455,6 +1452,25 @@ impl NativeTable {
     #[inline(always)]
     pub fn hash_size(&self) -> usize {
         self.sizenode()
+    }
+
+    /// Compute the current memory footprint of this table's data.
+    /// Matches Lua 5.5's `luaH_size`:
+    ///   - Array part: asize * (sizeof(Value) + 1) + sizeof(u32)  (values + tags + lenhint)
+    ///   - Hash part: sizenode * sizeof(Node)
+    #[inline]
+    pub fn compute_mem_size(&self) -> usize {
+        let mut sz = 0usize;
+        if self.asize > 0 {
+            // concretesize: asize * (sizeof(Value) + 1) + sizeof(u32)
+            sz += self.asize as usize * (std::mem::size_of::<Value>() + 1)
+                + std::mem::size_of::<u32>();
+        }
+        let hs = self.sizenode();
+        if hs > 0 {
+            sz += hs * std::mem::size_of::<Node>();
+        }
+        sz
     }
 
     /// Remove value at lua_index (1-based), shifting elements backward

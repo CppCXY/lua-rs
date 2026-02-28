@@ -1,5 +1,5 @@
 use crate::{
-    GcObjectKind, LuaFunction, LuaTable,
+    GcObjectKind, LuaFunction, LuaTable, LuaValue,
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
 };
@@ -30,22 +30,71 @@ pub const MASKGCBITS: u8 = MASKCOLORS | AGEBITS;
 /// GC object header - embedded in every GC-managed object
 /// Port of Lua 5.5's CommonHeader (lgc.h)
 ///
-/// Bit layout of `marked` field:
-/// - Bits 0-2: Age (G_NEW=0, G_SURVIVAL=1, G_OLD0=2, G_OLD1=3, G_OLD=4, G_TOUCHED1=5, G_TOUCHED2=6)
-/// - Bit 3: WHITE0 (white type 0)
-/// - Bit 4: WHITE1 (white type 1)  
-/// - Bit 5: BLACK (fully marked)
-/// - Bit 6: FINALIZEDBIT (marked for finalization)
-/// - Bit 7: Reserved for future use
+/// Compressed to 8 bytes (was 16). Layout:
+///
+///   `packed: u32` — marked + index, bit layout:
+///     bits  0-7 : `marked` — color + age + finalized bit
+///       - Bits 0-2: Age (G_NEW=0 .. G_TOUCHED2=6)
+///       - Bit 3: WHITE0
+///       - Bit 4: WHITE1
+///       - Bit 5: BLACK
+///       - Bit 6: FINALIZEDBIT
+///       - Bit 7: Reserved
+///     bits 8-31 : `index` — position in GcList (24-bit, max ~16.7M objects)
+///
+///   `size: u32` — allocation-time memory size estimate (for GC pacing).
+///     Set once at creation, never updated. This ensures consistent
+///     accounting between trace_object (allocation) and sweep (deallocation).
 ///
 /// **Tri-color invariant**: Gray is implicit - an object is gray iff it has no white bits AND no black bit.
-/// This allows gray detection without an explicit gray bit: `!is_white() && !is_black()`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
-    pub marked: u8,   // Color and age bits combined
-    pub size: u32,    // Size of the object in bytes (for memory tracking)
-    pub index: usize, // Index in the GC pool
+    packed: u32,
+    pub size: u32,
+}
+
+impl std::fmt::Debug for GcHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcHeader")
+            .field("marked", &self.marked())
+            .field("index", &self.index())
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+impl GcHeader {
+    const MARKED_MASK: u32 = 0xFF; // bits 0-7
+    const INDEX_SHIFT: u32 = 8;
+    const INDEX_MAX: u32 = (1 << 24) - 1; // 16,777,215
+
+    // ============ Raw field access ============
+
+    #[inline(always)]
+    pub fn marked(&self) -> u8 {
+        self.packed as u8
+    }
+
+    #[inline(always)]
+    fn set_marked_bits(&mut self, m: u8) {
+        self.packed = (self.packed & !Self::MARKED_MASK) | (m as u32);
+    }
+
+    #[inline(always)]
+    pub fn index(&self) -> usize {
+        (self.packed >> Self::INDEX_SHIFT) as usize
+    }
+
+    #[inline(always)]
+    pub fn set_index(&mut self, idx: usize) {
+        debug_assert!(
+            idx <= Self::INDEX_MAX as usize,
+            "GcList index overflow: {idx} > {}",
+            Self::INDEX_MAX
+        );
+        self.packed = (self.packed & Self::MARKED_MASK) | ((idx as u32) << Self::INDEX_SHIFT);
+    }
 }
 
 impl Default for GcHeader {
@@ -53,54 +102,46 @@ impl Default for GcHeader {
         // WARNING: Default creates a GRAY object (no color bits set)
         // This is INCORRECT for new objects - they should be WHITE
         // Use GcHeader::with_white(current_white) instead when creating GC objects
-        // Port of lgc.c: New objects MUST be created with luaC_white(g)
         GcHeader {
-            marked: G_NEW, // Age 0, no color bits set (gray state - WRONG for new objects!)
+            packed: G_NEW as u32,
             size: 0,
-            index: 0,
         }
     }
 }
 
 impl GcHeader {
-    /// Create a new header with given white bit and age G_NEW
-    /// Port of lgc.c: luaC_white(g) which returns (currentwhite & WHITEBITS)
-    /// combined with makewhite(g,x) which sets white color for new objects
+    /// Create a new header with given white bit and age G_NEW, index=0
     ///
     /// **CRITICAL**: All new GC objects MUST use this constructor with current_white from GC
-    /// Using Default::default() creates incorrect GRAY objects that may be prematurely collected
     #[inline(always)]
-    pub fn with_white(current_white: u8, size: u32) -> Self {
+    pub fn with_white(current_white: u8) -> Self {
         debug_assert!(
             current_white == 0 || current_white == 1,
             "current_white must be 0 or 1"
         );
         GcHeader {
-            marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
-            size,
-            index: 0,
+            packed: ((1 << (WHITE0BIT + current_white)) | G_NEW) as u32,
+            size: 0,
         }
     }
 
     // ============ Age Operations (generational GC) ============
 
     /// Get object age (bits 0-2)
-    /// Port of lgc.h: getage(o) returns (o->marked & AGEBITS)
     #[inline(always)]
     pub fn age(&self) -> u8 {
-        self.marked & AGEBITS
+        self.marked() & AGEBITS
     }
 
-    /// Set object age (preserves color bits)
-    /// Port of lgc.h: setage(o,a) sets age while preserving other bits
+    /// Set object age (preserves color bits and index)
     #[inline(always)]
     pub fn set_age(&mut self, age: u8) {
         debug_assert!(age <= G_TOUCHED2, "Invalid age value");
-        self.marked = (self.marked & !AGEBITS) | (age & AGEBITS);
+        let m = (self.marked() & !AGEBITS) | (age & AGEBITS);
+        self.set_marked_bits(m);
     }
 
     /// Check if object is old (age > G_SURVIVAL)
-    /// Port of lgc.h: isold(o) macro
     #[inline(always)]
     pub fn is_old(&self) -> bool {
         self.age() > G_SURVIVAL
@@ -108,160 +149,124 @@ impl GcHeader {
 
     // ============ Color Operations (tri-color marking) ============
 
-    /// Check if object is white (either WHITE0 or WHITE1)
-    /// Port of lgc.h: iswhite(x) macro
     #[inline(always)]
     pub fn is_white(&self) -> bool {
-        (self.marked & WHITEBITS) != 0
+        (self.marked() & WHITEBITS) != 0
     }
 
-    /// Check if object is current white (the white color of current GC cycle)
-    /// This is used during marking phase to determine if object needs marking
     #[inline(always)]
     pub fn is_current_white(&self, current_white: u8) -> bool {
         debug_assert!(
             current_white == 0 || current_white == 1,
             "current_white must be 0 or 1"
         );
-        (self.marked & (1 << (WHITE0BIT + current_white))) != 0
+        (self.marked() & (1 << (WHITE0BIT + current_white))) != 0
     }
 
-    /// Check if object is black
-    /// Port of lgc.h: isblack(x) macro
     #[inline(always)]
     pub fn is_black(&self) -> bool {
-        (self.marked & (1 << BLACKBIT)) != 0
+        (self.marked() & (1 << BLACKBIT)) != 0
     }
 
-    /// Check if object is gray (neither white nor black)
-    /// Port of lgc.h: isgray(x) macro
-    /// Gray objects are in gray lists waiting to be scanned
     #[inline(always)]
     pub fn is_gray(&self) -> bool {
-        (self.marked & (WHITEBITS | (1 << BLACKBIT))) == 0
+        (self.marked() & (WHITEBITS | (1 << BLACKBIT))) == 0
     }
 
     // ============ Special Flags ============
 
-    /// Check if object is marked for finalization
-    /// Port of lgc.h: tofinalize(x) macro
     #[inline(always)]
     pub fn to_finalize(&self) -> bool {
-        (self.marked & (1 << FINALIZEDBIT)) != 0
+        (self.marked() & (1 << FINALIZEDBIT)) != 0
     }
 
-    /// Mark object for finalization
     #[inline(always)]
     pub fn set_finalized(&mut self) {
-        self.marked |= 1 << FINALIZEDBIT;
+        self.set_marked_bits(self.marked() | (1 << FINALIZEDBIT));
     }
 
-    /// Clear finalization mark
     #[inline(always)]
     pub fn clear_finalized(&mut self) {
-        self.marked &= !(1 << FINALIZEDBIT);
+        self.set_marked_bits(self.marked() & !(1 << FINALIZEDBIT));
     }
 
     // ============ Color Transitions ============
 
-    /// Make object white with given current_white (0 or 1)
-    /// Port of lgc.c: makewhite(g,x) macro
-    /// Sets object to current white color, preserving age
     #[inline(always)]
     pub fn make_white(&mut self, current_white: u8) {
         debug_assert!(
             current_white == 0 || current_white == 1,
             "current_white must be 0 or 1"
         );
-        // Clear all color bits, then set the appropriate white bit
-        self.marked = (self.marked & !MASKCOLORS) | (1 << (WHITE0BIT + current_white));
+        let m = (self.marked() & !MASKCOLORS) | (1 << (WHITE0BIT + current_white));
+        self.set_marked_bits(m);
     }
 
-    /// Make object gray (clear all color bits, keep age)
-    /// Port of lgc.c: set2gray(x) macro
-    /// Gray objects are in gray lists waiting to be scanned
     #[inline(always)]
     pub fn make_gray(&mut self) {
-        self.marked &= !MASKCOLORS; // Clear color bits, preserve age
+        self.set_marked_bits(self.marked() & !MASKCOLORS);
     }
 
-    /// Make object black (from any color)
-    /// Port of lgc.c: set2black(x) macro
-    /// Black objects are fully marked (object and all references scanned)
     #[inline(always)]
     pub fn make_black(&mut self) {
-        self.marked = (self.marked & !WHITEBITS) | (1 << BLACKBIT);
+        let m = (self.marked() & !WHITEBITS) | (1 << BLACKBIT);
+        self.set_marked_bits(m);
     }
 
-    /// Make object black from non-white state (assertion version)
-    /// Port of lgc.c: nw2black(x) macro
     #[inline(always)]
     pub fn nw2black(&mut self) {
         debug_assert!(!self.is_white(), "nw2black called on white object");
-        self.marked |= 1 << BLACKBIT;
+        self.set_marked_bits(self.marked() | (1 << BLACKBIT));
     }
 
     // ============ Death Detection ============
 
-    /// Check if object is dead (has the "other" white bit set)
-    /// Port of lgc.h: isdead(g,v) and isdeadm(ow,m) macros
-    /// During sweep, objects with "other white" are garbage
     #[inline(always)]
     pub fn is_dead(&self, other_white: u8) -> bool {
         debug_assert!(
             other_white == 0 || other_white == 1,
             "other_white must be 0 or 1"
         );
-        (self.marked & (1 << (WHITE0BIT + other_white))) != 0
+        (self.marked() & (1 << (WHITE0BIT + other_white))) != 0
     }
 
-    /// Get the "other white" bit from current white
-    /// Port of lgc.h: otherwhite(g) macro returns (currentwhite ^ WHITEBITS)
     #[inline(always)]
     pub fn otherwhite(current_white: u8) -> u8 {
         current_white ^ 1
     }
 
-    /// Change white type (flip between WHITE0 and WHITE1)
-    /// Port of lgc.h: changewhite(x) macro
     #[inline(always)]
     pub fn change_white(&mut self) {
-        self.marked ^= WHITEBITS;
+        self.set_marked_bits(self.marked() ^ WHITEBITS);
     }
 
     // ============ Generational GC Age Transitions ============
 
-    /// Advance object to OLD0 (marked old by forward barrier)
     #[inline(always)]
     pub fn make_old0(&mut self) {
         self.set_age(G_OLD0);
     }
 
-    /// Advance object to OLD1 (first full cycle as old)
     #[inline(always)]
     pub fn make_old1(&mut self) {
         self.set_age(G_OLD1);
     }
 
-    /// Advance object to fully OLD (won't be visited in minor collections)
     #[inline(always)]
     pub fn make_old(&mut self) {
         self.set_age(G_OLD);
     }
 
-    /// Mark object as TOUCHED1 (old object modified in this cycle)
     #[inline(always)]
     pub fn make_touched1(&mut self) {
         self.set_age(G_TOUCHED1);
     }
 
-    /// Mark object as TOUCHED2 (old object modified in previous cycle)
     #[inline(always)]
     pub fn make_touched2(&mut self) {
         self.set_age(G_TOUCHED2);
     }
 
-    /// Make object SURVIVAL (survived one minor collection)
     #[inline(always)]
     pub fn make_survival(&mut self) {
         self.set_age(G_SURVIVAL);
@@ -269,8 +274,6 @@ impl GcHeader {
 
     // ============ Utility Methods ============
 
-    /// Check if object is marked (not white)
-    /// Convenience method for readability
     #[inline(always)]
     pub fn is_marked(&self) -> bool {
         !self.is_white()
@@ -281,6 +284,7 @@ pub trait HasGcHeader {
     fn header(&self) -> &GcHeader;
 }
 
+#[repr(C)]
 pub struct Gc<T> {
     pub header: GcHeader,
     pub data: T,
@@ -288,10 +292,9 @@ pub struct Gc<T> {
 
 impl<T> Gc<T> {
     pub fn new(data: T, current_white: u8, size: u32) -> Self {
-        Gc {
-            header: GcHeader::with_white(current_white, size),
-            data,
-        }
+        let mut header = GcHeader::with_white(current_white);
+        header.size = size;
+        Gc { header, data }
     }
 }
 
@@ -349,11 +352,26 @@ impl<T: HasGcHeader> GcPtr<T> {
         }
     }
 
+    /// Construct from raw u64 (used by GcObjectPtr tagged-pointer unpacking)
+    #[inline(always)]
+    pub fn from_raw(raw: u64) -> Self {
+        Self {
+            ptr: raw,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
     pub fn null() -> Self {
         Self {
             ptr: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Get the raw u64 pointer value (used by GcObjectPtr tagged-pointer packing)
+    #[inline(always)]
+    pub fn as_u64(&self) -> u64 {
+        self.ptr
     }
 
     #[inline(always)]
@@ -392,74 +410,106 @@ pub type RClosurePtr = GcPtr<GcRClosure>;
 pub type UserdataPtr = GcPtr<GcUserdata>;
 pub type ThreadPtr = GcPtr<GcThread>;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GcObjectPtr {
-    String(StringPtr),
-    Binary(BinaryPtr),
-    Table(TablePtr),
-    Function(FunctionPtr),
-    CClosure(CClosurePtr),
-    RClosure(RClosurePtr),
-    Upvalue(UpvaluePtr),
-    Thread(ThreadPtr),
-    Userdata(UserdataPtr),
+/// Compressed GcObjectPtr — tagged pointer in a single `u64` (8 bytes, was 16).
+///
+/// x86-64 user-space pointers use at most 48 bits. We store a 4-bit type tag
+/// in bits 60-63, leaving bits 0-47 for the pointer. This is safe because:
+/// - Windows user addresses < 0x0000_7FFF_FFFF_FFFF
+/// - Linux user addresses < 0x0000_7FFF_FFFF_F000
+/// - Tag values 0-8 in bits 60-63 never collide with valid addresses.
+///
+/// Because all `Gc<T>` are `#[repr(C)]` with `header: GcHeader` at offset 0,
+/// `header()` / `header_mut()` are direct pointer casts — no match dispatch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct GcObjectPtr(u64);
+
+impl std::fmt::Debug for GcObjectPtr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GcObjectPtr({:?}, 0x{:012x})",
+            self.kind(),
+            self.raw_ptr()
+        )
+    }
+}
+
+impl std::hash::Hash for GcObjectPtr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
 }
 
 impl GcObjectPtr {
+    const TAG_SHIFT: u32 = 60;
+    const PTR_MASK: u64 = (1u64 << 48) - 1; // low 48 bits
+
+    // Tag values — must match GcObjectKind repr(u8)
+    const TAG_STRING: u64 = 0;
+    const TAG_TABLE: u64 = 1;
+    const TAG_FUNCTION: u64 = 2;
+    const TAG_CCLOSURE: u64 = 3;
+    const TAG_RCLOSURE: u64 = 4;
+    const TAG_UPVALUE: u64 = 5;
+    const TAG_THREAD: u64 = 6;
+    const TAG_USERDATA: u64 = 7;
+    const TAG_BINARY: u64 = 8;
+
+    #[inline(always)]
+    fn new_tagged(ptr: u64, tag: u64) -> Self {
+        debug_assert!(
+            ptr & !Self::PTR_MASK == 0,
+            "pointer exceeds 48 bits: 0x{ptr:016x}"
+        );
+        Self(ptr | (tag << Self::TAG_SHIFT))
+    }
+
+    #[inline(always)]
+    fn tag(&self) -> u8 {
+        (self.0 >> Self::TAG_SHIFT) as u8
+    }
+
+    #[inline(always)]
+    fn raw_ptr(&self) -> u64 {
+        self.0 & Self::PTR_MASK
+    }
+
+    // ============ Header access — zero-cost via #[repr(C)] guarantee ============
+
+    /// Access the GcHeader at offset 0 of the pointed-to Gc<T>.
+    /// Safe because all Gc<T> are #[repr(C)] with header as first field.
+    #[inline(always)]
     pub fn header(&self) -> Option<&GcHeader> {
-        match self {
-            GcObjectPtr::String(p) => Some(&p.as_ref().header),
-            GcObjectPtr::Table(p) => Some(&p.as_ref().header),
-            GcObjectPtr::Function(p) => Some(&p.as_ref().header),
-            GcObjectPtr::CClosure(p) => Some(&p.as_ref().header),
-            GcObjectPtr::RClosure(p) => Some(&p.as_ref().header),
-            GcObjectPtr::Upvalue(p) => Some(&p.as_ref().header),
-            GcObjectPtr::Thread(p) => Some(&p.as_ref().header),
-            GcObjectPtr::Userdata(p) => Some(&p.as_ref().header),
-            GcObjectPtr::Binary(p) => Some(&p.as_ref().header),
+        let p = self.raw_ptr();
+        if p == 0 {
+            None
+        } else {
+            Some(unsafe { &*(p as *const GcHeader) })
         }
     }
 
+    #[inline(always)]
+    #[allow(clippy::mut_from_ref)]
     pub fn header_mut(&self) -> Option<&mut GcHeader> {
-        match self {
-            GcObjectPtr::String(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::Table(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::Function(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::CClosure(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::RClosure(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::Upvalue(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::Thread(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::Userdata(p) => Some(&mut p.as_mut_ref().header),
-            GcObjectPtr::Binary(p) => Some(&mut p.as_mut_ref().header),
+        let p = self.raw_ptr();
+        if p == 0 {
+            None
+        } else {
+            Some(unsafe { &mut *(p as *mut GcHeader) })
         }
     }
 
+    #[inline(always)]
     pub fn kind(&self) -> GcObjectKind {
-        match self {
-            GcObjectPtr::String(_) => GcObjectKind::String,
-            GcObjectPtr::Table(_) => GcObjectKind::Table,
-            GcObjectPtr::Function(_) => GcObjectKind::Function,
-            GcObjectPtr::CClosure(_) => GcObjectKind::CClosure,
-            GcObjectPtr::RClosure(_) => GcObjectKind::RClosure,
-            GcObjectPtr::Upvalue(_) => GcObjectKind::Upvalue,
-            GcObjectPtr::Thread(_) => GcObjectKind::Thread,
-            GcObjectPtr::Userdata(_) => GcObjectKind::Userdata,
-            GcObjectPtr::Binary(_) => GcObjectKind::Binary,
-        }
+        // Safety: tag values 0-8 match repr(u8) of GcObjectKind
+        unsafe { std::mem::transmute(self.tag()) }
     }
 
+    #[inline(always)]
     pub(crate) fn index(&self) -> usize {
-        match self {
-            GcObjectPtr::String(p) => p.as_ref().header.index,
-            GcObjectPtr::Table(p) => p.as_ref().header.index,
-            GcObjectPtr::Function(p) => p.as_ref().header.index,
-            GcObjectPtr::CClosure(p) => p.as_ref().header.index,
-            GcObjectPtr::RClosure(p) => p.as_ref().header.index,
-            GcObjectPtr::Upvalue(p) => p.as_ref().header.index,
-            GcObjectPtr::Thread(p) => p.as_ref().header.index,
-            GcObjectPtr::Userdata(p) => p.as_ref().header.index,
-            GcObjectPtr::Binary(p) => p.as_ref().header.index,
-        }
+        // Reads index directly from header
+        self.header().map(|h| h.index()).unwrap_or(0)
     }
 
     pub fn fix_gc_object(&mut self) {
@@ -468,59 +518,171 @@ impl GcObjectPtr {
             header.make_gray(); // Gray forever, like Lua 5.5
         }
     }
+
+    // ============ Typed pointer extraction ============
+
+    #[inline(always)]
+    pub fn as_string_ptr(&self) -> StringPtr {
+        debug_assert!(self.tag() == Self::TAG_STRING as u8);
+        StringPtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_table_ptr(&self) -> TablePtr {
+        debug_assert!(self.tag() == Self::TAG_TABLE as u8);
+        TablePtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_function_ptr(&self) -> FunctionPtr {
+        debug_assert!(self.tag() == Self::TAG_FUNCTION as u8);
+        FunctionPtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_cclosure_ptr(&self) -> CClosurePtr {
+        debug_assert!(self.tag() == Self::TAG_CCLOSURE as u8);
+        CClosurePtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_rclosure_ptr(&self) -> RClosurePtr {
+        debug_assert!(self.tag() == Self::TAG_RCLOSURE as u8);
+        RClosurePtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_upvalue_ptr(&self) -> UpvaluePtr {
+        debug_assert!(self.tag() == Self::TAG_UPVALUE as u8);
+        UpvaluePtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_thread_ptr(&self) -> ThreadPtr {
+        debug_assert!(self.tag() == Self::TAG_THREAD as u8);
+        ThreadPtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_userdata_ptr(&self) -> UserdataPtr {
+        debug_assert!(self.tag() == Self::TAG_USERDATA as u8);
+        UserdataPtr::from_raw(self.raw_ptr())
+    }
+
+    #[inline(always)]
+    pub fn as_binary_ptr(&self) -> BinaryPtr {
+        debug_assert!(self.tag() == Self::TAG_BINARY as u8);
+        BinaryPtr::from_raw(self.raw_ptr())
+    }
+
+    // ============ Pattern matching helpers (for code that still uses if-let) ============
+
+    #[inline(always)]
+    pub fn is_string(&self) -> bool {
+        self.tag() == Self::TAG_STRING as u8
+    }
+
+    #[inline(always)]
+    pub fn is_table(&self) -> bool {
+        self.tag() == Self::TAG_TABLE as u8
+    }
+
+    #[inline(always)]
+    pub fn is_upvalue(&self) -> bool {
+        self.tag() == Self::TAG_UPVALUE as u8
+    }
+
+    #[inline(always)]
+    pub fn is_thread(&self) -> bool {
+        self.tag() == Self::TAG_THREAD as u8
+    }
+
+    #[inline(always)]
+    pub fn is_function(&self) -> bool {
+        self.tag() == Self::TAG_FUNCTION as u8
+    }
+
+    #[inline(always)]
+    pub fn is_cclosure(&self) -> bool {
+        self.tag() == Self::TAG_CCLOSURE as u8
+    }
+
+    #[inline(always)]
+    pub fn is_rclosure(&self) -> bool {
+        self.tag() == Self::TAG_RCLOSURE as u8
+    }
+
+    #[inline(always)]
+    pub fn is_userdata(&self) -> bool {
+        self.tag() == Self::TAG_USERDATA as u8
+    }
+
+    #[inline(always)]
+    pub fn is_binary(&self) -> bool {
+        self.tag() == Self::TAG_BINARY as u8
+    }
 }
 
 impl From<StringPtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: StringPtr) -> Self {
-        GcObjectPtr::String(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_STRING)
     }
 }
 
 impl From<BinaryPtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: BinaryPtr) -> Self {
-        GcObjectPtr::Binary(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_BINARY)
     }
 }
 
 impl From<TablePtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: TablePtr) -> Self {
-        GcObjectPtr::Table(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_TABLE)
     }
 }
 
 impl From<FunctionPtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: FunctionPtr) -> Self {
-        GcObjectPtr::Function(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_FUNCTION)
     }
 }
 
 impl From<UpvaluePtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: UpvaluePtr) -> Self {
-        GcObjectPtr::Upvalue(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_UPVALUE)
     }
 }
 
 impl From<ThreadPtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: ThreadPtr) -> Self {
-        GcObjectPtr::Thread(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_THREAD)
     }
 }
 
 impl From<UserdataPtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: UserdataPtr) -> Self {
-        GcObjectPtr::Userdata(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_USERDATA)
     }
 }
 
 impl From<CClosurePtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: CClosurePtr) -> Self {
-        GcObjectPtr::CClosure(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_CCLOSURE)
     }
 }
 
 impl From<RClosurePtr> for GcObjectPtr {
+    #[inline(always)]
     fn from(ptr: RClosurePtr) -> Self {
-        GcObjectPtr::RClosure(ptr)
+        Self::new_tagged(ptr.as_u64(), Self::TAG_RCLOSURE)
     }
 }
 
@@ -538,8 +700,44 @@ pub enum GcObjectOwner {
 }
 
 impl GcObjectOwner {
+    /// Compute the approximate memory size of this object (replaces the old
+    /// `header.size` field). Called at allocation/deallocation for GC pacing —
+    /// NOT on hot paths, so the match + dynamic calculation is fine.
+    pub fn compute_size(&self) -> usize {
+        match self {
+            GcObjectOwner::String(s) => std::mem::size_of::<GcString>() + s.data.str.len(),
+            GcObjectOwner::Binary(b) => std::mem::size_of::<GcBinary>() + b.data.len(),
+            GcObjectOwner::Table(t) => {
+                let base = std::mem::size_of::<GcTable>();
+                let asize = t.data.impl_table.asize as usize;
+                let array_bytes = if asize > 0 { asize * 17 + 4 } else { 0 };
+                let hash_bytes = {
+                    let hs = t.data.hash_size();
+                    if hs > 0 { hs * 24 + 8 } else { 0 }
+                };
+                base + array_bytes + hash_bytes
+            }
+            GcObjectOwner::Function(f) => {
+                f.data.chunk().proto_data_size as usize + std::mem::size_of_val(f.data.upvalues())
+            }
+            GcObjectOwner::CClosure(c) => {
+                std::mem::size_of::<GcCClosure>()
+                    + c.data.upvalues().len() * std::mem::size_of::<LuaValue>()
+            }
+            GcObjectOwner::RClosure(r) => {
+                std::mem::size_of::<GcRClosure>()
+                    + r.data.upvalues().len() * std::mem::size_of::<LuaValue>()
+            }
+            GcObjectOwner::Upvalue(_) => 64, // fixed estimate
+            GcObjectOwner::Thread(t) => std::mem::size_of::<GcThread>() + t.data.stack.len() * 16,
+            GcObjectOwner::Userdata(_) => std::mem::size_of::<GcUserdata>(),
+        }
+    }
+
+    /// Return the stored allocation-time size (from header.size)
+    #[inline]
     pub fn size(&self) -> usize {
-        self.header_unchecked().size as usize
+        self.header().size as usize
     }
 
     pub fn header(&self) -> &GcHeader {
@@ -556,20 +754,6 @@ impl GcObjectOwner {
         }) as _
     }
 
-    pub(crate) fn header_unchecked(&self) -> &GcHeader {
-        match self {
-            GcObjectOwner::String(s) => &s.header,
-            GcObjectOwner::Table(t) => &t.header,
-            GcObjectOwner::Function(f) => &f.header,
-            GcObjectOwner::CClosure(c) => &c.header,
-            GcObjectOwner::RClosure(r) => &r.header,
-            GcObjectOwner::Upvalue(u) => &u.header,
-            GcObjectOwner::Thread(t) => &t.header,
-            GcObjectOwner::Userdata(u) => &u.header,
-            GcObjectOwner::Binary(b) => &b.header,
-        }
-    }
-
     pub fn header_mut(&mut self) -> &mut GcHeader {
         (match self {
             GcObjectOwner::String(s) => &mut s.header,
@@ -582,20 +766,6 @@ impl GcObjectOwner {
             GcObjectOwner::Userdata(u) => &mut u.header,
             GcObjectOwner::Binary(b) => &mut b.header,
         }) as _
-    }
-
-    pub(crate) fn header_mut_unchecked(&mut self) -> &mut GcHeader {
-        match self {
-            GcObjectOwner::String(s) => &mut s.header,
-            GcObjectOwner::Table(t) => &mut t.header,
-            GcObjectOwner::Function(f) => &mut f.header,
-            GcObjectOwner::CClosure(c) => &mut c.header,
-            GcObjectOwner::RClosure(r) => &mut r.header,
-            GcObjectOwner::Upvalue(u) => &mut u.header,
-            GcObjectOwner::Thread(t) => &mut t.header,
-            GcObjectOwner::Userdata(u) => &mut u.header,
-            GcObjectOwner::Binary(b) => &mut b.header,
-        }
     }
 
     /// Get type tag of this object
@@ -666,31 +836,31 @@ impl GcObjectOwner {
     pub fn as_gc_ptr(&self) -> GcObjectPtr {
         match self {
             GcObjectOwner::String(s) => {
-                GcObjectPtr::String(StringPtr::new(s.as_ref() as *const GcString))
+                GcObjectPtr::from(StringPtr::new(s.as_ref() as *const GcString))
             }
             GcObjectOwner::Table(t) => {
-                GcObjectPtr::Table(TablePtr::new(t.as_ref() as *const GcTable))
+                GcObjectPtr::from(TablePtr::new(t.as_ref() as *const GcTable))
             }
             GcObjectOwner::Function(f) => {
-                GcObjectPtr::Function(FunctionPtr::new(f.as_ref() as *const GcFunction))
+                GcObjectPtr::from(FunctionPtr::new(f.as_ref() as *const GcFunction))
             }
             GcObjectOwner::Upvalue(u) => {
-                GcObjectPtr::Upvalue(UpvaluePtr::new(u.as_ref() as *const GcUpvalue))
+                GcObjectPtr::from(UpvaluePtr::new(u.as_ref() as *const GcUpvalue))
             }
             GcObjectOwner::Thread(t) => {
-                GcObjectPtr::Thread(ThreadPtr::new(t.as_ref() as *const GcThread))
+                GcObjectPtr::from(ThreadPtr::new(t.as_ref() as *const GcThread))
             }
             GcObjectOwner::Userdata(u) => {
-                GcObjectPtr::Userdata(UserdataPtr::new(u.as_ref() as *const GcUserdata))
+                GcObjectPtr::from(UserdataPtr::new(u.as_ref() as *const GcUserdata))
             }
             GcObjectOwner::Binary(b) => {
-                GcObjectPtr::Binary(BinaryPtr::new(b.as_ref() as *const GcBinary))
+                GcObjectPtr::from(BinaryPtr::new(b.as_ref() as *const GcBinary))
             }
             GcObjectOwner::CClosure(c) => {
-                GcObjectPtr::CClosure(CClosurePtr::new(c.as_ref() as *const GcCClosure))
+                GcObjectPtr::from(CClosurePtr::new(c.as_ref() as *const GcCClosure))
             }
             GcObjectOwner::RClosure(r) => {
-                GcObjectPtr::RClosure(RClosurePtr::new(r.as_ref() as *const GcRClosure))
+                GcObjectPtr::from(RClosurePtr::new(r.as_ref() as *const GcRClosure))
             }
         }
     }
@@ -779,7 +949,7 @@ impl GcList {
     #[inline]
     pub fn add(&mut self, mut value: GcObjectOwner) {
         let index = self.gc_list.len();
-        value.header_mut_unchecked().index = index;
+        value.header_mut().set_index(index);
         self.gc_list.push(value);
     }
 
@@ -792,7 +962,7 @@ impl GcList {
         if index != last_index {
             // Update moved object's index
             let moved_obj = &mut self.gc_list[last_index];
-            moved_obj.header_mut().index = index;
+            moved_obj.header_mut().set_index(index);
         }
 
         // swap_remove: O(1) removal by moving last element to this position
@@ -890,7 +1060,7 @@ impl GcList {
     pub fn add_all(&mut self, objects: Vec<GcObjectOwner>) {
         for mut obj in objects {
             let index = self.gc_list.len();
-            obj.header_mut().index = index;
+            obj.header_mut().set_index(index);
             self.gc_list.push(obj);
         }
     }

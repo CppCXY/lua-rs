@@ -17,7 +17,8 @@ use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_M
 use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 use crate::{
-    Chunk, CreateResult, GcObjectPtr, LuaRegistrable, LuaVM, StringPtr, ThreadPtr, UpvaluePtr,
+    Chunk, CreateResult, GcObjectPtr, LuaRegistrable, LuaVM, StringPtr, TablePtr, ThreadPtr,
+    UpvaluePtr,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -959,7 +960,7 @@ impl LuaState {
 
                     // Close the upvalue (move value to heap)
                     upval_ptr.as_mut_ref().data.close(value);
-                    let gc_ptr = GcObjectPtr::Upvalue(upval_ptr);
+                    let gc_ptr = GcObjectPtr::from(upval_ptr);
 
                     if let Some(header) = gc_ptr.header_mut()
                         && !header.is_white()
@@ -3848,7 +3849,7 @@ impl LuaState {
     #[inline(always)]
     pub fn gc_barrier(&mut self, upvalue_ptr: UpvaluePtr, value_gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
-        let owner_ptr = GcObjectPtr::Upvalue(upvalue_ptr);
+        let owner_ptr = GcObjectPtr::from(upvalue_ptr);
         vm.gc.barrier(self, owner_ptr, value_gc_ptr);
     }
 
@@ -3858,6 +3859,13 @@ impl LuaState {
     pub fn gc_barrier_back(&mut self, gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
         vm.gc.barrier_back(gc_ptr);
+    }
+
+    /// Track table memory change from a resize delta.
+    #[inline]
+    pub fn gc_track_table_resize(&mut self, table_ptr: TablePtr, delta: isize) {
+        let vm = unsafe { &mut *self.vm };
+        vm.gc.track_resize(table_ptr, delta);
     }
 
     #[inline]

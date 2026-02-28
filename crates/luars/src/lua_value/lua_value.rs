@@ -923,14 +923,14 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_gc_ptr(&self) -> Option<GcObjectPtr> {
         match self.kind() {
-            LuaValueKind::Table => self.as_table_ptr().map(GcObjectPtr::Table),
-            LuaValueKind::Function => self.as_function_ptr().map(GcObjectPtr::Function),
-            LuaValueKind::CClosure => self.as_cclosure_ptr().map(GcObjectPtr::CClosure),
-            LuaValueKind::RClosure => self.as_rclosure_ptr().map(GcObjectPtr::RClosure),
-            LuaValueKind::String => self.as_string_ptr().map(GcObjectPtr::String),
-            LuaValueKind::Binary => self.as_binary_ptr().map(GcObjectPtr::Binary),
-            LuaValueKind::Thread => self.as_thread_ptr().map(GcObjectPtr::Thread),
-            LuaValueKind::Userdata => self.as_userdata_ptr().map(GcObjectPtr::Userdata),
+            LuaValueKind::Table => self.as_table_ptr().map(GcObjectPtr::from),
+            LuaValueKind::Function => self.as_function_ptr().map(GcObjectPtr::from),
+            LuaValueKind::CClosure => self.as_cclosure_ptr().map(GcObjectPtr::from),
+            LuaValueKind::RClosure => self.as_rclosure_ptr().map(GcObjectPtr::from),
+            LuaValueKind::String => self.as_string_ptr().map(GcObjectPtr::from),
+            LuaValueKind::Binary => self.as_binary_ptr().map(GcObjectPtr::from),
+            LuaValueKind::Thread => self.as_thread_ptr().map(GcObjectPtr::from),
+            LuaValueKind::Userdata => self.as_userdata_ptr().map(GcObjectPtr::from),
             _ => None,
         }
     }

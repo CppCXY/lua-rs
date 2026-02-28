@@ -1160,7 +1160,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     continue;
                                 }
                                 // Key outside array — skip redundant fast_seti in set_int
-                                table_ref.impl_table.set_int_slow(rb.ivalue(), val);
+                                let delta = table_ref.impl_table.set_int_slow(rb.ivalue(), val);
+                                if delta != 0
+                                    && let Some(table_ptr) = ra.as_table_ptr()
+                                {
+                                    lua_state.gc_track_table_resize(table_ptr, delta);
+                                }
                                 if val.is_collectable()
                                     && let Some(gc_ptr) = ra.as_gc_ptr()
                                 {
@@ -1278,7 +1283,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 continue;
                             }
                             // No metatable: use set_int_slow (skip redundant fast_seti)
-                            table_ref.impl_table.set_int_slow(b as i64, value);
+                            let delta = table_ref.impl_table.set_int_slow(b as i64, value);
+                            if delta != 0
+                                && let Some(table_ptr) = ra.as_table_ptr()
+                            {
+                                lua_state.gc_track_table_resize(table_ptr, delta);
+                            }
                             if value.is_collectable()
                                 && let Some(gc_ptr) = ra.as_gc_ptr()
                             {

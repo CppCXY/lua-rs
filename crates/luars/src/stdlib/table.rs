@@ -302,7 +302,12 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
             // Fast path: raw len + raw set (no metamethod overhead)
             let table = table_val.as_table_mut().unwrap();
             let len = table.len() as i64;
-            table.raw_seti(len + 1, value);
+            let delta = table.raw_seti(len + 1, value);
+            if delta != 0
+                && let Some(table_ptr) = table_val.as_table_ptr()
+            {
+                l.gc_track_table_resize(table_ptr, delta);
+            }
             // GC barrier for collectable values
             if value.iscollectable()
                 && let Some(gc_ptr) = table_val.as_gc_ptr()
@@ -347,13 +352,19 @@ fn table_insert(l: &mut LuaState) -> LuaResult<usize> {
                 );
             }
             // Shift elements up using raw access
+            let mut total_delta: isize = 0;
             let mut i = len;
             while i >= pos {
                 let val = table.raw_geti(i).unwrap_or(LuaValue::nil());
-                table.raw_seti(i + 1, val);
+                total_delta += table.raw_seti(i + 1, val);
                 i -= 1;
             }
-            table.raw_seti(pos, value);
+            total_delta += table.raw_seti(pos, value);
+            if total_delta != 0
+                && let Some(table_ptr) = table_val.as_table_ptr()
+            {
+                l.gc_track_table_resize(table_ptr, total_delta);
+            }
             if value.iscollectable()
                 && let Some(gc_ptr) = table_val.as_gc_ptr()
             {
