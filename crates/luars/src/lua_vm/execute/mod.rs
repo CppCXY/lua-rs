@@ -83,7 +83,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             return Ok(());
         }
 
-        let frame_idx = current_depth - 1;
+        let mut frame_idx = current_depth - 1;
         // ===== LOAD FRAME CONTEXT =====
         // Safety: frame_idx < call_depth (guaranteed by check above)
         // Stale stack slots above stack_top are NOT cleared here.
@@ -102,25 +102,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
 
         // Hot path: read CI fields for Lua function dispatch.
+        // These are `let mut` so that RETURN1 can restore caller context
+        // inline without going through the full 'startfunc reload.
         let ci = lua_state.get_call_info(frame_idx);
         let func_value = ci.func;
         let mut pc = ci.pc as usize;
         let mut base = ci.base;
-        let chunk_ptr = ci.chunk_ptr;
+        let mut chunk_ptr = ci.chunk_ptr;
 
         let lua_func = unsafe { func_value.as_lua_function_unchecked() };
 
         // Use cached chunk_ptr from CI (avoids Rc deref on every startfunc entry).
         // chunk_ptr is set by push_lua_frame/push_frame/handle_tailcall for all Lua frames.
-        let chunk = unsafe { &*chunk_ptr };
-        let upvalue_ptrs = lua_func.upvalues();
+        let mut chunk = unsafe { &*chunk_ptr };
+        let mut upvalue_ptrs = lua_func.upvalues();
         // Stack already grown by push_lua_frame — no need for grow_stack here.
         // Only the very first entry (top-level chunk) needs this check.
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
 
         // Cache pointers
-        let constants = &chunk.constants;
-        let code = &chunk.code;
+        let mut constants = &chunk.constants;
+        let mut code = &chunk.code;
 
         // Macro to save PC before operations that may call functions
         macro_rules! save_pc {
@@ -888,9 +890,39 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::Return1 => {
                     // return R[A] — hottest return path
+                    // Inline return handling + context restore to avoid
+                    // the full 'startfunc reload overhead (saves ~12 memory ops
+                    // per return, critical for small closures like sort comparators)
                     let a = instr.get_a() as usize;
                     return_handler::handle_return1(lua_state, base, frame_idx, a);
-                    continue 'startfunc;
+
+                    // Check if returned past target depth
+                    let new_depth = lua_state.call_depth();
+                    if new_depth <= target_depth {
+                        return Ok(());
+                    }
+                    frame_idx = new_depth - 1;
+
+                    // Cold check: C frame or pending finish → full startfunc
+                    let cs = lua_state.get_call_info(frame_idx).call_status;
+                    if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
+                        continue 'startfunc;
+                    }
+
+                    // Hot path: restore caller context directly
+                    let ci = lua_state.get_call_info(frame_idx);
+                    pc = ci.pc as usize;
+                    base = ci.base;
+                    chunk_ptr = ci.chunk_ptr;
+                    chunk = unsafe { &*chunk_ptr };
+                    // Bypass borrow checker: upvalue_ptrs borrows from GC heap,
+                    // not from any local. The func is alive on the stack.
+                    upvalue_ptrs = unsafe {
+                        let lf: *const _ = ci.func.as_lua_function_unchecked();
+                        (&*lf).upvalues()
+                    };
+                    constants = &chunk.constants;
+                    code = &chunk.code;
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
@@ -1383,7 +1415,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let nresults = if c == 0 { -1 } else { (c - 1) as i32 };
 
                         let lua_func = unsafe { func.as_lua_function_unchecked() };
-                        let chunk = lua_func.chunk();
+                        let new_chunk = lua_func.chunk();
 
                         save_pc!();
                         lua_state.push_lua_frame(
@@ -1391,11 +1423,25 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             func_idx + 1,
                             nargs,
                             nresults,
-                            chunk.param_count,
-                            chunk.max_stack_size,
-                            chunk as *const _,
+                            new_chunk.param_count,
+                            new_chunk.max_stack_size,
+                            new_chunk as *const _,
                         )?;
-                        continue 'startfunc;
+
+                        // Inline callee entry: restore context without startfunc
+                        frame_idx = lua_state.call_depth() - 1;
+                        let ci = lua_state.get_call_info(frame_idx);
+                        pc = ci.pc as usize;
+                        base = ci.base;
+                        chunk_ptr = ci.chunk_ptr;
+                        chunk = unsafe { &*chunk_ptr };
+                        upvalue_ptrs = unsafe {
+                            let lf: *const _ = ci.func.as_lua_function_unchecked();
+                            (&*lf).upvalues()
+                        };
+                        constants = &chunk.constants;
+                        code = &chunk.code;
+                        continue;
                     }
 
                     // Cold path: C function or __call metamethod
@@ -1909,11 +1955,54 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::Lt => {
-                    comparison_ops::exec_lt(lua_state, instr, base, frame_idx, &mut pc)?;
+                    // LT fast path: inline integer/float comparison
+                    // Avoids exec_lt function call overhead for the common case
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let k = instr.get_k();
+
+                    let stack = lua_state.stack();
+                    let ra = unsafe { *stack.get_unchecked(base + a) };
+                    let rb = unsafe { *stack.get_unchecked(base + b) };
+
+                    if ra.ttisinteger() && rb.ttisinteger() {
+                        let cond = ra.ivalue() < rb.ivalue();
+                        if cond != k {
+                            pc += 1;
+                        }
+                    } else if ra.ttisfloat() && rb.ttisfloat() {
+                        let cond = ra.fltvalue() < rb.fltvalue();
+                        if cond != k {
+                            pc += 1;
+                        }
+                    } else {
+                        comparison_ops::exec_lt(lua_state, instr, base, frame_idx, &mut pc)?;
+                    }
                 }
 
                 OpCode::Le => {
-                    comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc)?;
+                    // LE fast path: inline integer/float comparison
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let k = instr.get_k();
+
+                    let stack = lua_state.stack();
+                    let ra = unsafe { *stack.get_unchecked(base + a) };
+                    let rb = unsafe { *stack.get_unchecked(base + b) };
+
+                    if ra.ttisinteger() && rb.ttisinteger() {
+                        let cond = ra.ivalue() <= rb.ivalue();
+                        if cond != k {
+                            pc += 1;
+                        }
+                    } else if ra.ttisfloat() && rb.ttisfloat() {
+                        let cond = ra.fltvalue() <= rb.fltvalue();
+                        if cond != k {
+                            pc += 1;
+                        }
+                    } else {
+                        comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc)?;
+                    }
                 }
 
                 // ============================================================

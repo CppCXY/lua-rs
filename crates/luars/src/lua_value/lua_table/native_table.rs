@@ -751,12 +751,27 @@ impl NativeTable {
 
     /// Fast SETI path - mirrors Lua 5.5's luaH_fastseti macro
     /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
+    ///
+    /// Optimization: when overwriting a live (non-nil) slot with a non-nil value,
+    /// lenhint is unchanged — skip write_array's lenhint maintenance entirely.
+    /// C Lua's luaH_fastseti only succeeds for existing non-empty slots for this
+    /// reason, but we handle both cases: overwrite (fast) and new-key (via write_array).
     #[inline(always)]
     pub fn fast_seti(&mut self, key: i64, value: LuaValue) -> bool {
         // Fast path: array bounds check
         if key >= 1 && key <= self.asize as i64 {
+            let k = (key - 1) as usize;
             unsafe {
-                self.write_array(key, value);
+                let old_tag = *self.get_arr_tag(k);
+                // Overwrite fast path: existing live slot + non-nil new value
+                // → lenhint is unchanged, skip write_array entirely
+                if old_tag != LUA_VNIL && old_tag != LUA_VEMPTY && !value.is_nil() {
+                    *self.get_arr_tag(k) = value.tt;
+                    *self.get_arr_val(k) = value.value;
+                } else {
+                    // Nil transition: need lenhint maintenance
+                    self.write_array(key, value);
+                }
             }
             return true;
         }
