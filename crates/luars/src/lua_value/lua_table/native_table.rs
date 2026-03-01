@@ -816,6 +816,7 @@ impl NativeTable {
     /// Fast GETFIELD path - for short string keys (most common in field access)
     /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
     #[inline(always)]
+    #[allow(unused)]
     pub fn fast_getfield(&self, key: &LuaValue) -> Option<LuaValue> {
         // GETFIELD only uses short string keys (interned)
         if key.is_short_string() {
