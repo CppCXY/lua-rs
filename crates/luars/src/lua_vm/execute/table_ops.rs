@@ -419,6 +419,36 @@ pub fn exec_setfield(
 }
 
 /// SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
+/// Cold path for SELF deep __index chain.
+/// Called when inline fast path determined __index is a table but
+/// key wasn't found in it. Continues the chain from the __index table.
+#[inline(never)]
+pub fn self_deep_chain(
+    lua_state: &mut LuaState,
+    index_table: LuaValue,
+    key: &LuaValue,
+    a: usize,
+    frame_idx: usize,
+) -> LuaResult<()> {
+    let ci_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top_raw(ci_top);
+
+    match helper::lookup_from_metatable(lua_state, &index_table, key) {
+        Ok(result) => {
+            let base = lua_state.get_frame_base(frame_idx);
+            lua_state.stack_mut()[base + a] = result.unwrap_or(LuaValue::nil());
+            Ok(())
+        }
+        Err(LuaError::Yield) => {
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = a as i32;
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub fn exec_self(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -445,38 +475,27 @@ pub fn exec_self(
     // R[A] := R[B][K[C]] (get method)
     let key = &constants[c];
 
-    // OPTIMIZED: Try raw_get first if it's a table
-    let fast_result = if let Some(table) = rb.as_table_mut() {
-        table.raw_get(key)
-    } else {
-        None
-    };
-
-    if let Some(val) = fast_result {
-        let stack = lua_state.stack_mut();
-        stack[base + a] = val;
-    } else {
-        // Key not found in table OR not a table: try __index metamethod
-        let call_info_top = lua_state.get_call_info(frame_idx).top;
-        lua_state.set_top(call_info_top)?;
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match helper::lookup_from_metatable(lua_state, &rb, key) {
-            Ok(result) => {
-                let new_base = lua_state.get_frame_base(frame_idx);
-                if new_base != base {
-                    return Err(lua_state.error("base changed in SELF".to_string()));
-                }
-                let stack = lua_state.stack_mut();
-                stack[base + a] = result.unwrap_or(LuaValue::nil());
+    // Skip direct table lookup — inline fast path already checked this.
+    // Go directly to metamethod/chain lookup.
+    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    lua_state.set_top(call_info_top)?;
+    lua_state.set_frame_pc(frame_idx, *pc as u32);
+    match helper::lookup_from_metatable(lua_state, &rb, key) {
+        Ok(result) => {
+            let new_base = lua_state.get_frame_base(frame_idx);
+            if new_base != base {
+                return Err(lua_state.error("base changed in SELF".to_string()));
             }
-            Err(LuaError::Yield) => {
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = a as i32;
-                ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
+            let stack = lua_state.stack_mut();
+            stack[base + a] = result.unwrap_or(LuaValue::nil());
         }
+        Err(LuaError::Yield) => {
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = a as i32;
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            return Err(LuaError::Yield);
+        }
+        Err(e) => return Err(e),
     }
 
     Ok(())

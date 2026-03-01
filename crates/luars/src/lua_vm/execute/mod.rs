@@ -1143,16 +1143,50 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Try fast path: table with string key
                     if let Some(table_ref) = rb.as_table() {
-                        if let Some(val) = table_ref.impl_table.fast_getfield(key) {
+                        if let Some(val) = table_ref.impl_table.get_shortstr_fast(key) {
                             unsafe {
                                 *stack.get_unchecked_mut(base + a) = val;
                             }
                             continue;
                         }
-                        // Key not found — if no metatable, result is nil (skip exec_getfield)
-                        if !table_ref.has_metatable() {
+                        // Key not found — check metatable __index (one level inline)
+                        let meta = table_ref.meta_ptr();
+                        if meta.is_null() {
                             unsafe {
                                 *stack.get_unchecked_mut(base + a) = LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                        if mt.no_tm(TmKind::Index as u8) {
+                            unsafe {
+                                *stack.get_unchecked_mut(base + a) = LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        // Get __index value from metatable
+                        let event_key =
+                            lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+                        if let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                            // __index is a table: direct one-level lookup
+                            if let Some(fallback) = tm.as_table() {
+                                if let Some(val) = fallback.impl_table.get_shortstr_fast(key) {
+                                    unsafe {
+                                        *lua_state.stack_mut().as_mut_ptr().add(base + a) = val;
+                                    }
+                                    continue;
+                                }
+                                // Deep chain: continue from tm (cold path)
+                                save_pc!();
+                                table_ops::self_deep_chain(lua_state, tm, key, a, frame_idx)?;
+                                restore_state!();
+                                continue;
+                            }
+                            // __index is a function — fall through
+                        } else {
+                            mt.set_tm_absent(TmKind::Index as u8);
+                            unsafe {
+                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
                             }
                             continue;
                         }
@@ -1386,7 +1420,78 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::Self_ => {
+                    // SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
+                    // HOT PATH: Inline fast path for OOP method lookup
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let key = unsafe { constants.get_unchecked(c) };
+                    let rb;
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        rb = *sp.add(base + b);
+                        // R[A+1] := R[B] (save object for method call)
+                        *sp.add(base + a + 1) = rb;
+                    }
+
+                    // Fast path: rb is a table
+                    if let Some(table_ref) = rb.as_table() {
+                        // Try direct lookup (key is always a short string constant)
+                        if let Some(val) = table_ref.impl_table.get_shortstr_fast(key) {
+                            unsafe {
+                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = val;
+                            }
+                            continue;
+                        }
+                        // Key not found — check metatable __index (one level)
+                        let meta = table_ref.meta_ptr();
+                        if meta.is_null() {
+                            unsafe {
+                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                        if mt.no_tm(TmKind::Index as u8) {
+                            unsafe {
+                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        let event_key =
+                            lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+                        if let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                            // __index is a table: try one-level lookup
+                            if let Some(fallback_table) = tm.as_table() {
+                                if let Some(val) = fallback_table.impl_table.get_shortstr_fast(key)
+                                {
+                                    unsafe {
+                                        *lua_state.stack_mut().as_mut_ptr().add(base + a) = val;
+                                    }
+                                    continue;
+                                }
+                                // Deep chain: continue from tm (cold path,
+                                // avoids redundant lookups in exec_self)
+                                save_pc!();
+                                table_ops::self_deep_chain(lua_state, tm, key, a, frame_idx)?;
+                                restore_state!();
+                                continue;
+                            }
+                            // __index is a function or unusual — fall through
+                        } else {
+                            mt.set_tm_absent(TmKind::Index as u8);
+                            unsafe {
+                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Slow path: non-table receiver or __index function
+                    save_pc!();
                     table_ops::exec_self(lua_state, instr, constants, base, frame_idx, &mut pc)?;
+                    restore_state!();
                 }
                 OpCode::Call => {
                     // R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
