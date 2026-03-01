@@ -164,6 +164,12 @@ impl LuaValue {
 
     // ============ Constructors ============
 
+    /// Construct from raw value and type tag (for packed Node access)
+    #[inline(always)]
+    pub const fn from_raw(value: Value, tt: u8) -> Self {
+        Self { value, tt }
+    }
+
     #[inline(always)]
     pub const fn nil() -> Self {
         Self {

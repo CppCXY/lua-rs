@@ -504,12 +504,15 @@ impl std::fmt::Display for LuaStrRepr {
 
 #[derive(Clone)]
 pub struct LuaString {
-    pub str: LuaStrRepr,
+    /// Hash comes first for cache locality: GcHeader(8B) + hash(8B) = 16B,
+    /// both in the same cache line after pointer dereference.
+    /// C Lua has TString.hash at offset 12 — ours is now at offset 8.
     pub hash: u64,
     /// Intrusive chain pointer for the string intern table (short strings only).
     /// Forms a singly-linked list of strings sharing the same bucket.
     /// Null for long strings (they are not interned).
     pub next: crate::StringPtr,
+    pub str: LuaStrRepr,
 }
 
 impl std::fmt::Debug for LuaString {
@@ -524,9 +527,9 @@ impl std::fmt::Debug for LuaString {
 impl LuaString {
     pub fn new(s: LuaStrRepr, hash: u64) -> Self {
         Self {
-            str: s,
             hash,
             next: crate::StringPtr::null(),
+            str: s,
         }
     }
 
