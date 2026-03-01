@@ -825,6 +825,97 @@ impl NativeTable {
         None
     }
 
+    /// Fast SETFIELD path for NEW key insertion into a table with no metatable.
+    /// Only handles short string keys. Handles both new key insertion and
+    /// existing key update. Returns true on success.
+    /// Used by SETFIELD inline when the table has no metatable (no __newindex).
+    /// Caller MUST call invalidate_tm_cache() after success — the table
+    /// may be used as a metatable for other tables.
+    #[inline(always)]
+    pub fn fast_setfield_newkey(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+        if self.node.is_null() {
+            return false;
+        }
+
+        let mp = self.mainposition_string(key);
+        let key_ptr = unsafe { key.value.i };
+
+        unsafe {
+            // Main position is free — insert directly
+            if (*mp).key.is_nil() {
+                (*mp).key = *key;
+                (*mp).value = value;
+                (*mp).next = 0;
+                return true;
+            }
+
+            // Main position has a key — check if it's ours
+            if (*mp).key.is_string() && (*mp).key.value.i == key_ptr {
+                (*mp).value = value;
+                return true;
+            }
+
+            // Main position occupied by dead key — reuse slot
+            if (*mp).value.is_nil() {
+                (*mp).key = *key;
+                (*mp).value = value;
+                // Keep next — chains may pass through
+                return true;
+            }
+
+            // Check collision chain for existing key
+            let mut node = mp;
+            let mut next = (*node).next;
+            while next != 0 {
+                node = node.offset(next as isize);
+                if (*node).key.is_string() && (*node).key.value.i == key_ptr {
+                    (*node).value = value;
+                    return true;
+                }
+                next = (*node).next;
+            }
+
+            // Key not found in chain — need a free slot
+            // Check if the occupying node belongs here
+            let othern = self.mainposition(&(*mp).key);
+            if othern != mp {
+                // Displaced node: move it to a free position, give mp to new key
+                if let Some(free_node) = self.getfreepos() {
+                    let mut prev = othern;
+                    while prev.offset((*prev).next as isize) != mp {
+                        prev = prev.offset((*prev).next as isize);
+                    }
+                    (*prev).next = Self::node_offset(prev, free_node);
+                    *free_node = *mp;
+                    if (*free_node).next != 0 {
+                        (*free_node).next += Self::node_offset(free_node, mp);
+                    }
+                    (*mp).key = *key;
+                    (*mp).value = value;
+                    (*mp).next = 0;
+                    return true;
+                }
+            } else {
+                // Main position node belongs here — link new key after it
+                if let Some(free_node) = self.getfreepos() {
+                    (*free_node).key = *key;
+                    (*free_node).value = value;
+                    if (*mp).next != 0 {
+                        (*free_node).next =
+                            Self::node_offset(free_node, mp.offset((*mp).next as isize));
+                    } else {
+                        (*free_node).next = 0;
+                    }
+                    (*mp).next = Self::node_offset(mp, free_node);
+                    return true;
+                }
+            }
+        }
+
+        // No free position — needs rehash, fall to slow path
+        false
+    }
+
     /// Fast SETFIELD path - for short string keys
     /// Returns true if successfully set in hash part (no metatable, key exists or room available)
     /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction

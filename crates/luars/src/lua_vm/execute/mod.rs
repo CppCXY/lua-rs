@@ -1396,28 +1396,53 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // __newindex is NEVER consulted when the key already exists
                     // in the table's own hash part. So this is safe regardless
                     // of whether the table has a metatable.
-                    let fast_path_ok = if let Some(table_ref) = ra.as_table_mut() {
-                        table_ref.impl_table.fast_setfield(key, value)
-                    } else {
-                        false
-                    };
-
-                    if fast_path_ok {
-                        // GC write barrier: if the table (BLACK) now references
-                        // a new WHITE value, the GC must be notified.
-                        if value.is_collectable()
-                            && let Some(gc_ptr) = ra.as_gc_ptr()
-                        {
-                            lua_state.gc_barrier_back(gc_ptr);
+                    if let Some(table_ref) = ra.as_table_mut() {
+                        if table_ref.impl_table.fast_setfield(key, value) {
+                            // Existing key updated — GC write barrier
+                            if value.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
                         }
-                    } else {
-                        // Slow path: metamethod, new key insertion, or non-table
-                        save_pc!();
-                        table_ops::exec_setfield(
-                            lua_state, instr, constants, base, frame_idx, &mut pc,
-                        )?;
-                        restore_state!();
+                        // Key doesn't exist yet. If no metatable, use fast new-key path
+                        // to avoid exec_setfield function call overhead.
+                        if !table_ref.has_metatable() {
+                            if table_ref.impl_table.fast_setfield_newkey(key, value) {
+                                // Must invalidate TM cache: this table may be used as
+                                // a metatable for other tables (e.g. mt.__eq = func).
+                                table_ref.invalidate_tm_cache();
+                                if value.is_collectable()
+                                    && let Some(gc_ptr) = ra.as_gc_ptr()
+                                {
+                                    lua_state.gc_barrier_back(gc_ptr);
+                                }
+                                continue;
+                            }
+                            // Needs rehash — use raw_set directly
+                            let (_, delta) = table_ref.impl_table.raw_set(key, value);
+                            table_ref.invalidate_tm_cache();
+                            if delta != 0
+                                && let Some(table_ptr) = ra.as_table_ptr()
+                            {
+                                lua_state.gc_track_table_resize(table_ptr, delta);
+                            }
+                            if value.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
+                        }
                     }
+
+                    // Slow path: metamethod, non-table, or has metatable with new key
+                    save_pc!();
+                    table_ops::exec_setfield(
+                        lua_state, instr, constants, base, frame_idx, &mut pc,
+                    )?;
+                    restore_state!();
                 }
                 OpCode::Self_ => {
                     // SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
