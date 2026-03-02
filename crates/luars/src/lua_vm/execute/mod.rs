@@ -419,9 +419,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 pc += 1;
                             } else {
                                 save_pc!();
-                                return Err(
-                                    lua_state.error("attempt to divide by zero".to_string())
-                                );
+                                return Err(cold::error_div_by_zero(lua_state));
                             }
                         } else {
                             let mut n1 = 0.0;
@@ -453,7 +451,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 pc += 1;
                             } else {
                                 save_pc!();
-                                return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
+                                return Err(cold::error_mod_by_zero(lua_state));
                             }
                         } else {
                             let mut n1 = 0.0;
@@ -620,7 +618,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 pc += 1;
                             } else {
                                 save_pc!();
-                                return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
+                                return Err(cold::error_mod_by_zero(lua_state));
                             }
                         } else {
                             let mut n1 = 0.0;
@@ -692,9 +690,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 pc += 1;
                             } else {
                                 save_pc!();
-                                return Err(
-                                    lua_state.error("attempt to divide by zero".to_string())
-                                );
+                                return Err(cold::error_div_by_zero(lua_state));
                             }
                         } else {
                             let mut n1 = 0.0;
@@ -1072,7 +1068,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
 
                     if k && pc < code.len() {
-                        let extra_instr = code[pc];
+                        let extra_instr = unsafe { *code.get_unchecked(pc) };
                         if extra_instr.get_opcode() == OpCode::ExtraArg {
                             vc += extra_instr.get_ax() as usize * 1024;
                         }
@@ -1343,10 +1339,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             // Non-integer key: validate then raw_set
                             if rb.is_nil() {
-                                return Err(lua_state.error("table index is nil".to_string()));
+                                return Err(cold::error_table_index_nil(lua_state));
                             }
                             if rb.ttisfloat() && rb.fltvalue().is_nan() {
-                                return Err(lua_state.error("table index is NaN".to_string()));
+                                return Err(cold::error_table_index_nan(lua_state));
                             }
                             lua_state.raw_set(&ra, rb, val);
                             continue;
@@ -1824,10 +1820,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Jump back
                                 if bx > pc {
-                                    lua_state.set_frame_pc(frame_idx, pc as u32);
-                                    return Err(
-                                        lua_state.error("FORLOOP: invalid jump".to_string())
-                                    );
+                                    return Err(cold::error_forloop_invalid_jump(
+                                        lua_state, frame_idx, pc,
+                                    ));
                                 }
                                 pc -= bx;
                             }
@@ -1866,7 +1861,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         if step == 0 {
                             save_pc!();
-                            return Err(lua_state.error("'for' step is zero".to_string()));
+                            return Err(cold::error_for_step_zero(lua_state));
                         }
 
                         // forlimit: convert limit to integer per C Lua 5.5 logic
@@ -2068,64 +2063,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                         unsafe { *lua_state.stack().get_unchecked(base_mm + b) };
 
                                     if mm.is_lua_function() {
-                                        // Non-recursive Lua metamethod call:
-                                        // Push [mm, v1, v2] above ci_top, push frame,
-                                        // mark caller PENDING_FINISH, continue main loop.
-                                        let func_pos = lua_state.current_frame_top_unchecked();
-                                        let top = lua_state.get_top();
-                                        if top != func_pos {
-                                            lua_state.set_top_raw(func_pos);
-                                        }
-                                        unsafe {
-                                            let sp = lua_state.stack_mut().as_mut_ptr();
-                                            *sp.add(func_pos) = mm;
-                                            *sp.add(func_pos + 1) = v1;
-                                            *sp.add(func_pos + 2) = v2;
-                                        }
-                                        lua_state.set_top_raw(func_pos + 3);
-
-                                        let lua_func = unsafe { mm.as_lua_function_unchecked() };
-                                        let chunk_mm = lua_func.chunk();
+                                        // Non-recursive Lua metamethod call
                                         save_pc!();
-                                        lua_state.push_lua_frame(
-                                            &mm,
-                                            func_pos + 1,
-                                            2,
-                                            1,
-                                            chunk_mm.param_count,
-                                            chunk_mm.max_stack_size,
-                                            chunk_mm as *const _,
-                                        )?;
-                                        // Mark caller for pending result
-                                        {
-                                            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                                            let ci = lua_state.get_call_info_mut(frame_idx);
-                                            ci.call_status |= CIST_PENDING_FINISH;
-                                        }
+                                        cold::push_lua_mm_frame(lua_state, mm, v1, v2, frame_idx)?;
                                         continue 'startfunc;
                                     }
 
-                                    // C function metamethod — use call_tm_res
+                                    // C function metamethod — use cold helper
                                     let pi = unsafe { *code.get_unchecked(pc - 2) };
                                     let result_reg = pi.get_a() as usize;
                                     save_pc!();
-                                    let result = match call_tm_res(lua_state, mm, v1, v2) {
-                                        Ok(r) => r,
-                                        Err(LuaError::Yield) => {
-                                            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                                            let ci = lua_state.get_call_info_mut(frame_idx);
-                                            ci.pending_finish_get = result_reg as i32;
-                                            ci.call_status |= CIST_PENDING_FINISH;
-                                            return Err(LuaError::Yield);
-                                        }
-                                        Err(e) => return Err(e),
-                                    };
-                                    let cur_base = lua_state.get_frame_base(frame_idx);
-                                    unsafe {
-                                        *lua_state
-                                            .stack_mut()
-                                            .get_unchecked_mut(cur_base + result_reg) = result
-                                    };
+                                    cold::call_c_mm_bin(
+                                        lua_state, mm, v1, v2, result_reg, frame_idx,
+                                    )?;
                                     restore_state!();
                                     continue;
                                 } else {
@@ -2283,14 +2233,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // HOT PATH: inline table length for no-metatable case
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    let rb = lua_state.stack_mut()[base + b];
+                    let rb = unsafe { *lua_state.stack_mut().get_unchecked(base + b) };
                     if rb.ttistable() {
                         let table_gc = unsafe { &mut *(rb.value.ptr as *mut GcTable) };
                         let table = &mut table_gc.data;
                         let meta = table.meta_ptr();
                         if meta.is_null() {
                             // No metatable — raw len
-                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                            setivalue(
+                                unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
+                                table.len() as i64,
+                            );
                             continue;
                         }
                         // Has metatable — inline fasttm check for __len
@@ -2298,55 +2251,35 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         const TM_LEN_BIT: u8 = TmKind::Len as u8;
                         if mt.no_tm(TM_LEN_BIT) {
                             // __len cached absent — raw len
-                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                            setivalue(
+                                unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
+                                table.len() as i64,
+                            );
                             continue;
                         }
                         let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Len);
                         if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
                             if mm.is_lua_function() {
-                                // Non-recursive __len: push metamethod frame,
-                                // result via handle_pending_ops on RETURN.
-                                let func_pos = lua_state.current_frame_top_unchecked();
-                                let top = lua_state.get_top();
-                                if top != func_pos {
-                                    lua_state.set_top_raw(func_pos);
-                                }
-                                unsafe {
-                                    let sp = lua_state.stack_mut().as_mut_ptr();
-                                    *sp.add(func_pos) = mm;
-                                    *sp.add(func_pos + 1) = rb;
-                                    *sp.add(func_pos + 2) = rb;
-                                }
-                                lua_state.set_top_raw(func_pos + 3);
-
-                                let lua_func = unsafe { mm.as_lua_function_unchecked() };
-                                let chunk_mm = lua_func.chunk();
+                                // Non-recursive __len: push metamethod frame
                                 save_pc!();
-                                lua_state.push_lua_frame(
-                                    &mm,
-                                    func_pos + 1,
-                                    2,
-                                    1,
-                                    chunk_mm.param_count,
-                                    chunk_mm.max_stack_size,
-                                    chunk_mm as *const _,
-                                )?;
-                                {
-                                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                                    let ci = lua_state.get_call_info_mut(frame_idx);
-                                    ci.call_status |= CIST_PENDING_FINISH;
-                                }
+                                cold::push_lua_mm_frame(lua_state, mm, rb, rb, frame_idx)?;
                                 continue 'startfunc;
                             }
                             // __len is not Lua function — fall to handle_len
                         } else {
                             // __len absent — cache and use raw len
                             mt.set_tm_absent(TM_LEN_BIT);
-                            setivalue(&mut lua_state.stack_mut()[base + a], table.len() as i64);
+                            setivalue(
+                                unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
+                                table.len() as i64,
+                            );
                             continue;
                         }
                     } else if let Some(s) = rb.as_str() {
-                        setivalue(&mut lua_state.stack_mut()[base + a], s.len() as i64);
+                        setivalue(
+                            unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
+                            s.len() as i64,
+                        );
                         continue;
                     }
                     handle_len(lua_state, instr, &mut base, frame_idx, pc)?;
@@ -2621,7 +2554,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // It's always consumed by the previous instruction (NEWTABLE, SETLIST, etc.)
                     // If we reach here, it's a compiler error
                     save_pc!();
-                    return Err(lua_state.error("unexpected EXTRAARG instruction".to_string()));
+                    return Err(cold::error_unexpected_extraarg(lua_state));
                 }
             } // end match
         } // end 'mainloop

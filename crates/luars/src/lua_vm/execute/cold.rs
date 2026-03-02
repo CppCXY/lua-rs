@@ -432,3 +432,201 @@ pub fn error_for_bad_limit(
     let t = crate::stdlib::debug::objtypename(lua_state, limit_val);
     lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
 }
+
+/// Cold error: attempt to divide by zero (IDIV)
+#[cold]
+#[inline(never)]
+pub fn error_div_by_zero(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("attempt to divide by zero".to_string())
+}
+
+/// Cold error: attempt to perform 'n%0' (MOD)
+#[cold]
+#[inline(never)]
+pub fn error_mod_by_zero(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("attempt to perform 'n%0'".to_string())
+}
+
+/// Cold error: table index is nil
+#[cold]
+#[inline(never)]
+pub fn error_table_index_nil(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("table index is nil".to_string())
+}
+
+/// Cold error: table index is NaN
+#[cold]
+#[inline(never)]
+pub fn error_table_index_nan(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("table index is NaN".to_string())
+}
+
+/// Cold error: 'for' step is zero
+#[cold]
+#[inline(never)]
+pub fn error_for_step_zero(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("'for' step is zero".to_string())
+}
+
+/// Cold error: FORLOOP invalid jump
+#[cold]
+#[inline(never)]
+pub fn error_forloop_invalid_jump(
+    lua_state: &mut LuaState,
+    frame_idx: usize,
+    pc: usize,
+) -> LuaError {
+    lua_state.set_frame_pc(frame_idx, pc as u32);
+    lua_state.error("FORLOOP: invalid jump".to_string())
+}
+
+/// Cold error: unexpected EXTRAARG instruction
+#[cold]
+#[inline(never)]
+pub fn error_unexpected_extraarg(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("unexpected EXTRAARG instruction".to_string())
+}
+
+/// Cold helper: register-register comparison metamethod fallback (used by exec_lt, exec_le)
+#[cold]
+#[inline(never)]
+pub fn cmp_reg_metamethod(
+    lua_state: &mut LuaState,
+    va: LuaValue,
+    vb: LuaValue,
+    tm: TmKind,
+    frame_idx: usize,
+    pc: usize,
+    base: usize,
+) -> LuaResult<bool> {
+    lua_state.set_frame_pc(frame_idx, pc as u32);
+    match super::metamethod::try_comp_tm(lua_state, va, vb, tm) {
+        Ok(Some(result)) => {
+            let new_base = lua_state.get_frame_base(frame_idx);
+            if new_base != base {
+                return Err(lua_state.error("base changed in comparison".to_string()));
+            }
+            Ok(result)
+        }
+        Ok(None) => Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb)),
+        Err(LuaError::Yield) => {
+            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Cold helper: immediate comparison metamethod fallback (used by exec_lti, exec_lei, exec_gti, exec_gei)
+#[cold]
+#[inline(never)]
+pub fn cmp_imm_metamethod(
+    lua_state: &mut LuaState,
+    ra_val: LuaValue,
+    im: i32,
+    isf: bool,
+    tm: TmKind,
+    swap: bool,
+    frame_idx: usize,
+    pc: usize,
+) -> LuaResult<bool> {
+    let imm_val = if isf {
+        LuaValue::float(im as f64)
+    } else {
+        LuaValue::integer(im as i64)
+    };
+    let (va, vb) = if swap {
+        (imm_val, ra_val)
+    } else {
+        (ra_val, imm_val)
+    };
+    lua_state.set_frame_pc(frame_idx, pc as u32);
+    match super::metamethod::try_comp_tm(lua_state, va, vb, tm) {
+        Ok(Some(result)) => Ok(result),
+        Ok(None) => Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb)),
+        Err(LuaError::Yield) => {
+            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Cold helper: push a non-recursive Lua metamethod frame and mark caller PENDING_FINISH.
+/// Used by MmBin and Len opcodes. Returns Ok(()) on success; caller should `continue 'startfunc`.
+#[cold]
+#[inline(never)]
+pub fn push_lua_mm_frame(
+    lua_state: &mut LuaState,
+    mm: LuaValue,
+    v1: LuaValue,
+    v2: LuaValue,
+    frame_idx: usize,
+) -> LuaResult<()> {
+    let func_pos = lua_state.current_frame_top_unchecked();
+    let top = lua_state.get_top();
+    if top != func_pos {
+        lua_state.set_top_raw(func_pos);
+    }
+    unsafe {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        *sp.add(func_pos) = mm;
+        *sp.add(func_pos + 1) = v1;
+        *sp.add(func_pos + 2) = v2;
+    }
+    lua_state.set_top_raw(func_pos + 3);
+
+    let lua_func = unsafe { mm.as_lua_function_unchecked() };
+    let chunk_mm = lua_func.chunk();
+    lua_state.push_lua_frame(
+        &mm,
+        func_pos + 1,
+        2,
+        1,
+        chunk_mm.param_count,
+        chunk_mm.max_stack_size,
+        chunk_mm as *const _,
+    )?;
+    {
+        use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+        let ci = lua_state.get_call_info_mut(frame_idx);
+        ci.call_status |= CIST_PENDING_FINISH;
+    }
+    Ok(())
+}
+
+/// Cold helper: handle C function metamethod in MmBin.
+/// Calls the metamethod and stores the result in the target register.
+#[cold]
+#[inline(never)]
+pub fn call_c_mm_bin(
+    lua_state: &mut LuaState,
+    mm: LuaValue,
+    v1: LuaValue,
+    v2: LuaValue,
+    result_reg: usize,
+    frame_idx: usize,
+) -> LuaResult<()> {
+    let result = match super::metamethod::call_tm_res(lua_state, mm, v1, v2) {
+        Ok(r) => r,
+        Err(LuaError::Yield) => {
+            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.pending_finish_get = result_reg as i32;
+            ci.call_status |= CIST_PENDING_FINISH;
+            return Err(LuaError::Yield);
+        }
+        Err(e) => return Err(e),
+    };
+    let cur_base = lua_state.get_frame_base(frame_idx);
+    unsafe {
+        *lua_state
+            .stack_mut()
+            .get_unchecked_mut(cur_base + result_reg) = result;
+    }
+    Ok(())
+}

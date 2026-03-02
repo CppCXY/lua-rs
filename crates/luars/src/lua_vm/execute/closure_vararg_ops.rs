@@ -23,7 +23,7 @@ use super::helper::{buildhiddenargs, setnilvalue};
 fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> LuaResult<usize> {
     let table_val = {
         let stack = lua_state.stack_mut();
-        stack[base + vatab_reg]
+        unsafe { *stack.get_unchecked(base + vatab_reg) }
     };
 
     if let Some(table) = table_val.as_table_mut() {
@@ -119,19 +119,22 @@ pub fn exec_vararg(
         // Get from vararg table at R[B]
         let table_val = {
             let stack = lua_state.stack_mut();
-            stack[base + b]
+            unsafe { *stack.get_unchecked(base + b) }
         };
 
         if let Some(table) = table_val.as_table_mut() {
             let stack = lua_state.stack_mut();
             for i in 0..touse {
-                stack[ra + i] = table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil());
+                unsafe {
+                    *stack.get_unchecked_mut(ra + i) =
+                        table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil())
+                };
             }
         } else {
             // Not a table, fill with nil
             let stack = lua_state.stack_mut();
             for i in 0..touse {
-                setnilvalue(&mut stack[ra + i]);
+                setnilvalue(unsafe { stack.get_unchecked_mut(ra + i) });
             }
         }
     }
@@ -140,7 +143,7 @@ pub fn exec_vararg(
     if wanted >= 0 {
         let stack = lua_state.stack_mut();
         for i in touse..(wanted as usize) {
-            setnilvalue(&mut stack[ra + i]);
+            setnilvalue(unsafe { stack.get_unchecked_mut(ra + i) });
         }
     }
 
@@ -211,7 +214,7 @@ pub fn exec_varargprep(
         }
 
         let stack = lua_state.stack_mut();
-        stack[target_idx] = table_val;
+        unsafe { *stack.get_unchecked_mut(target_idx) = table_val };
 
         // In Lua 5.5 C implementation "luaT_adjustvarargs", the table is placed
         // at the slot after fixed parameters. L->top is adjusted to include the table.
@@ -235,14 +238,14 @@ pub fn exec_varargprep(
         // The named vararg param (e.g., 't' in '...t') is at register nfixparams
         // It should be nil when using hidden args mode (GETVARG accesses hidden area directly)
         let stack = lua_state.stack_mut();
-        setnilvalue(&mut stack[new_base + nfixparams]);
+        setnilvalue(unsafe { stack.get_unchecked_mut(new_base + nfixparams) });
     }
     // No vararg table needed and no extra args: still need to nil the vararg register
     // so it doesn't contain stale stack values
     else if chunk.is_vararg {
         let current_base = lua_state.get_call_info(frame_idx).base;
         let stack = lua_state.stack_mut();
-        setnilvalue(&mut stack[current_base + nfixparams]);
+        setnilvalue(unsafe { stack.get_unchecked_mut(current_base + nfixparams) });
     }
 
     Ok(())
@@ -285,7 +288,7 @@ pub fn exec_setlist(
     }
 
     // Get table from R[A] - OPTIMIZED: Direct pointer access
-    let table_val = lua_state.stack_mut()[base + a];
+    let table_val = unsafe { *lua_state.stack_mut().get_unchecked(base + a) };
     let mut is_collectable = false;
     if let Some(table) = table_val.as_table_mut() {
         unsafe {

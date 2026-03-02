@@ -42,11 +42,12 @@ pub fn buildhiddenargs(
     let stack = lua_state.stack_mut();
 
     // Step 1: Copy function to new_func_pos
-    stack[new_func_pos] = stack[func_pos];
+    // Safety: grow_stack above ensures stack is large enough for new_func_pos and new_base
+    unsafe { *stack.get_unchecked_mut(new_func_pos) = *stack.get_unchecked(func_pos) };
 
     // Step 2: Copy fixed parameters to after new function position
     for i in 0..nfixparams {
-        stack[new_base + i] = stack[func_pos + 1 + i];
+        unsafe { *stack.get_unchecked_mut(new_base + i) = *stack.get_unchecked(func_pos + 1 + i) };
         // Erase original parameter with nil (for GC)
         unsafe {
             psetnilvalue(&mut stack[func_pos + 1 + i] as *mut LuaValue);
