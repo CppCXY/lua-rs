@@ -833,7 +833,7 @@ fn forstat(fs: &mut FuncState, line: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), String> {
+fn fornum(fs: &mut FuncState, varname: String, line: usize) -> Result<(), String> {
     // fornum -> NAME = exp, exp [,exp] forbody
     // Port of lparser.c:1685-1704
 
@@ -915,6 +915,9 @@ fn fornum(fs: &mut FuncState, varname: String, _line: usize) -> Result<(), Strin
     // This matches lparser.c: fixforjump(fs, endfor, prep + 1, 1)
     // back=true means the distance will be stored as positive (absolute value)
     fix_for_jump(fs, loop_pc, prep_pc + 1, true)?;
+
+    // lparser.c: luaK_fixline(fs, line); /* pretend loop starts at 'for' line */
+    code::fixline(fs, line);
 
     // Don't remove variables here - the outer forstat's leaveblock will handle it
     // fs.remove_vars(fs.nactvar - 1);
@@ -1014,6 +1017,9 @@ fn forlist(fs: &mut FuncState, indexname: String) -> Result<(), String> {
     // lparser.c:1563: fixforjump(fs, endfor, prep + 1, 1);
     // Fix TFORLOOP to jump back to prep+1 (back jump)
     fix_for_jump(fs, endfor_pc, prep_pc + 1, true)?;
+
+    // lparser.c: luaK_fixline(fs, line); /* pretend TFORLOOP is on 'for' line */
+    code::fixline(fs, line);
 
     // Don't remove variables here - the outer forstat's leaveblock will handle it
     // fs.remove_vars(fs.nactvar - nvars as u8);

@@ -192,7 +192,11 @@ fn write_chunk(
     // Write upvalue descriptors
     write_u32(buf, chunk.upvalue_descs.len() as u32);
     for desc in &chunk.upvalue_descs {
-        write_string(buf, &desc.name);
+        if strip {
+            write_string(buf, ""); // strip upvalue names
+        } else {
+            write_string(buf, &desc.name);
+        }
         buf.push(if desc.is_local { 1 } else { 0 });
         write_u32(buf, desc.index);
     }
@@ -262,7 +266,11 @@ fn write_chunk_with_dedup(
     // Write upvalue descriptors (with string dedup for names)
     write_u32(buf, chunk.upvalue_descs.len() as u32);
     for desc in &chunk.upvalue_descs {
-        write_string_with_dedup(buf, &desc.name, string_table)?;
+        if strip {
+            write_string_with_dedup(buf, "", string_table)?; // strip upvalue names
+        } else {
+            write_string_with_dedup(buf, &desc.name, string_table)?;
+        }
         buf.push(if desc.is_local { 1 } else { 0 });
         write_u32(buf, desc.index);
     }
@@ -333,7 +341,11 @@ fn write_chunk_no_pool_with_dedup(
     // Write upvalue descriptors with deduplication
     write_u32(buf, chunk.upvalue_descs.len() as u32);
     for desc in &chunk.upvalue_descs {
-        write_string_with_dedup(buf, &desc.name, string_table)?;
+        if strip {
+            write_string_with_dedup(buf, "", string_table)?; // strip upvalue names
+        } else {
+            write_string_with_dedup(buf, &desc.name, string_table)?;
+        }
         buf.push(if desc.is_local { 1 } else { 0 });
         write_u32(buf, desc.index);
     }
@@ -400,7 +412,11 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
     // Write upvalue descriptors
     write_u32(buf, chunk.upvalue_descs.len() as u32);
     for desc in &chunk.upvalue_descs {
-        write_string(buf, &desc.name);
+        if strip {
+            write_string(buf, ""); // strip upvalue names
+        } else {
+            write_string(buf, &desc.name);
+        }
         buf.push(if desc.is_local { 1 } else { 0 });
         write_u32(buf, desc.index);
     }

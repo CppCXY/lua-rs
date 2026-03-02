@@ -835,9 +835,8 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
                     params.push(vararg_name);
                     param_kinds.push(VarKind::RDKVAVAR);
                 } else {
-                    // Anonymous vararg - still needs a placeholder local variable
-                    // Use empty string as marker (like Lua 5.5)
-                    params.push("".to_string());
+                    // Anonymous vararg - use "(vararg table)" as marker (like Lua 5.5's lparser.c)
+                    params.push("(vararg table)".to_string());
                     param_kinds.push(VarKind::RDKVAVAR);
                 }
                 break;

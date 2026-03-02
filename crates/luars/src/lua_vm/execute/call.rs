@@ -252,6 +252,16 @@ pub fn call_c_function(
     // Use lean push_c_frame (skips type dispatch)
     lua_state.push_c_frame(&func, call_base, nargs, nresults)?;
 
+    // Fire call hook for C functions (matches C Lua's precallC)
+    {
+        let hook_mask = lua_state.hook_mask;
+        if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook {
+            // ftransfer=1, ntransfer=narg (actual args passed to C function)
+            let narg = (lua_state.get_top() - call_base) as i32;
+            lua_state.run_hook(crate::lua_vm::LUA_HOOKCALL, -1, 1, narg)?;
+        }
+    }
+
     // Call the function (it returns number of results)
     let n = if let Some(c_func) = c_func {
         match c_func(lua_state) {
@@ -283,6 +293,16 @@ pub fn call_c_function(
     } else {
         call_base
     };
+
+    // Fire return hook for C functions (matches C Lua's rethook)
+    {
+        let hook_mask = lua_state.hook_mask;
+        if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
+            // ftransfer = 1-based index relative to base (call_base)
+            let ftransfer = (first_result - call_base + 1) as i32;
+            lua_state.run_hook(crate::lua_vm::LUA_HOOKRET, -1, ftransfer, n as i32)?;
+        }
+    }
 
     // Pop frame (lean path, no call_status bit check)
     lua_state.pop_c_frame();
@@ -554,6 +574,9 @@ pub fn handle_tailcall(
 
         // Reset PC to 0 to start executing the new function from beginning
         lua_state.set_frame_pc(current_frame_idx, 0);
+
+        // Mark as tail call (for debug.getinfo istailcall)
+        lua_state.get_call_info_mut(current_frame_idx).set_tail();
 
         // Update cached chunk pointer for the new function
         lua_state.get_call_info_mut(current_frame_idx).chunk_ptr = chunk as *const _;

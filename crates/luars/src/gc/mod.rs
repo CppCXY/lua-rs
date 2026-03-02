@@ -1284,8 +1284,8 @@ impl GC {
         // markvalue(g, &g->l_registry);
         self.mark_value(l, &registry);
 
-        // Mark debug hook function (global, may be a GC-managed closure)
-        let hook = l.vm_mut().hook;
+        // Mark debug hook function (per-thread, on main thread)
+        let hook = l.hook;
         if !hook.is_nil() {
             self.mark_value(l, &hook);
         }
@@ -2074,12 +2074,9 @@ impl GC {
             // Guard: if stack is not yet built (empty), skip marking.
             // Matches C Lua: "if (o == NULL) return 0;"
             //
-            // OPTIMIZATION: Dead coroutines (returned/errored) have empty stacks
-            // (Vec cleared by handle_resume_result). We mark the error_object
-            // defensively but do NOT re-add the thread to grayagain. This prevents
-            // dead threads from accumulating in grayagain and being needlessly
-            // re-traversed every cycle, which was causing O(n²) behavior with
-            // many coroutines (e.g., 1M coroutine recursion test).
+            // OPTIMIZATION: Normally-completed or explicitly-closed coroutines
+            // have empty stacks. Dead-by-error coroutines retain their stacks
+            // for debug.traceback and will be fully traversed below.
             if stack.is_empty() {
                 // Still mark error_object if present (safety)
                 let err_obj = &state.error_object;
@@ -2120,6 +2117,13 @@ impl GC {
             let err_obj = &state.error_object;
             if !err_obj.is_nil() {
                 self.mark_value(l, err_obj);
+                count += 1;
+            }
+
+            // Mark per-thread debug hook function (may be a GC-managed closure)
+            let hook = &state.hook;
+            if !hook.is_nil() {
+                self.mark_value(l, hook);
                 count += 1;
             }
 
@@ -2261,8 +2265,8 @@ impl GC {
         let registry = l.vm_mut().registry;
         self.mark_value(l, &registry);
 
-        // Mark debug hook function (global, may be a GC-managed closure)
-        let hook = l.vm_mut().hook;
+        // Mark debug hook function (per-thread, stored on LuaState)
+        let hook = l.hook;
         if !hook.is_nil() {
             self.mark_value(l, &hook);
         }

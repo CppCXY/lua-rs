@@ -89,11 +89,12 @@ pub fn exec_vararg(
         wanted as usize
     };
 
-    // Always update stack_top and frame.top to accommodate the results
+    // Always update stack_top to accommodate the results
+    // NOTE: Only update L->top (stack_top), NOT ci->top.
+    // ci->top must remain at base + max_stack_size to protect ALL registers.
+    // C Lua's luaT_getvarargs only sets L->top.p = where + nvar, never ci->top.
     let new_top = base + a + touse;
     lua_state.set_top(new_top)?;
-    let call_info = lua_state.get_call_info_mut(frame_idx);
-    call_info.top = new_top;
 
     let ra = base + a;
 
@@ -235,6 +236,13 @@ pub fn exec_varargprep(
         // It should be nil when using hidden args mode (GETVARG accesses hidden area directly)
         let stack = lua_state.stack_mut();
         setnilvalue(&mut stack[new_base + nfixparams]);
+    }
+    // No vararg table needed and no extra args: still need to nil the vararg register
+    // so it doesn't contain stale stack values
+    else if chunk.is_vararg {
+        let current_base = lua_state.get_call_info(frame_idx).base;
+        let stack = lua_state.stack_mut();
+        setnilvalue(&mut stack[current_base + nfixparams]);
     }
 
     Ok(())

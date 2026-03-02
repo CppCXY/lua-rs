@@ -114,14 +114,6 @@ pub struct LuaVM {
     /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
     pub(crate) io_default_output: Option<LuaValue>,
     pub(crate) io_default_input: Option<LuaValue>,
-
-    // === Debug hook state (global — shared by all coroutines) ===
-    /// Hook function (nil = no hook). Set via debug.sethook.
-    pub(crate) hook: LuaValue,
-    /// Active hook mask (bitmask of LUA_MASKCALL/RET/LINE/COUNT).
-    pub(crate) hook_mask: u8,
-    /// Base value for count hook (reset interval). Set via debug.sethook.
-    pub(crate) base_hook_count: i32,
 }
 
 impl LuaVM {
@@ -156,9 +148,6 @@ impl LuaVM {
             const_strings: cs,
             io_default_output: None,
             io_default_input: None,
-            hook: LuaValue::nil(),
-            hook_mask: 0,
-            base_hook_count: 0,
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;

@@ -126,8 +126,23 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         // ===== DEBUG HOOK STATE =====
         let vm_ptr = lua_state.vm_ptr();
-        let mut hook_mask = unsafe { (*vm_ptr).hook_mask };
-        let mut last_line: u32 = 0; // for line hook change detection
+        let mut hook_mask = lua_state.hook_mask;
+        // Line hook tracking:
+        // - On resume (pc>0): set to caller's current line so same-line
+        //   continuation doesn't fire.
+        // - On vararg function entry (pc==0, is_vararg): set to line_info[0]
+        //   to suppress the line event for VARARGPREP (matching C Lua which
+        //   skips the hook check for VARARGPREP entirely).
+        // - On normal function entry (pc==0, !is_vararg): set to 0 so the
+        //   first instruction always fires (0 != any real line).
+        let mut last_line: u32 = if pc > 0 && !chunk.line_info.is_empty() {
+            let idx = (pc - 1).min(chunk.line_info.len() - 1);
+            chunk.line_info[idx]
+        } else if chunk.is_vararg && !chunk.line_info.is_empty() {
+            chunk.line_info[0] // suppress VARARGPREP line event
+        } else {
+            0 // will differ from any real line ≥1 → first instruction fires
+        };
 
         // Macro to save PC before operations that may call functions
         macro_rules! save_pc {
@@ -146,7 +161,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
         if hook_mask != 0 && pc == 0 && lua_state.allow_hook {
-            hook_on_call(lua_state, vm_ptr, hook_mask, call_status)?;
+            hook_on_call(lua_state, vm_ptr, hook_mask, call_status, chunk)?;
         }
 
         // MAINLOOP: Main instruction dispatch loop
@@ -159,8 +174,23 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             // Live-read hook_mask from VM (not cached) so that debug.sethook
             // called from C functions takes effect immediately.
             // When no hooks are set (common case): one load + one branch (predicted not-taken).
-            hook_mask = unsafe { (*vm_ptr).hook_mask };
+            let old_mask = hook_mask;
+            hook_mask = lua_state.hook_mask;
             if hook_mask != 0 && lua_state.allow_hook {
+                // Detect line hook activation: if line hook was just enabled
+                // (was off, now on), set last_line to the line of the CALL
+                // instruction that invoked debug.sethook (at pc-2).
+                // This way: if the next instruction is on the same line as the
+                // sethook call → no fire; if on a different line → fire.
+                // This matches C Lua where L->oldpc reflects the last instruction
+                // that was checked by the hook.
+                if hook_mask & crate::lua_vm::LUA_MASKLINE != 0
+                    && old_mask & crate::lua_vm::LUA_MASKLINE == 0
+                    && pc >= 2
+                    && (pc - 2) < chunk.line_info.len()
+                {
+                    last_line = chunk.line_info[pc - 2];
+                }
                 hook_mask = hook_check_instruction(
                     lua_state,
                     vm_ptr,
@@ -894,6 +924,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         return Err(lua_state.error(format!("JMP: invalid target pc={}", new_pc)));
                     }
 
+                    // Backward jump: force next line hook to fire (C Lua: npci <= oldpc)
+                    if sj < 0 {
+                        last_line = 0;
+                    }
                     pc = new_pc;
                 }
                 OpCode::Return => {
@@ -908,7 +942,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Return hook (cold path)
                     if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
-                        hook_on_return(lua_state, frame_idx, pc as u32)?;
+                        let nres = if b != 0 {
+                            (b - 1) as i32
+                        } else {
+                            (lua_state.get_top() - (base + a)) as i32
+                        };
+                        hook_on_return(lua_state, frame_idx, pc as u32, nres)?;
                     }
 
                     // Handle return
@@ -919,7 +958,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // return (no values)
                     // Return hook (cold path)
                     if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
-                        hook_on_return(lua_state, frame_idx, pc as u32)?;
+                        hook_on_return(lua_state, frame_idx, pc as u32, 0)?;
                     }
                     return_handler::handle_return0(lua_state, frame_idx);
                     continue 'startfunc;
@@ -930,7 +969,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Return hook (cold path)
                     if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
-                        hook_on_return(lua_state, frame_idx, pc as u32)?;
+                        hook_on_return(lua_state, frame_idx, pc as u32, 1)?;
                     }
 
                     // Inline return handling + context restore to avoid
@@ -965,9 +1004,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
                     constants = &chunk.constants;
                     code = &chunk.code;
-                    // After returning to caller, reset line tracking
-                    // (caller's line may differ from callee's last line)
-                    last_line = 0;
+                    // Restore caller's line: set to caller's current line
+                    // so same-line continuation doesn't fire.
+                    if pc > 0 && !chunk.line_info.is_empty() {
+                        let idx = (pc - 1).min(chunk.line_info.len() - 1);
+                        last_line = chunk.line_info[idx];
+                    } else {
+                        last_line = 0;
+                    }
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
@@ -1619,9 +1663,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         // Call hook for inline Lua call (cold path)
                         if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook {
-                            hook_on_call(lua_state, vm_ptr, hook_mask, 0)?;
+                            hook_on_call(lua_state, vm_ptr, hook_mask, 0, chunk)?;
                         }
-                        last_line = 0; // Reset for new function
+                        // Vararg: suppress VARARGPREP line; non-vararg: fire first instr
+                        last_line = if chunk.is_vararg && !chunk.line_info.is_empty() {
+                            chunk.line_info[0]
+                        } else {
+                            0
+                        };
                         continue;
                     }
 
@@ -1712,9 +1761,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                         if hook_mask & crate::lua_vm::LUA_MASKCALL != 0
                                             && lua_state.allow_hook
                                         {
-                                            hook_on_call(lua_state, vm_ptr, hook_mask, 0)?;
+                                            hook_on_call(lua_state, vm_ptr, hook_mask, 0, chunk)?;
                                         }
-                                        last_line = 0;
+                                        // Vararg: suppress VARARGPREP line; non-vararg: fire first instr
+                                        last_line =
+                                            if chunk.is_vararg && !chunk.line_info.is_empty() {
+                                                chunk.line_info[0]
+                                            } else {
+                                                0
+                                            };
                                         continue;
                                     }
                                     // __call is not a Lua function — fall to cold path
@@ -1746,10 +1801,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Save PC before call
                     save_pc!();
 
-                    // Return hook for the current function being tail-replaced (cold path)
-                    if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
-                        hook_on_return(lua_state, frame_idx, pc as u32)?;
-                    }
+                    // NOTE: No return hook here. Lua 5.5's luaD_pretailcall does NOT
+                    // call rethook for Lua-to-Lua tail calls. Only the "tail call" event
+                    // fires via the call hook at the new function's entry (pc==0).
+                    // For C function tail calls, hooks are handled inside call_c_function.
 
                     // Delegate to tailcall handler
                     // (call hook fires via 'startfunc when pc==0, with LUA_HOOKTAILCALL event)
@@ -1816,6 +1871,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Jump back (no error check - validated at compile time)
                                 pc -= bx;
+                                // Backward jump: force next line hook to fire
+                                last_line = 0;
                             }
                             // else: counter expired, exit loop
                         } else {
@@ -1849,6 +1906,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     );
                                 }
                                 pc -= bx;
+                                // Backward jump: force next line hook to fire
+                                last_line = 0;
                             }
                             // else: exit loop
                         }
@@ -2054,6 +2113,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if !unsafe { stack.get_unchecked(ra + 3) }.is_nil() {
                         // Continue loop: jump back
                         pc -= bx;
+                        // Backward jump: force next line hook to fire
+                        last_line = 0;
                     }
                     // else: exit loop (control variable is nil)
                 }
@@ -2618,6 +2679,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                 OpCode::VarargPrep => {
                     closure_vararg_ops::exec_varargprep(lua_state, frame_idx, chunk, &mut base)?;
+                    // After VARARGPREP, force next instruction to fire line event.
+                    // This matches C Lua's L->oldpc = 1 in OP_VARARGPREP which
+                    // causes npci <= oldpc (both == 1) to be true, firing unconditionally.
+                    last_line = 0;
                 }
 
                 OpCode::ExtraArg => {

@@ -39,6 +39,10 @@ pub mod call_status {
     /// without prepending true/false.
     pub const CIST_YCALL: u32 = 1 << 14;
 
+    /// Frame was interrupted by a hook (set during hook callback).
+    /// Used by debug.getinfo to report namewhat="hook".
+    pub const CIST_HOOKED: u32 = 1 << 15;
+
     /// Offset for __call metamethod count (bits 9-12)
     pub const CIST_CCMT: u32 = 9;
     /// Mask for __call metamethod count (0xf at bits 9-12 = 0x1E00)

@@ -1308,7 +1308,7 @@ fn swapexps(e1: &mut ExpDesc, e2: &mut ExpDesc) {
 
 // Port of codeconcat from lcode.c:1686-1698
 // Create code for '(e1 .. e2)'
-fn codeconcat(fs: &mut FuncState, e1: &mut ExpDesc, e2: &mut ExpDesc) {
+fn codeconcat(fs: &mut FuncState, e1: &mut ExpDesc, e2: &mut ExpDesc, line: usize) {
     // Check if previous instruction is CONCAT to merge multiple concatenations
     if fs.pc > 0 {
         let prev_pc = fs.pc - 1;
@@ -1327,6 +1327,7 @@ fn codeconcat(fs: &mut FuncState, e1: &mut ExpDesc, e2: &mut ExpDesc) {
     // New concat opcode
     code_abc(fs, OpCode::Concat, e1.u.info() as u32, 2, 0);
     free_exp(fs, e2);
+    fixline(fs, line);
 }
 
 // Port of codeABRK from lcode.c:1040-1044
@@ -1790,7 +1791,7 @@ pub fn posfix(
                 }
             }
             exp2nextreg(fs, e2);
-            codeconcat(fs, e1, e2);
+            codeconcat(fs, e1, e2, line);
         }
         // lcode.c:1762-1764: OPR_EQ, OPR_NE
         BinaryOperator::OpEq | BinaryOperator::OpNe => {
@@ -1861,6 +1862,7 @@ pub fn posfix(
 
                         e1.kind = ExpKind::VRELOC;
                         e1.u = ExpUnion::Info(pc as i32);
+                        fixline(fs, line);
 
                         // Generate MMBINI for metamethod fallback
                         let mm_imm = ((imm_val + 127) & 0xff) as u32;
@@ -1897,6 +1899,7 @@ pub fn posfix(
 
                         e1.kind = ExpKind::VRELOC;
                         e1.u = ExpUnion::Info(pc as i32);
+                        fixline(fs, line);
 
                         // Generate MMBINI with ORIGINAL value for metamethod
                         // (finishbinexpneg corrects the metamethod argument - lcode.c:1476)
@@ -1935,6 +1938,7 @@ pub fn posfix(
 
                         e1.kind = ExpKind::VRELOC;
                         e1.u = ExpUnion::Info(pc as i32);
+                        fixline(fs, line);
 
                         // MMBINI with flip=1 since immediate was on left
                         let mm_imm = ((imm_val + 127) & 0xff) as u32;
@@ -1964,6 +1968,7 @@ pub fn posfix(
 
                         e1.kind = ExpKind::VRELOC;
                         e1.u = ExpUnion::Info(pc as i32);
+                        fixline(fs, line);
 
                         // MMBINI with ORIGINAL value for TM_SHL
                         let mm_imm = ((imm_val + 127) & 0xff) as u32;
@@ -2084,6 +2089,7 @@ pub fn posfix(
                 // Mark as relocatable - target register will be decided later
                 e1.kind = ExpKind::VRELOC;
                 e1.u = ExpUnion::Info(pc as i32);
+                fixline(fs, line);
 
                 // Generate metamethod fallback instruction (MMBINK)
                 // Like finishbinexpval in lcode.c:1416
@@ -2149,6 +2155,7 @@ pub fn posfix(
                 // Mark as relocatable
                 e1.kind = ExpKind::VRELOC;
                 e1.u = ExpUnion::Info(pc as i32);
+                fixline(fs, line);
 
                 // Generate metamethod fallback instruction (MMBIN)
                 // Like finishbinexpval in lcode.c:1416

@@ -165,8 +165,7 @@ report"gc.lua"
 local f = assert(loadfile('gc.lua'))
 f()
 
-print("skip db.lua tests")
--- dofile('db.lua')
+dofile('db.lua')
 assert(dofile('calls.lua') == deep and deep)
 _G.deep = nil
 olddofile('strings.lua')

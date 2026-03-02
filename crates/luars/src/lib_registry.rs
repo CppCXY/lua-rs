@@ -120,6 +120,22 @@ impl LibraryRegistry {
                 };
                 vm.set_global(name, value)?;
             }
+            // Also register _G (the globals table) in package.loaded["_G"]
+            // This matches C Lua's behavior where luaL_requiref stores the base library
+            // result in package.loaded["_G"], enabling pushglobalfuncname to find
+            // global C functions like pcall, print, etc.
+            let globals = vm.global;
+            if let Some(package_table) = vm.get_global("package")?
+                && package_table.is_table()
+            {
+                let loaded_key = vm.create_string("loaded")?;
+                if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
+                    && loaded_table.is_table()
+                {
+                    let mod_key = vm.create_string("_G")?;
+                    vm.raw_set(&loaded_table, mod_key, globals);
+                }
+            }
         } else {
             // For module libraries, set the table as global
             vm.set_global(module.name, lib_table)?;

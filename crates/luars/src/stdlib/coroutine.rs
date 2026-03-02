@@ -145,6 +145,9 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
         if thread.is_main_thread() {
             // Main thread is always running
             str_running
+        } else if thread.dead {
+            // Dead by error — still has stack/frames for debug.traceback
+            str_dead
         } else if thread.call_depth() > 0 {
             if thread.is_yielded() {
                 str_suspended
@@ -302,6 +305,8 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
         // 0 = dead, 1 = suspended, 2 = normal, 3 = running
         let status: u8 = if is_self {
             3 // COS_RUN: L == co
+        } else if thread.dead {
+            0 // COS_DEAD: dead by error
         } else if thread.is_yielded() {
             1 // COS_YIELD
         } else if thread.call_depth() > 0 {

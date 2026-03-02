@@ -67,8 +67,24 @@ pub struct LuaState {
     /// to prevent recursive hook invocations within the same thread.
     pub(crate) allow_hook: bool,
 
+    /// Hook function (nil = no hook). Per-thread, set via debug.sethook.
+    pub(crate) hook: LuaValue,
+
+    /// Active hook mask (bitmask of LUA_MASKCALL/RET/LINE/COUNT). Per-thread.
+    pub(crate) hook_mask: u8,
+
+    /// Base value for count hook (reset interval). Per-thread.
+    pub(crate) base_hook_count: i32,
+
     /// Current countdown for count hook (per-thread, counts instructions independently).
     pub(crate) hook_count: i32,
+
+    /// Transfer info for call/return hooks (like C Lua's L->transferinfo).
+    /// ftransfer: 1-based index of first transferred value (relative to func position).
+    /// ntransfer: number of values being transferred.
+    /// Set before calling hooks, read by debug.getinfo with 'r' option.
+    pub(crate) ftransfer: i32,
+    pub(crate) ntransfer: i32,
 
     safe_state: LuaSafeState,
 
@@ -84,6 +100,12 @@ pub struct LuaState {
     /// Used to distinguish "running" from "yielded" when call_stack is non-empty.
     /// Set to true when yield is captured by resume, false when execution resumes.
     yielded: bool,
+
+    /// Whether this coroutine is dead (finished with error).
+    /// Unlike normal completion (stack cleared), dead-by-error coroutines
+    /// retain their stack and call frames for debug.traceback inspection,
+    /// matching C Lua's behavior.
+    pub(crate) dead: bool,
 
     /// Whether close_tbc_with_error is currently running on this thread.
     /// Used to detect re-entrant coroutine.close() calls from __close handlers.
@@ -129,11 +151,17 @@ impl LuaState {
             error_object: LuaValue::nil(),
             yield_values: Vec::new(),
             allow_hook: true,
+            hook: LuaValue::nil(),
+            hook_mask: 0,
+            base_hook_count: 0,
             hook_count: 0,
+            ftransfer: 0,
+            ntransfer: 0,
             safe_state: safe_option.into(),
             is_main,
             tbc_list: Vec::new(),
             yielded: false,
+            dead: false,
             is_closing: false,
             nny: if is_main { 1 } else { 0 },
             pending_future: None,
@@ -1055,7 +1083,12 @@ impl LuaState {
     /// The current TBC was already popped from tbc_list, so on resume
     /// close_tbc can be called again to continue with remaining entries.
     pub fn close_tbc(&mut self, level: usize) -> LuaResult<()> {
-        let mut current_error: Option<LuaValue> = None;
+        // Restore cascaded error from a previous yield (saved in error_object
+        // before yielding when a prior __close had thrown).
+        let mut current_error: Option<LuaValue> = {
+            let saved = std::mem::take(&mut self.error_object);
+            if saved.is_nil() { None } else { Some(saved) }
+        };
 
         while let Some(&tbc_idx) = self.tbc_list.last() {
             if tbc_idx < level {
@@ -1099,6 +1132,11 @@ impl LuaState {
                         // Close method yielded — propagate yield immediately.
                         // The TBC entry was already popped, so on resume
                         // close_tbc can continue with remaining entries.
+                        // If a previous __close threw, persist the error in
+                        // error_object so it survives the yield/resume cycle.
+                        if let Some(err) = current_error {
+                            self.error_object = err;
+                        }
                         return Err(LuaError::Yield);
                     }
                     Err(_) => {
@@ -1609,8 +1647,18 @@ impl LuaState {
                     }
                     'r' => {
                         // Transfer info — only meaningful inside hooks (CIST_HOOKED).
-                        // We don't support hooks that set transferinfo, so always 0.
-                        info.fill_transfer(0, 0);
+                        // Like C Lua: only return actual values when ci has CIST_HOOKED flag.
+                        if let Some(ci) = ci {
+                            if ci.call_status & crate::lua_vm::call_info::call_status::CIST_HOOKED
+                                != 0
+                            {
+                                info.fill_transfer(self.ftransfer, self.ntransfer);
+                            } else {
+                                info.fill_transfer(0, 0);
+                            }
+                        } else {
+                            info.fill_transfer(0, 0);
+                        }
                     }
                     'L' => {
                         info.fill_activelines(&chunk.line_info, chunk.is_vararg);
@@ -1661,7 +1709,17 @@ impl LuaState {
                         info.fill_tail(istailcall, extraargs);
                     }
                     'r' => {
-                        info.fill_transfer(0, 0);
+                        if let Some(ci) = ci {
+                            if ci.call_status & crate::lua_vm::call_info::call_status::CIST_HOOKED
+                                != 0
+                            {
+                                info.fill_transfer(self.ftransfer, self.ntransfer);
+                            } else {
+                                info.fill_transfer(0, 0);
+                            }
+                        } else {
+                            info.fill_transfer(0, 0);
+                        }
                     }
                     'L' => {
                         info.fill_activelines_nil();
@@ -3502,11 +3560,20 @@ impl LuaState {
     /// - finished=false: coroutine yielded
     pub fn resume(&mut self, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Check coroutine state:
+        // - dead flag set → dead by error (cannot resume)
         // - call_depth > 0 && !yielded → running (cannot resume)
         // - call_depth > 0 && yielded → suspended after yield (can resume)
         // - call_depth == 0 && stack not empty → initial state (can resume)
         // - call_depth == 0 && stack empty → dead (cannot resume)
+        if self.dead {
+            // Clear stale error_object so that this error uses the fresh
+            // error_msg set by self.error(), rather than a leftover
+            // error_object from a previous failed resume.
+            self.error_object = LuaValue::nil();
+            return Err(self.error("cannot resume dead coroutine".to_string()));
+        }
         if self.call_depth > 0 && !self.yielded {
+            self.error_object = LuaValue::nil();
             return Err(self.error("cannot resume non-suspended coroutine".to_string()));
         }
 
@@ -3556,16 +3623,15 @@ impl LuaState {
             // Resuming after yield
             // The yield function's frame is still on the stack, we need to:
             // 1. Pop the yield frame
-            // 2. Place resume arguments as yield's return values
+            // 2. Place resume arguments as yield's return values (with proper adjustment)
             // 3. Continue execution from the caller's frame
             // NOTE: Do NOT close upvalues or TBC variables on yield resume!
             // Yield is not an exit — variables are still alive.
 
             // Get the yield frame info before popping
-            let func_idx = if let Some(frame) = self.current_frame() {
+            let (func_idx, nresults) = if let Some(frame) = self.current_frame() {
                 // func_idx is base - func_offset (where the yield function was called)
-
-                frame.base - frame.func_offset
+                (frame.base - frame.func_offset, frame.nresults)
             } else {
                 return Err(self.error("cannot resume: no frame".to_string()));
             };
@@ -3573,18 +3639,38 @@ impl LuaState {
             // Pop the yield frame
             self.pop_frame();
 
-            // Place resume arguments at func_idx as yield's return values
-            // This simulates the yield function returning normally
+            // Place resume arguments at func_idx as yield's return values.
+            // This simulates the yield function returning normally.
+            // Like C Lua's luaD_poscall, we must respect nresults from the
+            // CALL instruction to avoid stale stack values leaking as extra
+            // return values.
             let actual_nresults = args.len();
             for (i, arg) in args.into_iter().enumerate() {
+                if nresults >= 0 && i >= nresults as usize {
+                    break; // Don't place more than requested
+                }
                 self.stack_set(func_idx + i, arg)?;
             }
 
-            // Update stack top to result extent.
-            // Values above this position were nil'd by GC's atomic phase
-            // (traverse_thread clears top..stack_end, matching C Lua).
-            let new_top = func_idx + actual_nresults;
-            self.set_top_raw(new_top);
+            // Adjust stack top based on expected nresults
+            if nresults >= 0 {
+                let wanted = nresults as usize;
+                // Nil-pad if fewer results than expected
+                for i in actual_nresults..wanted {
+                    self.stack_set(func_idx + i, LuaValue::nil())?;
+                }
+                // Restore caller frame's top (matching call_c_function behavior)
+                if self.call_depth() > 0 {
+                    let ci_top = self.get_call_info(self.call_depth() - 1).top;
+                    self.set_top_raw(ci_top);
+                } else {
+                    self.set_top_raw(func_idx + wanted);
+                }
+            } else {
+                // MULTRET: top = func_idx + actual results
+                let new_top = func_idx + actual_nresults;
+                self.set_top_raw(new_top);
+            }
 
             // Execute until yield or completion
             self.inc_n_ccalls()?;
@@ -3651,19 +3737,15 @@ impl LuaState {
                     let pcall_idx = self.find_pcall_recovery_frame();
                     if pcall_idx.is_none() {
                         // No recovery point — coroutine dies.
-                        // Close all TBC variables before dying
-                        // (equivalent to Lua 5.5's luaF_close in lua_resume).
+                        // Keep stack and call frames intact for debug.traceback
+                        // (matching C Lua behavior: dead coroutines retain their
+                        // call stack for inspection).
                         let err_obj = std::mem::take(&mut self.error_object);
                         let error_val = if !err_obj.is_nil() {
                             err_obj
                         } else {
                             LuaValue::nil()
                         };
-
-                        // Pop all frames
-                        while self.call_depth() > 0 {
-                            self.pop_frame();
-                        }
 
                         // Close all upvalues and TBC variables from level 0
                         self.close_upvalues(0);
@@ -3679,10 +3761,8 @@ impl LuaState {
                             self.error_msg = format!("{}", self.error_object);
                         }
 
-                        // Mark coroutine as dead by clearing the stack.
-                        // error_msg is stored separately and remains accessible.
-                        self.stack.clear();
-                        self.stack_top = 0;
+                        // Mark coroutine as dead but keep stack for debug.traceback
+                        self.dead = true;
 
                         return Err(_e);
                     }
@@ -3913,13 +3993,22 @@ impl LuaState {
     /// # Arguments
     /// * `event` - One of LUA_HOOKCALL, LUA_HOOKRET, LUA_HOOKLINE, etc.
     /// * `line` - Current line number (meaningful for LUA_HOOKLINE, -1 otherwise)
+    /// * `ftransfer` - 1-based index of first transferred value (0 for line/count hooks)
+    /// * `ntransfer` - number of values being transferred (0 for line/count hooks)
     #[cold]
-    pub fn run_hook(&mut self, event: i32, line: i32) -> LuaResult<()> {
-        let vm = unsafe { &mut *self.vm };
-        let hook = vm.hook;
+    pub fn run_hook(
+        &mut self,
+        event: i32,
+        line: i32,
+        ftransfer: i32,
+        ntransfer: i32,
+    ) -> LuaResult<()> {
+        let hook = self.hook;
         if hook.is_nil() {
             return Ok(());
         }
+
+        let vm = unsafe { &mut *self.vm };
 
         // Get the cached event name string from ConstString (no allocation)
         let event_name = match event {
@@ -3935,8 +4024,30 @@ impl LuaState {
         self.allow_hook = false;
         // Hooks are non-yieldable
         self.nny += 1;
+        // Store transfer info for debug.getinfo 'r' option
+        self.ftransfer = ftransfer;
+        self.ntransfer = ntransfer;
         // Save stack_top (restored after hook returns, like C Lua's luaD_hook)
         let old_top = self.stack_top;
+
+        // Protect the current frame's registers: ensure stack_top >= ci.top
+        // so that hook function/args are placed ABOVE the current frame.
+        // This matches C Lua's luaD_hook: "if (isLua(ci) && L->top < ci->top)
+        //   L->top = ci->top; /* protect entire activation register */"
+        let ci_idx = self.call_depth().wrapping_sub(1);
+        if ci_idx < self.call_depth() {
+            let ci_top = self.get_call_info(ci_idx).top;
+            if self.stack_top < ci_top {
+                self.stack_top = ci_top;
+            }
+        }
+
+        // Mark current frame as hooked (for debug.getinfo namewhat="hook")
+        let ci_idx = self.call_depth().wrapping_sub(1);
+        if ci_idx < self.call_depth() {
+            let ci = self.get_call_info_mut(ci_idx);
+            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_HOOKED;
+        }
 
         // Build args: (event_name, line_or_nil)
         let line_val = if line >= 0 {
@@ -3946,6 +4057,12 @@ impl LuaState {
         };
 
         let result = self.call(hook, vec![event_name, line_val]);
+
+        // Clear hooked flag
+        if ci_idx < self.call_depth() {
+            let ci = self.get_call_info_mut(ci_idx);
+            ci.call_status &= !crate::lua_vm::call_info::call_status::CIST_HOOKED;
+        }
 
         // Restore state
         self.stack_top = old_top;
