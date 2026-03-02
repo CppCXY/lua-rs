@@ -22,6 +22,7 @@ mod closure_handler;
 mod cold;
 mod concat;
 pub(crate) mod helper;
+mod hook;
 pub(crate) mod metamethod;
 mod return_handler;
 
@@ -36,7 +37,7 @@ use crate::{
     GcTable,
     lua_value::{LUA_VFALSE, LUA_VTABLE, LuaValue},
     lua_vm::{
-        LuaResult, LuaState, OpCode,
+        LuaError, LuaResult, LuaState, OpCode,
         call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
         execute::{
             closure_handler::handle_closure,
@@ -51,6 +52,7 @@ use crate::{
                 pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
                 tointeger, tointegerns, tonumberns, ttisinteger,
             },
+            hook::{hook_check_instruction, hook_on_call, hook_on_return},
         },
         lua_limits::EXTRA_STACK,
     },
@@ -58,8 +60,6 @@ use crate::{
 pub use helper::{get_metamethod_event, get_metatable};
 pub use metamethod::TmKind;
 pub use metamethod::call_tm_res;
-
-use crate::lua_vm::LuaError;
 
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
@@ -124,6 +124,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut constants = &chunk.constants;
         let mut code = &chunk.code;
 
+        // ===== DEBUG HOOK STATE =====
+        let vm_ptr = lua_state.vm_ptr();
+        let mut hook_mask = unsafe { (*vm_ptr).hook_mask };
+        let mut last_line: u32 = 0; // for line hook change detection
+
         // Macro to save PC before operations that may call functions
         macro_rules! save_pc {
             () => {
@@ -139,11 +144,33 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             };
         }
 
+        // CALL HOOK: fire when entering a new Lua function (pc == 0)
+        if hook_mask != 0 && pc == 0 && lua_state.allow_hook {
+            hook_on_call(lua_state, vm_ptr, hook_mask, call_status)?;
+        }
+
         // MAINLOOP: Main instruction dispatch loop
         loop {
             // Fetch instruction and advance PC
             let instr = unsafe { *code.get_unchecked(pc) };
             pc += 1;
+
+            // ===== DEBUG HOOK CHECK =====
+            // Live-read hook_mask from VM (not cached) so that debug.sethook
+            // called from C functions takes effect immediately.
+            // When no hooks are set (common case): one load + one branch (predicted not-taken).
+            hook_mask = unsafe { (*vm_ptr).hook_mask };
+            if hook_mask != 0 && lua_state.allow_hook {
+                hook_mask = hook_check_instruction(
+                    lua_state,
+                    vm_ptr,
+                    hook_mask,
+                    pc,
+                    chunk,
+                    &mut last_line,
+                    frame_idx,
+                )?;
+            }
 
             // Dispatch instruction (continues in next replacement...)
             match instr.get_opcode() {
@@ -879,21 +906,36 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Update PC before returning
                     save_pc!();
 
+                    // Return hook (cold path)
+                    if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
+                        hook_on_return(lua_state, frame_idx, pc as u32)?;
+                    }
+
                     // Handle return
                     return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
                     continue 'startfunc;
                 }
                 OpCode::Return0 => {
                     // return (no values)
+                    // Return hook (cold path)
+                    if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
+                        hook_on_return(lua_state, frame_idx, pc as u32)?;
+                    }
                     return_handler::handle_return0(lua_state, frame_idx);
                     continue 'startfunc;
                 }
                 OpCode::Return1 => {
                     // return R[A] — hottest return path
+                    let a = instr.get_a() as usize;
+
+                    // Return hook (cold path)
+                    if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
+                        hook_on_return(lua_state, frame_idx, pc as u32)?;
+                    }
+
                     // Inline return handling + context restore to avoid
                     // the full 'startfunc reload overhead (saves ~12 memory ops
                     // per return, critical for small closures like sort comparators)
-                    let a = instr.get_a() as usize;
                     return_handler::handle_return1(lua_state, base, frame_idx, a);
 
                     // Check if returned past target depth
@@ -923,6 +965,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
                     constants = &chunk.constants;
                     code = &chunk.code;
+                    // After returning to caller, reset line tracking
+                    // (caller's line may differ from callee's last line)
+                    last_line = 0;
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
@@ -1571,6 +1616,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         };
                         constants = &chunk.constants;
                         code = &chunk.code;
+
+                        // Call hook for inline Lua call (cold path)
+                        if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook {
+                            hook_on_call(lua_state, vm_ptr, hook_mask, 0)?;
+                        }
+                        last_line = 0; // Reset for new function
                         continue;
                     }
 
@@ -1656,6 +1707,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                         };
                                         constants = &chunk.constants;
                                         code = &chunk.code;
+
+                                        // Call hook for inline __call path (cold path)
+                                        if hook_mask & crate::lua_vm::LUA_MASKCALL != 0
+                                            && lua_state.allow_hook
+                                        {
+                                            hook_on_call(lua_state, vm_ptr, hook_mask, 0)?;
+                                        }
+                                        last_line = 0;
                                         continue;
                                     }
                                     // __call is not a Lua function — fall to cold path
@@ -1687,7 +1746,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Save PC before call
                     save_pc!();
 
+                    // Return hook for the current function being tail-replaced (cold path)
+                    if hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook {
+                        hook_on_return(lua_state, frame_idx, pc as u32)?;
+                    }
+
                     // Delegate to tailcall handler
+                    // (call hook fires via 'startfunc when pc==0, with LUA_HOOKTAILCALL event)
                     match call::handle_tailcall(lua_state, base, a, b) {
                         Ok(FrameAction::Continue) => {
                             // Continue execution

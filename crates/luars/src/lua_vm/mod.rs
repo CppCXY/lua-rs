@@ -47,6 +47,19 @@ pub type LuaResult<T> = Result<T, LuaError>;
 /// Now takes LuaContext instead of LuaVM for better ergonomics
 pub type CFunction = fn(&mut LuaState) -> LuaResult<usize>;
 
+// Debug hook event types
+pub const LUA_HOOKCALL: i32 = 0;
+pub const LUA_HOOKRET: i32 = 1;
+pub const LUA_HOOKLINE: i32 = 2;
+pub const LUA_HOOKCOUNT: i32 = 3;
+pub const LUA_HOOKTAILCALL: i32 = 4;
+
+// Debug hook masks
+pub const LUA_MASKCALL: u8 = 1 << LUA_HOOKCALL as u8;
+pub const LUA_MASKRET: u8 = 1 << LUA_HOOKRET as u8;
+pub const LUA_MASKLINE: u8 = 1 << LUA_HOOKLINE as u8;
+pub const LUA_MASKCOUNT: u8 = 1 << LUA_HOOKCOUNT as u8;
+
 /// Global VM state (equivalent to global_State in Lua C API)
 /// Manages global resources shared by all execution threads/coroutines
 pub struct LuaVM {
@@ -101,6 +114,14 @@ pub struct LuaVM {
     /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
     pub(crate) io_default_output: Option<LuaValue>,
     pub(crate) io_default_input: Option<LuaValue>,
+
+    // === Debug hook state (global — shared by all coroutines) ===
+    /// Hook function (nil = no hook). Set via debug.sethook.
+    pub(crate) hook: LuaValue,
+    /// Active hook mask (bitmask of LUA_MASKCALL/RET/LINE/COUNT).
+    pub(crate) hook_mask: u8,
+    /// Base value for count hook (reset interval). Set via debug.sethook.
+    pub(crate) base_hook_count: i32,
 }
 
 impl LuaVM {
@@ -135,6 +156,9 @@ impl LuaVM {
             const_strings: cs,
             io_default_output: None,
             io_default_input: None,
+            hook: LuaValue::nil(),
+            hook_mask: 0,
+            base_hook_count: 0,
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;

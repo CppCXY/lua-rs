@@ -1284,6 +1284,12 @@ impl GC {
         // markvalue(g, &g->l_registry);
         self.mark_value(l, &registry);
 
+        // Mark debug hook function (global, may be a GC-managed closure)
+        let hook = l.vm_mut().hook;
+        if !hook.is_nil() {
+            self.mark_value(l, &hook);
+        }
+
         // markmt(g);  /* mark global metatables */
         self.mark_mt(l);
 
@@ -2254,6 +2260,12 @@ impl GC {
         // Mark registry (global state)
         let registry = l.vm_mut().registry;
         self.mark_value(l, &registry);
+
+        // Mark debug hook function (global, may be a GC-managed closure)
+        let hook = l.vm_mut().hook;
+        if !hook.is_nil() {
+            self.mark_value(l, &hook);
+        }
 
         // Mark global metatables (string, number, etc.)
         self.mark_mt(l);
@@ -4112,13 +4124,15 @@ impl GC {
         // Lua 5.5's GCTM only saves/restores gcstp, not GCdebt.
         // Allocations during finalizer execution should properly affect gc_debt.
 
-        // TODO: Save and restore L->allowhook (requires VM support)
-        // TODO: Set L->ci->callstatus |= CIST_FIN (requires VM support)
+        // Save and restore allow_hook: hooks must not fire during finalizers
+        let old_allow_hook = l.allow_hook;
+        l.allow_hook = false;
 
         // Call __gc(obj) using pcall to handle errors safely
         let result = l.pcall(gc_method, vec![obj_value]);
 
-        // Restore GC state
+        // Restore hook state and GC state
+        l.allow_hook = old_allow_hook;
         self.gc_stopem = old_stopem;
 
         // If error occurred, warn but don't propagate

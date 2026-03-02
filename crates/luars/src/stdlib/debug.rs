@@ -1068,19 +1068,116 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// debug.gethook([thread]) - Get current hook settings
-/// Stub implementation: always returns nil (no hooks set)
-fn debug_gethook(_l: &mut LuaState) -> LuaResult<usize> {
-    // TODO: Implement proper hook support
-    // For now, return nil to indicate no hook is set
-    Ok(0) // Return nothing (nil)
+/// Returns the hook function, mask string, and count.
+/// Note: In our implementation, hooks are global (stored on LuaVM),
+/// so the optional thread argument is accepted but ignored.
+fn debug_gethook(l: &mut LuaState) -> LuaResult<usize> {
+    let vm = l.vm_mut();
+    let hook = vm.hook;
+    let mask = vm.hook_mask;
+    let count = vm.base_hook_count;
+
+    // Push hook function (or nil if not set)
+    l.push_value(hook)?;
+
+    // Build mask string
+    let mut mask_str = String::new();
+    if mask & crate::lua_vm::LUA_MASKCALL != 0 {
+        mask_str.push('c');
+    }
+    if mask & crate::lua_vm::LUA_MASKRET != 0 {
+        mask_str.push('r');
+    }
+    if mask & crate::lua_vm::LUA_MASKLINE != 0 {
+        mask_str.push('l');
+    }
+    let mask_val = l.create_string(&mask_str)?;
+    l.push_value(mask_val)?;
+
+    // Push count
+    l.push_value(LuaValue::integer(count as i64))?;
+
+    Ok(3)
 }
 
 /// debug.sethook([thread,] hook, mask [, count]) - Set a debug hook
-/// Stub implementation: accepts arguments but does nothing
-fn debug_sethook(_l: &mut LuaState) -> LuaResult<usize> {
-    // TODO: Implement proper hook support
-    // For now, just accept the arguments and do nothing
-    Ok(0) // Return nothing
+/// Sets a global debug hook that fires for all coroutines.
+/// Note: hooks are stored on LuaVM (global), not per-thread.
+/// The optional thread argument is accepted but ignored.
+///
+/// Arguments:
+///   hook: function to call, or nil/nothing to clear
+///   mask: string containing 'c' (call), 'r' (return), 'l' (line)
+///   count: (optional) fire hook every N instructions
+///
+/// Calling with no arguments clears the hook.
+fn debug_sethook(l: &mut LuaState) -> LuaResult<usize> {
+    let arg1 = l.get_arg(1);
+    let arg2 = l.get_arg(2);
+    let arg3 = l.get_arg(3);
+
+    // Detect if first arg is a thread (skip it if so — we ignore thread param)
+    let (hook_val, mask_val, count_val) = if let Some(a1) = arg1 {
+        if a1.is_thread() {
+            // debug.sethook(thread, hook, mask [, count])
+            (l.get_arg(2), l.get_arg(3), l.get_arg(4))
+        } else {
+            // debug.sethook(hook, mask [, count])
+            (Some(a1), arg2, arg3)
+        }
+    } else {
+        // debug.sethook() — clear hook
+        (None, None, None)
+    };
+
+    // Parse hook function
+    let hook = match hook_val {
+        Some(v) if v.is_function() => v,
+        Some(v) if v.is_nil() => LuaValue::nil(),
+        None => LuaValue::nil(),
+        _ => {
+            // If hook is not a function and not nil, check if clearing
+            // (C Lua treats non-function first arg as mask when clearing)
+            LuaValue::nil()
+        }
+    };
+
+    // Parse mask string
+    let mut mask: u8 = 0;
+    if let Some(mask_str_val) = mask_val
+        && let Some(s) = mask_str_val.as_str()
+    {
+        for ch in s.chars() {
+            match ch {
+                'c' => mask |= crate::lua_vm::LUA_MASKCALL,
+                'r' => mask |= crate::lua_vm::LUA_MASKRET,
+                'l' => mask |= crate::lua_vm::LUA_MASKLINE,
+                _ => {} // ignore unknown characters
+            }
+        }
+    }
+
+    // Parse count
+    let count = count_val.and_then(|v| v.as_integer()).unwrap_or(0) as i32;
+    if count > 0 {
+        mask |= crate::lua_vm::LUA_MASKCOUNT;
+    }
+
+    // If hook is nil, clear everything
+    if hook.is_nil() {
+        mask = 0;
+    }
+
+    // Set global hook state on LuaVM
+    let vm = l.vm_mut();
+    vm.hook = hook;
+    vm.hook_mask = mask;
+    vm.base_hook_count = count;
+
+    // Initialize per-thread hook_count
+    l.hook_count = count;
+
+    Ok(0)
 }
 
 /// debug.getregistry() - Return the registry table

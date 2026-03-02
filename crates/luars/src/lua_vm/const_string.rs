@@ -34,6 +34,13 @@ pub struct ConstString {
     pub str_false: LuaValue,    // "false"
     pub str_integer: LuaValue,  // "integer" (for math.type)
     pub str_float: LuaValue,    // "float"   (for math.type)
+
+    // Pre-cached debug hook event name strings
+    pub str_hook_call: LuaValue,      // "call"
+    pub str_hook_return: LuaValue,    // "return"
+    pub str_hook_line: LuaValue,      // "line"
+    pub str_hook_count: LuaValue,     // "count"
+    pub str_hook_tail_call: LuaValue, // "tail call"
 }
 
 impl ConstString {
@@ -61,6 +68,11 @@ impl ConstString {
             str_false: nil,
             str_integer: nil,
             str_float: nil,
+            str_hook_call: nil,
+            str_hook_return: nil,
+            str_hook_line: nil,
+            str_hook_count: nil,
+            str_hook_tail_call: nil,
         };
 
         // Pre-create all metamethod name strings indexed by TmKind discriminant
@@ -147,6 +159,18 @@ impl ConstString {
         gc.fixed(cs.str_false.as_gc_ptr().unwrap());
         gc.fixed(cs.str_integer.as_gc_ptr().unwrap());
         gc.fixed(cs.str_float.as_gc_ptr().unwrap());
+
+        // Pre-create debug hook event name strings
+        cs.str_hook_call = allocator.create_string(gc, "call").unwrap();
+        cs.str_hook_return = allocator.create_string(gc, "return").unwrap();
+        cs.str_hook_line = allocator.create_string(gc, "line").unwrap();
+        cs.str_hook_count = allocator.create_string(gc, "count").unwrap();
+        cs.str_hook_tail_call = allocator.create_string(gc, "tail call").unwrap();
+        gc.fixed(cs.str_hook_call.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_hook_return.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_hook_line.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_hook_count.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_hook_tail_call.as_gc_ptr().unwrap());
 
         gc.tm_gc = cs.tmname[TmKind::Gc as usize];
         gc.tm_mode = cs.tmname[TmKind::Mode as usize];

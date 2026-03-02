@@ -63,9 +63,12 @@ pub struct LuaState {
     /// Yield values storage (for coroutine yield)
     yield_values: Vec<LuaValue>,
 
-    /// Hook mask and count (for debug hooks)
-    _hook_mask: u8,
-    _hook_count: i32,
+    /// Whether hook re-entry is allowed. Set to false while a hook is running
+    /// to prevent recursive hook invocations within the same thread.
+    pub(crate) allow_hook: bool,
+
+    /// Current countdown for count hook (per-thread, counts instructions independently).
+    pub(crate) hook_count: i32,
 
     safe_state: LuaSafeState,
 
@@ -125,8 +128,8 @@ impl LuaState {
             error_msg: String::new(),
             error_object: LuaValue::nil(),
             yield_values: Vec::new(),
-            _hook_mask: 0,
-            _hook_count: 0,
+            allow_hook: true,
+            hook_count: 0,
             safe_state: safe_option.into(),
             is_main,
             tbc_list: Vec::new(),
@@ -3897,6 +3900,59 @@ impl LuaState {
         let vm = unsafe { &mut *self.vm };
         vm.full_gc(self, false);
         Ok(())
+    }
+
+    // ===== Debug Hook Support =====
+
+    /// Invoke the debug hook function for the given event.
+    /// This is called from the execute loop at hook check points.
+    ///
+    /// Mirrors C Lua's luaD_hook: saves/restores stack_top, sets allow_hook
+    /// to false during the hook call, increments nny (hooks are non-yieldable).
+    ///
+    /// # Arguments
+    /// * `event` - One of LUA_HOOKCALL, LUA_HOOKRET, LUA_HOOKLINE, etc.
+    /// * `line` - Current line number (meaningful for LUA_HOOKLINE, -1 otherwise)
+    #[cold]
+    pub fn run_hook(&mut self, event: i32, line: i32) -> LuaResult<()> {
+        let vm = unsafe { &mut *self.vm };
+        let hook = vm.hook;
+        if hook.is_nil() {
+            return Ok(());
+        }
+
+        // Get the cached event name string from ConstString (no allocation)
+        let event_name = match event {
+            super::LUA_HOOKCALL => vm.const_strings.str_hook_call,
+            super::LUA_HOOKRET => vm.const_strings.str_hook_return,
+            super::LUA_HOOKLINE => vm.const_strings.str_hook_line,
+            super::LUA_HOOKCOUNT => vm.const_strings.str_hook_count,
+            super::LUA_HOOKTAILCALL => vm.const_strings.str_hook_tail_call,
+            _ => return Ok(()),
+        };
+
+        // Prevent re-entrant hooks
+        self.allow_hook = false;
+        // Hooks are non-yieldable
+        self.nny += 1;
+        // Save stack_top (restored after hook returns, like C Lua's luaD_hook)
+        let old_top = self.stack_top;
+
+        // Build args: (event_name, line_or_nil)
+        let line_val = if line >= 0 {
+            LuaValue::integer(line as i64)
+        } else {
+            LuaValue::nil()
+        };
+
+        let result = self.call(hook, vec![event_name, line_val]);
+
+        // Restore state
+        self.stack_top = old_top;
+        self.nny -= 1;
+        self.allow_hook = true;
+
+        result.map(|_| ())
     }
 
     pub fn to_string(&mut self, value: &LuaValue) -> LuaResult<String> {
