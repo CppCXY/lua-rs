@@ -7,7 +7,7 @@
 use crate::{
     GcTable, Instruction, LuaResult, LuaValue, OpCode,
     lua_vm::{
-        LuaState, TmKind,
+        LuaError, LuaState, TmKind,
         execute::{
             helper::{self, ivalue, setfltvalue, setivalue, setnilvalue, tonumberns, ttisinteger},
             metamethod,
@@ -404,4 +404,31 @@ pub fn handle_call_metamethod(
     }
 
     Ok(true)
+}
+
+/// Cold error path for JMP with invalid target PC.
+#[cold]
+#[inline(never)]
+pub fn error_jmp_invalid_pc(
+    lua_state: &mut LuaState,
+    frame_idx: usize,
+    pc: usize,
+    new_pc: usize,
+) -> LuaError {
+    lua_state.set_frame_pc(frame_idx, pc as u32);
+    lua_state.error(format!("JMP: invalid target pc={}", new_pc))
+}
+
+/// Cold error path for 'for' loop with non-numeric limit.
+#[cold]
+#[inline(never)]
+pub fn error_for_bad_limit(
+    lua_state: &mut LuaState,
+    frame_idx: usize,
+    pc: usize,
+    limit_val: &LuaValue,
+) -> LuaError {
+    lua_state.set_frame_pc(frame_idx, pc as u32);
+    let t = crate::stdlib::debug::objtypename(lua_state, limit_val);
+    lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
 }

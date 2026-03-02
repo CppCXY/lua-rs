@@ -495,7 +495,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     if ttisinteger(&rb) {
                         let ib = ivalue(&rb);
-                        setivalue(unsafe { stack.get_unchecked_mut(base + a) }, ib.wrapping_neg());
+                        setivalue(
+                            unsafe { stack.get_unchecked_mut(base + a) },
+                            ib.wrapping_neg(),
+                        );
                     } else {
                         let mut nb = 0.0;
                         if tonumberns(&rb, &mut nb) {
@@ -819,7 +822,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
                         pc += 1;
-                        setivalue(unsafe { stack.get_unchecked_mut(base + a) }, lua_shiftl(i1, i2));
+                        setivalue(
+                            unsafe { stack.get_unchecked_mut(base + a) },
+                            lua_shiftl(i1, i2),
+                        );
                     }
                 }
                 OpCode::Shr => {
@@ -836,7 +842,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
                         pc += 1;
-                        setivalue(unsafe { stack.get_unchecked_mut(base + a) }, lua_shiftr(i1, i2));
+                        setivalue(
+                            unsafe { stack.get_unchecked_mut(base + a) },
+                            lua_shiftr(i1, i2),
+                        );
                     }
                 }
                 OpCode::BNot => {
@@ -884,7 +893,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if tointegerns(rb, &mut ib) {
                         pc += 1;
                         // luaV_shiftl(ic, ib): shift ic left by ib
-                        setivalue(unsafe { stack.get_unchecked_mut(base + a) }, lua_shiftl(ic as i64, ib));
+                        setivalue(
+                            unsafe { stack.get_unchecked_mut(base + a) },
+                            lua_shiftl(ic as i64, ib),
+                        );
                     }
                     // else: metamethod
                 }
@@ -902,7 +914,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if tointegerns(rb, &mut ib) {
                         pc += 1;
                         // luaV_shiftr(ib, ic) = luaV_shiftl(ib, -ic)
-                        setivalue(unsafe { stack.get_unchecked_mut(base + a) }, lua_shiftr(ib, ic as i64));
+                        setivalue(
+                            unsafe { stack.get_unchecked_mut(base + a) },
+                            lua_shiftr(ib, ic as i64),
+                        );
                     }
                     // else: metamethod
                 }
@@ -912,8 +927,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let new_pc = (pc as i32 + sj) as usize;
 
                     if new_pc >= code.len() {
-                        lua_state.set_frame_pc(frame_idx, pc as u32);
-                        return Err(lua_state.error(format!("JMP: invalid target pc={}", new_pc)));
+                        return Err(cold::error_jmp_invalid_pc(lua_state, frame_idx, pc, new_pc));
                     }
 
                     // Backward jump detection: hook_check_instruction uses
@@ -1294,7 +1308,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let stack = lua_state.stack();
                     let ra = unsafe { *stack.get_unchecked(base + a) };
                     let rb = unsafe { *stack.get_unchecked(base + b) };
-                    let val = if k { unsafe { *constants.get_unchecked(c) } } else { unsafe { *stack.get_unchecked(base + c) } };
+                    let val = if k {
+                        unsafe { *constants.get_unchecked(c) }
+                    } else {
+                        unsafe { *stack.get_unchecked(base + c) }
+                    };
 
                     if let Some(table_ref) = ra.as_table_mut() {
                         if !table_ref.has_metatable() {
@@ -1415,7 +1433,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     let stack = lua_state.stack();
                     let ra = unsafe { *stack.get_unchecked(base + a) };
-                    let value = if k { unsafe { *constants.get_unchecked(c) } } else { unsafe { *stack.get_unchecked(base + c) } };
+                    let value = if k {
+                        unsafe { *constants.get_unchecked(c) }
+                    } else {
+                        unsafe { *stack.get_unchecked(base + c) }
+                    };
 
                     // Try fast path: table with array access.
                     // Without metatable: any in-range array write is fine.
@@ -1473,7 +1495,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let stack = lua_state.stack();
                     let ra = unsafe { *stack.get_unchecked(base + a) };
                     let key = unsafe { constants.get_unchecked(b) };
-                    let value = if k { unsafe { *constants.get_unchecked(c) } } else { unsafe { *stack.get_unchecked(base + c) } };
+                    let value = if k {
+                        unsafe { *constants.get_unchecked(c) }
+                    } else {
+                        unsafe { *stack.get_unchecked(base + c) }
+                    };
 
                     // Try fast path: fast_setfield only succeeds when the key
                     // already exists with a non-nil value. Per Lua semantics,
@@ -1831,7 +1857,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    if ttisinteger(unsafe { stack.get_unchecked(ra) }) && ttisinteger(unsafe { stack.get_unchecked(ra + 2) }) {
+                    if ttisinteger(unsafe { stack.get_unchecked(ra) })
+                        && ttisinteger(unsafe { stack.get_unchecked(ra + 2) })
+                    {
                         // Integer loop (init and step are integers)
                         let init = ivalue(unsafe { stack.get_unchecked(ra) });
                         let step = ivalue(unsafe { stack.get_unchecked(ra + 2) });
@@ -1853,12 +1881,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let mut flimit = 0.0;
                             let limit_val = unsafe { *stack.get_unchecked(ra + 1) }; // Copy to avoid borrow conflict
                             if !tonumberns(&limit_val, &mut flimit) {
-                                let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
                                 save_pc!();
-                                return Err(lua_state.error(format!(
-                                    "bad 'for' limit (number expected, got {})",
-                                    t
-                                )));
+                                return Err(cold::error_for_bad_limit(
+                                    lua_state, frame_idx, pc, &limit_val,
+                                ));
                             }
                             // Try rounding the float to integer
                             let nl = if step < 0 {
@@ -2184,7 +2210,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             Ok(result) => {
                                 restore_state!();
                                 let stack = lua_state.stack_mut();
-                                unsafe { *stack.get_unchecked_mut(base + a) = result.unwrap_or(LuaValue::nil()) };
+                                unsafe {
+                                    *stack.get_unchecked_mut(base + a) =
+                                        result.unwrap_or(LuaValue::nil())
+                                };
                             }
                             Err(LuaError::Yield) => {
                                 // Metamethod yielded — save destination register

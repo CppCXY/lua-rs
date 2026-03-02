@@ -1495,6 +1495,7 @@ impl LuaState {
     /// Grow stack to accommodate needed size (similar to luaD_growstack in Lua)
     /// Stack can grow dynamically up to MAX_STACK_SIZE
     /// C functions can call this, which means Vec may reallocate
+    #[inline(never)]
     pub fn grow_stack(&mut self, needed: usize) -> LuaResult<()> {
         if needed > self.safe_state.max_stack_size {
             self.error(format!(

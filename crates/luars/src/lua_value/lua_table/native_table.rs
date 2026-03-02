@@ -818,7 +818,7 @@ impl NativeTable {
     /// Slow path of set_int — called when fast_seti already failed.
     /// Handles resize/push and hash fallback.
     /// Returns memory delta from resize operations.
-    #[inline(always)]
+    /// NOT inlined: contains resize_array + migrate + set_node cold paths.
     pub fn set_int_slow(&mut self, key: i64, value: LuaValue) -> isize {
         // Key outside array range: push optimization for sequential insertion
         if key >= 1 && !value.is_nil() {
@@ -1364,9 +1364,10 @@ impl NativeTable {
     // }
 
     /// Generic set - returns (new_key_inserted, mem_delta)
-    #[inline(always)]
     /// Port of lua5.5's newcheckedkey logic in luaH_set/luaH_setint
     /// CRITICAL INVARIANT: integer keys in [1..asize] must ONLY exist in array part!
+    /// NOT inlined: contains resize/rehash cold paths (resize_array, set_node,
+    /// migrate_hash_int_keys_to_array) that must NOT inflate lua_execute's frame.
     pub fn raw_set(&mut self, key: &LuaValue, value: LuaValue) -> (bool, isize) {
         // Normalize float keys to integer if they have no fractional part
         // This ensures t[3.0] and t[3] refer to the same slot
