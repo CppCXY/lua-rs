@@ -22,7 +22,7 @@ A Lua 5.5 interpreter written in pure Rust. Faithfully ported from the official 
 
 ```toml
 [dependencies]
-luars = "0.7"
+luars = "0.12"
 ```
 
 ```rust
@@ -207,12 +207,11 @@ Passes the official Lua 5.5 test suite (`lua_tests/testes/all.lua`):
 | cstack.lua | ✅ | | sort.lua | ✅ |
 | nextvar.lua | ✅ | | bitwise.lua | ✅ |
 | verybig.lua | ✅ | | files.lua | ✅ |
-| main.lua | ⏭️ | | db.lua | ⏭️ |
+| main.lua | ⏭️ | | db.lua | ✅ |
 
 \* Some C-API-dependent test sections are skipped (no `testC` library).
 
-**Skipped:** `main.lua` (interactive CLI), `db.lua` (debug hooks not yet implemented).
-
+**Skipped:** `main.lua` (interactive CLI).
 For the full list of behavioral differences, see [docs/Different.md](docs/Different.md).
 
 ### Key Differences from C Lua

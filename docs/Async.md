@@ -13,10 +13,6 @@ This directory contains the complete documentation for luars async features.
 | [Multi-VM Patterns](async/05-multi-vm.md) | Design patterns for multi-LuaVM concurrent processing |
 | [HTTP Server Example](async/06-http-server.md) | Complete async HTTP server walkthrough |
 
-## Design Document
-
-For lower-level design decisions and industry research, see [Async_Design.md](../Async_Design.md).
-
 ## Core Concept Overview
 
 ```text

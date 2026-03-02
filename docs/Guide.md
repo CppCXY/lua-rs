@@ -73,10 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```toml
 [dependencies]
-luars = "0.7"
+luars = "0.12"
 
 # With JSON support:
-luars = { version = "0.7", features = ["serde"] }
+luars = { version = "0.12", features = ["serde"] }
 ```
 
 The `#[derive(LuaUserData)]` and `#[lua_methods]` macros are re-exported by `luars` automatically — no need to add `luars-derive` separately.

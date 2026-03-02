@@ -55,16 +55,7 @@ Affected: `attrib.lua` (~L265, ~L335) — C library / external-string tests skip
 ---
 
 ## 5. debug library limitations
-
-### 5.1 Hooks not implemented
-`debug.sethook` is a no-op stub; `debug.gethook` always returns `nil`. Hook functions (call / return / line / count) do not fire.
-
-Affected:
-- `coroutine.lua` (~L400) — coroutine step-hook test
-- `locals.lua` (~L824) — `__close` vs return-hook test
-
-### 5.2 Implemented debug functions
-`debug.getinfo`, `debug.getlocal`, `debug.setlocal`, `debug.getupvalue`, `debug.setupvalue`, `debug.upvalueid`, `debug.upvaluejoin`, `debug.traceback`, `debug.getmetatable`, `debug.setmetatable`, `debug.getregistry`.
+The `debug` library is partially implemented. `debug.setuservalue` and `debug.getuservalue` are not implemented. Because we are different userdata implementations.
 
 ---
 

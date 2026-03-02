@@ -21,10 +21,10 @@ A Lua 5.5 interpreter written in pure Rust — embeddable, async-capable, with d
 
 ```toml
 [dependencies]
-luars = "0.7"
+luars = "0.12"
 
 # With JSON support:
-luars = { version = "0.7", features = ["serde"] }
+luars = { version = "0.12", features = ["serde"] }
 ```
 
 ### Basic Example
