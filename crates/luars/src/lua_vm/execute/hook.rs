@@ -4,7 +4,6 @@ use crate::lua_vm::LUA_HOOKCOUNT;
 use crate::lua_vm::LUA_HOOKLINE;
 use crate::lua_vm::LUA_MASKLINE;
 use crate::lua_vm::LuaState;
-use crate::lua_vm::LuaVM;
 use crate::lua_vm::call_info::call_status::CIST_TAIL;
 use crate::lua_vm::{LUA_HOOKCALL, LUA_HOOKTAILCALL, LUA_MASKCALL, LUA_MASKCOUNT};
 
@@ -15,7 +14,6 @@ use crate::lua_vm::{LUA_HOOKCALL, LUA_HOOKTAILCALL, LUA_MASKCALL, LUA_MASKCOUNT}
 #[inline(never)]
 pub fn hook_on_call(
     lua_state: &mut LuaState,
-    _vm_ptr: *mut LuaVM,
     hook_mask: u8,
     call_status: u32,
     chunk: &Chunk,
@@ -59,19 +57,30 @@ pub fn hook_on_return(
 }
 
 /// Check count / line hooks inside the main instruction loop.
-/// Returns the (possibly updated) hook_mask.
+/// Returns true if trap should remain active.
+///
+/// Unlike C Lua's traceexec which uses npci = pcRel(++pc) (one-ahead),
+/// we use npci = pc - 1 (current instruction). This avoids spurious
+/// line events for skipped branches (e.g., JMP past else reporting
+/// the else branch's line). The backward jump condition uses strict
+/// less-than (npci < oldpc) to avoid firing on same-instruction
+/// comparisons after function returns.
 #[cold]
 #[inline(never)]
 pub fn hook_check_instruction(
     lua_state: &mut LuaState,
-    _vm_ptr: *mut LuaVM,
-    hook_mask: u8,
     pc: usize,
     chunk: &Chunk,
-    last_line: &mut u32,
     frame_idx: usize,
-) -> LuaResult<u8> {
-    // Count hook: decrement per-instruction counter
+) -> LuaResult<bool> {
+    let hook_mask = lua_state.hook_mask;
+    if hook_mask == 0 {
+        return Ok(false);
+    }
+    if !lua_state.allow_hook {
+        return Ok(true);
+    }
+    // Count hook
     if hook_mask & LUA_MASKCOUNT != 0 {
         lua_state.hook_count -= 1;
         if lua_state.hook_count == 0 {
@@ -80,32 +89,59 @@ pub fn hook_check_instruction(
             lua_state.run_hook(LUA_HOOKCOUNT, -1, 0, 0)?;
         }
     }
-    // Line hook: fire when source line changes
+    // Line hook: fire when source line changes (changedline logic)
     if hook_mask & LUA_MASKLINE != 0 {
         let line_info = &chunk.line_info;
         if !line_info.is_empty() {
-            // Normal code with line info: fire when line changes
-            if pc > 0 && (pc - 1) < line_info.len() {
-                let current_line = line_info[pc - 1];
-                if current_line != *last_line {
-                    *last_line = current_line;
-                    lua_state.set_frame_pc(frame_idx, pc as u32);
-                    lua_state.run_hook(LUA_HOOKLINE, current_line as i32, 0, 0)?;
+            // npci = current instruction's 0-based index
+            let npci = pc.saturating_sub(1);
+            let oldpc = lua_state.oldpc as usize;
+
+            // Fire conditions:
+            // 1. oldpc out of range (u32::MAX sentinel) → first instruction → always fire
+            // 2. npci < oldpc (strict) → backward jump (loop) → fire
+            // 3. changedline(oldpc, npci) → source line changed → fire
+            //
+            // We use strict < (not <=) because after function returns,
+            // rethook sets oldpc = ci.pc - 1 = npci. With <=, this would
+            // trigger the backward-jump condition spuriously.
+            let should_fire = if oldpc >= line_info.len() {
+                // Function entry sentinel (u32::MAX) → always fire
+                true
+            } else {
+                npci < oldpc || {
+                    let old_line = line_info[oldpc];
+                    let new_line = if npci < line_info.len() {
+                        line_info[npci]
+                    } else {
+                        // Past last instruction (RETURN) → use last line
+                        line_info[line_info.len() - 1]
+                    };
+                    old_line != new_line
                 }
+            };
+
+            if should_fire {
+                let new_line = if npci < line_info.len() {
+                    line_info[npci]
+                } else {
+                    line_info[line_info.len() - 1]
+                };
+                lua_state.set_frame_pc(frame_idx, pc as u32);
+                lua_state.run_hook(LUA_HOOKLINE, new_line as i32, 0, 0)?;
             }
+            // Store current instruction index (like C Lua's L->oldpc = npci)
+            lua_state.oldpc = npci as u32;
         } else {
-            // Stripped code (no line info): fire at first instruction (npc==0)
-            // and on backward jumps (pc <= oldpc), with line=-1.
-            // Reuse last_line as oldpc tracker (0 = not yet seen).
-            let old_pc = *last_line as usize;
-            let npc = pc.saturating_sub(1); // 0-indexed like C Lua's pcRel
-            if npc == 0 || pc <= old_pc {
+            // Stripped code (no line info): fire on backward jumps
+            let npci = pc.saturating_sub(1);
+            let oldpc = lua_state.oldpc as usize;
+            if oldpc == usize::MAX || npci < oldpc {
                 lua_state.set_frame_pc(frame_idx, pc as u32);
                 lua_state.run_hook(LUA_HOOKLINE, -1, 0, 0)?;
             }
-            *last_line = pc as u32;
+            lua_state.oldpc = npci as u32;
         }
     }
-    // Re-read hook_mask (hook callback may have changed it via debug.sethook)
-    Ok(lua_state.hook_mask)
+    Ok(lua_state.hook_mask != 0)
 }

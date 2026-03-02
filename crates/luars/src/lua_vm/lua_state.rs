@@ -79,6 +79,12 @@ pub struct LuaState {
     /// Current countdown for count hook (per-thread, counts instructions independently).
     pub(crate) hook_count: i32,
 
+    /// Last instruction PC (0-based index) seen by the line hook (like C Lua's L->oldpc).
+    /// Stored per-thread so the main execution loop doesn't waste a register on it.
+    /// Used by hook_check_instruction to detect line changes via changedline logic.
+    /// Also set by rethook/return paths to the caller's current PC.
+    pub(crate) oldpc: u32,
+
     /// Transfer info for call/return hooks (like C Lua's L->transferinfo).
     /// ftransfer: 1-based index of first transferred value (relative to func position).
     /// ntransfer: number of values being transferred.
@@ -155,6 +161,7 @@ impl LuaState {
             hook_mask: 0,
             base_hook_count: 0,
             hook_count: 0,
+            oldpc: 0,
             ftransfer: 0,
             ntransfer: 0,
             safe_state: safe_option.into(),

@@ -307,6 +307,21 @@ pub fn call_c_function(
     // Pop frame (lean path, no call_status bit check)
     lua_state.pop_c_frame();
 
+    // Update oldpc for the caller frame (like C Lua's rethook in
+    // luaD_poscall: L->oldpc = pcRel(ci->u.l.savedpc, ci_func(ci)->p)).
+    // This ensures same-line suppression after C function returns.
+    // In C Lua, rethook is called from luaD_poscall for ALL function
+    // returns (both C and Lua).
+    if lua_state.call_depth() > 0 {
+        let ci = lua_state.get_call_info(lua_state.call_depth() - 1);
+        if ci.call_status & crate::lua_vm::call_info::call_status::CIST_C == 0 {
+            // Caller is a Lua frame: set oldpc to ci.pc - 1
+            // (matching hook_check_instruction's npci = pc - 1 convention)
+            let saved_pc = ci.pc;
+            lua_state.oldpc = if saved_pc > 0 { saved_pc - 1 } else { 0 };
+        }
+    }
+
     // Move results using unsafe fast path
     unsafe {
         let stack = lua_state.stack_mut();
