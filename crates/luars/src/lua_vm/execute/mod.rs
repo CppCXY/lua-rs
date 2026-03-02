@@ -42,8 +42,8 @@ use crate::{
         execute::{
             closure_handler::handle_closure,
             cold::{
-                handle_close, handle_errnil, handle_forprep_float, handle_getvarg, handle_len,
-                handle_loadkx,
+                handle_call_metamethod, handle_close, handle_errnil, handle_forprep_float,
+                handle_getvarg, handle_len, handle_loadkx,
             },
             concat::handle_concat,
             helper::{
@@ -1668,108 +1668,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         continue;
                     }
 
-                    // Semi-hot path: __call metamethod on table — inline the common case
-                    // where the metamethod is a Lua function, avoiding handle_call overhead
-                    // and using unsafe pointer ops for argument shifting.
+                    // Semi-cold path: __call metamethod on table
+                    // Extracted to cold function to reduce lua_execute code size
+                    // and register pressure in the hot loop.
                     if func.ttistable() {
-                        let table = unsafe { &mut *(func.value.ptr as *mut GcTable) };
-                        let meta = table.data.meta_ptr();
-                        if !meta.is_null() {
-                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                            const TM_CALL_BIT: u8 = TmKind::Call as u8;
-                            if !mt.no_tm(TM_CALL_BIT) {
-                                let event_key =
-                                    lua_state.vm_mut().const_strings.get_tm_value(TmKind::Call);
-                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                                    if mm.is_lua_function() {
-                                        // Compute nargs
-                                        let nargs = if b != 0 {
-                                            b - 1
-                                        } else {
-                                            let current_top = lua_state.get_top();
-                                            if current_top > func_idx + 1 {
-                                                current_top - func_idx - 1
-                                            } else {
-                                                0
-                                            }
-                                        };
-
-                                        // Shift arguments right by 1 using unsafe ptr copy
-                                        // Layout: [func, arg1, ..., argN]
-                                        // After:  [mm, func, arg1, ..., argN]
-                                        unsafe {
-                                            let sp = lua_state.stack_mut().as_mut_ptr();
-                                            let src = sp.add(func_idx + 1);
-                                            std::ptr::copy(src, src.add(1), nargs);
-                                            *src = func; // original callable → 1st arg
-                                            *sp.add(func_idx) = mm; // metamethod → func slot
-                                        }
-
-                                        let new_nargs = nargs + 1;
-                                        let nresults = if c == 0 { -1 } else { (c - 1) as i32 };
-
-                                        // For b==0 case, stack_top needs +1 for shifted arg
-                                        if b == 0 {
-                                            let top = lua_state.get_top();
-                                            lua_state.set_top_raw(top + 1);
-                                        }
-
-                                        let lua_func = unsafe { mm.as_lua_function_unchecked() };
-                                        let new_chunk = lua_func.chunk();
-
-                                        save_pc!();
-                                        lua_state.push_lua_frame(
-                                            &mm,
-                                            func_idx + 1,
-                                            new_nargs,
-                                            nresults,
-                                            new_chunk.param_count,
-                                            new_chunk.max_stack_size,
-                                            new_chunk as *const _,
-                                        )?;
-
-                                        // Track __call depth for debug.getinfo extraargs
-                                        {
-                                            use crate::lua_vm::call_info::call_status;
-                                            let new_fi = lua_state.call_depth() - 1;
-                                            let ci = lua_state.get_call_info_mut(new_fi);
-                                            ci.call_status =
-                                                call_status::set_ccmt_count(ci.call_status, 1);
-                                        }
-
-                                        // Inline callee entry
-                                        frame_idx = lua_state.call_depth() - 1;
-                                        let ci = lua_state.get_call_info(frame_idx);
-                                        pc = ci.pc as usize;
-                                        base = ci.base;
-                                        chunk_ptr = ci.chunk_ptr;
-                                        chunk = unsafe { &*chunk_ptr };
-                                        upvalue_ptrs = unsafe {
-                                            let lf: *const _ = ci.func.as_lua_function_unchecked();
-                                            (&*lf).upvalues()
-                                        };
-                                        constants = &chunk.constants;
-                                        code = &chunk.code;
-
-                                        // Call hook for inline __call path (cold path)
-                                        if trap
-                                            && lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL
-                                                != 0
-                                            && lua_state.allow_hook
-                                        {
-                                            hook_on_call(lua_state, lua_state.hook_mask, 0, chunk)?;
-                                        }
-                                        // Init oldpc for new function
-                                        lua_state.oldpc =
-                                            if chunk.is_vararg { 0 } else { u32::MAX };
-                                        continue;
-                                    }
-                                    // __call is not a Lua function — fall to cold path
-                                } else {
-                                    // __call absent — cache it
-                                    mt.set_tm_absent(TM_CALL_BIT);
-                                }
-                            }
+                        save_pc!();
+                        if handle_call_metamethod(lua_state, func, func_idx, b, c)? {
+                            continue 'startfunc;
                         }
                     }
 
