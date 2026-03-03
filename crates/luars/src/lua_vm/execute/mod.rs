@@ -1572,26 +1572,28 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let bx = instr.get_bx() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let ra = base + a;
+                        // Use cached base_ptr (r15) instead of lua_state.stack_mut().as_mut_ptr()
+                        // to avoid 3 extra memory loads (load base, shl, add stack_ptr).
+                        // SAFETY: ForLoop fast paths never grow the stack.
+                        let ra_ptr = base_ptr.add(a);
 
-                        // Check if integer loop
-                        if pttisinteger(sp.add(ra + 1) as *const LuaValue) {
+                        // Check if integer loop (tag of step at ra+1)
+                        if pttisinteger(ra_ptr.add(1) as *const LuaValue) {
                             // Integer loop (most common for numeric loops)
                             // ra: counter (count of iterations left)
                             // ra+1: step
                             // ra+2: control variable (idx)
-                            let count = pivalue(sp.add(ra) as *const LuaValue) as u64;
+                            let count = pivalue(ra_ptr as *const LuaValue) as u64;
                             if count > 0 {
                                 // More iterations
-                                let step = pivalue(sp.add(ra + 1) as *const LuaValue);
-                                let idx = pivalue(sp.add(ra + 2) as *const LuaValue);
+                                let step = pivalue(ra_ptr.add(1) as *const LuaValue);
+                                let idx = pivalue(ra_ptr.add(2) as *const LuaValue);
 
                                 // Update counter (decrement) - only write value, tag unchanged
-                                (*sp.add(ra)).value.i = (count - 1) as i64;
+                                (*ra_ptr).value.i = (count - 1) as i64;
 
                                 // Update control variable: idx += step - only write value
-                                (*sp.add(ra + 2)).value.i = idx.wrapping_add(step);
+                                (*ra_ptr.add(2)).value.i = idx.wrapping_add(step);
 
                                 // Jump back (no error check - validated at compile time)
                                 pc -= bx;
@@ -1602,9 +1604,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             // ra: limit
                             // ra+1: step
                             // ra+2: idx (control variable)
-                            let step = pfltvalue(sp.add(ra + 1) as *const LuaValue);
-                            let limit = pfltvalue(sp.add(ra) as *const LuaValue);
-                            let idx = pfltvalue(sp.add(ra + 2) as *const LuaValue);
+                            let step = pfltvalue(ra_ptr.add(1) as *const LuaValue);
+                            let limit = pfltvalue(ra_ptr as *const LuaValue);
+                            let idx = pfltvalue(ra_ptr.add(2) as *const LuaValue);
 
                             // idx += step
                             let new_idx = idx + step;
@@ -1618,7 +1620,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                             if should_continue {
                                 // Update control variable - only write value, tag unchanged
-                                (*sp.add(ra + 2)).value.n = new_idx;
+                                (*ra_ptr.add(2)).value.n = new_idx;
 
                                 // Jump back (bytecode compiler guarantees valid targets)
                                 debug_assert!(bx <= pc, "ForLoop float: invalid jump");
