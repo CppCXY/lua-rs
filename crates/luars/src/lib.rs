@@ -56,6 +56,8 @@ pub use lua_vm::async_thread::{AsyncCallHandle, AsyncFuture, AsyncReturnValue, A
 pub use lua_vm::lua_error::LuaFullError;
 pub use lua_vm::table_builder::TableBuilder;
 pub use lua_vm::{
-    Instruction, LuaAnyRef, LuaFunctionRef, LuaResult, LuaStringRef, LuaTableRef, LuaVM, OpCode,
+    CFunction, CallInfo, DebugInfo, Instruction, LuaAnyRef, LuaFunctionRef, LuaResult, LuaState,
+    LuaStringRef, LuaTableRef, LuaVM, OpCode,
 };
+pub use lua_vm::{LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET};
 pub use stdlib::Stdlib;

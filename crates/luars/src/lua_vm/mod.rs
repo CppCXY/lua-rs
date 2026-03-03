@@ -184,6 +184,24 @@ impl LuaVM {
         &self.main_state.as_ref().data
     }
 
+    /// Register a CFunction in package.preload[name].
+    /// When Lua code calls `require("name")`, the preload searcher will
+    /// find this function and call it as the module loader.
+    pub fn register_preload(
+        &mut self,
+        name: &str,
+        loader: crate::lua_vm::CFunction,
+    ) -> LuaResult<()> {
+        let preload_val = self.registry_get("_PRELOAD")?;
+        if let Some(preload) = preload_val
+            && preload.is_table()
+        {
+            let key = self.create_string(name)?;
+            self.raw_set(&preload, key, LuaValue::cfunction(loader));
+        }
+        Ok(())
+    }
+
     /// Set a value in the registry by integer key
     pub fn registry_seti(&mut self, key: i64, value: LuaValue) {
         self.raw_seti(&self.registry.clone(), key, value);

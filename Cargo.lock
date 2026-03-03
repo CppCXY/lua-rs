@@ -241,10 +241,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "luars_debugger"
+version = "0.1.0"
+dependencies = [
+ "luars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "luars_interpreter"
 version = "0.1.0"
 dependencies = [
  "luars",
+ "luars_debugger",
 ]
 
 [[package]]
