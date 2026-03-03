@@ -104,18 +104,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Hot path: read CI fields for Lua function dispatch.
         // These are `let mut` so that RETURN1 can restore caller context
         // inline without going through the full 'startfunc reload.
+        //
+        // Register pressure note: C Lua keeps 5 values in registers
+        // (L, ci, base, k, pc). We keep 7 (lua_state, frame_idx, pc,
+        // base, chunk, constants, code). chunk_ptr and upvalue_ptrs
+        // are eliminated — derived on demand — to reduce cross-dispatch
+        // live variables from 10 to 8, closer to the 5-6 callee-saved
+        // registers available on x86-64.
         let ci = lua_state.get_call_info(frame_idx);
-        let func_value = ci.func;
         let mut pc = ci.pc as usize;
         let mut base = ci.base;
-        let mut chunk_ptr = ci.chunk_ptr;
 
-        let lua_func = unsafe { func_value.as_lua_function_unchecked() };
-
-        // Use cached chunk_ptr from CI (avoids Rc deref on every startfunc entry).
-        // chunk_ptr is set by push_lua_frame/push_frame/handle_tailcall for all Lua frames.
-        let mut chunk = unsafe { &*chunk_ptr };
-        let mut upvalue_ptrs = lua_func.upvalues();
+        // Derive chunk from CI's cached pointer (avoids Rc deref).
+        // chunk_ptr is set by push_lua_frame/push_frame/handle_tailcall.
+        let mut chunk = unsafe { &*ci.chunk_ptr };
         // Stack already grown by push_lua_frame — no need for grow_stack here.
         // Only the very first entry (top-level chunk) needs this check.
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
@@ -125,13 +127,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut code = &chunk.code;
 
         // ===== DEBUG HOOK STATE =====
-        // C Lua's trap pattern: a single boolean that controls whether the
-        // cold hook-check path runs. Set at function entry from hook_mask,
-        // updated only after operations that may change hooks (Protect, jumps,
-        // function calls). This keeps the hot loop to a single register test
-        // + branch (predicted not-taken), avoiding memory loads for hook_mask,
-        // allow_hook, last_line, vm_ptr every instruction.
-        let trap = lua_state.hook_mask != 0;
+        // No local `trap` variable — we read hook_mask directly at each
+        // check site to avoid pinning a register across the dispatch jump.
+        // Cost: one extra byte load from L1 cache at Return/Call (cold path).
 
         // Initialise oldpc for this function.
         // New function (pc==0): For vararg functions, VARARGPREP is at
@@ -165,7 +163,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
-        if trap && pc == 0 {
+        if pc == 0 && lua_state.hook_mask != 0 {
             let hook_mask = lua_state.hook_mask;
             if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook {
                 hook_on_call(lua_state, hook_mask, call_status, chunk)?;
@@ -183,15 +181,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             pc += 1;
 
             // ===== DEBUG HOOK CHECK =====
-            // C Lua's trap pattern: read hook_mask once per instruction.
-            // 3 fewer live local variables vs old approach (no old_mask,
-            // last_line, vm_ptr), freeing registers for pc/base/chunk.
             // Cost: one byte load + branch (predicted not-taken) per instruction.
-            let trap = lua_state.hook_mask != 0;
-            if trap && hook_check_instruction(lua_state, pc, chunk, frame_idx)? {
-                // hook_check_instruction returns false if hooks were
-                // disabled during the callback — we don't need to act on
-                // this since we re-read hook_mask on the next iteration.
+            // No local `trap` variable — avoids cross-dispatch register liveness
+            // that would pin a register from loop top through Return/Call handlers.
+            if lua_state.hook_mask != 0 {
+                hook_check_instruction(lua_state, pc, chunk, frame_idx)?;
             }
 
             // Dispatch instruction (continues in next replacement...)
@@ -941,10 +935,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Update PC before returning
                     save_pc!();
 
-                    // Return hook (cold path)
-                    if trap
-                        && lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0
-                        && lua_state.allow_hook
+                    // Return hook (cold path — re-read hook_mask directly,
+                    // no cross-dispatch `trap` variable needed)
+                    if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
                         let nres = if b != 0 {
                             (b - 1) as i32
@@ -961,9 +954,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Return0 => {
                     // return (no values)
                     // Return hook (cold path)
-                    if trap
-                        && lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0
-                        && lua_state.allow_hook
+                    if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
                         hook_on_return(lua_state, frame_idx, pc as u32, 0)?;
                     }
@@ -975,9 +966,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
 
                     // Return hook (cold path)
-                    if trap
-                        && lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0
-                        && lua_state.allow_hook
+                    if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
                         hook_on_return(lua_state, frame_idx, pc as u32, 1)?;
                     }
@@ -1004,14 +993,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ci = lua_state.get_call_info(frame_idx);
                     pc = ci.pc as usize;
                     base = ci.base;
-                    chunk_ptr = ci.chunk_ptr;
-                    chunk = unsafe { &*chunk_ptr };
-                    // Bypass borrow checker: upvalue_ptrs borrows from GC heap,
-                    // not from any local. The func is alive on the stack.
-                    upvalue_ptrs = unsafe {
-                        let lf: *const _ = ci.func.as_lua_function_unchecked();
-                        (&*lf).upvalues()
-                    };
+                    chunk = unsafe { &*ci.chunk_ptr };
                     constants = &chunk.constants;
                     code = &chunk.code;
                     // Update oldpc for caller context (rethook equivalent).
@@ -1020,8 +1002,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
+                    // Derive upvalue_ptrs on demand (not cached cross-dispatch)
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
+                    let upvalue_ptrs = unsafe {
+                        let ci = lua_state.get_call_info(frame_idx);
+                        (&*ci.func.as_lua_function_unchecked()).upvalues()
+                    };
                     let value = unsafe { upvalue_ptrs.get_unchecked(b) }
                         .as_ref()
                         .data
@@ -1035,6 +1022,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // UpValue[B] := R[A]
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
+                    let upvalue_ptrs = unsafe {
+                        let ci = lua_state.get_call_info(frame_idx);
+                        (&*ci.func.as_lua_function_unchecked()).upvalues()
+                    };
                     let value = unsafe { *lua_state.stack().get_unchecked(base + a) };
                     let upval_ptr = unsafe { *upvalue_ptrs.get_unchecked(b) };
                     upval_ptr.as_mut_ref().data.set_value(value);
@@ -1093,7 +1084,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetTable => {
                     // GETTABLE: R[A] := R[B][R[C]]
-                    // HOT PATH: inline fast path for integer keys into tables
+                    // Inline: fast table lookup + no-metatable nil.
+                    // Cold: metatable __index chain → exec_gettable.
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
@@ -1106,7 +1098,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         rc = *sp.add(base + c);
                     }
 
-                    // Inline fast path: table[key]
                     if let Some(table_ref) = rb.as_table() {
                         let result = if rc.ttisinteger() {
                             table_ref.impl_table.fast_geti(rc.ivalue())
@@ -1119,78 +1110,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Key not found — check metatable for __index
-                        let meta = table_ref.meta_ptr();
-                        if meta.is_null() {
+                        if !table_ref.has_metatable() {
                             unsafe {
                                 *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
                             }
                             continue;
                         }
-                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                        if mt.no_tm(TmKind::Index as u8) {
-                            unsafe {
-                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        let event_key =
-                            lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
-                        if let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                            // __index is a table: direct lookup (no function call)
-                            if let Some(fallback) = tm.as_table() {
-                                let res = if rc.ttisinteger() {
-                                    fallback.impl_table.fast_geti(rc.ivalue())
-                                } else if rc.is_short_string() {
-                                    fallback.impl_table.get_shortstr_fast(&rc)
-                                } else {
-                                    fallback.raw_get(&rc)
-                                };
-                                if let Some(val) = res {
-                                    unsafe {
-                                        *lua_state.stack_mut().as_mut_ptr().add(base + a) = val;
-                                    }
-                                    continue;
-                                }
-                                // Key not found in fallback table — it may have
-                                // its own __index chain, fall through to slow path.
-                            }
-                            // __index is a function: call directly (skip exec_gettable overhead)
-                            if tm.is_function() {
-                                save_pc!();
-                                let ci_top = lua_state.get_call_info(frame_idx).top;
-                                lua_state.set_top_raw(ci_top);
-                                match metamethod::call_tm_res(lua_state, tm, rb, rc) {
-                                    Ok(result) => {
-                                        base = lua_state.get_frame_base(frame_idx);
-                                        unsafe {
-                                            *lua_state.stack_mut().as_mut_ptr().add(base + a) =
-                                                result;
-                                        }
-                                        continue;
-                                    }
-                                    Err(LuaError::Yield) => {
-                                        let ci = lua_state.get_call_info_mut(frame_idx);
-                                        ci.pending_finish_get = a as i32;
-                                        ci.call_status |= CIST_PENDING_FINISH;
-                                        return Err(LuaError::Yield);
-                                    }
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                            // __index is something else — fall through to slow path
-                        } else {
-                            mt.set_tm_absent(TmKind::Index as u8);
-                            unsafe {
-                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        // Has __index — fall through to slow path
                     }
 
-                    // Slow path: non-table value or unusual __index chain
+                    // Cold: metatable __index chain or non-table
+                    save_pc!();
                     table_ops::exec_gettable(lua_state, instr, base, frame_idx, &mut pc)?;
+                    restore_state!();
                 }
                 OpCode::GetI => {
                     // GETI: R[A] := R[B][C] (integer key)
@@ -1243,50 +1174,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Key not found — check metatable __index (one level inline)
-                        let meta = table_ref.meta_ptr();
-                        if meta.is_null() {
+                        if !table_ref.has_metatable() {
                             unsafe {
                                 *stack.get_unchecked_mut(base + a) = LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                        if mt.no_tm(TmKind::Index as u8) {
-                            unsafe {
-                                *stack.get_unchecked_mut(base + a) = LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        // Get __index value from metatable
-                        let event_key =
-                            lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
-                        if let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                            // __index is a table: direct one-level lookup
-                            if let Some(fallback) = tm.as_table() {
-                                if let Some(val) = fallback.impl_table.get_shortstr_fast(key) {
-                                    unsafe {
-                                        *lua_state.stack_mut().as_mut_ptr().add(base + a) = val;
-                                    }
-                                    continue;
-                                }
-                                // Deep chain: continue from tm (cold path)
-                                save_pc!();
-                                table_ops::self_deep_chain(lua_state, tm, key, a, frame_idx)?;
-                                restore_state!();
-                                continue;
-                            }
-                            // __index is a function — fall through
-                        } else {
-                            mt.set_tm_absent(TmKind::Index as u8);
-                            unsafe {
-                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
                             }
                             continue;
                         }
                     }
 
-                    // Slow path: metamethod lookup
+                    // Cold: metatable __index chain, __index function, non-table
                     save_pc!();
                     table_ops::exec_getfield(
                         lua_state, instr, constants, base, frame_idx, &mut pc,
@@ -1366,55 +1262,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             lua_state.raw_set(&ra, rb, val);
                             continue;
                         }
-                        // Key doesn't exist — inline fasttm for __newindex
-                        let meta = table_ref.meta_ptr();
-                        if !meta.is_null() {
-                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                            const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8;
-                            if mt.no_tm(TM_NEWINDEX_BIT) {
-                                // No __newindex — set directly
-                                lua_state.raw_set(&ra, rb, val);
-                                continue;
-                            }
-                            let event_key = lua_state
-                                .vm_mut()
-                                .const_strings
-                                .get_tm_value(TmKind::NewIndex);
-                            if let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                                if tm.is_function() {
-                                    // __newindex is a function: call directly
-                                    save_pc!();
-                                    let ci_top = lua_state.get_call_info(frame_idx).top;
-                                    lua_state.set_top_raw(ci_top);
-                                    match metamethod::call_tm(lua_state, tm, ra, rb, val) {
-                                        Ok(_) => {
-                                            let ci_top2 = lua_state.get_call_info(frame_idx).top;
-                                            lua_state.set_top_raw(ci_top2);
-                                            continue;
-                                        }
-                                        Err(LuaError::Yield) => {
-                                            let ci = lua_state.get_call_info_mut(frame_idx);
-                                            ci.pending_finish_get = -2;
-                                            ci.call_status |= CIST_PENDING_FINISH;
-                                            return Err(LuaError::Yield);
-                                        }
-                                        Err(e) => return Err(e),
-                                    }
-                                }
-                                // __newindex is a table — fall through to finishset
-                            } else {
-                                mt.set_tm_absent(TM_NEWINDEX_BIT);
-                                lua_state.raw_set(&ra, rb, val);
-                                continue;
-                            }
-                        } else {
-                            // No metatable — set directly
-                            lua_state.raw_set(&ra, rb, val);
-                            continue;
-                        }
                     }
 
-                    // Slow path: metamethod chain or non-table
+                    // Cold: metatable __newindex chain or non-table
+                    save_pc!();
                     table_ops::exec_settable(
                         lua_state, instr, constants, base, frame_idx, &mut pc,
                     )?;
@@ -1575,43 +1426,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Key not found — check metatable __index (one level)
-                        let meta = table_ref.meta_ptr();
-                        if meta.is_null() {
-                            unsafe {
-                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                        if mt.no_tm(TmKind::Index as u8) {
-                            unsafe {
-                                *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        let event_key =
-                            lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
-                        if let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                            // __index is a table: try one-level lookup
-                            if let Some(fallback_table) = tm.as_table() {
-                                if let Some(val) = fallback_table.impl_table.get_shortstr_fast(key)
-                                {
-                                    unsafe {
-                                        *lua_state.stack_mut().as_mut_ptr().add(base + a) = val;
-                                    }
-                                    continue;
-                                }
-                                // Deep chain: continue from tm (cold path,
-                                // avoids redundant lookups in exec_self)
-                                save_pc!();
-                                table_ops::self_deep_chain(lua_state, tm, key, a, frame_idx)?;
-                                restore_state!();
-                                continue;
-                            }
-                            // __index is a function or unusual — fall through
-                        } else {
-                            mt.set_tm_absent(TmKind::Index as u8);
+                        if !table_ref.has_metatable() {
                             unsafe {
                                 *lua_state.stack_mut().as_mut_ptr().add(base + a) = LuaValue::nil();
                             }
@@ -1619,7 +1434,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    // Slow path: non-table receiver or __index function
+                    // Cold: metatable __index chain, __index function, non-table
                     save_pc!();
                     table_ops::exec_self(lua_state, instr, constants, base, frame_idx, &mut pc)?;
                     restore_state!();
@@ -1669,18 +1484,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ci = lua_state.get_call_info(frame_idx);
                         pc = ci.pc as usize;
                         base = ci.base;
-                        chunk_ptr = ci.chunk_ptr;
-                        chunk = unsafe { &*chunk_ptr };
-                        upvalue_ptrs = unsafe {
-                            let lf: *const _ = ci.func.as_lua_function_unchecked();
-                            (&*lf).upvalues()
-                        };
+                        chunk = unsafe { &*ci.chunk_ptr };
                         constants = &chunk.constants;
                         code = &chunk.code;
 
                         // Call hook for inline Lua call (cold path)
-                        if trap
-                            && lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
+                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
                             && lua_state.allow_hook
                         {
                             hook_on_call(lua_state, lua_state.hook_mask, 0, chunk)?;
@@ -2126,6 +1935,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
+                    let upvalue_ptrs = unsafe {
+                        let ci = lua_state.get_call_info(frame_idx);
+                        (&*ci.func.as_lua_function_unchecked()).upvalues()
+                    };
                     let upval = &upvalue_ptrs[b].as_ref().data;
                     let key = unsafe { constants.get_unchecked(c) };
                     let table_value = upval.get_value_ref();
@@ -2193,6 +2006,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
 
                     // Fast path: direct set for existing short string key
+                    let upvalue_ptrs = unsafe {
+                        let ci = lua_state.get_call_info(frame_idx);
+                        (&*ci.func.as_lua_function_unchecked()).upvalues()
+                    };
                     let upval = &upvalue_ptrs[a].as_ref().data;
                     let table_value = upval.get_value_ref();
                     if table_value.tt == LUA_VTABLE {
@@ -2521,6 +2338,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 // CLOSURE AND VARARG
                 // ============================================================
                 OpCode::Closure => {
+                    // Derive upvalue_ptrs via raw pointer to avoid borrow conflict
+                    // with &mut lua_state passed to handle_closure.
+                    // Safety: func LuaFunction lives on the stack (alive in current frame).
+                    let upvalue_ptrs = unsafe {
+                        let ci = lua_state.get_call_info(frame_idx);
+                        let lf: *const _ = ci.func.as_lua_function_unchecked();
+                        (&*lf).upvalues()
+                    };
                     handle_closure(lua_state, instr, base, frame_idx, chunk, upvalue_ptrs, pc)?;
                 }
 
@@ -2543,7 +2368,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Our absolute line_info makes changedline(0, 1) return
                     // false when VARARGPREP and the next instruction share a
                     // line. The sentinel forces unconditional fire.
-                    if trap {
+                    if lua_state.hook_mask != 0 {
                         lua_state.oldpc = u32::MAX;
                     }
                 }
