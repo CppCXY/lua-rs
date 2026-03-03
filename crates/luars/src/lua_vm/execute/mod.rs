@@ -121,6 +121,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Only the very first entry (top-level chunk) needs this check.
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
 
+        // Cache code pointer for dispatch: avoids chunk→code.ptr indirection
+        // each iteration (saves 1 dependent load per dispatch, ~4 cycles).
+        // Updated whenever chunk changes (Call/Return).
+        let mut code = chunk.code.as_ptr();
+
         // Stack and chunk slices accessed via chunk.code / chunk.constants
         // with get_unchecked — no cached raw pointers needed.
 
@@ -176,7 +181,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // MAINLOOP: Main instruction dispatch loop
         loop {
             // Fetch instruction and advance PC
-            let instr = unsafe { *chunk.code.get_unchecked(pc) };
+            let instr = unsafe { *code.add(pc) };
             pc += 1;
 
             // ===== DEBUG HOOK CHECK =====
@@ -1054,9 +1059,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     base = ci.base;
                     let chunk_raw = ci.chunk_ptr;
                     chunk = unsafe { &*chunk_raw };
+                    code = chunk.code.as_ptr(); // update cached code pointer for caller
                     // Update oldpc for caller context (rethook equivalent).
-                    // Uses pc-1 to match hook_check_instruction's npci = pc-1.
-                    lua_state.oldpc = (pc - 1) as u32;
+                    // Only needed when hooks are active — otherwise oldpc is never read.
+                    if lua_state.hook_mask != 0 {
+                        lua_state.oldpc = (pc - 1) as u32;
+                    }
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
@@ -1551,25 +1559,29 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         let lua_func = unsafe { func.as_lua_function_unchecked() };
                         let new_chunk = lua_func.chunk();
+                        let new_chunk_ptr = new_chunk as *const crate::lua_value::Chunk;
 
+                        let new_base = func_idx + 1;
                         save_pc!();
                         lua_state.push_lua_frame(
                             &func,
-                            func_idx + 1,
+                            new_base,
                             nargs,
                             nresults,
                             new_chunk.param_count,
                             new_chunk.max_stack_size,
-                            new_chunk as *const _,
+                            new_chunk_ptr,
                         )?;
 
-                        // Inline callee entry: restore context without startfunc
+                        // Inline callee entry: use known values directly instead of
+                        // reading back from CallInfo (avoids redundant call_stack reload
+                        // + frame_idx*72 address computation + 3 loads from memory we
+                        // just wrote to — saves ~7 instructions on the hot path).
                         frame_idx = lua_state.call_depth() - 1;
-                        let ci = lua_state.get_call_info(frame_idx);
-                        pc = ci.pc as usize;
-                        base = ci.base;
-                        let chunk_raw = ci.chunk_ptr;
-                        chunk = unsafe { &*chunk_raw };
+                        pc = 0; // push_lua_frame always sets ci.pc = 0
+                        base = new_base; // push_lua_frame stores the base we gave it
+                        chunk = unsafe { &*new_chunk_ptr }; // same chunk_ptr we gave push_lua_frame
+                        code = chunk.code.as_ptr(); // update cached code pointer for callee
 
                         // Call hook for inline Lua call (cold path)
                         if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
@@ -1577,8 +1589,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         {
                             hook_on_call(lua_state, lua_state.hook_mask, 0, chunk)?;
                         }
-                        // Init oldpc for new function
-                        lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+                        // Init oldpc for new function (only needed when hooks active)
+                        // When hooks are disabled, oldpc is never read (hook_check_instruction
+                        // is skipped), so we can avoid the is_vararg branch + memory write.
+                        if lua_state.hook_mask != 0 {
+                            lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+                        }
                         updatetrap!();
                         continue;
                     }

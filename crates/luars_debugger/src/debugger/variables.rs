@@ -75,20 +75,20 @@ pub fn make_variable(
     let mut children = Vec::new();
 
     // Expand table children if depth > 0
-    if depth > 0 {
-        if let Some(table) = value.as_table() {
-            let pairs = table.iter_all();
-            for (k, v) in &pairs {
-                let child_name = if let Some(s) = k.as_str() {
-                    s.to_string()
-                } else if let Some(i) = k.as_integer() {
-                    format!("[{i}]")
-                } else {
-                    format!("{k}")
-                };
-                *cache_id += 1;
-                children.push(make_variable(&child_name, v, depth - 1, cache_id));
-            }
+    if depth > 0
+        && let Some(table) = value.as_table()
+    {
+        let pairs = table.iter_all();
+        for (k, v) in &pairs {
+            let child_name = if let Some(s) = k.as_str() {
+                s.to_string()
+            } else if let Some(i) = k.as_integer() {
+                format!("[{i}]")
+            } else {
+                format!("{k}")
+            };
+            *cache_id += 1;
+            children.push(make_variable(&child_name, v, depth - 1, cache_id));
         }
     }
 

@@ -45,22 +45,22 @@ fn eval_expression(
     // Check locals
     let local_count = state.local_count(level);
     for i in 1..=local_count {
-        if let Some((name, value)) = state.get_local(level, i) {
-            if name == expr {
-                let mut cache_id = 0;
-                return Ok(make_variable(&name, &value, depth, &mut cache_id));
-            }
+        if let Some((name, value)) = state.get_local(level, i)
+            && name == expr
+        {
+            let mut cache_id = 0;
+            return Ok(make_variable(&name, &value, depth, &mut cache_id));
         }
     }
 
     // Check upvalues
     let upvalue_count = state.upvalue_count(level);
     for i in 1..=upvalue_count {
-        if let Some((name, value)) = state.get_upvalue(level, i) {
-            if name == expr {
-                let mut cache_id = 0;
-                return Ok(make_variable(&name, &value, depth, &mut cache_id));
-            }
+        if let Some((name, value)) = state.get_upvalue(level, i)
+            && name == expr
+        {
+            let mut cache_id = 0;
+            return Ok(make_variable(&name, &value, depth, &mut cache_id));
         }
     }
 

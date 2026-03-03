@@ -92,10 +92,10 @@ pub fn should_break(
         // Check hit condition
         if !bp.hit_condition.is_empty() {
             bp.hit_count += 1;
-            if let Ok(target) = bp.hit_condition.parse::<i32>() {
-                if bp.hit_count < target {
-                    return false;
-                }
+            if let Ok(target) = bp.hit_condition.parse::<i32>()
+                && bp.hit_count < target
+            {
+                return false;
             }
         }
         return true;

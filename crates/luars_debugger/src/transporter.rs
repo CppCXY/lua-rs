@@ -14,6 +14,12 @@ pub struct Transporter {
     stream: Arc<Mutex<Option<TcpStream>>>,
 }
 
+impl Default for Transporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transporter {
     pub fn new() -> Self {
         Self {
@@ -73,27 +79,26 @@ impl Transporter {
             guard.as_ref()?.try_clone().ok()?
         };
         let mut reader = BufReader::new(cloned);
-        loop {
-            // Line 1: cmd header
-            let mut header = String::new();
-            match reader.read_line(&mut header) {
-                Ok(0) | Err(_) => return None,
-                _ => {}
-            }
-            let cmd: i32 = header.trim().parse().unwrap_or(0);
 
-            // Line 2: JSON body
-            let mut body = String::new();
-            match reader.read_line(&mut body) {
-                Ok(0) | Err(_) => return None,
-                _ => {}
-            }
-            let body = body
-                .trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_string();
-            return Some((cmd, body));
+        // Line 1: cmd header
+        let mut header = String::new();
+        match reader.read_line(&mut header) {
+            Ok(0) | Err(_) => return None,
+            _ => {}
         }
+        let cmd: i32 = header.trim().parse().unwrap_or(0);
+
+        // Line 2: JSON body
+        let mut body = String::new();
+        match reader.read_line(&mut body) {
+            Ok(0) | Err(_) => return None,
+            _ => {}
+        }
+        let body = body
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string();
+        return Some((cmd, body));
     }
 
     /// Receive messages in a loop, calling the handler for each.
