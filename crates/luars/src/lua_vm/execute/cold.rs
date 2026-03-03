@@ -406,8 +406,6 @@ pub fn handle_call_metamethod(
     Ok(true)
 }
 
-
-
 /// Cold error: attempt to divide by zero (IDIV)
 #[cold]
 #[inline(never)]
@@ -435,8 +433,6 @@ pub fn error_table_index_nil(lua_state: &mut LuaState) -> LuaError {
 pub fn error_table_index_nan(lua_state: &mut LuaState) -> LuaError {
     lua_state.error("table index is NaN".to_string())
 }
-
-
 
 /// Cold error: unexpected EXTRAARG instruction
 #[cold]
@@ -607,9 +603,8 @@ pub fn handle_forprep_int(
     for offset in 0..3 {
         let val = unsafe { *stack.get_unchecked(ra + offset) };
         if val.is_string() {
-            let num = crate::stdlib::basic::parse_number::parse_lua_number(
-                val.as_str().unwrap_or(""),
-            );
+            let num =
+                crate::stdlib::basic::parse_number::parse_lua_number(val.as_str().unwrap_or(""));
             if !num.is_nil() {
                 unsafe { *stack.get_unchecked_mut(ra + offset) = num };
             }
