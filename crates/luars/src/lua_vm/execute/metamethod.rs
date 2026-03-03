@@ -93,7 +93,6 @@ pub fn try_unary_tm(
 /// ```
 pub fn handle_mmbin(
     lua_state: &mut LuaState,
-    _base: usize,         // Unused, kept for compatibility
     a: usize,             // First operand register
     b: usize,             // Second operand register
     c: usize,             // Tag method (TMS)
@@ -162,11 +161,10 @@ pub fn handle_mmbin(
 /// ```
 pub fn handle_mmbini(
     lua_state: &mut LuaState,
-    _base: usize, // Unused, kept for compatibility
-    a: usize,     // Operand register
-    sb: i32,      // Immediate value
-    c: usize,     // Tag method (TMS)
-    k: bool,      // flip flag
+    a: usize, // Operand register
+    sb: i32,  // Immediate value
+    c: usize, // Tag method (TMS)
+    k: bool,  // flip flag
     pc: usize,
     code: &[Instruction],
     frame_idx: usize, // Frame index for accessing current base
@@ -244,11 +242,10 @@ pub fn handle_mmbini(
 /// ```
 pub fn handle_mmbink(
     lua_state: &mut LuaState,
-    _base: usize, // Unused, kept for compatibility
-    a: usize,     // Operand register
-    b: usize,     // Constant index
-    c: usize,     // Tag method (TMS)
-    k: bool,      // flip flag
+    a: usize, // Operand register
+    b: usize, // Constant index
+    c: usize, // Tag method (TMS)
+    k: bool,  // flip flag
     pc: usize,
     code: &[Instruction],
     constants: &[LuaValue],

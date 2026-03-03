@@ -13,9 +13,9 @@ use crate::{
             metamethod,
         },
     },
+    stdlib::basic::parse_number::parse_lua_number,
 };
 
-#[cold]
 #[inline(never)]
 pub fn handle_loadkx(
     lua_state: &mut LuaState,
@@ -53,7 +53,6 @@ pub fn handle_loadkx(
     Ok(())
 }
 
-#[cold]
 #[inline(never)]
 pub fn handle_close(
     lua_state: &mut LuaState,
@@ -76,7 +75,6 @@ pub fn handle_close(
     }
 }
 
-#[cold]
 #[inline(never)]
 pub fn handle_getvarg(
     lua_state: &mut LuaState,
@@ -588,7 +586,6 @@ pub fn call_c_mm_bin(
 /// Integer for-loop preparation — extracted to reduce main loop code size.
 /// ForPrep only executes once per loop, so function call overhead is negligible.
 /// Extracting this prevents LLVM from clobbering r12/r15 in the main dispatch.
-#[cold]
 #[inline(never)]
 pub fn handle_forprep_int(
     lua_state: &mut LuaState,
@@ -603,8 +600,7 @@ pub fn handle_forprep_int(
     for offset in 0..3 {
         let val = unsafe { *stack.get_unchecked(ra + offset) };
         if val.is_string() {
-            let num =
-                crate::stdlib::basic::parse_number::parse_lua_number(val.as_str().unwrap_or(""));
+            let num = parse_lua_number(val.as_str().unwrap_or(""));
             if !num.is_nil() {
                 unsafe { *stack.get_unchecked_mut(ra + offset) = num };
             }
