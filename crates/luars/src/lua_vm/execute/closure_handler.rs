@@ -29,11 +29,16 @@ pub fn handle_closure(
     base: usize,
     frame_idx: usize,
     chunk: &Chunk,
-    upvalue_ptrs: &[UpvaluePtr],
     pc: usize,
 ) -> LuaResult<()> {
     let a = instr.get_a() as usize;
     let bx = instr.get_bx() as usize;
+
+    let upvalue_ptrs = unsafe {
+        let ci = lua_state.get_call_info(frame_idx);
+        let lf: *const _ = ci.func.as_lua_function_unchecked();
+        (&*lf).upvalues()
+    };
 
     // Create closure from child prototype
     handle_closure_internal(lua_state, base, a, bx, chunk, upvalue_ptrs)?;

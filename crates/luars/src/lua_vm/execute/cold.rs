@@ -406,32 +406,7 @@ pub fn handle_call_metamethod(
     Ok(true)
 }
 
-/// Cold error path for JMP with invalid target PC.
-#[cold]
-#[inline(never)]
-pub fn error_jmp_invalid_pc(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    pc: usize,
-    new_pc: usize,
-) -> LuaError {
-    lua_state.set_frame_pc(frame_idx, pc as u32);
-    lua_state.error(format!("JMP: invalid target pc={}", new_pc))
-}
 
-/// Cold error path for 'for' loop with non-numeric limit.
-#[cold]
-#[inline(never)]
-pub fn error_for_bad_limit(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    pc: usize,
-    limit_val: &LuaValue,
-) -> LuaError {
-    lua_state.set_frame_pc(frame_idx, pc as u32);
-    let t = crate::stdlib::debug::objtypename(lua_state, limit_val);
-    lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
-}
 
 /// Cold error: attempt to divide by zero (IDIV)
 #[cold]
@@ -461,24 +436,7 @@ pub fn error_table_index_nan(lua_state: &mut LuaState) -> LuaError {
     lua_state.error("table index is NaN".to_string())
 }
 
-/// Cold error: 'for' step is zero
-#[cold]
-#[inline(never)]
-pub fn error_for_step_zero(lua_state: &mut LuaState) -> LuaError {
-    lua_state.error("'for' step is zero".to_string())
-}
 
-/// Cold error: FORLOOP invalid jump
-#[cold]
-#[inline(never)]
-pub fn error_forloop_invalid_jump(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    pc: usize,
-) -> LuaError {
-    lua_state.set_frame_pc(frame_idx, pc as u32);
-    lua_state.error("FORLOOP: invalid jump".to_string())
-}
 
 /// Cold error: unexpected EXTRAARG instruction
 #[cold]
@@ -629,4 +587,117 @@ pub fn call_c_mm_bin(
             .get_unchecked_mut(cur_base + result_reg) = result;
     }
     Ok(())
+}
+
+/// Integer for-loop preparation — extracted to reduce main loop code size.
+/// ForPrep only executes once per loop, so function call overhead is negligible.
+/// Extracting this prevents LLVM from clobbering r12/r15 in the main dispatch.
+#[cold]
+#[inline(never)]
+pub fn handle_forprep_int(
+    lua_state: &mut LuaState,
+    ra: usize,
+    bx: usize,
+    frame_idx: usize,
+    pc: &mut usize,
+) -> LuaResult<()> {
+    let stack = lua_state.stack_mut();
+
+    // Convert string values to numbers (Lua 5.5 allows string for-loop params)
+    for offset in 0..3 {
+        let val = unsafe { *stack.get_unchecked(ra + offset) };
+        if val.is_string() {
+            let num = crate::stdlib::basic::parse_number::parse_lua_number(
+                val.as_str().unwrap_or(""),
+            );
+            if !num.is_nil() {
+                unsafe { *stack.get_unchecked_mut(ra + offset) = num };
+            }
+        }
+    }
+
+    if ttisinteger(unsafe { stack.get_unchecked(ra) })
+        && ttisinteger(unsafe { stack.get_unchecked(ra + 2) })
+    {
+        // Integer loop (init and step are integers)
+        let init = ivalue(unsafe { stack.get_unchecked(ra) });
+        let step = ivalue(unsafe { stack.get_unchecked(ra + 2) });
+
+        if step == 0 {
+            lua_state.set_frame_pc(frame_idx, *pc as u32);
+            return Err(lua_state.error("'for' step is zero".to_string()));
+        }
+
+        // forlimit: convert limit to integer per C Lua 5.5 logic
+        let (limit, should_skip) = 'forlimit: {
+            // Try integer limit directly
+            if ttisinteger(unsafe { stack.get_unchecked(ra + 1) }) {
+                let lim = ivalue(unsafe { stack.get_unchecked(ra + 1) });
+                let skip = if step > 0 { init > lim } else { init < lim };
+                break 'forlimit (lim, skip);
+            }
+            // Try converting to float (handles float and string)
+            let mut flimit = 0.0;
+            let limit_val = unsafe { *stack.get_unchecked(ra + 1) };
+            if !tonumberns(&limit_val, &mut flimit) {
+                lua_state.set_frame_pc(frame_idx, *pc as u32);
+                return Err(cold_error_for_bad_limit(lua_state, &limit_val));
+            }
+            // Try rounding the float to integer
+            let nl = if step < 0 {
+                flimit.ceil()
+            } else {
+                flimit.floor()
+            };
+            // Check if the rounded float fits in i64
+            if nl >= (i64::MIN as f64) && nl < -(i64::MIN as f64) && !nl.is_nan() {
+                let lim = nl as i64;
+                let skip = if step > 0 { init > lim } else { init < lim };
+                break 'forlimit (lim, skip);
+            }
+            // Float is out of integer range — use C Lua overflow logic
+            if flimit > 0.0 {
+                if step < 0 {
+                    break 'forlimit (0, true);
+                }
+                break 'forlimit (i64::MAX, false);
+            } else {
+                if step > 0 {
+                    break 'forlimit (0, true);
+                }
+                break 'forlimit (i64::MIN, false);
+            }
+        };
+
+        let stack = lua_state.stack_mut();
+        if should_skip {
+            *pc += bx + 1;
+        } else {
+            let count = if step > 0 {
+                ((limit as u64).wrapping_sub(init as u64)) / (step as u64)
+            } else {
+                let step_abs = if step == i64::MIN {
+                    i64::MAX as u64 + 1
+                } else {
+                    (-step) as u64
+                };
+                ((init as u64).wrapping_sub(limit as u64)) / step_abs
+            };
+
+            setivalue(unsafe { stack.get_unchecked_mut(ra) }, count as i64);
+            setivalue(unsafe { stack.get_unchecked_mut(ra + 1) }, step);
+            setivalue(unsafe { stack.get_unchecked_mut(ra + 2) }, init);
+        }
+    } else {
+        // Float loop — delegate to existing handler
+        handle_forprep_float(lua_state, ra, bx, frame_idx, pc)?;
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn cold_error_for_bad_limit(lua_state: &mut LuaState, limit_val: &LuaValue) -> LuaError {
+    let t = crate::stdlib::debug::objtypename(lua_state, limit_val);
+    lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
 }
