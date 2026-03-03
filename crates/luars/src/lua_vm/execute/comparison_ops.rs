@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::{
+    cold,
     helper::{
         float_le_int, float_lt_int, fltvalue, int_le_float, int_lt_float, ivalue, tonumberns,
         ttisfloat, ttisinteger, ttisstring,
@@ -37,7 +38,12 @@ pub fn exec_eq(
 
     let (ra, rb) = {
         let stack = lua_state.stack_mut();
-        (stack[base + a], stack[base + b])
+        unsafe {
+            (
+                *stack.get_unchecked(base + a),
+                *stack.get_unchecked(base + b),
+            )
+        }
     };
 
     // Save PC before potential metamethod call
@@ -80,8 +86,8 @@ pub fn exec_lt(
 
     let cond = {
         let stack = lua_state.stack_mut();
-        let ra = &stack[base + a];
-        let rb = &stack[base + b];
+        let ra = unsafe { stack.get_unchecked(base + a) };
+        let rb = unsafe { stack.get_unchecked(base + b) };
 
         if ttisinteger(ra) && ttisinteger(rb) {
             ivalue(ra) < ivalue(rb)
@@ -108,31 +114,25 @@ pub fn exec_lt(
                 false
             }
         } else {
-            // Try metamethod
             let va = *ra;
             let vb = *rb;
-
-            lua_state.set_frame_pc(frame_idx, *pc as u32);
-            let result = match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
-                Ok(Some(result)) => result,
-                Ok(None) => {
-                    return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
+            return match cold::cmp_reg_metamethod(
+                lua_state,
+                va,
+                vb,
+                TmKind::Lt,
+                frame_idx,
+                *pc,
+                base,
+            ) {
+                Ok(result) => {
+                    if result != k {
+                        *pc += 1;
+                    }
+                    Ok(true)
                 }
-                Err(LuaError::Yield) => {
-                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                    let ci = lua_state.get_call_info_mut(frame_idx);
-                    ci.call_status |= CIST_PENDING_FINISH;
-                    return Err(LuaError::Yield);
-                }
-                Err(e) => return Err(e),
+                Err(e) => Err(e),
             };
-
-            let new_base = lua_state.get_frame_base(frame_idx);
-            if new_base != base {
-                return Err(lua_state.error("base changed in LT".to_string()));
-            }
-
-            result
         }
     };
 
@@ -156,7 +156,7 @@ pub fn exec_eqk(
     let k = instr.get_k();
 
     let stack = lua_state.stack_mut();
-    let ra = stack[base + a];
+    let ra = unsafe { *stack.get_unchecked(base + a) };
     let kb = constants.get(b).unwrap();
 
     // Raw equality (no metamethods for constants)
@@ -180,7 +180,7 @@ pub fn exec_eqi(
     let k = instr.get_k();
 
     let stack = lua_state.stack_mut();
-    let ra = &stack[base + a];
+    let ra = unsafe { stack.get_unchecked(base + a) };
 
     let cond = if ttisinteger(ra) {
         ivalue(ra) == (sb as i64)
@@ -210,36 +210,33 @@ pub fn exec_lti(
     let k = instr.get_k();
 
     let stack = lua_state.stack_mut();
-    let ra = &stack[base + a];
+    let ra = unsafe { stack.get_unchecked(base + a) };
 
     let cond = if ttisinteger(ra) {
         ivalue(ra) < (im as i64)
     } else if ttisfloat(ra) {
         fltvalue(ra) < (im as f64)
     } else {
-        // Metamethod fallback: R[A] < im => try_comp_tm(R[A], im, Lt)
         let va = *ra;
-        // Check isfloat flag in C field to preserve original type
         let isf = instr.get_c() != 0;
-        let vb = if isf {
-            LuaValue::float(im as f64)
-        } else {
-            LuaValue::integer(im as i64)
+        return match cold::cmp_imm_metamethod(
+            lua_state,
+            va,
+            im,
+            isf,
+            TmKind::Lt,
+            false,
+            frame_idx,
+            *pc,
+        ) {
+            Ok(result) => {
+                if result != k {
+                    *pc += 1;
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
         };
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
-            Ok(Some(result)) => result,
-            Ok(None) => {
-                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
-            }
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
     };
 
     if cond != k {
@@ -262,7 +259,7 @@ pub fn exec_lei(
     let k = instr.get_k();
 
     let stack = lua_state.stack_mut();
-    let ra = &stack[base + a];
+    let ra = unsafe { stack.get_unchecked(base + a) };
 
     let cond = if ttisinteger(ra) {
         ivalue(ra) <= (im as i64)
@@ -271,25 +268,24 @@ pub fn exec_lei(
     } else {
         let va = *ra;
         let isf = instr.get_c() != 0;
-        let vb = if isf {
-            LuaValue::float(im as f64)
-        } else {
-            LuaValue::integer(im as i64)
+        return match cold::cmp_imm_metamethod(
+            lua_state,
+            va,
+            im,
+            isf,
+            TmKind::Le,
+            false,
+            frame_idx,
+            *pc,
+        ) {
+            Ok(result) => {
+                if result != k {
+                    *pc += 1;
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
         };
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
-            Ok(Some(result)) => result,
-            Ok(None) => {
-                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
-            }
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
     };
 
     if cond != k {
@@ -312,7 +308,7 @@ pub fn exec_gti(
     let k = instr.get_k();
 
     let stack = lua_state.stack_mut();
-    let ra = &stack[base + a];
+    let ra = unsafe { stack.get_unchecked(base + a) };
 
     let cond = if ttisinteger(ra) {
         ivalue(ra) > (im as i64)
@@ -320,27 +316,26 @@ pub fn exec_gti(
         fltvalue(ra) > (im as f64)
     } else {
         // R[A] > im is equivalent to im < R[A]
+        let va = *ra;
         let isf = instr.get_c() != 0;
-        let va = if isf {
-            LuaValue::float(im as f64)
-        } else {
-            LuaValue::integer(im as i64)
+        return match cold::cmp_imm_metamethod(
+            lua_state,
+            va,
+            im,
+            isf,
+            TmKind::Lt,
+            true,
+            frame_idx,
+            *pc,
+        ) {
+            Ok(result) => {
+                if result != k {
+                    *pc += 1;
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
         };
-        let vb = *ra;
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Lt) {
-            Ok(Some(result)) => result,
-            Ok(None) => {
-                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
-            }
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
     };
 
     if cond != k {
@@ -363,7 +358,7 @@ pub fn exec_gei(
     let k = instr.get_k();
 
     let stack = lua_state.stack_mut();
-    let ra = &stack[base + a];
+    let ra = unsafe { stack.get_unchecked(base + a) };
 
     let cond = if ttisinteger(ra) {
         ivalue(ra) >= (im as i64)
@@ -371,27 +366,26 @@ pub fn exec_gei(
         fltvalue(ra) >= (im as f64)
     } else {
         // R[A] >= im is equivalent to im <= R[A]
+        let va = *ra;
         let isf = instr.get_c() != 0;
-        let va = if isf {
-            LuaValue::float(im as f64)
-        } else {
-            LuaValue::integer(im as i64)
+        return match cold::cmp_imm_metamethod(
+            lua_state,
+            va,
+            im,
+            isf,
+            TmKind::Le,
+            true,
+            frame_idx,
+            *pc,
+        ) {
+            Ok(result) => {
+                if result != k {
+                    *pc += 1;
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
         };
-        let vb = *ra;
-        lua_state.set_frame_pc(frame_idx, *pc as u32);
-        match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
-            Ok(Some(result)) => result,
-            Ok(None) => {
-                return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
-            }
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
     };
 
     if cond != k {
@@ -416,8 +410,8 @@ pub fn exec_le(
 
     let cond = {
         let stack = lua_state.stack_mut();
-        let ra = &stack[base + a];
-        let rb = &stack[base + b];
+        let ra = unsafe { stack.get_unchecked(base + a) };
+        let rb = unsafe { stack.get_unchecked(base + b) };
 
         if ttisinteger(ra) && ttisinteger(rb) {
             ivalue(ra) <= ivalue(rb)
@@ -442,22 +436,23 @@ pub fn exec_le(
         } else {
             let va = *ra;
             let vb = *rb;
-
-            lua_state.set_frame_pc(frame_idx, *pc as u32);
-
-            match metamethod::try_comp_tm(lua_state, va, vb, TmKind::Le) {
-                Ok(Some(result)) => result,
-                Ok(None) => {
-                    return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb));
+            return match cold::cmp_reg_metamethod(
+                lua_state,
+                va,
+                vb,
+                TmKind::Le,
+                frame_idx,
+                *pc,
+                base,
+            ) {
+                Ok(result) => {
+                    if result != k {
+                        *pc += 1;
+                    }
+                    Ok(())
                 }
-                Err(LuaError::Yield) => {
-                    use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                    let ci = lua_state.get_call_info_mut(frame_idx);
-                    ci.call_status |= CIST_PENDING_FINISH;
-                    return Err(LuaError::Yield);
-                }
-                Err(e) => return Err(e),
-            }
+                Err(e) => Err(e),
+            };
         }
     };
 

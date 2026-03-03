@@ -21,6 +21,8 @@ use super::helper;
 
 /// GETTABLE slow path: only called when key not found and table has metatable, or value is not a table.
 /// The main loop already handled: fast path success and no-metatable nil cases.
+#[cold]
+#[inline(never)]
 pub fn exec_gettable(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -61,6 +63,8 @@ pub fn exec_gettable(
 }
 
 /// SETTABLE: R[A][R[B]] := RK(C)
+#[cold]
+#[inline(never)]
 pub fn exec_settable(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -155,6 +159,8 @@ pub fn exec_settable(
 
 /// GETI slow path: only called when key not found and table has metatable, or value is not a table.
 /// The main loop already handled: fast_geti success and no-metatable nil cases.
+#[cold]
+#[inline(never)]
 pub fn exec_geti(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -195,6 +201,8 @@ pub fn exec_geti(
 }
 
 /// SETI: R[A][B] := RK(C) (integer key)
+#[cold]
+#[inline(never)]
 pub fn exec_seti(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -294,6 +302,8 @@ pub fn exec_seti(
 /// GETFIELD: R[A] := R[B][K[C]:string]
 /// GETFIELD slow path: only called when key not found and table has metatable, or value is not a table.
 /// The main loop already handled: fast_getfield success and no-metatable nil cases.
+#[cold]
+#[inline(never)]
 pub fn exec_getfield(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -335,6 +345,8 @@ pub fn exec_getfield(
 }
 
 /// SETFIELD: R[A][K[B]:string] := RK(C)
+#[cold]
+#[inline(never)]
 pub fn exec_setfield(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -418,37 +430,8 @@ pub fn exec_setfield(
     Ok(())
 }
 
-/// SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
-/// Cold path for SELF deep __index chain.
-/// Called when inline fast path determined __index is a table but
-/// key wasn't found in it. Continues the chain from the __index table.
+#[cold]
 #[inline(never)]
-pub fn self_deep_chain(
-    lua_state: &mut LuaState,
-    index_table: LuaValue,
-    key: &LuaValue,
-    a: usize,
-    frame_idx: usize,
-) -> LuaResult<()> {
-    let ci_top = lua_state.get_call_info(frame_idx).top;
-    lua_state.set_top_raw(ci_top);
-
-    match helper::lookup_from_metatable(lua_state, &index_table, key) {
-        Ok(result) => {
-            let base = lua_state.get_frame_base(frame_idx);
-            lua_state.stack_mut()[base + a] = result.unwrap_or(LuaValue::nil());
-            Ok(())
-        }
-        Err(LuaError::Yield) => {
-            let ci = lua_state.get_call_info_mut(frame_idx);
-            ci.pending_finish_get = a as i32;
-            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-            Err(LuaError::Yield)
-        }
-        Err(e) => Err(e),
-    }
-}
-
 pub fn exec_self(
     lua_state: &mut LuaState,
     instr: Instruction,
