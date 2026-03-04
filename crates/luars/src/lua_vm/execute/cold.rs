@@ -597,6 +597,70 @@ pub fn push_lua_newindex_frame(
     Ok(())
 }
 
+/// Cold helper: Try to push a non-recursive comparison metamethod frame.
+/// Looks up metamethod from both operands' metatables (v1 first, then v2).
+/// If found and is a Lua function, pushes the frame and returns Ok(true).
+/// Otherwise returns Ok(false) so the caller can fall through to the recursive path.
+#[cold]
+#[inline(never)]
+pub fn try_push_comp_mm_frame(
+    lua_state: &mut LuaState,
+    v1: LuaValue,
+    v2: LuaValue,
+    tm: TmKind,
+    frame_idx: usize,
+) -> LuaResult<bool> {
+    let mm = helper::get_binop_metamethod(lua_state, &v1, &v2, tm);
+    if let Some(mm) = mm
+        && mm.is_lua_function()
+    {
+        push_lua_mm_frame(lua_state, mm, v1, v2, frame_idx)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Cold helper: Try to push a non-recursive __eq metamethod frame.
+/// Only for same-type tables or userdata. Returns Ok(true) if frame pushed.
+#[cold]
+#[inline(never)]
+pub fn try_push_eq_mm_frame(
+    lua_state: &mut LuaState,
+    t1: LuaValue,
+    t2: LuaValue,
+    frame_idx: usize,
+) -> LuaResult<bool> {
+    let mm = helper::get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
+    if let Some(mm) = mm
+        && mm.is_lua_function()
+    {
+        push_lua_mm_frame(lua_state, mm, t1, t2, frame_idx)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Cold helper: Try to push a non-recursive unary metamethod frame (for UNM, BNOT).
+/// Looks up metamethod from the operand's metatable.
+/// If found and is a Lua function, pushes the frame (mm, operand, operand) and returns Ok(true).
+#[cold]
+#[inline(never)]
+pub fn try_push_unary_mm_frame(
+    lua_state: &mut LuaState,
+    operand: LuaValue,
+    tm: TmKind,
+    frame_idx: usize,
+) -> LuaResult<bool> {
+    let mm = helper::get_metamethod_event(lua_state, &operand, tm);
+    if let Some(mm) = mm
+        && mm.is_lua_function()
+    {
+        push_lua_mm_frame(lua_state, mm, operand, operand, frame_idx)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Cold helper: handle C function metamethod in MmBin.
 /// Calls the metamethod and stores the result in the target register.
 #[cold]

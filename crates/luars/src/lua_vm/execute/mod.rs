@@ -533,8 +533,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 -nb,
                             );
                         } else {
-                            // Try __unm metamethod with Protect pattern
+                            // Try non-recursive __unm for tables/userdata
                             save_pc!();
+                            if cold::try_push_unary_mm_frame(
+                                lua_state,
+                                rb,
+                                metamethod::TmKind::Unm,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                            // Fall through to recursive path (C function mm or error)
                             match metamethod::try_unary_tm(
                                 lua_state,
                                 rb,
@@ -923,8 +932,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             !ib,
                         );
                     } else {
-                        // Try __bnot metamethod with Protect pattern
+                        // Try non-recursive __bnot for tables/userdata
                         save_pc!();
+                        if cold::try_push_unary_mm_frame(
+                            lua_state,
+                            v1,
+                            metamethod::TmKind::Bnot,
+                            frame_idx,
+                        )? {
+                            continue 'startfunc;
+                        }
+                        // Fall through to recursive path (C function mm or error)
                         match metamethod::try_unary_tm(
                             lua_state,
                             v1,
@@ -1200,7 +1218,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Inline __index fast path: Lua function metamethod → non-recursive
+                        // Inline __index fast path
                         let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
                         const TM_INDEX_BIT: u8 = TmKind::Index as u8;
                         if !mt.no_tm(TM_INDEX_BIT) {
@@ -1211,6 +1229,23 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     save_pc!();
                                     cold::push_lua_mm_frame(lua_state, mm, rb, rc, frame_idx)?;
                                     continue 'startfunc;
+                                }
+                                // __index is a table: look up key directly
+                                if mm.tt == LUA_VTABLE {
+                                    let idx_table = unsafe { &*(mm.value.ptr as *const GcTable) };
+                                    let idx_result = if rc.ttisinteger() {
+                                        idx_table.data.impl_table.fast_geti(rc.ivalue())
+                                    } else {
+                                        idx_table.data.impl_table.raw_get(&rc)
+                                    };
+                                    if let Some(val) = idx_result {
+                                        unsafe {
+                                            *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                                val;
+                                        }
+                                        continue;
+                                    }
+                                    // key not found: fall through to cold path for chain resolution
                                 }
                             } else {
                                 mt.set_tm_absent(TM_INDEX_BIT);
@@ -1264,7 +1299,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Inline __index fast path: Lua function metamethod → non-recursive
+                        // Inline __index fast path
                         let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
                         const TM_INDEX_BIT: u8 = TmKind::Index as u8;
                         if !mt.no_tm(TM_INDEX_BIT) {
@@ -1281,6 +1316,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                         frame_idx,
                                     )?;
                                     continue 'startfunc;
+                                }
+                                // __index is a table: look up integer key directly
+                                if mm.tt == LUA_VTABLE {
+                                    let idx_table = unsafe { &*(mm.value.ptr as *const GcTable) };
+                                    let idx_result = idx_table.data.impl_table.fast_geti(c);
+                                    if let Some(val) = idx_result {
+                                        unsafe {
+                                            *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                                val;
+                                        }
+                                        continue;
+                                    }
+                                    // key not found: fall through to cold path for chain resolution
                                 }
                             } else {
                                 mt.set_tm_absent(TM_INDEX_BIT);
@@ -1334,7 +1382,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Inline __index fast path: Lua function metamethod → non-recursive
+                        // Inline __index fast path
                         let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
                         const TM_INDEX_BIT: u8 = TmKind::Index as u8;
                         if !mt.no_tm(TM_INDEX_BIT) {
@@ -1345,6 +1393,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     save_pc!();
                                     cold::push_lua_mm_frame(lua_state, mm, rb, *key, frame_idx)?;
                                     continue 'startfunc;
+                                }
+                                // __index is a table: look up string key directly
+                                if mm.tt == LUA_VTABLE {
+                                    let idx_table = unsafe { &*(mm.value.ptr as *const GcTable) };
+                                    let idx_result =
+                                        idx_table.data.impl_table.get_shortstr_fast(key);
+                                    if let Some(val) = idx_result {
+                                        unsafe {
+                                            *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                                val;
+                                        }
+                                        continue;
+                                    }
+                                    // key not found: fall through to cold path for chain resolution
                                 }
                             } else {
                                 mt.set_tm_absent(TM_INDEX_BIT);
@@ -1459,14 +1521,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     .vm_mut()
                                     .const_strings
                                     .get_tm_value(TmKind::NewIndex);
-                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                                    if mm.is_lua_function() {
-                                        save_pc!();
-                                        cold::push_lua_newindex_frame(
-                                            lua_state, mm, ra, rb, val, frame_idx,
-                                        )?;
-                                        continue 'startfunc;
-                                    }
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key)
+                                    && mm.is_lua_function()
+                                {
+                                    save_pc!();
+                                    cold::push_lua_newindex_frame(
+                                        lua_state, mm, ra, rb, val, frame_idx,
+                                    )?;
+                                    continue 'startfunc;
                                 }
                             }
                         }
@@ -1548,19 +1610,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     .vm_mut()
                                     .const_strings
                                     .get_tm_value(TmKind::NewIndex);
-                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                                    if mm.is_lua_function() {
-                                        save_pc!();
-                                        cold::push_lua_newindex_frame(
-                                            lua_state,
-                                            mm,
-                                            ra,
-                                            LuaValue::integer(b as i64),
-                                            value,
-                                            frame_idx,
-                                        )?;
-                                        continue 'startfunc;
-                                    }
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key)
+                                    && mm.is_lua_function()
+                                {
+                                    save_pc!();
+                                    cold::push_lua_newindex_frame(
+                                        lua_state,
+                                        mm,
+                                        ra,
+                                        LuaValue::integer(b as i64),
+                                        value,
+                                        frame_idx,
+                                    )?;
+                                    continue 'startfunc;
                                 }
                             }
                         }
@@ -1650,14 +1712,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     .vm_mut()
                                     .const_strings
                                     .get_tm_value(TmKind::NewIndex);
-                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
-                                    if mm.is_lua_function() {
-                                        save_pc!();
-                                        cold::push_lua_newindex_frame(
-                                            lua_state, mm, ra, *key, value, frame_idx,
-                                        )?;
-                                        continue 'startfunc;
-                                    }
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key)
+                                    && mm.is_lua_function()
+                                {
+                                    save_pc!();
+                                    cold::push_lua_newindex_frame(
+                                        lua_state, mm, ra, *key, value, frame_idx,
+                                    )?;
+                                    continue 'startfunc;
                                 }
                             }
                         }
@@ -1712,7 +1774,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Inline __index fast path for Lua function → non-recursive
+                        // Inline __index fast path
                         let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
                         const TM_INDEX_BIT: u8 = TmKind::Index as u8;
                         if !mt.no_tm(TM_INDEX_BIT) {
@@ -1723,6 +1785,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     save_pc!();
                                     cold::push_lua_mm_frame(lua_state, mm, rb, *key, frame_idx)?;
                                     continue 'startfunc;
+                                }
+                                // __index is a table: look up string key directly
+                                if mm.tt == LUA_VTABLE {
+                                    let idx_table = unsafe { &*(mm.value.ptr as *const GcTable) };
+                                    let idx_result =
+                                        idx_table.data.impl_table.get_shortstr_fast(key);
+                                    if let Some(val) = idx_result {
+                                        unsafe {
+                                            *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                                val;
+                                        }
+                                        continue;
+                                    }
+                                    // key not found: fall through to cold path for chain resolution
                                 }
                             } else {
                                 mt.set_tm_absent(TM_INDEX_BIT);
@@ -2305,6 +2381,22 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                             )?;
                                             continue 'startfunc;
                                         }
+                                        // __index is a table: look up string key directly
+                                        if mm.tt == LUA_VTABLE {
+                                            let idx_table =
+                                                unsafe { &*(mm.value.ptr as *const GcTable) };
+                                            let idx_result =
+                                                idx_table.data.impl_table.get_shortstr_fast(key);
+                                            if let Some(val) = idx_result {
+                                                unsafe {
+                                                    *lua_state
+                                                        .stack_mut()
+                                                        .get_unchecked_mut(base + a) = val
+                                                };
+                                                continue;
+                                            }
+                                            // key not found: fall through to cold path for chain resolution
+                                        }
                                     } else {
                                         mt.set_tm_absent(TM_INDEX_BIT);
                                         unsafe {
@@ -2367,27 +2459,55 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
 
                     // Fast path: direct set for existing short string key
-                    let upvalue_ptrs = unsafe {
+                    // Use raw pointer to avoid borrow conflicts with lua_state
+                    let (table_val_copy, table_raw_ptr) = unsafe {
                         let ci = lua_state.get_call_info(frame_idx);
-                        ci.func.as_lua_function_unchecked().upvalues()
+                        let upvalue_ptrs = ci.func.as_lua_function_unchecked().upvalues();
+                        let upval = &upvalue_ptrs[a].as_ref().data;
+                        let tv = upval.get_value_ref();
+                        (*tv, tv as *const LuaValue)
                     };
-                    let upval = &upvalue_ptrs[a].as_ref().data;
-                    let table_value = upval.get_value_ref();
-                    if table_value.tt == LUA_VTABLE {
-                        let table = unsafe { &mut *(table_value.value.ptr as *mut GcTable) };
+                    if table_val_copy.tt == LUA_VTABLE {
+                        let table = unsafe { &mut *(table_val_copy.value.ptr as *mut GcTable) };
                         let native = &mut table.data.impl_table;
                         if native.has_hash() && native.set_shortstr_unchecked(&key, value) {
                             if value.is_collectable()
-                                && let Some(gc_ptr) = table_value.as_gc_ptr()
+                                && let Some(gc_ptr) = table_val_copy.as_gc_ptr()
                             {
                                 lua_state.gc_barrier_back(gc_ptr);
                             }
                             continue;
                         }
+                        // Inline __newindex fast path: Lua function → non-recursive
+                        let meta = table.data.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8;
+                            if !mt.no_tm(TM_NEWINDEX_BIT) {
+                                let event_key = lua_state
+                                    .vm_mut()
+                                    .const_strings
+                                    .get_tm_value(TmKind::NewIndex);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key)
+                                    && mm.is_lua_function()
+                                {
+                                    save_pc!();
+                                    cold::push_lua_newindex_frame(
+                                        lua_state,
+                                        mm,
+                                        table_val_copy,
+                                        key,
+                                        value,
+                                        frame_idx,
+                                    )?;
+                                    continue 'startfunc;
+                                }
+                            }
+                        }
                     }
 
                     // Slow path: handle metamethods (__newindex)
-                    let table_value = *upval.get_value_ref();
+                    let table_value = unsafe { *table_raw_ptr };
                     save_pc!();
                     match helper::finishset(lua_state, &table_value, &key, value) {
                         Ok(_) => {
@@ -2484,9 +2604,39 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::Eq => {
-                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
-                    comparison_ops::exec_eq(lua_state, instr, base, frame_idx, &mut pc_idx)?;
-                    pc = unsafe { code_base.add(pc_idx) };
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let k = instr.get_k();
+                    let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
+                    let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
+                    // Fast path: same identity → equal
+                    // EQ: if ((R[A] == R[B]) ~= k) then pc++
+                    if ra == rb {
+                        // cond=true: skip when k=false (true ~= false → true)
+                        if !k {
+                            pc = unsafe { pc.add(1) };
+                        }
+                    } else if ra.tt() != rb.tt() {
+                        // Different types → never equal (cond=false)
+                        // skip when k=true (false ~= true → true)
+                        if k {
+                            pc = unsafe { pc.add(1) };
+                        }
+                    } else if ra.ttistable() || ra.ttisfulluserdata() {
+                        // Same-type tables/userdata: try __eq metamethod non-recursive
+                        save_pc!();
+                        if cold::try_push_eq_mm_frame(lua_state, ra, rb, frame_idx)? {
+                            continue 'startfunc;
+                        }
+                        // Fall through to recursive path
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_eq(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
+                    } else {
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_eq(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
+                    }
                 }
 
                 OpCode::Lt => {
@@ -2510,6 +2660,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc = unsafe { pc.add(1) };
                         }
                     } else {
+                        // Try non-recursive metamethod fast path for table operands
+                        if ra.tt == LUA_VTABLE || rb.tt == LUA_VTABLE {
+                            save_pc!();
+                            if cold::try_push_comp_mm_frame(
+                                lua_state,
+                                ra,
+                                rb,
+                                TmKind::Lt,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
                         let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                         comparison_ops::exec_lt(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = unsafe { code_base.add(pc_idx) };
@@ -2536,6 +2699,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc = unsafe { pc.add(1) };
                         }
                     } else {
+                        // Try non-recursive metamethod fast path for table operands
+                        if ra.tt == LUA_VTABLE || rb.tt == LUA_VTABLE {
+                            save_pc!();
+                            if cold::try_push_comp_mm_frame(
+                                lua_state,
+                                ra,
+                                rb,
+                                TmKind::Le,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
                         let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                         comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = unsafe { code_base.add(pc_idx) };
@@ -2577,6 +2753,26 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc = unsafe { pc.add(1) };
                         }
                     } else {
+                        // ra is not number, try non-recursive metamethod for tables
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            if cold::try_push_comp_mm_frame(
+                                lua_state,
+                                ra_val,
+                                imm_val,
+                                TmKind::Lt,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
                         let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                         comparison_ops::exec_lti(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = unsafe { code_base.add(pc_idx) };
@@ -2601,6 +2797,25 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc = unsafe { pc.add(1) };
                         }
                     } else {
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            if cold::try_push_comp_mm_frame(
+                                lua_state,
+                                ra_val,
+                                imm_val,
+                                TmKind::Le,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
                         let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                         comparison_ops::exec_lei(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = unsafe { code_base.add(pc_idx) };
@@ -2625,6 +2840,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc = unsafe { pc.add(1) };
                         }
                     } else {
+                        // GTI: R[A] > im is equivalent to im < R[A]
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            // swap: __lt(imm, ra)
+                            if cold::try_push_comp_mm_frame(
+                                lua_state,
+                                imm_val,
+                                ra_val,
+                                TmKind::Lt,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
                         let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                         comparison_ops::exec_gti(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = unsafe { code_base.add(pc_idx) };
@@ -2649,6 +2885,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc = unsafe { pc.add(1) };
                         }
                     } else {
+                        // GEI: R[A] >= im is equivalent to im <= R[A]
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            // swap: __le(imm, ra)
+                            if cold::try_push_comp_mm_frame(
+                                lua_state,
+                                imm_val,
+                                ra_val,
+                                TmKind::Le,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
                         let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                         comparison_ops::exec_gei(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = unsafe { code_base.add(pc_idx) };
