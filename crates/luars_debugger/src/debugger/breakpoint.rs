@@ -1,8 +1,6 @@
 //! Breakpoint management.
 
-use std::collections::HashMap;
-
-use crate::proto::BreakPointProto;
+use std::collections::{HashMap, HashSet};
 
 /// Internal breakpoint with hit counter.
 #[derive(Debug, Clone)]
@@ -15,24 +13,29 @@ pub struct BreakPoint {
     pub hit_count: i32,
 }
 
-impl From<BreakPointProto> for BreakPoint {
-    fn from(p: BreakPointProto) -> Self {
+impl From<crate::proto::BreakPoint> for BreakPoint {
+    fn from(p: crate::proto::BreakPoint) -> Self {
         Self {
             file: normalize_path(&p.file),
             line: p.line,
-            condition: p.condition,
-            hit_condition: p.hit_condition,
-            log_message: p.log_message,
+            condition: p.condition.unwrap_or("".to_string()),
+            hit_condition: p.hit_condition.unwrap_or("".to_string()),
+            log_message: p.log_message.unwrap_or("".to_string()),
             hit_count: 0,
         }
     }
 }
 
 /// Stores breakpoints keyed by normalized file path.
+/// Maintains a fast `line_set` for O(1) line-level pre-filtering.
 #[derive(Debug, Default)]
 pub struct BreakPointManager {
     /// file_path → list of breakpoints
     breakpoints: HashMap<String, Vec<BreakPoint>>,
+    /// Set of all breakpoint line numbers across all files.
+    /// Used for fast pre-filtering: if the current line is NOT in this set,
+    /// we can skip source lookup entirely.
+    line_set: HashSet<i32>,
 }
 
 impl BreakPointManager {
@@ -40,13 +43,25 @@ impl BreakPointManager {
         Self::default()
     }
 
+    /// Rebuild the line_set from all breakpoints.
+    fn rebuild_line_set(&mut self) {
+        self.line_set.clear();
+        for bps in self.breakpoints.values() {
+            for bp in bps {
+                self.line_set.insert(bp.line);
+            }
+        }
+    }
+
     /// Clear all breakpoints.
     pub fn clear(&mut self) {
         self.breakpoints.clear();
+        self.line_set.clear();
     }
 
     /// Add a breakpoint.
     pub fn add(&mut self, bp: BreakPoint) {
+        self.line_set.insert(bp.line);
         self.breakpoints
             .entry(bp.file.clone())
             .or_default()
@@ -62,6 +77,7 @@ impl BreakPointManager {
                 self.breakpoints.remove(&key);
             }
         }
+        self.rebuild_line_set();
     }
 
     /// Check if there are any breakpoints at all.
@@ -69,21 +85,58 @@ impl BreakPointManager {
         !self.breakpoints.is_empty()
     }
 
+    /// Fast check: does ANY breakpoint exist on this line (any file)?
+    /// This is an O(1) lookup used for pre-filtering before the more
+    /// expensive source path check.
+    #[inline]
+    pub fn has_line(&self, line: i32) -> bool {
+        self.line_set.contains(&line)
+    }
+
     /// Find a breakpoint matching the given source and line.
+    /// `source` should be the raw Lua source name (with or without `@` prefix).
     /// Returns a mutable reference so the caller can bump hit_count.
     pub fn find_mut(&mut self, source: &str, line: i32) -> Option<&mut BreakPoint> {
         let key = normalize_path(source);
-        self.breakpoints
-            .get_mut(&key)
-            .and_then(|list| list.iter_mut().find(|bp| bp.line == line))
+
+        // Single pass: check exact match first, then suffix match
+        // We iterate all entries to avoid overlapping mutable borrows.
+        let mut exact_found = false;
+        let mut suffix_key: Option<String> = None;
+        for bp_file in self.breakpoints.keys() {
+            if *bp_file == key {
+                exact_found = true;
+                break;
+            }
+            if suffix_key.is_none()
+                && (key.ends_with(bp_file.as_str()) || bp_file.ends_with(key.as_str()))
+            {
+                suffix_key = Some(bp_file.clone());
+            }
+        }
+
+        let match_key = if exact_found { key } else { suffix_key? };
+
+        let list = self.breakpoints.get_mut(&match_key)?;
+        list.iter_mut().find(|bp| bp.line == line)
     }
 
     /// Find a breakpoint matching the given source and line (immutable).
     pub fn find(&self, source: &str, line: i32) -> Option<&BreakPoint> {
         let key = normalize_path(source);
-        self.breakpoints
-            .get(&key)
-            .and_then(|list| list.iter().find(|bp| bp.line == line))
+        if let Some(list) = self.breakpoints.get(&key)
+            && let Some(bp) = list.iter().find(|bp| bp.line == line)
+        {
+            return Some(bp);
+        }
+        for (bp_file, list) in &self.breakpoints {
+            if (key.ends_with(bp_file.as_str()) || bp_file.ends_with(key.as_str()))
+                && let Some(bp) = list.iter().find(|bp| bp.line == line)
+            {
+                return Some(bp);
+            }
+        }
+        None
     }
 }
 
@@ -96,15 +149,7 @@ pub fn normalize_path(path: &str) -> String {
     p.replace('\\', "/").to_lowercase()
 }
 
-/// Check if a Lua source name matches a breakpoint file path.
-/// Lua sources can be `@path/to/file.lua` (file) or `=stdin` etc.
-pub fn source_matches(source: &str, bp_file: &str) -> bool {
-    let norm_src = normalize_path(source);
-    let norm_bp = normalize_path(bp_file);
-    // Exact match
-    if norm_src == norm_bp {
-        return true;
-    }
-    // Suffix match (source ends with breakpoint file or vice versa)
-    norm_src.ends_with(&norm_bp) || norm_bp.ends_with(&norm_src)
+/// Strip the leading `@` from a Lua source name for display to IDE.
+pub fn strip_at_prefix(source: &str) -> &str {
+    source.strip_prefix('@').unwrap_or(source)
 }

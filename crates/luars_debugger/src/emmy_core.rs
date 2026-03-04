@@ -91,6 +91,7 @@ fn emmy_break_here(l: &mut LuaState) -> LuaResult<usize> {
         let s = dbg.state.lock().unwrap();
         s.ide_ready
     };
+
     if is_ready {
         dbg.enter_debug_mode(l);
     }
@@ -112,13 +113,19 @@ fn emmy_stop(l: &mut LuaState) -> LuaResult<usize> {
 fn debugger_hook(l: &mut LuaState) -> LuaResult<usize> {
     let dbg = get_debugger();
 
+    // Get line from hook arg (2nd argument, already provided by run_hook — free, no debug info)
+    let line = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(-1) as i32;
+    if line < 0 {
+        return Ok(0);
+    }
+
     let should = {
         let mut s = dbg.state.lock().unwrap();
         if !s.ide_ready || !s.started {
             return Ok(0);
         }
         let hs = s.hook_state.clone();
-        should_break(l, &hs, &mut s.bp_manager)
+        should_break(l, line, &hs, &mut s.bp_manager)
     };
 
     if should {
@@ -137,7 +144,7 @@ fn install_hook(l: &mut LuaState) {
 
 /// The CFunction that serves as the `require "emmy_core"` loader.
 /// Returns a table with all debugger functions.
-pub fn emmy_core_loader(l: &mut LuaState) -> LuaResult<usize> {
+pub fn luaopen_emmy_core(l: &mut LuaState) -> LuaResult<usize> {
     let table = l.create_table(0, 8)?;
 
     let set_field =

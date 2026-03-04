@@ -1,8 +1,14 @@
 [package]
 name = "luars_debugger"
-version = "0.1.0"
+version = "0.14.0"
 edition = "2024"
-description = "Built-in DAP debugger for luars, loaded via require('emmy_core')"
+description = "Built-in debugger for luars, loaded via require('emmy_core')"
+authors = ["CppCXY"]
+license = "MIT"
+repository = "https://github.com/CppCXY/lua-rs"
+readme = "README.md"
+keywords = ["lua", "debugger"]
+categories = ["development-tools"]
 
 [dependencies]
 luars.workspace = true

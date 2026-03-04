@@ -7,9 +7,9 @@ members = [
 
 [workspace.dependencies]
 # local
-luars = { path = "crates/luars", version = "0.13.0" }
+luars = { path = "crates/luars", version = "0.14.0" }
 luars-derive = { path = "crates/luars-derive", version = "0.7.0" }
-luars_debugger = { path = "crates/luars_debugger", version = "0.1.0" }
+luars_debugger = { path = "crates/luars_debugger", version = "0.14.0" }
 
 wasm-bindgen = "0.2"
 ahash = "0.8"

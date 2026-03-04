@@ -4194,6 +4194,20 @@ impl LuaState {
         self.hook
     }
 
+    /// Get the source name of the function at the given stack level (0 = current).
+    /// This is a fast path that only reads the chunk's source_name without
+    /// building a full DebugInfo. Returns `None` for C functions or invalid levels.
+    pub fn get_source(&self, level: usize) -> Option<String> {
+        let call_depth = self.call_depth();
+        if level >= call_depth {
+            return None;
+        }
+        let frame_idx = call_depth - 1 - level;
+        let func = self.get_frame_func(frame_idx)?;
+        let lua_func = func.as_lua_function()?;
+        lua_func.chunk().source_name.clone()
+    }
+
     /// Get a local variable name and value at the given stack level and index.
     /// `level` is 0-based (0 = current frame). `local_idx` is 1-based.
     /// Returns `None` if the level/index is out of range.
