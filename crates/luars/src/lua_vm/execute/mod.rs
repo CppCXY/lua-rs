@@ -1178,7 +1178,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         rc = *sp.add(base + c);
                     }
 
-                    if let Some(table_ref) = rb.as_table() {
+                    if rb.tt == LUA_VTABLE {
+                        let table_gc = unsafe { &*(rb.value.ptr as *const GcTable) };
+                        let table_ref = &table_gc.data;
                         let result = if rc.ttisinteger() {
                             table_ref.impl_table.fast_geti(rc.ivalue())
                         } else {
@@ -1190,7 +1192,35 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        if !table_ref.has_metatable() {
+                        let meta = table_ref.meta_ptr();
+                        if meta.is_null() {
+                            unsafe {
+                                *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                    LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        // Inline __index fast path: Lua function metamethod → non-recursive
+                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                        const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+                        if !mt.no_tm(TM_INDEX_BIT) {
+                            let event_key =
+                                lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+                            if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                if mm.is_lua_function() {
+                                    save_pc!();
+                                    cold::push_lua_mm_frame(lua_state, mm, rb, rc, frame_idx)?;
+                                    continue 'startfunc;
+                                }
+                            } else {
+                                mt.set_tm_absent(TM_INDEX_BIT);
+                                unsafe {
+                                    *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                        LuaValue::nil();
+                                }
+                                continue;
+                            }
+                        } else {
                             unsafe {
                                 *lua_state.stack_mut().get_unchecked_mut(base + a) =
                                     LuaValue::nil();
@@ -1216,15 +1246,51 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
 
                     // Try fast path via inline fast_geti
-                    if let Some(table_ref) = rb.as_table() {
+                    if rb.tt == LUA_VTABLE {
+                        let table_gc = unsafe { &*(rb.value.ptr as *const GcTable) };
+                        let table_ref = &table_gc.data;
                         if let Some(val) = table_ref.impl_table.fast_geti(c) {
                             unsafe {
                                 *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
                             }
                             continue;
                         }
-                        // Key not found — if no metatable, result is nil (skip exec_geti)
-                        if !table_ref.has_metatable() {
+                        // Key not found — check metatable
+                        let meta = table_ref.meta_ptr();
+                        if meta.is_null() {
+                            unsafe {
+                                *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                    LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        // Inline __index fast path: Lua function metamethod → non-recursive
+                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                        const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+                        if !mt.no_tm(TM_INDEX_BIT) {
+                            let event_key =
+                                lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+                            if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                if mm.is_lua_function() {
+                                    save_pc!();
+                                    cold::push_lua_mm_frame(
+                                        lua_state,
+                                        mm,
+                                        rb,
+                                        LuaValue::integer(c),
+                                        frame_idx,
+                                    )?;
+                                    continue 'startfunc;
+                                }
+                            } else {
+                                mt.set_tm_absent(TM_INDEX_BIT);
+                                unsafe {
+                                    *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                        LuaValue::nil();
+                                }
+                                continue;
+                            }
+                        } else {
                             unsafe {
                                 *lua_state.stack_mut().get_unchecked_mut(base + a) =
                                     LuaValue::nil();
@@ -1251,14 +1317,44 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let key = unsafe { &*chunk.constants.as_ptr().add(c) };
 
                     // Try fast path: table with string key
-                    if let Some(table_ref) = rb.as_table() {
+                    if rb.tt == LUA_VTABLE {
+                        let table_gc = unsafe { &*(rb.value.ptr as *const GcTable) };
+                        let table_ref = &table_gc.data;
                         if let Some(val) = table_ref.impl_table.get_shortstr_fast(key) {
                             unsafe {
                                 *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
                             }
                             continue;
                         }
-                        if !table_ref.has_metatable() {
+                        let meta = table_ref.meta_ptr();
+                        if meta.is_null() {
+                            unsafe {
+                                *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                    LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        // Inline __index fast path: Lua function metamethod → non-recursive
+                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                        const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+                        if !mt.no_tm(TM_INDEX_BIT) {
+                            let event_key =
+                                lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+                            if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                if mm.is_lua_function() {
+                                    save_pc!();
+                                    cold::push_lua_mm_frame(lua_state, mm, rb, *key, frame_idx)?;
+                                    continue 'startfunc;
+                                }
+                            } else {
+                                mt.set_tm_absent(TM_INDEX_BIT);
+                                unsafe {
+                                    *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                        LuaValue::nil();
+                                }
+                                continue;
+                            }
+                        } else {
                             unsafe {
                                 *lua_state.stack_mut().get_unchecked_mut(base + a) =
                                     LuaValue::nil();
@@ -1353,6 +1449,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             lua_state.raw_set(&ra, rb, val);
                             continue;
                         }
+                        // Inline __newindex fast path: Lua function → non-recursive
+                        let meta = table_ref.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8;
+                            if !mt.no_tm(TM_NEWINDEX_BIT) {
+                                let event_key = lua_state
+                                    .vm_mut()
+                                    .const_strings
+                                    .get_tm_value(TmKind::NewIndex);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                    if mm.is_lua_function() {
+                                        save_pc!();
+                                        cold::push_lua_newindex_frame(
+                                            lua_state, mm, ra, rb, val, frame_idx,
+                                        )?;
+                                        continue 'startfunc;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Cold: metatable __newindex chain or non-table
@@ -1420,6 +1537,32 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 lua_state.gc_barrier_back(gc_ptr);
                             }
                             continue;
+                        }
+                        // Inline __newindex fast path: Lua function → non-recursive
+                        let meta = table_ref.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8;
+                            if !mt.no_tm(TM_NEWINDEX_BIT) {
+                                let event_key = lua_state
+                                    .vm_mut()
+                                    .const_strings
+                                    .get_tm_value(TmKind::NewIndex);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                    if mm.is_lua_function() {
+                                        save_pc!();
+                                        cold::push_lua_newindex_frame(
+                                            lua_state,
+                                            mm,
+                                            ra,
+                                            LuaValue::integer(b as i64),
+                                            value,
+                                            frame_idx,
+                                        )?;
+                                        continue 'startfunc;
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1497,6 +1640,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
+                        // Has metatable with new key: inline __newindex fast path
+                        let meta = table_ref.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8;
+                            if !mt.no_tm(TM_NEWINDEX_BIT) {
+                                let event_key = lua_state
+                                    .vm_mut()
+                                    .const_strings
+                                    .get_tm_value(TmKind::NewIndex);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                    if mm.is_lua_function() {
+                                        save_pc!();
+                                        cold::push_lua_newindex_frame(
+                                            lua_state, mm, ra, *key, value, frame_idx,
+                                        )?;
+                                        continue 'startfunc;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Slow path: metamethod, non-table, or has metatable with new key
@@ -1530,7 +1694,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     // Fast path: rb is a table
-                    if let Some(table_ref) = rb.as_table() {
+                    if rb.tt == LUA_VTABLE {
+                        let table_gc = unsafe { &*(rb.value.ptr as *const GcTable) };
+                        let table_ref = &table_gc.data;
                         // Try direct lookup (key is always a short string constant)
                         if let Some(val) = table_ref.impl_table.get_shortstr_fast(key) {
                             unsafe {
@@ -1538,7 +1704,35 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        if !table_ref.has_metatable() {
+                        let meta = table_ref.meta_ptr();
+                        if meta.is_null() {
+                            unsafe {
+                                *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                    LuaValue::nil();
+                            }
+                            continue;
+                        }
+                        // Inline __index fast path for Lua function → non-recursive
+                        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                        const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+                        if !mt.no_tm(TM_INDEX_BIT) {
+                            let event_key =
+                                lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+                            if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                if mm.is_lua_function() {
+                                    save_pc!();
+                                    cold::push_lua_mm_frame(lua_state, mm, rb, *key, frame_idx)?;
+                                    continue 'startfunc;
+                                }
+                            } else {
+                                mt.set_tm_absent(TM_INDEX_BIT);
+                                unsafe {
+                                    *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                        LuaValue::nil();
+                                }
+                                continue;
+                            }
+                        } else {
                             unsafe {
                                 *lua_state.stack_mut().get_unchecked_mut(base + a) =
                                     LuaValue::nil();
@@ -1944,7 +2138,43 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
 
-                    // Protect metamethod call
+                    // Fast path: v1 is a table with a Lua metamethod
+                    let base_mm = lua_state.get_frame_base(frame_idx);
+                    let v1 = unsafe { *lua_state.stack().get_unchecked(base_mm + a) };
+                    if v1.ttistable() {
+                        let table = unsafe { &mut *(v1.value.ptr as *mut GcTable) };
+                        let meta = table.data.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            let tm_idx = c as u8;
+                            if !mt.no_tm(tm_idx) {
+                                let tm_kind = unsafe { TmKind::from_u8_unchecked(tm_idx) };
+                                let event_key =
+                                    lua_state.vm_mut().const_strings.get_tm_value(tm_kind);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                    let imm = LuaValue::integer(sb as i64);
+                                    let (p1, p2) = if k { (imm, v1) } else { (v1, imm) };
+                                    if mm.is_lua_function() {
+                                        save_pc!();
+                                        cold::push_lua_mm_frame(lua_state, mm, p1, p2, frame_idx)?;
+                                        continue 'startfunc;
+                                    }
+                                    let pi = unsafe { *pc.sub(2) };
+                                    let result_reg = pi.get_a() as usize;
+                                    save_pc!();
+                                    cold::call_c_mm_bin(
+                                        lua_state, mm, p1, p2, result_reg, frame_idx,
+                                    )?;
+                                    restore_state!();
+                                    continue;
+                                } else {
+                                    mt.set_tm_absent(tm_idx);
+                                }
+                            }
+                        }
+                    }
+
+                    // Slow path
                     save_pc!();
                     metamethod::handle_mmbini(
                         lua_state,
@@ -1965,7 +2195,43 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
 
-                    // Protect metamethod call
+                    // Fast path: v1 is a table with a Lua metamethod
+                    let base_mm = lua_state.get_frame_base(frame_idx);
+                    let v1 = unsafe { *lua_state.stack().get_unchecked(base_mm + a) };
+                    if v1.ttistable() {
+                        let table = unsafe { &mut *(v1.value.ptr as *mut GcTable) };
+                        let meta = table.data.meta_ptr();
+                        if !meta.is_null() {
+                            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                            let tm_idx = c as u8;
+                            if !mt.no_tm(tm_idx) {
+                                let tm_kind = unsafe { TmKind::from_u8_unchecked(tm_idx) };
+                                let event_key =
+                                    lua_state.vm_mut().const_strings.get_tm_value(tm_kind);
+                                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                    let kb = unsafe { *chunk.constants.as_ptr().add(b) };
+                                    let (p1, p2) = if k { (kb, v1) } else { (v1, kb) };
+                                    if mm.is_lua_function() {
+                                        save_pc!();
+                                        cold::push_lua_mm_frame(lua_state, mm, p1, p2, frame_idx)?;
+                                        continue 'startfunc;
+                                    }
+                                    let pi = unsafe { *pc.sub(2) };
+                                    let result_reg = pi.get_a() as usize;
+                                    save_pc!();
+                                    cold::call_c_mm_bin(
+                                        lua_state, mm, p1, p2, result_reg, frame_idx,
+                                    )?;
+                                    restore_state!();
+                                    continue;
+                                } else {
+                                    mt.set_tm_absent(tm_idx);
+                                }
+                            }
+                        }
+                    }
+
+                    // Slow path
                     save_pc!();
                     metamethod::handle_mmbink(
                         lua_state,
@@ -2014,8 +2280,52 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if let Some(val) = result {
                         unsafe { *lua_state.stack_mut().get_unchecked_mut(base + a) = val };
                     } else {
-                        // Slow path: metamethod lookup
+                        // Inline __index fast path for Lua function metamethod
                         let table_value = *upval.get_value_ref();
+                        if table_value.tt == LUA_VTABLE {
+                            let table_gc = unsafe { &*(table_value.value.ptr as *const GcTable) };
+                            let meta = table_gc.data.meta_ptr();
+                            if !meta.is_null() {
+                                let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+                                const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+                                if !mt.no_tm(TM_INDEX_BIT) {
+                                    let event_key = lua_state
+                                        .vm_mut()
+                                        .const_strings
+                                        .get_tm_value(TmKind::Index);
+                                    if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                                        if mm.is_lua_function() {
+                                            save_pc!();
+                                            cold::push_lua_mm_frame(
+                                                lua_state,
+                                                mm,
+                                                table_value,
+                                                *key,
+                                                frame_idx,
+                                            )?;
+                                            continue 'startfunc;
+                                        }
+                                    } else {
+                                        mt.set_tm_absent(TM_INDEX_BIT);
+                                        unsafe {
+                                            *lua_state.stack_mut().get_unchecked_mut(base + a) =
+                                                LuaValue::nil()
+                                        };
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        // Slow path: metamethod lookup (non-Lua __index, table chain, non-table)
+                        let table_value = *lua_state
+                            .get_call_info(frame_idx)
+                            .func
+                            .as_lua_function()
+                            .unwrap()
+                            .upvalues()[b]
+                            .as_ref()
+                            .data
+                            .get_value_ref();
                         let write_pos = base + a;
                         let call_info = lua_state.get_call_info_mut(frame_idx);
                         if write_pos + 1 > call_info.top {
@@ -2032,8 +2342,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 };
                             }
                             Err(LuaError::Yield) => {
-                                // Metamethod yielded — save destination register
-                                // so we can finish the operation on resume.
                                 let ci = lua_state.get_call_info_mut(frame_idx);
                                 ci.pending_finish_get = a as i32;
                                 ci.call_status |= CIST_PENDING_FINISH;

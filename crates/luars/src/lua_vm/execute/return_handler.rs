@@ -41,7 +41,7 @@ pub fn handle_return(
 
     // Check if we're resuming a yield during close (CIST_CLSRET)
     let ci_status = lua_state.get_call_info(frame_idx).call_status;
-    let mut nres = if ci_status & CIST_CLSRET != 0 {
+    let nres = if ci_status & CIST_CLSRET != 0 {
         // Resuming after yield in __close: restore nres and top from saved state
         let saved = lua_state.get_call_info(frame_idx).saved_nres as usize;
         lua_state.set_top_raw(ra_pos + saved);
@@ -100,7 +100,14 @@ pub fn handle_return(
     // Copy results from R[A]..R[A+nres-1] to func_pos..func_pos+nres-1
     let stack = lua_state.stack_mut();
     unsafe {
-        for i in 0..nres {
+        // Only copy min(nres, wanted_results) values — excess return values are truncated.
+        // Then nil-fill if caller wants more than we have.
+        let copy_count = if wanted_results < nres {
+            wanted_results
+        } else {
+            nres
+        };
+        for i in 0..copy_count {
             *stack.get_unchecked_mut(func_pos + i) = *stack.get_unchecked(base + a + i);
         }
 
@@ -109,11 +116,10 @@ pub fn handle_return(
             for i in nres..wanted_results {
                 *stack.get_unchecked_mut(func_pos + i) = LuaValue::nil();
             }
-            nres = wanted_results;
         }
     }
 
-    let new_top = func_pos + nres;
+    let new_top = func_pos + wanted_results;
 
     // Pop current call frame
     lua_state.pop_call_frame();

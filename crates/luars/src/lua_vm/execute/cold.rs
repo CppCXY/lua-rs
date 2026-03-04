@@ -551,6 +551,52 @@ pub fn push_lua_mm_frame(
     Ok(())
 }
 
+/// Cold helper: push a non-recursive Lua __newindex metamethod frame (3 args, 0 results).
+/// Used by SetField/SetI/SetTable/SetTabUp opcodes.
+/// Caller should `continue 'startfunc`.
+#[cold]
+#[inline(never)]
+pub fn push_lua_newindex_frame(
+    lua_state: &mut LuaState,
+    mm: LuaValue,
+    obj: LuaValue,
+    key: LuaValue,
+    val: LuaValue,
+    frame_idx: usize,
+) -> LuaResult<()> {
+    let func_pos = lua_state.current_frame_top_unchecked();
+    let top = lua_state.get_top();
+    if top != func_pos {
+        lua_state.set_top_raw(func_pos);
+    }
+    unsafe {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        *sp.add(func_pos) = mm;
+        *sp.add(func_pos + 1) = obj;
+        *sp.add(func_pos + 2) = key;
+        *sp.add(func_pos + 3) = val;
+    }
+    lua_state.set_top_raw(func_pos + 4);
+
+    let lua_func = unsafe { mm.as_lua_function_unchecked() };
+    let chunk_mm = lua_func.chunk();
+    lua_state.push_lua_frame(
+        &mm,
+        func_pos + 1,
+        3,
+        0,
+        chunk_mm.param_count,
+        chunk_mm.max_stack_size,
+        chunk_mm as *const _,
+    )?;
+    {
+        use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+        let ci = lua_state.get_call_info_mut(frame_idx);
+        ci.call_status |= CIST_PENDING_FINISH;
+    }
+    Ok(())
+}
+
 /// Cold helper: handle C function metamethod in MmBin.
 /// Calls the metamethod and stores the result in the target register.
 #[cold]
