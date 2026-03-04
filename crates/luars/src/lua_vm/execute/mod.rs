@@ -37,7 +37,7 @@ use crate::{
     GcTable,
     lua_value::{LUA_VFALSE, LUA_VTABLE, LuaValue},
     lua_vm::{
-        LuaError, LuaResult, LuaState, OpCode,
+        Instruction, LuaError, LuaResult, LuaState, OpCode,
         call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
         execute::{
             closure_handler::handle_closure,
@@ -110,8 +110,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // and compute sp = stack_ptr on demand within each opcode handler.
         // This trades one load per opcode for freeing a cross-dispatch register.
         let ci = lua_state.get_call_info(frame_idx);
-        let mut pc = ci.pc as usize;
         let mut base = ci.base;
+        let pc_init = ci.pc as usize;
         let chunk_raw = ci.chunk_ptr; // Copy raw pointer before dropping ci borrow
 
         // Derive chunk from CI's cached pointer (avoids Rc deref).
@@ -121,11 +121,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Only the very first entry (top-level chunk) needs this check.
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
 
-        // Stack and chunk slices accessed via chunk.code / chunk.constants
-        // with get_unchecked — no cached raw pointers needed.
+        // Pointer-based PC: merges the old `code` ptr + `pc` index into a
+        // single `*const Instruction` (like C Lua's `const Instruction *pc`).
+        // Saves 1 load per dispatch (no separate code-base reload).
+        // `code_base` is kept for index conversion in save_pc / hooks.
+        let mut code_base: *const Instruction = chunk.code.as_ptr();
+        let mut pc: *const Instruction = unsafe { code_base.add(pc_init) };
 
-        lua_state.oldpc = if pc > 0 {
-            (pc - 1) as u32 // current instruction index
+        lua_state.oldpc = if pc_init > 0 {
+            (pc_init - 1) as u32 // current instruction index
         } else if chunk.is_vararg {
             0 // skip VARARGPREP line event (matches C Lua)
         } else {
@@ -135,7 +139,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // Macro to save PC before operations that may call functions
         macro_rules! save_pc {
             () => {
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                #[allow(unused_unsafe)]
+                lua_state.set_frame_pc(frame_idx, unsafe { pc.offset_from(code_base) } as u32);
             };
         }
 
@@ -154,7 +159,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut trap = lua_state.hook_mask != 0;
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
-        if pc == 0 && trap {
+        if pc == code_base && trap {
             let hook_mask = lua_state.hook_mask;
             if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook {
                 hook_on_call(lua_state, hook_mask, call_status, chunk)?;
@@ -176,14 +181,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         // MAINLOOP: Main instruction dispatch loop
         loop {
             // Fetch instruction and advance PC
-            let instr = unsafe { *chunk.code.get_unchecked(pc) };
-            pc += 1;
+            let instr = unsafe { *pc };
+            pc = unsafe { pc.add(1) };
 
             // ===== DEBUG HOOK CHECK =====
             // Cost: one register test + branch (predicted not-taken) per dispatch.
             // `trap` is a local bool — avoids memory load of hook_mask each cycle.
             if trap {
-                hook_check_instruction(lua_state, pc, chunk, frame_idx)?;
+                hook_check_instruction(
+                    lua_state,
+                    unsafe { pc.offset_from(code_base) } as usize,
+                    chunk,
+                    frame_idx,
+                )?;
                 updatetrap!();
             }
 
@@ -226,6 +236,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::LoadKX => {
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                     handle_loadkx(
                         lua_state,
                         instr,
@@ -233,8 +244,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         frame_idx,
                         &chunk.code,
                         &chunk.constants,
-                        &mut pc,
+                        &mut pc_idx,
                     )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                 }
                 OpCode::LoadFalse => {
                     // R[A] := false
@@ -245,7 +257,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := false; pc++
                     let a = instr.get_a() as usize;
                     setbfvalue(unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) });
-                    pc += 1; // Skip next instruction
+                    pc = unsafe { pc.add(1) }; // Skip next instruction
                 }
                 OpCode::LoadTrue => {
                     // R[A] := true
@@ -281,22 +293,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
 
-                        // Fast path: both integers (most common case)
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            let i1 = pivalue(v1_ptr);
-                            let i2 = pivalue(v2_ptr);
-                            psetivalue(ra_ptr, i1.wrapping_add(i2));
-                            pc += 1; // Skip metamethod on success
-                        }
-                        // Slow path: try float conversion (no string coercion)
-                        else {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr)));
+                            pc = pc.add(1);
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) + pfltvalue(v2_ptr));
+                            pc = pc.add(1);
+                        } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 + n2);
-                                pc += 1; // Skip metamethod on success
+                                pc = pc.add(1);
                             }
-                            // else: fall through to MMBIN (next instruction)
                         }
                     }
                 }
@@ -316,13 +325,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if pttisinteger(v1_ptr) {
                             let iv1 = pivalue(v1_ptr);
                             psetivalue(ra_ptr, iv1.wrapping_add(sc as i64));
-                            pc += 1; // Skip metamethod on success
+                            pc = pc.add(1); // Skip metamethod on success
                         }
                         // Slow path: float
                         else if pttisfloat(v1_ptr) {
                             let nb = pfltvalue(v1_ptr);
                             psetfltvalue(ra_ptr, nb + (sc as f64));
-                            pc += 1; // Skip metamethod on success
+                            pc = pc.add(1); // Skip metamethod on success
                         }
                         // else: fall through to MMBINI (next instruction)
                     }
@@ -341,13 +350,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
                             psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
-                            pc += 1;
+                            pc = pc.add(1);
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) - pfltvalue(v2_ptr));
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 - n2);
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -366,13 +378,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
                             psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
-                            pc += 1;
+                            pc = pc.add(1);
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) * pfltvalue(v2_ptr));
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 * n2);
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -389,11 +404,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
 
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                            psetfltvalue(ra_ptr, n1 / n2);
-                            pc += 1;
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) / pfltvalue(v2_ptr));
+                            pc = pc.add(1);
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 / n2);
+                                pc = pc.add(1);
+                            }
                         }
                     }
                 }
@@ -414,17 +434,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let i2 = pivalue(v2_ptr);
                             if i2 != 0 {
                                 psetivalue(ra_ptr, lua_idiv(i1, i2));
-                                pc += 1;
+                                pc = pc.add(1);
                             } else {
                                 save_pc!();
                                 return Err(cold::error_div_by_zero(lua_state));
                             }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor());
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, (n1 / n2).floor());
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -446,17 +469,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let i2 = pivalue(v2_ptr);
                             if i2 != 0 {
                                 psetivalue(ra_ptr, lua_imod(i1, i2));
-                                pc += 1;
+                                pc = pc.add(1);
                             } else {
                                 save_pc!();
                                 return Err(cold::error_mod_by_zero(lua_state));
                             }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, lua_fmod(n1, n2));
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -473,11 +499,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
 
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                            psetfltvalue(ra_ptr, luai_numpow(n1, n2));
-                            pc += 1;
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc = pc.add(1);
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, luai_numpow(n1, n2));
+                                pc = pc.add(1);
+                            }
                         }
                     }
                 }
@@ -537,13 +568,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
                             psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr)));
-                            pc += 1;
+                            pc = pc.add(1);
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) + pfltvalue(v2_ptr));
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 + n2);
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -562,13 +596,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
                             psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
-                            pc += 1;
+                            pc = pc.add(1);
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) - pfltvalue(v2_ptr));
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 - n2);
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -587,13 +624,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
                             psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
-                            pc += 1;
+                            pc = pc.add(1);
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) * pfltvalue(v2_ptr));
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, n1 * n2);
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -615,17 +655,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let i2 = pivalue(v2_ptr);
                             if i2 != 0 {
                                 psetivalue(ra_ptr, lua_imod(i1, i2));
-                                pc += 1;
+                                pc = pc.add(1);
                             } else {
                                 save_pc!();
                                 return Err(cold::error_mod_by_zero(lua_state));
                             }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, lua_fmod(n1, n2));
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -642,11 +685,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let v2_ptr = chunk.constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
 
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                            psetfltvalue(ra_ptr, luai_numpow(n1, n2));
-                            pc += 1;
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc = pc.add(1);
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, luai_numpow(n1, n2));
+                                pc = pc.add(1);
+                            }
                         }
                     }
                 }
@@ -662,11 +710,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let v2_ptr = chunk.constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
 
-                        let mut n1 = 0.0;
-                        let mut n2 = 0.0;
-                        if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                            psetfltvalue(ra_ptr, n1 / n2);
-                            pc += 1;
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) / pfltvalue(v2_ptr));
+                            pc = pc.add(1);
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 / n2);
+                                pc = pc.add(1);
+                            }
                         }
                     }
                 }
@@ -687,17 +740,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let i2 = pivalue(v2_ptr);
                             if i2 != 0 {
                                 psetivalue(ra_ptr, lua_idiv(i1, i2));
-                                pc += 1;
+                                pc = pc.add(1);
                             } else {
                                 save_pc!();
                                 return Err(cold::error_div_by_zero(lua_state));
                             }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor());
+                            pc = pc.add(1);
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
                                 psetfltvalue(ra_ptr, (n1 / n2).floor());
-                                pc += 1;
+                                pc = pc.add(1);
                             }
                         }
                     }
@@ -714,7 +770,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             i1 & i2,
@@ -733,7 +789,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             i1 | i2,
@@ -752,7 +808,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             i1 ^ i2,
@@ -771,7 +827,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             i1 & i2,
@@ -790,7 +846,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             i1 | i2,
@@ -809,7 +865,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             i1 ^ i2,
@@ -828,7 +884,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             lua_shiftl(i1, i2),
@@ -847,7 +903,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                             lua_shiftr(i1, i2),
@@ -897,7 +953,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     let mut ib = 0i64;
                     if tointegerns(rb, &mut ib) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         // luaV_shiftl(ic, ib): shift ic left by ib
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
@@ -917,7 +973,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     let mut ib = 0i64;
                     if tointegerns(rb, &mut ib) {
-                        pc += 1;
+                        pc = unsafe { pc.add(1) };
                         // luaV_shiftr(ib, ic) = luaV_shiftl(ib, -ic)
                         setivalue(
                             unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
@@ -927,18 +983,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // else: metamethod
                 }
                 OpCode::Jmp => {
-                    // pc += sJ
+                    // pc += sJ (pointer arithmetic, like C Lua)
                     let sj = instr.get_sj();
-                    let new_pc = (pc as i32 + sj) as usize;
-
-                    // Bytecode compiler guarantees valid jump targets,
-                    // so skip the bounds check in release builds.
-                    debug_assert!(new_pc < chunk.code.len(), "Jmp target out of bounds");
-
-                    // Backward jump detection: hook_check_instruction uses
-                    // npci <= oldpc which naturally fires on backward jumps.
-                    // No need to set oldpc here.
-                    pc = new_pc;
+                    pc = unsafe { pc.offset(sj as isize) };
                 }
                 OpCode::Return => {
                     // return R[A], ..., R[A+B-2]
@@ -959,7 +1006,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             (lua_state.get_top() - (base + a)) as i32
                         };
-                        hook_on_return(lua_state, frame_idx, pc as u32, nres)?;
+                        hook_on_return(
+                            lua_state,
+                            frame_idx,
+                            unsafe { pc.offset_from(code_base) } as u32,
+                            nres,
+                        )?;
                     }
 
                     // Handle return
@@ -971,7 +1023,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Return hook (cold path)
                     if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
-                        hook_on_return(lua_state, frame_idx, pc as u32, 0)?;
+                        hook_on_return(
+                            lua_state,
+                            frame_idx,
+                            unsafe { pc.offset_from(code_base) } as u32,
+                            0,
+                        )?;
                     }
                     return_handler::handle_return0(lua_state, frame_idx);
                     continue 'startfunc;
@@ -983,7 +1040,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Return hook (cold path)
                     if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
-                        hook_on_return(lua_state, frame_idx, pc as u32, 1)?;
+                        hook_on_return(
+                            lua_state,
+                            frame_idx,
+                            unsafe { pc.offset_from(code_base) } as u32,
+                            1,
+                        )?;
                     }
 
                     // Inline return handling + context restore to avoid
@@ -1006,13 +1068,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Hot path: restore caller context directly
                     let ci = lua_state.get_call_info(frame_idx);
-                    pc = ci.pc as usize;
                     base = ci.base;
-                    let chunk_raw = ci.chunk_ptr;
-                    chunk = unsafe { &*chunk_raw };
+                    let ci_pc = ci.pc as usize;
+                    chunk = unsafe { &*ci.chunk_ptr };
+                    code_base = chunk.code.as_ptr();
+                    pc = unsafe { code_base.add(ci_pc) };
                     // Update oldpc for caller context (rethook equivalent).
-                    // Uses pc-1 to match hook_check_instruction's npci = pc-1.
-                    lua_state.oldpc = (pc - 1) as u32;
+                    // Only needed when hooks are active — otherwise oldpc is never read.
+                    if lua_state.hook_mask != 0 {
+                        lua_state.oldpc = (ci_pc - 1) as u32;
+                    }
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
@@ -1050,7 +1115,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::Close => {
-                    handle_close(lua_state, instr, base, frame_idx, pc)?;
+                    handle_close(lua_state, instr, base, frame_idx, unsafe {
+                        pc.offset_from(code_base)
+                    }
+                        as usize)?;
                 }
                 OpCode::Tbc => {
                     // Mark variable as to-be-closed
@@ -1071,14 +1139,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         0
                     };
 
-                    if k && pc < chunk.code.len() {
-                        let extra_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                    if k && (unsafe { pc.offset_from(code_base) } as usize) < chunk.code.len() {
+                        let extra_instr = unsafe { *pc };
                         if extra_instr.get_opcode() == OpCode::ExtraArg {
                             vc += extra_instr.get_ax() as usize * 1024;
                         }
                     }
 
-                    pc += 1; // skip EXTRAARG
+                    pc = unsafe { pc.add(1) }; // skip EXTRAARG
 
                     let value = lua_state.create_table(vc, hash_size)?;
                     unsafe { *lua_state.stack_mut().get_unchecked_mut(base + a) = value };
@@ -1133,7 +1201,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Cold: metatable __index chain or non-table
                     save_pc!();
-                    table_ops::exec_gettable(lua_state, instr, base, frame_idx, &mut pc)?;
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                    table_ops::exec_gettable(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                    pc = unsafe { code_base.add(pc_idx) };
                     restore_state!();
                 }
                 OpCode::GetI => {
@@ -1165,7 +1235,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Slow path: metamethod lookup
                     save_pc!();
-                    table_ops::exec_geti(lua_state, instr, base, frame_idx, &mut pc)?;
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                    table_ops::exec_geti(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                    pc = unsafe { code_base.add(pc_idx) };
                     restore_state!();
                 }
                 OpCode::GetField => {
@@ -1197,14 +1269,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Cold: metatable __index chain, __index function, non-table
                     save_pc!();
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                     table_ops::exec_getfield(
                         lua_state,
                         instr,
                         &chunk.constants,
                         base,
                         frame_idx,
-                        &mut pc,
+                        &mut pc_idx,
                     )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                     restore_state!();
                 }
                 OpCode::SetTable => {
@@ -1283,14 +1357,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Cold: metatable __newindex chain or non-table
                     save_pc!();
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                     table_ops::exec_settable(
                         lua_state,
                         instr,
                         &chunk.constants,
                         base,
                         frame_idx,
-                        &mut pc,
+                        &mut pc_idx,
                     )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                 }
                 OpCode::SetI => {
                     // SETI: R[A][B] := RK(C) (integer key)
@@ -1349,14 +1425,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Slow path: metamethod or non-table
                     save_pc!();
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                     table_ops::exec_seti(
                         lua_state,
                         instr,
                         &chunk.constants,
                         base,
                         frame_idx,
-                        &mut pc,
+                        &mut pc_idx,
                     )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                     restore_state!();
                 }
                 OpCode::SetField => {
@@ -1423,14 +1501,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Slow path: metamethod, non-table, or has metatable with new key
                     save_pc!();
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                     table_ops::exec_setfield(
                         lua_state,
                         instr,
                         &chunk.constants,
                         base,
                         frame_idx,
-                        &mut pc,
+                        &mut pc_idx,
                     )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                     restore_state!();
                 }
                 OpCode::Self_ => {
@@ -1469,14 +1549,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Cold: metatable __index chain, __index function, non-table
                     save_pc!();
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
                     table_ops::exec_self(
                         lua_state,
                         instr,
                         &chunk.constants,
                         base,
                         frame_idx,
-                        &mut pc,
+                        &mut pc_idx,
                     )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                     restore_state!();
                 }
                 OpCode::Call => {
@@ -1507,25 +1589,29 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         let lua_func = unsafe { func.as_lua_function_unchecked() };
                         let new_chunk = lua_func.chunk();
+                        let new_chunk_ptr = new_chunk as *const crate::lua_value::Chunk;
 
+                        let new_base = func_idx + 1;
                         save_pc!();
                         lua_state.push_lua_frame(
                             &func,
-                            func_idx + 1,
+                            new_base,
                             nargs,
                             nresults,
                             new_chunk.param_count,
                             new_chunk.max_stack_size,
-                            new_chunk as *const _,
+                            new_chunk_ptr,
                         )?;
 
-                        // Inline callee entry: restore context without startfunc
+                        // Inline callee entry: use known values directly instead of
+                        // reading back from CallInfo (avoids redundant call_stack reload
+                        // + frame_idx*72 address computation + 3 loads from memory we
+                        // just wrote to — saves ~7 instructions on the hot path).
                         frame_idx = lua_state.call_depth() - 1;
-                        let ci = lua_state.get_call_info(frame_idx);
-                        pc = ci.pc as usize;
-                        base = ci.base;
-                        let chunk_raw = ci.chunk_ptr;
-                        chunk = unsafe { &*chunk_raw };
+                        base = new_base; // push_lua_frame stores the base we gave it
+                        chunk = unsafe { &*new_chunk_ptr }; // same chunk_ptr we gave push_lua_frame
+                        code_base = chunk.code.as_ptr();
+                        pc = code_base; // pc = 0 means start of code
 
                         // Call hook for inline Lua call (cold path)
                         if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
@@ -1533,8 +1619,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         {
                             hook_on_call(lua_state, lua_state.hook_mask, 0, chunk)?;
                         }
-                        // Init oldpc for new function
-                        lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+                        // Init oldpc for new function (only needed when hooks active)
+                        // When hooks are disabled, oldpc is never read (hook_check_instruction
+                        // is skipped), so we can avoid the is_vararg branch + memory write.
+                        if lua_state.hook_mask != 0 {
+                            lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+                        }
                         updatetrap!();
                         continue;
                     }
@@ -1555,7 +1645,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         Ok(FrameAction::Continue) => {
                             restore_state!();
                             // rethook: update oldpc for caller
-                            lua_state.oldpc = (pc - 1) as u32;
+                            lua_state.oldpc = (unsafe { pc.offset_from(code_base) } - 1) as u32;
                             updatetrap!();
                         }
                         Ok(FrameAction::Call) | Ok(FrameAction::TailCall) => {
@@ -1583,7 +1673,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         Ok(FrameAction::Continue) => {
                             // C tail call returned
                             restore_state!();
-                            lua_state.oldpc = (pc - 1) as u32;
+                            lua_state.oldpc = (unsafe { pc.offset_from(code_base) } - 1) as u32;
                             updatetrap!();
                         }
                         Ok(FrameAction::TailCall) => {
@@ -1644,7 +1734,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 (*ra_ptr.add(2)).value.i = idx.wrapping_add(step);
 
                                 // Jump back (no error check - validated at compile time)
-                                pc -= bx;
+                                pc = pc.sub(bx);
                             }
                             // else: counter expired, exit loop
                         } else {
@@ -1671,8 +1761,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 (*ra_ptr.add(2)).value.n = new_idx;
 
                                 // Jump back (bytecode compiler guarantees valid targets)
-                                debug_assert!(bx <= pc, "ForLoop float: invalid jump");
-                                pc -= bx;
+                                pc = pc.sub(bx);
                             }
                             // else: exit loop
                         }
@@ -1683,7 +1772,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // main loop code size and prevent r12/r15 clobbering
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
-                    cold::handle_forprep_int(lua_state, base + a, bx, frame_idx, &mut pc)?;
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                    cold::handle_forprep_int(lua_state, base + a, bx, frame_idx, &mut pc_idx)?;
+                    pc = unsafe { code_base.add(pc_idx) };
                 }
                 OpCode::TForPrep => {
                     // Prepare generic for loop — inline (for loop related)
@@ -1699,7 +1790,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Mark ra+2 as to-be-closed if not nil
                     lua_state.mark_tbc(ra + 2)?;
 
-                    pc += bx;
+                    pc = unsafe { pc.add(bx) };
                 }
                 OpCode::TForCall => {
                     // Generic for loop call — HOT PATH for ipairs/pairs/next iterators
@@ -1733,7 +1824,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
 
                     // Save PC before call
-                    lua_state.set_frame_pc(frame_idx, pc as u32);
+                    lua_state.set_frame_pc(frame_idx, unsafe { pc.offset_from(code_base) } as u32);
 
                     if let Some(c_func) = c_func_opt {
                         // FAST PATH: C function iterator (ipairs_next, lua_next, etc.)
@@ -1747,13 +1838,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )?;
                         restore_state!();
                         // rethook: update oldpc after C function returns
-                        lua_state.oldpc = (pc - 1) as u32;
+                        lua_state.oldpc = (unsafe { pc.offset_from(code_base) } - 1) as u32;
                     } else {
                         // Slow path: Lua function or __call metamethod
                         match call::handle_call(lua_state, base, a + 3, 3, c + 1, 0) {
                             Ok(FrameAction::Continue) => {
                                 restore_state!();
-                                lua_state.oldpc = (pc - 1) as u32;
+                                lua_state.oldpc = (unsafe { pc.offset_from(code_base) } - 1) as u32;
                                 updatetrap!();
                             }
                             Ok(FrameAction::Call) => {
@@ -1780,7 +1871,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Check if ra+3 (control value from iterator) is not nil
                     if !unsafe { stack.get_unchecked(ra + 3) }.is_nil() {
                         // Continue loop: jump back
-                        pc -= bx;
+                        pc = unsafe { pc.sub(bx) };
                     }
                     // else: exit loop (control variable is nil)
                 }
@@ -1818,7 +1909,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     }
 
                                     // C function metamethod — use cold helper
-                                    let pi = unsafe { *chunk.code.get_unchecked(pc - 2) };
+                                    let pi = unsafe { *pc.sub(2) };
                                     let result_reg = pi.get_a() as usize;
                                     save_pc!();
                                     cold::call_c_mm_bin(
@@ -1835,7 +1926,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Slow path: string coercion, userdata, v2 metamethods
                     save_pc!();
-                    metamethod::handle_mmbin(lua_state, a, b, c, pc, &chunk.code, frame_idx)?;
+                    metamethod::handle_mmbin(
+                        lua_state,
+                        a,
+                        b,
+                        c,
+                        unsafe { pc.offset_from(code_base) } as usize,
+                        &chunk.code,
+                        frame_idx,
+                    )?;
                     restore_state!();
                 }
                 OpCode::MmBinI => {
@@ -1847,7 +1946,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Protect metamethod call
                     save_pc!();
-                    metamethod::handle_mmbini(lua_state, a, sb, c, k, pc, &chunk.code, frame_idx)?;
+                    metamethod::handle_mmbini(
+                        lua_state,
+                        a,
+                        sb,
+                        c,
+                        k,
+                        unsafe { pc.offset_from(code_base) } as usize,
+                        &chunk.code,
+                        frame_idx,
+                    )?;
                     restore_state!();
                 }
                 OpCode::MmBinK => {
@@ -1865,7 +1973,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         b,
                         c,
                         k,
-                        pc,
+                        unsafe { pc.offset_from(code_base) } as usize,
                         &chunk.code,
                         &chunk.constants,
                         frame_idx,
@@ -2044,7 +2152,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         );
                         continue;
                     }
-                    handle_len(lua_state, instr, &mut base, frame_idx, pc)?;
+                    handle_len(lua_state, instr, &mut base, frame_idx, unsafe {
+                        pc.offset_from(code_base)
+                    }
+                        as usize)?;
                 }
 
                 OpCode::Concat => {
@@ -2058,11 +2169,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if concat_top > lua_state.get_top() {
                         lua_state.set_top_raw(concat_top);
                     }
-                    handle_concat(lua_state, instr, &mut base, frame_idx, pc)?;
+                    handle_concat(lua_state, instr, &mut base, frame_idx, unsafe {
+                        pc.offset_from(code_base)
+                    }
+                        as usize)?;
                 }
 
                 OpCode::Eq => {
-                    comparison_ops::exec_eq(lua_state, instr, base, frame_idx, &mut pc)?;
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                    comparison_ops::exec_eq(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                    pc = unsafe { code_base.add(pc_idx) };
                 }
 
                 OpCode::Lt => {
@@ -2078,15 +2194,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ra.ttisinteger() && rb.ttisinteger() {
                         let cond = ra.ivalue() < rb.ivalue();
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else if ra.ttisfloat() && rb.ttisfloat() {
                         let cond = ra.fltvalue() < rb.fltvalue();
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else {
-                        comparison_ops::exec_lt(lua_state, instr, base, frame_idx, &mut pc)?;
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_lt(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
                     }
                 }
 
@@ -2102,23 +2220,35 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ra.ttisinteger() && rb.ttisinteger() {
                         let cond = ra.ivalue() <= rb.ivalue();
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else if ra.ttisfloat() && rb.ttisfloat() {
                         let cond = ra.fltvalue() <= rb.fltvalue();
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else {
-                        comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc)?;
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
                     }
                 }
                 OpCode::EqK => {
-                    comparison_ops::exec_eqk(lua_state, instr, &chunk.constants, base, &mut pc)?;
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                    comparison_ops::exec_eqk(
+                        lua_state,
+                        instr,
+                        &chunk.constants,
+                        base,
+                        &mut pc_idx,
+                    )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                 }
 
                 OpCode::EqI => {
-                    comparison_ops::exec_eqi(lua_state, instr, base, &mut pc)?;
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                    comparison_ops::exec_eqi(lua_state, instr, base, &mut pc_idx)?;
+                    pc = unsafe { code_base.add(pc_idx) };
                 }
 
                 OpCode::LtI => {
@@ -2131,15 +2261,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() < (im as i64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() < (im as f64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else {
-                        comparison_ops::exec_lti(lua_state, instr, base, frame_idx, &mut pc)?;
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_lti(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
                     }
                 }
 
@@ -2153,15 +2285,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() <= (im as i64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() <= (im as f64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else {
-                        comparison_ops::exec_lei(lua_state, instr, base, frame_idx, &mut pc)?;
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_lei(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
                     }
                 }
 
@@ -2175,15 +2309,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() > (im as i64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() > (im as f64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else {
-                        comparison_ops::exec_gti(lua_state, instr, base, frame_idx, &mut pc)?;
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_gti(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
                     }
                 }
 
@@ -2197,15 +2333,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if ra.ttisinteger() {
                         let cond = ra.ivalue() >= (im as i64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else if ra.ttisfloat() {
                         let cond = ra.fltvalue() >= (im as f64);
                         if cond != k {
-                            pc += 1;
+                            pc = unsafe { pc.add(1) };
                         }
                     } else {
-                        comparison_ops::exec_gei(lua_state, instr, base, frame_idx, &mut pc)?;
+                        let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                        comparison_ops::exec_gei(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = unsafe { code_base.add(pc_idx) };
                     }
                 }
 
@@ -2221,13 +2359,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let cond = !is_false;
 
                     if cond != k {
-                        pc += 1; // Skip next instruction (JMP)
+                        pc = unsafe { pc.add(1) }; // Skip next instruction (JMP)
                     } else {
                         // Execute next instruction (must be JMP)
-                        let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
-                        pc += 1;
+                        let next_instr = unsafe { *pc };
+                        pc = unsafe { pc.add(1) };
                         let sj = next_instr.get_sj();
-                        pc = (pc as i32 + sj) as usize;
+                        pc = unsafe { pc.offset(sj as isize) };
                     }
                 }
 
@@ -2241,23 +2379,34 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let is_false = rb.is_nil() || (rb.is_boolean() && rb.tt() == LUA_VFALSE);
 
                     if is_false == k {
-                        pc += 1; // Condition failed - skip next instruction (JMP)
+                        pc = unsafe { pc.add(1) }; // Condition failed - skip next instruction (JMP)
                     } else {
                         // Condition succeeded - copy value and EXECUTE next instruction (must be JMP)
                         unsafe { *lua_state.stack_mut().get_unchecked_mut(base + a) = *rb };
                         // donextjump: fetch and execute next JMP instruction
-                        let next_instr = unsafe { *chunk.code.get_unchecked(pc) };
+                        let next_instr = unsafe { *pc };
                         debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
-                        pc += 1; // Move past the JMP instruction
+                        pc = unsafe { pc.add(1) }; // Move past the JMP instruction
                         let sj = next_instr.get_sj();
-                        pc = (pc as i32 + sj) as usize; // Execute the jump
+                        pc = unsafe { pc.offset(sj as isize) }; // Execute the jump
                     }
                 }
                 OpCode::SetList => {
-                    closure_vararg_ops::exec_setlist(lua_state, instr, &chunk.code, base, &mut pc)?;
+                    let mut pc_idx = unsafe { pc.offset_from(code_base) } as usize;
+                    closure_vararg_ops::exec_setlist(
+                        lua_state,
+                        instr,
+                        &chunk.code,
+                        base,
+                        &mut pc_idx,
+                    )?;
+                    pc = unsafe { code_base.add(pc_idx) };
                 }
                 OpCode::Closure => {
-                    handle_closure(lua_state, instr, base, frame_idx, chunk, pc)?;
+                    handle_closure(lua_state, instr, base, frame_idx, chunk, unsafe {
+                        pc.offset_from(code_base)
+                    }
+                        as usize)?;
                 }
 
                 OpCode::Vararg => {
@@ -2269,7 +2418,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::ErrNNil => {
-                    handle_errnil(lua_state, instr, base, &chunk.constants, frame_idx, pc)?;
+                    handle_errnil(
+                        lua_state,
+                        instr,
+                        base,
+                        &chunk.constants,
+                        frame_idx,
+                        unsafe { pc.offset_from(code_base) } as usize,
+                    )?;
                 }
 
                 OpCode::VarargPrep => {

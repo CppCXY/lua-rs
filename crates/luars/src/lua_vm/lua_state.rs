@@ -4170,6 +4170,150 @@ impl LuaState {
     pub fn is_yielded(&self) -> bool {
         self.yielded
     }
+
+    // ========================================================================
+    // Debugger API — public methods for external debugger integration
+    // ========================================================================
+
+    /// Set a Lua hook function with the given mask and count.
+    /// This is the programmatic equivalent of `debug.sethook`.
+    pub fn set_hook(&mut self, hook: LuaValue, mask: u8, count: i32) {
+        self.hook = hook;
+        self.hook_mask = mask;
+        self.base_hook_count = count;
+        self.hook_count = count;
+    }
+
+    /// Get the current hook mask (bitmask of LUA_MASKCALL/RET/LINE/COUNT).
+    pub fn hook_mask(&self) -> u8 {
+        self.hook_mask
+    }
+
+    /// Get the current hook function value.
+    pub fn hook_func(&self) -> LuaValue {
+        self.hook
+    }
+
+    /// Get the source name of the function at the given stack level (0 = current).
+    /// This is a fast path that only reads the chunk's source_name without
+    /// building a full DebugInfo. Returns `None` for C functions or invalid levels.
+    pub fn get_source(&self, level: usize) -> Option<String> {
+        let call_depth = self.call_depth();
+        if level >= call_depth {
+            return None;
+        }
+        let frame_idx = call_depth - 1 - level;
+        let func = self.get_frame_func(frame_idx)?;
+        let lua_func = func.as_lua_function()?;
+        lua_func.chunk().source_name.clone()
+    }
+
+    /// Get a local variable name and value at the given stack level and index.
+    /// `level` is 0-based (0 = current frame). `local_idx` is 1-based.
+    /// Returns `None` if the level/index is out of range.
+    pub fn get_local(&self, level: usize, local_idx: usize) -> Option<(String, LuaValue)> {
+        let call_depth = self.call_depth();
+        if level >= call_depth {
+            return None;
+        }
+        let frame_idx = call_depth - 1 - level;
+        let func = self.get_frame_func(frame_idx)?;
+        let lua_func = func.as_lua_function()?;
+        let chunk = lua_func.chunk();
+        let ci = self.get_frame(frame_idx)?;
+        let pc = if ci.pc > 0 { ci.pc as usize - 1 } else { 0 };
+        let base = ci.base;
+
+        // Find the n-th active local variable at this PC
+        let mut active_count = 0usize;
+        for locvar in &chunk.locals {
+            if (locvar.startpc as usize) > pc {
+                break;
+            }
+            if pc < locvar.endpc as usize {
+                active_count += 1;
+                if active_count == local_idx {
+                    let reg = active_count - 1;
+                    let value = self.stack_get(base + reg).unwrap_or_default();
+                    return Some((locvar.name.to_string(), value));
+                }
+            }
+        }
+        None
+    }
+
+    /// Count the number of active local variables at the given stack level.
+    pub fn local_count(&self, level: usize) -> usize {
+        let call_depth = self.call_depth();
+        if level >= call_depth {
+            return 0;
+        }
+        let frame_idx = call_depth - 1 - level;
+        let func = match self.get_frame_func(frame_idx) {
+            Some(f) => f,
+            None => return 0,
+        };
+        let lua_func = match func.as_lua_function() {
+            Some(f) => f,
+            None => return 0,
+        };
+        let chunk = lua_func.chunk();
+        let ci = match self.get_frame(frame_idx) {
+            Some(c) => c,
+            None => return 0,
+        };
+        let pc = if ci.pc > 0 { ci.pc as usize - 1 } else { 0 };
+
+        let mut count = 0usize;
+        for locvar in &chunk.locals {
+            if (locvar.startpc as usize) > pc {
+                break;
+            }
+            if pc < locvar.endpc as usize {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Get an upvalue name and value for the function at the given stack level.
+    /// `level` is 0-based. `up_idx` is 1-based.
+    pub fn get_upvalue(&self, level: usize, up_idx: usize) -> Option<(String, LuaValue)> {
+        let call_depth = self.call_depth();
+        if level >= call_depth || up_idx == 0 {
+            return None;
+        }
+        let frame_idx = call_depth - 1 - level;
+        let func = self.get_frame_func(frame_idx)?;
+        let lua_func = func.as_lua_function()?;
+        let upvalues = lua_func.upvalues();
+        let chunk = lua_func.chunk();
+        let idx = up_idx - 1;
+        if idx >= upvalues.len() || idx >= chunk.upvalue_descs.len() {
+            return None;
+        }
+        let name = chunk.upvalue_descs[idx].name.to_string();
+        let value = upvalues[idx].as_ref().data.get_value();
+        Some((name, value))
+    }
+
+    /// Count the number of upvalues for the function at the given stack level.
+    pub fn upvalue_count(&self, level: usize) -> usize {
+        let call_depth = self.call_depth();
+        if level >= call_depth {
+            return 0;
+        }
+        let frame_idx = call_depth - 1 - level;
+        let func = match self.get_frame_func(frame_idx) {
+            Some(f) => f,
+            None => return 0,
+        };
+        let lua_func = match func.as_lua_function() {
+            Some(f) => f,
+            None => return 0,
+        };
+        lua_func.upvalues().len()
+    }
 }
 
 impl Default for LuaState {

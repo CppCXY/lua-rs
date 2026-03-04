@@ -1234,9 +1234,19 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Integer => write!(f, "{}", self.ivalue()),
             LuaValueKind::Float => write!(f, "{}", self.fltvalue()),
             LuaValueKind::String => {
-                write!(f, "\"{}\"", self.as_str().unwrap_or("<invalid string>"))
+                write!(f, "{}", self.as_str().unwrap_or("<invalid string>"))
             }
-            LuaValueKind::Binary => write!(f, "binary(0x{:#x})", self.raw_ptr_repr() as usize),
+            LuaValueKind::Binary => {
+                let data = self.as_binary().unwrap_or(&[]);
+                write!(f, "binary(len={}, [", data.len())?;
+                for (i, &b) in data.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{:02x}", b)?;
+                }
+                write!(f, "])")
+            }
             LuaValueKind::Table => write!(f, "table(0x{:#x})", self.raw_ptr_repr() as usize),
             LuaValueKind::Function => write!(f, "function(0x{:#x})", self.raw_ptr_repr() as usize),
             LuaValueKind::CFunction => {
@@ -1287,7 +1297,15 @@ impl std::fmt::Display for LuaValue {
                 write!(f, "thread: 0x{:x}", unsafe { self.value.ptr as usize })
             }
             LuaValueKind::Binary => {
-                write!(f, "binary: 0x{:x}", unsafe { self.value.ptr as usize })
+                let data = self.as_binary().unwrap_or(&[]);
+                write!(f, "binary(len={}, [", data.len())?;
+                for (i, &b) in data.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{:02x}", b)?;
+                }
+                write!(f, "])")
             }
         }
     }
