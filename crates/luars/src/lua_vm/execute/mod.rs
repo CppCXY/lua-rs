@@ -183,8 +183,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         // MAINLOOP: Main instruction dispatch loop
         loop {
-            // Fetch instruction and advance PC (slice indexing — noalias)
-            let instr = code[pc];
+            // Fetch instruction and advance PC (get_unchecked — noalias slice)
+            let instr = unsafe { *code.get_unchecked(pc) };
             pc += 1;
 
             // ===== DEBUG HOOK CHECK =====
@@ -772,7 +772,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     let v1 = unsafe { lua_state.stack().get_unchecked(base + b) };
-                    let v2 = &constants[c];
+                    let v2 = unsafe { constants.get_unchecked(c) };
 
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
@@ -791,7 +791,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     let v1 = unsafe { lua_state.stack().get_unchecked(base + b) };
-                    let v2 = &constants[c];
+                    let v2 = unsafe { constants.get_unchecked(c) };
 
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
@@ -810,7 +810,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     let v1 = unsafe { lua_state.stack().get_unchecked(base + b) };
-                    let v2 = &constants[c];
+                    let v2 = unsafe { constants.get_unchecked(c) };
 
                     let mut i1 = 0i64;
                     let mut i2 = 0i64;
@@ -1165,7 +1165,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
 
                     if k && (pc) < chunk.code.len() {
-                        let extra_instr = code[pc];
+                        let extra_instr = unsafe { *code.get_unchecked(pc) };
                         if extra_instr.get_opcode() == OpCode::ExtraArg {
                             vc += extra_instr.get_ax() as usize * 1024;
                         }
@@ -1299,7 +1299,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
-                    let key = &constants[c];
+                    let key = unsafe { constants.get_unchecked(c) };
 
                     // Try fast path: table with string key
                     if rb.tt == LUA_VTABLE {
@@ -1535,7 +1535,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let k = instr.get_k();
 
                     let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
-                    let key = &constants[b];
+                    let key = unsafe { constants.get_unchecked(b) };
                     let value = if k {
                         unsafe { *constants.as_ptr().add(c) }
                     } else {
@@ -1619,7 +1619,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let key = &constants[c];
+                    let key = unsafe { constants.get_unchecked(c) };
                     let rb;
                     unsafe {
                         let sp = lua_state.stack_mut().as_mut_ptr();
@@ -2024,7 +2024,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let v1 = unsafe { *lua_state.stack().get_unchecked(base_mm + a) };
                     if v1.ttistable() {
                         let v2 = unsafe { *lua_state.stack().get_unchecked(base_mm + b) };
-                        let result_reg = code[pc - 2].get_a() as usize;
+                        let result_reg = unsafe { code.get_unchecked(pc - 2) }.get_a() as usize;
                         save_pc!();
                         match noinline::try_mmbin_table_fast(
                             lua_state, v1, v1, v2, c as u8, result_reg, frame_idx,
@@ -2055,7 +2055,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if v1.ttistable() {
                         let imm = LuaValue::integer(sb as i64);
                         let (p1, p2) = if k { (imm, v1) } else { (v1, imm) };
-                        let result_reg = code[pc - 2].get_a() as usize;
+                        let result_reg = unsafe { code.get_unchecked(pc - 2) }.get_a() as usize;
                         save_pc!();
                         match noinline::try_mmbin_table_fast(
                             lua_state, v1, p1, p2, c as u8, result_reg, frame_idx,
@@ -2086,7 +2086,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if v1.ttistable() {
                         let kb = unsafe { *constants.as_ptr().add(b) };
                         let (p1, p2) = if k { (kb, v1) } else { (v1, kb) };
-                        let result_reg = code[pc - 2].get_a() as usize;
+                        let result_reg = unsafe { code.get_unchecked(pc - 2) }.get_a() as usize;
                         save_pc!();
                         match noinline::try_mmbin_table_fast(
                             lua_state, v1, p1, p2, c as u8, result_reg, frame_idx,
@@ -2122,7 +2122,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         ci.func.as_lua_function_unchecked().upvalues()
                     };
                     let upval = &upvalue_ptrs[b].as_ref().data;
-                    let key = &constants[c];
+                    let key = unsafe { constants.get_unchecked(c) };
                     let table_value = upval.get_value_ref();
 
                     // Fast path: direct hash lookup for short string keys
@@ -2699,7 +2699,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         pc += 1; // Skip next instruction (JMP)
                     } else {
                         // Execute next instruction (must be JMP)
-                        let next_instr = code[pc];
+                        let next_instr = unsafe { *code.get_unchecked(pc) };
                         pc += 1;
                         let sj = next_instr.get_sj();
                         pc = (pc as isize + sj as isize) as usize;
@@ -2721,7 +2721,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // Condition succeeded - copy value and EXECUTE next instruction (must be JMP)
                         unsafe { *lua_state.stack_mut().get_unchecked_mut(base + a) = *rb };
                         // donextjump: fetch and execute next JMP instruction
-                        let next_instr = code[pc];
+                        let next_instr = unsafe { *code.get_unchecked(pc) };
                         debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
                         pc += 1; // Move past the JMP instruction
                         let sj = next_instr.get_sj();
