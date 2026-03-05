@@ -1774,7 +1774,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // For C function tail calls, hooks are handled inside call_c_function.
 
                     // Delegate to tailcall handler
-                    // (call hook fires via 'startfunc when pc==0, with LUA_HOOKTAILCALL event)
                     match call::handle_tailcall(lua_state, base, a, b) {
                         Ok(FrameAction::Continue) => {
                             // C tail call returned
@@ -1783,8 +1782,34 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             updatetrap!();
                         }
                         Ok(FrameAction::TailCall) => {
-                            // Tail call replaced frame
-                            continue 'startfunc;
+                            // Tail call replaced frame — inline context restore
+                            // (like Return1's inline restore, avoids full 'startfunc overhead)
+                            let ci = lua_state.get_call_info(frame_idx);
+                            base = ci.base;
+                            chunk = unsafe { &*ci.chunk_ptr };
+                            code_base = chunk.code.as_ptr();
+                            pc = code_base; // new function starts at pc=0
+
+                            // Set oldpc sentinel for hook_check_instruction
+                            lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+
+                            // Call hook at function entry (cold path)
+                            if trap {
+                                let hook_mask = lua_state.hook_mask;
+                                if hook_mask & crate::lua_vm::LUA_MASKCALL != 0
+                                    && lua_state.allow_hook
+                                {
+                                    hook_on_call(
+                                        lua_state,
+                                        hook_mask,
+                                        lua_state.get_call_info(frame_idx).call_status,
+                                        chunk,
+                                    )?;
+                                }
+                                if hook_mask & crate::lua_vm::LUA_MASKCOUNT != 0 {
+                                    lua_state.hook_count = lua_state.base_hook_count;
+                                }
+                            }
                         }
                         Ok(FrameAction::Call) => {
                             // Shouldn't happen from handle_tailcall

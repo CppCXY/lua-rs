@@ -464,7 +464,7 @@ pub fn call_c_function_fast(
 
 /// Handle TAILCALL opcode - Lua style (replace frame, don't recurse)
 /// Tail call optimization: return R[A](R[A+1], ... ,R[A+B-1])
-#[inline]
+#[inline(never)]
 pub fn handle_tailcall(
     lua_state: &mut LuaState,
     base: usize,
@@ -475,128 +475,81 @@ pub fn handle_tailcall(
     // This is needed for variable args (b==0) calculation
     let actual_stack_top = lua_state.get_top();
 
-    // REMOVED: Sync stack_top with frame.top
-    // This was causing issues when resolve_call_chain increased stack_top beyond frame.top
-    // and then this sync would truncate it, losing arguments
-    //
-    // if let Some(frame) = lua_state.current_frame() {
-    //     let frame_top = frame.top;
-    //     lua_state.set_top(frame_top)?;
-    // }
-
     let nargs = if b == 0 {
         // Variable args: use actual_stack_top (saved above), NOT frame.top
-        // frame.top is the stack limit (base + maxstacksize), not current top
         let func_idx = base + a;
-        let first_arg = func_idx + 1;
-
-        actual_stack_top.saturating_sub(first_arg)
+        actual_stack_top.saturating_sub(func_idx + 1)
     } else {
         b - 1
     };
 
-    // Get function to call
+    // Get function to call — unchecked since stack was grown by push_lua_frame
     let func_idx = base + a;
-    let func = lua_state
-        .stack_get(func_idx)
-        .ok_or_else(|| lua_state.error("TAILCALL: function not found".to_string()))?;
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
 
-    // Check if it's a function
-    if func.is_lua_function() {
+    // Hot path: Lua function tail call
+    // Combined type check + extraction (one enum match instead of two)
+    if let Some(lua_func) = func.as_lua_function() {
         let current_frame_idx = lua_state.call_depth() - 1;
 
         // Close upvalues from current call before moving arguments
         // This is critical: like Lua 5.5's OP_TAILCALL which calls luaF_closeupval(L, base)
-        // We need to close upvalues that reference the current frame's locals
-        // because we're about to overwrite them with the new function's arguments
         lua_state.close_upvalues(base);
 
-        // Like Lua 5.5's luaD_pretailcall: move function and arguments down
-        // to ci->func.p position (= base - func_offset), NOT base-1.
-        // This is critical for vararg functions where buildhiddenargs shifts
-        // base forward, making func_offset > 1. The return handler uses
-        // func_pos = base - func_offset to find where to place results,
-        // so func must be moved there to keep return positions correct.
-        let current_frame = lua_state.get_call_info(current_frame_idx);
-        let func_offset = current_frame.func_offset;
+        // Get function position (handles vararg func_offset)
+        let func_offset = lua_state.get_call_info(current_frame_idx).func_offset;
         let func_pos = base - func_offset;
 
-        let narg1 = nargs + 1; // Include function itself
-        for i in 0..narg1 {
-            let src_idx = func_idx + i;
-            let dst_idx = func_pos + i;
-            if let Some(val) = lua_state.stack_get(src_idx) {
-                lua_state.stack_set(dst_idx, val)?;
-            } else {
-                lua_state.stack_set(dst_idx, LuaValue::nil())?;
+        // Move function + arguments down using ptr::copy (like C Lua's setobjs2s loop)
+        // This replaces per-element bounds-checked stack_get/stack_set
+        let narg1 = nargs + 1;
+        unsafe {
+            let stack_ptr = lua_state.stack_mut().as_mut_ptr();
+            std::ptr::copy(stack_ptr.add(func_idx), stack_ptr.add(func_pos), narg1);
+        }
+
+        let new_base = func_pos + 1;
+        let chunk = lua_func.chunk();
+        let numparams = chunk.param_count;
+
+        // Pad missing parameters with nil (like C Lua's narg1..nfixparams loop)
+        if nargs < numparams {
+            let stack = lua_state.stack_mut();
+            for i in nargs..numparams {
+                unsafe { *stack.get_unchecked_mut(new_base + i) = LuaValue::nil() };
             }
         }
 
-        // After moving, update func reference to the moved position
-        let new_base = func_pos + 1;
-        let moved_func = lua_state.stack_get(func_pos).unwrap_or(func);
-
-        // Get the moved function body for parameter info
-        let moved_func_body = moved_func.as_lua_function().ok_or_else(|| {
-            lua_state.error("TAILCALL: moved function is not a Lua function".to_string())
-        })?;
-
-        // Pad missing parameters with nil if needed
-        let chunk = moved_func_body.chunk();
-        let numparams = chunk.param_count;
-        let mut current_nargs = nargs;
-
-        // Pad fixed parameters with nil if needed
-        while current_nargs < numparams {
-            lua_state.stack_set(new_base + current_nargs, LuaValue::nil())?;
-            current_nargs += 1;
-        }
-
-        // nextraargs = max(0, nargs - numparams)
-        let new_nextraargs = if nargs > numparams {
+        let actual_nargs = nargs.max(numparams);
+        let nextraargs = if nargs > numparams {
             (nargs - numparams) as i32
         } else {
             0
         };
 
-        lua_state.set_frame_nextraargs(current_frame_idx, new_nextraargs);
-
-        // Update frame base and func_offset: reset to standard layout
-        // (func at new_base - 1, func_offset = 1). VARARGPREP will adjust
-        // again if the new function is vararg.
-        {
-            let ci = lua_state.get_call_info_mut(current_frame_idx);
-            ci.base = new_base;
-            ci.func_offset = 1;
-        }
-
-        // Update frame top: func + 1 + maxstacksize
         let frame_top = func_pos + 1 + chunk.max_stack_size;
-        // Ensure physical stack is large enough for the new function.
-        // The tailcalled function may need more stack space than the caller.
+
+        // Ensure physical stack is large enough for the new function
         let needed_physical = frame_top + EXTRA_STACK;
         if needed_physical > lua_state.stack_len() {
             lua_state.grow_stack(needed_physical)?;
         }
-        lua_state.set_frame_top(current_frame_idx, frame_top);
 
-        // Set stack top: new_base + current_nargs
-        let stack_top = new_base + current_nargs;
-        lua_state.set_top(stack_top)?;
+        // Batch update all CI fields in one get_call_info_mut call
+        // (eliminates 6+ separate call_stack[idx] lookups)
+        let ci = lua_state.get_call_info_mut(current_frame_idx);
+        ci.func = func;
+        ci.base = new_base;
+        ci.func_offset = 1;
+        ci.top = frame_top;
+        ci.pc = 0;
+        ci.nextraargs = nextraargs;
+        ci.call_status |= call_status::CIST_TAIL;
+        ci.chunk_ptr = chunk as *const _;
 
-        // Update frame func pointer to the moved function
-        lua_state.set_frame_func(current_frame_idx, moved_func);
+        // Set stack top (no bounds check needed — we ensured space above)
+        lua_state.set_top_raw(new_base + actual_nargs);
 
-        // Reset PC to 0 to start executing the new function from beginning
-        lua_state.set_frame_pc(current_frame_idx, 0);
-
-        // Mark as tail call (for debug.getinfo istailcall)
-        lua_state.get_call_info_mut(current_frame_idx).set_tail();
-
-        // Update cached chunk pointer for the new function
-        lua_state.get_call_info_mut(current_frame_idx).chunk_ptr = chunk as *const _;
-
-        // Return FrameAction::TailCall - main loop will load new chunk and continue
         Ok(FrameAction::TailCall)
     } else if func.is_cfunction() || func.is_cclosure() || func.is_rclosure() {
         // C function / Rust closure tail call
