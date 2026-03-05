@@ -72,9 +72,48 @@ pub fn try_index_meta_str(
             return Ok(IndexResult::CallMm);
         }
         if mm.tt == LUA_VTABLE {
-            let idx_table = unsafe { &*(mm.value.ptr as *const GcTable) };
-            if let Some(val) = idx_table.data.impl_table.get_shortstr_fast(key) {
-                return Ok(IndexResult::Found(val));
+            // Chain through __index tables (prototype chain optimization).
+            // Instead of checking only one level and falling through to the
+            // expensive cold path, iterate up to MAXTAGLOOP levels inline.
+            let mut current_mm = mm;
+            for _ in 0..crate::lua_vm::lua_limits::MAXTAGLOOP {
+                let idx_table = unsafe { &*(current_mm.value.ptr as *const GcTable) };
+                if let Some(val) = idx_table.data.impl_table.get_shortstr_fast(key) {
+                    return Ok(IndexResult::Found(val));
+                }
+                // Not found — check if this __index table also has a metatable
+                let next_meta = idx_table.data.meta_ptr();
+                if next_meta.is_null() {
+                    return Ok(IndexResult::Found(LuaValue::nil()));
+                }
+                let next_mt = unsafe { &mut (*next_meta.as_mut_ptr()).data };
+                if next_mt.no_tm(TM_INDEX_BIT) {
+                    return Ok(IndexResult::Found(LuaValue::nil()));
+                }
+                let next_event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+                match next_mt.impl_table.get_shortstr_fast(&next_event_key) {
+                    Some(next_mm) => {
+                        if next_mm.is_lua_function() {
+                            // __index is a Lua function — push call frame
+                            let idx_val = LuaValue {
+                                value: current_mm.value,
+                                tt: current_mm.tt,
+                            };
+                            cold::push_lua_mm_frame(lua_state, next_mm, idx_val, *key, frame_idx)?;
+                            return Ok(IndexResult::CallMm);
+                        }
+                        if next_mm.tt == LUA_VTABLE {
+                            current_mm = next_mm;
+                            continue;
+                        }
+                        // __index is some other type — fall through to cold path
+                        return Ok(IndexResult::FallThrough);
+                    }
+                    None => {
+                        next_mt.set_tm_absent(TM_INDEX_BIT);
+                        return Ok(IndexResult::Found(LuaValue::nil()));
+                    }
+                }
             }
         }
         Ok(IndexResult::FallThrough)

@@ -1452,6 +1452,7 @@ impl LuaState {
     }
 
     /// Get stack reference (for GC tracing)
+    #[inline(always)]
     pub fn stack(&self) -> &[LuaValue] {
         &self.stack
     }
@@ -3949,6 +3950,7 @@ impl LuaState {
     /// Backward GC barrier (luaC_barrierback in Lua 5.5)
     /// Called when modifying a BLACK object (typically table) with new values
     /// Instead of marking the value, re-gray the object for re-traversal
+    #[inline(always)]
     pub fn gc_barrier_back(&mut self, gc_ptr: GcObjectPtr) {
         let vm = unsafe { &mut *self.vm };
         vm.gc.barrier_back(gc_ptr);

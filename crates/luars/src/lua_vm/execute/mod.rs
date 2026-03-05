@@ -1050,7 +1050,32 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )?;
                     }
                     return_handler::handle_return0(lua_state, frame_idx);
-                    continue 'startfunc;
+
+                    // Inline context restore (like Return1) to avoid full 'startfunc
+                    // reload overhead. Critical for closures like counter.increment()
+                    // that return no values.
+                    let new_depth = lua_state.call_depth();
+                    if new_depth <= target_depth {
+                        return Ok(());
+                    }
+                    frame_idx = new_depth - 1;
+
+                    // Cold check: C frame or pending finish → full startfunc
+                    let cs = lua_state.get_call_info(frame_idx).call_status;
+                    if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
+                        continue 'startfunc;
+                    }
+
+                    // Hot path: restore caller context directly
+                    let ci = lua_state.get_call_info(frame_idx);
+                    base = ci.base;
+                    let ci_pc = ci.pc as usize;
+                    chunk = unsafe { &*ci.chunk_ptr };
+                    code_base = chunk.code.as_ptr();
+                    pc = unsafe { code_base.add(ci_pc) };
+                    if lua_state.hook_mask != 0 {
+                        lua_state.oldpc = (ci_pc - 1) as u32;
+                    }
                 }
                 OpCode::Return1 => {
                     // return R[A] — hottest return path
