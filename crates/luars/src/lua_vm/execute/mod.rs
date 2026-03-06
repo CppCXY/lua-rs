@@ -140,6 +140,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut constants: &[LuaValue] = &chunk.constants;
         let mut pc: usize = pc_init;
 
+        // Cache the stack data pointer (like C Lua's `base`).
+        // SAFETY: Valid as long as Stack Vec is not reallocated.
+        // Must be reloaded after any operation that may grow the stack
+        // (handled by restore_state!() and 'startfunc re‑entry).
+        let mut stack_ptr: *mut LuaValue = lua_state.stack.as_mut_ptr();
+
         lua_state.oldpc = if pc_init > 0 {
             (pc_init - 1) as u32 // current instruction index
         } else if chunk.is_vararg {
@@ -160,6 +166,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             () => {
                 debug_assert!(frame_idx < lua_state.call_depth());
                 base = lua_state.get_frame_base(frame_idx);
+                stack_ptr = lua_state.stack.as_mut_ptr();
             };
         }
 
@@ -210,8 +217,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     unsafe {
-                        let stack = lua_state.stack_mut();
-                        *stack.get_unchecked_mut(base + a) = *stack.get_unchecked(base + b);
+                        *stack_ptr.add(base + a) = *stack_ptr.add(base + b);
                     }
                 }
                 OpCode::LoadI => {
@@ -219,8 +225,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let sbx = instr.get_sbx();
                     unsafe {
-                        *lua_state.stack_mut().get_unchecked_mut(base + a) =
-                            LuaValue::integer(sbx as i64);
+                        let sp = stack_ptr;
+                        *sp.add(base + a) = LuaValue::integer(sbx as i64);
                     }
                 }
                 OpCode::LoadF => {
@@ -228,8 +234,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let sbx = instr.get_sbx();
                     unsafe {
-                        *lua_state.stack_mut().get_unchecked_mut(base + a) =
-                            LuaValue::float(sbx as f64);
+                        let sp = stack_ptr;
+                        *sp.add(base + a) = LuaValue::float(sbx as f64);
                     }
                 }
                 OpCode::LoadK => {
@@ -237,8 +243,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
                     unsafe {
-                        *lua_state.stack_mut().get_unchecked_mut(base + a) =
-                            *constants.get_unchecked(bx);
+                        let sp = stack_ptr;
+                        *sp.add(base + a) = *constants.get_unchecked(bx);
                     }
                 }
                 OpCode::LoadKX => {
@@ -257,33 +263,44 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::LoadFalse => {
                     // R[A] := false
                     let a = instr.get_a() as usize;
-                    setbfvalue(unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) });
+                    unsafe {
+                        let sp = stack_ptr;
+                        setbfvalue(&mut *sp.add(base + a));
+                    }
                 }
                 OpCode::LFalseSkip => {
                     // R[A] := false; pc++
                     let a = instr.get_a() as usize;
-                    setbfvalue(unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) });
+                    unsafe {
+                        let sp = stack_ptr;
+                        setbfvalue(&mut *sp.add(base + a));
+                    }
                     pc += 1; // Skip next instruction
                 }
                 OpCode::LoadTrue => {
                     // R[A] := true
                     let a = instr.get_a() as usize;
-                    setbtvalue(unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) });
+                    unsafe {
+                        let sp = stack_ptr;
+                        setbtvalue(&mut *sp.add(base + a));
+                    }
                 }
                 OpCode::LoadNil => {
                     // R[A], R[A+1], ..., R[A+B] := nil
                     let a = instr.get_a() as usize;
                     let mut b = instr.get_b() as usize;
 
-                    let stack = lua_state.stack_mut();
-                    let mut idx = base + a;
-                    loop {
-                        setnilvalue(unsafe { stack.get_unchecked_mut(idx) });
-                        if b == 0 {
-                            break;
+                    unsafe {
+                        let sp = stack_ptr;
+                        let mut idx = base + a;
+                        loop {
+                            setnilvalue(&mut *sp.add(idx));
+                            if b == 0 {
+                                break;
+                            }
+                            b -= 1;
+                            idx += 1;
                         }
-                        b -= 1;
-                        idx += 1;
                     }
                 }
                 OpCode::Add => {
@@ -294,7 +311,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
@@ -323,7 +340,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let sc = instr.get_sc();
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
 
@@ -349,7 +366,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
@@ -377,7 +394,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
@@ -405,7 +422,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
@@ -430,7 +447,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
@@ -465,7 +482,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
@@ -500,7 +517,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = sp.add(base + c) as *const LuaValue;
                         let ra_ptr = sp.add(base + a);
@@ -576,7 +593,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
@@ -604,7 +621,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
@@ -632,7 +649,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
@@ -660,7 +677,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
@@ -695,7 +712,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
@@ -720,7 +737,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
@@ -745,7 +762,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
 
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         let v1_ptr = sp.add(base + b) as *const LuaValue;
                         let v2_ptr = constants.as_ptr().add(c);
                         let ra_ptr = sp.add(base + a);
@@ -1065,13 +1082,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ci = lua_state.get_call_info(frame_idx);
                     base = ci.base;
                     let ci_pc = ci.pc as usize;
-                    chunk = unsafe { &*ci.chunk_ptr };
+                    let ci_chunk_ptr = ci.chunk_ptr;
+                    upvalue_ptrs =
+                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
+                    // ci borrow ends here
+                    stack_ptr = lua_state.stack.as_mut_ptr();
+                    chunk = unsafe { &*ci_chunk_ptr };
                     code = &chunk.code;
                     constants = &chunk.constants;
                     pc = ci_pc;
-                    // Restore cached upvalue pointer for caller
-                    upvalue_ptrs =
-                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
                     if lua_state.hook_mask != 0 {
                         lua_state.oldpc = (ci_pc - 1) as u32;
                     }
@@ -1108,15 +1127,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ci = lua_state.get_call_info(frame_idx);
                     base = ci.base;
                     let ci_pc = ci.pc as usize;
-                    chunk = unsafe { &*ci.chunk_ptr };
+                    let ci_chunk_ptr = ci.chunk_ptr;
+                    upvalue_ptrs =
+                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
+                    // ci borrow ends here
+                    stack_ptr = lua_state.stack.as_mut_ptr();
+                    chunk = unsafe { &*ci_chunk_ptr };
                     code = &chunk.code;
                     constants = &chunk.constants;
                     pc = ci_pc;
-                    // Restore cached upvalue pointer for caller
-                    upvalue_ptrs =
-                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
-                    // Update oldpc for caller context (rethook equivalent).
-                    // Only needed when hooks are active — otherwise oldpc is never read.
                     if lua_state.hook_mask != 0 {
                         lua_state.oldpc = (ci_pc - 1) as u32;
                     }
@@ -1128,8 +1147,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     unsafe {
                         let uv = &(*upvalue_ptrs.add(b)).as_ref().data;
-                        let sp = lua_state.stack.as_mut_ptr();
-                        *sp.add(base + a) = *uv.get_v_ptr();
+                        *stack_ptr.add(base + a) = *uv.get_v_ptr();
                     }
                 }
                 OpCode::SetUpval => {
@@ -1137,15 +1155,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     unsafe {
-                        let sp = lua_state.stack.as_ptr();
-                        let value = *sp.add(base + a);
+                        let value = *stack_ptr.add(base + a);
                         let upval_ptr = *upvalue_ptrs.add(b);
-                        upval_ptr.as_mut_ref().data.set_value(value);
-                        // GC barrier (only for collectable values)
-                        if value.is_collectable()
-                            && let Some(gc_ptr) = value.as_gc_ptr()
-                        {
-                            lua_state.gc_barrier(upval_ptr, gc_ptr);
+                        let v_ptr = upval_ptr.as_ref().data.get_v_ptr();
+                        *v_ptr = value;
+                        // GC barrier: cold path (keeps hot dispatch lean)
+                        if value.is_collectable() {
+                            cold::setupval_gc_barrier(lua_state, upval_ptr, value);
                         }
                     }
                 }
@@ -1622,7 +1638,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let key = unsafe { constants.get_unchecked(c) };
                     let rb;
                     unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let sp = stack_ptr;
                         rb = *sp.add(base + b);
                         // R[A+1] := R[B] (save object for method call)
                         *sp.add(base + a + 1) = rb;
@@ -1683,7 +1699,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Hot path: inline Lua function call
                     // Avoids handle_call overhead (FrameAction enum, set_top_raw,
                     // cold C/__call code in instruction cache)
-                    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                    let func = unsafe { *stack_ptr.add(func_idx) };
                     if func.is_lua_function() {
                         // Compute nargs without set_top_raw
                         // (push_lua_frame handles stack_top directly)
@@ -1721,6 +1737,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // just wrote to — saves ~7 instructions on the hot path).
                         frame_idx = lua_state.call_depth() - 1;
                         base = new_base; // push_lua_frame stores the base we gave it
+                        stack_ptr = lua_state.stack.as_mut_ptr(); // reload after potential stack grow
                         chunk = unsafe { &*new_chunk_ptr }; // same chunk_ptr we gave push_lua_frame
                         code = &chunk.code;
                         constants = &chunk.constants;
@@ -1854,10 +1871,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let bx = instr.get_bx() as usize;
 
                     unsafe {
-                        // Compute stack-relative pointer for ForLoop fast path.
-                        // SAFETY: ForLoop fast paths never grow the stack.
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let ra_ptr = sp.add(base + a);
+                        // Use cached stack_ptr — ForLoop never grows the stack.
+                        let ra_ptr = stack_ptr.add(base + a);
 
                         // Check if integer loop (tag of step at ra+1)
                         if pttisinteger(ra_ptr.add(1) as *const LuaValue) {

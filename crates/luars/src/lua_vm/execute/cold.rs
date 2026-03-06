@@ -6,6 +6,7 @@
 
 use crate::{
     GcTable, Instruction, LuaResult, LuaValue, OpCode,
+    gc::UpvaluePtr,
     lua_vm::{
         LuaError, LuaState, TmKind,
         execute::{
@@ -801,4 +802,14 @@ pub fn handle_forprep_int(
 fn cold_error_for_bad_limit(lua_state: &mut LuaState, limit_val: &LuaValue) -> LuaError {
     let t = crate::stdlib::debug::objtypename(lua_state, limit_val);
     lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
+}
+
+/// Cold GC barrier for SETUPVAL — keeps the barrier code out of the hot dispatch path.
+/// Only called when the assigned value is collectable.
+#[cold]
+#[inline(never)]
+pub fn setupval_gc_barrier(lua_state: &mut LuaState, upval_ptr: UpvaluePtr, value: LuaValue) {
+    if let Some(gc_ptr) = value.as_gc_ptr() {
+        lua_state.gc_barrier(upval_ptr, gc_ptr);
+    }
 }
