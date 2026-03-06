@@ -63,15 +63,20 @@ echo ""
 
 # Detect lua-rs binary location
 LUARS_BIN="./target/release/lua"
+LUARSM_BIN="./target/release/luam"
 if [ ! -f "$LUARS_BIN" ]; then
     echo "Building lua-rs in release mode..."
     cargo build --release
 fi
+if [ ! -f "$LUARSM_BIN" ]; then
+    echo "Error: lua-rs mimalloc binary not found at $LUARSM_BIN"
+    exit 1
+fi
 
 # Detect native Lua
 NATIVE_LUA=""
-if command -v lua5.4 &> /dev/null; then
-    NATIVE_LUA="lua5.4"
+if command -v lua5.5 &> /dev/null; then
+    NATIVE_LUA="lua5.5"
 elif command -v lua &> /dev/null; then
     NATIVE_LUA="lua"
 else
@@ -91,6 +96,11 @@ for bench in "${BENCHMARKS[@]}"; do
         echo -e "${GREEN}--- Native Lua ---${NC}"
         "$NATIVE_LUA" "benchmarks/$bench"
     fi
+
+
+    echo ""
+    echo -e "${MAGENTA}--- Lua-RS (mimalloc) ---${NC}"
+    "$LUARSM_BIN" "benchmarks/$bench"
     
     echo ""
     echo "----------------------------------------"
@@ -101,4 +111,4 @@ echo -e "${CYAN}========================================${NC}"
 echo -e "${CYAN}  Comparison Complete!${NC}"
 echo -e "${CYAN}========================================${NC}"
 echo ""
-echo -e "${YELLOW}See PERFORMANCE_REPORT.md for detailed analysis${NC}"
+
