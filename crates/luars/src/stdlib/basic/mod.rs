@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use crate::gc::{code_param, decode_param};
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::lua_value::{LuaValue, LuaValueKind, UpvalueStore};
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
@@ -1383,7 +1383,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            let func = l.create_function(Rc::new(chunk), upvalues.into_boxed_slice())?;
+            let func = l.create_function(Rc::new(chunk), UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1518,7 +1518,8 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            let func = l.create_function(std::rc::Rc::new(chunk), upvalues.into_boxed_slice())?;
+            let func =
+                l.create_function(std::rc::Rc::new(chunk), UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1595,8 +1596,10 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     let global = l.vm_mut().global;
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;
-    let upvalues = vec![env_upvalue];
-    let func = l.create_function(std::rc::Rc::new(chunk), upvalues.into_boxed_slice())?;
+    let func = l.create_function(
+        std::rc::Rc::new(chunk),
+        UpvalueStore::from_single(env_upvalue),
+    )?;
 
     // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
     // C Lua does lua_settop(L, 1) to keep only the filename, then pushes the chunk at slot 2.

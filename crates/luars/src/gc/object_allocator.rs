@@ -9,6 +9,7 @@
 // 6. GC headers embedded in objects for mark-sweep
 
 use crate::gc::string_interner::StringInterner;
+use crate::lua_value::UpvalueStore;
 use crate::lua_value::{
     CClosureFunction, Chunk, LuaUpvalue, LuaUserdata, RClosureFunction, RustCallback,
 };
@@ -180,7 +181,7 @@ impl ObjectAllocator {
         &mut self,
         gc: &mut GC,
         chunk: Rc<Chunk>,
-        upvalue_store: Box<[UpvaluePtr]>,
+        upvalue_store: UpvalueStore,
     ) -> CreateResult {
         let current_white = gc.current_white;
         let upval_size = upvalue_store.len() * std::mem::size_of::<UpvaluePtr>();

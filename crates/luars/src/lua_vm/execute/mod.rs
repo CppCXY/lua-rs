@@ -1123,25 +1123,30 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
+                    // Pointer-based: read upvalue's v pointer, copy directly to stack
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    let value = unsafe { *upvalue_ptrs.add(b) }.as_ref().data.get_value();
                     unsafe {
-                        *lua_state.stack_mut().get_unchecked_mut(base + a) = value;
+                        let uv = &(*upvalue_ptrs.add(b)).as_ref().data;
+                        let sp = lua_state.stack.as_mut_ptr();
+                        *sp.add(base + a) = *uv.get_v_ptr();
                     }
                 }
                 OpCode::SetUpval => {
                     // UpValue[B] := R[A]
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    let value = unsafe { *lua_state.stack().get_unchecked(base + a) };
-                    let upval_ptr = unsafe { *upvalue_ptrs.add(b) };
-                    upval_ptr.as_mut_ref().data.set_value(value);
-                    // GC barrier (only for collectable values)
-                    if value.is_collectable()
-                        && let Some(gc_ptr) = value.as_gc_ptr()
-                    {
-                        lua_state.gc_barrier(upval_ptr, gc_ptr);
+                    unsafe {
+                        let sp = lua_state.stack.as_ptr();
+                        let value = *sp.add(base + a);
+                        let upval_ptr = *upvalue_ptrs.add(b);
+                        upval_ptr.as_mut_ref().data.set_value(value);
+                        // GC barrier (only for collectable values)
+                        if value.is_collectable()
+                            && let Some(gc_ptr) = value.as_gc_ptr()
+                        {
+                            lua_state.gc_barrier(upval_ptr, gc_ptr);
+                        }
                     }
                 }
                 OpCode::Close => {

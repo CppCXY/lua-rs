@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::lua_value::userdata_trait::UserDataTrait;
-use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
+use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
 };
@@ -1417,15 +1417,16 @@ impl LuaState {
     /// Find or create an open upvalue for the given stack index.
     /// Uses linear scan on sorted Vec — faster than HashMap for typical 0-5 open upvalues.
     pub fn find_or_create_upvalue(&mut self, stack_index: usize) -> LuaResult<UpvaluePtr> {
-        // Linear scan on sorted list (descending by stack index).
-        // For 0-5 elements, this is faster than HashMap (no hash computation).
-        for &upval_ptr in &self.open_upvalues_list {
+        // Single scan on sorted list (descending by stack index).
+        // Finds existing upvalue or determines insert position in one pass.
+        let mut insert_pos = self.open_upvalues_list.len();
+        for (i, &upval_ptr) in self.open_upvalues_list.iter().enumerate() {
             let idx = upval_ptr.as_ref().data.get_stack_index();
             if idx == stack_index {
                 return Ok(upval_ptr);
             }
             if idx < stack_index {
-                // Passed the insertion point — not found (list is sorted descending)
+                insert_pos = i;
                 break;
             }
         }
@@ -1433,18 +1434,11 @@ impl LuaState {
         // Not found, create a new one
         let upval_ptr = {
             let ptr = LuaValuePtr {
-                ptr: (&self.stack[stack_index]) as *const LuaValue as *mut LuaValue,
+                ptr: unsafe { self.stack.as_mut_ptr().add(stack_index) },
             };
             let vm = self.vm_mut();
             vm.create_upvalue_open(stack_index, ptr)?
         };
-
-        // Insert in sorted position (higher indices first)
-        let insert_pos = self
-            .open_upvalues_list
-            .iter()
-            .position(|&ptr| ptr.as_ref().data.get_stack_index() < stack_index)
-            .unwrap_or(self.open_upvalues_list.len());
 
         self.open_upvalues_list.insert(insert_pos, upval_ptr);
 
@@ -2007,11 +2001,7 @@ impl LuaState {
 
     /// Create function closure
     #[inline]
-    pub fn create_function(
-        &mut self,
-        chunk: Rc<Chunk>,
-        upvalues: Box<[UpvaluePtr]>,
-    ) -> CreateResult {
+    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: UpvalueStore) -> CreateResult {
         self.vm_mut().create_function(chunk, upvalues)
     }
 

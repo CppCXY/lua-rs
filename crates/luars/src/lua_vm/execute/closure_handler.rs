@@ -17,6 +17,7 @@
 
 use crate::{
     Chunk, Instruction, UpvaluePtr,
+    lua_value::UpvalueStore,
     lua_vm::{LuaError, LuaResult, LuaState},
 };
 
@@ -77,14 +78,23 @@ fn handle_closure_internal(
     let upvalue_descs = &proto.upvalue_descs;
     let num_upvalues = upvalue_descs.len();
 
-    // Build upvalue array
-    let mut upvalue_vec = Vec::with_capacity(num_upvalues);
-    for desc in upvalue_descs {
-        upvalue_vec.push(resolve_upvalue(lua_state, base, desc, parent_upvalues)?);
-    }
-    let upvalue_store = upvalue_vec.into_boxed_slice();
+    // Build UpvalueStore — avoid heap allocation for 0-1 upvalues
+    let upvalue_store = match num_upvalues {
+        0 => UpvalueStore::Empty,
+        1 => {
+            let uv = resolve_upvalue(lua_state, base, &upvalue_descs[0], parent_upvalues)?;
+            UpvalueStore::One(uv)
+        }
+        _ => {
+            let mut upvalue_vec = Vec::with_capacity(num_upvalues);
+            for desc in upvalue_descs {
+                upvalue_vec.push(resolve_upvalue(lua_state, base, desc, parent_upvalues)?);
+            }
+            UpvalueStore::Many(upvalue_vec.into_boxed_slice())
+        }
+    };
 
-    // Create the function with the proto and upvalues (no intermediate Vec)
+    // Create the function with the proto and upvalues
     let closure_value = lua_state.create_function(proto, upvalue_store)?;
 
     // Store in R[A]

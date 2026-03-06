@@ -554,16 +554,68 @@ impl PartialEq for LuaString {
     }
 }
 
+/// Inline storage for upvalue pointers — avoids heap allocation for 0-1 upvalues.
+/// Most closures in Lua have 1 upvalue (_ENV), so this eliminates one allocation
+/// per closure creation on the most common path.
+pub enum UpvalueStore {
+    Empty,
+    One(UpvaluePtr),
+    Many(Box<[UpvaluePtr]>),
+}
+
+impl UpvalueStore {
+    #[inline(always)]
+    pub fn from_single(ptr: UpvaluePtr) -> Self {
+        UpvalueStore::One(ptr)
+    }
+
+    #[inline(always)]
+    pub fn from_vec(v: Vec<UpvaluePtr>) -> Self {
+        match v.len() {
+            0 => UpvalueStore::Empty,
+            1 => UpvalueStore::One(v[0]),
+            _ => UpvalueStore::Many(v.into_boxed_slice()),
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[UpvaluePtr] {
+        match self {
+            UpvalueStore::Empty => &[],
+            UpvalueStore::One(p) => std::slice::from_ref(p),
+            UpvalueStore::Many(b) => b,
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_mut_slice(&mut self) -> &mut [UpvaluePtr] {
+        match self {
+            UpvalueStore::Empty => &mut [],
+            UpvalueStore::One(p) => std::slice::from_mut(p),
+            UpvalueStore::Many(b) => b,
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        match self {
+            UpvalueStore::Empty => 0,
+            UpvalueStore::One(_) => 1,
+            UpvalueStore::Many(b) => b.len(),
+        }
+    }
+}
+
 pub struct LuaFunction {
     chunk: Rc<Chunk>,
-    upvalue_ptrs: Box<[UpvaluePtr]>,
+    upvalue_store: UpvalueStore,
 }
 
 impl LuaFunction {
-    pub fn new(chunk: Rc<Chunk>, upvalue_ptrs: Box<[UpvaluePtr]>) -> Self {
+    pub fn new(chunk: Rc<Chunk>, upvalue_store: UpvalueStore) -> Self {
         LuaFunction {
             chunk,
-            upvalue_ptrs,
+            upvalue_store,
         }
     }
 
@@ -576,13 +628,13 @@ impl LuaFunction {
     /// Get upvalue pointers as a slice.
     #[inline(always)]
     pub fn upvalues(&self) -> &[UpvaluePtr] {
-        &self.upvalue_ptrs
+        self.upvalue_store.as_slice()
     }
 
     /// Get mutable access to upvalue pointers (used by debug.upvaluejoin)
     #[inline(always)]
     pub fn upvalues_mut(&mut self) -> &mut [UpvaluePtr] {
-        &mut self.upvalue_ptrs
+        self.upvalue_store.as_mut_slice()
     }
 }
 
