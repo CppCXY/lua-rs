@@ -61,9 +61,6 @@ foreach ($bench in $benchmarks) {
     
     Write-ColorHost "--- Lua-RS ---" "Magenta"
     & ".\target\release\lua.exe" "benchmarks\$bench"
-
-    Write-ColorHost "--- Lua-RS (mimalloc) ---" "Magenta"
-    & ".\target\release\luam.exe" "benchmarks\$bench"
     
     Write-Host ""
     Write-ColorHost "--- Native Lua ---" "Green"

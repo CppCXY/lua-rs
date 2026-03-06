@@ -63,14 +63,9 @@ echo ""
 
 # Detect lua-rs binary location
 LUARS_BIN="./target/release/lua"
-LUARSM_BIN="./target/release/luam"
 if [ ! -f "$LUARS_BIN" ]; then
     echo "Building lua-rs in release mode..."
     cargo build --release
-fi
-if [ ! -f "$LUARSM_BIN" ]; then
-    echo "Error: lua-rs mimalloc binary not found at $LUARSM_BIN"
-    exit 1
 fi
 
 # Detect native Lua
@@ -97,11 +92,6 @@ for bench in "${BENCHMARKS[@]}"; do
         "$NATIVE_LUA" "benchmarks/$bench"
     fi
 
-
-    echo ""
-    echo -e "${MAGENTA}--- Lua-RS (mimalloc) ---${NC}"
-    "$LUARSM_BIN" "benchmarks/$bench"
-    
     echo ""
     echo "----------------------------------------"
 done

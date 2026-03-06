@@ -10,7 +10,6 @@ serde = ["luars/serde"]
 [dependencies]
 luars.workspace = true
 luars_debugger.workspace = true
-mimalloc.workspace = true
 
 [[bin]]
 name = "lua"
@@ -19,7 +18,3 @@ path = "src/bin/main.rs"
 [[bin]]
 name = "bytecode_dump"
 path = "src/bin/bytecode_dump.rs"
-
-[[bin]]
-name = "luam"
-path = "src/bin/main_mimalloc.rs"
