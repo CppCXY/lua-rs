@@ -37,7 +37,7 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
-    GcTable,
+    GcTable, UpvaluePtr,
     lua_value::{LUA_VFALSE, LUA_VTABLE, LuaValue},
     lua_vm::{
         Instruction, LuaError, LuaResult, LuaState, OpCode,
@@ -115,6 +115,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut base = ci.base;
         let pc_init = ci.pc as usize;
         let chunk_raw = ci.chunk_ptr; // Copy raw pointer before dropping ci borrow
+
+        // Cache upvalue slice pointer (like C Lua's `cl = ci_func(ci)`).
+        // The Box<[UpvaluePtr]> is owned by GcFunction on the heap — it won't move
+        // while this function is on the call stack, so the raw pointer stays valid.
+        let mut upvalue_ptrs: *const UpvaluePtr = unsafe {
+            let upvals = ci.func.as_lua_function_unchecked().upvalues();
+            upvals.as_ptr()
+        };
 
         // Derive chunk from CI's cached pointer (avoids Rc deref).
         // chunk_ptr is set by push_lua_frame/push_frame/handle_tailcall.
@@ -1061,6 +1069,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     code = &chunk.code;
                     constants = &chunk.constants;
                     pc = ci_pc;
+                    // Restore cached upvalue pointer for caller
+                    upvalue_ptrs =
+                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
                     if lua_state.hook_mask != 0 {
                         lua_state.oldpc = (ci_pc - 1) as u32;
                     }
@@ -1101,6 +1112,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     code = &chunk.code;
                     constants = &chunk.constants;
                     pc = ci_pc;
+                    // Restore cached upvalue pointer for caller
+                    upvalue_ptrs =
+                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
                     // Update oldpc for caller context (rethook equivalent).
                     // Only needed when hooks are active — otherwise oldpc is never read.
                     if lua_state.hook_mask != 0 {
@@ -1109,17 +1123,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
-                    // Derive upvalue_ptrs on demand (not cached cross-dispatch)
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    let upvalue_ptrs = unsafe {
-                        let ci = lua_state.get_call_info(frame_idx);
-                        ci.func.as_lua_function_unchecked().upvalues()
-                    };
-                    let value = unsafe { upvalue_ptrs.get_unchecked(b) }
-                        .as_ref()
-                        .data
-                        .get_value();
+                    let value = unsafe { *upvalue_ptrs.add(b) }.as_ref().data.get_value();
                     unsafe {
                         *lua_state.stack_mut().get_unchecked_mut(base + a) = value;
                     }
@@ -1128,12 +1134,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // UpValue[B] := R[A]
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
-                    let upvalue_ptrs = unsafe {
-                        let ci = lua_state.get_call_info(frame_idx);
-                        ci.func.as_lua_function_unchecked().upvalues()
-                    };
                     let value = unsafe { *lua_state.stack().get_unchecked(base + a) };
-                    let upval_ptr = unsafe { *upvalue_ptrs.get_unchecked(b) };
+                    let upval_ptr = unsafe { *upvalue_ptrs.add(b) };
                     upval_ptr.as_mut_ref().data.set_value(value);
                     // GC barrier (only for collectable values)
                     if value.is_collectable()
@@ -1725,6 +1727,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         code = &chunk.code;
                         constants = &chunk.constants;
                         pc = 0; // pc = 0 means start of code
+                        // Cache callee's upvalue pointer
+                        upvalue_ptrs = lua_func.upvalues().as_ptr();
 
                         // Call hook for inline Lua call (cold path)
                         if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
@@ -1797,6 +1801,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             code = &chunk.code;
                             constants = &chunk.constants;
                             pc = 0; // new function starts at pc=0
+                            // Restore cached upvalue pointer for tail-called function
+                            upvalue_ptrs =
+                                unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
 
                             // Set oldpc sentinel for hook_check_instruction
                             lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
@@ -2117,11 +2124,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let upvalue_ptrs = unsafe {
-                        let ci = lua_state.get_call_info(frame_idx);
-                        ci.func.as_lua_function_unchecked().upvalues()
-                    };
-                    let upval = &upvalue_ptrs[b].as_ref().data;
+                    let upval_ptr = unsafe { *upvalue_ptrs.add(b) };
+                    let upval = &upval_ptr.as_ref().data;
                     let key = unsafe { constants.get_unchecked(c) };
                     let table_value = upval.get_value_ref();
 
@@ -2167,12 +2171,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                         }
                         // Slow path: metamethod lookup (non-Lua __index, table chain, non-table)
-                        let table_value = *lua_state
-                            .get_call_info(frame_idx)
-                            .func
-                            .as_lua_function()
-                            .unwrap()
-                            .upvalues()[b]
+                        let table_value = *unsafe { *upvalue_ptrs.add(b) }
                             .as_ref()
                             .data
                             .get_value_ref();
@@ -2219,9 +2218,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Fast path: direct set for existing short string key
                     // Use raw pointer to avoid borrow conflicts with lua_state
                     let (table_val_copy, table_raw_ptr) = unsafe {
-                        let ci = lua_state.get_call_info(frame_idx);
-                        let upvalue_ptrs = ci.func.as_lua_function_unchecked().upvalues();
-                        let upval = &upvalue_ptrs[a].as_ref().data;
+                        let upval = &(*upvalue_ptrs.add(a)).as_ref().data;
                         let tv = upval.get_value_ref();
                         (*tv, tv as *const LuaValue)
                     };

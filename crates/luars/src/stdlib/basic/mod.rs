@@ -1383,10 +1383,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            let func = l.create_function(
-                Rc::new(chunk),
-                crate::lua_value::UpvalueStore::from_vec(upvalues),
-            )?;
+            let func = l.create_function(Rc::new(chunk), upvalues.into_boxed_slice())?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1521,10 +1518,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            let func = l.create_function(
-                std::rc::Rc::new(chunk),
-                crate::lua_value::UpvalueStore::from_vec(upvalues),
-            )?;
+            let func = l.create_function(std::rc::Rc::new(chunk), upvalues.into_boxed_slice())?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1602,10 +1596,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;
     let upvalues = vec![env_upvalue];
-    let func = l.create_function(
-        std::rc::Rc::new(chunk),
-        crate::lua_value::UpvalueStore::from_vec(upvalues),
-    )?;
+    let func = l.create_function(std::rc::Rc::new(chunk), upvalues.into_boxed_slice())?;
 
     // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
     // C Lua does lua_settop(L, 1) to keep only the filename, then pushes the chunk at slot 2.

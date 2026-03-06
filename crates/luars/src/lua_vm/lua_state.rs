@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::lua_value::userdata_trait::UserDataTrait;
-use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
+use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
 };
@@ -2007,7 +2007,11 @@ impl LuaState {
 
     /// Create function closure
     #[inline]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: UpvalueStore) -> CreateResult {
+    pub fn create_function(
+        &mut self,
+        chunk: Rc<Chunk>,
+        upvalues: Box<[UpvaluePtr]>,
+    ) -> CreateResult {
         self.vm_mut().create_function(chunk, upvalues)
     }
 

@@ -554,82 +554,13 @@ impl PartialEq for LuaString {
     }
 }
 
-/// Inline storage for upvalue pointers — avoids heap allocation for 0-2 upvalues.
-/// Stored directly in LuaFunction: 0-2 upvalues are inline, 3+ use Box<[UpvaluePtr]>.
-pub enum UpvalueStore {
-    Empty,
-    One(UpvaluePtr),
-    Two([UpvaluePtr; 2]),
-    Many(Box<[UpvaluePtr]>),
-}
-
-impl UpvalueStore {
-    #[inline(always)]
-    pub fn from_vec(v: Vec<UpvaluePtr>) -> Self {
-        match v.len() {
-            0 => UpvalueStore::Empty,
-            1 => UpvalueStore::One(v[0]),
-            2 => UpvalueStore::Two([v[0], v[1]]),
-            _ => UpvalueStore::Many(v.into_boxed_slice()),
-        }
-    }
-
-    /// Convert to Box<[UpvaluePtr]> for storage in LuaFunction.
-    /// 0 upvalues: no heap allocation (dangling pointer).
-    /// 1-2 upvalues: single small allocation (8-16 bytes).
-    /// 3+: already boxed, zero-cost move.
-    #[inline(always)]
-    pub fn into_boxed_slice(self) -> Box<[UpvaluePtr]> {
-        match self {
-            UpvalueStore::Empty => Box::new([]),
-            UpvalueStore::One(p) => Box::new([p]),
-            UpvalueStore::Two(ps) => Box::new(ps),
-            UpvalueStore::Many(v) => v,
-        }
-    }
-
-    /// Get upvalue pointers as a slice (branchless for Many, single match for 0-2).
-    /// Called once per function entry — branch cost is negligible.
-    #[inline(always)]
-    pub fn as_slice(&self) -> &[UpvaluePtr] {
-        match self {
-            UpvalueStore::Empty => &[],
-            UpvalueStore::One(p) => std::slice::from_ref(p),
-            UpvalueStore::Two(a) => a.as_slice(),
-            UpvalueStore::Many(v) => v,
-        }
-    }
-
-    /// Get mutable upvalue pointers as a slice.
-    /// Used by debug.upvaluejoin (rare).
-    #[inline(always)]
-    pub fn as_mut_slice(&mut self) -> &mut [UpvaluePtr] {
-        match self {
-            UpvalueStore::Empty => &mut [],
-            UpvalueStore::One(p) => std::slice::from_mut(p),
-            UpvalueStore::Two(a) => a.as_mut_slice(),
-            UpvalueStore::Many(v) => v,
-        }
-    }
-
-    #[inline(always)]
-    pub fn len(&self) -> usize {
-        match self {
-            UpvalueStore::Empty => 0,
-            UpvalueStore::One(_) => 1,
-            UpvalueStore::Two(_) => 2,
-            UpvalueStore::Many(v) => v.len(),
-        }
-    }
-}
-
 pub struct LuaFunction {
     chunk: Rc<Chunk>,
-    upvalue_ptrs: UpvalueStore,
+    upvalue_ptrs: Box<[UpvaluePtr]>,
 }
 
 impl LuaFunction {
-    pub fn new(chunk: Rc<Chunk>, upvalue_ptrs: UpvalueStore) -> Self {
+    pub fn new(chunk: Rc<Chunk>, upvalue_ptrs: Box<[UpvaluePtr]>) -> Self {
         LuaFunction {
             chunk,
             upvalue_ptrs,
@@ -643,16 +574,15 @@ impl LuaFunction {
     }
 
     /// Get upvalue pointers as a slice.
-    /// Called once per 'startfunc iteration (function entry) — branch is negligible.
     #[inline(always)]
     pub fn upvalues(&self) -> &[UpvaluePtr] {
-        self.upvalue_ptrs.as_slice()
+        &self.upvalue_ptrs
     }
 
     /// Get mutable access to upvalue pointers (used by debug.upvaluejoin)
     #[inline(always)]
     pub fn upvalues_mut(&mut self) -> &mut [UpvaluePtr] {
-        self.upvalue_ptrs.as_mut_slice()
+        &mut self.upvalue_ptrs
     }
 }
 

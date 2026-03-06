@@ -16,7 +16,6 @@ use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     GC, GcBinary, GcCClosure, GcFunction, GcObjectOwner, GcRClosure, GcTable, GcThread, GcUpvalue,
     GcUserdata, LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
-    lua_value::UpvalueStore,
 };
 use std::rc::Rc;
 
@@ -181,10 +180,9 @@ impl ObjectAllocator {
         &mut self,
         gc: &mut GC,
         chunk: Rc<Chunk>,
-        upvalue_store: UpvalueStore,
+        upvalue_store: Box<[UpvaluePtr]>,
     ) -> CreateResult {
         let current_white = gc.current_white;
-        // Use cached proto data size + upvalue size
         let upval_size = upvalue_store.len() * std::mem::size_of::<UpvaluePtr>();
         let size = chunk.proto_data_size + upval_size as u32;
 

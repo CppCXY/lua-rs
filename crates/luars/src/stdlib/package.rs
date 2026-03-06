@@ -209,10 +209,7 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
 
     // Create a function from the chunk with _ENV upvalue
     let env_upvalue = vm.create_upvalue_closed(vm.global)?;
-    let func = vm.create_function(
-        Rc::new(chunk),
-        crate::lua_value::UpvalueStore::from_vec(vec![env_upvalue]),
-    )?;
+    let func = vm.create_function(Rc::new(chunk), vec![env_upvalue].into_boxed_slice())?;
 
     // Call the function to execute the module and get its return value
     // The module should return its exports (usually a table)

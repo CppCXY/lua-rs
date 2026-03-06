@@ -15,9 +15,7 @@ pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::GC;
-use crate::lua_value::{
-    Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
-};
+use crate::lua_value::{Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr};
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
@@ -345,7 +343,7 @@ impl LuaVM {
         // Main chunk needs _ENV upvalue pointing to global table
         // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
         let env_upval = self.create_upvalue_closed(self.global)?;
-        let func = self.create_function(chunk, UpvalueStore::from_vec(vec![env_upval]))?;
+        let func = self.create_function(chunk, vec![env_upval].into_boxed_slice())?;
         self.execute_function(func, vec![])
     }
 
@@ -370,7 +368,7 @@ impl LuaVM {
     pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
         let chunk = self.compile(source)?;
         let env_upval = self.create_upvalue_closed(self.global)?;
-        self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))
+        self.create_function(Rc::new(chunk), vec![env_upval].into_boxed_slice())
     }
 
     /// Compile source code with a chunk name and return a callable function value.
@@ -379,7 +377,7 @@ impl LuaVM {
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
         let chunk = self.compile_with_name(source, chunk_name)?;
         let env_upval = self.create_upvalue_closed(self.global)?;
-        self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))
+        self.create_function(Rc::new(chunk), vec![env_upval].into_boxed_slice())
     }
 
     /// Read a file, compile it, and execute it.
@@ -917,8 +915,7 @@ impl LuaVM {
     ) -> LuaResult<async_thread::AsyncThread> {
         // Main chunk needs _ENV upvalue pointing to global table
         let env_upval = self.create_upvalue_closed(self.global)?;
-        let func_val =
-            self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))?;
+        let func_val = self.create_function(Rc::new(chunk), vec![env_upval].into_boxed_slice())?;
         let thread_val = self.create_thread(func_val)?;
         let vm_ptr = self as *mut LuaVM;
         Ok(async_thread::AsyncThread::new(thread_val, vm_ptr, args))
@@ -1010,7 +1007,7 @@ impl LuaVM {
         let chunk = self.compile(async_thread::ASYNC_CALL_RUNNER)?;
         let env_upval = self.create_upvalue_closed(self.global)?;
         let runner_func =
-            self.create_function(Rc::new(chunk), UpvalueStore::from_vec(vec![env_upval]))?;
+            self.create_function(Rc::new(chunk), vec![env_upval].into_boxed_slice())?;
         let thread_val = self.create_thread(runner_func)?;
         let vm_ptr = self as *mut LuaVM;
         async_thread::AsyncCallHandle::new(thread_val, vm_ptr, func)
@@ -1166,7 +1163,11 @@ impl LuaVM {
 
     /// Create a function in object pool
     #[inline(always)]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: UpvalueStore) -> CreateResult {
+    pub fn create_function(
+        &mut self,
+        chunk: Rc<Chunk>,
+        upvalues: Box<[UpvaluePtr]>,
+    ) -> CreateResult {
         self.object_allocator
             .create_function(&mut self.gc, chunk, upvalues)
     }
