@@ -1358,7 +1358,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
 
-                    let sp = unsafe { lua_state.stack().as_ptr() };
+                    let sp = lua_state.stack().as_ptr();
                     let ra_ptr = unsafe { sp.add(base + a) };
                     let rb_ptr = unsafe { sp.add(base + b) };
                     let val_ptr = if k {
@@ -1470,7 +1470,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
 
-                    let sp = unsafe { lua_state.stack().as_ptr() };
+                    let sp = lua_state.stack().as_ptr();
                     let ra_ptr = unsafe { sp.add(base + a) };
                     let val_ptr = if k {
                         unsafe { constants.as_ptr().add(c) }
