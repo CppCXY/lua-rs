@@ -722,20 +722,23 @@ impl NativeTable {
     /// Called directly from VM execute loop for maximum performance
     #[inline(always)]
     pub fn fast_geti(&self, key: i64) -> Option<LuaValue> {
-        // Fast path: array bounds check
-        if key >= 1 && key <= self.asize as i64 {
-            let k = (key - 1) as usize;
+        // Unsigned subtraction trick (like C Lua's l_castS2U(k)-1 < asize):
+        // key < 1 wraps to huge unsigned, single comparison handles both bounds
+        let u = (key as u64).wrapping_sub(1);
+        if u < self.asize as u64 {
+            let k = u as usize;
             unsafe {
-                // Direct array access (zero function calls)
-                // Layout: Tags at array + sizeof(u32) + k
-                //         Values at array - sizeof(Value) * (1 + k)
                 let tag_ptr = (self.array as *const u8).add(4 + k);
                 let tt = *tag_ptr;
 
-                if tt != LUA_VNIL && tt != LUA_VEMPTY {
-                    let value_ptr = (self.array as *mut Value).sub(1 + k);
-                    let value = *value_ptr;
-                    return Some(LuaValue { value, tt });
+                // Single comparison: both LUA_VNIL(0x00) and LUA_VEMPTY(0x10)
+                // have novariant() == 0 (LUA_TNIL). Any real value has low nibble != 0.
+                if (tt & 0x0F) != 0 {
+                    let value_ptr = (self.array as *const Value).sub(1 + k);
+                    return Some(LuaValue {
+                        value: *value_ptr,
+                        tt,
+                    });
                 }
             }
             return None;
@@ -748,6 +751,27 @@ impl NativeTable {
         }
 
         None
+    }
+
+    /// Zero-copy fast GETI: writes directly to destination pointer like C Lua's farr2val.
+    /// Returns true if a non-nil/non-empty value was found and written.
+    /// CRITICAL: #[inline(always)] — this is the hot path for t[i] reads.
+    #[inline(always)]
+    pub unsafe fn fast_geti_into(&self, key: i64, dest: *mut LuaValue) -> bool {
+        unsafe {
+            let u = (key as u64).wrapping_sub(1);
+            if u < self.asize as u64 {
+                let k = u as usize;
+                let tag_ptr = (self.array as *const u8).add(4 + k);
+                let tt = *tag_ptr;
+                if (tt & 0x0F) != 0 {
+                    (*dest).tt = tt;
+                    (*dest).value = *(self.array as *const Value).sub(1 + k);
+                    return true;
+                }
+            }
+            false
+        }
     }
 
     /// Get value from array part
@@ -767,9 +791,9 @@ impl NativeTable {
     /// reason, but we handle both cases: overwrite (fast) and new-key (via write_array).
     #[inline(always)]
     pub fn fast_seti(&mut self, key: i64, value: LuaValue) -> bool {
-        // Fast path: array bounds check
-        if key >= 1 && key <= self.asize as i64 {
-            let k = (key - 1) as usize;
+        let u = (key as u64).wrapping_sub(1);
+        if u < self.asize as u64 {
+            let k = u as usize;
             unsafe {
                 let old_tag = *self.get_arr_tag(k);
                 // Overwrite fast path: existing live slot + non-nil new value
@@ -792,7 +816,8 @@ impl NativeTable {
     /// consulted for keys whose rawget() returns nil.
     #[inline(always)]
     pub fn fast_seti_existing(&mut self, key: i64, value: LuaValue) -> bool {
-        if key >= 1 && key <= self.asize as i64 {
+        let u = (key as u64).wrapping_sub(1);
+        if u < self.asize as u64 {
             let existing = unsafe { self.read_array(key) };
             if existing.is_some_and(|v| !v.is_nil()) {
                 unsafe {

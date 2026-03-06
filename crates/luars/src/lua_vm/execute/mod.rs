@@ -1191,53 +1191,50 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetTable => {
                     // GETTABLE: R[A] := R[B][R[C]]
-                    // Inline: fast table lookup + no-metatable nil.
-                    // Cold: metatable __index chain → exec_gettable.
+                    // Pointer-based access (like C Lua's vRB/vRC — no 16-byte copy)
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let rb;
-                    let rc;
-                    unsafe {
-                        let sp = lua_state.stack().as_ptr();
-                        rb = *sp.add(base + b);
-                        rc = *sp.add(base + c);
-                    }
+                    let sp = lua_state.stack.as_mut_ptr();
 
-                    if rb.tt == LUA_VTABLE {
-                        let table_gc = unsafe { &*(rb.value.ptr as *const GcTable) };
-                        let table_ref = &table_gc.data;
-                        let result = if rc.ttisinteger() {
-                            table_ref.impl_table.fast_geti(rc.ivalue())
-                        } else {
-                            table_ref.impl_table.raw_get(&rc)
-                        };
-                        if let Some(val) = result {
-                            unsafe {
-                                *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
-                            }
-                            continue;
-                        }
-                        let meta = table_ref.meta_ptr();
-                        if meta.is_null() {
-                            unsafe {
-                                *lua_state.stack_mut().get_unchecked_mut(base + a) =
-                                    LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        save_pc!();
-                        match noinline::try_index_meta_generic(lua_state, meta, rb, rc, frame_idx)?
-                        {
-                            noinline::IndexResult::Found(val) => {
-                                unsafe {
-                                    *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
-                                }
+                    unsafe {
+                        let rb_ptr = sp.add(base + b);
+                        let rc_ptr = sp.add(base + c) as *const LuaValue;
+
+                        if (*rb_ptr).tt == LUA_VTABLE {
+                            let table_gc = &*((*rb_ptr).value.ptr as *const GcTable);
+                            let native = &table_gc.data.impl_table;
+
+                            if pttisinteger(rc_ptr)
+                                && native.fast_geti_into(pivalue(rc_ptr), sp.add(base + a))
+                            {
                                 continue;
                             }
-                            noinline::IndexResult::CallMm => continue 'startfunc,
-                            noinline::IndexResult::FallThrough => {}
+                            // Non-integer key OR integer key missed array
+                            let rc = *rc_ptr;
+                            if let Some(val) = native.raw_get(&rc) {
+                                *sp.add(base + a) = val;
+                                continue;
+                            }
+                            // Miss: check metatable
+                            let meta = table_gc.data.meta_ptr();
+                            if meta.is_null() {
+                                *sp.add(base + a) = LuaValue::nil();
+                                continue;
+                            }
+                            let rb = *rb_ptr;
+                            save_pc!();
+                            match noinline::try_index_meta_generic(
+                                lua_state, meta, rb, rc, frame_idx,
+                            )? {
+                                noinline::IndexResult::Found(val) => {
+                                    *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
+                                    continue;
+                                }
+                                noinline::IndexResult::CallMm => continue 'startfunc,
+                                noinline::IndexResult::FallThrough => {}
+                            }
                         }
                     }
 
@@ -1254,35 +1251,38 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as i64;
 
-                    let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
+                    let sp = lua_state.stack.as_mut_ptr();
 
-                    if rb.tt == LUA_VTABLE {
-                        let table_gc = unsafe { &*(rb.value.ptr as *const GcTable) };
-                        let table_ref = &table_gc.data;
-                        if let Some(val) = table_ref.impl_table.fast_geti(c) {
-                            unsafe {
-                                *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
-                            }
-                            continue;
-                        }
-                        let meta = table_ref.meta_ptr();
-                        if meta.is_null() {
-                            unsafe {
-                                *lua_state.stack_mut().get_unchecked_mut(base + a) =
-                                    LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        save_pc!();
-                        match noinline::try_index_meta_int(lua_state, meta, rb, c, frame_idx)? {
-                            noinline::IndexResult::Found(val) => {
-                                unsafe {
-                                    *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
-                                }
+                    unsafe {
+                        let rb_ptr = sp.add(base + b);
+
+                        if (*rb_ptr).tt == LUA_VTABLE {
+                            let table_gc = &*((*rb_ptr).value.ptr as *const GcTable);
+                            let native = &table_gc.data.impl_table;
+
+                            if native.fast_geti_into(c, sp.add(base + a)) {
                                 continue;
                             }
-                            noinline::IndexResult::CallMm => continue 'startfunc,
-                            noinline::IndexResult::FallThrough => {}
+                            // Array miss: check hash part for sparse integer keys
+                            if let Some(val) = native.fast_geti(c) {
+                                *sp.add(base + a) = val;
+                                continue;
+                            }
+                            let meta = table_gc.data.meta_ptr();
+                            if meta.is_null() {
+                                *sp.add(base + a) = LuaValue::nil();
+                                continue;
+                            }
+                            let rb = *rb_ptr;
+                            save_pc!();
+                            match noinline::try_index_meta_int(lua_state, meta, rb, c, frame_idx)? {
+                                noinline::IndexResult::Found(val) => {
+                                    *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
+                                    continue;
+                                }
+                                noinline::IndexResult::CallMm => continue 'startfunc,
+                                noinline::IndexResult::FallThrough => {}
+                            }
                         }
                     }
 
@@ -1295,42 +1295,39 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetField => {
                     // GETFIELD: R[A] := R[B][K[C]:string]
-                    // HOT PATH: Unsafe stack access, single stack_mut()
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
                     let key = unsafe { constants.get_unchecked(c) };
+                    let sp = lua_state.stack.as_mut_ptr();
 
-                    // Try fast path: table with string key
-                    if rb.tt == LUA_VTABLE {
-                        let table_gc = unsafe { &*(rb.value.ptr as *const GcTable) };
-                        let table_ref = &table_gc.data;
-                        if let Some(val) = table_ref.impl_table.get_shortstr_fast(key) {
-                            unsafe {
-                                *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
-                            }
-                            continue;
-                        }
-                        let meta = table_ref.meta_ptr();
-                        if meta.is_null() {
-                            unsafe {
-                                *lua_state.stack_mut().get_unchecked_mut(base + a) =
-                                    LuaValue::nil();
-                            }
-                            continue;
-                        }
-                        save_pc!();
-                        match noinline::try_index_meta_str(lua_state, meta, rb, key, frame_idx)? {
-                            noinline::IndexResult::Found(val) => {
-                                unsafe {
-                                    *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
-                                }
+                    unsafe {
+                        let rb_ptr = sp.add(base + b);
+
+                        if (*rb_ptr).tt == LUA_VTABLE {
+                            let table_gc = &*((*rb_ptr).value.ptr as *const GcTable);
+                            let table_ref = &table_gc.data;
+                            if let Some(val) = table_ref.impl_table.get_shortstr_fast(key) {
+                                *sp.add(base + a) = val;
                                 continue;
                             }
-                            noinline::IndexResult::CallMm => continue 'startfunc,
-                            noinline::IndexResult::FallThrough => {}
+                            let meta = table_ref.meta_ptr();
+                            if meta.is_null() {
+                                *sp.add(base + a) = LuaValue::nil();
+                                continue;
+                            }
+                            let rb = *rb_ptr;
+                            save_pc!();
+                            match noinline::try_index_meta_str(lua_state, meta, rb, key, frame_idx)?
+                            {
+                                noinline::IndexResult::Found(val) => {
+                                    *lua_state.stack_mut().get_unchecked_mut(base + a) = val;
+                                    continue;
+                                }
+                                noinline::IndexResult::CallMm => continue 'startfunc,
+                                noinline::IndexResult::FallThrough => {}
+                            }
                         }
                     }
 
@@ -1350,7 +1347,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::SetTable => {
                     // SETTABLE: R[A][R[B]] := RK(C)
-                    // HOT PATH: inline fast path for integer keys + no-metatable
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
@@ -1364,30 +1360,30 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         unsafe { *lua_state.stack().get_unchecked(base + c) }
                     };
 
-                    if let Some(table_ref) = ra.as_table_mut() {
+                    if ra.tt == LUA_VTABLE {
+                        let table_gc = unsafe { &mut *(ra.value.ptr as *mut GcTable) };
+                        let table_ref = &mut table_gc.data;
                         if !table_ref.has_metatable() {
                             // No metatable: try integer fast path first (t[i] = v)
                             if rb.ttisinteger() {
                                 if table_ref.impl_table.fast_seti(rb.ivalue(), val) {
-                                    // GC write barrier
-                                    if val.is_collectable()
-                                        && let Some(gc_ptr) = ra.as_gc_ptr()
-                                    {
-                                        lua_state.gc_barrier_back(gc_ptr);
+                                    if val.is_collectable() {
+                                        lua_state.gc_barrier_back(unsafe {
+                                            ra.as_gc_ptr_table_unchecked()
+                                        });
                                     }
                                     continue;
                                 }
-                                // Key outside array — skip redundant fast_seti in set_int
                                 let delta = table_ref.impl_table.set_int_slow(rb.ivalue(), val);
-                                if delta != 0
-                                    && let Some(table_ptr) = ra.as_table_ptr()
-                                {
-                                    lua_state.gc_track_table_resize(table_ptr, delta);
+                                if delta != 0 {
+                                    lua_state.gc_track_table_resize(
+                                        unsafe { ra.as_table_ptr_unchecked() },
+                                        delta,
+                                    );
                                 }
-                                if val.is_collectable()
-                                    && let Some(gc_ptr) = ra.as_gc_ptr()
-                                {
-                                    lua_state.gc_barrier_back(gc_ptr);
+                                if val.is_collectable() {
+                                    lua_state
+                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                                 }
                                 continue;
                             }
@@ -1406,10 +1402,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if rb.ttisinteger()
                             && table_ref.impl_table.fast_seti_existing(rb.ivalue(), val)
                         {
-                            if val.is_collectable()
-                                && let Some(gc_ptr) = ra.as_gc_ptr()
-                            {
-                                lua_state.gc_barrier_back(gc_ptr);
+                            if val.is_collectable() {
+                                lua_state
+                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                             }
                             continue;
                         }
@@ -1420,7 +1415,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             lua_state.raw_set(&ra, rb, val);
                             continue;
                         }
-                        // Noinline __newindex fast path: Lua function → non-recursive
+                        // Noinline __newindex fast path
                         let meta = table_ref.meta_ptr();
                         if !meta.is_null() {
                             save_pc!();
@@ -1463,37 +1458,35 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Without metatable: any in-range array write is fine.
                     // With metatable: only overwrite existing non-nil values
                     // (nil slots require __newindex check).
-                    if let Some(table_ref) = ra.as_table_mut() {
+                    if ra.tt == LUA_VTABLE {
+                        let table_gc = unsafe { &mut *(ra.value.ptr as *mut GcTable) };
+                        let table_ref = &mut table_gc.data;
                         if !table_ref.has_metatable() {
                             if table_ref.impl_table.fast_seti(b as i64, value) {
-                                // GC write barrier
-                                if value.is_collectable()
-                                    && let Some(gc_ptr) = ra.as_gc_ptr()
-                                {
-                                    lua_state.gc_barrier_back(gc_ptr);
+                                if value.is_collectable() {
+                                    lua_state
+                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                                 }
                                 continue;
                             }
                             // No metatable: use set_int_slow (skip redundant fast_seti)
                             let delta = table_ref.impl_table.set_int_slow(b as i64, value);
-                            if delta != 0
-                                && let Some(table_ptr) = ra.as_table_ptr()
-                            {
-                                lua_state.gc_track_table_resize(table_ptr, delta);
+                            if delta != 0 {
+                                lua_state.gc_track_table_resize(
+                                    unsafe { ra.as_table_ptr_unchecked() },
+                                    delta,
+                                );
                             }
-                            if value.is_collectable()
-                                && let Some(gc_ptr) = ra.as_gc_ptr()
-                            {
-                                lua_state.gc_barrier_back(gc_ptr);
+                            if value.is_collectable() {
+                                lua_state
+                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                             }
                             continue;
                         }
                         if table_ref.impl_table.fast_seti_existing(b as i64, value) {
-                            // GC write barrier
-                            if value.is_collectable()
-                                && let Some(gc_ptr) = ra.as_gc_ptr()
-                            {
-                                lua_state.gc_barrier_back(gc_ptr);
+                            if value.is_collectable() {
+                                lua_state
+                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                             }
                             continue;
                         }
@@ -1549,13 +1542,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // __newindex is NEVER consulted when the key already exists
                     // in the table's own hash part. So this is safe regardless
                     // of whether the table has a metatable.
-                    if let Some(table_ref) = ra.as_table_mut() {
+                    if ra.tt == LUA_VTABLE {
+                        let table_gc = unsafe { &mut *(ra.value.ptr as *mut GcTable) };
+                        let table_ref = &mut table_gc.data;
                         if table_ref.impl_table.fast_setfield(key, value) {
                             // Existing key updated — GC write barrier
-                            if value.is_collectable()
-                                && let Some(gc_ptr) = ra.as_gc_ptr()
-                            {
-                                lua_state.gc_barrier_back(gc_ptr);
+                            if value.is_collectable() {
+                                lua_state
+                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                             }
                             continue;
                         }
@@ -1566,25 +1560,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 // Must invalidate TM cache: this table may be used as
                                 // a metatable for other tables (e.g. mt.__eq = func).
                                 table_ref.invalidate_tm_cache();
-                                if value.is_collectable()
-                                    && let Some(gc_ptr) = ra.as_gc_ptr()
-                                {
-                                    lua_state.gc_barrier_back(gc_ptr);
+                                if value.is_collectable() {
+                                    lua_state
+                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                                 }
                                 continue;
                             }
                             // Needs rehash — use raw_set directly
                             let (_, delta) = table_ref.impl_table.raw_set(key, value);
                             table_ref.invalidate_tm_cache();
-                            if delta != 0
-                                && let Some(table_ptr) = ra.as_table_ptr()
-                            {
-                                lua_state.gc_track_table_resize(table_ptr, delta);
+                            if delta != 0 {
+                                lua_state.gc_track_table_resize(
+                                    unsafe { ra.as_table_ptr_unchecked() },
+                                    delta,
+                                );
                             }
-                            if value.is_collectable()
-                                && let Some(gc_ptr) = ra.as_gc_ptr()
-                            {
-                                lua_state.gc_barrier_back(gc_ptr);
+                            if value.is_collectable() {
+                                lua_state
+                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
                             }
                             continue;
                         }

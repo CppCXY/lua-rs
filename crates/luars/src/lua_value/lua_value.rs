@@ -941,6 +941,47 @@ impl LuaValue {
         }
     }
 
+    /// Unchecked version: caller guarantees this is a GC-collectable value (table, function, etc.).
+    /// Skips the 8-arm kind() match. For use in hot paths where the type tag was already checked.
+    #[inline(always)]
+    pub unsafe fn as_gc_ptr_unchecked(&self) -> GcObjectPtr {
+        unsafe {
+            let ptr = self.value.ptr as u64;
+            match self.kind() {
+                LuaValueKind::Table => GcObjectPtr::from(TablePtr::new(ptr as *mut GcTable)),
+                LuaValueKind::Function => {
+                    GcObjectPtr::from(FunctionPtr::new(ptr as *mut GcFunction))
+                }
+                LuaValueKind::CClosure => {
+                    GcObjectPtr::from(CClosurePtr::new(ptr as *mut GcCClosure))
+                }
+                LuaValueKind::RClosure => {
+                    GcObjectPtr::from(RClosurePtr::new(ptr as *mut GcRClosure))
+                }
+                LuaValueKind::String => GcObjectPtr::from(StringPtr::new(ptr as *mut GcString)),
+                LuaValueKind::Binary => GcObjectPtr::from(BinaryPtr::new(ptr as *mut GcBinary)),
+                LuaValueKind::Thread => GcObjectPtr::from(ThreadPtr::new(ptr as *mut GcThread)),
+                LuaValueKind::Userdata => {
+                    GcObjectPtr::from(UserdataPtr::new(ptr as *mut GcUserdata))
+                }
+                _ => core::hint::unreachable_unchecked(),
+            }
+        }
+    }
+
+    /// Unchecked version: caller guarantees this is a table value (tt == LUA_VTABLE).
+    /// Constructs GcObjectPtr tagged as table without any type checks.
+    #[inline(always)]
+    pub unsafe fn as_gc_ptr_table_unchecked(&self) -> GcObjectPtr {
+        unsafe { GcObjectPtr::from(TablePtr::new(self.value.ptr as *mut GcTable)) }
+    }
+
+    /// Unchecked version: caller guarantees this is a table value (tt == LUA_VTABLE).
+    #[inline(always)]
+    pub unsafe fn as_table_ptr_unchecked(&self) -> TablePtr {
+        unsafe { TablePtr::new(self.value.ptr as *mut GcTable) }
+    }
+
     // ============ Truthiness (Lua semantics) ============
 
     /// l_isfalse - Lua truthiness: only nil and false are falsy
