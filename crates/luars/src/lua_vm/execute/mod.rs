@@ -1352,71 +1352,87 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::SetTable => {
                     // SETTABLE: R[A][R[B]] := RK(C)
+                    // Pointer-based: avoid 16B LuaValue copies on fast path
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
 
-                    let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
-                    let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
-                    let val = if k {
-                        unsafe { *constants.as_ptr().add(c) }
+                    let sp = unsafe { lua_state.stack().as_ptr() };
+                    let ra_ptr = unsafe { sp.add(base + a) };
+                    let rb_ptr = unsafe { sp.add(base + b) };
+                    let val_ptr = if k {
+                        unsafe { constants.as_ptr().add(c) }
                     } else {
-                        unsafe { *lua_state.stack().get_unchecked(base + c) }
+                        unsafe { sp.add(base + c) }
                     };
 
-                    if ra.tt == LUA_VTABLE {
-                        let table_gc = unsafe { &mut *(ra.value.ptr as *mut GcTable) };
+                    if unsafe { (*ra_ptr).tt } == LUA_VTABLE {
+                        let table_gc = unsafe { &mut *((*ra_ptr).value.ptr as *mut GcTable) };
                         let table_ref = &mut table_gc.data;
                         if !table_ref.has_metatable() {
                             // No metatable: try integer fast path first (t[i] = v)
-                            if rb.ttisinteger() {
-                                if table_ref.impl_table.fast_seti(rb.ivalue(), val) {
-                                    if val.is_collectable() {
+                            if unsafe { pttisinteger(rb_ptr) } {
+                                let ikey = unsafe { (*rb_ptr).value.i };
+                                if unsafe { table_ref.impl_table.fast_seti_ptr(ikey, val_ptr) } {
+                                    if unsafe { (*val_ptr).tt } & 0x40 != 0 {
                                         lua_state.gc_barrier_back(unsafe {
-                                            ra.as_gc_ptr_table_unchecked()
+                                            (*ra_ptr).as_gc_ptr_table_unchecked()
                                         });
                                     }
                                     continue;
                                 }
-                                let delta = table_ref.impl_table.set_int_slow(rb.ivalue(), val);
+                                let val = unsafe { *val_ptr };
+                                let delta = table_ref.impl_table.set_int_slow(ikey, val);
                                 if delta != 0 {
                                     lua_state.gc_track_table_resize(
-                                        unsafe { ra.as_table_ptr_unchecked() },
+                                        unsafe { (*ra_ptr).as_table_ptr_unchecked() },
                                         delta,
                                     );
                                 }
                                 if val.is_collectable() {
-                                    lua_state
-                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                    lua_state.gc_barrier_back(unsafe {
+                                        (*ra_ptr).as_gc_ptr_table_unchecked()
+                                    });
                                 }
                                 continue;
                             }
                             // Non-integer key: validate then raw_set
+                            let rb = unsafe { *rb_ptr };
                             if rb.is_nil() {
                                 return Err(cold::error_table_index_nil(lua_state));
                             }
                             if rb.ttisfloat() && rb.fltvalue().is_nan() {
                                 return Err(cold::error_table_index_nan(lua_state));
                             }
+                            let ra = unsafe { *ra_ptr };
+                            let val = unsafe { *val_ptr };
                             lua_state.raw_set(&ra, rb, val);
                             continue;
                         }
                         // Has metatable: if integer key with existing non-nil value
                         // in array, __newindex is NOT consulted
-                        if rb.ttisinteger()
-                            && table_ref.impl_table.fast_seti_existing(rb.ivalue(), val)
-                        {
-                            if val.is_collectable() {
-                                lua_state
-                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                        if unsafe { pttisinteger(rb_ptr) } {
+                            let val = unsafe { *val_ptr };
+                            if table_ref
+                                .impl_table
+                                .fast_seti_existing(unsafe { (*rb_ptr).value.i }, val)
+                            {
+                                if val.is_collectable() {
+                                    lua_state.gc_barrier_back(unsafe {
+                                        (*ra_ptr).as_gc_ptr_table_unchecked()
+                                    });
+                                }
+                                continue;
                             }
-                            continue;
                         }
                         // Generic non-integer existing key check
+                        let rb = unsafe { *rb_ptr };
                         if let Some(existing) = table_ref.impl_table.raw_get(&rb)
                             && !existing.is_nil()
                         {
+                            let ra = unsafe { *ra_ptr };
+                            let val = unsafe { *val_ptr };
                             lua_state.raw_set(&ra, rb, val);
                             continue;
                         }
@@ -1424,6 +1440,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let meta = table_ref.meta_ptr();
                         if !meta.is_null() {
                             save_pc!();
+                            let ra = unsafe { *ra_ptr };
+                            let val = unsafe { *val_ptr };
                             if noinline::try_newindex_meta(lua_state, meta, ra, rb, val, frame_idx)?
                             {
                                 continue 'startfunc;
@@ -1446,52 +1464,57 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::SetI => {
                     // SETI: R[A][B] := RK(C) (integer key)
-                    // HOT PATH: Uses fast_seti() for zero-cost abstraction
+                    // Pointer-based: avoid 16B LuaValue copies on fast path
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
 
-                    let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
-                    let value = if k {
-                        unsafe { *constants.as_ptr().add(c) }
+                    let sp = unsafe { lua_state.stack().as_ptr() };
+                    let ra_ptr = unsafe { sp.add(base + a) };
+                    let val_ptr = if k {
+                        unsafe { constants.as_ptr().add(c) }
                     } else {
-                        unsafe { *lua_state.stack().get_unchecked(base + c) }
+                        unsafe { sp.add(base + c) }
                     };
 
-                    // Try fast path: table with array access.
-                    // Without metatable: any in-range array write is fine.
-                    // With metatable: only overwrite existing non-nil values
-                    // (nil slots require __newindex check).
-                    if ra.tt == LUA_VTABLE {
-                        let table_gc = unsafe { &mut *(ra.value.ptr as *mut GcTable) };
+                    if unsafe { (*ra_ptr).tt } == LUA_VTABLE {
+                        let table_gc = unsafe { &mut *((*ra_ptr).value.ptr as *mut GcTable) };
                         let table_ref = &mut table_gc.data;
                         if !table_ref.has_metatable() {
-                            if table_ref.impl_table.fast_seti(b as i64, value) {
-                                if value.is_collectable() {
-                                    lua_state
-                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                            if unsafe { table_ref.impl_table.fast_seti_ptr(b as i64, val_ptr) } {
+                                if unsafe { (*val_ptr).tt } & 0x40 != 0 {
+                                    lua_state.gc_barrier_back(unsafe {
+                                        (*ra_ptr).as_gc_ptr_table_unchecked()
+                                    });
                                 }
                                 continue;
                             }
-                            // No metatable: use set_int_slow (skip redundant fast_seti)
+                            // No metatable: use set_int_slow
+                            let value = unsafe { *val_ptr };
                             let delta = table_ref.impl_table.set_int_slow(b as i64, value);
                             if delta != 0 {
                                 lua_state.gc_track_table_resize(
-                                    unsafe { ra.as_table_ptr_unchecked() },
+                                    unsafe { (*ra_ptr).as_table_ptr_unchecked() },
                                     delta,
                                 );
                             }
                             if value.is_collectable() {
-                                lua_state
-                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                lua_state.gc_barrier_back(unsafe {
+                                    (*ra_ptr).as_gc_ptr_table_unchecked()
+                                });
                             }
                             continue;
                         }
-                        if table_ref.impl_table.fast_seti_existing(b as i64, value) {
-                            if value.is_collectable() {
-                                lua_state
-                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                        if unsafe {
+                            table_ref
+                                .impl_table
+                                .fast_seti_existing_ptr(b as i64, val_ptr)
+                        } {
+                            if unsafe { (*val_ptr).tt } & 0x40 != 0 {
+                                lua_state.gc_barrier_back(unsafe {
+                                    (*ra_ptr).as_gc_ptr_table_unchecked()
+                                });
                             }
                             continue;
                         }
@@ -1499,6 +1522,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let meta = table_ref.meta_ptr();
                         if !meta.is_null() {
                             save_pc!();
+                            let ra = unsafe { *ra_ptr };
+                            let value = unsafe { *val_ptr };
                             if noinline::try_newindex_meta(
                                 lua_state,
                                 meta,

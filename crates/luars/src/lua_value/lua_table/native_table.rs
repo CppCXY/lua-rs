@@ -241,14 +241,14 @@ impl NativeTable {
 
     /// Get pointer to tag for array index k (0-based C index)
     #[inline(always)]
-    unsafe fn get_arr_tag(&self, k: usize) -> *mut u8 {
+    pub(crate) unsafe fn get_arr_tag(&self, k: usize) -> *mut u8 {
         // array + sizeof(u32) + k
         unsafe { self.array.add(std::mem::size_of::<u32>() + k) }
     }
 
     /// Get pointer to value for array index k (0-based C index)
     #[inline(always)]
-    unsafe fn get_arr_val(&self, k: usize) -> *mut Value {
+    pub(crate) unsafe fn get_arr_val(&self, k: usize) -> *mut Value {
         // array - 1 - k (in Value units)
         let value_ptr = self.array as *mut Value;
         unsafe { value_ptr.sub(1 + k) }
@@ -782,29 +782,35 @@ impl NativeTable {
         self.fast_geti(key)
     }
 
-    /// Fast SETI path - mirrors Lua 5.5's luaH_fastseti macro
-    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
+    /// Fast SETI path - mirrors Lua 5.5's luaH_fastseti + luaH_finishset.
+    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction.
     ///
-    /// Optimization: when overwriting a live (non-nil) slot with a non-nil value,
-    /// lenhint is unchanged — skip write_array's lenhint maintenance entirely.
-    /// C Lua's luaH_fastseti only succeeds for existing non-empty slots for this
-    /// reason, but we handle both cases: overwrite (fast) and new-key (via write_array).
+    /// Writes tag+value directly to the array slot without lenhint maintenance.
+    /// lenhint is a lazy hint (like C Lua's alimit) — only recomputed by len().
+    /// len() already handles stale hints via vicinity search + binary search.
     #[inline(always)]
     pub fn fast_seti(&mut self, key: i64, value: LuaValue) -> bool {
         let u = (key as u64).wrapping_sub(1);
         if u < self.asize as u64 {
             let k = u as usize;
             unsafe {
-                let old_tag = *self.get_arr_tag(k);
-                // Overwrite fast path: existing live slot + non-nil new value
-                // → lenhint is unchanged, skip write_array entirely
-                if old_tag != LUA_VNIL && old_tag != LUA_VEMPTY && !value.is_nil() {
-                    *self.get_arr_tag(k) = value.tt;
-                    *self.get_arr_val(k) = value.value;
-                } else {
-                    // Nil transition: need lenhint maintenance
-                    self.write_array(key, value);
-                }
+                *self.get_arr_tag(k) = value.tt;
+                *self.get_arr_val(k) = value.value;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Pointer-based fast_seti: reads value from pointer, avoiding 16B copy at call site.
+    #[inline(always)]
+    pub unsafe fn fast_seti_ptr(&mut self, key: i64, val_ptr: *const LuaValue) -> bool {
+        let u = (key as u64).wrapping_sub(1);
+        if u < self.asize as u64 {
+            let k = u as usize;
+            unsafe {
+                *self.get_arr_tag(k) = (*val_ptr).tt;
+                *self.get_arr_val(k) = (*val_ptr).value;
             }
             return true;
         }
@@ -818,12 +824,32 @@ impl NativeTable {
     pub fn fast_seti_existing(&mut self, key: i64, value: LuaValue) -> bool {
         let u = (key as u64).wrapping_sub(1);
         if u < self.asize as u64 {
-            let existing = unsafe { self.read_array(key) };
-            if existing.is_some_and(|v| !v.is_nil()) {
+            let k = u as usize;
+            let old_tag = unsafe { *self.get_arr_tag(k) };
+            if old_tag != LUA_VNIL && old_tag != LUA_VEMPTY {
                 unsafe {
-                    self.write_array(key, value);
+                    *self.get_arr_tag(k) = value.tt;
+                    *self.get_arr_val(k) = value.value;
                 }
                 return true;
+            }
+        }
+        false
+    }
+
+    /// Pointer-based fast_seti_existing: reads value from pointer, avoiding 16B copy.
+    #[inline(always)]
+    pub unsafe fn fast_seti_existing_ptr(&mut self, key: i64, val_ptr: *const LuaValue) -> bool {
+        let u = (key as u64).wrapping_sub(1);
+        if u < self.asize as u64 {
+            let k = u as usize;
+            unsafe {
+                let old_tag = *self.get_arr_tag(k);
+                if old_tag != LUA_VNIL && old_tag != LUA_VEMPTY {
+                    *self.get_arr_tag(k) = (*val_ptr).tt;
+                    *self.get_arr_val(k) = (*val_ptr).value;
+                    return true;
+                }
             }
         }
         false
@@ -855,7 +881,9 @@ impl NativeTable {
                 let new_size = ((key as u32).next_power_of_two()).max(4);
                 let delta = self.resize_array(new_size);
                 unsafe {
-                    self.write_array(key, value);
+                    let k = (key as u64 - 1) as usize;
+                    *self.get_arr_tag(k) = value.tt;
+                    *self.get_arr_val(k) = value.value;
                 }
                 // After expanding, migrate any integer keys from hash that now
                 // fit in the new array range. Without this, keys already in hash
