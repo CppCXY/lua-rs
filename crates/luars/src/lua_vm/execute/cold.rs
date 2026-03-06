@@ -318,6 +318,7 @@ pub fn handle_len(
 /// The caller should `continue 'startfunc` on Ok(true) to reload all context.
 #[cold]
 #[inline(never)]
+#[allow(dead_code)]
 pub fn handle_call_metamethod(
     lua_state: &mut LuaState,
     func: LuaValue,
