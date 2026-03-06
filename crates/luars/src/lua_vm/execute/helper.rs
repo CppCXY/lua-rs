@@ -186,12 +186,14 @@ pub unsafe fn psetbfvalue(v: *mut LuaValue) {
 
 /// setbfvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
+#[allow(dead_code)]
 pub fn setbfvalue(v: &mut LuaValue) {
     *v = LuaValue::boolean(false);
 }
 
 /// setbtvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
+#[allow(dead_code)]
 pub fn setbtvalue(v: &mut LuaValue) {
     *v = LuaValue::boolean(true);
 }

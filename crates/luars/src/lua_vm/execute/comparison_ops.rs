@@ -144,6 +144,7 @@ pub fn exec_lt(
 
 /// EQK: if ((R[A] == K[B]) ~= k) then pc++
 #[inline(always)]
+#[allow(dead_code)]
 pub fn exec_eqk(
     lua_state: &mut LuaState,
     instr: Instruction,
@@ -169,6 +170,7 @@ pub fn exec_eqk(
 
 /// EQI: if ((R[A] == sB) ~= k) then pc++
 #[inline(always)]
+#[allow(dead_code)]
 pub fn exec_eqi(
     lua_state: &mut LuaState,
     instr: Instruction,
