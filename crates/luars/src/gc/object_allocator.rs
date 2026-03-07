@@ -128,7 +128,7 @@ impl ObjectAllocator {
 
     // ==================== Table Operations ====================
 
-    #[inline]
+    #[inline(always)]
     pub fn create_table(
         &mut self,
         gc: &mut GC,
@@ -176,7 +176,7 @@ impl ObjectAllocator {
     /// Create a Lua function (closure with bytecode chunk)
     /// Now caches upvalue pointers for direct access
     ///
-    #[inline]
+    #[inline(always)]
     pub fn create_function(
         &mut self,
         gc: &mut GC,

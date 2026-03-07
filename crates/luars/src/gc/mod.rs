@@ -536,48 +536,29 @@ impl GC {
         }
     }
 
+    /// Register a newly created GC object.
+    ///
+    /// Hot path is inlined: reads `header.size`, pushes to `allgc`, adjusts debt.
+    /// OOM returns `Err(OutOfMemory)` without formatting any string — the error
+    /// message is generated lazily in `get_error_message()`.
+    #[inline(always)]
     pub fn trace_object(&mut self, gc_object_owner: GcObjectOwner) -> LuaResult<()> {
         let size = gc_object_owner.size_of_data();
 
-        // SAFETY CHECK: Prevent out-of-memory by limiting total allocation to MAX_MEMORY_LIMIT
-        let total_bytes = self.get_total_bytes();
-        let limit_bytes = self.get_limit_bytes();
-        if self.gc_memory_check && (total_bytes + size as isize > limit_bytes) {
-            // For simple test, later will return an error instead of panic
-            self.gc_error_msg = Some(format!(
-                "Memory limit exceeded: {} bytes allocated, attempting to allocate {} more bytes (limit: {} bytes)",
-                total_bytes, size, limit_bytes,
-            ));
-            return Err(LuaError::OutOfMemory);
+        if self.gc_memory_check {
+            let total_bytes = self.get_total_bytes();
+            let limit_bytes = self.get_limit_bytes();
+            if total_bytes + size as isize > limit_bytes {
+                return Err(LuaError::OutOfMemory);
+            }
         }
 
-        let age = gc_object_owner.header().age();
-
-        // Add to appropriate generation list based on age
-        // New objects (G_NEW) go to allgc (nursery)
-        // This matches Lua 5.5's design where new objects are prepended to allgc
-        match age {
-            G_NEW => self.allgc.add(gc_object_owner),
-            G_SURVIVAL => self.survival.add(gc_object_owner),
-            G_OLD1 => self.old1.add(gc_object_owner),
-            _ => self.old.add(gc_object_owner), // G_OLD0, G_OLD, G_TOUCHED*
-        }
-
-        self.track_size(size);
+        // New objects always have age G_NEW, so skip the age match on the hot path
+        self.allgc.add(gc_object_owner);
+        self.gc_debt -= size as isize;
+        self.stats.bytes_allocated += size;
 
         Ok(())
-    }
-
-    /// Track a new object allocation (like luaC_newobj in Lua)
-    /// This increments debt - when debt becomes positive, GC should run
-    ///
-    #[inline]
-    fn track_size(&mut self, size: usize) {
-        let size_signed = size as isize;
-
-        // Lua 5.5 lmem.c luaM_malloc_:
-        self.gc_debt -= size_signed; // 分配减少debt
-        self.stats.bytes_allocated += size;
     }
 
     /// Track memory delta from a table resize.
@@ -4218,7 +4199,13 @@ impl GC {
     }
 
     pub fn get_error_message(&mut self) -> String {
-        std::mem::take(&mut self.gc_error_msg).unwrap_or_default()
+        std::mem::take(&mut self.gc_error_msg).unwrap_or_else(|| {
+            format!(
+                "Memory limit exceeded: {} bytes allocated (limit: {} bytes)",
+                self.get_total_bytes(),
+                self.get_limit_bytes(),
+            )
+        })
     }
 
     pub fn disable_memory_check(&mut self) {
