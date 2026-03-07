@@ -41,7 +41,7 @@ use crate::{
     lua_value::{LUA_VFALSE, LUA_VTABLE, LuaValue},
     lua_vm::{
         Instruction, LuaError, LuaResult, LuaState, OpCode,
-        call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
+        call_info::call_status::{CIST_C, CIST_PENDING_FINISH, CIST_TAIL},
         execute::{
             closure_handler::handle_closure,
             cold::{
@@ -1798,59 +1798,70 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Tail call optimization: return R[A](R[A+1], ... ,R[A+B-1])
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
+                    let func_idx = base + a;
 
-                    // Save PC before call
                     save_pc!();
 
-                    // NOTE: No return hook here. Lua 5.5's luaD_pretailcall does NOT
-                    // call rethook for Lua-to-Lua tail calls. Only the "tail call" event
-                    // fires via the call hook at the new function's entry (pc==0).
-                    // For C function tail calls, hooks are handled inside call_c_function.
+                    // Hot path: Lua-to-Lua tail call
+                    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                    if func.is_lua_function() {
+                        let nargs = if b != 0 {
+                            b - 1
+                        } else {
+                            let current_top = lua_state.get_top();
+                            if current_top > func_idx + 1 {
+                                current_top - func_idx - 1
+                            } else {
+                                0
+                            }
+                        };
 
-                    // Delegate to tailcall handler
+                        // Close upvalues only when k bit is set (like C Lua's TESTARG_k)
+                        if instr.get_k() {
+                            lua_state.close_upvalues(base);
+                        }
+
+                        let lua_func = unsafe { func.as_lua_function_unchecked() };
+                        let new_chunk_ptr = call::pretailcall_lua(
+                            lua_state, func, lua_func, func_idx, base, nargs, frame_idx,
+                        )?;
+
+                        // Set local vars directly from known values
+                        let ci = lua_state.get_call_info(frame_idx);
+                        base = ci.base;
+                        chunk = unsafe { &*new_chunk_ptr };
+                        code = &chunk.code;
+                        constants = &chunk.constants;
+                        pc = 0;
+                        upvalue_ptrs = lua_func.upvalues().as_ptr();
+
+                        lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+
+                        // Call hook at function entry (cold path)
+                        if trap {
+                            let hook_mask = lua_state.hook_mask;
+                            if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook
+                            {
+                                hook_on_call(lua_state, hook_mask, CIST_TAIL, chunk)?;
+                            }
+                            if hook_mask & crate::lua_vm::LUA_MASKCOUNT != 0 {
+                                lua_state.hook_count = lua_state.base_hook_count;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Cold path: C function, __call metamethod, etc.
                     match call::handle_tailcall(lua_state, base, a, b) {
                         Ok(FrameAction::Continue) => {
-                            // C tail call returned
                             restore_state!();
                             lua_state.oldpc = (pc - 1) as u32;
                             updatetrap!();
                         }
                         Ok(FrameAction::TailCall) => {
-                            // Tail call replaced frame — inline context restore
-                            // (like Return1's inline restore, avoids full 'startfunc overhead)
-                            let ci = lua_state.get_call_info(frame_idx);
-                            base = ci.base;
-                            chunk = unsafe { &*ci.chunk_ptr };
-                            code = &chunk.code;
-                            constants = &chunk.constants;
-                            pc = 0; // new function starts at pc=0
-                            // Restore cached upvalue pointer for tail-called function
-                            upvalue_ptrs =
-                                unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
-
-                            // Set oldpc sentinel for hook_check_instruction
-                            lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
-
-                            // Call hook at function entry (cold path)
-                            if trap {
-                                let hook_mask = lua_state.hook_mask;
-                                if hook_mask & crate::lua_vm::LUA_MASKCALL != 0
-                                    && lua_state.allow_hook
-                                {
-                                    hook_on_call(
-                                        lua_state,
-                                        hook_mask,
-                                        lua_state.get_call_info(frame_idx).call_status,
-                                        chunk,
-                                    )?;
-                                }
-                                if hook_mask & crate::lua_vm::LUA_MASKCOUNT != 0 {
-                                    lua_state.hook_count = lua_state.base_hook_count;
-                                }
-                            }
+                            continue 'startfunc;
                         }
                         Ok(FrameAction::Call) => {
-                            // Shouldn't happen from handle_tailcall
                             continue 'startfunc;
                         }
                         Err(e) => return Err(e),

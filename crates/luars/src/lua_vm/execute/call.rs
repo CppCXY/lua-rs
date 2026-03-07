@@ -462,6 +462,72 @@ pub fn call_c_function_fast(
     Ok(())
 }
 
+/// Lua-to-Lua tail call core: move args, update CI, return chunk_ptr.
+/// Kept out-of-line to avoid bloating lua_execute's dispatch loop.
+#[inline(never)]
+pub fn pretailcall_lua(
+    lua_state: &mut LuaState,
+    func: LuaValue,
+    lua_func: &crate::lua_value::LuaFunction,
+    func_idx: usize,
+    base: usize,
+    nargs: usize,
+    frame_idx: usize,
+) -> LuaResult<*const crate::lua_value::Chunk> {
+    let chunk = lua_func.chunk();
+    let new_chunk_ptr = chunk as *const crate::lua_value::Chunk;
+    let numparams = chunk.param_count;
+
+    // Get current frame's func position (handles vararg func_offset)
+    let func_offset = lua_state.get_call_info(frame_idx).func_offset;
+    let func_pos = base - func_offset;
+
+    // Move function + arguments down (like C Lua's setobjs2s loop)
+    let narg1 = nargs + 1;
+    unsafe {
+        let stack_ptr = lua_state.stack_mut().as_mut_ptr();
+        std::ptr::copy(stack_ptr.add(func_idx), stack_ptr.add(func_pos), narg1);
+    }
+
+    let new_base = func_pos + 1;
+
+    // Pad missing parameters with nil
+    if nargs < numparams {
+        let stack = lua_state.stack_mut();
+        for i in nargs..numparams {
+            unsafe { *stack.get_unchecked_mut(new_base + i) = LuaValue::nil() };
+        }
+    }
+
+    let actual_nargs = nargs.max(numparams);
+    let frame_top = func_pos + 1 + chunk.max_stack_size;
+
+    // Ensure physical stack is large enough
+    let needed_physical = frame_top + EXTRA_STACK;
+    if needed_physical > lua_state.stack_len() {
+        lua_state.grow_stack(needed_physical)?;
+    }
+
+    // Batch update CI fields (reuse current frame, no push/pop)
+    let ci = lua_state.get_call_info_mut(frame_idx);
+    ci.func = func;
+    ci.base = new_base;
+    ci.func_offset = 1;
+    ci.top = frame_top;
+    ci.pc = 0;
+    ci.nextraargs = if nargs > numparams {
+        (nargs - numparams) as i32
+    } else {
+        0
+    };
+    ci.call_status |= call_status::CIST_TAIL;
+    ci.chunk_ptr = new_chunk_ptr;
+
+    lua_state.set_top_raw(new_base + actual_nargs);
+
+    Ok(new_chunk_ptr)
+}
+
 /// Handle TAILCALL opcode - Lua style (replace frame, don't recurse)
 /// Tail call optimization: return R[A](R[A+1], ... ,R[A+B-1])
 #[inline(never)]
