@@ -107,7 +107,7 @@ fn test_rclosure_with_upvalues() {
                 // Get the function value from the stack (func_idx position)
                 // The upvalues are stored on the RClosureFunction, accessed via the function value
                 let frame = &state.call_stack[state.call_depth() - 1];
-                let func_idx = frame.base - frame.func_offset;
+                let func_idx = frame.base - frame.func_offset as usize;
                 let func_val = state.stack_get(func_idx).unwrap();
                 let rclosure = func_val.as_rclosure().unwrap();
                 let offset = rclosure.upvalues()[0].as_integer().unwrap_or(0);

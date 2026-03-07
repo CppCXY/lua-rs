@@ -469,7 +469,7 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
     // Cache base to avoid repeated frame lookups
     let frame = &l.call_stack[l.call_depth() - 1];
     let base = frame.base;
-    let top = frame.top;
+    let top = frame.top as usize;
 
     // first_arg_idx is 1-based: arg 2 + start_idx → stack offset = base + 1 + start_idx
     let stack_start = base + 1 + start_idx;
@@ -726,7 +726,7 @@ fn lua_xpcall(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or(LuaError::RuntimeError)?;
     let xpcall_func_pos = l
         .current_frame()
-        .map(|f| f.base - f.func_offset)
+        .map(|f| f.base - f.func_offset as usize)
         .ok_or(LuaError::RuntimeError)?;
 
     // Rearrange stack for xpcall_stack_based:
@@ -1608,7 +1608,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     // so we must clear all args and place the chunk right after the C function slot.
     let func_pos = l
         .current_frame()
-        .map(|f| f.base - f.func_offset)
+        .map(|f| f.base - f.func_offset as usize)
         .unwrap_or(0);
     let clear_to = func_pos + 1; // right after the dofile function slot
     l.set_top(clear_to)?;

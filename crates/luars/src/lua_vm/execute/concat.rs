@@ -95,7 +95,7 @@ pub fn handle_concat(
                 lua_state.set_top_raw(concat_top);
             }
             lua_state.check_gc()?;
-            let frame_top = lua_state.get_call_info(frame_idx).top;
+            let frame_top = lua_state.get_call_info(frame_idx).top as usize;
             lua_state.set_top_raw(frame_top);
             return Ok(());
         }
@@ -111,7 +111,7 @@ pub fn handle_concat(
             lua_state.set_top_raw(concat_top);
         }
         lua_state.check_gc()?;
-        let frame_top = lua_state.get_call_info(frame_idx).top;
+        let frame_top = lua_state.get_call_info(frame_idx).top as usize;
         lua_state.set_top_raw(frame_top);
         return Ok(());
     }
@@ -202,7 +202,7 @@ pub fn handle_concat(
     lua_state.set_frame_pc(frame_idx, pc as u32);
     lua_state.check_gc()?;
 
-    let frame_top = lua_state.get_call_info(frame_idx).top;
+    let frame_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top_raw(frame_top);
     Ok(())
 }

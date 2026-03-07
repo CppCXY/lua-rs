@@ -50,7 +50,7 @@ pub fn handle_closure(
     lua_state.set_top_raw(new_top);
     lua_state.check_gc()?;
 
-    let frame_top = lua_state.get_call_info(frame_idx).top;
+    let frame_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top_raw(frame_top);
     Ok(())
 }

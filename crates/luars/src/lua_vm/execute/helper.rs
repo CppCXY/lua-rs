@@ -58,8 +58,8 @@ pub fn buildhiddenargs(
     {
         let call_info = lua_state.get_call_info_mut(frame_idx);
         call_info.base = new_base;
-        call_info.top = new_base + chunk.max_stack_size;
-        call_info.func_offset = new_base - func_pos; // Distance from new_base to original func
+        call_info.top = (new_base + chunk.max_stack_size) as u32;
+        call_info.func_offset = (new_base - func_pos) as u32; // Distance from new_base to original func
     }
 
     // Update lua_state.top to match call_info.top
@@ -761,7 +761,7 @@ pub fn float_le_int(f: f64, i: i64) -> bool {
 #[inline(never)]
 fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
     let ci = lua_state.get_call_info(frame_idx);
-    let pcall_func_pos = ci.base - ci.func_offset;
+    let pcall_func_pos = ci.base - ci.func_offset as usize;
     let nresults = ci.nresults;
     let has_recst = ci.call_status & CIST_RECST != 0;
     let is_xpcall = ci.call_status & CIST_XPCALL != 0;
@@ -834,12 +834,12 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                     if lua_state.call_depth() > 0 {
                         let ci_idx = lua_state.call_depth() - 1;
                         if nresults == -1 {
-                            let ci_top = lua_state.get_call_info(ci_idx).top;
+                            let ci_top = lua_state.get_call_info(ci_idx).top as usize;
                             if ci_top < new_top {
-                                lua_state.get_call_info_mut(ci_idx).top = new_top;
+                                lua_state.get_call_info_mut(ci_idx).top = new_top as u32;
                             }
                         } else {
-                            let frame_top = lua_state.get_call_info(ci_idx).top;
+                            let frame_top = lua_state.get_call_info(ci_idx).top as usize;
                             lua_state.set_top_raw(frame_top);
                         }
                     }
@@ -895,12 +895,12 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
             if lua_state.call_depth() > 0 {
                 let ci_idx = lua_state.call_depth() - 1;
                 if nresults == -1 {
-                    let ci_top = lua_state.get_call_info(ci_idx).top;
+                    let ci_top = lua_state.get_call_info(ci_idx).top as usize;
                     if ci_top < new_top {
-                        lua_state.get_call_info_mut(ci_idx).top = new_top;
+                        lua_state.get_call_info_mut(ci_idx).top = new_top as u32;
                     }
                 } else {
-                    let frame_top = lua_state.get_call_info(ci_idx).top;
+                    let frame_top = lua_state.get_call_info(ci_idx).top as usize;
                     lua_state.set_top_raw(frame_top);
                 }
             }
@@ -941,12 +941,12 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
         if lua_state.call_depth() > 0 {
             let ci_idx = lua_state.call_depth() - 1;
             if nresults == -1 {
-                let ci_top = lua_state.get_call_info(ci_idx).top;
+                let ci_top = lua_state.get_call_info(ci_idx).top as usize;
                 if ci_top < new_top {
-                    lua_state.get_call_info_mut(ci_idx).top = new_top;
+                    lua_state.get_call_info_mut(ci_idx).top = new_top as u32;
                 }
             } else {
-                let frame_top = lua_state.get_call_info(ci_idx).top;
+                let frame_top = lua_state.get_call_info(ci_idx).top as usize;
                 lua_state.set_top_raw(frame_top);
             }
         }
@@ -1065,7 +1065,7 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
     }
 
     // Restore ci_top
-    let ci_top = lua_state.get_call_info(frame_idx).top;
+    let ci_top = lua_state.get_call_info(frame_idx).top as usize;
     let current_top = lua_state.get_top();
     if current_top < ci_top {
         lua_state.set_top_raw(ci_top);

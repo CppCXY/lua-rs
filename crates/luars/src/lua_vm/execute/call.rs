@@ -360,13 +360,13 @@ pub fn call_c_function(
     if lua_state.call_depth() > 0 {
         let ci_idx = lua_state.call_depth() - 1;
         if nresults == -1 {
-            let ci_top = lua_state.get_call_info(ci_idx).top;
+            let ci_top = lua_state.get_call_info(ci_idx).top as usize;
             if ci_top < new_top {
-                lua_state.get_call_info_mut(ci_idx).top = new_top;
+                lua_state.get_call_info_mut(ci_idx).top = new_top as u32;
             }
             lua_state.set_top_raw(new_top);
         } else {
-            let frame_top = lua_state.get_call_info(ci_idx).top;
+            let frame_top = lua_state.get_call_info(ci_idx).top as usize;
             lua_state.set_top_raw(frame_top);
         }
     } else {
@@ -446,13 +446,13 @@ pub fn call_c_function_fast(
     if lua_state.call_depth() > 0 {
         let ci_idx = lua_state.call_depth() - 1;
         if nresults == -1 {
-            let ci_top = lua_state.get_call_info(ci_idx).top;
+            let ci_top = lua_state.get_call_info(ci_idx).top as usize;
             if ci_top < new_top {
-                lua_state.get_call_info_mut(ci_idx).top = new_top;
+                lua_state.get_call_info_mut(ci_idx).top = new_top as u32;
             }
             lua_state.set_top_raw(new_top);
         } else {
-            let frame_top = lua_state.get_call_info(ci_idx).top;
+            let frame_top = lua_state.get_call_info(ci_idx).top as usize;
             lua_state.set_top_raw(frame_top);
         }
     } else {
@@ -480,7 +480,7 @@ pub fn pretailcall_lua(
 
     // Get current frame's func position (handles vararg func_offset)
     let func_offset = lua_state.get_call_info(frame_idx).func_offset;
-    let func_pos = base - func_offset;
+    let func_pos = base - func_offset as usize;
 
     // Move function + arguments down (like C Lua's setobjs2s loop)
     let narg1 = nargs + 1;
@@ -513,7 +513,7 @@ pub fn pretailcall_lua(
     ci.func = func;
     ci.base = new_base;
     ci.func_offset = 1;
-    ci.top = frame_top;
+    ci.top = frame_top as u32;
     ci.pc = 0;
     ci.nextraargs = if nargs > numparams {
         (nargs - numparams) as i32
@@ -522,6 +522,7 @@ pub fn pretailcall_lua(
     };
     ci.call_status |= call_status::CIST_TAIL;
     ci.chunk_ptr = new_chunk_ptr;
+    ci.upvalue_ptrs = unsafe { func.as_lua_function_unchecked().upvalues().as_ptr() };
 
     lua_state.set_top_raw(new_base + actual_nargs);
 
@@ -564,7 +565,7 @@ pub fn handle_tailcall(
 
         // Get function position (handles vararg func_offset)
         let func_offset = lua_state.get_call_info(current_frame_idx).func_offset;
-        let func_pos = base - func_offset;
+        let func_pos = base - func_offset as usize;
 
         // Move function + arguments down using ptr::copy (like C Lua's setobjs2s loop)
         // This replaces per-element bounds-checked stack_get/stack_set
@@ -607,11 +608,12 @@ pub fn handle_tailcall(
         ci.func = func;
         ci.base = new_base;
         ci.func_offset = 1;
-        ci.top = frame_top;
+        ci.top = frame_top as u32;
         ci.pc = 0;
         ci.nextraargs = nextraargs;
         ci.call_status |= call_status::CIST_TAIL;
         ci.chunk_ptr = chunk as *const _;
+        ci.upvalue_ptrs = unsafe { func.as_lua_function_unchecked().upvalues().as_ptr() };
 
         // Set stack top (no bounds check needed — we ensured space above)
         lua_state.set_top_raw(new_base + actual_nargs);

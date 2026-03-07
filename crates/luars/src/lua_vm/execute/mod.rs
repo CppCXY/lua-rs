@@ -37,7 +37,7 @@ mod table_ops;
 use call::FrameAction;
 
 use crate::{
-    GcTable, UpvaluePtr,
+    GcTable,
     lua_value::{LUA_VFALSE, LUA_VTABLE, LuaValue},
     lua_vm::{
         Instruction, LuaError, LuaResult, LuaState, OpCode,
@@ -153,17 +153,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             };
         }
 
-        // Macro to get upvalue pointer from current frame (cold path only).
+        // Macro to get upvalue pointer from current frame's cached field.
+        // The pointer is pre-computed in push_lua_frame, avoiding the
+        // func → GcPtr → GcRClosure → LuaFunction → UpvalueStore enum match
+        // chain on every access (saves 2-3 loads + 1 branch per GetUpval/SetUpval).
         macro_rules! current_upvalue_ptrs {
             () => {
-                unsafe {
-                    lua_state
-                        .get_call_info(frame_idx)
-                        .func
-                        .as_lua_function_unchecked()
-                        .upvalues()
-                        .as_ptr()
-                }
+                lua_state.get_call_info(frame_idx).upvalue_ptrs
             };
         }
 
@@ -1181,7 +1177,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     save_pc!();
                     lua_state.set_top_raw(new_top);
                     lua_state.check_gc()?;
-                    let frame_top = lua_state.get_call_info(frame_idx).top;
+                    let frame_top = lua_state.get_call_info(frame_idx).top as usize;
                     lua_state.set_top_raw(frame_top);
                 }
                 OpCode::GetTable => {
@@ -2002,8 +1998,46 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         restore_state!();
                         // rethook: update oldpc after C function returns
                         lua_state.oldpc = (pc - 1) as u32;
+                    } else if iterator.is_lua_function() {
+                        // FAST PATH: Lua closure iterator (closure-based for loops)
+                        // Inline call setup — avoids handle_call overhead, FrameAction
+                        // enum, set_top_raw, and 'startfunc full context reload.
+                        let lua_func = unsafe { iterator.as_lua_function_unchecked() };
+                        let new_chunk = lua_func.chunk();
+                        let new_chunk_ptr = new_chunk as *const crate::lua_value::Chunk;
+                        let new_base = ra_base + 4; // func at ra+3, args start at ra+4
+                        let nresults = c as i32 + 1;
+
+                        lua_state.push_lua_frame(
+                            &iterator,
+                            new_base,
+                            2, // always 2 args (state, control)
+                            nresults,
+                            new_chunk.param_count,
+                            new_chunk.max_stack_size,
+                            new_chunk_ptr,
+                        )?;
+
+                        // Inline callee entry (same as Call opcode fast path)
+                        frame_idx = lua_state.call_depth() - 1;
+                        base = new_base;
+                        let callee_chunk = unsafe { &*new_chunk_ptr };
+                        code = &callee_chunk.code;
+                        constants = &callee_chunk.constants;
+                        pc = 0;
+
+                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
+                            && lua_state.allow_hook
+                        {
+                            hook_on_call(lua_state, lua_state.hook_mask, 0, callee_chunk)?;
+                        }
+                        if lua_state.hook_mask != 0 {
+                            lua_state.oldpc = if callee_chunk.is_vararg { 0 } else { u32::MAX };
+                        }
+                        updatetrap!();
+                        continue;
                     } else {
-                        // Slow path: Lua function or __call metamethod
+                        // Cold path: __call metamethod
                         match call::handle_call(lua_state, base, a + 3, 3, c + 1, 0) {
                             Ok(FrameAction::Continue) => {
                                 restore_state!();
@@ -2194,8 +2228,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             .get_value_ref();
                         let write_pos = base + a;
                         let call_info = lua_state.get_call_info_mut(frame_idx);
-                        if write_pos + 1 > call_info.top {
-                            call_info.top = write_pos + 1;
+                        if write_pos + 1 > call_info.top as usize {
+                            call_info.top = (write_pos + 1) as u32;
                             lua_state.set_top(write_pos + 1)?;
                         }
                         save_pc!();
@@ -2767,7 +2801,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                 OpCode::VarargPrep => {
                     let chunk_ref = current_chunk!();
-                    closure_vararg_ops::exec_varargprep(lua_state, frame_idx, chunk_ref, &mut base)?;
+                    closure_vararg_ops::exec_varargprep(
+                        lua_state, frame_idx, chunk_ref, &mut base,
+                    )?;
                     // real instruction always fires a line event.
                     // Our absolute line_info makes changedline(0, 1) return
                     // false when VARARGPREP and the next instruction share a

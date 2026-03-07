@@ -38,7 +38,7 @@ pub fn exec_gettable(
     let rc = lua_state.stack_mut()[base + c];
 
     // Go directly to metamethod lookup — the fast table path was already tried inline
-    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     let result = match helper::lookup_from_metatable(lua_state, &rb, &rc) {
@@ -126,7 +126,7 @@ pub fn exec_settable(
     //  Ensure stack_top protects call_info.top before calling metamethod
     // call_info.top should NOT be modified - it's set once at function call
     // See Lua 5.5's savestate macro: L->top.p = ci->top.p
-    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     if lua_state.get_top() < call_info_top {
         lua_state.set_top(call_info_top)?;
     }
@@ -176,7 +176,7 @@ pub fn exec_geti(
     let key = LuaValue::integer(c as i64);
 
     // Go directly to metamethod lookup — the fast table path was already tried inline
-    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     let result = match helper::lookup_from_metatable(lua_state, &rb, &key) {
@@ -217,7 +217,7 @@ pub fn exec_seti(
     let k = instr.get_k();
 
     //  Ensure stack_top protects call_info.top
-    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     if lua_state.get_top() < call_info_top {
         lua_state.set_top(call_info_top)?;
     }
@@ -320,7 +320,7 @@ pub fn exec_getfield(
     let key = unsafe { constants.get_unchecked(c) };
 
     // Go directly to metamethod lookup — the fast table path was already tried inline
-    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     let result = match helper::lookup_from_metatable(lua_state, &rb, key) {
@@ -401,7 +401,7 @@ pub fn exec_setfield(
     }
 
     // savestate: L->top = ci->top before metamethod call
-    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     if lua_state.get_top() < call_info_top {
         lua_state.set_top(call_info_top)?;
     }
@@ -460,7 +460,7 @@ pub fn exec_self(
 
     // Skip direct table lookup — inline fast path already checked this.
     // Go directly to metamethod/chain lookup.
-    let call_info_top = lua_state.get_call_info(frame_idx).top;
+    let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
     match helper::lookup_from_metatable(lua_state, &rb, key) {

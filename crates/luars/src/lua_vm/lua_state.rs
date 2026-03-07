@@ -205,7 +205,7 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn current_frame_top_unchecked(&self) -> usize {
         debug_assert!(self.call_depth > 0);
-        unsafe { self.call_stack.get_unchecked(self.call_depth - 1).top }
+        unsafe { self.call_stack.get_unchecked(self.call_depth - 1).top as usize }
     }
 
     /// Get mutable current call frame
@@ -258,7 +258,7 @@ impl LuaState {
         // This single call replaces multiple is_c_function/as_lua_function checks
 
         // Determine function type and extract metadata in one pass
-        let (call_status, maxstacksize, numparams, nextraargs, chunk_raw) =
+        let (call_status, maxstacksize, numparams, nextraargs, chunk_raw, upvalue_raw) =
             if let Some(func_obj) = func.as_lua_function() {
                 let chunk = func_obj.chunk();
                 // Lua function with chunk
@@ -269,16 +269,25 @@ impl LuaState {
                     0
                 };
                 let chunk_ptr: *const crate::lua_value::Chunk = chunk;
+                let upvalue_ptr = func_obj.upvalues().as_ptr();
                 (
                     CIST_LUA,
                     chunk.max_stack_size,
                     numparams,
                     nextraargs,
                     chunk_ptr,
+                    upvalue_ptr,
                 )
             } else if func.is_c_callable() {
                 // Light C function
-                (CIST_C, nparams, nparams, 0, std::ptr::null())
+                (
+                    CIST_C,
+                    nparams,
+                    nparams,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
             } else {
                 // Not callable - this should be prevented by caller
                 debug_assert!(false, "push_frame called with non-callable value");
@@ -323,7 +332,7 @@ impl LuaState {
                 func: *func,
                 base,
                 func_offset: 1,
-                top: frame_top,
+                top: frame_top as u32,
                 pc: 0,
                 nresults,
                 call_status,
@@ -331,6 +340,7 @@ impl LuaState {
                 saved_nres: 0,
                 pending_finish_get: -1,
                 chunk_ptr: chunk_raw,
+                upvalue_ptrs: upvalue_raw,
             };
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
@@ -338,7 +348,7 @@ impl LuaState {
                 func: *func,
                 base,
                 func_offset: 1,
-                top: frame_top,
+                top: frame_top as u32,
                 pc: 0,
                 nresults,
                 call_status,
@@ -346,6 +356,7 @@ impl LuaState {
                 saved_nres: 0,
                 pending_finish_get: -1,
                 chunk_ptr: chunk_raw,
+                upvalue_ptrs: upvalue_raw,
             };
             self.call_stack.push(ci);
         }
@@ -386,6 +397,7 @@ impl LuaState {
 
         // Pre-compute common values
         let frame_top = base + max_stack_size;
+        let upvalue_ptrs = unsafe { func.as_lua_function_unchecked().upvalues().as_ptr() };
 
         // Fast path for the common case: enough params (no nil filling needed),
         // stack already large enough, call_stack slot available for reuse.
@@ -399,12 +411,13 @@ impl LuaState {
             ci.func = *func;
             ci.base = base;
             ci.func_offset = 1;
-            ci.top = frame_top;
+            ci.top = frame_top as u32;
             ci.pc = 0;
             ci.nresults = nresults;
             ci.call_status = CIST_LUA;
             ci.nextraargs = (nparams - param_count) as i32;
             ci.chunk_ptr = chunk_ptr;
+            ci.upvalue_ptrs = upvalue_ptrs;
 
             self.call_depth += 1;
 
@@ -426,6 +439,7 @@ impl LuaState {
             max_stack_size,
             frame_top,
             chunk_ptr,
+            upvalue_ptrs,
         )
     }
 
@@ -457,6 +471,7 @@ impl LuaState {
         _max_stack_size: usize,
         frame_top: usize,
         chunk_ptr: *const crate::lua_value::Chunk,
+        upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<()> {
         let nextraargs = if nparams > param_count {
             (nparams - param_count) as i32
@@ -491,18 +506,19 @@ impl LuaState {
             ci.func = *func;
             ci.base = base;
             ci.func_offset = 1;
-            ci.top = frame_top;
+            ci.top = frame_top as u32;
             ci.pc = 0;
             ci.nresults = nresults;
             ci.call_status = CIST_LUA;
             ci.nextraargs = nextraargs;
             ci.chunk_ptr = chunk_ptr;
+            ci.upvalue_ptrs = upvalue_ptrs;
         } else {
             self.call_stack.push(CallInfo {
                 func: *func,
                 base,
                 func_offset: 1,
-                top: frame_top,
+                top: frame_top as u32,
                 pc: 0,
                 nresults,
                 call_status: CIST_LUA,
@@ -510,6 +526,7 @@ impl LuaState {
                 saved_nres: 0,
                 pending_finish_get: -1,
                 chunk_ptr,
+                upvalue_ptrs,
             });
         }
 
@@ -554,25 +571,20 @@ impl LuaState {
         // Reuse existing CallInfo slot or allocate
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
-            *ci = CallInfo {
-                func: *func,
-                base,
-                func_offset: 1,
-                top: frame_top,
-                pc: 0,
-                nresults,
-                call_status: CIST_C,
-                nextraargs: 0,
-                saved_nres: 0,
-                pending_finish_get: -1,
-                chunk_ptr: std::ptr::null(),
-            };
+            ci.func = *func;
+            ci.base = base;
+            ci.func_offset = 1;
+            ci.top = frame_top as u32;
+            ci.pc = 0;
+            ci.nresults = nresults;
+            ci.call_status = CIST_C;
+            ci.nextraargs = 0;
         } else {
             self.call_stack.push(CallInfo {
                 func: *func,
                 base,
                 func_offset: 1,
-                top: frame_top,
+                top: frame_top as u32,
                 pc: 0,
                 nresults,
                 call_status: CIST_C,
@@ -580,6 +592,7 @@ impl LuaState {
                 saved_nres: 0,
                 pending_finish_get: -1,
                 chunk_ptr: std::ptr::null(),
+                upvalue_ptrs: std::ptr::null(),
             });
         }
 
@@ -649,7 +662,7 @@ impl LuaState {
             return &[];
         }
         let frame = &self.call_stack[self.call_depth - 1];
-        let end = frame.top.min(self.stack.len());
+        let end = (frame.top as usize).min(self.stack.len());
         &self.stack[frame.base..end]
     }
 
@@ -1754,7 +1767,7 @@ impl LuaState {
     #[inline(always)]
     pub fn set_frame_top(&mut self, frame_idx: usize, top: usize) {
         if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-            frame.top = top;
+            frame.top = top as u32;
         }
     }
 
@@ -1875,7 +1888,7 @@ impl LuaState {
 
         let frame = &self.call_stack[self.call_depth - 1];
         let base = frame.base;
-        let top = frame.top;
+        let top = frame.top as usize;
 
         // Arguments are from base to top-1 (NOT base+1!)
         // In Lua, the function itself is NOT part of the frame's stack
@@ -1902,7 +1915,7 @@ impl LuaState {
 
         let frame = &self.call_stack[self.call_depth - 1];
         let base = frame.base;
-        let top = frame.top;
+        let top = frame.top as usize;
 
         // Arguments are 1-based: arg 1 is at base, arg 2 is at base+1, etc.
         // (NOT base+1, because C function frame.base already points to first arg)
@@ -1937,7 +1950,7 @@ impl LuaState {
 
         let frame = &self.call_stack[self.call_depth - 1];
         let base = frame.base;
-        let top = frame.top;
+        let top = frame.top as usize;
 
         // Arguments are from base to top-1
         top.saturating_sub(base)
@@ -2460,7 +2473,7 @@ impl LuaState {
         // Restore caller frame top if needed
         if self.call_depth() > 0 {
             let ci_idx = self.call_depth() - 1;
-            let frame_top = self.get_call_info(ci_idx).top;
+            let frame_top = self.get_call_info(ci_idx).top as usize;
             if self.stack_top < frame_top {
                 self.stack_top = frame_top;
             }
@@ -2538,7 +2551,7 @@ impl LuaState {
         // Restore caller frame top if needed
         if self.call_depth() > 0 {
             let ci_idx = self.call_depth() - 1;
-            let frame_top = self.get_call_info(ci_idx).top;
+            let frame_top = self.get_call_info(ci_idx).top as usize;
             if self.stack_top < frame_top {
                 self.stack_top = frame_top;
             }
@@ -3634,7 +3647,7 @@ impl LuaState {
             // Get the yield frame info before popping
             let (func_idx, nresults) = if let Some(frame) = self.current_frame() {
                 // func_idx is base - func_offset (where the yield function was called)
-                (frame.base - frame.func_offset, frame.nresults)
+                (frame.base - frame.func_offset as usize, frame.nresults)
             } else {
                 return Err(self.error("cannot resume: no frame".to_string()));
             };
@@ -3664,7 +3677,7 @@ impl LuaState {
                 }
                 // Restore caller frame's top (matching call_c_function behavior)
                 if self.call_depth() > 0 {
-                    let ci_top = self.get_call_info(self.call_depth() - 1).top;
+                    let ci_top = self.get_call_info(self.call_depth() - 1).top as usize;
                     self.set_top_raw(ci_top);
                 } else {
                     self.set_top_raw(func_idx + wanted);
@@ -3773,7 +3786,7 @@ impl LuaState {
 
                     // Get pcall's info before cleanup
                     let pcall_ci = self.get_call_info(pcall_frame_idx);
-                    let pcall_func_pos = pcall_ci.base - pcall_ci.func_offset;
+                    let pcall_func_pos = pcall_ci.base - pcall_ci.func_offset as usize;
                     let pcall_nresults = pcall_ci.nresults;
                     let close_level = pcall_ci.base; // close from body position
                     let is_xpcall = pcall_ci.call_status & CIST_XPCALL != 0;
@@ -3860,12 +3873,12 @@ impl LuaState {
                             if self.call_depth() > 0 {
                                 let ci_idx = self.call_depth() - 1;
                                 if pcall_nresults == -1 {
-                                    let ci_top = self.get_call_info(ci_idx).top;
+                                    let ci_top = self.get_call_info(ci_idx).top as usize;
                                     if ci_top < new_top {
-                                        self.get_call_info_mut(ci_idx).top = new_top;
+                                        self.get_call_info_mut(ci_idx).top = new_top as u32;
                                     }
                                 } else {
-                                    let frame_top = self.get_call_info(ci_idx).top;
+                                    let frame_top = self.get_call_info(ci_idx).top as usize;
                                     self.set_top_raw(frame_top);
                                 }
                             }
@@ -4040,7 +4053,7 @@ impl LuaState {
         //   L->top = ci->top; /* protect entire activation register */"
         let ci_idx = self.call_depth().wrapping_sub(1);
         if ci_idx < self.call_depth() {
-            let ci_top = self.get_call_info(ci_idx).top;
+            let ci_top = self.get_call_info(ci_idx).top as usize;
             if self.stack_top < ci_top {
                 self.stack_top = ci_top;
             }

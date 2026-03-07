@@ -1,6 +1,7 @@
 // CallInfo - Information about a single function call
 // Equivalent to CallInfo structure in Lua C API (lstate.h)
 
+use crate::gc::UpvaluePtr;
 use crate::lua_value::{Chunk, LuaValue};
 
 /// Call status flags (equivalent to Lua's CIST_* flags)
@@ -75,11 +76,11 @@ pub struct CallInfo {
     /// When nextraargs > 0 and buildhiddenargs was called:
     /// - func_offset = totalargs + 1 (the shift amount)
     /// Otherwise: func_offset = 1 (base - 1 = func)
-    pub func_offset: usize,
+    pub func_offset: u32,
 
     /// Top of stack for this frame (first free slot)
     /// Equivalent to Lua's CallInfo.top
-    pub top: usize,
+    pub top: u32,
 
     /// Program counter (for Lua functions only)
     /// Points to next instruction to execute
@@ -116,6 +117,13 @@ pub struct CallInfo {
     /// Null for C function frames.
     /// Safety: valid as long as the frame is active (func keeps the Rc alive).
     pub chunk_ptr: *const Chunk,
+
+    /// Cached pointer to the upvalue array for Lua closures.
+    /// Avoids the func → GcPtr → GcRClosure → LuaFunction → UpvalueStore enum match
+    /// chain on every GetUpval/SetUpval (saves 2-3 loads + 1 branch per access).
+    /// Null for C function frames (never accessed).
+    /// Safety: valid as long as this frame is active (func keeps the closure alive).
+    pub upvalue_ptrs: *const UpvaluePtr,
 }
 
 impl CallInfo {
@@ -125,7 +133,7 @@ impl CallInfo {
             func,
             base,
             func_offset: 1, // Initially base - 1 = func
-            top: base + nparams,
+            top: (base + nparams) as u32,
             pc: 0,
             nresults: -1,
             call_status: call_status::CIST_LUA,
@@ -133,6 +141,7 @@ impl CallInfo {
             saved_nres: 0,
             pending_finish_get: -1,
             chunk_ptr: std::ptr::null(),
+            upvalue_ptrs: std::ptr::null(),
         }
     }
 
@@ -142,7 +151,7 @@ impl CallInfo {
             func,
             base,
             func_offset: 1,
-            top: base + nparams,
+            top: (base + nparams) as u32,
             pc: 0,
             nresults: -1,
             call_status: call_status::CIST_C,
@@ -150,6 +159,7 @@ impl CallInfo {
             saved_nres: 0,
             pending_finish_get: -1,
             chunk_ptr: std::ptr::null(),
+            upvalue_ptrs: std::ptr::null(),
         }
     }
 
@@ -192,6 +202,10 @@ impl Default for CallInfo {
             saved_nres: 0,
             pending_finish_get: -1,
             chunk_ptr: std::ptr::null(),
+            upvalue_ptrs: std::ptr::null(),
         }
     }
 }
+
+// Compile-time size check: CallInfo must be 72 bytes (cache-friendly)
+const _: () = assert!(std::mem::size_of::<CallInfo>() == 72);

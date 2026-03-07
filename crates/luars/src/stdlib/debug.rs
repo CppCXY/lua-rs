@@ -1370,7 +1370,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             let base = ci.base;
-            let func_offset = ci.func_offset;
+            let func_offset = ci.func_offset as usize;
             let original_func_pos = if func_offset > 0 {
                 base - func_offset
             } else {
@@ -1422,7 +1422,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
                 target.get_top()
             } else {
                 let next_ci = target.get_call_info(frame_idx + 1);
-                next_ci.base - next_ci.func_offset
+                next_ci.base - next_ci.func_offset as usize
             };
             if value_idx < limit {
                 let value = target.stack_get(value_idx).unwrap_or_default();
@@ -1437,7 +1437,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
                 target.get_top()
             } else {
                 let next_ci = target.get_call_info(frame_idx + 1);
-                next_ci.base - next_ci.func_offset
+                next_ci.base - next_ci.func_offset as usize
             };
             let n = local_index;
             if (limit as isize - base as isize) >= n as isize && n > 0 {
@@ -1458,7 +1458,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
                 target.get_top()
             } else {
                 let next_ci = target.get_call_info(frame_idx + 1);
-                next_ci.base - next_ci.func_offset
+                next_ci.base - next_ci.func_offset as usize
             };
             if (limit as isize - base as isize) >= local_index as isize {
                 let value_idx = base + local_index - 1;
@@ -1550,7 +1550,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             let base = ci.base;
-            let func_offset = ci.func_offset;
+            let func_offset = ci.func_offset as usize;
             let original_func_pos = if func_offset > 0 {
                 base - func_offset
             } else {
@@ -1600,7 +1600,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
                 target.get_top()
             } else {
                 let next_ci = target.get_call_info(frame_idx + 1);
-                next_ci.base - next_ci.func_offset
+                next_ci.base - next_ci.func_offset as usize
             };
             if value_idx < limit {
                 target.stack_set(value_idx, value)?;
@@ -1615,7 +1615,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
                 target.get_top()
             } else {
                 let next_ci = target.get_call_info(frame_idx + 1);
-                next_ci.base - next_ci.func_offset
+                next_ci.base - next_ci.func_offset as usize
             };
             let n = local_index;
             if (limit as isize - base as isize) >= n as isize && n > 0 {

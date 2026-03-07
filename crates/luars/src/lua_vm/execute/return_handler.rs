@@ -62,7 +62,7 @@ pub fn handle_return(
         // Also update frame.top so close methods don't overwrite return values
         {
             let frame = lua_state.get_call_info_mut(frame_idx);
-            frame.top = ra_pos + nres;
+            frame.top = (ra_pos + nres) as u32;
         }
         match lua_state.close_all(base) {
             Ok(()) => {}
@@ -89,7 +89,7 @@ pub fn handle_return(
     // Move return values to correct position
     // After buildhiddenargs, we need to use func_offset to find original position
     let call_info = lua_state.get_call_info(frame_idx);
-    let func_pos = call_info.base - call_info.func_offset;
+    let func_pos = call_info.base - call_info.func_offset as usize;
 
     let wanted_results = if call_info.nresults < 0 {
         nres // LUA_MULTRET: return all results
@@ -139,7 +139,7 @@ pub fn handle_return(
 pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) {
     // Get caller's expected results
     let call_info = lua_state.get_call_info(frame_idx);
-    let func_pos = call_info.base - call_info.func_offset;
+    let func_pos = call_info.base - call_info.func_offset as usize;
     let wanted_results = if call_info.nresults < 0 {
         0 // LUA_MULTRET for return0 means 0
     } else {
@@ -171,7 +171,7 @@ pub fn handle_return0(lua_state: &mut LuaState, frame_idx: usize) {
 pub fn handle_return1(lua_state: &mut LuaState, base: usize, frame_idx: usize, a: usize) {
     // Get call info first
     let call_info = lua_state.get_call_info(frame_idx);
-    let func_pos = call_info.base - call_info.func_offset;
+    let func_pos = call_info.base - call_info.func_offset as usize;
     let nresults = call_info.nresults;
 
     let stack = lua_state.stack_mut();
