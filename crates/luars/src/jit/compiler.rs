@@ -221,10 +221,56 @@ fn emit_ir(
     // Do NOT seal body_block yet.
 
     // ── BLOCK: body ───────────────────────────────────────────────────────
+    // Pre-scan for jump targets so we can pre-create Cranelift blocks.
+    let mut jump_targets = std::collections::BTreeSet::new();
+    for instr in &analysis.body {
+        match instr {
+            BodyInstr::CmpImmJmp { target, .. }
+            | BodyInstr::CmpRRJmp  { target, .. }
+            | BodyInstr::Jmp       { target }    => { jump_targets.insert(*target as usize); }
+            _ => {}
+        }
+    }
+    // Also, every CmpImmJmp/CmpRRJmp has a fall-through to the next instr.
+    for (idx, instr) in analysis.body.iter().enumerate() {
+        match instr {
+            BodyInstr::CmpImmJmp { .. } | BodyInstr::CmpRRJmp { .. } => {
+                jump_targets.insert(idx + 1);
+            }
+            _ => {}
+        }
+    }
+    // Map: body-index → cranelift block.  The body end maps to epilog.
+    let mut target_blocks: std::collections::HashMap<usize, cranelift_codegen::ir::Block>
+        = std::collections::HashMap::new();
+    let body_len = analysis.body.len();
+    // Pre-create blocks for every jump target except body_len (that goes to epilog).
+    let mut body_internal_blocks: Vec<cranelift_codegen::ir::Block> = Vec::new();
+    for &t in &jump_targets {
+        if t < body_len && t > 0 {
+            let blk = b.create_block();
+            target_blocks.insert(t, blk);
+            body_internal_blocks.push(blk);
+        }
+    }
+    // body_len → epilog_block
+    target_blocks.insert(body_len, epilog_block);
+    // Index 0 is just body_block itself (if a jump targets 0, it jumps to body start,
+    // but that shouldn't happen for forward-only jumps in the body).
+
     b.switch_to_block(body_block);
 
-    for &instr in &analysis.body {
-        match instr {
+    for (ip, instr) in analysis.body.iter().enumerate() {
+        // If this instruction is a jump target, we must switch to its block.
+        if ip > 0 {
+            if let Some(&tgt_blk) = target_blocks.get(&ip) {
+                // End previous block with an unconditional fall-through.
+                b.ins().jump(tgt_blk, &[]);
+                b.switch_to_block(tgt_blk);
+            }
+        }
+
+        match *instr {
             // ── Register-register arithmetic ──────────────────────────────
             BodyInstr::AddRR { dest, lhs, rhs } => {
                 let vl  = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
@@ -245,15 +291,12 @@ fn emit_ir(
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::IDivRR { dest, lhs, rhs } => {
-                // Lua floor division.  Zero-divisor → deopt (return -1).
-                // Since we haven't written any output yet when checking the
-                // divisor we can safely deopt here.
                 let vl   = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
                 let vr   = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
                 let zero = b.ins().iconst(I64, 0);
                 let nz   = b.ins().icmp(IntCC::NotEqual, vr, zero);
                 let ok_block  = b.create_block();
-                b.seal_block(ok_block);
+                body_internal_blocks.push(ok_block);
                 b.ins().brif(nz, ok_block, &[], deopt_block, &[]);
                 b.switch_to_block(ok_block);
 
@@ -266,7 +309,7 @@ fn emit_ir(
                 let zero = b.ins().iconst(I64, 0);
                 let nz   = b.ins().icmp(IntCC::NotEqual, vr, zero);
                 let ok_block  = b.create_block();
-                b.seal_block(ok_block);
+                body_internal_blocks.push(ok_block);
                 b.ins().brif(nz, ok_block, &[], deopt_block, &[]);
                 b.switch_to_block(ok_block);
 
@@ -293,7 +336,6 @@ fn emit_ir(
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::IDivImm { dest, src, imm } => {
-                // Constant divisor is guaranteed non-zero by the analyzer.
                 let vs  = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
                 let ki  = b.ins().iconst(I64, imm);
                 let res = emit_idiv(&mut b, vs, ki);
@@ -365,8 +407,6 @@ fn emit_ir(
             }
             // ── Shift ops ─────────────────────────────────────────────────
             BodyInstr::ShrImm { dest, src, imm } => {
-                // lua_shiftr(R[src], imm) with compile-time constant imm.
-                // Select the right instruction at JIT compile time — no branches needed.
                 let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
                 let res = if imm == 0 {
                     vs
@@ -375,36 +415,109 @@ fn emit_ir(
                 } else if imm > 0 {
                     b.ins().ushr_imm(vs, imm)
                 } else {
-                    // negative imm: right-shift becomes left-shift
                     b.ins().ishl_imm(vs, -imm)
                 };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::ShlIConst { dest, src, imm } => {
-                // lua_shiftl(imm_const, R[src]):  constant VALUE shifted left by variable COUNT.
                 let count = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
                 let value = b.ins().iconst(I64, imm);
                 let res   = emit_lua_shiftl(&mut b, value, count);
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::ShlRR { dest, lhs, rhs } => {
-                // lua_shiftl(R[lhs], R[rhs])
                 let vl  = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
                 let vr  = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
                 let res = emit_lua_shiftl(&mut b, vl, vr);
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::ShrRR { dest, lhs, rhs } => {
-                // lua_shiftr(R[lhs], R[rhs]) = lua_shiftl(R[lhs], -R[rhs])
                 let vl      = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
                 let vr      = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
                 let neg_vr  = b.ins().ineg(vr);
                 let res     = emit_lua_shiftl(&mut b, vl, neg_vr);
                 write_reg(&mut b, dest, res, &written_vars);
             }
+            // ── Control flow ──────────────────────────────────────────────
+            BodyInstr::CmpImmJmp { reg, imm, cc, k, target } => {
+                let va  = read_reg(&mut b, reg, ra_idx, var_idx, &written_vars, stack_base);
+                let vi  = b.ins().iconst(I64, imm);
+                let cmp_cc = match cc {
+                    0 => IntCC::Equal,              // EqI
+                    1 => IntCC::SignedLessThan,      // LtI
+                    2 => IntCC::SignedLessThanOrEqual,// LeI
+                    3 => IntCC::SignedGreaterThan,    // GtI
+                    _ => IntCC::SignedGreaterThanOrEqual, // GeI (4)
+                };
+                let cond = b.ins().icmp(cmp_cc, va, vi);
+                // Lua: if (cond != k) then pc++ (skip Jmp = fall through)
+                //      else execute Jmp (go to target)
+                // So: if cond == k → jump to target; else → fall through.
+                let target_blk = target_blocks[&(target as usize)];
+                let fall_blk = if let Some(&fb) = target_blocks.get(&(ip + 1)) {
+                    fb
+                } else {
+                    let fb = b.create_block();
+                    body_internal_blocks.push(fb);
+                    target_blocks.insert(ip + 1, fb);
+                    fb
+                };
+                if k {
+                    // k=true: if cond == true → jump to target; else fall through
+                    b.ins().brif(cond, target_blk, &[], fall_blk, &[]);
+                } else {
+                    // k=false: if cond == false → jump to target; else fall through
+                    // i.e. if !cond → jump to target
+                    b.ins().brif(cond, fall_blk, &[], target_blk, &[]);
+                }
+                b.switch_to_block(fall_blk);
+            }
+            BodyInstr::CmpRRJmp { lhs, rhs, cc, k, target } => {
+                let vl = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
+                let vr = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
+                let cmp_cc = match cc {
+                    0 => IntCC::Equal,
+                    1 => IntCC::SignedLessThan,
+                    _ => IntCC::SignedLessThanOrEqual, // 2
+                };
+                let cond = b.ins().icmp(cmp_cc, vl, vr);
+                let target_blk = target_blocks[&(target as usize)];
+                let fall_blk = if let Some(&fb) = target_blocks.get(&(ip + 1)) {
+                    fb
+                } else {
+                    let fb = b.create_block();
+                    body_internal_blocks.push(fb);
+                    target_blocks.insert(ip + 1, fb);
+                    fb
+                };
+                if k {
+                    b.ins().brif(cond, target_blk, &[], fall_blk, &[]);
+                } else {
+                    b.ins().brif(cond, fall_blk, &[], target_blk, &[]);
+                }
+                b.switch_to_block(fall_blk);
+            }
+            BodyInstr::Jmp { target } => {
+                let target_blk = target_blocks[&(target as usize)];
+                b.ins().jump(target_blk, &[]);
+                // After an unconditional jump, the next instruction (if any)
+                // must be a jump target with its own block; we'll switch to it
+                // in the next iteration's "if ip > 0" check above. For now,
+                // create a dummy unreachable block to hold any instructions
+                // that follow (they'll be dead code if not a target).
+                let dummy = b.create_block();
+                body_internal_blocks.push(dummy);
+                b.switch_to_block(dummy);
+            }
         }
     }
+    // Jump from the end of the last body block to the epilog.
     b.ins().jump(epilog_block, &[]);
+
+    // Seal all body-internal blocks (they only have forward edges within the body).
+    for blk in &body_internal_blocks {
+        b.seal_block(*blk);
+    }
 
     // ── BLOCK: epilog ─────────────────────────────────────────────────────
     // Mirrors interpreter's ForLoop: if count > 0, decrement count, advance

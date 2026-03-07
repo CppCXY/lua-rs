@@ -63,11 +63,26 @@ pub enum BodyInstr {
     ShlRR { dest: u8, lhs: u8, rhs: u8 },
     /// R[dest] = lua_shiftr(R[lhs], R[rhs])  (from Shr + MmBin)
     ShrRR { dest: u8, lhs: u8, rhs: u8 },
+
+    // ── Control flow (comparison + Jmp fused) ────────────────────────────
+    /// Compare register vs signed-immediate, then conditional jump.
+    /// Encodes a CmpXxx + Jmp pair.
+    /// `cc`: 0=Eq, 1=Lt, 2=Le, 3=Gt, 4=Ge
+    /// `k`: the `k` flag from the comparison instruction.
+    /// If `(R[reg] cc imm) != k` → skip Jmp (fall through to next BodyInstr).
+    /// Else → jump to BodyInstr at index `target` (absolute index in body vec).
+    CmpImmJmp { reg: u8, imm: i64, cc: u8, k: bool, target: u16 },
+    /// Compare register vs register, then conditional jump.
+    /// `cc`: 0=Eq, 1=Lt, 2=Le
+    CmpRRJmp { lhs: u8, rhs: u8, cc: u8, k: bool, target: u16 },
+    /// Unconditional jump to BodyInstr at index `target`.
+    Jmp { target: u16 },
 }
 
 impl BodyInstr {
-    /// The destination register of this instruction.
-    pub fn dest(&self) -> u8 {
+    /// The destination register of this instruction, if any.
+    /// Control-flow instructions (CmpImmJmp, CmpRRJmp, Jmp) return `None`.
+    pub fn dest(&self) -> Option<u8> {
         match self {
             Self::AddRR  { dest, .. } | Self::SubRR  { dest, .. } | Self::MulRR  { dest, .. }
             | Self::IDivRR { dest, .. } | Self::ModRR  { dest, .. }
@@ -78,7 +93,8 @@ impl BodyInstr {
             | Self::Unm    { dest, .. } | Self::BNot   { dest, .. }
             | Self::Move   { dest, .. } | Self::LoadI  { dest, .. }
             | Self::ShrImm { dest, .. } | Self::ShlIConst { dest, .. }
-            | Self::ShlRR  { dest, .. } | Self::ShrRR  { dest, .. } => *dest,
+            | Self::ShlRR  { dest, .. } | Self::ShrRR  { dest, .. } => Some(*dest),
+            Self::CmpImmJmp { .. } | Self::CmpRRJmp { .. } | Self::Jmp { .. } => None,
         }
     }
 
@@ -102,8 +118,12 @@ impl BodyInstr {
             | Self::Move   { src, .. }
             | Self::ShrImm { src, .. } | Self::ShlIConst { src, .. }
             => { buf[0] = *src; 1 }
+            // One source register (comparison vs imm)
+            Self::CmpImmJmp { reg, .. } => { buf[0] = *reg; 1 }
+            // Two source registers (comparison reg vs reg)
+            Self::CmpRRJmp { lhs, rhs, .. } => { buf[0] = *lhs; buf[1] = *rhs; 2 }
             // No source register
-            Self::LoadI { .. } => 0,
+            Self::LoadI { .. } | Self::Jmp { .. } => 0,
         }
     }
 }
@@ -155,8 +175,14 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
     let mut written: Vec<u8>     = Vec::new();
     let mut reads:   Vec<u8>     = Vec::new();
 
+    // raw_offset → body index mapping (for resolving jump targets)
+    let mut raw_to_body: Vec<(usize, usize)> = Vec::new();
+    // deferred target fixups: (body_index, raw_body_target_offset)
+    let mut fixups: Vec<(usize, usize)> = Vec::new();
+
     let mut i = 0;
     while i < raw_body.len() {
+        raw_to_body.push((i, body.len()));
         let instr = raw_body[i];
         match instr.get_opcode() {
             // ── register-register arithmetic (followed by MmBin) ──────────
@@ -436,8 +462,91 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 body.push(BodyInstr::ShrRR { dest, lhs, rhs });
                 i += 2;
             }
+            // ── comparison + Jmp fused pairs ──────────────────────────────
+            // Pattern: CmpXxx A sB k  followed by  Jmp sJ
+            // Semantics: if (R[A] cc sB) != k then skip Jmp (fall to next)
+            //            else pc = pc_after_jmp + sJ
+            OpCode::EqI | OpCode::LtI | OpCode::LeI | OpCode::GtI | OpCode::GeI => {
+                // Next instruction must be Jmp
+                if i + 1 >= raw_body.len() { return None; }
+                let jmp_instr = raw_body[i + 1];
+                if jmp_instr.get_opcode() != OpCode::Jmp { return None; }
+
+                let reg = instr.get_a() as u8;
+                let imm = instr.get_sb() as i64;
+                let k   = instr.get_k();
+                let cc  = match instr.get_opcode() {
+                    OpCode::EqI => 0u8,
+                    OpCode::LtI => 1,
+                    OpCode::LeI => 2,
+                    OpCode::GtI => 3,
+                    OpCode::GeI => 4,
+                    _ => unreachable!(),
+                };
+                // sJ is relative to (i+2), i.e. after the Jmp instruction itself.
+                // Target in raw_body = i + 2 + sJ
+                let sj = jmp_instr.get_sj();
+                let raw_target = (i as isize + 2 + sj as isize) as usize;
+
+                track(&mut reads, reg);
+                let body_idx = body.len();
+                body.push(BodyInstr::CmpImmJmp { reg, imm, cc, k, target: 0 });
+                fixups.push((body_idx, raw_target));
+                i += 2;
+            }
+            OpCode::Eq | OpCode::Lt | OpCode::Le => {
+                if i + 1 >= raw_body.len() { return None; }
+                let jmp_instr = raw_body[i + 1];
+                if jmp_instr.get_opcode() != OpCode::Jmp { return None; }
+
+                let lhs = instr.get_a() as u8;
+                let rhs = instr.get_b() as u8;
+                let k   = instr.get_k();
+                let cc  = match instr.get_opcode() {
+                    OpCode::Eq => 0u8,
+                    OpCode::Lt => 1,
+                    OpCode::Le => 2,
+                    _ => unreachable!(),
+                };
+                let sj = jmp_instr.get_sj();
+                let raw_target = (i as isize + 2 + sj as isize) as usize;
+
+                track(&mut reads, lhs);
+                track(&mut reads, rhs);
+                let body_idx = body.len();
+                body.push(BodyInstr::CmpRRJmp { lhs, rhs, cc, k, target: 0 });
+                fixups.push((body_idx, raw_target));
+                i += 2;
+            }
+            OpCode::Jmp => {
+                // Standalone Jmp (e.g. end of then-branch jumping over else-branch)
+                let sj = instr.get_sj();
+                let raw_target = (i as isize + 1 + sj as isize) as usize;
+                let body_idx = body.len();
+                body.push(BodyInstr::Jmp { target: 0 });
+                fixups.push((body_idx, raw_target));
+                i += 1;
+            }
             // Anything else (calls, table access, upvalues, …) → bail out
             _ => return None,
+        }
+    }
+
+    // Record mapping for one-past-end (jump targets may point to body end)
+    raw_to_body.push((i, body.len()));
+
+    // Resolve jump targets: map raw_body offsets → body indices
+    for (body_idx, raw_target) in &fixups {
+        let target_body = raw_to_body.iter()
+            .find(|&&(raw_off, _)| raw_off == *raw_target)
+            .map(|&(_, bi)| bi);
+        let Some(t) = target_body else { return None; };
+        if t > u16::MAX as usize { return None; }
+        match &mut body[*body_idx] {
+            BodyInstr::CmpImmJmp { target, .. }
+            | BodyInstr::CmpRRJmp { target, .. }
+            | BodyInstr::Jmp { target } => *target = t as u16,
+            _ => unreachable!(),
         }
     }
 
@@ -463,7 +572,7 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 track(&mut loop_carried, s);
             }
         }
-        defined_in_body.push(instr.dest());
+        defined_in_body.extend(instr.dest());
     }
 
     Some(LoopAnalysis { a, for_loop_pc, body, written, loop_carried })
