@@ -1929,11 +1929,81 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::ForPrep => {
                     // Cold path — only runs once per loop, extracted to reduce
                     // main loop code size and prevent r12/r15 clobbering
-                    let a = instr.get_a() as usize;
+                    let a  = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
+                    let pre_pc = pc; // pc = prep_pc+1; used by #[cfg(feature="jit")]
+                    #[cfg(not(feature = "jit"))]
+                    let _ = pre_pc;
                     let mut pc_idx = pc;
                     cold::handle_forprep_int(lua_state, base + a, bx, frame_idx, &mut pc_idx)?;
                     pc = pc_idx;
+
+                    // JIT fast path — only when hooks are off and the loop will actually run.
+                    //
+                    // TRIGGER: use the iteration count stored in stack[base+a] by
+                    // handle_forprep_int.  For `for i=1,N do` that count = N-1.
+                    // ForPrep fires exactly ONCE per loop invocation, so a hot-call
+                    // counter would never reach a useful threshold for a single long loop.
+                    // Instead we JIT immediately if count >= JIT_MIN_ITERS.
+                    #[cfg(feature = "jit")]
+                    if !trap && pc == pre_pc {
+                        let prep_pc_key = (pre_pc - 1) as u32; // ForPrep bytecode index
+                        // for_loop_pc = prep_pc + bx + 1 = pre_pc + bx
+                        let for_loop_pc = pre_pc + bx;
+
+                        let cache_val = {
+                            let chunk = current_chunk!();
+                            chunk.jit_cache.borrow().get(&prep_pc_key).copied()
+                        };
+
+                        let run_jit = |lua_state: &mut crate::lua_vm::LuaState,
+                                       fn_ptr: usize,
+                                       base: usize,
+                                       for_loop_pc: usize,
+                                       pc: &mut usize| {
+                            let jit_fn: crate::jit::JitLoopFn =
+                                unsafe { std::mem::transmute(fn_ptr) };
+                            let stack_base = unsafe {
+                                (lua_state.stack_mut().as_mut_ptr() as *mut u8)
+                                    .add(base * std::mem::size_of::<LuaValue>())
+                            };
+                            let result = unsafe { jit_fn(stack_base) };
+                            if result == 0 {
+                                // JIT completed the loop — skip past ForLoop.
+                                *pc = for_loop_pc + 1;
+                            }
+                            // result == -1 → deopt: interpreter handles the loop.
+                        };
+
+                        match cache_val {
+                            // Previous compilation failed → never retry.
+                            Some(crate::jit::JIT_FAILED) => {}
+                            // Already compiled and valid → run immediately.
+                            Some(fn_ptr) => {
+                                run_jit(lua_state, fn_ptr, base, for_loop_pc, &mut pc);
+                            }
+                            // First visit for this loop site: decide based on iteration count.
+                            None => {
+                                // Read the integer iteration count set by handle_forprep_int.
+                                // Safety: ra = base + a is within the stack (guaranteed by push_frame).
+                                let count = unsafe {
+                                    let ra = lua_state.stack_mut().as_ptr().add(base + a);
+                                    if (*ra).ttisinteger() { (*ra).value.i as usize } else { 0 }
+                                };
+                                if count >= crate::jit::JIT_MIN_ITERS {
+                                    let chunk = current_chunk!();
+                                    let fn_ptr =
+                                        crate::jit::try_compile_loop(chunk, prep_pc_key as usize)
+                                            .map(|f| f as usize)
+                                            .unwrap_or(crate::jit::JIT_FAILED);
+                                    chunk.jit_cache.borrow_mut().insert(prep_pc_key, fn_ptr);
+                                    if fn_ptr != crate::jit::JIT_FAILED {
+                                        run_jit(lua_state, fn_ptr, base, for_loop_pc, &mut pc);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 OpCode::TForPrep => {
                     // Prepare generic for loop — inline (for loop related)

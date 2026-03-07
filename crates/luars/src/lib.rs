@@ -25,6 +25,8 @@ mod test;
 
 pub mod compiler;
 pub mod gc;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod lib_registry;
 pub mod lua_value;
 pub mod lua_vm;
