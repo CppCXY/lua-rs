@@ -2,7 +2,7 @@
 // 16 bytes, no pointer caching, all GC objects accessed via ID
 pub mod chunk_serializer;
 pub mod lua_convert;
-mod lua_table;
+pub(crate) mod lua_table;
 mod lua_value;
 pub mod userdata_builder;
 pub mod userdata_trait;

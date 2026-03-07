@@ -35,7 +35,7 @@
 // Tri-color invariant: Black objects cannot point to white objects
 
 mod gc_kind;
-mod gc_object;
+pub(crate) mod gc_object;
 mod object_allocator;
 mod string_interner;
 

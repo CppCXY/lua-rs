@@ -37,6 +37,9 @@ use super::{runtime, JitLoopFn};
 /// `makevariant!(LUA_TNUMBER=3, 0)` = 3 = 0x03
 const LUA_VNUMINT: i64 = 3;
 
+/// `LUA_TTABLE | BIT_ISCOLLECTABLE` = 5 | 0x40 = 0x45
+const LUA_VTABLE: i64 = 0x45;
+
 /// Byte size of `LuaValue` in memory.
 const LV: i32 = 16;
 
@@ -190,6 +193,15 @@ fn emit_ir(
         let ok  = b.ins().icmp(IntCC::Equal, tag, expected);
         all_ok  = b.ins().band(all_ok, ok);
     }
+    // Also verify table registers have the correct type tag (LUA_VTABLE).
+    if !analysis.table_regs.is_empty() {
+        let expected_table = b.ins().iconst(I8, LUA_VTABLE);
+        for &r in &analysis.table_regs {
+            let tag = b.ins().load(I8, MemFlags::trusted(), stack_base, tag_off(r));
+            let ok  = b.ins().icmp(IntCC::Equal, tag, expected_table);
+            all_ok  = b.ins().band(all_ok, ok);
+        }
+    }
     b.ins().brif(all_ok, pre_loop_block, &[], deopt_block, &[]);
 
     // ── BLOCK: pre_loop ───────────────────────────────────────────────────
@@ -216,6 +228,29 @@ fn emit_ir(
         };
         b.def_var(var, init);
     }
+
+    // Load table metadata for each table register.
+    // GC chain: LuaValue.value.ptr → Gc<LuaTable>.data → LuaTable.impl_table → {array, asize}
+    // All offsets are computed at Rust compile time via offset_of!().
+    use crate::gc::gc_object::Gc;
+    use crate::lua_value::lua_table::LuaTable;
+    use crate::lua_value::lua_table::native_table::NativeTable;
+    let gc_to_array: i32 = (std::mem::offset_of!(Gc<LuaTable>, data)
+        + std::mem::offset_of!(LuaTable, impl_table)
+        + std::mem::offset_of!(NativeTable, array)) as i32;
+    let gc_to_asize: i32 = (std::mem::offset_of!(Gc<LuaTable>, data)
+        + std::mem::offset_of!(LuaTable, impl_table)
+        + std::mem::offset_of!(NativeTable, asize)) as i32;
+    // table_meta: (register, array_ptr, asize_i64)
+    let table_meta: Vec<(u8, cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> =
+        analysis.table_regs.iter().map(|&r| {
+            let gc_ptr  = b.ins().load(I64, MemFlags::trusted(), stack_base, val_off(r));
+            let array   = b.ins().load(I64, MemFlags::trusted(), gc_ptr, gc_to_array);
+            let asize32 = b.ins().load(I32, MemFlags::trusted(), gc_ptr, gc_to_asize);
+            let asize   = b.ins().uextend(I64, asize32);
+            (r, array, asize)
+        }).collect();
+
     b.ins().jump(body_block, &[]);
     // body_block now has two predecessors: pre_loop and (later) epilog_block.
     // Do NOT seal body_block yet.
@@ -437,6 +472,69 @@ fn emit_ir(
                 let neg_vr  = b.ins().ineg(vr);
                 let res     = emit_lua_shiftl(&mut b, vl, neg_vr);
                 write_reg(&mut b, dest, res, &written_vars);
+            }
+            // ── Table array access ────────────────────────────────────────
+            BodyInstr::GetArrayImm { dest, table_reg, key } => {
+                let &(_, array, asize) = table_meta.iter()
+                    .find(|&&(r, _, _)| r == table_reg).unwrap();
+                if key < 1 {
+                    // Constant key < 1 always fails bounds → deopt.
+                    b.ins().jump(deopt_block, &[]);
+                    let dummy = b.create_block();
+                    body_internal_blocks.push(dummy);
+                    b.switch_to_block(dummy);
+                } else {
+                    let k = key - 1; // 0-based index
+                    let k_val       = b.ins().iconst(I64, k);
+                    let in_bounds   = b.ins().icmp(IntCC::UnsignedLessThan, k_val, asize);
+                    let ok1 = b.create_block();
+                    body_internal_blocks.push(ok1);
+                    b.ins().brif(in_bounds, ok1, &[], deopt_block, &[]);
+                    b.switch_to_block(ok1);
+                    // Read tag: array + 4 + k
+                    let tag_addr = b.ins().iadd_imm(array, 4 + k);
+                    let tag      = b.ins().load(I8, MemFlags::trusted(), tag_addr, 0);
+                    let exp_int  = b.ins().iconst(I8, LUA_VNUMINT);
+                    let is_int   = b.ins().icmp(IntCC::Equal, tag, exp_int);
+                    let ok2 = b.create_block();
+                    body_internal_blocks.push(ok2);
+                    b.ins().brif(is_int, ok2, &[], deopt_block, &[]);
+                    b.switch_to_block(ok2);
+                    // Read value: array - (k+1)*8  (negative offset from array pointer)
+                    let val_addr = b.ins().iadd_imm(array, -((k + 1) * 8));
+                    let value    = b.ins().load(I64, MemFlags::trusted(), val_addr, 0);
+                    write_reg(&mut b, dest, value, &written_vars);
+                }
+            }
+            BodyInstr::GetArrayReg { dest, table_reg, key_reg } => {
+                let &(_, array, asize) = table_meta.iter()
+                    .find(|&&(r, _, _)| r == table_reg).unwrap();
+                let key_val = read_reg(&mut b, key_reg, ra_idx, var_idx, &written_vars, stack_base);
+                // Bounds check: (key - 1) as unsigned < asize
+                let one = b.ins().iconst(I64, 1);
+                let k   = b.ins().isub(key_val, one);
+                let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, k, asize);
+                let ok1 = b.create_block();
+                body_internal_blocks.push(ok1);
+                b.ins().brif(in_bounds, ok1, &[], deopt_block, &[]);
+                b.switch_to_block(ok1);
+                // Read tag: array + 4 + k
+                let four = b.ins().iconst(I64, 4);
+                let tag_off_val = b.ins().iadd(k, four);
+                let tag_addr    = b.ins().iadd(array, tag_off_val);
+                let tag         = b.ins().load(I8, MemFlags::trusted(), tag_addr, 0);
+                let exp_int     = b.ins().iconst(I8, LUA_VNUMINT);
+                let is_int      = b.ins().icmp(IntCC::Equal, tag, exp_int);
+                let ok2 = b.create_block();
+                body_internal_blocks.push(ok2);
+                b.ins().brif(is_int, ok2, &[], deopt_block, &[]);
+                b.switch_to_block(ok2);
+                // Read value: array - (k+1)*8
+                let k1       = b.ins().iadd(k, one);
+                let byte_off = b.ins().ishl_imm(k1, 3); // * 8
+                let val_addr = b.ins().isub(array, byte_off);
+                let value    = b.ins().load(I64, MemFlags::trusted(), val_addr, 0);
+                write_reg(&mut b, dest, value, &written_vars);
             }
             // ── Control flow ──────────────────────────────────────────────
             BodyInstr::CmpImmJmp { reg, imm, cc, k, target } => {

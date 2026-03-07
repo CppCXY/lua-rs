@@ -77,6 +77,14 @@ pub enum BodyInstr {
     CmpRRJmp { lhs: u8, rhs: u8, cc: u8, k: bool, target: u16 },
     /// Unconditional jump to BodyInstr at index `target`.
     Jmp { target: u16 },
+
+    // ── Table array access ────────────────────────────────────────────────
+    /// R[dest] = R[table_reg][key]  (from GetI, integer constant key)
+    /// Reads from integer-only table array part; deopt on bounds/type fail.
+    GetArrayImm { dest: u8, table_reg: u8, key: i64 },
+    /// R[dest] = R[table_reg][R[key_reg]]  (from GetTable, register key)
+    /// key_reg must be an integer; deopt on bounds/type fail.
+    GetArrayReg { dest: u8, table_reg: u8, key_reg: u8 },
 }
 
 impl BodyInstr {
@@ -93,7 +101,8 @@ impl BodyInstr {
             | Self::Unm    { dest, .. } | Self::BNot   { dest, .. }
             | Self::Move   { dest, .. } | Self::LoadI  { dest, .. }
             | Self::ShrImm { dest, .. } | Self::ShlIConst { dest, .. }
-            | Self::ShlRR  { dest, .. } | Self::ShrRR  { dest, .. } => Some(*dest),
+            | Self::ShlRR  { dest, .. } | Self::ShrRR  { dest, .. }
+            | Self::GetArrayImm { dest, .. } | Self::GetArrayReg { dest, .. } => Some(*dest),
             Self::CmpImmJmp { .. } | Self::CmpRRJmp { .. } | Self::Jmp { .. } => None,
         }
     }
@@ -124,6 +133,9 @@ impl BodyInstr {
             Self::CmpRRJmp { lhs, rhs, .. } => { buf[0] = *lhs; buf[1] = *rhs; 2 }
             // No source register
             Self::LoadI { .. } | Self::Jmp { .. } => 0,
+            // Table access: table_reg is tracked separately (not an integer operand)
+            Self::GetArrayImm { .. } => 0,
+            Self::GetArrayReg { key_reg, .. } => { buf[0] = *key_reg; 1 },
         }
     }
 }
@@ -142,6 +154,10 @@ pub struct LoopAnalysis {
     /// These registers must hold valid integers at loop entry (type-checked).
     /// Pure body-local temporaries (written before first use) are NOT here.
     pub loop_carried: Vec<u8>,
+    /// Registers that must hold tables at loop entry.
+    /// Type-checked for LUA_VTABLE; their NativeTable metadata (array pointer
+    /// + asize) is loaded once in the pre_loop block.
+    pub table_regs: Vec<u8>,
 }
 
 /// Try to analyze the integer for-loop whose `ForPrep` is at `prep_pc`.
@@ -174,6 +190,7 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
     let mut body: Vec<BodyInstr> = Vec::new();
     let mut written: Vec<u8>     = Vec::new();
     let mut reads:   Vec<u8>     = Vec::new();
+    let mut table_regs: Vec<u8>  = Vec::new();
 
     // raw_offset → body index mapping (for resolving jump targets)
     let mut raw_to_body: Vec<(usize, usize)> = Vec::new();
@@ -527,6 +544,28 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 fixups.push((body_idx, raw_target));
                 i += 1;
             }
+            // ── table array access (read-only, integer values only) ───────
+            OpCode::GetI => {
+                // R[A] = R[B][C]   C is immediate integer key
+                let dest      = instr.get_a() as u8;
+                let table_reg = instr.get_b() as u8;
+                let key       = instr.get_c() as i64;
+                track(&mut written, dest);
+                track(&mut table_regs, table_reg);
+                body.push(BodyInstr::GetArrayImm { dest, table_reg, key });
+                i += 1;
+            }
+            OpCode::GetTable => {
+                // R[A] = R[B][R[C]]   C is register with integer key
+                let dest      = instr.get_a() as u8;
+                let table_reg = instr.get_b() as u8;
+                let key_reg   = instr.get_c() as u8;
+                track(&mut written, dest);
+                track(&mut table_regs, table_reg);
+                track(&mut reads, key_reg);
+                body.push(BodyInstr::GetArrayReg { dest, table_reg, key_reg });
+                i += 1;
+            }
             // Anything else (calls, table access, upvalues, …) → bail out
             _ => return None,
         }
@@ -555,6 +594,14 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
         return None;
     }
 
+    // Table regs must NOT overlap with written regs or for-loop control regs.
+    // They are read-only table pointers loaded once at loop entry.
+    for &tr in &table_regs {
+        if written.contains(&tr) || tr == a || tr == a + 1 || tr == a + 2 {
+            return None;
+        }
+    }
+
     // Determine which written registers are "loop-carried":
     // a register is loop-carried if it is first *read* before it is first
     // *written* in a single pass through the body.  Pure temporaries (always
@@ -575,7 +622,7 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
         defined_in_body.extend(instr.dest());
     }
 
-    Some(LoopAnalysis { a, for_loop_pc, body, written, loop_carried })
+    Some(LoopAnalysis { a, for_loop_pc, body, written, loop_carried, table_regs })
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
