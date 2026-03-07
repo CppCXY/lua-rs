@@ -105,47 +105,30 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
 
         // Hot path: read CI fields for Lua function dispatch.
-        // These are `let mut` so that RETURN1 can restore caller context
-        // inline without going through the full 'startfunc reload.
-        //
-        // Register strategy: code & constants as `&[T]` slices carry noalias,
-        // so LLVM can keep their base pointers in registers across &mut calls.
-        // pc is a usize index (not a raw pointer), base is stack index.
+        // Register pressure optimization: only 5 `let mut` loop variables
+        // (base, pc, code, constants, frame_idx) to fit in callee-saved GPRs.
+        // chunk, upvalue_ptrs, and trap are derived on-demand from lua_state
+        // to reduce live ranges and help LLVM's register allocator.
         let ci = lua_state.get_call_info(frame_idx);
         let mut base = ci.base;
         let pc_init = ci.pc as usize;
-        let chunk_raw = ci.chunk_ptr; // Copy raw pointer before dropping ci borrow
+        let chunk_raw = ci.chunk_ptr;
 
-        // Cache upvalue slice pointer (like C Lua's `cl = ci_func(ci)`).
-        // The Box<[UpvaluePtr]> is owned by GcFunction on the heap — it won't move
-        // while this function is on the call stack, so the raw pointer stays valid.
-        let mut upvalue_ptrs: *const UpvaluePtr = unsafe {
-            let upvals = ci.func.as_lua_function_unchecked().upvalues();
-            upvals.as_ptr()
-        };
+        // Derive code/constants directly without keeping chunk as loop variable.
+        // chunk is only needed on cold paths (hooks, closures, varargs).
+        let chunk_init = unsafe { &*chunk_raw };
+        debug_assert!(lua_state.stack_len() >= base + chunk_init.max_stack_size + EXTRA_STACK);
 
-        // Derive chunk from CI's cached pointer (avoids Rc deref).
-        // chunk_ptr is set by push_lua_frame/push_frame/handle_tailcall.
-        let mut chunk = unsafe { &*chunk_raw };
-        // Stack already grown by push_lua_frame — no need for grow_stack here.
-        // Only the very first entry (top-level chunk) needs this check.
-        debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
-
-        // Slice-based dispatch: code and constants are borrowed as slices.
-        // Rust proves noalias for `&[T]`, so LLVM knows these immutable
-        // borrows don't alias with `&mut lua_state`. This lets LLVM keep
-        // the slice base pointer in a register across function calls,
-        // unlike raw `*const Instruction` which must be spilled/reloaded.
-        let mut code: &[Instruction] = &chunk.code;
-        let mut constants: &[LuaValue] = &chunk.constants;
+        let mut code: &[Instruction] = &chunk_init.code;
+        let mut constants: &[LuaValue] = &chunk_init.constants;
         let mut pc: usize = pc_init;
 
         lua_state.oldpc = if pc_init > 0 {
-            (pc_init - 1) as u32 // current instruction index
-        } else if chunk.is_vararg {
-            0 // skip VARARGPREP line event (matches C Lua)
+            (pc_init - 1) as u32
+        } else if chunk_init.is_vararg {
+            0
         } else {
-            u32::MAX // sentinel: first instruction always fires
+            u32::MAX
         };
 
         // Macro to save PC before operations that may call functions
@@ -163,26 +146,43 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             };
         }
 
-        // trap: local hook flag, mirrors C Lua's `int trap` pattern.
-        // Kept as a local bool so LLVM can place it in a register.
-        // Avoids reading lua_state.hook_mask (memory) on every dispatch.
-        // Updated after hook calls and backward jumps via updatetrap!().
-        let mut trap = lua_state.hook_mask != 0;
+        // Macro to derive chunk from current frame (cold path only).
+        macro_rules! current_chunk {
+            () => {
+                unsafe { &*lua_state.get_call_info(frame_idx).chunk_ptr }
+            };
+        }
+
+        // Macro to get upvalue pointer from current frame (cold path only).
+        macro_rules! current_upvalue_ptrs {
+            () => {
+                unsafe {
+                    lua_state
+                        .get_call_info(frame_idx)
+                        .func
+                        .as_lua_function_unchecked()
+                        .upvalues()
+                        .as_ptr()
+                }
+            };
+        }
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
+        // trap: local hook flag matching C Lua's `int trap` pattern.
+        // Kept as local bool so LLVM can place it in a register / consistent
+        // stack slot without perturbing jump-table register allocation.
+        let mut trap = lua_state.hook_mask != 0;
         if pc == 0 && trap {
             let hook_mask = lua_state.hook_mask;
             if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook {
-                hook_on_call(lua_state, hook_mask, call_status, chunk)?;
+                hook_on_call(lua_state, hook_mask, call_status, chunk_init)?;
             }
-            // Initialise hook_count for count hooks
             if hook_mask & crate::lua_vm::LUA_MASKCOUNT != 0 {
                 lua_state.hook_count = lua_state.base_hook_count;
             }
         }
 
         // Macro to re-sync trap from lua_state after hook-related calls.
-        // Matches C Lua's `updatetrap(ci)` — re-reads hook_mask.
         macro_rules! updatetrap {
             () => {
                 trap = lua_state.hook_mask != 0;
@@ -191,15 +191,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         // MAINLOOP: Main instruction dispatch loop
         loop {
-            // Fetch instruction and advance PC (get_unchecked — noalias slice)
             let instr = unsafe { *code.get_unchecked(pc) };
             pc += 1;
 
-            // ===== DEBUG HOOK CHECK =====
-            // Cost: one register test + branch (predicted not-taken) per dispatch.
-            // `trap` is a local bool — avoids memory load of hook_mask each cycle.
             if trap {
-                hook_check_instruction(lua_state, pc, chunk, frame_idx)?;
+                let chunk_ref = current_chunk!();
+                hook_check_instruction(lua_state, pc, chunk_ref, frame_idx)?;
                 updatetrap!();
             }
 
@@ -1065,13 +1062,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ci = lua_state.get_call_info(frame_idx);
                     base = ci.base;
                     let ci_pc = ci.pc as usize;
-                    chunk = unsafe { &*ci.chunk_ptr };
-                    code = &chunk.code;
-                    constants = &chunk.constants;
+                    let caller_chunk = unsafe { &*ci.chunk_ptr };
+                    code = &caller_chunk.code;
+                    constants = &caller_chunk.constants;
                     pc = ci_pc;
-                    // Restore cached upvalue pointer for caller
-                    upvalue_ptrs =
-                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
                     if lua_state.hook_mask != 0 {
                         lua_state.oldpc = (ci_pc - 1) as u32;
                     }
@@ -1108,25 +1102,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ci = lua_state.get_call_info(frame_idx);
                     base = ci.base;
                     let ci_pc = ci.pc as usize;
-                    chunk = unsafe { &*ci.chunk_ptr };
-                    code = &chunk.code;
-                    constants = &chunk.constants;
+                    let caller_chunk = unsafe { &*ci.chunk_ptr };
+                    code = &caller_chunk.code;
+                    constants = &caller_chunk.constants;
                     pc = ci_pc;
-                    // Restore cached upvalue pointer for caller
-                    upvalue_ptrs =
-                        unsafe { ci.func.as_lua_function_unchecked().upvalues().as_ptr() };
-                    // Update oldpc for caller context (rethook equivalent).
-                    // Only needed when hooks are active — otherwise oldpc is never read.
                     if lua_state.hook_mask != 0 {
                         lua_state.oldpc = (ci_pc - 1) as u32;
                     }
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
-                    // Pointer-based: read upvalue's v pointer, copy directly to stack
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     unsafe {
+                        let upvalue_ptrs = current_upvalue_ptrs!();
                         let uv = &(*upvalue_ptrs.add(b)).as_ref().data;
                         let sp = lua_state.stack.as_mut_ptr();
                         *sp.add(base + a) = *uv.get_v_ptr();
@@ -1137,6 +1126,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     unsafe {
+                        let upvalue_ptrs = current_upvalue_ptrs!();
                         let sp = lua_state.stack.as_ptr();
                         let value = *sp.add(base + a);
                         let upval_ptr = *upvalue_ptrs.add(b);
@@ -1171,7 +1161,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         0
                     };
 
-                    if k && (pc) < chunk.code.len() {
+                    if k && (pc) < current_chunk!().code.len() {
                         let extra_instr = unsafe { *code.get_unchecked(pc) };
                         if extra_instr.get_opcode() == OpCode::ExtraArg {
                             vc += extra_instr.get_ax() as usize * 1024;
@@ -1745,33 +1735,28 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // + frame_idx*72 address computation + 3 loads from memory we
                         // just wrote to — saves ~7 instructions on the hot path).
                         frame_idx = lua_state.call_depth() - 1;
-                        base = new_base; // push_lua_frame stores the base we gave it
-                        chunk = unsafe { &*new_chunk_ptr }; // same chunk_ptr we gave push_lua_frame
-                        code = &chunk.code;
-                        constants = &chunk.constants;
-                        pc = 0; // pc = 0 means start of code
-                        // Cache callee's upvalue pointer
-                        upvalue_ptrs = lua_func.upvalues().as_ptr();
+                        base = new_base;
+                        // Use raw pointer to derive code/constants (func is local,
+                        // can't borrow new_chunk across the loop boundary).
+                        let callee_chunk = unsafe { &*new_chunk_ptr };
+                        code = &callee_chunk.code;
+                        constants = &callee_chunk.constants;
+                        pc = 0;
 
                         // Call hook for inline Lua call (cold path)
                         if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
                             && lua_state.allow_hook
                         {
-                            hook_on_call(lua_state, lua_state.hook_mask, 0, chunk)?;
+                            hook_on_call(lua_state, lua_state.hook_mask, 0, callee_chunk)?;
                         }
-                        // Init oldpc for new function (only needed when hooks active)
-                        // When hooks are disabled, oldpc is never read (hook_check_instruction
-                        // is skipped), so we can avoid the is_vararg branch + memory write.
                         if lua_state.hook_mask != 0 {
-                            lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+                            lua_state.oldpc = if callee_chunk.is_vararg { 0 } else { u32::MAX };
                         }
                         updatetrap!();
                         continue;
                     }
 
                     // Semi-cold path: __call metamethod on table
-                    // Extracted to cold function to reduce lua_execute code size
-                    // and register pressure in the hot loop.
                     if func.ttistable() {
                         save_pc!();
                         if handle_call_metamethod(lua_state, func, func_idx, b, c)? {
@@ -1784,7 +1769,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {
                             restore_state!();
-                            // rethook: update oldpc for caller
                             lua_state.oldpc = (pc - 1) as u32;
                             updatetrap!();
                         }
@@ -1829,20 +1813,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // Set local vars directly from known values
                         let ci = lua_state.get_call_info(frame_idx);
                         base = ci.base;
-                        chunk = unsafe { &*new_chunk_ptr };
-                        code = &chunk.code;
-                        constants = &chunk.constants;
+                        let new_chunk = unsafe { &*new_chunk_ptr };
+                        code = &new_chunk.code;
+                        constants = &new_chunk.constants;
                         pc = 0;
-                        upvalue_ptrs = lua_func.upvalues().as_ptr();
 
-                        lua_state.oldpc = if chunk.is_vararg { 0 } else { u32::MAX };
+                        lua_state.oldpc = if new_chunk.is_vararg { 0 } else { u32::MAX };
 
                         // Call hook at function entry (cold path)
-                        if trap {
+                        if lua_state.hook_mask != 0 {
                             let hook_mask = lua_state.hook_mask;
                             if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook
                             {
-                                hook_on_call(lua_state, hook_mask, CIST_TAIL, chunk)?;
+                                hook_on_call(lua_state, hook_mask, CIST_TAIL, new_chunk)?;
                             }
                             if hook_mask & crate::lua_vm::LUA_MASKCOUNT != 0 {
                                 lua_state.hook_count = lua_state.base_hook_count;
@@ -2158,7 +2141,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
 
-                    let upval_ptr = unsafe { *upvalue_ptrs.add(b) };
+                    let upval_ptr = unsafe { *current_upvalue_ptrs!().add(b) };
                     let upval = &upval_ptr.as_ref().data;
                     let key = unsafe { constants.get_unchecked(c) };
                     let table_value = upval.get_value_ref();
@@ -2205,7 +2188,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                         }
                         // Slow path: metamethod lookup (non-Lua __index, table chain, non-table)
-                        let table_value = *unsafe { *upvalue_ptrs.add(b) }
+                        let table_value = *unsafe { *current_upvalue_ptrs!().add(b) }
                             .as_ref()
                             .data
                             .get_value_ref();
@@ -2252,7 +2235,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Fast path: direct set for existing short string key
                     // Use raw pointer to avoid borrow conflicts with lua_state
                     let (table_val_copy, table_raw_ptr) = unsafe {
-                        let upval = &(*upvalue_ptrs.add(a)).as_ref().data;
+                        let upval = &(*current_upvalue_ptrs!().add(a)).as_ref().data;
                         let tv = upval.get_value_ref();
                         (*tv, tv as *const LuaValue)
                     };
@@ -2765,11 +2748,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     pc = pc_idx;
                 }
                 OpCode::Closure => {
-                    handle_closure(lua_state, instr, base, frame_idx, chunk, pc)?;
+                    let chunk_ref = current_chunk!();
+                    handle_closure(lua_state, instr, base, frame_idx, chunk_ref, pc)?;
                 }
 
                 OpCode::Vararg => {
-                    closure_vararg_ops::exec_vararg(lua_state, instr, base, frame_idx, chunk)?;
+                    let chunk_ref = current_chunk!();
+                    closure_vararg_ops::exec_vararg(lua_state, instr, base, frame_idx, chunk_ref)?;
                 }
 
                 OpCode::GetVarg => {
@@ -2781,7 +2766,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::VarargPrep => {
-                    closure_vararg_ops::exec_varargprep(lua_state, frame_idx, chunk, &mut base)?;
+                    let chunk_ref = current_chunk!();
+                    closure_vararg_ops::exec_varargprep(lua_state, frame_idx, chunk_ref, &mut base)?;
                     // real instruction always fires a line event.
                     // Our absolute line_info makes changedline(0, 1) return
                     // false when VARARGPREP and the next instruction share a
