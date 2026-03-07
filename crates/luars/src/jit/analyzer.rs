@@ -85,6 +85,32 @@ pub enum BodyInstr {
     /// R[dest] = R[table_reg][R[key_reg]]  (from GetTable, register key)
     /// key_reg must be an integer; deopt on bounds/type fail.
     GetArrayReg { dest: u8, table_reg: u8, key_reg: u8 },
+
+    // ── Table array write ─────────────────────────────────────────────────
+    /// R[table_reg][key] = R[src]  (from SetI with k=0, integer constant key)
+    SetArrayImm { table_reg: u8, key: i64, src: u8 },
+    /// R[table_reg][R[key_reg]] = R[src]  (from SetTable with k=0)
+    SetArrayReg { table_reg: u8, key_reg: u8, src: u8 },
+
+    // ── Truthiness branching (Test/TestSet + Jmp fused) ───────────────────
+    /// Test R[reg] truthiness, then conditional jump.
+    /// In integer-only JIT: integers are always truthy → constant-folded.
+    /// k: the k flag from Test instruction.
+    TestJmp { reg: u8, k: bool, target: u16 },
+    /// TestSet: if truthy(R[src]) != k → copy R[src] to R[dest], skip Jmp.
+    /// Else → execute Jmp to target.
+    TestSetJmp { dest: u8, src: u8, k: bool, target: u16 },
+
+    // ── Table length ──────────────────────────────────────────────────────
+    /// R[dest] = #R[table_reg]  (from Len opcode on a table)
+    LenTable { dest: u8, table_reg: u8 },
+
+    // ── Table field access (constant string key) ─────────────────────────
+    /// R[dest] = R[table_reg][K[field_kidx]:string]
+    /// The field lookup is done once at loop entry via helper function.
+    /// `field_kidx` is the index into the chunk's constants table.
+    /// `key_ptr` is the interned string pointer (for runtime hash lookup).
+    GetFieldConst { dest: u8, table_reg: u8, field_kidx: u16, key_ptr: usize },
 }
 
 impl BodyInstr {
@@ -102,8 +128,12 @@ impl BodyInstr {
             | Self::Move   { dest, .. } | Self::LoadI  { dest, .. }
             | Self::ShrImm { dest, .. } | Self::ShlIConst { dest, .. }
             | Self::ShlRR  { dest, .. } | Self::ShrRR  { dest, .. }
-            | Self::GetArrayImm { dest, .. } | Self::GetArrayReg { dest, .. } => Some(*dest),
-            Self::CmpImmJmp { .. } | Self::CmpRRJmp { .. } | Self::Jmp { .. } => None,
+            | Self::GetArrayImm { dest, .. } | Self::GetArrayReg { dest, .. }
+            | Self::LenTable { dest, .. } | Self::GetFieldConst { dest, .. } => Some(*dest),
+            Self::CmpImmJmp { .. } | Self::CmpRRJmp { .. } | Self::Jmp { .. }
+            | Self::SetArrayImm { .. } | Self::SetArrayReg { .. }
+            | Self::TestJmp { .. } => None,
+            Self::TestSetJmp { dest, .. } => Some(*dest),
         }
     }
 
@@ -136,6 +166,16 @@ impl BodyInstr {
             // Table access: table_reg is tracked separately (not an integer operand)
             Self::GetArrayImm { .. } => 0,
             Self::GetArrayReg { key_reg, .. } => { buf[0] = *key_reg; 1 },
+            // Table write
+            Self::SetArrayImm { src, .. } => { buf[0] = *src; 1 },
+            Self::SetArrayReg { key_reg, src, .. } => { buf[0] = *key_reg; buf[1] = *src; 2 },
+            // Test/TestSet: source registers for truthiness check
+            Self::TestJmp { reg, .. } => { buf[0] = *reg; 1 },
+            Self::TestSetJmp { src, .. } => { buf[0] = *src; 1 },
+            // Len: no integer source register (table_reg tracked separately)
+            Self::LenTable { .. } => 0,
+            // GetField: no integer source register (table_reg tracked separately)
+            Self::GetFieldConst { .. } => 0,
         }
     }
 }
@@ -566,7 +606,117 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 body.push(BodyInstr::GetArrayReg { dest, table_reg, key_reg });
                 i += 1;
             }
-            // Anything else (calls, table access, upvalues, …) → bail out
+            // ── table array write (integer values only) ───────────────────
+            OpCode::SetI => {
+                // R[A][B] = RK(C)  —  B is integer key, k flag selects reg vs const
+                let table_reg = instr.get_a() as u8;
+                let key       = instr.get_b() as i64;
+                let c         = instr.get_c() as usize;
+                let k_flag    = instr.get_k();
+                if k_flag {
+                    // Constant value — must be integer
+                    let imm = const_int(chunk, c)?;
+                    // Emit as SetArrayImm with a synthetic LoadI + SetArrayImm.
+                    // We'll use a special encoding: src=255 means the value is
+                    // embedded as an imm in the instruction itself. Actually,
+                    // let's just emit a LoadI into a scratch register concept...
+                    // Simpler: bail if constant value (rare in hot loops).
+                    // Actually, let's handle it: emit LoadI + SetArrayImm
+                    // We need a scratch dest. But that complicates things.
+                    // For now, bail on constant-value SetI.
+                    let _ = imm;
+                    return None;
+                }
+                let src = c as u8;
+                track(&mut table_regs, table_reg);
+                track(&mut reads, src);
+                body.push(BodyInstr::SetArrayImm { table_reg, key, src });
+                i += 1;
+            }
+            OpCode::SetTable => {
+                // R[A][R[B]] = RK(C)  —  k flag selects reg vs const for value
+                let table_reg = instr.get_a() as u8;
+                let key_reg   = instr.get_b() as u8;
+                let c         = instr.get_c() as usize;
+                let k_flag    = instr.get_k();
+                if k_flag {
+                    return None; // Bail on constant-value SetTable
+                }
+                let src = c as u8;
+                track(&mut table_regs, table_reg);
+                track(&mut reads, key_reg);
+                track(&mut reads, src);
+                body.push(BodyInstr::SetArrayReg { table_reg, key_reg, src });
+                i += 1;
+            }
+            // ── truthiness test + Jmp fused ───────────────────────────────
+            OpCode::Test => {
+                // Test A k: if bool(R[A]) != k then skip Jmp
+                if i + 1 >= raw_body.len() { return None; }
+                let jmp_instr = raw_body[i + 1];
+                if jmp_instr.get_opcode() != OpCode::Jmp { return None; }
+
+                let reg = instr.get_a() as u8;
+                let k   = instr.get_k();
+                let sj  = jmp_instr.get_sj();
+                let raw_target = (i as isize + 2 + sj as isize) as usize;
+
+                track(&mut reads, reg);
+                let body_idx = body.len();
+                body.push(BodyInstr::TestJmp { reg, k, target: 0 });
+                fixups.push((body_idx, raw_target));
+                i += 2;
+            }
+            OpCode::TestSet => {
+                // TestSet A B k: if is_false(R[B]) == k then skip
+                //                else R[A] = R[B]; execute Jmp
+                if i + 1 >= raw_body.len() { return None; }
+                let jmp_instr = raw_body[i + 1];
+                if jmp_instr.get_opcode() != OpCode::Jmp { return None; }
+
+                let dest = instr.get_a() as u8;
+                let src  = instr.get_b() as u8;
+                let k    = instr.get_k();
+                let sj   = jmp_instr.get_sj();
+                let raw_target = (i as isize + 2 + sj as isize) as usize;
+
+                track(&mut reads, src);
+                track(&mut written, dest);
+                let body_idx = body.len();
+                body.push(BodyInstr::TestSetJmp { dest, src, k, target: 0 });
+                fixups.push((body_idx, raw_target));
+                i += 2;
+            }
+            // ── table length ──────────────────────────────────────────────
+            OpCode::Len => {
+                // R[A] = #R[B]  — only for tables in our JIT
+                let dest      = instr.get_a() as u8;
+                let table_reg = instr.get_b() as u8;
+                track(&mut written, dest);
+                track(&mut table_regs, table_reg);
+                body.push(BodyInstr::LenTable { dest, table_reg });
+                i += 1;
+            }
+            // ── table field access (constant string key) ──────────────────
+            OpCode::GetField => {
+                // R[A] = R[B][K[C]:string]
+                let dest      = instr.get_a() as u8;
+                let table_reg = instr.get_b() as u8;
+                let c         = instr.get_c() as usize;
+                // K[C] must be a short string
+                let key_val = chunk.constants.get(c)?;
+                if !key_val.is_short_string() { return None; }
+                let key_ptr = unsafe { key_val.value.ptr as usize };
+                track(&mut written, dest);
+                track(&mut table_regs, table_reg);
+                body.push(BodyInstr::GetFieldConst {
+                    dest, table_reg,
+                    field_kidx: c as u16,
+                    key_ptr,
+                });
+                i += 1;
+            }
+            // Anything else (calls, upvalues, …) → bail out
             _ => return None,
         }
     }
@@ -584,7 +734,9 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
         match &mut body[*body_idx] {
             BodyInstr::CmpImmJmp { target, .. }
             | BodyInstr::CmpRRJmp { target, .. }
-            | BodyInstr::Jmp { target } => *target = t as u16,
+            | BodyInstr::Jmp { target }
+            | BodyInstr::TestJmp { target, .. }
+            | BodyInstr::TestSetJmp { target, .. } => *target = t as u16,
             _ => unreachable!(),
         }
     }

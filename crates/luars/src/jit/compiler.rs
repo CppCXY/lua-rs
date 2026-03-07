@@ -262,14 +262,17 @@ fn emit_ir(
         match instr {
             BodyInstr::CmpImmJmp { target, .. }
             | BodyInstr::CmpRRJmp  { target, .. }
-            | BodyInstr::Jmp       { target }    => { jump_targets.insert(*target as usize); }
+            | BodyInstr::Jmp       { target }
+            | BodyInstr::TestJmp   { target, .. }
+            | BodyInstr::TestSetJmp { target, .. } => { jump_targets.insert(*target as usize); }
             _ => {}
         }
     }
-    // Also, every CmpImmJmp/CmpRRJmp has a fall-through to the next instr.
+    // Also, every conditional branch has a fall-through to the next instr.
     for (idx, instr) in analysis.body.iter().enumerate() {
         match instr {
-            BodyInstr::CmpImmJmp { .. } | BodyInstr::CmpRRJmp { .. } => {
+            BodyInstr::CmpImmJmp { .. } | BodyInstr::CmpRRJmp { .. }
+            | BodyInstr::TestJmp { .. } | BodyInstr::TestSetJmp { .. } => {
                 jump_targets.insert(idx + 1);
             }
             _ => {}
@@ -535,6 +538,157 @@ fn emit_ir(
                 let val_addr = b.ins().isub(array, byte_off);
                 let value    = b.ins().load(I64, MemFlags::trusted(), val_addr, 0);
                 write_reg(&mut b, dest, value, &written_vars);
+            }
+            // ── Table array write ─────────────────────────────────────────
+            BodyInstr::SetArrayImm { table_reg, key, src } => {
+                let &(_, array, asize) = table_meta.iter()
+                    .find(|&&(r, _, _)| r == table_reg).unwrap();
+                let value = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                if key < 1 {
+                    b.ins().jump(deopt_block, &[]);
+                    let dummy = b.create_block();
+                    body_internal_blocks.push(dummy);
+                    b.switch_to_block(dummy);
+                } else {
+                    let k = key - 1; // 0-based
+                    let k_val     = b.ins().iconst(I64, k);
+                    let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, k_val, asize);
+                    let ok1 = b.create_block();
+                    body_internal_blocks.push(ok1);
+                    b.ins().brif(in_bounds, ok1, &[], deopt_block, &[]);
+                    b.switch_to_block(ok1);
+                    // Write tag: array + 4 + k = LUA_VNUMINT
+                    let tag_addr = b.ins().iadd_imm(array, 4 + k);
+                    let int_tag  = b.ins().iconst(I8, LUA_VNUMINT);
+                    b.ins().store(MemFlags::trusted(), int_tag, tag_addr, 0);
+                    // Write value: array - (k+1)*8
+                    let val_addr = b.ins().iadd_imm(array, -((k + 1) * 8));
+                    b.ins().store(MemFlags::trusted(), value, val_addr, 0);
+                }
+            }
+            BodyInstr::SetArrayReg { table_reg, key_reg, src } => {
+                let &(_, array, asize) = table_meta.iter()
+                    .find(|&&(r, _, _)| r == table_reg).unwrap();
+                let key_val = read_reg(&mut b, key_reg, ra_idx, var_idx, &written_vars, stack_base);
+                let value   = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let one = b.ins().iconst(I64, 1);
+                let k   = b.ins().isub(key_val, one);
+                let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, k, asize);
+                let ok1 = b.create_block();
+                body_internal_blocks.push(ok1);
+                b.ins().brif(in_bounds, ok1, &[], deopt_block, &[]);
+                b.switch_to_block(ok1);
+                // Write tag
+                let four = b.ins().iconst(I64, 4);
+                let tag_off_val = b.ins().iadd(k, four);
+                let tag_addr    = b.ins().iadd(array, tag_off_val);
+                let int_tag     = b.ins().iconst(I8, LUA_VNUMINT);
+                b.ins().store(MemFlags::trusted(), int_tag, tag_addr, 0);
+                // Write value
+                let k1       = b.ins().iadd(k, one);
+                let byte_off = b.ins().ishl_imm(k1, 3);
+                let val_addr = b.ins().isub(array, byte_off);
+                b.ins().store(MemFlags::trusted(), value, val_addr, 0);
+            }
+            // ── Truthiness branching (constant-folded for integers) ───────
+            BodyInstr::TestJmp { reg: _, k, target } => {
+                // In integer-only JIT, all tracked values are integers.
+                // Integers are ALWAYS truthy (not nil, not false).
+                // Test semantics: if bool(R[A]) != k then skip Jmp
+                // bool(integer) = true always.
+                // k=false(0): true != false = true → always skip Jmp (fall through)
+                // k=true(1):  true != true  = false → always execute Jmp (jump)
+                let target_blk = target_blocks[&(target as usize)];
+                let fall_blk = if let Some(&fb) = target_blocks.get(&(ip + 1)) {
+                    fb
+                } else {
+                    let fb = b.create_block();
+                    body_internal_blocks.push(fb);
+                    target_blocks.insert(ip + 1, fb);
+                    fb
+                };
+                if k {
+                    // k=true → always jump to target
+                    b.ins().jump(target_blk, &[]);
+                } else {
+                    // k=false → always fall through
+                    b.ins().jump(fall_blk, &[]);
+                }
+                b.switch_to_block(fall_blk);
+            }
+            BodyInstr::TestSetJmp { dest, src, k, target } => {
+                // TestSet semantics: if is_false(R[B]) == k then skip
+                //                    else R[A] = R[B]; execute Jmp
+                // For integers: is_false = false always.
+                // k=false: false == false = true → skip (fall through), no copy
+                // k=true:  false == true  = false → copy R[B]→R[A], jump
+                let target_blk = target_blocks[&(target as usize)];
+                let fall_blk = if let Some(&fb) = target_blocks.get(&(ip + 1)) {
+                    fb
+                } else {
+                    let fb = b.create_block();
+                    body_internal_blocks.push(fb);
+                    target_blocks.insert(ip + 1, fb);
+                    fb
+                };
+                if k {
+                    // k=true → copy src to dest, then jump
+                    let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                    write_reg(&mut b, dest, vs, &written_vars);
+                    b.ins().jump(target_blk, &[]);
+                } else {
+                    // k=false → skip (no copy, fall through)
+                    b.ins().jump(fall_blk, &[]);
+                }
+                b.switch_to_block(fall_blk);
+            }
+            // ── Table length ──────────────────────────────────────────────
+            BodyInstr::LenTable { dest, table_reg } => {
+                // Call the Rust helper: jit_table_len(gc_ptr) -> i64
+                let gc_ptr = b.ins().load(I64, MemFlags::trusted(), stack_base, val_off(table_reg));
+                let fn_addr = b.ins().iconst(I64, jit_table_len as *const () as usize as i64);
+                let cc = b.func.signature.call_conv;
+                let sig = b.func.import_signature(cranelift_codegen::ir::Signature {
+                    params: vec![AbiParam::new(I64)],
+                    returns: vec![AbiParam::new(I64)],
+                    call_conv: cc,
+                });
+                let call = b.ins().call_indirect(sig, fn_addr, &[gc_ptr]);
+                let len_val = b.inst_results(call)[0];
+                write_reg(&mut b, dest, len_val, &written_vars);
+            }
+            // ── Table field access (constant string key) ──────────────────
+            BodyInstr::GetFieldConst { dest, table_reg, key_ptr, .. } => {
+                // Call Rust helper: jit_table_get_field(gc_ptr, key_ptr, out_val) -> tag
+                // tag == LUA_VNUMINT → success; otherwise → deopt
+                let gc_ptr = b.ins().load(I64, MemFlags::trusted(), stack_base, val_off(table_reg));
+                let key_val = b.ins().iconst(I64, key_ptr as i64);
+                let fn_addr = b.ins().iconst(I64, jit_table_get_field as *const () as usize as i64);
+                let cc = b.func.signature.call_conv;
+                // Allocate stack slot for the out value
+                let slot = b.func.create_sized_stack_slot(
+                    cranelift_codegen::ir::StackSlotData::new(
+                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 8, 3,
+                    ),
+                );
+                let slot_addr = b.ins().stack_addr(I64, slot, 0);
+                let sig = b.func.import_signature(cranelift_codegen::ir::Signature {
+                    params: vec![AbiParam::new(I64), AbiParam::new(I64), AbiParam::new(I64)],
+                    returns: vec![AbiParam::new(I64)],
+                    call_conv: cc,
+                });
+                let call = b.ins().call_indirect(sig, fn_addr, &[gc_ptr, key_val, slot_addr]);
+                let tag = b.inst_results(call)[0];
+                // Check that the tag is LUA_VNUMINT (integer)
+                let exp_int = b.ins().iconst(I64, LUA_VNUMINT);
+                let is_int  = b.ins().icmp(IntCC::Equal, tag, exp_int);
+                let ok_blk = b.create_block();
+                body_internal_blocks.push(ok_blk);
+                b.ins().brif(is_int, ok_blk, &[], deopt_block, &[]);
+                b.switch_to_block(ok_blk);
+                // Load value from stack slot
+                let field_val = b.ins().stack_load(I64, slot, 0);
+                write_reg(&mut b, dest, field_val, &written_vars);
             }
             // ── Control flow ──────────────────────────────────────────────
             BodyInstr::CmpImmJmp { reg, imm, cc, k, target } => {
@@ -805,4 +959,51 @@ fn emit_lua_shiftl(
     // Select: do_shl → shl_res; else do_shr → shr_res; else → 0
     let shr_or_zero = b.ins().select(do_shr, shr_res, zero);
     b.ins().select(do_shl, shl_res, shr_or_zero)
+}
+
+// ── JIT helper functions (called from generated code via call_indirect) ───────
+
+/// Compute `#t` (table length) from a raw GC pointer to `Gc<LuaTable>`.
+///
+/// # Safety
+/// `gc_ptr` must point to a valid, live `Gc<LuaTable>` allocation.
+extern "C" fn jit_table_len(gc_ptr: *const u8) -> i64 {
+    use crate::gc::gc_object::Gc;
+    use crate::lua_value::lua_table::LuaTable;
+    use crate::lua_value::lua_table::native_table::NativeTable;
+    unsafe {
+        let gc_to_nt = std::mem::offset_of!(Gc<LuaTable>, data)
+            + std::mem::offset_of!(LuaTable, impl_table);
+        let nt = &*(gc_ptr.add(gc_to_nt) as *const NativeTable);
+        nt.len() as i64
+    }
+}
+
+/// Look up a field in a table by constant interned string key.
+///
+/// Returns the type tag of the value (e.g. `LUA_VNUMINT = 3`).
+/// On success, writes the value payload to `*out_val`.
+/// Returns `0xFF` if the field is not found.
+///
+/// # Safety
+/// - `gc_ptr` must point to a valid, live `Gc<LuaTable>` allocation.
+/// - `key_ptr` must be the raw integer representation of an interned `Gc<GcString>`.
+/// - `out_val` must point to writable memory for at least 8 bytes.
+extern "C" fn jit_table_get_field(gc_ptr: *const u8, key_ptr: i64, out_val: *mut i64) -> i64 {
+    use crate::gc::gc_object::Gc;
+    use crate::lua_value::lua_table::LuaTable;
+    use crate::lua_value::lua_table::native_table::NativeTable;
+    use crate::lua_value::{LuaValue, Value};
+    unsafe {
+        let gc_to_nt = std::mem::offset_of!(Gc<LuaTable>, data)
+            + std::mem::offset_of!(LuaTable, impl_table);
+        let nt = &*(gc_ptr.add(gc_to_nt) as *const NativeTable);
+        let key_lv = LuaValue::from_raw(Value { i: key_ptr }, 0x44); // LUA_VSHRSTR
+        if let Some(val) = nt.get_shortstr_fast(&key_lv) {
+            *out_val = val.value.i;
+            val.tt as i64
+        } else {
+            0xFF
+        }
+    }
 }

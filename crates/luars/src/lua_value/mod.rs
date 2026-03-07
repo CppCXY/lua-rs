@@ -19,7 +19,7 @@ pub use userdata_trait::{
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
-pub use lua_value::{LuaValue, LuaValueKind};
+pub use lua_value::{LuaValue, LuaValueKind, Value};
 
 // Re-export type tag constants for VM execution
 pub use lua_value::{
