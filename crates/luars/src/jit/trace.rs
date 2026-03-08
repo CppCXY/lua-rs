@@ -110,6 +110,8 @@ pub struct SnapEntry {
     pub slot: u16,
     /// Where the value comes from.
     pub val: SnapValue,
+    /// Type of the value (needed for tag writeback on side exit).
+    pub ty: IrType,
 }
 
 /// How a snapshot slot gets its value.
@@ -166,6 +168,14 @@ pub enum TraceIr {
 
     /// Guard a register-register comparison R[lhs] <cmp> R[rhs].
     GuardCmpRR {
+        lhs: TRef,
+        rhs: TRef,
+        cmp: CmpOp,
+        snap_id: u32,
+    },
+
+    /// Guard a float-float comparison.
+    GuardCmpF {
         lhs: TRef,
         rhs: TRef,
         cmp: CmpOp,

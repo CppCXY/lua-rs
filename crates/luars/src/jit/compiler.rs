@@ -914,8 +914,8 @@ fn emit_ir(
     // On the "more iterations" path — update count and idx, jump back.
     // On the "done" path — jump to exit (idx and count already at final values).
     let update_block = b.create_block();
-    b.seal_block(update_block); // one predecessor: epilog brif
     b.ins().brif(more, update_block, &[], exit_block, &[]);
+    b.seal_block(update_block); // one predecessor: epilog brif
 
     b.switch_to_block(update_block);
     let one       = b.ins().iconst(I64, 1);

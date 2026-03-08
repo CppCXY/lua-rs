@@ -1044,9 +1044,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             .map(|ct| ct.fn_ptr);
                         if let Some(fn_ptr) = trace_fn_ptr {
                             let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
+                            let upval_raw = current_upvalue_ptrs!() as *const u8;
                             let snap_id = unsafe {
                                 let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
-                                f(stack_ptr, base)
+                                f(stack_ptr, base, upval_raw)
                             };
                             if snap_id > 0 {
                                 if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {

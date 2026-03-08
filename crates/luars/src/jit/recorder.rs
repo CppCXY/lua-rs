@@ -83,8 +83,13 @@ pub struct TraceRecorder {
     call_depth: u32,
     /// Whether we have emitted `LoopStart` yet (set on second visit to head).
     loop_started: bool,
+    /// How many times we have visited the trace head during recording.
+    head_visits: u32,
     /// How many instructions recorded so far.
     len: usize,
+    /// Phi node info: (ops_index, slot, entry_tref) for each Phi placeholder.
+    /// Filled at LoopStart, backedge patched at LoopEnd.
+    phi_entries: Vec<(usize, u16, TRef)>,
 }
 
 impl TraceRecorder {
@@ -105,7 +110,9 @@ impl TraceRecorder {
             chunk_ptr,
             call_depth: 0,
             loop_started: false,
+            head_visits: 0,
             len: 0,
+            phi_entries: Vec::new(),
         }
     }
 
@@ -119,6 +126,88 @@ impl TraceRecorder {
         TRef(idx as u32)
     }
 
+    /// Try to constant-fold a binary IR instruction.
+    /// If both operands are KInt/KFloat constants, compute the result at
+    /// record time and return a new constant TRef. Otherwise emit the IR.
+    fn fold_or_emit(&mut self, ir: TraceIr) -> TRef {
+        if let Some(folded) = self.try_fold(&ir) {
+            return self.emit(folded);
+        }
+        self.emit(ir)
+    }
+
+    fn try_fold(&self, ir: &TraceIr) -> Option<TraceIr> {
+        match ir {
+            // Integer arithmetic
+            TraceIr::AddInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_add(b)),
+            TraceIr::SubInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_sub(b)),
+            TraceIr::MulInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_mul(b)),
+            TraceIr::IDivInt { lhs, rhs } => {
+                if let (TraceIr::KInt(a), TraceIr::KInt(b)) = (&self.ops[lhs.index()], &self.ops[rhs.index()]) {
+                    if *b != 0 { Some(TraceIr::KInt(a.wrapping_div(*b))) } else { None }
+                } else { None }
+            }
+            TraceIr::ModInt { lhs, rhs } => {
+                if let (TraceIr::KInt(a), TraceIr::KInt(b)) = (&self.ops[lhs.index()], &self.ops[rhs.index()]) {
+                    if *b != 0 { Some(TraceIr::KInt(a.wrapping_rem(*b))) } else { None }
+                } else { None }
+            }
+            // Float arithmetic
+            TraceIr::AddFloat { lhs, rhs } => self.fold_float_bin(*lhs, *rhs, |a, b| a + b),
+            TraceIr::SubFloat { lhs, rhs } => self.fold_float_bin(*lhs, *rhs, |a, b| a - b),
+            TraceIr::MulFloat { lhs, rhs } => self.fold_float_bin(*lhs, *rhs, |a, b| a * b),
+            TraceIr::DivFloat { lhs, rhs } => self.fold_float_bin(*lhs, *rhs, |a, b| a / b),
+            // Bitwise
+            TraceIr::BAndInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a & b),
+            TraceIr::BOrInt  { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a | b),
+            TraceIr::BXorInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a ^ b),
+            TraceIr::ShlInt  { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_shl(b as u32)),
+            TraceIr::ShrInt  { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_shr(b as u32)),
+            // Unary
+            TraceIr::NegInt { src } => {
+                if let TraceIr::KInt(v) = &self.ops[src.index()] {
+                    Some(TraceIr::KInt(v.wrapping_neg()))
+                } else { None }
+            }
+            TraceIr::NegFloat { src } => {
+                if let TraceIr::KFloat(v) = &self.ops[src.index()] {
+                    Some(TraceIr::KFloat(-v))
+                } else { None }
+            }
+            TraceIr::BNotInt { src } => {
+                if let TraceIr::KInt(v) = &self.ops[src.index()] {
+                    Some(TraceIr::KInt(!v))
+                } else { None }
+            }
+            TraceIr::IntToFloat { src } => {
+                if let TraceIr::KInt(v) = &self.ops[src.index()] {
+                    Some(TraceIr::KFloat(*v as f64))
+                } else { None }
+            }
+            _ => None,
+        }
+    }
+
+    fn fold_int_bin(&self, lhs: TRef, rhs: TRef, f: impl FnOnce(i64, i64) -> i64) -> Option<TraceIr> {
+        if let (TraceIr::KInt(a), TraceIr::KInt(b)) = (&self.ops[lhs.index()], &self.ops[rhs.index()]) {
+            Some(TraceIr::KInt(f(*a, *b)))
+        } else { None }
+    }
+
+    fn fold_float_bin(&self, lhs: TRef, rhs: TRef, f: impl FnOnce(f64, f64) -> f64) -> Option<TraceIr> {
+        let a = match &self.ops[lhs.index()] {
+            TraceIr::KFloat(v) => *v,
+            TraceIr::KInt(v) => *v as f64,
+            _ => return None,
+        };
+        let b = match &self.ops[rhs.index()] {
+            TraceIr::KFloat(v) => *v,
+            TraceIr::KInt(v) => *v as f64,
+            _ => return None,
+        };
+        Some(TraceIr::KFloat(f(a, b)))
+    }
+
     /// Take a snapshot of the current interpreter state for a side exit.
     fn snapshot(&mut self, pc: u32, base: usize) -> u32 {
         let snap_id = self.snapshots.len() as u32;
@@ -128,9 +217,10 @@ impl TraceRecorder {
             .iter()
             .enumerate()
             .filter_map(|(i, e)| {
-                e.map(|(tref, _)| SnapEntry {
+                e.map(|(tref, ty)| SnapEntry {
                     slot: i as u16,
                     val: SnapValue::Ref(tref),
+                    ty,
                 })
             })
             .collect();
@@ -163,11 +253,11 @@ impl TraceRecorder {
         tref
     }
 
-    /// Write a computed value to a stack slot in the slot map
-    /// and emit a StoreSlot to keep the VM stack in sync.
+    /// Write a computed value to a stack slot in the slot map.
+    /// No StoreSlot is emitted — writeback happens lazily at side exits
+    /// (via snapshot entries) and at LoopEnd.
     fn write_slot(&mut self, slot: u16, tref: TRef, ty: IrType) {
         self.slot_map.set(slot, tref, ty);
-        self.emit(TraceIr::StoreSlot { slot, val: tref, ty });
     }
 
     /// Check abort conditions (trace too long, too many exits).
@@ -203,6 +293,21 @@ impl TraceRecorder {
         }
     }
 
+    /// Try to detect an upvalue's current runtime type from the active closure.
+    ///
+    /// Recording runs before instruction dispatch, so destination registers for
+    /// `GetUpval` still hold old values. Reading type from R[A] is incorrect.
+    fn detect_upvalue_type(base: usize, upval_idx: u16, stack: &[LuaValue]) -> Option<IrType> {
+        if base == 0 {
+            return None;
+        }
+        let func = stack.get(base - 1)?;
+        let lua_func = func.as_lua_function()?;
+        let upval_ptr = lua_func.upvalues().get(upval_idx as usize)?;
+        let upval_val = upval_ptr.as_ref().data.get_value_ref();
+        Some(Self::detect_type(upval_val))
+    }
+
     // ── Main entry point ──────────────────────────────────────────────
 
     /// Record one interpreter instruction.
@@ -222,14 +327,44 @@ impl TraceRecorder {
     ) -> RecordResult {
         // Check if we've looped back to the trace head.
         if pc == self.head_pc && base == self.head_base && self.call_depth == 0 {
-            if self.loop_started {
-                // Second time at head — loop is closed.
-                self.emit(TraceIr::LoopEnd);
-                return RecordResult::LoopClosed;
-            } else {
-                // First time back at head — insert loop marker.
+            self.head_visits += 1;
+            if self.head_visits == 1 {
+                // First visit — start of recording.  Record the prologue
+                // (one full loop body) normally without LoopStart.
+            } else if self.head_visits == 2 {
+                // Second visit — prologue is done.  Emit LoopStart + Phi.
                 self.loop_started = true;
                 self.emit(TraceIr::LoopStart);
+                // Emit Phi placeholders for all live slots and update slot_map
+                // to point to Phi results.
+                let live_slots: Vec<(u16, TRef, IrType)> = self.slot_map.entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| e.map(|(tref, ty)| (i as u16, tref, ty)))
+                    .collect();
+                for (slot, entry_tref, ty) in live_slots {
+                    let ops_idx = self.ops.len();
+                    let phi_tref = self.emit(TraceIr::Phi {
+                        slot,
+                        entry: entry_tref,
+                        backedge: TRef::NONE, // patched at LoopEnd
+                    });
+                    self.phi_entries.push((ops_idx, slot, entry_tref));
+                    self.slot_map.set(slot, phi_tref, ty);
+                }
+            } else {
+                // Third visit — loop body recorded.  Patch Phi backedges.
+                for (ops_idx, slot, _entry) in &self.phi_entries {
+                    if let Some((backedge_tref, _ty)) = self.slot_map.get(*slot) {
+                        if let TraceIr::Phi { backedge, .. } = &mut self.ops[*ops_idx] {
+                            *backedge = backedge_tref;
+                        }
+                    }
+                }
+                // Take a final snapshot for safety-exit writeback.
+                self.snapshot(pc, base);
+                self.emit(TraceIr::LoopEnd);
+                return RecordResult::LoopClosed;
             }
         }
 
@@ -394,25 +529,23 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_loadk(&mut self, instr: Instruction, _pc: u32, _base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_loadk(&mut self, instr: Instruction, _pc: u32, _base: usize, _stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
-        // The interpreter already loaded the constant into stack[base+a].
-        // We just need to record what type and value it has.
-        let bx = instr.get_bx();
-        // We detect the type from the stack (post-execution).
-        let _ = bx; // constant index, but we read from stack
-        let val = &stack[_base + a as usize];
-        let ty = Self::detect_type(val);
-        let r = match ty {
-            IrType::Int => {
-                let iv = unsafe { val.value.i };
-                self.emit(TraceIr::KInt(iv))
-            }
-            IrType::Float => {
-                let fv = unsafe { val.value.n };
-                self.emit(TraceIr::KFloat(fv))
-            }
-            _ => return RecordResult::Abort(AbortReason::NYI("loadk non-numeric")),
+        // Read the constant from the chunk's constant pool (NOT from the
+        // stack, because the recorder runs BEFORE instruction dispatch).
+        let bx = instr.get_bx() as usize;
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(kv) = chunk.constants.get(bx) else {
+            return RecordResult::Abort(AbortReason::NYI("loadk const oob"));
+        };
+        let (r, ty) = if kv.ttisinteger() {
+            let iv = unsafe { kv.value.i };
+            (self.emit(TraceIr::KInt(iv)), IrType::Int)
+        } else if kv.ttisfloat() {
+            let fv = unsafe { kv.value.n };
+            (self.emit(TraceIr::KFloat(fv)), IrType::Float)
+        } else {
+            return RecordResult::Abort(AbortReason::NYI("loadk non-numeric"));
         };
         self.write_slot(a, r, ty);
         RecordResult::Continue
@@ -475,7 +608,7 @@ impl TraceRecorder {
             (OpCode::Pow, _)             => TraceIr::PowFloat { lhs, rhs }, // always float
             _ => return RecordResult::Abort(AbortReason::NYI("arith combo")),
         };
-        let r = self.emit(ir);
+        let r = self.fold_or_emit(ir);
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
@@ -506,50 +639,43 @@ impl TraceRecorder {
     fn record_arith_rk(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
+        let c = instr.get_c() as usize;
         let op = instr.get_opcode();
 
         let val_b = &stack[base + b as usize];
         let ty_b = Self::detect_type(val_b);
         let vb = self.ensure_slot(b, ty_b, pc, base);
 
-        // The result is already in stack[base+a] after execution.
-        let val_a = &stack[base + a as usize];
-        let res_ty = Self::detect_type(val_a);
-
-        // Read the constant value from the result to determine what K was.
-        // We reconstruct the constant from actual result type.
-        let kval = if res_ty == IrType::Int {
-            // For int result, compute K = result - B (for AddK), etc.
-            // Simpler: read the post-exec destination and reverse-engineer K.
-            // Actually, the constant comes from the chunk's constant pool.
-            // We read it from the result in the stack.
-            let ival = unsafe { val_a.value.i };
-            let bval = unsafe { val_b.value.i };
-            let k = match op {
-                OpCode::AddK => ival.wrapping_sub(bval),
-                OpCode::SubK => bval.wrapping_sub(ival),
-                OpCode::MulK => if bval != 0 { ival / bval } else { 0 },
-                _ => return RecordResult::Abort(AbortReason::NYI("rk int combo")),
-            };
-            self.emit(TraceIr::KInt(k))
-        } else {
-            let fval = unsafe { val_a.value.n };
-            let bfval = if ty_b == IrType::Float { unsafe { val_b.value.n } } else { (unsafe { val_b.value.i }) as f64 };
-            let k = match op {
-                OpCode::AddK => fval - bfval,
-                OpCode::SubK => bfval - fval,
-                OpCode::MulK => if bfval != 0.0 { fval / bfval } else { 0.0 },
-                OpCode::DivK => if fval != 0.0 { bfval / (bfval / fval * bfval / fval).sqrt() } else { 0.0 },
-                _ => return RecordResult::Abort(AbortReason::NYI("rk float combo")),
-            };
-            self.emit(TraceIr::KFloat(k))
+        // Read the constant directly from the chunk's constant pool.
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(kv) = chunk.constants.get(c) else {
+            return RecordResult::Abort(AbortReason::NYI("rk const oob"));
         };
 
-        let (lhs, rhs) = if res_ty == IrType::Float && ty_b == IrType::Int {
-            (self.coerce_one(vb, ty_b), kval)
+        // Determine constant type from the constant pool value.
+        let (kval, ty_k) = if kv.ttisinteger() {
+            let ki = unsafe { kv.value.i };
+            (self.emit(TraceIr::KInt(ki)), IrType::Int)
+        } else if kv.ttisfloat() {
+            let kf = unsafe { kv.value.n };
+            (self.emit(TraceIr::KFloat(kf)), IrType::Float)
         } else {
-            (vb, kval)
+            return RecordResult::Abort(AbortReason::NYI("rk non-numeric const"));
         };
+
+        // Map *K opcodes to their base opcodes for coerce_arith.
+        let base_op = match op {
+            OpCode::AddK => OpCode::Add,
+            OpCode::SubK => OpCode::Sub,
+            OpCode::MulK => OpCode::Mul,
+            OpCode::DivK => OpCode::Div,
+            OpCode::IDivK => OpCode::IDiv,
+            OpCode::ModK => OpCode::Mod,
+            OpCode::PowK => OpCode::Pow,
+            _ => return RecordResult::Abort(AbortReason::NYI("rk combo")),
+        };
+
+        let (lhs, rhs, res_ty) = self.coerce_arith(vb, ty_b, kval, ty_k, base_op);
 
         let ir = match (op, res_ty) {
             (OpCode::AddK, IrType::Int)   => TraceIr::AddInt   { lhs, rhs },
@@ -564,7 +690,7 @@ impl TraceRecorder {
             (OpCode::PowK, _)             => TraceIr::PowFloat { lhs, rhs },
             _ => return RecordResult::Abort(AbortReason::NYI("rk combo")),
         };
-        let r = self.emit(ir);
+        let r = self.fold_or_emit(ir);
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
@@ -574,7 +700,7 @@ impl TraceRecorder {
     /// Coerce one value to float if needed.
     fn coerce_one(&mut self, val: TRef, ty: IrType) -> TRef {
         if ty == IrType::Int {
-            self.emit(TraceIr::IntToFloat { src: val })
+            self.fold_or_emit(TraceIr::IntToFloat { src: val })
         } else {
             val
         }
@@ -617,29 +743,38 @@ impl TraceRecorder {
             OpCode::Shr  => TraceIr::ShrInt  { lhs: vb, rhs: vc },
             _ => unreachable!(),
         };
-        let r = self.emit(ir);
+        let r = self.fold_or_emit(ir);
         self.write_slot(a, r, IrType::Int);
         RecordResult::Continue
     }
 
-    fn record_bitwise_rk(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_bitwise_rk(&mut self, instr: Instruction, pc: u32, base: usize, _stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
+        let c = instr.get_c() as usize;
         let op = instr.get_opcode();
-        let _vb = self.ensure_slot(b, IrType::Int, pc, base);
-        // Read constant from result
-        let val_a = &stack[base + a as usize];
-        let val_b_i = unsafe { stack[base + b as usize].value.i };
-        let res_i = unsafe { val_a.value.i };
-        let _k = match op {
-            OpCode::BAndK => res_i,
-            OpCode::BOrK  => res_i,
-            OpCode::BXorK => res_i ^ val_b_i,
-            _ => return RecordResult::Abort(AbortReason::NYI("bitwise_rk")),
+        let vb = self.ensure_slot(b, IrType::Int, pc, base);
+
+        // Read the constant directly from the chunk's constant pool.
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(kv) = chunk.constants.get(c) else {
+            return RecordResult::Abort(AbortReason::NYI("bitwise_rk const oob"));
         };
-        // Actually just record the result directly since we can't reverse all bitwise easily
-        let kval = self.emit(TraceIr::KInt(res_i));
-        self.write_slot(a, kval, IrType::Int);
+        let ki = if kv.ttisinteger() {
+            unsafe { kv.value.i }
+        } else {
+            return RecordResult::Abort(AbortReason::NYI("bitwise_rk non-int const"));
+        };
+        let kval = self.emit(TraceIr::KInt(ki));
+
+        let ir = match op {
+            OpCode::BAndK => TraceIr::BAndInt { lhs: vb, rhs: kval },
+            OpCode::BOrK  => TraceIr::BOrInt  { lhs: vb, rhs: kval },
+            OpCode::BXorK => TraceIr::BXorInt { lhs: vb, rhs: kval },
+            _ => unreachable!(),
+        };
+        let r = self.fold_or_emit(ir);
+        self.write_slot(a, r, IrType::Int);
         RecordResult::Continue
     }
 
@@ -655,7 +790,7 @@ impl TraceRecorder {
             OpCode::ShrI => TraceIr::ShrInt { lhs: vb, rhs: kc }, // ShrI: R[B] >> sC
             _ => unreachable!(),
         };
-        let r = self.emit(ir);
+        let r = self.fold_or_emit(ir);
         self.write_slot(a, r, IrType::Int);
         RecordResult::Continue
     }
@@ -675,7 +810,7 @@ impl TraceRecorder {
             IrType::Float => (TraceIr::NegFloat { src: vb }, IrType::Float),
             _ => return RecordResult::Abort(AbortReason::NYI("unm non-numeric")),
         };
-        let r = self.emit(ir);
+        let r = self.fold_or_emit(ir);
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
@@ -684,7 +819,7 @@ impl TraceRecorder {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let vb = self.ensure_slot(b, IrType::Int, pc, base);
-        let r = self.emit(TraceIr::BNotInt { src: vb });
+        let r = self.fold_or_emit(TraceIr::BNotInt { src: vb });
         self.write_slot(a, r, IrType::Int);
         RecordResult::Continue
     }
@@ -709,10 +844,9 @@ impl TraceRecorder {
         let val = &stack[base + b as usize];
         let ty = Self::detect_type(val);
         let vb = self.ensure_slot(b, ty, pc, base);
-        // `not` just produces a boolean.  We can't easily represent this
-        // without a dedicated IR node, so snapshot the result.
-        let result = &stack[base + a as usize];
-        let rv = if result.is_truthy() { 1i64 } else { 0i64 };
+        // `not` just produces a boolean. Derive from the INPUT value
+        // (register B, which is valid pre-execution).
+        let rv = if val.is_truthy() { 0i64 } else { 1i64 }; // not(truthy)=false, not(falsy)=true
         let r = self.emit(TraceIr::KInt(rv));
         self.write_slot(a, r, IrType::Bool);
         let _ = vb; // guard ensures consistent type
@@ -823,8 +957,8 @@ impl TraceRecorder {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let r = self.emit(TraceIr::LoadUpval { upval_idx: b });
-        let result = &stack[base + a as usize];
-        let res_ty = Self::detect_type(result);
+        let res_ty = Self::detect_upvalue_type(base, b, stack)
+            .unwrap_or_else(|| Self::detect_type(&stack[base + a as usize]));
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
@@ -849,20 +983,30 @@ impl TraceRecorder {
         let op = instr.get_opcode();
         let val_a = &stack[base + a as usize];
         let ty = Self::detect_type(val_a);
-        if ty == IrType::Float {
-            return RecordResult::Abort(AbortReason::NYI("float cmp_imm"));
-        }
         let va = self.ensure_slot(a, ty, pc, base);
         let sb = instr.get_sb() as i64;
 
         // Determine the observed comparison result at recording time
-        let cond = match op {
-            OpCode::EqI => val_a.ivalue() == sb,
-            OpCode::LtI => val_a.ivalue() < sb,
-            OpCode::LeI => val_a.ivalue() <= sb,
-            OpCode::GtI => val_a.ivalue() > sb,
-            OpCode::GeI => val_a.ivalue() >= sb,
-            _ => unreachable!(),
+        let cond = if ty == IrType::Float {
+            let fval = unsafe { val_a.value.n };
+            let fsb = sb as f64;
+            match op {
+                OpCode::EqI => fval == fsb,
+                OpCode::LtI => fval < fsb,
+                OpCode::LeI => fval <= fsb,
+                OpCode::GtI => fval > fsb,
+                OpCode::GeI => fval >= fsb,
+                _ => unreachable!(),
+            }
+        } else {
+            match op {
+                OpCode::EqI => val_a.ivalue() == sb,
+                OpCode::LtI => val_a.ivalue() < sb,
+                OpCode::LeI => val_a.ivalue() <= sb,
+                OpCode::GtI => val_a.ivalue() > sb,
+                OpCode::GeI => val_a.ivalue() >= sb,
+                _ => unreachable!(),
+            }
         };
         // Guard the comparison matches the observed result
         let cmp = match (op, cond) {
@@ -880,12 +1024,22 @@ impl TraceRecorder {
         };
         self.snapshot(pc, base);
         let snap_id = self.snapshots.len() as u32 - 1;
-        self.emit(TraceIr::GuardCmpI {
-            lhs: va,
-            rhs_imm: sb,
-            cmp,
-            snap_id,
-        });
+        if ty == IrType::Float {
+            let rhs = self.emit(TraceIr::KFloat(sb as f64));
+            self.emit(TraceIr::GuardCmpF {
+                lhs: va,
+                rhs,
+                cmp,
+                snap_id,
+            });
+        } else {
+            self.emit(TraceIr::GuardCmpI {
+                lhs: va,
+                rhs_imm: sb,
+                cmp,
+                snap_id,
+            });
+        }
         RecordResult::Continue
     }
 
@@ -897,18 +1051,27 @@ impl TraceRecorder {
         let val_b = &stack[base + b as usize];
         let ty_a = Self::detect_type(val_a);
         let ty_b = Self::detect_type(val_b);
-        if ty_a == IrType::Float || ty_b == IrType::Float {
-            return RecordResult::Abort(AbortReason::NYI("float cmp_rr"));
-        }
         let va = self.ensure_slot(a, ty_a, pc, base);
         let vb = self.ensure_slot(b, ty_b, pc, base);
 
         let op = instr.get_opcode();
-        let cond = match op {
-            OpCode::Eq => val_a.ivalue() == val_b.ivalue(),
-            OpCode::Lt => val_a.ivalue() < val_b.ivalue(),
-            OpCode::Le => val_a.ivalue() <= val_b.ivalue(),
-            _ => unreachable!(),
+        let is_float = ty_a == IrType::Float || ty_b == IrType::Float;
+        let cond = if is_float {
+            let fa = if ty_a == IrType::Float { unsafe { val_a.value.n } } else { val_a.ivalue() as f64 };
+            let fb = if ty_b == IrType::Float { unsafe { val_b.value.n } } else { val_b.ivalue() as f64 };
+            match op {
+                OpCode::Eq => fa == fb,
+                OpCode::Lt => fa < fb,
+                OpCode::Le => fa <= fb,
+                _ => unreachable!(),
+            }
+        } else {
+            match op {
+                OpCode::Eq => val_a.ivalue() == val_b.ivalue(),
+                OpCode::Lt => val_a.ivalue() < val_b.ivalue(),
+                OpCode::Le => val_a.ivalue() <= val_b.ivalue(),
+                _ => unreachable!(),
+            }
         };
         let cmp = match (op, cond) {
             (OpCode::Lt, true) => CmpOp::Lt,
@@ -921,12 +1084,23 @@ impl TraceRecorder {
         };
         self.snapshot(pc, base);
         let snap_id = self.snapshots.len() as u32 - 1;
-        self.emit(TraceIr::GuardCmpRR {
-            lhs: va,
-            rhs: vb,
-            cmp,
-            snap_id,
-        });
+        if is_float {
+            let fa = self.coerce_one(va, ty_a);
+            let fb = self.coerce_one(vb, ty_b);
+            self.emit(TraceIr::GuardCmpF {
+                lhs: fa,
+                rhs: fb,
+                cmp,
+                snap_id,
+            });
+        } else {
+            self.emit(TraceIr::GuardCmpRR {
+                lhs: va,
+                rhs: vb,
+                cmp,
+                snap_id,
+            });
+        }
         RecordResult::Continue
     }
 

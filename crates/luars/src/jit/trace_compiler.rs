@@ -5,7 +5,7 @@
 
 use cranelift_codegen::ir::{
     AbiParam, InstBuilder, MemFlags,
-    condcodes::IntCC,
+    condcodes::{IntCC, FloatCC},
     types::{I8, I32, I64, F64},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -73,6 +73,17 @@ fn cmp_to_intcc(cmp: &CmpOp) -> IntCC {
     }
 }
 
+fn cmp_to_floatcc(cmp: &CmpOp) -> FloatCC {
+    match cmp {
+        CmpOp::Lt => FloatCC::LessThan,
+        CmpOp::Le => FloatCC::LessThanOrEqual,
+        CmpOp::Gt => FloatCC::GreaterThan,
+        CmpOp::Ge => FloatCC::GreaterThanOrEqual,
+        CmpOp::Eq => FloatCC::Equal,
+        CmpOp::Ne => FloatCC::NotEqual,
+    }
+}
+
 pub struct CompiledTrace {
     pub trace_id: u32,
     pub fn_ptr: *const u8,
@@ -85,7 +96,7 @@ pub struct CompiledTrace {
 unsafe impl Send for CompiledTrace {}
 unsafe impl Sync for CompiledTrace {}
 
-pub type TraceFn = unsafe fn(*mut u8, usize) -> i32;
+pub type TraceFn = unsafe fn(*mut u8, usize, *const u8) -> i32;
 
 pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
     with_module(|module| {
@@ -93,6 +104,7 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(ptr_type));
         sig.params.push(AbiParam::new(I64));
+        sig.params.push(AbiParam::new(ptr_type)); // upvalue_ptrs
         sig.returns.push(AbiParam::new(I32));
 
         let func_name = format!("trace_{}", trace.id);
@@ -100,12 +112,29 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)
             .map_err(|e| format!("declare: {e}"))?;
 
+        // Declare `pow(f64,f64)->f64` if this trace uses PowFloat.
+        let needs_pow = trace.ops.iter().any(|op| matches!(op, TraceIr::PowFloat { .. }));
+        let pow_func_id = if needs_pow {
+            let mut pow_sig = module.make_signature();
+            pow_sig.params.push(AbiParam::new(F64));
+            pow_sig.params.push(AbiParam::new(F64));
+            pow_sig.returns.push(AbiParam::new(F64));
+            Some(module.declare_function("pow", cranelift_module::Linkage::Import, &pow_sig)
+                .map_err(|e| format!("declare pow: {e}"))?)
+        } else { None };
+
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
+
+        // Import pow into the function if needed.
+        let pow_fref = pow_func_id.map(|fid| {
+            module.declare_func_in_func(fid, &mut ctx.func)
+        });
+
         let mut fb_ctx = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-            emit_trace_ir(&mut builder, trace)?;
+            emit_trace_ir(&mut builder, trace, pow_fref)?;
             builder.finalize();
         }
 
@@ -126,7 +155,7 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
     })
 }
 
-fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace) -> Result<(), String> {
+fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, pow_fref: Option<cranelift_codegen::ir::FuncRef>) -> Result<(), String> {
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
     let exit_blocks: Vec<_> = (0..trace.snapshots.len()).map(|_| b.create_block()).collect();
@@ -137,6 +166,7 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace) -> Result<(), String> {
     b.seal_block(entry);
     let stack_ptr = b.block_params(entry)[0];
     let base_val = b.block_params(entry)[1];
+    let upval_ptrs = b.block_params(entry)[2];
     let lv = b.ins().iconst(I64, LV as i64);
     let base_off = b.ins().imul(base_val, lv);
     let sbase = b.ins().iadd(stack_ptr, base_off);
@@ -155,7 +185,7 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace) -> Result<(), String> {
     // Safety counter: prevent infinite loops in compiled traces
     let var_counter = b.declare_var(I64);
     let safety_exit = b.create_block();
-    let counter_init = b.ins().iconst(I64, 10_000);
+    let counter_init = b.ins().iconst(I64, 1_000_000);
     b.def_var(var_counter, counter_init);
 
     let mut vals: Vec<cranelift_codegen::ir::Value> = Vec::with_capacity(trace.ops.len());
@@ -192,6 +222,17 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace) -> Result<(), String> {
                 b.switch_to_block(cont);
                 b.ins().iconst(I64, 0)
             }
+            TraceIr::GuardCmpF { lhs, rhs, cmp, snap_id } => {
+                let cc = cmp_to_floatcc(cmp);
+                let fl = as_f64(b, vals[lhs.index()]);
+                let fr = as_f64(b, vals[rhs.index()]);
+                let ok = b.ins().fcmp(cc, fl, fr);
+                let cont = b.create_block();
+                b.ins().brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
+                b.seal_block(cont);
+                b.switch_to_block(cont);
+                b.ins().iconst(I64, 0)
+            }
             TraceIr::GuardTruthy { .. } => {
                 // After GuardType, truthiness is determined by type alone;
                 // Int/Float/String/Table/Function are always truthy.
@@ -206,6 +247,30 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace) -> Result<(), String> {
                 b.ins().store(MemFlags::trusted(), sv, sbase, val_off(*slot));
                 let tg = b.ins().iconst(I8, ir_type_tag(ty));
                 b.ins().store(MemFlags::trusted(), tg, sbase, tag_off(*slot));
+                b.ins().iconst(I64, 0)
+            }
+            TraceIr::LoadUpval { upval_idx } => {
+                // upvalue_ptrs is *const UpvaluePtr (array of GcPtr<GcUpvalue>, each 8 bytes).
+                // Chain: upvalue_ptrs[idx].ptr → Gc<LuaUpvalue> → .data.v → *LuaValue
+                // GcHeader is 8 bytes, so LuaUpvalue.v is at offset 8 in Gc<LuaUpvalue>.
+                let off = b.ins().iconst(I64, *upval_idx as i64 * 8);
+                let upval_slot = b.ins().iadd(upval_ptrs, off);
+                // Load GcPtr.ptr (raw pointer to Gc<LuaUpvalue>)
+                let gc_ptr = b.ins().load(I64, MemFlags::trusted(), upval_slot, 0);
+                // Load LuaUpvalue.v (*mut LuaValue) at offset 8 (after GcHeader)
+                let v_ptr = b.ins().load(I64, MemFlags::trusted(), gc_ptr, 8);
+                // Load value payload from v_ptr
+                b.ins().load(I64, MemFlags::trusted(), v_ptr, VALUE_OFF)
+            }
+            TraceIr::StoreUpval { upval_idx, val, ty } => {
+                let off = b.ins().iconst(I64, *upval_idx as i64 * 8);
+                let upval_slot = b.ins().iadd(upval_ptrs, off);
+                let gc_ptr = b.ins().load(I64, MemFlags::trusted(), upval_slot, 0);
+                let v_ptr = b.ins().load(I64, MemFlags::trusted(), gc_ptr, 8);
+                let sv = as_i64(b, vals[val.index()]);
+                b.ins().store(MemFlags::trusted(), sv, v_ptr, VALUE_OFF);
+                let tg = b.ins().iconst(I8, ir_type_tag(ty));
+                b.ins().store(MemFlags::trusted(), tg, v_ptr, TAG_OFF);
                 b.ins().iconst(I64, 0)
             }
             TraceIr::Move { src } => vals[src.index()],
@@ -235,7 +300,12 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace) -> Result<(), String> {
                 let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
                 b.ins().fdiv(l, r)
             }
-            TraceIr::PowFloat { .. } => return Err("NYI: PowFloat".into()),
+            TraceIr::PowFloat { lhs, rhs } => {
+                let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
+                let fref = pow_fref.expect("pow_fref must be set for PowFloat");
+                let call = b.ins().call(fref, &[l, r]);
+                b.inst_results(call)[0]
+            }
             TraceIr::BAndInt { lhs, rhs } => b.ins().band(vals[lhs.index()], vals[rhs.index()]),
             TraceIr::BOrInt { lhs, rhs } => b.ins().bor(vals[lhs.index()], vals[rhs.index()]),
             TraceIr::BXorInt { lhs, rhs } => b.ins().bxor(vals[lhs.index()], vals[rhs.index()]),
@@ -289,16 +359,40 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace) -> Result<(), String> {
         b.ins().return_(&[z]);
     }
 
+    // ── Side-exit blocks: writeback snapshot entries then return snap_id ──
     for (i, &blk) in exit_blocks.iter().enumerate() {
         b.switch_to_block(blk);
         b.seal_block(blk);
+        let snap = &trace.snapshots[i];
+        for entry in &snap.entries {
+            if let super::trace::SnapValue::Ref(tref) = entry.val {
+                if (tref.index()) < vals.len() {
+                    let sv = as_i64(b, vals[tref.index()]);
+                    b.ins().store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
+                    let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
+                    b.ins().store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
+                }
+            }
+        }
         let id = b.ins().iconst(I32, (i as i64) + 1);
         b.ins().return_(&[id]);
     }
 
-    // Safety exit: iteration counter exhausted, return 0
+    // ── Safety exit: writeback from last snapshot, return 0 ──
     b.switch_to_block(safety_exit);
     b.seal_block(safety_exit);
+    if let Some(last_snap) = trace.snapshots.last() {
+        for entry in &last_snap.entries {
+            if let super::trace::SnapValue::Ref(tref) = entry.val {
+                if (tref.index()) < vals.len() {
+                    let sv = as_i64(b, vals[tref.index()]);
+                    b.ins().store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
+                    let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
+                    b.ins().store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
+                }
+            }
+        }
+    }
     let sz = b.ins().iconst(I32, 0);
     b.ins().return_(&[sz]);
 

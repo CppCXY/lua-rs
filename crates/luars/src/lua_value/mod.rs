@@ -43,6 +43,7 @@ pub struct LuaValuePtr {
 ///
 /// This eliminates the match branch on every `get_value()`/`set_value()` call,
 /// replacing it with a single pointer dereference (zero branching).
+#[repr(C)]
 pub struct LuaUpvalue {
     /// Always-valid pointer to the upvalue's current value.
     /// Open → stack slot, Closed → &self.closed_value
