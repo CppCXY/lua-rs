@@ -1,28 +1,16 @@
-/// JIT compiler for Lua — two-tier approach.
-///
-/// ## Tier 1: Loop-only JIT (existing)
-///
-/// Compiles simple numeric for-loops to native code. Triggered by
-/// `ForPrep` when the expected iteration count ≥ `JIT_MIN_ITERS`.
-///
-/// ## Tier 2: Tracing JIT (new, in progress)
+/// Tracing JIT compiler for Lua.
 ///
 /// Records interpreter execution at hot backward-jump sites and
 /// compiles the resulting trace to native code via Cranelift.
 ///
-/// The tracer counts backward jumps (ForLoop, TForLoop, backward Jmp).
+/// The tracer counts backward jumps (ForLoop, backward Jmp).
 /// Once a site reaches `HOT_THRESHOLD`, recording begins.  The recorder
 /// translates each subsequent interpreter instruction into `TraceIr`
 /// nodes.  When execution loops back to the trace head, the trace is
 /// closed and compiled.  On subsequent visits the compiled trace is
 /// executed directly.
 
-// ── Tier 1: loop-only JIT ───────────────────────────────────────────
-pub mod analyzer;
-pub mod compiler;
 pub mod runtime;
-
-// ── Tier 2: tracing JIT ─────────────────────────────────────────────
 pub mod trace;
 pub mod recorder;
 pub mod trace_compiler;
@@ -32,24 +20,6 @@ use std::collections::HashMap;
 use self::recorder::TraceRecorder;
 use self::trace::{RecordState, AbortReason};
 use self::trace_compiler::CompiledTrace;
-
-/// Minimum loop iteration count to trigger loop-only JIT compilation.
-pub const JIT_MIN_ITERS: usize = 1000;
-
-/// Sentinel: "compilation was attempted and failed".
-pub const JIT_FAILED: usize = 0;
-
-/// Compiled loop function: `fn(stack_base: *mut u8) -> i32`.
-pub type JitLoopFn = unsafe extern "C" fn(*mut u8) -> i32;
-
-/// Try to JIT-compile the integer for-loop whose `ForPrep` is at `prep_pc`.
-pub fn try_compile_loop(
-    chunk: &crate::lua_value::Chunk,
-    prep_pc: usize,
-) -> Option<JitLoopFn> {
-    let analysis = analyzer::analyze(chunk, prep_pc)?;
-    compiler::compile(&analysis)
-}
 
 // ── Tracing JIT state ────────────────────────────────────────────────────────
 

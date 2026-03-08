@@ -377,11 +377,6 @@ pub struct Chunk {
     pub linedefined: usize,           // Line where function starts (0 for main)
     pub lastlinedefined: usize,       // Line where function ends (0 for main)
     pub proto_data_size: u32,         // Cached size for GC (code+constants+children+lines)
-    /// JIT cache: maps ForPrep PC → compiled loop function pointer (as usize).
-    /// Value 0 means "already tried but JIT failed for this loop".
-    /// Protected by RefCell since Chunk is typically accessed via Rc<Chunk>.
-    #[cfg(feature = "jit")]
-    pub jit_cache: std::cell::RefCell<std::collections::HashMap<u32, usize>>,
 }
 
 impl Default for Chunk {
@@ -409,8 +404,6 @@ impl Chunk {
             linedefined: 0,
             lastlinedefined: 0,
             proto_data_size: 0,
-            #[cfg(feature = "jit")]
-            jit_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 

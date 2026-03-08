@@ -46,14 +46,15 @@ fn ir_type_tag(ty: &IrType) -> i64 {
     }
 }
 
-fn ir_result_type(op: &TraceIr) -> cranelift_codegen::ir::Type {
-    match op {
+fn ir_result_type(ops: &[TraceIr], idx: usize) -> cranelift_codegen::ir::Type {
+    match &ops[idx] {
         TraceIr::KFloat(_)
         | TraceIr::AddFloat { .. } | TraceIr::SubFloat { .. }
         | TraceIr::MulFloat { .. } | TraceIr::DivFloat { .. }
         | TraceIr::PowFloat { .. } | TraceIr::NegFloat { .. }
         | TraceIr::IntToFloat { .. }
         | TraceIr::CallBuiltin { .. } => F64,
+        TraceIr::Move { src } => ir_result_type(ops, src.index()),
         _ => I64,
     }
 }
@@ -275,7 +276,7 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
     let mut phis: Vec<PhiInfo> = Vec::new();
     for op in &trace.ops {
         if let TraceIr::Phi { entry, backedge, .. } = op {
-            let cl_ty = ir_result_type(&trace.ops[entry.index()]);
+            let cl_ty = ir_result_type(&trace.ops, entry.index());
             let var = b.declare_var(cl_ty);
             phis.push(PhiInfo { var, entry_ref: entry.index(), backedge_ref: backedge.index() });
         }

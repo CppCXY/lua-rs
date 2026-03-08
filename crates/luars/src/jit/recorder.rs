@@ -106,6 +106,10 @@ pub struct TraceRecorder {
     /// different chunk (constant pool, bytecode).  We push the caller's
     /// chunk_ptr here and set self.chunk_ptr to the callee's chunk.
     chunk_ptr_stack: Vec<*const u8>,
+    /// Stack of caller PCs for inlined calls.  When a side-exit fires
+    /// inside an inlined function, the interpreter must resume at the
+    /// Call instruction of the *caller*, not at the callee's internal PC.
+    caller_pc_stack: Vec<u32>,
 }
 
 impl TraceRecorder {
@@ -133,6 +137,7 @@ impl TraceRecorder {
             base_offset_stack: Vec::new(),
             call_info_stack: Vec::new(),
             chunk_ptr_stack: Vec::new(),
+            caller_pc_stack: Vec::new(),
         }
     }
 
@@ -231,6 +236,13 @@ impl TraceRecorder {
     /// Take a snapshot of the current interpreter state for a side exit.
     fn snapshot(&mut self, pc: u32, base: usize) -> u32 {
         let snap_id = self.snapshots.len() as u32;
+        // When inside an inlined call, side-exits must resume at the
+        // caller's Call instruction, not at the callee's internal PC.
+        let exit_pc = if self.call_depth > 0 {
+            *self.caller_pc_stack.last().unwrap()
+        } else {
+            pc
+        };
         let entries: Vec<SnapEntry> = self
             .slot_map
             .entries
@@ -245,7 +257,7 @@ impl TraceRecorder {
             })
             .collect();
         self.snapshots.push(Snapshot {
-            pc,
+            pc: exit_pc,
             base,
             depth: self.call_depth,
             entries,
@@ -1520,6 +1532,7 @@ impl TraceRecorder {
         let nresults = _c; // c: 0 = MULTRET, else c-1 results
         self.base_offset_stack.push(self.base_offset);
         self.call_info_stack.push((call_slot_abs, nresults));
+        self.caller_pc_stack.push(pc);
 
         // Save caller's chunk_ptr and switch to callee's chunk.
         self.chunk_ptr_stack.push(self.chunk_ptr);
@@ -1583,6 +1596,8 @@ impl TraceRecorder {
         // Restore caller's chunk_ptr.
         self.chunk_ptr = self.chunk_ptr_stack.pop()
             .expect("chunk_ptr_stack underflow");
+        // Restore caller's PC (no longer inside inlined call).
+        self.caller_pc_stack.pop();
 
         // Determine how many results the caller wants.
         let nresults = if nresults_raw == 0 {
