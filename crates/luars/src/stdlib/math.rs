@@ -206,7 +206,7 @@ fn math_fmod(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-fn math_log(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_log(l: &mut LuaState) -> LuaResult<usize> {
     let x = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'log' (number expected)".to_string()))?

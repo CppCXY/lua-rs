@@ -439,6 +439,7 @@ impl TraceRecorder {
             OpCode::SetI => self.record_seti(instr, pc, base, stack),
             OpCode::SetField => self.record_setfield(instr, pc, base, stack),
             OpCode::GetTabUp => self.record_gettabup(instr, pc, base, stack),
+            OpCode::SetTabUp => self.record_settabup(instr, pc, base, stack),
 
             // ── Upvalue access ────────────────────────────────────────
             OpCode::GetUpval => self.record_getupval(instr, pc, base, stack),
@@ -452,6 +453,7 @@ impl TraceRecorder {
             OpCode::Eq | OpCode::Lt | OpCode::Le => {
                 self.record_cmp_rr(instr, pc, base, stack)
             }
+            OpCode::EqK => self.record_eqk(instr, pc, base, stack),
 
             // ── Tests ─────────────────────────────────────────────────
             OpCode::Test => self.record_test(instr, pc, base, stack),
@@ -544,8 +546,17 @@ impl TraceRecorder {
         } else if kv.ttisfloat() {
             let fv = unsafe { kv.value.n };
             (self.emit(TraceIr::KFloat(fv)), IrType::Float)
+        } else if kv.ttisstring() {
+            // String constant: store raw pointer bits (stable, in constant pool)
+            let ptr_bits = unsafe { kv.value.i };
+            (self.emit(TraceIr::KInt(ptr_bits)), IrType::String)
+        } else if kv.is_nil() {
+            (self.emit(TraceIr::KInt(0)), IrType::Nil)
+        } else if kv.is_boolean() {
+            let bv = if kv.bvalue() { 1i64 } else { 0i64 };
+            (self.emit(TraceIr::KInt(bv)), IrType::Bool)
         } else {
-            return RecordResult::Abort(AbortReason::NYI("loadk non-numeric"));
+            return RecordResult::Abort(AbortReason::NYI("loadk unsupported type"));
         };
         self.write_slot(a, r, ty);
         RecordResult::Continue
@@ -864,8 +875,16 @@ impl TraceRecorder {
         let vt = self.ensure_slot(b, IrType::Table, pc, base);
         let vk = self.ensure_slot(c, IrType::Int, pc, base);
         let r = self.emit(TraceIr::TabGetI { table: vt, index: vk });
-        let result = &stack[base + a as usize];
-        let res_ty = Self::detect_type(result);
+        // Detect result type from the actual table lookup (R[A] is stale pre-execution).
+        let key_int = stack[base + c as usize].as_integer_strict().unwrap_or(0);
+        let res_ty = if let Some(tbl) = stack[base + b as usize].as_table() {
+            match tbl.raw_geti(key_int) {
+                Some(result) => Self::detect_type(&result),
+                None => IrType::Nil,
+            }
+        } else {
+            Self::detect_type(&stack[base + a as usize])
+        };
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
@@ -877,8 +896,15 @@ impl TraceRecorder {
         let vt = self.ensure_slot(b, IrType::Table, pc, base);
         let vk = self.emit(TraceIr::KInt(c));
         let r = self.emit(TraceIr::TabGetI { table: vt, index: vk });
-        let result = &stack[base + a as usize];
-        let res_ty = Self::detect_type(result);
+        // Detect result type from the actual table lookup (R[A] is stale pre-execution).
+        let res_ty = if let Some(tbl) = stack[base + b as usize].as_table() {
+            match tbl.raw_geti(c) {
+                Some(result) => Self::detect_type(&result),
+                None => IrType::Nil,
+            }
+        } else {
+            Self::detect_type(&stack[base + a as usize])
+        };
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
@@ -974,6 +1000,50 @@ impl TraceRecorder {
             .unwrap_or(IrType::Nil);
         let r = self.emit(TraceIr::TabGetS { table: uv, key_ptr });
         self.write_slot(a, r, res_ty);
+        RecordResult::Continue
+    }
+
+    fn record_settabup(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+        // SetTabUp: UpValue[A][K[B]] = RK(C)
+        let a = instr.get_a() as u16;
+        let b = instr.get_b() as usize;
+        let c = instr.get_c() as usize;
+        let k_flag = instr.get_k();
+
+        // Load the upvalue table
+        let uv = self.emit(TraceIr::LoadUpval { upval_idx: a });
+
+        // Get the string key from constants
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(key_const) = chunk.constants.get(b) else {
+            return RecordResult::Abort(AbortReason::NYI("settabup const oob"));
+        };
+        let key_ptr = unsafe { key_const.value.i } as usize;
+
+        // Get the value: from constant or register
+        if k_flag {
+            // Value is K[C]
+            let Some(cv) = chunk.constants.get(c) else {
+                return RecordResult::Abort(AbortReason::NYI("settabup val const oob"));
+            };
+            let (vc, ty) = if cv.ttisinteger() {
+                (self.emit(TraceIr::KInt(unsafe { cv.value.i })), IrType::Int)
+            } else if cv.ttisfloat() {
+                (self.emit(TraceIr::KFloat(unsafe { cv.value.n })), IrType::Float)
+            } else if cv.is_nil() {
+                (self.emit(TraceIr::KInt(0)), IrType::Nil)
+            } else {
+                return RecordResult::Abort(AbortReason::NYI("settabup const val type"));
+            };
+            self.emit(TraceIr::TabSetS { table: uv, key_ptr, val: vc, ty });
+        } else {
+            // Value is R[C]
+            let c16 = c as u16;
+            let val = &stack[base + c];
+            let ty = Self::detect_type(val);
+            let vc = self.ensure_slot(c16, ty, pc, base);
+            self.emit(TraceIr::TabSetS { table: uv, key_ptr, val: vc, ty });
+        }
         RecordResult::Continue
     }
 
@@ -1152,6 +1222,50 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
+    fn record_eqk(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+        // EqK: if (R[A] == K[B]) ~= k then pc++
+        let a = instr.get_a() as u16;
+        let b = instr.get_b() as usize;
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(kv) = chunk.constants.get(b) else {
+            return RecordResult::Abort(AbortReason::NYI("eqk const oob"));
+        };
+
+        let val_a = &stack[base + a as usize];
+        let ty_a = Self::detect_type(val_a);
+        let va = self.ensure_slot(a, ty_a, pc, base);
+
+        // Observed equality at recording time
+        let cond = *val_a == *kv;
+
+        self.snapshot(pc, base);
+        let snap_id = self.snapshots.len() as u32 - 1;
+
+        if kv.is_nil() || kv.is_boolean() {
+            // For nil/boolean, the type guard from ensure_slot is sufficient.
+            // Nil != anything else, true != false (they have distinct IrType).
+            // If R[A] changes type, the type guard fires.
+            // No additional value guard needed.
+        } else if kv.ttisinteger() {
+            let iv = unsafe { kv.value.i };
+            let cmp = if cond { CmpOp::Eq } else { CmpOp::Ne };
+            self.emit(TraceIr::GuardCmpI { lhs: va, rhs_imm: iv, cmp, snap_id });
+        } else if kv.ttisfloat() {
+            let fv = unsafe { kv.value.n };
+            let rhs = self.emit(TraceIr::KFloat(fv));
+            let cmp = if cond { CmpOp::Eq } else { CmpOp::Ne };
+            self.emit(TraceIr::GuardCmpF { lhs: va, rhs, cmp, snap_id });
+        } else if kv.ttisstring() {
+            // Interned strings: pointer equality
+            let str_bits = unsafe { kv.value.i };
+            let cmp = if cond { CmpOp::Eq } else { CmpOp::Ne };
+            self.emit(TraceIr::GuardCmpI { lhs: va, rhs_imm: str_bits, cmp, snap_id });
+        } else {
+            return RecordResult::Abort(AbortReason::NYI("eqk unsupported const type"));
+        }
+        RecordResult::Continue
+    }
+
     // ══════════════════════════════════════════════════════════════════
     // record_* methods — tests
     // ══════════════════════════════════════════════════════════════════
@@ -1234,6 +1348,11 @@ impl TraceRecorder {
             return RecordResult::Abort(AbortReason::NYI("unknown C function call"));
         }
 
+        // C closures — can't inline, abort.
+        if func_val.is_cclosure() || func_val.is_rclosure() {
+            return RecordResult::Abort(AbortReason::NYI("cclosure/rclosure call"));
+        }
+
         // Lua function call — increment call_depth (Return will decrement it).
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
@@ -1260,6 +1379,7 @@ impl TraceRecorder {
         if fp == math::math_sin as *const () as usize { return Some(BuiltinFn::MathSin); }
         if fp == math::math_cos as *const () as usize { return Some(BuiltinFn::MathCos); }
         if fp == math::math_exp as *const () as usize { return Some(BuiltinFn::MathExp); }
+        if fp == math::math_log as *const () as usize { return Some(BuiltinFn::MathLog); }
         None
     }
 
@@ -1290,11 +1410,9 @@ fn op_name(op: OpCode) -> &'static str {
         OpCode::Tbc => "tbc",
         OpCode::NewTable => "newtable",
         OpCode::Self_ => "self",
-        OpCode::SetTabUp => "settabup",
         OpCode::Closure => "closure",
         OpCode::Vararg | OpCode::GetVarg => "vararg",
         OpCode::SetList => "setlist",
-        OpCode::EqK => "eqk",
         OpCode::ErrNNil => "errnil",
         OpCode::VarargPrep => "varargprep",
         OpCode::LoadKX => "loadkx",

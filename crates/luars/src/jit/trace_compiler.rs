@@ -6,6 +6,7 @@
 use cranelift_codegen::ir::{
     AbiParam, InstBuilder, MemFlags,
     condcodes::{IntCC, FloatCC},
+    instructions::BlockArg,
     types::{I8, I32, I64, F64},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -413,16 +414,124 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
                 emit_lua_shiftl(b, vals[lhs.index()], neg)
             }
             // ── Table operations ───────────────────────────────────────
+            // TabGetI: inline array fast path with fallback to helper
             TraceIr::TabGetI { table, index } => {
+                let gc_table = vals[table.index()]; // GcTable* (i64)
+                let key = vals[index.index()];       // integer key (i64)
+
+                // Load array ptr and asize from GcTable at known offsets.
+                // GcTable layout: header(8) + meta(8) + flags(4) + pad(4) + array(8) + asize(4)
+                let arr_ptr = b.ins().load(I64, MemFlags::trusted(), gc_table, 24i32);
+                let asize_raw = b.ins().load(I32, MemFlags::trusted(), gc_table, 32i32);
+                let asize = b.ins().uextend(I64, asize_raw);
+
+                // u = key - 1 (unsigned subtraction: key < 1 wraps to huge)
+                let one = b.ins().iconst(I64, 1);
+                let u = b.ins().isub(key, one);
+
+                // Bounds check: u < asize
+                let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, u, asize);
+                let fast_block = b.create_block();
+                let slow_block = b.create_block();
+                let merge_block = b.create_block();
+                b.append_block_param(merge_block, I64); // result value
+
+                b.ins().brif(in_bounds, fast_block, &[], slow_block, &[]);
+                b.seal_block(fast_block);
+                b.seal_block(slow_block);
+
+                // ── Fast path: direct memory access ──
+                b.switch_to_block(fast_block);
+                // tag = *(array + 4 + u)
+                let four = b.ins().iconst(I64, 4);
+                let tag_base = b.ins().iadd(arr_ptr, four);
+                let tag_addr = b.ins().iadd(tag_base, u);
+                let tag = b.ins().load(I8, MemFlags::trusted(), tag_addr, 0i32);
+                let tag_mask = b.ins().iconst(I8, 0x0F);
+                let tag_low = b.ins().band(tag, tag_mask);
+                let zero8 = b.ins().iconst(I8, 0);
+                let non_nil = b.ins().icmp(IntCC::NotEqual, tag_low, zero8);
+
+                let val_block = b.create_block();
+                let nil_block = b.create_block();
+                b.ins().brif(non_nil, val_block, &[], nil_block, &[]);
+                b.seal_block(val_block);
+                b.seal_block(nil_block);
+
+                // Load value: array - 8*(1+u), i.e., arr_ptr - 8 - 8*u
+                b.switch_to_block(val_block);
+                let eight = b.ins().iconst(I64, 8);
+                let offset_u = b.ins().imul(u, eight);
+                let val_addr = b.ins().isub(arr_ptr, eight);
+                let val_addr = b.ins().isub(val_addr, offset_u);
+                let fast_val = b.ins().load(I64, MemFlags::trusted(), val_addr, 0i32);
+                b.ins().jump(merge_block, &[BlockArg::Value(fast_val)]);
+
+                // Nil slot in array → return 0 (nil bits)
+                b.switch_to_block(nil_block);
+                let nil_val = b.ins().iconst(I64, 0);
+                b.ins().jump(merge_block, &[BlockArg::Value(nil_val)]);
+
+                // ── Slow path: call helper function ──
+                b.switch_to_block(slow_block);
                 let fref = helpers.tab_geti.expect("tab_geti fref");
-                let call = b.ins().call(fref, &[vals[table.index()], vals[index.index()]]);
-                b.inst_results(call)[0]
+                let call = b.ins().call(fref, &[gc_table, key]);
+                let slow_val = b.inst_results(call)[0];
+                b.ins().jump(merge_block, &[BlockArg::Value(slow_val)]);
+
+                // ── Merge ──
+                b.switch_to_block(merge_block);
+                b.seal_block(merge_block);
+                b.block_params(merge_block)[0]
             }
+            // TabSetI: inline array fast path with fallback to helper
             TraceIr::TabSetI { table, index, val, ty } => {
-                let fref = helpers.tab_seti.expect("tab_seti fref");
+                let gc_table = vals[table.index()];
+                let key = vals[index.index()];
                 let sv = as_i64(b, vals[val.index()]);
-                let tag = b.ins().iconst(I64, ir_type_tag(ty));
-                b.ins().call(fref, &[vals[table.index()], vals[index.index()], sv, tag]);
+                let tag_val = b.ins().iconst(I64, ir_type_tag(ty));
+
+                // Load array ptr and asize
+                let arr_ptr = b.ins().load(I64, MemFlags::trusted(), gc_table, 24i32);
+                let asize_raw = b.ins().load(I32, MemFlags::trusted(), gc_table, 32i32);
+                let asize = b.ins().uextend(I64, asize_raw);
+
+                let one = b.ins().iconst(I64, 1);
+                let u = b.ins().isub(key, one);
+
+                let in_bounds = b.ins().icmp(IntCC::UnsignedLessThan, u, asize);
+                let fast_block = b.create_block();
+                let slow_block = b.create_block();
+                let done_block = b.create_block();
+
+                b.ins().brif(in_bounds, fast_block, &[], slow_block, &[]);
+                b.seal_block(fast_block);
+                b.seal_block(slow_block);
+
+                // ── Fast path: direct store ──
+                b.switch_to_block(fast_block);
+                // Store tag: *(array + 4 + u) = ty_tag
+                let four = b.ins().iconst(I64, 4);
+                let tag_base = b.ins().iadd(arr_ptr, four);
+                let tag_addr = b.ins().iadd(tag_base, u);
+                let tag8 = b.ins().ireduce(I8, tag_val);
+                b.ins().store(MemFlags::trusted(), tag8, tag_addr, 0i32);
+                // Store value: *(array - 8*(1+u)) = val
+                let eight = b.ins().iconst(I64, 8);
+                let offset_u = b.ins().imul(u, eight);
+                let val_addr = b.ins().isub(arr_ptr, eight);
+                let val_addr = b.ins().isub(val_addr, offset_u);
+                b.ins().store(MemFlags::trusted(), sv, val_addr, 0i32);
+                b.ins().jump(done_block, &[]);
+
+                // ── Slow path: call helper ──
+                b.switch_to_block(slow_block);
+                let fref = helpers.tab_seti.expect("tab_seti fref");
+                b.ins().call(fref, &[gc_table, key, sv, tag_val]);
+                b.ins().jump(done_block, &[]);
+
+                b.switch_to_block(done_block);
+                b.seal_block(done_block);
                 b.ins().iconst(I64, 0) // dummy result
             }
             TraceIr::TabGetS { table, key_ptr } => {
