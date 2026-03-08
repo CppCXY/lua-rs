@@ -90,6 +90,22 @@ pub struct TraceRecorder {
     /// Phi node info: (ops_index, slot, entry_tref) for each Phi placeholder.
     /// Filled at LoopStart, backedge patched at LoopEnd.
     phi_entries: Vec<(usize, u16, TRef)>,
+    /// Slot offset: current_base - head_base.  When recording inside a
+    /// called function, instruction-relative slots are shifted by this
+    /// amount so that LoadSlot/StoreSlot/GuardType use absolute offsets
+    /// from head_base.
+    base_offset: u16,
+    /// Stack of saved base offsets for nested inlined calls.
+    base_offset_stack: Vec<u16>,
+    /// Stack of (call_slot_abs, nresults) for each inlined call level.
+    /// call_slot_abs: absolute slot of the Call's R[A] (where results go).
+    /// nresults: how many results the caller expects (-1 = MULTRET).
+    call_info_stack: Vec<(u16, i8)>,
+    /// Stack of saved chunk_ptrs for nested inlined calls.
+    /// When recording through a Lua function call, the callee has a
+    /// different chunk (constant pool, bytecode).  We push the caller's
+    /// chunk_ptr here and set self.chunk_ptr to the callee's chunk.
+    chunk_ptr_stack: Vec<*const u8>,
 }
 
 impl TraceRecorder {
@@ -113,6 +129,10 @@ impl TraceRecorder {
             head_visits: 0,
             len: 0,
             phi_entries: Vec::new(),
+            base_offset: 0,
+            base_offset_stack: Vec::new(),
+            call_info_stack: Vec::new(),
+            chunk_ptr_stack: Vec::new(),
         }
     }
 
@@ -235,8 +255,11 @@ impl TraceRecorder {
 
     /// Ensure a stack slot has been loaded and type-guarded.
     /// Returns the `TRef` for the slot's value.
+    /// `slot` is instruction-relative (from `instr.get_a()` etc.);
+    /// internally offset by `base_offset` for absolute positioning.
     fn ensure_slot(&mut self, slot: u16, ty: IrType, pc: u32, base: usize) -> TRef {
-        if let Some((tref, existing_ty)) = self.slot_map.get(slot) {
+        let abs = slot + self.base_offset;
+        if let Some((tref, existing_ty)) = self.slot_map.get(abs) {
             if existing_ty == ty {
                 return tref;
             }
@@ -244,12 +267,12 @@ impl TraceRecorder {
         }
         let snap_id = self.snapshot(pc, base);
         self.emit(TraceIr::GuardType {
-            slot,
+            slot: abs,
             expected: ty,
             snap_id,
         });
-        let tref = self.emit(TraceIr::LoadSlot { slot });
-        self.slot_map.set(slot, tref, ty);
+        let tref = self.emit(TraceIr::LoadSlot { slot: abs });
+        self.slot_map.set(abs, tref, ty);
         tref
     }
 
@@ -257,7 +280,8 @@ impl TraceRecorder {
     /// No StoreSlot is emitted — writeback happens lazily at side exits
     /// (via snapshot entries) and at LoopEnd.
     fn write_slot(&mut self, slot: u16, tref: TRef, ty: IrType) {
-        self.slot_map.set(slot, tref, ty);
+        let abs = slot + self.base_offset;
+        self.slot_map.set(abs, tref, ty);
     }
 
     /// Check abort conditions (trace too long, too many exits).
@@ -981,6 +1005,9 @@ impl TraceRecorder {
     }
 
     fn record_gettabup(&mut self, instr: Instruction, _pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+        if self.call_depth > 0 {
+            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
+        }
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as usize;
@@ -1004,6 +1031,9 @@ impl TraceRecorder {
     }
 
     fn record_settabup(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+        if self.call_depth > 0 {
+            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
+        }
         // SetTabUp: UpValue[A][K[B]] = RK(C)
         let a = instr.get_a() as u16;
         let b = instr.get_b() as usize;
@@ -1072,6 +1102,9 @@ impl TraceRecorder {
     // ══════════════════════════════════════════════════════════════════
 
     fn record_getupval(&mut self, instr: Instruction, _pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+        if self.call_depth > 0 {
+            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
+        }
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let r = self.emit(TraceIr::LoadUpval { upval_idx: b });
@@ -1082,6 +1115,9 @@ impl TraceRecorder {
     }
 
     fn record_setupval(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+        if self.call_depth > 0 {
+            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
+        }
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let val = &stack[base + a as usize];
@@ -1353,18 +1389,37 @@ impl TraceRecorder {
             return RecordResult::Abort(AbortReason::NYI("cclosure/rclosure call"));
         }
 
-        // Lua function call — increment call_depth (Return will decrement it).
+        // Lua function call — inline by adjusting base_offset.
+        // The interpreter sets new_base = base + a + 1, so the callee's
+        // R[0] corresponds to absolute slot (current base_offset + a + 1).
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             return RecordResult::Abort(AbortReason::MaxCallDepth);
         }
 
-        self.snapshot(pc, base);
-        self.emit(TraceIr::CallGeneric {
-            func_slot: a as u16,
-            nargs: _b,
-            nresults: _c,
-        });
+        // Verify it's indeed a Lua function (not something unexpected).
+        if !func_val.is_lua_function() {
+            self.call_depth -= 1;
+            return RecordResult::Abort(AbortReason::NYI("non-lua function call"));
+        }
+
+        // Save current state for restoration at Return.
+        let call_slot_abs = self.base_offset + a as u16;
+        let nresults = _c; // c: 0 = MULTRET, else c-1 results
+        self.base_offset_stack.push(self.base_offset);
+        self.call_info_stack.push((call_slot_abs, nresults));
+
+        // Save caller's chunk_ptr and switch to callee's chunk.
+        self.chunk_ptr_stack.push(self.chunk_ptr);
+        let lua_func = unsafe { func_val.as_lua_function_unchecked() };
+        let callee_chunk = lua_func.chunk();
+        self.chunk_ptr = callee_chunk as *const crate::lua_value::Chunk as *const u8;
+
+        // Shift base_offset: callee's R[0] = caller's R[a+1].
+        self.base_offset += (a as u16) + 1;
+
+        // Don't emit CallGeneric — the callee instructions will be recorded
+        // inline with the adjusted base_offset.
         RecordResult::Continue
     }
 
@@ -1383,14 +1438,74 @@ impl TraceRecorder {
         None
     }
 
-    fn record_return(&mut self, _instr: Instruction, _pc: u32, _base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_return(&mut self, instr: Instruction, _pc: u32, _base: usize, _stack: &[LuaValue]) -> RecordResult {
         if self.call_depth == 0 {
             // Returning from the trace's root frame → abort (trace ends
             // at the loop back-edge, not a return).
             return RecordResult::Abort(AbortReason::NYI("return from root frame"));
         }
         self.call_depth -= 1;
-        // Return doesn't emit IR — the call site handles results.
+
+        let op = instr.get_opcode();
+        let ret_a = instr.get_a() as u16;
+        // Determine how many values the return ships.
+        let ret_count = match op {
+            OpCode::Return0 => 0usize,
+            OpCode::Return1 => 1usize,
+            OpCode::Return => {
+                let b = instr.get_b() as usize;
+                if b == 0 {
+                    // MULTRET — can't determine count statically; abort.
+                    return RecordResult::Abort(AbortReason::NYI("return multret"));
+                }
+                b - 1
+            }
+            _ => unreachable!(),
+        };
+
+        // Pop call info
+        let (call_slot_abs, nresults_raw) = self.call_info_stack.pop()
+            .expect("call_info_stack underflow");
+        let old_offset = self.base_offset_stack.pop()
+            .expect("base_offset_stack underflow");
+        // Restore caller's chunk_ptr.
+        self.chunk_ptr = self.chunk_ptr_stack.pop()
+            .expect("chunk_ptr_stack underflow");
+
+        // Determine how many results the caller wants.
+        let nresults = if nresults_raw == 0 {
+            // MULTRET on caller side — use all returned values
+            ret_count
+        } else {
+            (nresults_raw - 1) as usize
+        };
+
+        // Copy return values from callee's slots to caller's result slots.
+        // Callee's R[ret_a + i] → caller's R[call_slot] + i
+        // In absolute terms: callee R[ret_a + i] is at base_offset + ret_a + i
+        for i in 0..nresults.min(ret_count) {
+            let src_abs = self.base_offset + ret_a + i as u16;
+            let dst_abs = call_slot_abs + i as u16;
+            if let Some((tref, ty)) = self.slot_map.get(src_abs) {
+                self.slot_map.set(dst_abs, tref, ty);
+            } else {
+                // Return value not tracked; load from actual stack.
+                // After return, interpreter has base = old_base, and
+                // result is at stack[old_base + call_slot_rel + i].
+                // For now, mark as nil — the next ensure_slot will re-load.
+                let nil = self.emit(TraceIr::KInt(0));
+                self.slot_map.set(dst_abs, nil, IrType::Nil);
+            }
+        }
+        // Fill remaining expected results with nil.
+        for i in ret_count..nresults {
+            let dst_abs = call_slot_abs + i as u16;
+            let nil = self.emit(TraceIr::KInt(0));
+            self.slot_map.set(dst_abs, nil, IrType::Nil);
+        }
+
+        // Restore base_offset to caller's level.
+        self.base_offset = old_offset;
         RecordResult::Continue
     }
 

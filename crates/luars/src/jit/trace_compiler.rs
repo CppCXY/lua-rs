@@ -25,7 +25,7 @@ const TAG_TABLE: i64 = 0x45;
 const TAG_SSTR: i64 = 0x44;
 const TAG_TRUE: i64 = 0x11;
 const TAG_NIL: i64 = 0x00;
-const TAG_LCL: i64 = 0x66;
+const TAG_LCL: i64 = 0x46;
 
 #[inline(always)]
 fn val_off(slot: u16) -> i32 { slot as i32 * LV + VALUE_OFF }
