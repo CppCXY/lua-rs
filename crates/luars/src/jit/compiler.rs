@@ -25,13 +25,13 @@ use cranelift_codegen::{
     ir::{
         AbiParam, InstBuilder, MemFlags,
         condcodes::IntCC,
-        types::{I8, I32, I64},
+        types::{I8, I32, I64, F64},
     },
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{Linkage, Module};
 
-use super::analyzer::{BodyInstr, LoopAnalysis};
+use super::analyzer::{BodyInstr, LoopAnalysis, ValType, get_reg_type};
 use super::{runtime, JitLoopFn};
 
 /// `makevariant!(LUA_TNUMBER=3, 0)` = 3 = 0x03
@@ -39,6 +39,9 @@ const LUA_VNUMINT: i64 = 3;
 
 /// `LUA_TTABLE | BIT_ISCOLLECTABLE` = 5 | 0x40 = 0x45
 const LUA_VTABLE: i64 = 0x45;
+
+/// `makevariant!(LUA_TNUMBER=3, 1)` = 3 | (1<<4) = 0x13
+const LUA_VNUMFLT: i64 = 0x13;
 
 /// Byte size of `LuaValue` in memory.
 const LV: i32 = 16;
@@ -157,10 +160,13 @@ fn emit_ir(
     // ── SSA variables ─────────────────────────────────────────────────────
     let var_count = b.declare_var(I64);
     let var_idx   = b.declare_var(I64);
+    let reg_types = &analysis.reg_types;
     let written_vars: Vec<(u8, Variable)> = {
         let mut v = Vec::with_capacity(analysis.written.len());
         for &r in &analysis.written {
-            let var = b.declare_var(I64);
+            let ty = get_reg_type(r, reg_types);
+            let cl_ty = if ty == ValType::Float { F64 } else { I64 };
+            let var = b.declare_var(cl_ty);
             v.push((r, var));
         }
         v
@@ -172,28 +178,40 @@ fn emit_ir(
     b.seal_block(entry_block);
 
     let stack_base = b.block_params(entry_block)[0];
-    let expected   = b.ins().iconst(I8, LUA_VNUMINT);
+    let int_tag  = b.ins().iconst(I8, LUA_VNUMINT);
+    let flt_tag  = b.ins().iconst(I8, LUA_VNUMFLT);
 
-    // Check all relevant type tags in one combined test.
-    // Only check loop-carried registers plus the ForLoop control registers.
-    // Body-local temporaries (written before first read each iteration) must
-    // NOT be checked: they hold nil (or stale values) at loop entry.
-    let mut regs_to_check: Vec<u8> = vec![ra_cnt, ra_step, ra_idx];
-    for &r in &analysis.loop_carried {
-        if !regs_to_check.contains(&r) {
-            regs_to_check.push(r);
-        }
-    }
+    // Check type tags in one combined test.
+    // Loop control vars are always Int.
     let mut all_ok: cranelift_codegen::ir::Value = {
-        let tag = b.ins().load(I8, MemFlags::trusted(), stack_base, tag_off(regs_to_check[0]));
-        b.ins().icmp(IntCC::Equal, tag, expected)
+        let tag = b.ins().load(I8, MemFlags::trusted(), stack_base, tag_off(ra_cnt));
+        b.ins().icmp(IntCC::Equal, tag, int_tag)
     };
-    for &r in &regs_to_check[1..] {
+    for &r in &[ra_step, ra_idx] {
         let tag = b.ins().load(I8, MemFlags::trusted(), stack_base, tag_off(r));
-        let ok  = b.ins().icmp(IntCC::Equal, tag, expected);
+        let ok  = b.ins().icmp(IntCC::Equal, tag, int_tag);
         all_ok  = b.ins().band(all_ok, ok);
     }
-    // Also verify table registers have the correct type tag (LUA_VTABLE).
+    // Loop-carried registers: check per type (Float regs accept Int or Float).
+    for &r in &analysis.loop_carried {
+        if r == ra_cnt || r == ra_step || r == ra_idx { continue; }
+        let tag = b.ins().load(I8, MemFlags::trusted(), stack_base, tag_off(r));
+        let ok = if get_reg_type(r, reg_types) == ValType::Float {
+            let ok_int = b.ins().icmp(IntCC::Equal, tag, int_tag);
+            let ok_flt = b.ins().icmp(IntCC::Equal, tag, flt_tag);
+            b.ins().bor(ok_int, ok_flt)
+        } else {
+            b.ins().icmp(IntCC::Equal, tag, int_tag)
+        };
+        all_ok = b.ins().band(all_ok, ok);
+    }
+    // Read-only integer registers (source regs not written, not loop/table).
+    for &r in &analysis.read_only_int {
+        let tag = b.ins().load(I8, MemFlags::trusted(), stack_base, tag_off(r));
+        let ok  = b.ins().icmp(IntCC::Equal, tag, int_tag);
+        all_ok  = b.ins().band(all_ok, ok);
+    }
+    // Table registers: check LUA_VTABLE.
     if !analysis.table_regs.is_empty() {
         let expected_table = b.ins().iconst(I8, LUA_VTABLE);
         for &r in &analysis.table_regs {
@@ -217,14 +235,28 @@ fn emit_ir(
     b.def_var(var_count, count_init);
     b.def_var(var_idx,   idx_init);
     for &(r, var) in &written_vars {
+        let reg_ty = get_reg_type(r, reg_types);
         let init = if analysis.loop_carried.contains(&r) {
-            // Loop-carried register: load its current integer value from memory.
-            b.ins().load(I64, MemFlags::trusted(), stack_base, val_off(r))
+            if reg_ty == ValType::Float {
+                // Float loop_carried: accept both Int and Float at entry.
+                // If the value is already Float, interpret raw bits as f64.
+                // If Int, convert i64 → f64 via fcvt_from_sint.
+                let tag = b.ins().load(I8, MemFlags::trusted(), stack_base, tag_off(r));
+                let raw = b.ins().load(I64, MemFlags::trusted(), stack_base, val_off(r));
+                let is_flt = b.ins().icmp(IntCC::Equal, tag, flt_tag);
+                let as_bits = b.ins().bitcast(F64, MemFlags::new(), raw);
+                let as_conv = b.ins().fcvt_from_sint(F64, raw);
+                b.ins().select(is_flt, as_bits, as_conv)
+            } else {
+                b.ins().load(I64, MemFlags::trusted(), stack_base, val_off(r))
+            }
         } else {
-            // Body-local temporary: always written before first read each
-            // iteration, so the initial value is irrelevant.  Use 0 to
-            // satisfy Cranelift's SSA requirement (def on all paths).
-            b.ins().iconst(I64, 0)
+            // Body-local temporary: initial value is irrelevant.
+            if reg_ty == ValType::Float {
+                b.ins().f64const(0.0)
+            } else {
+                b.ins().iconst(I64, 0)
+            }
         };
         b.def_var(var, init);
     }
@@ -311,21 +343,48 @@ fn emit_ir(
         match *instr {
             // ── Register-register arithmetic ──────────────────────────────
             BodyInstr::AddRR { dest, lhs, rhs } => {
-                let vl  = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
-                let vr  = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
-                let res = b.ins().iadd(vl, vr);
+                let lt = get_reg_type(lhs, reg_types);
+                let rt = get_reg_type(rhs, reg_types);
+                let dt = get_reg_type(dest, reg_types);
+                let vl = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
+                let vr = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
+                let res = if dt == ValType::Float {
+                    let fl = coerce_to_f64(&mut b, vl, lt);
+                    let fr = coerce_to_f64(&mut b, vr, rt);
+                    b.ins().fadd(fl, fr)
+                } else {
+                    b.ins().iadd(vl, vr)
+                };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::SubRR { dest, lhs, rhs } => {
-                let vl  = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
-                let vr  = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
-                let res = b.ins().isub(vl, vr);
+                let lt = get_reg_type(lhs, reg_types);
+                let rt = get_reg_type(rhs, reg_types);
+                let dt = get_reg_type(dest, reg_types);
+                let vl = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
+                let vr = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
+                let res = if dt == ValType::Float {
+                    let fl = coerce_to_f64(&mut b, vl, lt);
+                    let fr = coerce_to_f64(&mut b, vr, rt);
+                    b.ins().fsub(fl, fr)
+                } else {
+                    b.ins().isub(vl, vr)
+                };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::MulRR { dest, lhs, rhs } => {
-                let vl  = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
-                let vr  = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
-                let res = b.ins().imul(vl, vr);
+                let lt = get_reg_type(lhs, reg_types);
+                let rt = get_reg_type(rhs, reg_types);
+                let dt = get_reg_type(dest, reg_types);
+                let vl = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
+                let vr = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
+                let res = if dt == ValType::Float {
+                    let fl = coerce_to_f64(&mut b, vl, lt);
+                    let fr = coerce_to_f64(&mut b, vr, rt);
+                    b.ins().fmul(fl, fr)
+                } else {
+                    b.ins().imul(vl, vr)
+                };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::IDivRR { dest, lhs, rhs } => {
@@ -356,21 +415,39 @@ fn emit_ir(
             }
             // ── Register-immediate arithmetic ─────────────────────────────
             BodyInstr::AddImm { dest, src, imm } => {
-                let vs      = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
-                let imm_val = b.ins().iconst(I64, imm);
-                let res     = b.ins().iadd(vs, imm_val);
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let res = if st == ValType::Float {
+                    let fimm = b.ins().f64const(imm as f64);
+                    b.ins().fadd(vs, fimm)
+                } else {
+                    let imm_val = b.ins().iconst(I64, imm);
+                    b.ins().iadd(vs, imm_val)
+                };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::SubImm { dest, src, imm } => {
-                let vs      = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
-                let imm_val = b.ins().iconst(I64, imm);
-                let res     = b.ins().isub(vs, imm_val);
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let res = if st == ValType::Float {
+                    let fimm = b.ins().f64const(imm as f64);
+                    b.ins().fsub(vs, fimm)
+                } else {
+                    let imm_val = b.ins().iconst(I64, imm);
+                    b.ins().isub(vs, imm_val)
+                };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::MulImm { dest, src, imm } => {
-                let vs      = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
-                let imm_val = b.ins().iconst(I64, imm);
-                let res     = b.ins().imul(vs, imm_val);
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let res = if st == ValType::Float {
+                    let fimm = b.ins().f64const(imm as f64);
+                    b.ins().fmul(vs, fimm)
+                } else {
+                    let imm_val = b.ins().iconst(I64, imm);
+                    b.ins().imul(vs, imm_val)
+                };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::IDivImm { dest, src, imm } => {
@@ -425,8 +502,13 @@ fn emit_ir(
             }
             // ── Unary ops ─────────────────────────────────────────────────
             BodyInstr::Unm { dest, src } => {
-                let vs  = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
-                let res = b.ins().ineg(vs);
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let res = if st == ValType::Float {
+                    b.ins().fneg(vs)
+                } else {
+                    b.ins().ineg(vs)
+                };
                 write_reg(&mut b, dest, res, &written_vars);
             }
             BodyInstr::BNot { dest, src } => {
@@ -442,6 +524,53 @@ fn emit_ir(
             BodyInstr::LoadI { dest, imm } => {
                 let cv = b.ins().iconst(I64, imm);
                 write_reg(&mut b, dest, cv, &written_vars);
+            }
+            // ── Float-specific instructions ───────────────────────────────
+            BodyInstr::LoadF { dest, fimm } => {
+                let cv = b.ins().f64const(fimm);
+                write_reg(&mut b, dest, cv, &written_vars);
+            }
+            BodyInstr::AddFConst { dest, src, fimm } => {
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let fs = coerce_to_f64(&mut b, vs, st);
+                let fc = b.ins().f64const(fimm);
+                let res = b.ins().fadd(fs, fc);
+                write_reg(&mut b, dest, res, &written_vars);
+            }
+            BodyInstr::SubFConst { dest, src, fimm } => {
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let fs = coerce_to_f64(&mut b, vs, st);
+                let fc = b.ins().f64const(fimm);
+                let res = b.ins().fsub(fs, fc);
+                write_reg(&mut b, dest, res, &written_vars);
+            }
+            BodyInstr::MulFConst { dest, src, fimm } => {
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let fs = coerce_to_f64(&mut b, vs, st);
+                let fc = b.ins().f64const(fimm);
+                let res = b.ins().fmul(fs, fc);
+                write_reg(&mut b, dest, res, &written_vars);
+            }
+            BodyInstr::DivRR { dest, lhs, rhs } => {
+                let lt = get_reg_type(lhs, reg_types);
+                let rt = get_reg_type(rhs, reg_types);
+                let vl = read_reg(&mut b, lhs, ra_idx, var_idx, &written_vars, stack_base);
+                let vr = read_reg(&mut b, rhs, ra_idx, var_idx, &written_vars, stack_base);
+                let fl = coerce_to_f64(&mut b, vl, lt);
+                let fr = coerce_to_f64(&mut b, vr, rt);
+                let res = b.ins().fdiv(fl, fr);
+                write_reg(&mut b, dest, res, &written_vars);
+            }
+            BodyInstr::DivFConst { dest, src, fimm } => {
+                let st = get_reg_type(src, reg_types);
+                let vs = read_reg(&mut b, src, ra_idx, var_idx, &written_vars, stack_base);
+                let fs = coerce_to_f64(&mut b, vs, st);
+                let fc = b.ins().f64const(fimm);
+                let res = b.ins().fdiv(fs, fc);
+                write_reg(&mut b, dest, res, &written_vars);
             }
             // ── Shift ops ─────────────────────────────────────────────────
             BodyInstr::ShrImm { dest, src, imm } => {
@@ -814,6 +943,11 @@ fn emit_ir(
     for &(r, var) in &written_vars {
         let final_val = b.use_var(var);
         b.ins().store(MemFlags::trusted(), final_val, stack_base, val_off(r));
+        // For Float registers, update the type tag to LUA_VNUMFLT.
+        if get_reg_type(r, reg_types) == ValType::Float {
+            let flt_tag_val = b.ins().iconst(I8, LUA_VNUMFLT);
+            b.ins().store(MemFlags::trusted(), flt_tag_val, stack_base, tag_off(r));
+        }
     }
     let ret_ok = b.ins().iconst(I32, 0);
     b.ins().return_(&[ret_ok]);
@@ -863,6 +997,19 @@ fn write_reg(
         b.def_var(var, val);
     }
     // If r isn't in written_vars this is a logic error in the analyzer, silently ignore.
+}
+
+/// Coerce a value to F64.  If `ty` is `Float`, the value is already F64.
+/// If `ty` is `Int`, convert I64 → F64 via `fcvt_from_sint`.
+fn coerce_to_f64(
+    b:   &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    ty:  ValType,
+) -> cranelift_codegen::ir::Value {
+    match ty {
+        ValType::Float => val,
+        ValType::Int   => b.ins().fcvt_from_sint(F64, val),
+    }
 }
 
 // ── Lua-semantics arithmetic helpers ─────────────────────────────────────────

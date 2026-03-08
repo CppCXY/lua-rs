@@ -6,6 +6,13 @@
 use crate::lua_value::Chunk;
 use crate::lua_vm::OpCode;
 
+/// Type of a value tracked by the JIT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValType {
+    Int,
+    Float,
+}
+
 /// A single decoded body instruction (MmBin companion stripped out).
 #[derive(Debug, Clone, Copy)]
 pub enum BodyInstr {
@@ -111,6 +118,20 @@ pub enum BodyInstr {
     /// `field_kidx` is the index into the chunk's constants table.
     /// `key_ptr` is the interned string pointer (for runtime hash lookup).
     GetFieldConst { dest: u8, table_reg: u8, field_kidx: u16, key_ptr: usize },
+
+    // ── Float-specific instructions ──────────────────────────────────────
+    /// Load float constant from K[bx].
+    LoadF { dest: u8, fimm: f64 },
+    /// R[dest] = R[src] + K[C]:float  (result always float)
+    AddFConst { dest: u8, src: u8, fimm: f64 },
+    /// R[dest] = R[src] - K[C]:float  (result always float)
+    SubFConst { dest: u8, src: u8, fimm: f64 },
+    /// R[dest] = R[src] * K[C]:float  (result always float)
+    MulFConst { dest: u8, src: u8, fimm: f64 },
+    /// R[dest] = R[B] / R[C]  (float division, always float result)
+    DivRR { dest: u8, lhs: u8, rhs: u8 },
+    /// R[dest] = R[src] / K[C]  (float division, always float result)
+    DivFConst { dest: u8, src: u8, fimm: f64 },
 }
 
 impl BodyInstr {
@@ -129,7 +150,11 @@ impl BodyInstr {
             | Self::ShrImm { dest, .. } | Self::ShlIConst { dest, .. }
             | Self::ShlRR  { dest, .. } | Self::ShrRR  { dest, .. }
             | Self::GetArrayImm { dest, .. } | Self::GetArrayReg { dest, .. }
-            | Self::LenTable { dest, .. } | Self::GetFieldConst { dest, .. } => Some(*dest),
+            | Self::LenTable { dest, .. } | Self::GetFieldConst { dest, .. }
+            | Self::LoadF { dest, .. }
+            | Self::AddFConst { dest, .. } | Self::SubFConst { dest, .. }
+            | Self::MulFConst { dest, .. }
+            | Self::DivRR { dest, .. } | Self::DivFConst { dest, .. } => Some(*dest),
             Self::CmpImmJmp { .. } | Self::CmpRRJmp { .. } | Self::Jmp { .. }
             | Self::SetArrayImm { .. } | Self::SetArrayReg { .. }
             | Self::TestJmp { .. } => None,
@@ -176,6 +201,12 @@ impl BodyInstr {
             Self::LenTable { .. } => 0,
             // GetField: no integer source register (table_reg tracked separately)
             Self::GetFieldConst { .. } => 0,
+            // Float instructions
+            Self::AddFConst { src, .. } | Self::SubFConst { src, .. }
+            | Self::MulFConst { src, .. } | Self::DivFConst { src, .. }
+            => { buf[0] = *src; 1 }
+            Self::DivRR { lhs, rhs, .. } => { buf[0] = *lhs; buf[1] = *rhs; 2 }
+            Self::LoadF { .. } => 0,
         }
     }
 }
@@ -198,6 +229,12 @@ pub struct LoopAnalysis {
     /// Type-checked for LUA_VTABLE; their NativeTable metadata (array pointer
     /// + asize) is loaded once in the pre_loop block.
     pub table_regs: Vec<u8>,
+    /// Type of each register used in the body (Int or Float).
+    /// Computed by forward type-inference pass.
+    pub reg_types: Vec<(u8, ValType)>,
+    /// Registers that are read but never written (not loop vars or tables).
+    /// These must hold integers at entry (type-checked).
+    pub read_only_int: Vec<u8>,
 }
 
 /// Try to analyze the integer for-loop whose `ForPrep` is at `prep_pc`.
@@ -276,6 +313,17 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 body.push(BodyInstr::MulRR { dest, lhs, rhs });
                 i += 2;
             }
+            OpCode::Div => {
+                if !expect_mmbin(raw_body, i) { return None; }
+                let dest = instr.get_a() as u8;
+                let lhs  = instr.get_b() as u8;
+                let rhs  = instr.get_c() as u8;
+                track(&mut written, dest);
+                track(&mut reads, lhs);
+                track(&mut reads, rhs);
+                body.push(BodyInstr::DivRR { dest, lhs, rhs });
+                i += 2;
+            }
             OpCode::IDiv => {
                 // Floor division: reg // reg.  Non-zero divisor is verified at
                 // runtime in the compiled loop (deopt on zero).
@@ -316,30 +364,48 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 if !expect_mmbin(raw_body, i) { return None; }
                 let dest = instr.get_a() as u8;
                 let src  = instr.get_b() as u8;
-                let imm  = const_int(chunk, instr.get_c() as usize)?;
+                let c    = instr.get_c() as usize;
                 track(&mut written, dest);
                 track(&mut reads, src);
-                body.push(BodyInstr::AddImm { dest, src, imm });
+                if let Some(imm) = const_int(chunk, c) {
+                    body.push(BodyInstr::AddImm { dest, src, imm });
+                } else if let Some(fimm) = const_float_strict(chunk, c) {
+                    body.push(BodyInstr::AddFConst { dest, src, fimm });
+                } else {
+                    return None;
+                }
                 i += 2;
             }
             OpCode::SubK => {
                 if !expect_mmbin(raw_body, i) { return None; }
                 let dest = instr.get_a() as u8;
                 let src  = instr.get_b() as u8;
-                let imm  = const_int(chunk, instr.get_c() as usize)?;
+                let c    = instr.get_c() as usize;
                 track(&mut written, dest);
                 track(&mut reads, src);
-                body.push(BodyInstr::SubImm { dest, src, imm });
+                if let Some(imm) = const_int(chunk, c) {
+                    body.push(BodyInstr::SubImm { dest, src, imm });
+                } else if let Some(fimm) = const_float_strict(chunk, c) {
+                    body.push(BodyInstr::SubFConst { dest, src, fimm });
+                } else {
+                    return None;
+                }
                 i += 2;
             }
             OpCode::MulK => {
                 if !expect_mmbin(raw_body, i) { return None; }
                 let dest = instr.get_a() as u8;
                 let src  = instr.get_b() as u8;
-                let imm  = const_int(chunk, instr.get_c() as usize)?;
+                let c    = instr.get_c() as usize;
                 track(&mut written, dest);
                 track(&mut reads, src);
-                body.push(BodyInstr::MulImm { dest, src, imm });
+                if let Some(imm) = const_int(chunk, c) {
+                    body.push(BodyInstr::MulImm { dest, src, imm });
+                } else if let Some(fimm) = const_float_strict(chunk, c) {
+                    body.push(BodyInstr::MulFConst { dest, src, fimm });
+                } else {
+                    return None;
+                }
                 i += 2;
             }
             OpCode::IDivK => {
@@ -358,10 +424,27 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 let dest = instr.get_a() as u8;
                 let src  = instr.get_b() as u8;
                 let imm  = const_int(chunk, instr.get_c() as usize)?;
-                if imm == 0 { return None; }  // constant mod-by-zero: bail
+                if imm == 0 { return None; }
                 track(&mut written, dest);
                 track(&mut reads, src);
                 body.push(BodyInstr::ModImm { dest, src, imm });
+                i += 2;
+            }
+            OpCode::DivK => {
+                if !expect_mmbin(raw_body, i) { return None; }
+                let dest = instr.get_a() as u8;
+                let src  = instr.get_b() as u8;
+                let c    = instr.get_c() as usize;
+                let fimm = if let Some(imm) = const_int(chunk, c) {
+                    imm as f64
+                } else if let Some(f) = const_float_strict(chunk, c) {
+                    f
+                } else {
+                    return None;
+                };
+                track(&mut written, dest);
+                track(&mut reads, src);
+                body.push(BodyInstr::DivFConst { dest, src, fimm });
                 i += 2;
             }
             // ── bitwise register-register (BAnd/BOr/BXor + MmBin) ─────────
@@ -462,12 +545,18 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
                 body.push(BodyInstr::LoadI { dest, imm });
                 i += 1;
             }
-            // LoadK with an integer constant → same as LoadI (no companion)
             OpCode::LoadK => {
                 let dest = instr.get_a() as u8;
-                let imm  = const_int(chunk, instr.get_bx() as usize)?;
-                track(&mut written, dest);
-                body.push(BodyInstr::LoadI { dest, imm });
+                let bx   = instr.get_bx() as usize;
+                if let Some(imm) = const_int(chunk, bx) {
+                    track(&mut written, dest);
+                    body.push(BodyInstr::LoadI { dest, imm });
+                } else if let Some(fimm) = const_float_strict(chunk, bx) {
+                    track(&mut written, dest);
+                    body.push(BodyInstr::LoadF { dest, fimm });
+                } else {
+                    return None;
+                }
                 i += 1;
             }
             // ── shift ops (followed by MmBin companion) ───────────────────
@@ -774,7 +863,107 @@ pub fn analyze(chunk: &Chunk, prep_pc: usize) -> Option<LoopAnalysis> {
         defined_in_body.extend(instr.dest());
     }
 
-    Some(LoopAnalysis { a, for_loop_pc, body, written, loop_carried, table_regs })
+    // ── Type inference ────────────────────────────────────────────────────
+    // Forward pass: determine Int vs Float type for each register.
+    let mut reg_types: Vec<(u8, ValType)> = Vec::new();
+    // Loop control variable is always Int.
+    set_reg_type(&mut reg_types, a + 2, ValType::Int);
+
+    for instr in &body {
+        match *instr {
+            BodyInstr::LoadI { dest, .. } =>
+                { set_reg_type(&mut reg_types, dest, ValType::Int)?; }
+            BodyInstr::LoadF { dest, .. } =>
+                { set_reg_type(&mut reg_types, dest, ValType::Float)?; }
+            BodyInstr::AddRR { dest, lhs, rhs }
+            | BodyInstr::SubRR { dest, lhs, rhs }
+            | BodyInstr::MulRR { dest, lhs, rhs } => {
+                let lt = get_reg_type(lhs, &reg_types);
+                let rt = get_reg_type(rhs, &reg_types);
+                let out = if lt == ValType::Float || rt == ValType::Float
+                    { ValType::Float } else { ValType::Int };
+                set_reg_type(&mut reg_types, dest, out)?;
+            }
+            BodyInstr::AddImm { dest, src, .. }
+            | BodyInstr::SubImm { dest, src, .. }
+            | BodyInstr::MulImm { dest, src, .. } => {
+                let st = get_reg_type(src, &reg_types);
+                set_reg_type(&mut reg_types, dest, st)?;
+            }
+            BodyInstr::IDivRR { dest, lhs, rhs } | BodyInstr::ModRR { dest, lhs, rhs } => {
+                if get_reg_type(lhs, &reg_types) == ValType::Float { return None; }
+                if get_reg_type(rhs, &reg_types) == ValType::Float { return None; }
+                set_reg_type(&mut reg_types, dest, ValType::Int)?;
+            }
+            BodyInstr::IDivImm { dest, src, .. } | BodyInstr::ModImm { dest, src, .. } => {
+                if get_reg_type(src, &reg_types) == ValType::Float { return None; }
+                set_reg_type(&mut reg_types, dest, ValType::Int)?;
+            }
+            BodyInstr::AddFConst { dest, .. } | BodyInstr::SubFConst { dest, .. }
+            | BodyInstr::MulFConst { dest, .. }
+            | BodyInstr::DivRR { dest, .. } | BodyInstr::DivFConst { dest, .. } =>
+                { set_reg_type(&mut reg_types, dest, ValType::Float)?; }
+            BodyInstr::BAndRR { dest, lhs, rhs } | BodyInstr::BOrRR { dest, lhs, rhs }
+            | BodyInstr::BXorRR { dest, lhs, rhs }
+            | BodyInstr::ShlRR { dest, lhs, rhs } | BodyInstr::ShrRR { dest, lhs, rhs } => {
+                if get_reg_type(lhs, &reg_types) == ValType::Float { return None; }
+                if get_reg_type(rhs, &reg_types) == ValType::Float { return None; }
+                set_reg_type(&mut reg_types, dest, ValType::Int)?;
+            }
+            BodyInstr::BAndImm { dest, src, .. } | BodyInstr::BOrImm { dest, src, .. }
+            | BodyInstr::BXorImm { dest, src, .. }
+            | BodyInstr::ShrImm { dest, src, .. } | BodyInstr::ShlIConst { dest, src, .. } => {
+                if get_reg_type(src, &reg_types) == ValType::Float { return None; }
+                set_reg_type(&mut reg_types, dest, ValType::Int)?;
+            }
+            BodyInstr::Unm { dest, src } => {
+                let st = get_reg_type(src, &reg_types);
+                set_reg_type(&mut reg_types, dest, st)?;
+            }
+            BodyInstr::BNot { dest, src } => {
+                if get_reg_type(src, &reg_types) == ValType::Float { return None; }
+                set_reg_type(&mut reg_types, dest, ValType::Int)?;
+            }
+            BodyInstr::Move { dest, src } => {
+                let st = get_reg_type(src, &reg_types);
+                set_reg_type(&mut reg_types, dest, st)?;
+            }
+            BodyInstr::CmpImmJmp { reg, .. } => {
+                if get_reg_type(reg, &reg_types) == ValType::Float { return None; }
+            }
+            BodyInstr::CmpRRJmp { lhs, rhs, .. } => {
+                if get_reg_type(lhs, &reg_types) == ValType::Float { return None; }
+                if get_reg_type(rhs, &reg_types) == ValType::Float { return None; }
+            }
+            BodyInstr::TestSetJmp { dest, src, .. } => {
+                let st = get_reg_type(src, &reg_types);
+                set_reg_type(&mut reg_types, dest, st)?;
+            }
+            BodyInstr::GetArrayImm { dest, .. } | BodyInstr::GetArrayReg { dest, .. }
+            | BodyInstr::LenTable { dest, .. } | BodyInstr::GetFieldConst { dest, .. } =>
+                { set_reg_type(&mut reg_types, dest, ValType::Int)?; }
+            BodyInstr::SetArrayImm { src, .. } => {
+                if get_reg_type(src, &reg_types) == ValType::Float { return None; }
+            }
+            BodyInstr::SetArrayReg { key_reg, src, .. } => {
+                if get_reg_type(key_reg, &reg_types) == ValType::Float { return None; }
+                if get_reg_type(src, &reg_types) == ValType::Float { return None; }
+            }
+            BodyInstr::Jmp { .. } | BodyInstr::TestJmp { .. } => {}
+        }
+    }
+
+    // Read-only integer registers: source regs that are not written, not loop
+    // control, not table regs. Check them for LUA_VNUMINT at entry.
+    let read_only_int: Vec<u8> = reads.iter()
+        .filter(|&&r| !written.contains(&r)
+            && r != a && r != a + 1 && r != a + 2
+            && !table_regs.contains(&r))
+        .copied()
+        .collect();
+
+    Some(LoopAnalysis { a, for_loop_pc, body, written, loop_carried, table_regs,
+                        reg_types, read_only_int })
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -804,4 +993,26 @@ fn expect_mmbin(code: &[crate::lua_vm::Instruction], at: usize) -> bool {
 /// strict integer (`LUA_VNUMINT`).  Returns `None` otherwise.
 fn const_int(chunk: &Chunk, idx: usize) -> Option<i64> {
     chunk.constants.get(idx)?.as_integer_strict()
+}
+
+/// Look up `chunk.constants[idx]` and return its value as `f64` if it is a
+/// strict float (`LUA_VNUMFLT`).  Returns `None` otherwise.
+fn const_float_strict(chunk: &Chunk, idx: usize) -> Option<f64> {
+    let v = chunk.constants.get(idx)?;
+    if v.is_float() { Some(unsafe { v.value.n }) } else { None }
+}
+
+/// Get the type of register `r` from the type map, defaulting to Int.
+pub fn get_reg_type(r: u8, types: &[(u8, ValType)]) -> ValType {
+    types.iter().find(|&&(rr, _)| rr == r).map(|&(_, t)| t).unwrap_or(ValType::Int)
+}
+
+/// Set the type of register `r`.  Returns None on type conflict (already set to a different type).
+fn set_reg_type(types: &mut Vec<(u8, ValType)>, reg: u8, ty: ValType) -> Option<()> {
+    if let Some(entry) = types.iter_mut().find(|(r, _)| *r == reg) {
+        if entry.1 != ty { return None; }
+    } else {
+        types.push((reg, ty));
+    }
+    Some(())
 }
