@@ -3,7 +3,7 @@
 
   Design Philosophy:
   1. **Slice-Based**: Code and constants accessed via `&[T]` slices with
-     `noalias` guarantees — LLVM keeps slice base pointers in registers
+     `noalias` guarantees 鈥?LLVM keeps slice base pointers in registers
      across function calls (raw pointers must be reloaded after `&mut` calls)
   2. **Minimal Indirection**: Use get_unchecked for stack access (no bounds checks)
   3. **No Allocation in Loop**: All errors via lua_state.error(), no String construction
@@ -155,7 +155,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         // Macro to get upvalue pointer from current frame's cached field.
         // The pointer is pre-computed in push_lua_frame, avoiding the
-        // func → GcPtr → GcRClosure → LuaFunction → UpvalueStore enum match
+        // func 鈫?GcPtr 鈫?GcRClosure 鈫?LuaFunction 鈫?UpvalueStore enum match
         // chain on every access (saves 2-3 loads + 1 branch per GetUpval/SetUpval).
         macro_rules! current_upvalue_ptrs {
             () => {
@@ -194,6 +194,36 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 let chunk_ref = current_chunk!();
                 hook_check_instruction(lua_state, pc, chunk_ref, frame_idx)?;
                 updatetrap!();
+            }
+
+            // 鈹€鈹€ Tracing JIT: feed instruction to recorder 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+            #[cfg(feature = "jit")]
+            if lua_state.jit_state.state == crate::jit::trace::RecordState::Recording {
+                let rec_pc = (pc - 1) as u32; // pc already incremented
+                // SAFETY: We need simultaneous read access to the stack and
+                // mutable access to the recorder. The recorder only reads
+                // stack values (no mutation). We obtain a raw slice pointer
+                // to avoid the borrow conflict.
+                let result = {
+                    let stack_ptr = lua_state.stack().as_ptr();
+                    let stack_len = lua_state.stack().len();
+                    let stack_slice = unsafe { std::slice::from_raw_parts(stack_ptr, stack_len) };
+                    let recorder = lua_state.jit_state.recorder.as_mut().unwrap();
+                    recorder.record_instruction(instr, rec_pc, base, stack_slice)
+                };
+                match result {
+                    crate::jit::trace::RecordResult::Continue => { /* keep going */ }
+                    crate::jit::trace::RecordResult::LoopClosed => {
+                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                        let head_pc = lua_state.jit_state.recorder.as_ref().unwrap().head_pc;
+                        lua_state.jit_state.finish_recording(chunk_ptr, head_pc);
+                    }
+                    crate::jit::trace::RecordResult::Abort(reason) => {
+                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                        let head_pc = lua_state.jit_state.recorder.as_ref().unwrap().head_pc;
+                        lua_state.jit_state.abort_recording(chunk_ptr, head_pc, reason);
+                    }
+                }
             }
 
             // Dispatch instruction (continues in next replacement...)
@@ -392,7 +422,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::Div => {
-                    // op_arithf(L, luai_numdiv) - 浮点除法
+                    // op_arithf(L, luai_numdiv) - 娴偣闄ゆ硶
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
@@ -417,7 +447,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::IDiv => {
-                    // op_arith(L, luaV_idiv, luai_numidiv) - 整数除法
+                    // op_arith(L, luaV_idiv, luai_numidiv) - 鏁存暟闄ゆ硶
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
@@ -512,7 +542,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::Unm => {
-                    // 取负: -value
+                    // 鍙栬礋: -value
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
 
@@ -1002,7 +1032,33 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Jmp => {
                     // pc += sJ (pointer arithmetic, like C Lua)
                     let sj = instr.get_sj();
+                    let old_pc = pc;
                     pc = (pc as isize + sj as isize) as usize;
+
+                    // Tracing JIT: count backward jumps only
+                    #[cfg(feature = "jit")]
+                    if pc < old_pc {
+                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                        // Execute compiled trace if available
+                        let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
+                            .map(|ct| ct.fn_ptr);
+                        if let Some(fn_ptr) = trace_fn_ptr {
+                            let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
+                            let snap_id = unsafe {
+                                let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
+                                f(stack_ptr, base)
+                            };
+                            if snap_id > 0 {
+                                if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {
+                                    pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
+                                }
+                            }
+                            continue;
+                        }
+                        if lua_state.jit_state.count_hot(chunk_ptr, pc as u32) {
+                            lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
+                        }
+                    }
                 }
                 OpCode::Return => {
                     // return R[A], ..., R[A+B-2]
@@ -1014,7 +1070,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Update PC before returning
                     save_pc!();
 
-                    // Return hook (cold path — re-read hook_mask directly,
+                    // Return hook (cold path 鈥?re-read hook_mask directly,
                     // no cross-dispatch `trap` variable needed)
                     if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
@@ -1048,7 +1104,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     frame_idx = new_depth - 1;
 
-                    // Cold check: C frame or pending finish → full startfunc
+                    // Cold check: C frame or pending finish 鈫?full startfunc
                     let cs = lua_state.get_call_info(frame_idx).call_status;
                     if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
                         continue 'startfunc;
@@ -1067,7 +1123,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::Return1 => {
-                    // return R[A] — hottest return path
+                    // return R[A] 鈥?hottest return path
                     let a = instr.get_a() as usize;
 
                     // Return hook (cold path)
@@ -1088,7 +1144,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     frame_idx = new_depth - 1;
 
-                    // Cold check: C frame or pending finish → full startfunc
+                    // Cold check: C frame or pending finish 鈫?full startfunc
                     let cs = lua_state.get_call_info(frame_idx).call_status;
                     if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
                         continue 'startfunc;
@@ -1145,7 +1201,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     lua_state.mark_tbc(stack_idx)?;
                 }
                 OpCode::NewTable => {
-                    // R[A] := {} (new table) — table ops should be inlined
+                    // R[A] := {} (new table) 鈥?table ops should be inlined
                     let a = instr.get_a() as usize;
                     let vb = instr.get_vb() as usize;
                     let mut vc = instr.get_vc() as usize;
@@ -1182,7 +1238,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetTable => {
                     // GETTABLE: R[A] := R[B][R[C]]
-                    // Pointer-based access (like C Lua's vRB/vRC — no 16-byte copy)
+                    // Pointer-based access (like C Lua's vRB/vRC 鈥?no 16-byte copy)
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
@@ -1504,7 +1560,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Noinline __newindex fast path: Lua function → non-recursive
+                        // Noinline __newindex fast path: Lua function 鈫?non-recursive
                         let meta = table_ref.meta_ptr();
                         if !meta.is_null() {
                             save_pc!();
@@ -1562,7 +1618,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let table_gc = unsafe { &mut *(ra.value.ptr as *mut GcTable) };
                         let table_ref = &mut table_gc.data;
                         if table_ref.impl_table.fast_setfield(key, value) {
-                            // Existing key updated — GC write barrier
+                            // Existing key updated 鈥?GC write barrier
                             if value.is_collectable() {
                                 lua_state
                                     .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
@@ -1582,7 +1638,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 }
                                 continue;
                             }
-                            // Needs rehash — use raw_set directly
+                            // Needs rehash 鈥?use raw_set directly
                             let (_, delta) = table_ref.impl_table.raw_set(key, value);
                             table_ref.invalidate_tm_cache();
                             if delta != 0 {
@@ -1729,7 +1785,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         // Inline callee entry: use known values directly instead of
                         // reading back from CallInfo (avoids redundant call_stack reload
                         // + frame_idx*72 address computation + 3 loads from memory we
-                        // just wrote to — saves ~7 instructions on the hot path).
+                        // just wrote to 鈥?saves ~7 instructions on the hot path).
                         frame_idx = lua_state.call_depth() - 1;
                         base = new_base;
                         // Use raw pointer to derive code/constants (func is local,
@@ -1894,6 +1950,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Jump back (no error check - validated at compile time)
                                 pc -= bx;
+
+                                // Tracing JIT: ForLoop backward jump — do NOT trace
+                                // (ForLoop counter update is not captured in trace IR;
+                                //  numeric for-loops are handled by the loop-only JIT)
                             }
                             // else: counter expired, exit loop
                         } else {
@@ -1921,13 +1981,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Jump back (bytecode compiler guarantees valid targets)
                                 pc -= bx;
+
+                                // Tracing JIT: ForLoop (float) backward jump — do NOT trace
                             }
                             // else: exit loop
                         }
                     }
                 }
                 OpCode::ForPrep => {
-                    // Cold path — only runs once per loop, extracted to reduce
+                    // Cold path 鈥?only runs once per loop, extracted to reduce
                     // main loop code size and prevent r12/r15 clobbering
                     let a  = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
@@ -1938,7 +2000,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     cold::handle_forprep_int(lua_state, base + a, bx, frame_idx, &mut pc_idx)?;
                     pc = pc_idx;
 
-                    // JIT fast path — only when hooks are off and the loop will actually run.
+                    // JIT fast path 鈥?only when hooks are off and the loop will actually run.
                     //
                     // TRIGGER: use the iteration count stored in stack[base+a] by
                     // handle_forprep_int.  For `for i=1,N do` that count = N-1.
@@ -1969,16 +2031,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             };
                             let result = unsafe { jit_fn(stack_base) };
                             if result == 0 {
-                                // JIT completed the loop — skip past ForLoop.
+                                // JIT completed the loop 鈥?skip past ForLoop.
                                 *pc = for_loop_pc + 1;
                             }
-                            // result == -1 → deopt: interpreter handles the loop.
+                            // result == -1 鈫?deopt: interpreter handles the loop.
                         };
 
                         match cache_val {
-                            // Previous compilation failed → never retry.
+                            // Previous compilation failed 鈫?never retry.
                             Some(crate::jit::JIT_FAILED) => {}
-                            // Already compiled and valid → run immediately.
+                            // Already compiled and valid 鈫?run immediately.
                             Some(fn_ptr) => {
                                 run_jit(lua_state, fn_ptr, base, for_loop_pc, &mut pc);
                             }
@@ -2006,7 +2068,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::TForPrep => {
-                    // Prepare generic for loop — inline (for loop related)
+                    // Prepare generic for loop 鈥?inline (for loop related)
                     let a = instr.get_a() as usize;
                     let bx = instr.get_bx() as usize;
 
@@ -2022,7 +2084,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     pc += bx;
                 }
                 OpCode::TForCall => {
-                    // Generic for loop call — HOT PATH for ipairs/pairs/next iterators
+                    // Generic for loop call 鈥?HOT PATH for ipairs/pairs/next iterators
                     // Call: ra+3,ra+4,...,ra+2+C := ra(ra+1, ra+2)
                     // ra=iterator, ra+1=state, ra+2=closing, ra+3=control
                     let a = instr.get_a() as usize;
@@ -2070,7 +2132,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state.oldpc = (pc - 1) as u32;
                     } else if iterator.is_lua_function() {
                         // FAST PATH: Lua closure iterator (closure-based for loops)
-                        // Inline call setup — avoids handle_call overhead, FrameAction
+                        // Inline call setup 鈥?avoids handle_call overhead, FrameAction
                         // enum, set_top_raw, and 'startfunc full context reload.
                         let lua_func = unsafe { iterator.as_lua_function_unchecked() };
                         let new_chunk = lua_func.chunk();
@@ -2139,6 +2201,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if !unsafe { stack.get_unchecked(ra + 3) }.is_nil() {
                         // Continue loop: jump back
                         pc -= bx;
+
+                        // Tracing JIT: TForLoop — do NOT trace yet
+                        // (exit condition not captured in trace IR)
                     }
                     // else: exit loop (control variable is nil)
                 }
@@ -2354,7 +2419,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         }
-                        // Noinline __newindex fast path: Lua function → non-recursive
+                        // Noinline __newindex fast path: Lua function 鈫?non-recursive
                         let meta = table.data.meta_ptr();
                         if !meta.is_null() {
                             save_pc!();
@@ -2379,7 +2444,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             restore_state!();
                         }
                         Err(LuaError::Yield) => {
-                            // __newindex yielded — mark for top restoration on resume
+                            // __newindex yielded 鈥?mark for top restoration on resume
                             let ci = lua_state.get_call_info_mut(frame_idx);
                             ci.pending_finish_get = -2;
                             ci.call_status |= CIST_PENDING_FINISH;
@@ -2402,14 +2467,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let table = &mut table_gc.data;
                         let meta = table.meta_ptr();
                         if meta.is_null() {
-                            // No metatable — raw len
+                            // No metatable 鈥?raw len
                             setivalue(
                                 unsafe { lua_state.stack_mut().get_unchecked_mut(base + a) },
                                 table.len() as i64,
                             );
                             continue;
                         }
-                        // Has metatable — use noinline helper
+                        // Has metatable 鈥?use noinline helper
                         save_pc!();
                         match noinline::try_len_meta(lua_state, meta, rb, frame_idx)? {
                             noinline::LenResult::RawLen => {
@@ -2453,16 +2518,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let k = instr.get_k();
                     let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
                     let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
-                    // Fast path: same identity → equal
+                    // Fast path: same identity 鈫?equal
                     // EQ: if ((R[A] == R[B]) ~= k) then pc++
                     if ra == rb {
-                        // cond=true: skip when k=false (true ~= false → true)
+                        // cond=true: skip when k=false (true ~= false 鈫?true)
                         if !k {
                             pc += 1;
                         }
                     } else if ra.tt() != rb.tt() {
-                        // Different types → never equal (cond=false)
-                        // skip when k=true (false ~= true → true)
+                        // Different types 鈫?never equal (cond=false)
+                        // skip when k=true (false ~= true 鈫?true)
                         if k {
                             pc += 1;
                         }

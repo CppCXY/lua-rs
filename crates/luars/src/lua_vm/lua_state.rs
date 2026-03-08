@@ -135,6 +135,10 @@ pub struct LuaState {
             Box<dyn Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>>>,
         >,
     >,
+
+    /// Per-thread tracing JIT state.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_state: crate::jit::JitState,
 }
 
 impl LuaState {
@@ -172,6 +176,8 @@ impl LuaState {
             is_closing: false,
             nny: if is_main { 1 } else { 0 },
             pending_future: None,
+            #[cfg(feature = "jit")]
+            jit_state: crate::jit::JitState::new(),
         }
     }
 
