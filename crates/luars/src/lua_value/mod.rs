@@ -22,7 +22,7 @@ pub use lua_table::LuaTable;
 pub use lua_value::{LuaValue, LuaValueKind, Value};
 
 // Re-export type tag constants for VM execution
-pub use lua_value::{``````````````````````````````````````````````````````````````
+pub use lua_value::{
     LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT,
     LUA_VNUMINT, LUA_VTABLE, LUA_VTRUE,
 };
