@@ -98,6 +98,16 @@ unsafe impl Sync for CompiledTrace {}
 
 pub type TraceFn = unsafe fn(*mut u8, usize, *const u8) -> i32;
 
+/// Collected Cranelift FuncRef handles for external helpers.
+struct HelperFuncs {
+    pow: Option<cranelift_codegen::ir::FuncRef>,
+    tab_geti: Option<cranelift_codegen::ir::FuncRef>,
+    tab_seti: Option<cranelift_codegen::ir::FuncRef>,
+    tab_gets: Option<cranelift_codegen::ir::FuncRef>,
+    tab_sets: Option<cranelift_codegen::ir::FuncRef>,
+    tab_len: Option<cranelift_codegen::ir::FuncRef>,
+}
+
 pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
     with_module(|module| {
         let ptr_type = module.target_config().pointer_type();
@@ -123,18 +133,81 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
                 .map_err(|e| format!("declare pow: {e}"))?)
         } else { None };
 
+        // Declare table helper functions if this trace uses table ops.
+        let needs_tab_geti = trace.ops.iter().any(|op| matches!(op, TraceIr::TabGetI { .. }));
+        let needs_tab_seti = trace.ops.iter().any(|op| matches!(op, TraceIr::TabSetI { .. }));
+        let needs_tab_gets = trace.ops.iter().any(|op| matches!(op, TraceIr::TabGetS { .. }));
+        let needs_tab_sets = trace.ops.iter().any(|op| matches!(op, TraceIr::TabSetS { .. }));
+        let needs_tab_len = trace.ops.iter().any(|op| matches!(op, TraceIr::TabLen { .. }));
+
+        // jit_tab_geti(i64, i64) -> i64
+        let tab_geti_id = if needs_tab_geti {
+            let mut s = module.make_signature();
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            s.returns.push(AbiParam::new(I64));
+            Some(module.declare_function("jit_tab_geti", cranelift_module::Linkage::Import, &s)
+                .map_err(|e| format!("declare jit_tab_geti: {e}"))?)
+        } else { None };
+
+        // jit_tab_seti(i64, i64, i64, i64) -> void
+        let tab_seti_id = if needs_tab_seti {
+            let mut s = module.make_signature();
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            Some(module.declare_function("jit_tab_seti", cranelift_module::Linkage::Import, &s)
+                .map_err(|e| format!("declare jit_tab_seti: {e}"))?)
+        } else { None };
+
+        // jit_tab_gets(i64, i64) -> i64
+        let tab_gets_id = if needs_tab_gets {
+            let mut s = module.make_signature();
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            s.returns.push(AbiParam::new(I64));
+            Some(module.declare_function("jit_tab_gets", cranelift_module::Linkage::Import, &s)
+                .map_err(|e| format!("declare jit_tab_gets: {e}"))?)
+        } else { None };
+
+        // jit_tab_sets(i64, i64, i64, i64) -> void
+        let tab_sets_id = if needs_tab_sets {
+            let mut s = module.make_signature();
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            s.params.push(AbiParam::new(I64));
+            Some(module.declare_function("jit_tab_sets", cranelift_module::Linkage::Import, &s)
+                .map_err(|e| format!("declare jit_tab_sets: {e}"))?)
+        } else { None };
+
+        // jit_tab_len(i64) -> i64
+        let tab_len_id = if needs_tab_len {
+            let mut s = module.make_signature();
+            s.params.push(AbiParam::new(I64));
+            s.returns.push(AbiParam::new(I64));
+            Some(module.declare_function("jit_tab_len", cranelift_module::Linkage::Import, &s)
+                .map_err(|e| format!("declare jit_tab_len: {e}"))?)
+        } else { None };
+
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
 
-        // Import pow into the function if needed.
-        let pow_fref = pow_func_id.map(|fid| {
-            module.declare_func_in_func(fid, &mut ctx.func)
-        });
+        // Import helpers into the function.
+        let helpers = HelperFuncs {
+            pow: pow_func_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            tab_geti: tab_geti_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            tab_seti: tab_seti_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            tab_gets: tab_gets_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            tab_sets: tab_sets_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            tab_len: tab_len_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+        };
 
         let mut fb_ctx = FunctionBuilderContext::new();
         {
             let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-            emit_trace_ir(&mut builder, trace, pow_fref)?;
+            emit_trace_ir(&mut builder, trace, &helpers)?;
             builder.finalize();
         }
 
@@ -155,7 +228,7 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
     })
 }
 
-fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, pow_fref: Option<cranelift_codegen::ir::FuncRef>) -> Result<(), String> {
+fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) -> Result<(), String> {
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
     let exit_blocks: Vec<_> = (0..trace.snapshots.len()).map(|_| b.create_block()).collect();
@@ -302,7 +375,7 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, pow_fref: Option<cranel
             }
             TraceIr::PowFloat { lhs, rhs } => {
                 let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
-                let fref = pow_fref.expect("pow_fref must be set for PowFloat");
+                let fref = helpers.pow.expect("pow fref must be set for PowFloat");
                 let call = b.ins().call(fref, &[l, r]);
                 b.inst_results(call)[0]
             }
@@ -315,6 +388,38 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, pow_fref: Option<cranel
             TraceIr::ShrInt { lhs, rhs } => {
                 let neg = b.ins().ineg(vals[rhs.index()]);
                 emit_lua_shiftl(b, vals[lhs.index()], neg)
+            }
+            // ── Table operations ───────────────────────────────────────
+            TraceIr::TabGetI { table, index } => {
+                let fref = helpers.tab_geti.expect("tab_geti fref");
+                let call = b.ins().call(fref, &[vals[table.index()], vals[index.index()]]);
+                b.inst_results(call)[0]
+            }
+            TraceIr::TabSetI { table, index, val, ty } => {
+                let fref = helpers.tab_seti.expect("tab_seti fref");
+                let sv = as_i64(b, vals[val.index()]);
+                let tag = b.ins().iconst(I64, ir_type_tag(ty));
+                b.ins().call(fref, &[vals[table.index()], vals[index.index()], sv, tag]);
+                b.ins().iconst(I64, 0) // dummy result
+            }
+            TraceIr::TabGetS { table, key_ptr } => {
+                let fref = helpers.tab_gets.expect("tab_gets fref");
+                let kp = b.ins().iconst(I64, *key_ptr as i64);
+                let call = b.ins().call(fref, &[vals[table.index()], kp]);
+                b.inst_results(call)[0]
+            }
+            TraceIr::TabSetS { table, key_ptr, val, ty } => {
+                let fref = helpers.tab_sets.expect("tab_sets fref");
+                let kp = b.ins().iconst(I64, *key_ptr as i64);
+                let sv = as_i64(b, vals[val.index()]);
+                let tag = b.ins().iconst(I64, ir_type_tag(ty));
+                b.ins().call(fref, &[vals[table.index()], kp, sv, tag]);
+                b.ins().iconst(I64, 0) // dummy result
+            }
+            TraceIr::TabLen { table } => {
+                let fref = helpers.tab_len.expect("tab_len fref");
+                let call = b.ins().call(fref, &[vals[table.index()]]);
+                b.inst_results(call)[0]
             }
             TraceIr::LoopStart => {
                 for phi in &phis { b.def_var(phi.var, vals[phi.entry_ref]); }

@@ -236,13 +236,13 @@ pub enum TraceIr {
     TabGetI { table: TRef, index: TRef },
 
     /// Array write: `t[idx] = val`
-    TabSetI { table: TRef, index: TRef, val: TRef },
+    TabSetI { table: TRef, index: TRef, val: TRef, ty: IrType },
 
     /// Field read by interned string key: `t.name`
     TabGetS { table: TRef, key_ptr: usize },
 
     /// Field write: `t.name = val`
-    TabSetS { table: TRef, key_ptr: usize, val: TRef },
+    TabSetS { table: TRef, key_ptr: usize, val: TRef, ty: IrType },
 
     /// Table length: `#t`
     TabLen { table: TRef },

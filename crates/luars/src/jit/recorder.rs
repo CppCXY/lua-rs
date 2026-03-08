@@ -886,14 +886,18 @@ impl TraceRecorder {
     fn record_getfield(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
-        // C indexes into constant table — the key is a string.
-        // We store the raw pointer to the interned string key.
+        let c = instr.get_c() as usize;
+        // C indexes into constant table — the key is a short string.
         let vt = self.ensure_slot(b, IrType::Table, pc, base);
-        // For now, read the result type from the stack.
+        // Read the string constant key pointer from the chunk.
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(key_const) = chunk.constants.get(c) else {
+            return RecordResult::Abort(AbortReason::NYI("getfield const oob"));
+        };
+        let key_ptr = unsafe { key_const.value.i } as usize;
         let result = &stack[base + a as usize];
         let res_ty = Self::detect_type(result);
-        // key_ptr: we pass 0 as placeholder — the compiler will read from bytecode.
-        let r = self.emit(TraceIr::TabGetS { table: vt, key_ptr: 0 });
+        let r = self.emit(TraceIr::TabGetS { table: vt, key_ptr });
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
@@ -907,7 +911,7 @@ impl TraceRecorder {
         let val = &stack[base + c as usize];
         let ty = Self::detect_type(val);
         let vc = self.ensure_slot(c, ty, pc, base);
-        self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc });
+        self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc, ty });
         RecordResult::Continue
     }
 
@@ -920,31 +924,44 @@ impl TraceRecorder {
         let val = &stack[base + c as usize];
         let ty = Self::detect_type(val);
         let vc = self.ensure_slot(c, ty, pc, base);
-        self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc });
+        self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc, ty });
         RecordResult::Continue
     }
 
     fn record_setfield(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
+        let b = instr.get_b() as usize; // K[B] is the string key
         let c = instr.get_c() as u16;
         let vt = self.ensure_slot(a, IrType::Table, pc, base);
+        // Read the string constant key pointer from the chunk.
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(key_const) = chunk.constants.get(b) else {
+            return RecordResult::Abort(AbortReason::NYI("setfield const oob"));
+        };
+        let key_ptr = unsafe { key_const.value.i } as usize;
         let val = &stack[base + c as usize];
         let ty = Self::detect_type(val);
         let vc = self.ensure_slot(c, ty, pc, base);
-        self.emit(TraceIr::TabSetS { table: vt, key_ptr: 0, val: vc });
+        self.emit(TraceIr::TabSetS { table: vt, key_ptr, val: vc, ty });
         RecordResult::Continue
     }
 
     fn record_gettabup(&mut self, instr: Instruction, _pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
+        let c = instr.get_c() as usize;
         // GetTabUp: R[A] = UpValue[B][K[C]]
         // Load the upvalue (which should be a table — typically _ENV).
         let uv = self.emit(TraceIr::LoadUpval { upval_idx: b });
-        // The key K[C] is a string constant — treat as field access.
+        // Read the string constant key pointer from the chunk.
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(key_const) = chunk.constants.get(c) else {
+            return RecordResult::Abort(AbortReason::NYI("gettabup const oob"));
+        };
+        let key_ptr = unsafe { key_const.value.i } as usize;
         let result = &stack[base + a as usize];
         let res_ty = Self::detect_type(result);
-        let r = self.emit(TraceIr::TabGetS { table: uv, key_ptr: 0 });
+        let r = self.emit(TraceIr::TabGetS { table: uv, key_ptr });
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
