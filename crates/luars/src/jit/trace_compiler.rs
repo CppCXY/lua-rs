@@ -12,7 +12,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
 
 use super::runtime::with_module;
-use super::trace::{Trace, TraceIr, IrType, CmpOp};
+use super::trace::{Trace, TraceIr, IrType, CmpOp, BuiltinFn};
 
 const LV: i32 = 16;
 const VALUE_OFF: i32 = 0;
@@ -49,7 +49,8 @@ fn ir_result_type(op: &TraceIr) -> cranelift_codegen::ir::Type {
         | TraceIr::AddFloat { .. } | TraceIr::SubFloat { .. }
         | TraceIr::MulFloat { .. } | TraceIr::DivFloat { .. }
         | TraceIr::PowFloat { .. } | TraceIr::NegFloat { .. }
-        | TraceIr::IntToFloat { .. } => F64,
+        | TraceIr::IntToFloat { .. }
+        | TraceIr::CallBuiltin { .. } => F64,
         _ => I64,
     }
 }
@@ -106,6 +107,10 @@ struct HelperFuncs {
     tab_gets: Option<cranelift_codegen::ir::FuncRef>,
     tab_sets: Option<cranelift_codegen::ir::FuncRef>,
     tab_len: Option<cranelift_codegen::ir::FuncRef>,
+    sin: Option<cranelift_codegen::ir::FuncRef>,
+    cos: Option<cranelift_codegen::ir::FuncRef>,
+    exp: Option<cranelift_codegen::ir::FuncRef>,
+    log: Option<cranelift_codegen::ir::FuncRef>,
 }
 
 pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
@@ -191,6 +196,20 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
                 .map_err(|e| format!("declare jit_tab_len: {e}"))?)
         } else { None };
 
+        // Declare libm functions for CallBuiltin: sin, cos, exp, log (all f64->f64).
+        let needs_libm = |bfn: &BuiltinFn| trace.ops.iter().any(|op| matches!(op, TraceIr::CallBuiltin { func, .. } if func == bfn));
+        let declare_f64_f64 = |module: &mut cranelift_jit::JITModule, name: &str| -> Result<_, String> {
+            let mut s = module.make_signature();
+            s.params.push(AbiParam::new(F64));
+            s.returns.push(AbiParam::new(F64));
+            module.declare_function(name, cranelift_module::Linkage::Import, &s)
+                .map_err(|e| format!("declare {name}: {e}"))
+        };
+        let sin_id = if needs_libm(&BuiltinFn::MathSin) { Some(declare_f64_f64(module, "sin")?) } else { None };
+        let cos_id = if needs_libm(&BuiltinFn::MathCos) { Some(declare_f64_f64(module, "cos")?) } else { None };
+        let exp_id = if needs_libm(&BuiltinFn::MathExp) { Some(declare_f64_f64(module, "exp")?) } else { None };
+        let log_id = if needs_libm(&BuiltinFn::MathLog) { Some(declare_f64_f64(module, "log")?) } else { None };
+
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
 
@@ -202,6 +221,10 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             tab_gets: tab_gets_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
             tab_sets: tab_sets_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
             tab_len: tab_len_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            sin: sin_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            cos: cos_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            exp: exp_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
+            log: log_id.map(|fid| module.declare_func_in_func(fid, &mut ctx.func)),
         };
 
         let mut fb_ctx = FunctionBuilderContext::new();
@@ -420,6 +443,37 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
                 let fref = helpers.tab_len.expect("tab_len fref");
                 let call = b.ins().call(fref, &[vals[table.index()]]);
                 b.inst_results(call)[0]
+            }
+            // ── CallBuiltin: math intrinsics / libm calls ──────────────
+            TraceIr::CallBuiltin { func, arg } => {
+                let a = as_f64(b, vals[arg.index()]);
+                match func {
+                    BuiltinFn::MathSqrt => b.ins().sqrt(a),
+                    BuiltinFn::MathAbs => b.ins().fabs(a),
+                    BuiltinFn::MathFloor => b.ins().floor(a),
+                    BuiltinFn::MathCeil => b.ins().ceil(a),
+                    BuiltinFn::MathSin => {
+                        let fref = helpers.sin.expect("sin fref");
+                        let call = b.ins().call(fref, &[a]);
+                        b.inst_results(call)[0]
+                    }
+                    BuiltinFn::MathCos => {
+                        let fref = helpers.cos.expect("cos fref");
+                        let call = b.ins().call(fref, &[a]);
+                        b.inst_results(call)[0]
+                    }
+                    BuiltinFn::MathExp => {
+                        let fref = helpers.exp.expect("exp fref");
+                        let call = b.ins().call(fref, &[a]);
+                        b.inst_results(call)[0]
+                    }
+                    BuiltinFn::MathLog => {
+                        let fref = helpers.log.expect("log fref");
+                        let call = b.ins().call(fref, &[a]);
+                        b.inst_results(call)[0]
+                    }
+                    _ => return Err(format!("NYI: CallBuiltin {func:?}")),
+                }
             }
             TraceIr::LoopStart => {
                 for phi in &phis { b.def_var(phi.var, vals[phi.entry_ref]); }

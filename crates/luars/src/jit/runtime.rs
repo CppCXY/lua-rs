@@ -91,6 +91,18 @@ fn create_module() -> JITModule {
     unsafe extern "C" { fn pow(x: f64, y: f64) -> f64; }
     builder.symbol("pow", pow as *const u8);
 
+    // Register libm math functions for CallBuiltin.
+    unsafe extern "C" {
+        fn sin(x: f64) -> f64;
+        fn cos(x: f64) -> f64;
+        fn exp(x: f64) -> f64;
+        fn log(x: f64) -> f64;
+    }
+    builder.symbol("sin", sin as *const u8);
+    builder.symbol("cos", cos as *const u8);
+    builder.symbol("exp", exp as *const u8);
+    builder.symbol("log", log as *const u8);
+
     // Register table access helpers for trace JIT.
     builder.symbol("jit_tab_geti", jit_tab_geti as *const u8);
     builder.symbol("jit_tab_seti", jit_tab_seti as *const u8);

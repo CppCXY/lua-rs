@@ -63,7 +63,7 @@ pub fn create_math_lib() -> LibraryModule {
     module
 }
 
-fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
     // SAFETY: push_c_frame guarantees EXTRA_STACK slots; arg 1 always readable.
     let value = unsafe { l.get_arg_unchecked(1) };
 
@@ -104,7 +104,7 @@ fn math_atan(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
     let value = unsafe { l.get_arg_unchecked(1) };
 
     // Fast path: integers are already ceil'd
@@ -127,7 +127,7 @@ fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
     Err(l.error("bad argument #1 to 'ceil' (number expected)".to_string()))
 }
 
-fn math_cos(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_cos(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "cos")?;
     unsafe { l.push_value_unchecked(LuaValue::float(x.cos())) };
     Ok(1)
@@ -139,13 +139,13 @@ fn math_deg(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-fn math_exp(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_exp(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "exp")?;
     unsafe { l.push_value_unchecked(LuaValue::float(x.exp())) };
     Ok(1)
 }
 
-fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
     let value = unsafe { l.get_arg_unchecked(1) };
 
     // Fast path: integers are already floor'd
@@ -511,13 +511,13 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
     Ok(2)
 }
 
-fn math_sin(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_sin(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "sin")?;
     unsafe { l.push_value_unchecked(LuaValue::float(x.sin())) };
     Ok(1)
 }
 
-fn math_sqrt(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_sqrt(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "sqrt")?;
     unsafe { l.push_value_unchecked(LuaValue::float(x.sqrt())) };
     Ok(1)

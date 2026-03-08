@@ -71,6 +71,7 @@ impl Node {
 /// - Values are accessed with negative offsets: array[-1-k]
 /// - Tags are accessed with positive offsets: array[sizeof(u32) + k]
 /// - This saves 43% memory vs storing full TValue structs
+#[repr(C)]
 pub struct NativeTable {
     /// Array pointer - points BETWEEN values and tags (PUBLIC for VM hot path)
     pub(crate) array: *mut u8,

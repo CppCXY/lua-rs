@@ -895,8 +895,16 @@ impl TraceRecorder {
             return RecordResult::Abort(AbortReason::NYI("getfield const oob"));
         };
         let key_ptr = unsafe { key_const.value.i } as usize;
-        let result = &stack[base + a as usize];
-        let res_ty = Self::detect_type(result);
+        // Detect result type from the actual table lookup (not the
+        // destination slot which may hold a stale value pre-execution).
+        let res_ty = if let Some(tbl) = stack[base + b as usize].as_table() {
+            match tbl.raw_get(key_const) {
+                Some(result) => Self::detect_type(&result),
+                None => IrType::Nil,
+            }
+        } else {
+            Self::detect_type(&stack[base + a as usize])
+        };
         let r = self.emit(TraceIr::TabGetS { table: vt, key_ptr });
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
@@ -959,11 +967,34 @@ impl TraceRecorder {
             return RecordResult::Abort(AbortReason::NYI("gettabup const oob"));
         };
         let key_ptr = unsafe { key_const.value.i } as usize;
-        let result = &stack[base + a as usize];
-        let res_ty = Self::detect_type(result);
+        // Detect result type by performing the actual lookup on the upvalue
+        // table. We cannot use stack[base + a] because recording is pre-
+        // execution, so R[A] still holds the old value.
+        let res_ty = Self::detect_table_result_type(base, b, key_const, stack)
+            .unwrap_or(IrType::Nil);
         let r = self.emit(TraceIr::TabGetS { table: uv, key_ptr });
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
+    }
+
+    /// Look up the actual result of GetTabUp by reading the upvalue table
+    /// directly. This avoids the pre-execution type detection problem.
+    fn detect_table_result_type(
+        base: usize,
+        upval_idx: u16,
+        key: &LuaValue,
+        stack: &[LuaValue],
+    ) -> Option<IrType> {
+        if base == 0 { return None; }
+        let func = stack.get(base - 1)?;
+        let lua_func = func.as_lua_function()?;
+        let upval_ptr = lua_func.upvalues().get(upval_idx as usize)?;
+        let uv_val = upval_ptr.as_ref().data.get_value_ref();
+        let tbl = uv_val.as_table()?;
+        match tbl.raw_get(key) {
+            Some(result) => Some(Self::detect_type(&result)),
+            None => Some(IrType::Nil),
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -1170,15 +1201,40 @@ impl TraceRecorder {
     // record_* methods — calls & returns
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_call(&mut self, instr: Instruction, pc: u32, base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_call(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as usize;
-        let b = instr.get_b() as u8;
-        let c = instr.get_c() as i8;
+        let _b = instr.get_b() as u8;
+        let _c = instr.get_c() as i8;
 
-        // For now we only record generic calls as opaque operations.
-        // Future: detect builtins (math.sqrt etc.) and inline them.
-        //
-        // Increment call_depth so we know we're inside a sub-frame.
+        let func_val = &stack[base + a];
+
+        // Check if this is a light C function (builtin).
+        if func_val.is_cfunction() {
+            let fptr = func_val.fvalue();
+            if let Some(builtin) = Self::detect_builtin(fptr) {
+                // Single-argument math builtin → inline it.
+                let arg_slot = (a + 1) as u16;
+                let arg_val = &stack[base + a + 1];
+                let arg_ty = Self::detect_type(arg_val);
+                let mut arg = self.ensure_slot(arg_slot, arg_ty, pc, base);
+
+                // Coerce integer arg to float if needed.
+                if arg_ty == IrType::Int {
+                    arg = self.emit(TraceIr::IntToFloat { src: arg });
+                }
+
+                let result = self.emit(TraceIr::CallBuiltin { func: builtin, arg });
+                // Result goes to R[A] (the function slot is reused for the result).
+                self.write_slot(a as u16, result, IrType::Float);
+
+                // C functions execute inline — no call_depth change.
+                return RecordResult::Continue;
+            }
+            // Unknown C function — can't compile.
+            return RecordResult::Abort(AbortReason::NYI("unknown C function call"));
+        }
+
+        // Lua function call — increment call_depth (Return will decrement it).
         self.call_depth += 1;
         if self.call_depth > MAX_CALL_DEPTH {
             return RecordResult::Abort(AbortReason::MaxCallDepth);
@@ -1187,10 +1243,24 @@ impl TraceRecorder {
         self.snapshot(pc, base);
         self.emit(TraceIr::CallGeneric {
             func_slot: a as u16,
-            nargs: b,
-            nresults: c,
+            nargs: _b,
+            nresults: _c,
         });
         RecordResult::Continue
+    }
+
+    /// Detect if a C function pointer matches a known JIT builtin.
+    fn detect_builtin(f: crate::lua_vm::CFunction) -> Option<BuiltinFn> {
+        use crate::stdlib::math;
+        let fp = f as *const () as usize;
+        if fp == math::math_sqrt as *const () as usize { return Some(BuiltinFn::MathSqrt); }
+        if fp == math::math_abs as *const () as usize { return Some(BuiltinFn::MathAbs); }
+        if fp == math::math_floor as *const () as usize { return Some(BuiltinFn::MathFloor); }
+        if fp == math::math_ceil as *const () as usize { return Some(BuiltinFn::MathCeil); }
+        if fp == math::math_sin as *const () as usize { return Some(BuiltinFn::MathSin); }
+        if fp == math::math_cos as *const () as usize { return Some(BuiltinFn::MathCos); }
+        if fp == math::math_exp as *const () as usize { return Some(BuiltinFn::MathExp); }
+        None
     }
 
     fn record_return(&mut self, _instr: Instruction, _pc: u32, _base: usize, _stack: &[LuaValue]) -> RecordResult {
