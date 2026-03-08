@@ -24,6 +24,7 @@ const TAG_FLOAT: i64 = 0x13;
 const TAG_TABLE: i64 = 0x45;
 const TAG_SSTR: i64 = 0x44;
 const TAG_TRUE: i64 = 0x11;
+const TAG_FALSE: i64 = 0x01;
 const TAG_NIL: i64 = 0x00;
 const TAG_LCL: i64 = 0x46;
 
@@ -38,7 +39,8 @@ fn ir_type_tag(ty: &IrType) -> i64 {
         IrType::Float => TAG_FLOAT,
         IrType::Table => TAG_TABLE,
         IrType::String => TAG_SSTR,
-        IrType::Bool => TAG_TRUE,
+        IrType::True => TAG_TRUE,
+        IrType::False => TAG_FALSE,
         IrType::Nil => TAG_NIL,
         IrType::Function => TAG_LCL,
     }

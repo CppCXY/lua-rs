@@ -253,6 +253,38 @@ impl TraceRecorder {
         snap_id
     }
 
+    /// Load a value from either the constant pool (when k=true) or
+    /// a register slot.  Used by SetTable/SetI/SetField when the
+    /// `k` flag indicates the value operand is K[C] instead of R[C].
+    fn load_rk_value(
+        &mut self,
+        c: usize,
+        _base: usize,
+        _stack: &[LuaValue],
+    ) -> Result<(TRef, IrType), RecordResult> {
+        let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
+        let Some(kv) = chunk.constants.get(c) else {
+            return Err(RecordResult::Abort(AbortReason::NYI("rk const oob")));
+        };
+        if kv.ttisinteger() {
+            let iv = unsafe { kv.value.i };
+            Ok((self.emit(TraceIr::KInt(iv)), IrType::Int))
+        } else if kv.ttisfloat() {
+            let fv = unsafe { kv.value.n };
+            Ok((self.emit(TraceIr::KFloat(fv)), IrType::Float))
+        } else if kv.ttisstring() {
+            let ptr_bits = unsafe { kv.value.i };
+            Ok((self.emit(TraceIr::KInt(ptr_bits)), IrType::String))
+        } else if kv.is_nil() {
+            Ok((self.emit(TraceIr::KInt(0)), IrType::Nil))
+        } else if kv.is_boolean() {
+            let bv = if kv.is_truthy() { 1i64 } else { 0i64 };
+            Ok((self.emit(TraceIr::KInt(bv)), if kv.is_truthy() { IrType::True } else { IrType::False }))
+        } else {
+            Err(RecordResult::Abort(AbortReason::NYI("rk unsupported const type")))
+        }
+    }
+
     /// Ensure a stack slot has been loaded and type-guarded.
     /// Returns the `TRef` for the slot's value.
     /// `slot` is instruction-relative (from `instr.get_a()` etc.);
@@ -309,7 +341,7 @@ impl TraceRecorder {
         } else if val.is_string() {
             IrType::String
         } else if val.is_boolean() {
-            IrType::Bool
+            if val.is_truthy() { IrType::True } else { IrType::False }
         } else if val.is_nil() {
             IrType::Nil
         } else {
@@ -485,7 +517,7 @@ impl TraceRecorder {
 
             // ── Jumps ─────────────────────────────────────────────────
             OpCode::Jmp => RecordResult::Continue, // no-op in trace
-            OpCode::ForLoop => RecordResult::Continue, // handled at top
+            OpCode::ForLoop => self.record_forloop(instr, pc, base, stack),
             OpCode::ForPrep => RecordResult::Continue, // no-op inside trace
 
             // ── Calls ─────────────────────────────────────────────────
@@ -578,7 +610,7 @@ impl TraceRecorder {
             (self.emit(TraceIr::KInt(0)), IrType::Nil)
         } else if kv.is_boolean() {
             let bv = if kv.bvalue() { 1i64 } else { 0i64 };
-            (self.emit(TraceIr::KInt(bv)), IrType::Bool)
+            (self.emit(TraceIr::KInt(bv)), if kv.bvalue() { IrType::True } else { IrType::False })
         } else {
             return RecordResult::Abort(AbortReason::NYI("loadk unsupported type"));
         };
@@ -604,7 +636,7 @@ impl TraceRecorder {
             _ => 0i64, // LoadFalse, LFalseSkip
         };
         let r = self.emit(TraceIr::KInt(val));
-        self.write_slot(a, r, IrType::Bool);
+        self.write_slot(a, r, if val != 0 { IrType::True } else { IrType::False });
         RecordResult::Continue
     }
 
@@ -883,7 +915,7 @@ impl TraceRecorder {
         // (register B, which is valid pre-execution).
         let rv = if val.is_truthy() { 0i64 } else { 1i64 }; // not(truthy)=false, not(falsy)=true
         let r = self.emit(TraceIr::KInt(rv));
-        self.write_slot(a, r, IrType::Bool);
+        self.write_slot(a, r, if rv != 0 { IrType::True } else { IrType::False });
         let _ = vb; // guard ensures consistent type
         RecordResult::Continue
     }
@@ -963,12 +995,20 @@ impl TraceRecorder {
     fn record_settable(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
-        let c = instr.get_c() as u16;
+        let c = instr.get_c() as usize;
+        let k_flag = instr.get_k();
         let vt = self.ensure_slot(a, IrType::Table, pc, base);
         let vk = self.ensure_slot(b, IrType::Int, pc, base);
-        let val = &stack[base + c as usize];
-        let ty = Self::detect_type(val);
-        let vc = self.ensure_slot(c, ty, pc, base);
+        let (vc, ty) = if k_flag {
+            match self.load_rk_value(c, base, stack) {
+                Ok(v) => v,
+                Err(r) => return r,
+            }
+        } else {
+            let val = &stack[base + c];
+            let ty = Self::detect_type(val);
+            (self.ensure_slot(c as u16, ty, pc, base), ty)
+        };
         self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc, ty });
         RecordResult::Continue
     }
@@ -976,12 +1016,20 @@ impl TraceRecorder {
     fn record_seti(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as i64;
-        let c = instr.get_c() as u16;
+        let c = instr.get_c() as usize;
+        let k_flag = instr.get_k();
         let vt = self.ensure_slot(a, IrType::Table, pc, base);
         let vk = self.emit(TraceIr::KInt(b));
-        let val = &stack[base + c as usize];
-        let ty = Self::detect_type(val);
-        let vc = self.ensure_slot(c, ty, pc, base);
+        let (vc, ty) = if k_flag {
+            match self.load_rk_value(c, base, stack) {
+                Ok(v) => v,
+                Err(r) => return r,
+            }
+        } else {
+            let val = &stack[base + c];
+            let ty = Self::detect_type(val);
+            (self.ensure_slot(c as u16, ty, pc, base), ty)
+        };
         self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc, ty });
         RecordResult::Continue
     }
@@ -989,7 +1037,8 @@ impl TraceRecorder {
     fn record_setfield(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as usize; // K[B] is the string key
-        let c = instr.get_c() as u16;
+        let c = instr.get_c() as usize;
+        let k_flag = instr.get_k();
         let vt = self.ensure_slot(a, IrType::Table, pc, base);
         // Read the string constant key pointer from the chunk.
         let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
@@ -997,9 +1046,16 @@ impl TraceRecorder {
             return RecordResult::Abort(AbortReason::NYI("setfield const oob"));
         };
         let key_ptr = unsafe { key_const.value.i } as usize;
-        let val = &stack[base + c as usize];
-        let ty = Self::detect_type(val);
-        let vc = self.ensure_slot(c, ty, pc, base);
+        let (vc, ty) = if k_flag {
+            match self.load_rk_value(c, base, stack) {
+                Ok(v) => v,
+                Err(r) => return r,
+            }
+        } else {
+            let val = &stack[base + c];
+            let ty = Self::detect_type(val);
+            (self.ensure_slot(c as u16, ty, pc, base), ty)
+        };
         self.emit(TraceIr::TabSetS { table: vt, key_ptr, val: vc, ty });
         RecordResult::Continue
     }
@@ -1344,6 +1400,62 @@ impl TraceRecorder {
         // If the guard succeeds, R[A] = R[B]
         let r = self.emit(TraceIr::Move { src: vb });
         self.write_slot(a, r, ty);
+        RecordResult::Continue
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // record_* methods — numeric for loop
+    // ══════════════════════════════════════════════════════════════════
+
+    fn record_forloop(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+        // The ForLoop's backward jump target is (pc+1) - bx (since the
+        // interpreter has already incremented pc past the instruction).
+        // If that target matches our trace head, this is the trace's own
+        // loop and should be recorded.  Otherwise it's a nested for-loop
+        // being unrolled inline — abort to avoid baking in a fixed
+        // iteration count.
+        let bx = instr.get_bx() as u32;
+        let target = pc + 1 - bx;
+        if target != self.head_pc || base != self.head_base {
+            return RecordResult::Abort(AbortReason::NYI("nested for loop"));
+        }
+
+        let a = instr.get_a() as u16;
+
+        // Check integer vs float loop by examining R[A+1] (step) type.
+        let step_val = &stack[base + a as usize + 1];
+        if !step_val.ttisinteger() {
+            return RecordResult::Abort(AbortReason::NYI("float for loop"));
+        }
+
+        // Integer for loop: R[A]=counter, R[A+1]=step, R[A+2]=idx
+        let count_slot = a;
+        let step_slot = a + 1;
+        let idx_slot = a + 2;
+
+        let count = self.ensure_slot(count_slot, IrType::Int, pc, base);
+        let step = self.ensure_slot(step_slot, IrType::Int, pc, base);
+        let idx = self.ensure_slot(idx_slot, IrType::Int, pc, base);
+
+        // Guard: count > 0 (side-exit if counter exhausted → loop ends)
+        self.snapshot(pc, base);
+        let snap_id = self.snapshots.len() as u32 - 1;
+        self.emit(TraceIr::GuardCmpI {
+            lhs: count,
+            rhs_imm: 0,
+            cmp: CmpOp::Gt,
+            snap_id,
+        });
+
+        // counter = counter - 1
+        let one = self.emit(TraceIr::KInt(1));
+        let new_count = self.emit(TraceIr::SubInt { lhs: count, rhs: one });
+        self.write_slot(count_slot, new_count, IrType::Int);
+
+        // idx = idx + step
+        let new_idx = self.emit(TraceIr::AddInt { lhs: idx, rhs: step });
+        self.write_slot(idx_slot, new_idx, IrType::Int);
+
         RecordResult::Continue
     }
 

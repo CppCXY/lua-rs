@@ -49,7 +49,8 @@ pub enum IrType {
     Float,    // LUA_VNUMFLT  = 0x13
     Table,    // LUA_VTABLE   = 0x45
     String,   // LUA_VSHRSTR  = 0x44 or LUA_VLNGSTR = 0x54
-    Bool,     // LUA_VTRUE=0x11 or LUA_VFALSE=0x01
+    True,     // LUA_VTRUE=0x11
+    False,    // LUA_VFALSE=0x01
     Nil,      // LUA_VNIL     = 0x00
     Function, // LUA_VLCL=0x66 / LUA_VCCL=0x46 / LUA_VLCF=0x16
 }
