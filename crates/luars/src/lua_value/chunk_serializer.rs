@@ -540,6 +540,8 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         linedefined,
         lastlinedefined,
         proto_data_size: 0,
+        #[cfg(feature = "jit")]
+        jit_counters: Vec::new(),
     };
     chunk.compute_proto_data_size();
     Ok(chunk)
@@ -632,6 +634,8 @@ fn read_chunk_with_dedup(
         linedefined,
         lastlinedefined,
         proto_data_size: 0,
+        #[cfg(feature = "jit")]
+        jit_counters: Vec::new(),
     };
     chunk.compute_proto_data_size();
     Ok(chunk)
@@ -884,6 +888,8 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
         linedefined,
         lastlinedefined,
         proto_data_size: 0,
+        #[cfg(feature = "jit")]
+        jit_counters: Vec::new(),
     };
     chunk.compute_proto_data_size();
     Ok(chunk)
@@ -996,6 +1002,8 @@ fn read_chunk_with_vm_dedup(
         linedefined,
         lastlinedefined,
         proto_data_size: 0,
+        #[cfg(feature = "jit")]
+        jit_counters: Vec::new(),
     };
     chunk.compute_proto_data_size();
     Ok(chunk)
@@ -1121,6 +1129,8 @@ fn read_chunk_with_strings(
         linedefined,
         lastlinedefined,
         proto_data_size: 0,
+        #[cfg(feature = "jit")]
+        jit_counters: Vec::new(),
     };
     chunk.compute_proto_data_size();
     Ok(chunk)

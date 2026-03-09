@@ -377,6 +377,13 @@ pub struct Chunk {
     pub linedefined: usize,           // Line where function starts (0 for main)
     pub lastlinedefined: usize,       // Line where function ends (0 for main)
     pub proto_data_size: u32,         // Cached size for GC (code+constants+children+lines)
+    /// Per-instruction JIT hot counters.  Indexed by PC.
+    /// Counts down from HOT_THRESHOLD; 0 = trigger recording;
+    /// `JIT_COUNTER_BLACKLISTED` = permanently excluded.
+    /// `JIT_COUNTER_COMPILED` = compiled trace exists.
+    /// Only allocated when the `jit` feature is enabled.
+    #[cfg(feature = "jit")]
+    pub jit_counters: Vec<u16>,
 }
 
 impl Default for Chunk {
@@ -404,6 +411,8 @@ impl Chunk {
             linedefined: 0,
             lastlinedefined: 0,
             proto_data_size: 0,
+            #[cfg(feature = "jit")]
+            jit_counters: Vec::new(),
         }
     }
 
@@ -415,6 +424,11 @@ impl Chunk {
         let child_size = self.child_protos.len() * size_of::<Self>();
         let line_size = self.line_info.len() * size_of::<u32>();
         self.proto_data_size = (instr_size + const_size + child_size + line_size) as u32;
+        // Initialize per-instruction JIT hot counters.
+        #[cfg(feature = "jit")]
+        {
+            self.jit_counters = vec![crate::jit::JIT_COUNTER_INIT; self.code.len()];
+        }
     }
 }
 

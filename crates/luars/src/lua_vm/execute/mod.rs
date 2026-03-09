@@ -123,6 +123,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut constants: &[LuaValue] = &chunk_init.constants;
         let mut pc: usize = pc_init;
 
+        // JIT inline counters: raw pointer to the current chunk's jit_counters
+        // data.  Updated alongside `code`/`constants` on every frame change.
+        #[cfg(feature = "jit")]
+        let mut jit_counters: *mut u16 = chunk_init.jit_counters.as_ptr() as *mut u16;
+
         lua_state.oldpc = if pc_init > 0 {
             (pc_init - 1) as u32
         } else if chunk_init.is_vararg {
@@ -219,13 +224,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let rec = lua_state.jit_state.recorder.as_ref().unwrap();
                         let head_chunk = rec.head_chunk_ptr();
                         let head_pc = rec.head_pc;
-                        lua_state.jit_state.finish_recording(head_chunk, head_pc);
+                        let head_ctrs = rec.head_counters_ptr();
+                        lua_state.jit_state.finish_recording(head_chunk, head_pc, head_ctrs);
                     }
                     crate::jit::trace::RecordResult::Abort(reason) => {
                         let rec = lua_state.jit_state.recorder.as_ref().unwrap();
                         let head_chunk = rec.head_chunk_ptr();
                         let head_pc = rec.head_pc;
-                        lua_state.jit_state.abort_recording(head_chunk, head_pc, reason);
+                        let head_ctrs = rec.head_counters_ptr();
+                        lua_state.jit_state.abort_recording(head_chunk, head_pc, head_ctrs, reason);
                     }
                 }
             }
@@ -1042,30 +1049,37 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // Tracing JIT: count backward jumps only
                     #[cfg(feature = "jit")]
                     if pc < old_pc {
-                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
-                        if lua_state.jit_state.is_blacklisted(chunk_ptr, pc as u32) {
-                            // skip — permanently excluded from JIT
-                        } else {
-                        // Execute compiled trace if available
-                        let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
-                            .map(|ct| ct.fn_ptr);
-                        if let Some(fn_ptr) = trace_fn_ptr {
-                            let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
-                            let upval_raw = current_upvalue_ptrs!() as *const u8;
-                            let snap_id = unsafe {
-                                let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
-                                f(stack_ptr, base, upval_raw)
-                            };
-                            if snap_id > 0 {
-                                if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {
-                                    pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
+                        let counter = unsafe { *jit_counters.add(pc) };
+                        if counter == crate::jit::JIT_COUNTER_BLACKLISTED {
+                            // permanently excluded — zero overhead
+                        } else if counter == crate::jit::JIT_COUNTER_COMPILED {
+                            let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                            let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
+                                .map(|ct| ct.fn_ptr);
+                            if let Some(fn_ptr) = trace_fn_ptr {
+                                let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
+                                let upval_raw = current_upvalue_ptrs!() as *const u8;
+                                let snap_id = unsafe {
+                                    let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
+                                    f(stack_ptr, base, upval_raw)
+                                };
+                                if snap_id > 0 {
+                                    if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {
+                                        pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
+                                    }
                                 }
+                                continue;
                             }
-                            continue;
-                        }
-                        if lua_state.jit_state.count_hot(chunk_ptr, pc as u32) {
-                            lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
-                        }
+                        } else if lua_state.jit_state.state != crate::jit::trace::RecordState::Recording {
+                            // Decrement counter
+                            let new_counter = counter - 1;
+                            unsafe { *jit_counters.add(pc) = new_counter; }
+                            if new_counter == 0 {
+                                // Hot! Start recording.
+                                let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                                unsafe { *jit_counters.add(pc) = crate::jit::JIT_COUNTER_INIT; }
+                                lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
+                            }
                         }
                     }
                 }
@@ -1126,6 +1140,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let caller_chunk = unsafe { &*ci.chunk_ptr };
                     code = &caller_chunk.code;
                     constants = &caller_chunk.constants;
+                    #[cfg(feature = "jit")]
+                    { jit_counters = caller_chunk.jit_counters.as_ptr() as *mut u16; }
                     pc = ci_pc;
                     if lua_state.hook_mask != 0 {
                         lua_state.oldpc = (ci_pc - 1) as u32;
@@ -1166,6 +1182,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let caller_chunk = unsafe { &*ci.chunk_ptr };
                     code = &caller_chunk.code;
                     constants = &caller_chunk.constants;
+                    #[cfg(feature = "jit")]
+                    { jit_counters = caller_chunk.jit_counters.as_ptr() as *mut u16; }
                     pc = ci_pc;
                     if lua_state.hook_mask != 0 {
                         lua_state.oldpc = (ci_pc - 1) as u32;
@@ -1802,6 +1820,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let callee_chunk = unsafe { &*new_chunk_ptr };
                         code = &callee_chunk.code;
                         constants = &callee_chunk.constants;
+                        #[cfg(feature = "jit")]
+                        { jit_counters = callee_chunk.jit_counters.as_ptr() as *mut u16; }
                         pc = 0;
 
                         // Call hook for inline Lua call (cold path)
@@ -1877,6 +1897,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let new_chunk = unsafe { &*new_chunk_ptr };
                         code = &new_chunk.code;
                         constants = &new_chunk.constants;
+                        #[cfg(feature = "jit")]
+                        { jit_counters = new_chunk.jit_counters.as_ptr() as *mut u16; }
                         pc = 0;
 
                         lua_state.oldpc = if new_chunk.is_vararg { 0 } else { u32::MAX };
@@ -1962,28 +1984,36 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Tracing JIT: ForLoop backward jump
                                 #[cfg(feature = "jit")]
-                                if !trap && lua_state.jit_state.state != crate::jit::trace::RecordState::Recording {
-                                    let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
-                                    if !lua_state.jit_state.is_blacklisted(chunk_ptr, pc as u32) {
-                                    let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
-                                        .map(|ct| ct.fn_ptr);
-                                    if let Some(fn_ptr) = trace_fn_ptr {
-                                        let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
-                                        let upval_raw = current_upvalue_ptrs!() as *const u8;
-                                        let snap_id = {
-                                            let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
-                                            f(stack_ptr, base, upval_raw)
-                                        };
-                                        if snap_id > 0 {
-                                            if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {
-                                                pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
+                                if !trap {
+                                    let counter = *jit_counters.add(pc);
+                                    if counter == crate::jit::JIT_COUNTER_BLACKLISTED {
+                                        // permanently excluded — zero overhead
+                                    } else if counter == crate::jit::JIT_COUNTER_COMPILED {
+                                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                                        let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
+                                            .map(|ct| ct.fn_ptr);
+                                        if let Some(fn_ptr) = trace_fn_ptr {
+                                            let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
+                                            let upval_raw = current_upvalue_ptrs!() as *const u8;
+                                            let snap_id = {
+                                                let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
+                                                f(stack_ptr, base, upval_raw)
+                                            };
+                                            if snap_id > 0 {
+                                                if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {
+                                                    pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
+                                                }
                                             }
+                                            continue;
                                         }
-                                        continue;
-                                    }
-                                    if lua_state.jit_state.count_hot(chunk_ptr, pc as u32) {
-                                        lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
-                                    }
+                                    } else if lua_state.jit_state.state != crate::jit::trace::RecordState::Recording {
+                                        let new_counter = counter - 1;
+                                        *jit_counters.add(pc) = new_counter;
+                                        if new_counter == 0 {
+                                            let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                                            *jit_counters.add(pc) = crate::jit::JIT_COUNTER_INIT;
+                                            lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
+                                        }
                                     }
                                 }
                             }
@@ -2016,28 +2046,36 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Tracing JIT: ForLoop (float) backward jump
                                 #[cfg(feature = "jit")]
-                                if !trap && lua_state.jit_state.state != crate::jit::trace::RecordState::Recording {
-                                    let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
-                                    if !lua_state.jit_state.is_blacklisted(chunk_ptr, pc as u32) {
-                                    let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
-                                        .map(|ct| ct.fn_ptr);
-                                    if let Some(fn_ptr) = trace_fn_ptr {
-                                        let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
-                                        let upval_raw = current_upvalue_ptrs!() as *const u8;
-                                        let snap_id = {
-                                            let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
-                                            f(stack_ptr, base, upval_raw)
-                                        };
-                                        if snap_id > 0 {
-                                            if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {
-                                                pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
+                                if !trap {
+                                    let counter = *jit_counters.add(pc);
+                                    if counter == crate::jit::JIT_COUNTER_BLACKLISTED {
+                                        // permanently excluded — zero overhead
+                                    } else if counter == crate::jit::JIT_COUNTER_COMPILED {
+                                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                                        let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
+                                            .map(|ct| ct.fn_ptr);
+                                        if let Some(fn_ptr) = trace_fn_ptr {
+                                            let stack_ptr = lua_state.stack.as_mut_ptr() as *mut u8;
+                                            let upval_raw = current_upvalue_ptrs!() as *const u8;
+                                            let snap_id = {
+                                                let f: crate::jit::trace_compiler::TraceFn = std::mem::transmute(fn_ptr);
+                                                f(stack_ptr, base, upval_raw)
+                                            };
+                                            if snap_id > 0 {
+                                                if let Some(ct) = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32) {
+                                                    pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
+                                                }
                                             }
+                                            continue;
                                         }
-                                        continue;
-                                    }
-                                    if lua_state.jit_state.count_hot(chunk_ptr, pc as u32) {
-                                        lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
-                                    }
+                                    } else if lua_state.jit_state.state != crate::jit::trace::RecordState::Recording {
+                                        let new_counter = counter - 1;
+                                        *jit_counters.add(pc) = new_counter;
+                                        if new_counter == 0 {
+                                            let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                                            *jit_counters.add(pc) = crate::jit::JIT_COUNTER_INIT;
+                                            lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
+                                        }
                                     }
                                 }
                             }
@@ -2147,6 +2185,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let callee_chunk = unsafe { &*new_chunk_ptr };
                         code = &callee_chunk.code;
                         constants = &callee_chunk.constants;
+                        #[cfg(feature = "jit")]
+                        { jit_counters = callee_chunk.jit_counters.as_ptr() as *mut u16; }
                         pc = 0;
 
                         if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0

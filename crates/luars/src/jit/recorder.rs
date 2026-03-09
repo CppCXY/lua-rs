@@ -156,6 +156,16 @@ impl TraceRecorder {
         self.trace_head_chunk_ptr as usize
     }
 
+    /// Return a raw mutable pointer to the trace head chunk's JIT counters.
+    pub fn head_counters_ptr(&self) -> *mut u16 {
+        let chunk = self.trace_head_chunk_ptr as *const crate::lua_value::Chunk;
+        // SAFETY: Chunk is alive while any frame references it (Rc-backed).
+        // jit_counters is a Vec<u16> field; we obtain a stable pointer to
+        // its heap-allocated buffer.  The Vec is never reallocated after
+        // compute_proto_data_size (size == code.len(), fixed).
+        unsafe { (*chunk).jit_counters.as_ptr() as *mut u16 }
+    }
+
     /// Emit an IR instruction and return its `TRef`.
     fn emit(&mut self, ir: TraceIr) -> TRef {
         let idx = self.ops.len();
