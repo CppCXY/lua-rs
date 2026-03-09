@@ -5,15 +5,15 @@
 
 use cranelift_codegen::ir::{
     AbiParam, InstBuilder, MemFlags,
-    condcodes::{IntCC, FloatCC},
+    condcodes::{FloatCC, IntCC},
     instructions::BlockArg,
-    types::{I8, I32, I64, F64},
+    types::{F64, I8, I32, I64},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
 
 use super::runtime::with_module;
-use super::trace::{Trace, TraceIr, IrType, CmpOp, BuiltinFn};
+use super::trace::{BuiltinFn, CmpOp, IrType, Trace, TraceIr};
 
 const LV: i32 = 16;
 const VALUE_OFF: i32 = 0;
@@ -26,12 +26,15 @@ const TAG_SSTR: i64 = 0x44;
 const TAG_TRUE: i64 = 0x11;
 const TAG_FALSE: i64 = 0x01;
 const TAG_NIL: i64 = 0x00;
-const TAG_LCL: i64 = 0x46;
 
 #[inline(always)]
-fn val_off(slot: u16) -> i32 { slot as i32 * LV + VALUE_OFF }
+fn val_off(slot: u16) -> i32 {
+    slot as i32 * LV + VALUE_OFF
+}
 #[inline(always)]
-fn tag_off(slot: u16) -> i32 { slot as i32 * LV + TAG_OFF }
+fn tag_off(slot: u16) -> i32 {
+    slot as i32 * LV + TAG_OFF
+}
 
 fn ir_type_tag(ty: &IrType) -> i64 {
     match ty {
@@ -42,29 +45,47 @@ fn ir_type_tag(ty: &IrType) -> i64 {
         IrType::True => TAG_TRUE,
         IrType::False => TAG_FALSE,
         IrType::Nil => TAG_NIL,
-        IrType::Function => TAG_LCL,
+        IrType::Function(tag) => *tag as i64,
     }
 }
 
 fn ir_result_type(ops: &[TraceIr], idx: usize) -> cranelift_codegen::ir::Type {
     match &ops[idx] {
         TraceIr::KFloat(_)
-        | TraceIr::AddFloat { .. } | TraceIr::SubFloat { .. }
-        | TraceIr::MulFloat { .. } | TraceIr::DivFloat { .. }
-        | TraceIr::PowFloat { .. } | TraceIr::NegFloat { .. }
+        | TraceIr::AddFloat { .. }
+        | TraceIr::SubFloat { .. }
+        | TraceIr::MulFloat { .. }
+        | TraceIr::DivFloat { .. }
+        | TraceIr::PowFloat { .. }
+        | TraceIr::NegFloat { .. }
         | TraceIr::IntToFloat { .. }
-        | TraceIr::CallBuiltin { .. } => F64,
+        | TraceIr::CallBuiltin { .. }
+        | TraceIr::CallBuiltin2 { .. } => F64,
         TraceIr::Move { src } => ir_result_type(ops, src.index()),
         _ => I64,
     }
 }
 
-fn as_f64(b: &mut FunctionBuilder, v: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
-    if b.func.dfg.value_type(v) == I64 { b.ins().bitcast(F64, MemFlags::new(), v) } else { v }
+fn as_f64(
+    b: &mut FunctionBuilder,
+    v: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    if b.func.dfg.value_type(v) == I64 {
+        b.ins().bitcast(F64, MemFlags::new(), v)
+    } else {
+        v
+    }
 }
 
-fn as_i64(b: &mut FunctionBuilder, v: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
-    if b.func.dfg.value_type(v) == F64 { b.ins().bitcast(I64, MemFlags::new(), v) } else { v }
+fn as_i64(
+    b: &mut FunctionBuilder,
+    v: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    if b.func.dfg.value_type(v) == F64 {
+        b.ins().bitcast(I64, MemFlags::new(), v)
+    } else {
+        v
+    }
 }
 
 fn cmp_to_intcc(cmp: &CmpOp) -> IntCC {
@@ -132,22 +153,45 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             .map_err(|e| format!("declare: {e}"))?;
 
         // Declare `pow(f64,f64)->f64` if this trace uses PowFloat.
-        let needs_pow = trace.ops.iter().any(|op| matches!(op, TraceIr::PowFloat { .. }));
+        let needs_pow = trace
+            .ops
+            .iter()
+            .any(|op| matches!(op, TraceIr::PowFloat { .. }));
         let pow_func_id = if needs_pow {
             let mut pow_sig = module.make_signature();
             pow_sig.params.push(AbiParam::new(F64));
             pow_sig.params.push(AbiParam::new(F64));
             pow_sig.returns.push(AbiParam::new(F64));
-            Some(module.declare_function("pow", cranelift_module::Linkage::Import, &pow_sig)
-                .map_err(|e| format!("declare pow: {e}"))?)
-        } else { None };
+            Some(
+                module
+                    .declare_function("pow", cranelift_module::Linkage::Import, &pow_sig)
+                    .map_err(|e| format!("declare pow: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // Declare table helper functions if this trace uses table ops.
-        let needs_tab_geti = trace.ops.iter().any(|op| matches!(op, TraceIr::TabGetI { .. }));
-        let needs_tab_seti = trace.ops.iter().any(|op| matches!(op, TraceIr::TabSetI { .. }));
-        let needs_tab_gets = trace.ops.iter().any(|op| matches!(op, TraceIr::TabGetS { .. }));
-        let needs_tab_sets = trace.ops.iter().any(|op| matches!(op, TraceIr::TabSetS { .. }));
-        let needs_tab_len = trace.ops.iter().any(|op| matches!(op, TraceIr::TabLen { .. }));
+        let needs_tab_geti = trace
+            .ops
+            .iter()
+            .any(|op| matches!(op, TraceIr::TabGetI { .. }));
+        let needs_tab_seti = trace
+            .ops
+            .iter()
+            .any(|op| matches!(op, TraceIr::TabSetI { .. }));
+        let needs_tab_gets = trace
+            .ops
+            .iter()
+            .any(|op| matches!(op, TraceIr::TabGetS { .. }));
+        let needs_tab_sets = trace
+            .ops
+            .iter()
+            .any(|op| matches!(op, TraceIr::TabSetS { .. }));
+        let needs_tab_len = trace
+            .ops
+            .iter()
+            .any(|op| matches!(op, TraceIr::TabLen { .. }));
 
         // jit_tab_geti(i64, i64) -> i64
         let tab_geti_id = if needs_tab_geti {
@@ -155,9 +199,14 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             s.params.push(AbiParam::new(I64));
             s.params.push(AbiParam::new(I64));
             s.returns.push(AbiParam::new(I64));
-            Some(module.declare_function("jit_tab_geti", cranelift_module::Linkage::Import, &s)
-                .map_err(|e| format!("declare jit_tab_geti: {e}"))?)
-        } else { None };
+            Some(
+                module
+                    .declare_function("jit_tab_geti", cranelift_module::Linkage::Import, &s)
+                    .map_err(|e| format!("declare jit_tab_geti: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // jit_tab_seti(i64, i64, i64, i64) -> void
         let tab_seti_id = if needs_tab_seti {
@@ -166,9 +215,14 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             s.params.push(AbiParam::new(I64));
             s.params.push(AbiParam::new(I64));
             s.params.push(AbiParam::new(I64));
-            Some(module.declare_function("jit_tab_seti", cranelift_module::Linkage::Import, &s)
-                .map_err(|e| format!("declare jit_tab_seti: {e}"))?)
-        } else { None };
+            Some(
+                module
+                    .declare_function("jit_tab_seti", cranelift_module::Linkage::Import, &s)
+                    .map_err(|e| format!("declare jit_tab_seti: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // jit_tab_gets(i64, i64) -> i64
         let tab_gets_id = if needs_tab_gets {
@@ -176,9 +230,14 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             s.params.push(AbiParam::new(I64));
             s.params.push(AbiParam::new(I64));
             s.returns.push(AbiParam::new(I64));
-            Some(module.declare_function("jit_tab_gets", cranelift_module::Linkage::Import, &s)
-                .map_err(|e| format!("declare jit_tab_gets: {e}"))?)
-        } else { None };
+            Some(
+                module
+                    .declare_function("jit_tab_gets", cranelift_module::Linkage::Import, &s)
+                    .map_err(|e| format!("declare jit_tab_gets: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // jit_tab_sets(i64, i64, i64, i64) -> void
         let tab_sets_id = if needs_tab_sets {
@@ -187,32 +246,65 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             s.params.push(AbiParam::new(I64));
             s.params.push(AbiParam::new(I64));
             s.params.push(AbiParam::new(I64));
-            Some(module.declare_function("jit_tab_sets", cranelift_module::Linkage::Import, &s)
-                .map_err(|e| format!("declare jit_tab_sets: {e}"))?)
-        } else { None };
+            Some(
+                module
+                    .declare_function("jit_tab_sets", cranelift_module::Linkage::Import, &s)
+                    .map_err(|e| format!("declare jit_tab_sets: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // jit_tab_len(i64) -> i64
         let tab_len_id = if needs_tab_len {
             let mut s = module.make_signature();
             s.params.push(AbiParam::new(I64));
             s.returns.push(AbiParam::new(I64));
-            Some(module.declare_function("jit_tab_len", cranelift_module::Linkage::Import, &s)
-                .map_err(|e| format!("declare jit_tab_len: {e}"))?)
-        } else { None };
+            Some(
+                module
+                    .declare_function("jit_tab_len", cranelift_module::Linkage::Import, &s)
+                    .map_err(|e| format!("declare jit_tab_len: {e}"))?,
+            )
+        } else {
+            None
+        };
 
         // Declare libm functions for CallBuiltin: sin, cos, exp, log (all f64->f64).
-        let needs_libm = |bfn: &BuiltinFn| trace.ops.iter().any(|op| matches!(op, TraceIr::CallBuiltin { func, .. } if func == bfn));
-        let declare_f64_f64 = |module: &mut cranelift_jit::JITModule, name: &str| -> Result<_, String> {
-            let mut s = module.make_signature();
-            s.params.push(AbiParam::new(F64));
-            s.returns.push(AbiParam::new(F64));
-            module.declare_function(name, cranelift_module::Linkage::Import, &s)
-                .map_err(|e| format!("declare {name}: {e}"))
+        let needs_libm = |bfn: &BuiltinFn| {
+            trace
+                .ops
+                .iter()
+                .any(|op| matches!(op, TraceIr::CallBuiltin { func, .. } if func == bfn))
         };
-        let sin_id = if needs_libm(&BuiltinFn::MathSin) { Some(declare_f64_f64(module, "sin")?) } else { None };
-        let cos_id = if needs_libm(&BuiltinFn::MathCos) { Some(declare_f64_f64(module, "cos")?) } else { None };
-        let exp_id = if needs_libm(&BuiltinFn::MathExp) { Some(declare_f64_f64(module, "exp")?) } else { None };
-        let log_id = if needs_libm(&BuiltinFn::MathLog) { Some(declare_f64_f64(module, "log")?) } else { None };
+        let declare_f64_f64 =
+            |module: &mut cranelift_jit::JITModule, name: &str| -> Result<_, String> {
+                let mut s = module.make_signature();
+                s.params.push(AbiParam::new(F64));
+                s.returns.push(AbiParam::new(F64));
+                module
+                    .declare_function(name, cranelift_module::Linkage::Import, &s)
+                    .map_err(|e| format!("declare {name}: {e}"))
+            };
+        let sin_id = if needs_libm(&BuiltinFn::MathSin) {
+            Some(declare_f64_f64(module, "sin")?)
+        } else {
+            None
+        };
+        let cos_id = if needs_libm(&BuiltinFn::MathCos) {
+            Some(declare_f64_f64(module, "cos")?)
+        } else {
+            None
+        };
+        let exp_id = if needs_libm(&BuiltinFn::MathExp) {
+            Some(declare_f64_f64(module, "exp")?)
+        } else {
+            None
+        };
+        let log_id = if needs_libm(&BuiltinFn::MathLog) {
+            Some(declare_f64_f64(module, "log")?)
+        } else {
+            None
+        };
 
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
@@ -238,9 +330,11 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
             builder.finalize();
         }
 
-        module.define_function(func_id, &mut ctx)
+        module
+            .define_function(func_id, &mut ctx)
             .map_err(|e| format!("define: {e}"))?;
-        module.finalize_definitions()
+        module
+            .finalize_definitions()
             .map_err(|e| format!("finalize: {e}"))?;
 
         let code_ptr = module.get_finalized_function(func_id);
@@ -255,10 +349,16 @@ pub fn compile_trace(trace: &Trace) -> Result<CompiledTrace, String> {
     })
 }
 
-fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) -> Result<(), String> {
+fn emit_trace_ir(
+    b: &mut FunctionBuilder,
+    trace: &Trace,
+    helpers: &HelperFuncs,
+) -> Result<(), String> {
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
-    let exit_blocks: Vec<_> = (0..trace.snapshots.len()).map(|_| b.create_block()).collect();
+    let exit_blocks: Vec<_> = (0..trace.snapshots.len())
+        .map(|_| b.create_block())
+        .collect();
     let loop_block = b.create_block();
     let mut loop_sealed = false;
 
@@ -272,13 +372,24 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
     let sbase = b.ins().iadd(stack_ptr, base_off);
 
     // Pre-scan Phi nodes to allocate Cranelift Variables
-    struct PhiInfo { var: Variable, entry_ref: usize, backedge_ref: usize }
+    struct PhiInfo {
+        var: Variable,
+        entry_ref: usize,
+        backedge_ref: usize,
+    }
     let mut phis: Vec<PhiInfo> = Vec::new();
     for op in &trace.ops {
-        if let TraceIr::Phi { entry, backedge, .. } = op {
+        if let TraceIr::Phi {
+            entry, backedge, ..
+        } = op
+        {
             let cl_ty = ir_result_type(&trace.ops, entry.index());
             let var = b.declare_var(cl_ty);
-            phis.push(PhiInfo { var, entry_ref: entry.index(), backedge_ref: backedge.index() });
+            phis.push(PhiInfo {
+                var,
+                entry_ref: entry.index(),
+                backedge_ref: backedge.index(),
+            });
         }
     }
 
@@ -293,42 +404,65 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
 
     for (i, op) in trace.ops.iter().enumerate() {
         let v = match op {
-            TraceIr::GuardType { slot, expected, snap_id } => {
+            TraceIr::GuardType {
+                slot,
+                expected,
+                snap_id,
+            } => {
                 let tag = b.ins().load(I8, MemFlags::trusted(), sbase, tag_off(*slot));
                 let exp = b.ins().iconst(I8, ir_type_tag(expected));
                 let ok = b.ins().icmp(IntCC::Equal, tag, exp);
                 let cont = b.create_block();
-                b.ins().brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
+                b.ins()
+                    .brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
                 b.seal_block(cont);
                 b.switch_to_block(cont);
                 b.ins().iconst(I64, 0)
             }
-            TraceIr::GuardCmpI { lhs, rhs_imm, cmp, snap_id } => {
+            TraceIr::GuardCmpI {
+                lhs,
+                rhs_imm,
+                cmp,
+                snap_id,
+            } => {
                 let rhs = b.ins().iconst(I64, *rhs_imm);
                 let cc = cmp_to_intcc(cmp);
                 let ok = b.ins().icmp(cc, vals[lhs.index()], rhs);
                 let cont = b.create_block();
-                b.ins().brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
+                b.ins()
+                    .brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
                 b.seal_block(cont);
                 b.switch_to_block(cont);
                 b.ins().iconst(I64, 0)
             }
-            TraceIr::GuardCmpRR { lhs, rhs, cmp, snap_id } => {
+            TraceIr::GuardCmpRR {
+                lhs,
+                rhs,
+                cmp,
+                snap_id,
+            } => {
                 let cc = cmp_to_intcc(cmp);
                 let ok = b.ins().icmp(cc, vals[lhs.index()], vals[rhs.index()]);
                 let cont = b.create_block();
-                b.ins().brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
+                b.ins()
+                    .brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
                 b.seal_block(cont);
                 b.switch_to_block(cont);
                 b.ins().iconst(I64, 0)
             }
-            TraceIr::GuardCmpF { lhs, rhs, cmp, snap_id } => {
+            TraceIr::GuardCmpF {
+                lhs,
+                rhs,
+                cmp,
+                snap_id,
+            } => {
                 let cc = cmp_to_floatcc(cmp);
                 let fl = as_f64(b, vals[lhs.index()]);
                 let fr = as_f64(b, vals[rhs.index()]);
                 let ok = b.ins().fcmp(cc, fl, fr);
                 let cont = b.create_block();
-                b.ins().brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
+                b.ins()
+                    .brif(ok, cont, &[], exit_blocks[*snap_id as usize], &[]);
                 b.seal_block(cont);
                 b.switch_to_block(cont);
                 b.ins().iconst(I64, 0)
@@ -340,13 +474,17 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
             }
             TraceIr::KInt(n) => b.ins().iconst(I64, *n),
             TraceIr::KFloat(n) => b.ins().f64const(*n),
-            TraceIr::LoadSlot { slot } =>
-                b.ins().load(I64, MemFlags::trusted(), sbase, val_off(*slot)),
+            TraceIr::LoadSlot { slot } => {
+                b.ins()
+                    .load(I64, MemFlags::trusted(), sbase, val_off(*slot))
+            }
             TraceIr::StoreSlot { slot, val, ty } => {
                 let sv = as_i64(b, vals[val.index()]);
-                b.ins().store(MemFlags::trusted(), sv, sbase, val_off(*slot));
+                b.ins()
+                    .store(MemFlags::trusted(), sv, sbase, val_off(*slot));
                 let tg = b.ins().iconst(I8, ir_type_tag(ty));
-                b.ins().store(MemFlags::trusted(), tg, sbase, tag_off(*slot));
+                b.ins()
+                    .store(MemFlags::trusted(), tg, sbase, tag_off(*slot));
                 b.ins().iconst(I64, 0)
             }
             TraceIr::LoadUpval { upval_idx } => {
@@ -373,11 +511,55 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
                 b.ins().store(MemFlags::trusted(), tg, v_ptr, TAG_OFF);
                 b.ins().iconst(I64, 0)
             }
+            TraceIr::LoadUpvalDirect {
+                upval_base,
+                upval_idx,
+            } => {
+                // Same chain as LoadUpval but using a baked-in constant base pointer.
+                let base_ptr = b.ins().iconst(I64, *upval_base as i64);
+                let off = b.ins().iconst(I64, *upval_idx as i64 * 8);
+                let upval_slot = b.ins().iadd(base_ptr, off);
+                let gc_ptr = b.ins().load(I64, MemFlags::trusted(), upval_slot, 0);
+                let v_ptr = b.ins().load(I64, MemFlags::trusted(), gc_ptr, 8);
+                b.ins().load(I64, MemFlags::trusted(), v_ptr, VALUE_OFF)
+            }
+            TraceIr::StoreUpvalDirect {
+                upval_base,
+                upval_idx,
+                val,
+                ty,
+            } => {
+                let base_ptr = b.ins().iconst(I64, *upval_base as i64);
+                let off = b.ins().iconst(I64, *upval_idx as i64 * 8);
+                let upval_slot = b.ins().iadd(base_ptr, off);
+                let gc_ptr = b.ins().load(I64, MemFlags::trusted(), upval_slot, 0);
+                let v_ptr = b.ins().load(I64, MemFlags::trusted(), gc_ptr, 8);
+                let sv = as_i64(b, vals[val.index()]);
+                b.ins().store(MemFlags::trusted(), sv, v_ptr, VALUE_OFF);
+                let tg = b.ins().iconst(I8, ir_type_tag(ty));
+                b.ins().store(MemFlags::trusted(), tg, v_ptr, TAG_OFF);
+                b.ins().iconst(I64, 0)
+            }
             TraceIr::Move { src } => vals[src.index()],
             TraceIr::IntToFloat { src } => b.ins().fcvt_from_sint(F64, vals[src.index()]),
             TraceIr::NegInt { src } => b.ins().ineg(vals[src.index()]),
+            TraceIr::MinInt { lhs, rhs } => {
+                let cmp = b
+                    .ins()
+                    .icmp(IntCC::SignedLessThan, vals[lhs.index()], vals[rhs.index()]);
+                b.ins().select(cmp, vals[lhs.index()], vals[rhs.index()])
+            }
+            TraceIr::MaxInt { lhs, rhs } => {
+                let cmp = b.ins().icmp(
+                    IntCC::SignedGreaterThan,
+                    vals[lhs.index()],
+                    vals[rhs.index()],
+                );
+                b.ins().select(cmp, vals[lhs.index()], vals[rhs.index()])
+            }
             TraceIr::NegFloat { src } => {
-                let v = as_f64(b, vals[src.index()]); b.ins().fneg(v)
+                let v = as_f64(b, vals[src.index()]);
+                b.ins().fneg(v)
             }
             TraceIr::AddInt { lhs, rhs } => b.ins().iadd(vals[lhs.index()], vals[rhs.index()]),
             TraceIr::SubInt { lhs, rhs } => b.ins().isub(vals[lhs.index()], vals[rhs.index()]),
@@ -385,23 +567,28 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
             TraceIr::IDivInt { lhs, rhs } => emit_idiv(b, vals[lhs.index()], vals[rhs.index()]),
             TraceIr::ModInt { lhs, rhs } => emit_imod(b, vals[lhs.index()], vals[rhs.index()]),
             TraceIr::AddFloat { lhs, rhs } => {
-                let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
+                let l = as_f64(b, vals[lhs.index()]);
+                let r = as_f64(b, vals[rhs.index()]);
                 b.ins().fadd(l, r)
             }
             TraceIr::SubFloat { lhs, rhs } => {
-                let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
+                let l = as_f64(b, vals[lhs.index()]);
+                let r = as_f64(b, vals[rhs.index()]);
                 b.ins().fsub(l, r)
             }
             TraceIr::MulFloat { lhs, rhs } => {
-                let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
+                let l = as_f64(b, vals[lhs.index()]);
+                let r = as_f64(b, vals[rhs.index()]);
                 b.ins().fmul(l, r)
             }
             TraceIr::DivFloat { lhs, rhs } => {
-                let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
+                let l = as_f64(b, vals[lhs.index()]);
+                let r = as_f64(b, vals[rhs.index()]);
                 b.ins().fdiv(l, r)
             }
             TraceIr::PowFloat { lhs, rhs } => {
-                let l = as_f64(b, vals[lhs.index()]); let r = as_f64(b, vals[rhs.index()]);
+                let l = as_f64(b, vals[lhs.index()]);
+                let r = as_f64(b, vals[rhs.index()]);
                 let fref = helpers.pow.expect("pow fref must be set for PowFloat");
                 let call = b.ins().call(fref, &[l, r]);
                 b.inst_results(call)[0]
@@ -410,8 +597,9 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
             TraceIr::BOrInt { lhs, rhs } => b.ins().bor(vals[lhs.index()], vals[rhs.index()]),
             TraceIr::BXorInt { lhs, rhs } => b.ins().bxor(vals[lhs.index()], vals[rhs.index()]),
             TraceIr::BNotInt { src } => b.ins().bnot(vals[src.index()]),
-            TraceIr::ShlInt { lhs, rhs } =>
-                emit_lua_shiftl(b, vals[lhs.index()], vals[rhs.index()]),
+            TraceIr::ShlInt { lhs, rhs } => {
+                emit_lua_shiftl(b, vals[lhs.index()], vals[rhs.index()])
+            }
             TraceIr::ShrInt { lhs, rhs } => {
                 let neg = b.ins().ineg(vals[rhs.index()]);
                 emit_lua_shiftl(b, vals[lhs.index()], neg)
@@ -420,7 +608,7 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
             // TabGetI: inline array fast path with fallback to helper
             TraceIr::TabGetI { table, index } => {
                 let gc_table = vals[table.index()]; // GcTable* (i64)
-                let key = vals[index.index()];       // integer key (i64)
+                let key = vals[index.index()]; // integer key (i64)
 
                 // Load array ptr and asize from GcTable at known offsets.
                 // GcTable layout: header(8) + meta(8) + flags(4) + pad(4) + array(8) + asize(4)
@@ -488,7 +676,12 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
                 b.block_params(merge_block)[0]
             }
             // TabSetI: inline array fast path with fallback to helper
-            TraceIr::TabSetI { table, index, val, ty } => {
+            TraceIr::TabSetI {
+                table,
+                index,
+                val,
+                ty,
+            } => {
                 let gc_table = vals[table.index()];
                 let key = vals[index.index()];
                 let sv = as_i64(b, vals[val.index()]);
@@ -543,7 +736,12 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
                 let call = b.ins().call(fref, &[vals[table.index()], kp]);
                 b.inst_results(call)[0]
             }
-            TraceIr::TabSetS { table, key_ptr, val, ty } => {
+            TraceIr::TabSetS {
+                table,
+                key_ptr,
+                val,
+                ty,
+            } => {
                 let fref = helpers.tab_sets.expect("tab_sets fref");
                 let kp = b.ins().iconst(I64, *key_ptr as i64);
                 let sv = as_i64(b, vals[val.index()]);
@@ -587,8 +785,19 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
                     _ => return Err(format!("NYI: CallBuiltin {func:?}")),
                 }
             }
+            TraceIr::CallBuiltin2 { func, arg1, arg2 } => {
+                let a1 = as_f64(b, vals[arg1.index()]);
+                let a2 = as_f64(b, vals[arg2.index()]);
+                match func {
+                    BuiltinFn::MathMax2 => b.ins().fmax(a1, a2),
+                    BuiltinFn::MathMin2 => b.ins().fmin(a1, a2),
+                    _ => return Err(format!("NYI: CallBuiltin2 {func:?}")),
+                }
+            }
             TraceIr::LoopStart => {
-                for phi in &phis { b.def_var(phi.var, vals[phi.entry_ref]); }
+                for phi in &phis {
+                    b.def_var(phi.var, vals[phi.entry_ref]);
+                }
                 b.ins().jump(loop_block, &[]);
                 b.switch_to_block(loop_block);
                 b.ins().iconst(I64, 0)
@@ -599,7 +808,9 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
                 v
             }
             TraceIr::LoopEnd => {
-                for phi in &phis { b.def_var(phi.var, vals[phi.backedge_ref]); }
+                for phi in &phis {
+                    b.def_var(phi.var, vals[phi.backedge_ref]);
+                }
                 // Decrement safety counter; exit if exhausted
                 let cnt = b.use_var(var_counter);
                 let one = b.ins().iconst(I64, 1);
@@ -639,9 +850,11 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
             if let super::trace::SnapValue::Ref(tref) = entry.val {
                 if (tref.index()) < vals.len() {
                     let sv = as_i64(b, vals[tref.index()]);
-                    b.ins().store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
+                    b.ins()
+                        .store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
                     let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
-                    b.ins().store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
+                    b.ins()
+                        .store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
                 }
             }
         }
@@ -657,9 +870,11 @@ fn emit_trace_ir(b: &mut FunctionBuilder, trace: &Trace, helpers: &HelperFuncs) 
             if let super::trace::SnapValue::Ref(tref) = entry.val {
                 if (tref.index()) < vals.len() {
                     let sv = as_i64(b, vals[tref.index()]);
-                    b.ins().store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
+                    b.ins()
+                        .store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
                     let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
-                    b.ins().store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
+                    b.ins()
+                        .store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
                 }
             }
         }

@@ -282,7 +282,7 @@ fn lua_float_lt_int(a: f64, b: i64) -> bool {
     }
 }
 
-fn math_max(l: &mut LuaState) -> LuaResult<usize> {
+pub fn math_max(l: &mut LuaState) -> LuaResult<usize> {
     let argc = l.arg_count();
 
     if argc == 0 {
@@ -328,7 +328,7 @@ fn math_max(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-fn math_min(l: &mut LuaState) -> LuaResult<usize> {
+pub fn math_min(l: &mut LuaState) -> LuaResult<usize> {
     let argc = l.arg_count();
 
     if argc == 0 {

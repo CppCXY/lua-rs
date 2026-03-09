@@ -82,13 +82,12 @@ fn create_module() -> JITModule {
         .finish(settings::Flags::new(settings::builder()))
         .expect("failed to create Cranelift ISA");
 
-    let mut builder = JITBuilder::with_isa(
-        isa,
-        cranelift_module::default_libcall_names(),
-    );
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
     // Register C `pow` so traces can compile PowFloat.
-    unsafe extern "C" { fn pow(x: f64, y: f64) -> f64; }
+    unsafe extern "C" {
+        fn pow(x: f64, y: f64) -> f64;
+    }
     builder.symbol("pow", pow as *const u8);
 
     // Register libm math functions for CallBuiltin.

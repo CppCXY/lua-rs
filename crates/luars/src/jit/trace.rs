@@ -45,14 +45,14 @@ impl TRef {
 /// to specialise the compiled code for a single type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrType {
-    Int,      // LUA_VNUMINT  = 0x03
-    Float,    // LUA_VNUMFLT  = 0x13
-    Table,    // LUA_VTABLE   = 0x45
-    String,   // LUA_VSHRSTR  = 0x44 or LUA_VLNGSTR = 0x54
-    True,     // LUA_VTRUE=0x11
-    False,    // LUA_VFALSE=0x01
-    Nil,      // LUA_VNIL     = 0x00
-    Function, // LUA_VLCL=0x66 / LUA_VCCL=0x46 / LUA_VLCF=0x16
+    Int,          // LUA_VNUMINT  = 0x03
+    Float,        // LUA_VNUMFLT  = 0x13
+    Table,        // LUA_VTABLE   = 0x45
+    String,       // LUA_VSHRSTR  = 0x44 or LUA_VLNGSTR = 0x54
+    True,         // LUA_VTRUE=0x11
+    False,        // LUA_VFALSE=0x01
+    Nil,          // LUA_VNIL     = 0x00
+    Function(u8), // Carries actual tt byte: LUA_VLCF=0x16, LUA_VCCL=0x46, LUA_VLCL=0x66
 }
 
 // ── Comparison ────────────────────────────────────────────────────────────────
@@ -193,76 +193,201 @@ pub enum TraceIr {
     // ── Stack access ───────────────────────────────────────────────
     /// Load the value payload from a VM stack slot.
     /// The type is determined by the preceding `GuardType`.
-    LoadSlot { slot: u16 },
+    LoadSlot {
+        slot: u16,
+    },
 
     /// Write a value back to a VM stack slot (with correct type tag).
-    StoreSlot { slot: u16, val: TRef, ty: IrType },
+    StoreSlot {
+        slot: u16,
+        val: TRef,
+        ty: IrType,
+    },
 
     // ── Upvalue access ─────────────────────────────────────────────
-    /// Load a value from an upvalue.
-    LoadUpval { upval_idx: u16 },
+    /// Load a value from an upvalue (root function — uses runtime `upval_ptrs` parameter).
+    LoadUpval {
+        upval_idx: u16,
+    },
 
-    /// Store a value to an upvalue.
-    StoreUpval { upval_idx: u16, val: TRef, ty: IrType },
+    /// Store a value to an upvalue (root function).
+    StoreUpval {
+        upval_idx: u16,
+        val: TRef,
+        ty: IrType,
+    },
+
+    /// Load a value from an upvalue of an inlined callee function.
+    /// `upval_base` is the raw address of the callee's upvalue array,
+    /// baked in at recording time.
+    LoadUpvalDirect {
+        upval_base: usize,
+        upval_idx: u16,
+    },
+
+    /// Store a value to an upvalue of an inlined callee function.
+    StoreUpvalDirect {
+        upval_base: usize,
+        upval_idx: u16,
+        val: TRef,
+        ty: IrType,
+    },
 
     // ── Integer arithmetic ─────────────────────────────────────────
-    AddInt { lhs: TRef, rhs: TRef },
-    SubInt { lhs: TRef, rhs: TRef },
-    MulInt { lhs: TRef, rhs: TRef },
-    IDivInt { lhs: TRef, rhs: TRef },
-    ModInt { lhs: TRef, rhs: TRef },
-    NegInt { src: TRef },
+    AddInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    SubInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    MulInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    IDivInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    ModInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    NegInt {
+        src: TRef,
+    },
+    MinInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    MaxInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
 
     // ── Float arithmetic ───────────────────────────────────────────
-    AddFloat { lhs: TRef, rhs: TRef },
-    SubFloat { lhs: TRef, rhs: TRef },
-    MulFloat { lhs: TRef, rhs: TRef },
-    DivFloat { lhs: TRef, rhs: TRef },
-    PowFloat { lhs: TRef, rhs: TRef },
-    NegFloat { src: TRef },
+    AddFloat {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    SubFloat {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    MulFloat {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    DivFloat {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    PowFloat {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    NegFloat {
+        src: TRef,
+    },
 
     /// Coerce integer to float.
-    IntToFloat { src: TRef },
+    IntToFloat {
+        src: TRef,
+    },
 
     // ── Bitwise ────────────────────────────────────────────────────
-    BAndInt { lhs: TRef, rhs: TRef },
-    BOrInt { lhs: TRef, rhs: TRef },
-    BXorInt { lhs: TRef, rhs: TRef },
-    BNotInt { src: TRef },
-    ShlInt { lhs: TRef, rhs: TRef },
-    ShrInt { lhs: TRef, rhs: TRef },
+    BAndInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    BOrInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    BXorInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    BNotInt {
+        src: TRef,
+    },
+    ShlInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
+    ShrInt {
+        lhs: TRef,
+        rhs: TRef,
+    },
 
     // ── Table operations ───────────────────────────────────────────
     /// Array read:  `t[idx]` where idx is a positive integer.
-    TabGetI { table: TRef, index: TRef },
+    TabGetI {
+        table: TRef,
+        index: TRef,
+    },
 
     /// Array write: `t[idx] = val`
-    TabSetI { table: TRef, index: TRef, val: TRef, ty: IrType },
+    TabSetI {
+        table: TRef,
+        index: TRef,
+        val: TRef,
+        ty: IrType,
+    },
 
     /// Field read by interned string key: `t.name`
-    TabGetS { table: TRef, key_ptr: usize },
+    TabGetS {
+        table: TRef,
+        key_ptr: usize,
+    },
 
     /// Field write: `t.name = val`
-    TabSetS { table: TRef, key_ptr: usize, val: TRef, ty: IrType },
+    TabSetS {
+        table: TRef,
+        key_ptr: usize,
+        val: TRef,
+        ty: IrType,
+    },
 
     /// Table length: `#t`
-    TabLen { table: TRef },
+    TabLen {
+        table: TRef,
+    },
 
     // ── Function calls ─────────────────────────────────────────────
-    /// Call a recognised builtin (math.sqrt, etc.).
-    /// The function identity was guarded at recording time.
-    CallBuiltin { func: BuiltinFn, arg: TRef },
+    /// Call a recognised builtin (math.sqrt, etc.) with one argument.
+    CallBuiltin {
+        func: BuiltinFn,
+        arg: TRef,
+    },
+
+    /// Call a recognised 2-argument builtin (math.min, math.max).
+    CallBuiltin2 {
+        func: BuiltinFn,
+        arg1: TRef,
+        arg2: TRef,
+    },
 
     /// Generic call — record but abort for now (NYI).
     /// Placeholder for future function inlining.
-    CallGeneric { func_slot: u16, nargs: u8, nresults: i8 },
+    CallGeneric {
+        func_slot: u16,
+        nargs: u8,
+        nresults: i8,
+    },
 
     // ── Data movement ──────────────────────────────────────────────
     /// Copy one trace value (used for register moves).
-    Move { src: TRef },
+    Move {
+        src: TRef,
+    },
 
     /// Concatenate values (NYI — currently aborts recording).
-    Concat { base: u16, count: u16 },
+    Concat {
+        base: u16,
+        count: u16,
+    },
 
     // ── Loop structure ─────────────────────────────────────────────
     /// Marks the beginning of the loop body.
@@ -271,7 +396,11 @@ pub enum TraceIr {
 
     /// Phi node: merges the `entry` value (from before the loop) with
     /// the `backedge` value (from the end of the previous iteration).
-    Phi { slot: u16, entry: TRef, backedge: TRef },
+    Phi {
+        slot: u16,
+        entry: TRef,
+        backedge: TRef,
+    },
 
     /// End of trace — unconditional jump back to `LoopStart`.
     LoopEnd,

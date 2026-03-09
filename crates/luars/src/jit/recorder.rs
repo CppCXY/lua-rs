@@ -18,9 +18,9 @@
 //! - An unsupported opcode is encountered → abort.
 //! - The trace exceeds length/exit limits → abort.
 
-use crate::lua_vm::opcode::OpCode;
-use crate::lua_vm::Instruction;
 use crate::lua_value::LuaValue;
+use crate::lua_vm::Instruction;
+use crate::lua_vm::opcode::OpCode;
 
 use super::trace::*;
 
@@ -115,6 +115,10 @@ pub struct TraceRecorder {
     /// inside an inlined function, the interpreter must resume at the
     /// Call instruction of the *caller*, not at the callee's internal PC.
     caller_pc_stack: Vec<u32>,
+    /// Stack of callee upvalue array base pointers for inlined calls.
+    /// When call_depth > 0, GetUpVal/SetUpVal use this instead of the
+    /// runtime `upval_ptrs` parameter.
+    upval_base_stack: Vec<usize>,
 }
 
 impl TraceRecorder {
@@ -144,6 +148,7 @@ impl TraceRecorder {
             call_info_stack: Vec::new(),
             chunk_ptr_stack: Vec::new(),
             caller_pc_stack: Vec::new(),
+            upval_base_stack: Vec::new(),
         }
     }
 
@@ -191,14 +196,30 @@ impl TraceRecorder {
             TraceIr::SubInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_sub(b)),
             TraceIr::MulInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_mul(b)),
             TraceIr::IDivInt { lhs, rhs } => {
-                if let (TraceIr::KInt(a), TraceIr::KInt(b)) = (&self.ops[lhs.index()], &self.ops[rhs.index()]) {
-                    if *b != 0 { Some(TraceIr::KInt(a.wrapping_div(*b))) } else { None }
-                } else { None }
+                if let (TraceIr::KInt(a), TraceIr::KInt(b)) =
+                    (&self.ops[lhs.index()], &self.ops[rhs.index()])
+                {
+                    if *b != 0 {
+                        Some(TraceIr::KInt(a.wrapping_div(*b)))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             }
             TraceIr::ModInt { lhs, rhs } => {
-                if let (TraceIr::KInt(a), TraceIr::KInt(b)) = (&self.ops[lhs.index()], &self.ops[rhs.index()]) {
-                    if *b != 0 { Some(TraceIr::KInt(a.wrapping_rem(*b))) } else { None }
-                } else { None }
+                if let (TraceIr::KInt(a), TraceIr::KInt(b)) =
+                    (&self.ops[lhs.index()], &self.ops[rhs.index()])
+                {
+                    if *b != 0 {
+                        Some(TraceIr::KInt(a.wrapping_rem(*b)))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             }
             // Float arithmetic
             TraceIr::AddFloat { lhs, rhs } => self.fold_float_bin(*lhs, *rhs, |a, b| a + b),
@@ -207,42 +228,68 @@ impl TraceRecorder {
             TraceIr::DivFloat { lhs, rhs } => self.fold_float_bin(*lhs, *rhs, |a, b| a / b),
             // Bitwise
             TraceIr::BAndInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a & b),
-            TraceIr::BOrInt  { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a | b),
+            TraceIr::BOrInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a | b),
             TraceIr::BXorInt { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a ^ b),
-            TraceIr::ShlInt  { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_shl(b as u32)),
-            TraceIr::ShrInt  { lhs, rhs } => self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_shr(b as u32)),
+            TraceIr::ShlInt { lhs, rhs } => {
+                self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_shl(b as u32))
+            }
+            TraceIr::ShrInt { lhs, rhs } => {
+                self.fold_int_bin(*lhs, *rhs, |a, b| a.wrapping_shr(b as u32))
+            }
             // Unary
             TraceIr::NegInt { src } => {
                 if let TraceIr::KInt(v) = &self.ops[src.index()] {
                     Some(TraceIr::KInt(v.wrapping_neg()))
-                } else { None }
+                } else {
+                    None
+                }
             }
             TraceIr::NegFloat { src } => {
                 if let TraceIr::KFloat(v) = &self.ops[src.index()] {
                     Some(TraceIr::KFloat(-v))
-                } else { None }
+                } else {
+                    None
+                }
             }
             TraceIr::BNotInt { src } => {
                 if let TraceIr::KInt(v) = &self.ops[src.index()] {
                     Some(TraceIr::KInt(!v))
-                } else { None }
+                } else {
+                    None
+                }
             }
             TraceIr::IntToFloat { src } => {
                 if let TraceIr::KInt(v) = &self.ops[src.index()] {
                     Some(TraceIr::KFloat(*v as f64))
-                } else { None }
+                } else {
+                    None
+                }
             }
             _ => None,
         }
     }
 
-    fn fold_int_bin(&self, lhs: TRef, rhs: TRef, f: impl FnOnce(i64, i64) -> i64) -> Option<TraceIr> {
-        if let (TraceIr::KInt(a), TraceIr::KInt(b)) = (&self.ops[lhs.index()], &self.ops[rhs.index()]) {
+    fn fold_int_bin(
+        &self,
+        lhs: TRef,
+        rhs: TRef,
+        f: impl FnOnce(i64, i64) -> i64,
+    ) -> Option<TraceIr> {
+        if let (TraceIr::KInt(a), TraceIr::KInt(b)) =
+            (&self.ops[lhs.index()], &self.ops[rhs.index()])
+        {
             Some(TraceIr::KInt(f(*a, *b)))
-        } else { None }
+        } else {
+            None
+        }
     }
 
-    fn fold_float_bin(&self, lhs: TRef, rhs: TRef, f: impl FnOnce(f64, f64) -> f64) -> Option<TraceIr> {
+    fn fold_float_bin(
+        &self,
+        lhs: TRef,
+        rhs: TRef,
+        f: impl FnOnce(f64, f64) -> f64,
+    ) -> Option<TraceIr> {
         let a = match &self.ops[lhs.index()] {
             TraceIr::KFloat(v) => *v,
             TraceIr::KInt(v) => *v as f64,
@@ -314,9 +361,18 @@ impl TraceRecorder {
             Ok((self.emit(TraceIr::KInt(0)), IrType::Nil))
         } else if kv.is_boolean() {
             let bv = if kv.is_truthy() { 1i64 } else { 0i64 };
-            Ok((self.emit(TraceIr::KInt(bv)), if kv.is_truthy() { IrType::True } else { IrType::False }))
+            Ok((
+                self.emit(TraceIr::KInt(bv)),
+                if kv.is_truthy() {
+                    IrType::True
+                } else {
+                    IrType::False
+                },
+            ))
         } else {
-            Err(RecordResult::Abort(AbortReason::NYI("rk unsupported const type")))
+            Err(RecordResult::Abort(AbortReason::NYI(
+                "rk unsupported const type",
+            )))
         }
     }
 
@@ -376,11 +432,15 @@ impl TraceRecorder {
         } else if val.is_string() {
             IrType::String
         } else if val.is_boolean() {
-            if val.is_truthy() { IrType::True } else { IrType::False }
+            if val.is_truthy() {
+                IrType::True
+            } else {
+                IrType::False
+            }
         } else if val.is_nil() {
             IrType::Nil
         } else {
-            IrType::Function
+            IrType::Function(val.tt())
         }
     }
 
@@ -428,7 +488,9 @@ impl TraceRecorder {
                 self.emit(TraceIr::LoopStart);
                 // Emit Phi placeholders for all live slots and update slot_map
                 // to point to Phi results.
-                let live_slots: Vec<(u16, TRef, IrType)> = self.slot_map.entries
+                let live_slots: Vec<(u16, TRef, IrType)> = self
+                    .slot_map
+                    .entries
                     .iter()
                     .enumerate()
                     .filter_map(|(i, e)| e.map(|(tref, ty)| (i as u16, tref, ty)))
@@ -467,21 +529,11 @@ impl TraceRecorder {
         let op = instr.get_opcode();
         match op {
             // ── Data movement ─────────────────────────────────────────
-            OpCode::Move => {
-                self.record_move(instr, pc, base, stack)
-            }
-            OpCode::LoadI => {
-                self.record_loadi(instr)
-            }
-            OpCode::LoadF => {
-                self.record_loadf(instr)
-            }
-            OpCode::LoadK => {
-                self.record_loadk(instr, pc, base, stack)
-            }
-            OpCode::LoadNil => {
-                self.record_loadnil(instr)
-            }
+            OpCode::Move => self.record_move(instr, pc, base, stack),
+            OpCode::LoadI => self.record_loadi(instr),
+            OpCode::LoadF => self.record_loadf(instr),
+            OpCode::LoadK => self.record_loadk(instr, pc, base, stack),
+            OpCode::LoadNil => self.record_loadnil(instr),
             OpCode::LoadTrue | OpCode::LoadFalse | OpCode::LFalseSkip => {
                 self.record_loadbool(instr, op)
             }
@@ -499,22 +551,22 @@ impl TraceRecorder {
             OpCode::AddI => self.record_arith_ri(instr, pc, base, stack),
 
             // ── Arithmetic: register-constant ─────────────────────────
-            OpCode::AddK | OpCode::SubK | OpCode::MulK | OpCode::DivK
-            | OpCode::IDivK | OpCode::ModK | OpCode::PowK => {
-                self.record_arith_rk(instr, pc, base, stack)
-            }
+            OpCode::AddK
+            | OpCode::SubK
+            | OpCode::MulK
+            | OpCode::DivK
+            | OpCode::IDivK
+            | OpCode::ModK
+            | OpCode::PowK => self.record_arith_rk(instr, pc, base, stack),
 
             // ── Bitwise ───────────────────────────────────────────────
-            OpCode::BAnd | OpCode::BOr | OpCode::BXor
-            | OpCode::Shl | OpCode::Shr => {
+            OpCode::BAnd | OpCode::BOr | OpCode::BXor | OpCode::Shl | OpCode::Shr => {
                 self.record_bitwise_rr(instr, pc, base, stack)
             }
             OpCode::BAndK | OpCode::BOrK | OpCode::BXorK => {
                 self.record_bitwise_rk(instr, pc, base, stack)
             }
-            OpCode::ShlI | OpCode::ShrI => {
-                self.record_shift_ri(instr, pc, base, stack)
-            }
+            OpCode::ShlI | OpCode::ShrI => self.record_shift_ri(instr, pc, base, stack),
 
             // ── Unary ─────────────────────────────────────────────────
             OpCode::Unm => self.record_unm(instr, pc, base, stack),
@@ -537,13 +589,10 @@ impl TraceRecorder {
             OpCode::SetUpval => self.record_setupval(instr, pc, base, stack),
 
             // ── Comparisons ───────────────────────────────────────────
-            OpCode::EqI | OpCode::LtI | OpCode::LeI
-            | OpCode::GtI | OpCode::GeI => {
+            OpCode::EqI | OpCode::LtI | OpCode::LeI | OpCode::GtI | OpCode::GeI => {
                 self.record_cmp_imm(instr, pc, base, stack)
             }
-            OpCode::Eq | OpCode::Lt | OpCode::Le => {
-                self.record_cmp_rr(instr, pc, base, stack)
-            }
+            OpCode::Eq | OpCode::Lt | OpCode::Le => self.record_cmp_rr(instr, pc, base, stack),
             OpCode::EqK => self.record_eqk(instr, pc, base, stack),
 
             // ── Tests ─────────────────────────────────────────────────
@@ -560,9 +609,7 @@ impl TraceRecorder {
             OpCode::Return | OpCode::Return0 | OpCode::Return1 => {
                 self.record_return(instr, pc, base, stack)
             }
-            OpCode::TailCall => {
-                RecordResult::Abort(AbortReason::NYI("tailcall"))
-            }
+            OpCode::TailCall => RecordResult::Abort(AbortReason::NYI("tailcall")),
 
             // ── Generic for ───────────────────────────────────────────
             OpCode::TForCall => self.record_tforcall(instr, pc, base, stack),
@@ -570,9 +617,7 @@ impl TraceRecorder {
             OpCode::TForPrep => RecordResult::Continue,
 
             // ── MmBin (metamethod fallback — skip, already handled) ───
-            OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
-                RecordResult::Continue
-            }
+            OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => RecordResult::Continue,
 
             // ── Everything else: abort ─────────────────────────────────
             _ => RecordResult::Abort(AbortReason::UnsupportedOp(op_name(op))),
@@ -595,7 +640,13 @@ impl TraceRecorder {
     // record_* methods — data movement
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_move(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_move(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let val = &stack[base + b as usize];
@@ -622,7 +673,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_loadk(&mut self, instr: Instruction, _pc: u32, _base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_loadk(
+        &mut self,
+        instr: Instruction,
+        _pc: u32,
+        _base: usize,
+        _stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         // Read the constant from the chunk's constant pool (NOT from the
         // stack, because the recorder runs BEFORE instruction dispatch).
@@ -645,7 +702,14 @@ impl TraceRecorder {
             (self.emit(TraceIr::KInt(0)), IrType::Nil)
         } else if kv.is_boolean() {
             let bv = if kv.bvalue() { 1i64 } else { 0i64 };
-            (self.emit(TraceIr::KInt(bv)), if kv.bvalue() { IrType::True } else { IrType::False })
+            (
+                self.emit(TraceIr::KInt(bv)),
+                if kv.bvalue() {
+                    IrType::True
+                } else {
+                    IrType::False
+                },
+            )
         } else {
             return RecordResult::Abort(AbortReason::NYI("loadk unsupported type"));
         };
@@ -671,7 +735,15 @@ impl TraceRecorder {
             _ => 0i64, // LoadFalse, LFalseSkip
         };
         let r = self.emit(TraceIr::KInt(val));
-        self.write_slot(a, r, if val != 0 { IrType::True } else { IrType::False });
+        self.write_slot(
+            a,
+            r,
+            if val != 0 {
+                IrType::True
+            } else {
+                IrType::False
+            },
+        );
         RecordResult::Continue
     }
 
@@ -680,7 +752,13 @@ impl TraceRecorder {
     // ══════════════════════════════════════════════════════════════════
 
     /// Record R[A] = R[B] op R[C] for arithmetic opcodes.
-    fn record_arith_rr(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_arith_rr(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as u16;
@@ -698,16 +776,16 @@ impl TraceRecorder {
         let (lhs, rhs, res_ty) = self.coerce_arith(vb, ty_b, vc, ty_c, op);
 
         let ir = match (op, res_ty) {
-            (OpCode::Add, IrType::Int)   => TraceIr::AddInt   { lhs, rhs },
+            (OpCode::Add, IrType::Int) => TraceIr::AddInt { lhs, rhs },
             (OpCode::Add, IrType::Float) => TraceIr::AddFloat { lhs, rhs },
-            (OpCode::Sub, IrType::Int)   => TraceIr::SubInt   { lhs, rhs },
+            (OpCode::Sub, IrType::Int) => TraceIr::SubInt { lhs, rhs },
             (OpCode::Sub, IrType::Float) => TraceIr::SubFloat { lhs, rhs },
-            (OpCode::Mul, IrType::Int)   => TraceIr::MulInt   { lhs, rhs },
+            (OpCode::Mul, IrType::Int) => TraceIr::MulInt { lhs, rhs },
             (OpCode::Mul, IrType::Float) => TraceIr::MulFloat { lhs, rhs },
-            (OpCode::Div, _)             => TraceIr::DivFloat { lhs, rhs }, // always float
-            (OpCode::IDiv, IrType::Int)  => TraceIr::IDivInt  { lhs, rhs },
-            (OpCode::Mod, IrType::Int)   => TraceIr::ModInt   { lhs, rhs },
-            (OpCode::Pow, _)             => TraceIr::PowFloat { lhs, rhs }, // always float
+            (OpCode::Div, _) => TraceIr::DivFloat { lhs, rhs }, // always float
+            (OpCode::IDiv, IrType::Int) => TraceIr::IDivInt { lhs, rhs },
+            (OpCode::Mod, IrType::Int) => TraceIr::ModInt { lhs, rhs },
+            (OpCode::Pow, _) => TraceIr::PowFloat { lhs, rhs }, // always float
             _ => return RecordResult::Abort(AbortReason::NYI("arith combo")),
         };
         let r = self.fold_or_emit(ir);
@@ -716,7 +794,13 @@ impl TraceRecorder {
     }
 
     /// Record R[A] = R[B] + sC (AddI).
-    fn record_arith_ri(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_arith_ri(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let sc = instr.get_sc() as i64;
@@ -731,14 +815,23 @@ impl TraceRecorder {
         } else {
             let fb = self.coerce_one(vb, ty_b);
             let kc = self.emit(TraceIr::KFloat(sc as f64));
-            (self.emit(TraceIr::AddFloat { lhs: fb, rhs: kc }), IrType::Float)
+            (
+                self.emit(TraceIr::AddFloat { lhs: fb, rhs: kc }),
+                IrType::Float,
+            )
         };
         self.write_slot(a, res, res_ty);
         RecordResult::Continue
     }
 
     /// Record R[A] = R[B] op K[C] for *K opcodes.
-    fn record_arith_rk(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_arith_rk(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as usize;
@@ -780,16 +873,16 @@ impl TraceRecorder {
         let (lhs, rhs, res_ty) = self.coerce_arith(vb, ty_b, kval, ty_k, base_op);
 
         let ir = match (op, res_ty) {
-            (OpCode::AddK, IrType::Int)   => TraceIr::AddInt   { lhs, rhs },
+            (OpCode::AddK, IrType::Int) => TraceIr::AddInt { lhs, rhs },
             (OpCode::AddK, IrType::Float) => TraceIr::AddFloat { lhs, rhs },
-            (OpCode::SubK, IrType::Int)   => TraceIr::SubInt   { lhs, rhs },
+            (OpCode::SubK, IrType::Int) => TraceIr::SubInt { lhs, rhs },
             (OpCode::SubK, IrType::Float) => TraceIr::SubFloat { lhs, rhs },
-            (OpCode::MulK, IrType::Int)   => TraceIr::MulInt   { lhs, rhs },
+            (OpCode::MulK, IrType::Int) => TraceIr::MulInt { lhs, rhs },
             (OpCode::MulK, IrType::Float) => TraceIr::MulFloat { lhs, rhs },
-            (OpCode::DivK, _)             => TraceIr::DivFloat { lhs, rhs },
-            (OpCode::IDivK, IrType::Int)  => TraceIr::IDivInt  { lhs, rhs },
-            (OpCode::ModK, IrType::Int)   => TraceIr::ModInt   { lhs, rhs },
-            (OpCode::PowK, _)             => TraceIr::PowFloat { lhs, rhs },
+            (OpCode::DivK, _) => TraceIr::DivFloat { lhs, rhs },
+            (OpCode::IDivK, IrType::Int) => TraceIr::IDivInt { lhs, rhs },
+            (OpCode::ModK, IrType::Int) => TraceIr::ModInt { lhs, rhs },
+            (OpCode::PowK, _) => TraceIr::PowFloat { lhs, rhs },
             _ => return RecordResult::Abort(AbortReason::NYI("rk combo")),
         };
         let r = self.fold_or_emit(ir);
@@ -809,7 +902,14 @@ impl TraceRecorder {
     }
 
     /// Determine result type and coerce operands for binary arithmetic.
-    fn coerce_arith(&mut self, lhs: TRef, lt: IrType, rhs: TRef, rt: IrType, op: OpCode) -> (TRef, TRef, IrType) {
+    fn coerce_arith(
+        &mut self,
+        lhs: TRef,
+        lt: IrType,
+        rhs: TRef,
+        rt: IrType,
+        op: OpCode,
+    ) -> (TRef, TRef, IrType) {
         // Div and Pow always produce float
         if op == OpCode::Div || op == OpCode::Pow {
             let fl = self.coerce_one(lhs, lt);
@@ -830,7 +930,13 @@ impl TraceRecorder {
     // record_* methods — bitwise & shifts
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_bitwise_rr(&mut self, instr: Instruction, pc: u32, base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_bitwise_rr(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        _stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as u16;
@@ -839,10 +945,10 @@ impl TraceRecorder {
         let vc = self.ensure_slot(c, IrType::Int, pc, base);
         let ir = match op {
             OpCode::BAnd => TraceIr::BAndInt { lhs: vb, rhs: vc },
-            OpCode::BOr  => TraceIr::BOrInt  { lhs: vb, rhs: vc },
+            OpCode::BOr => TraceIr::BOrInt { lhs: vb, rhs: vc },
             OpCode::BXor => TraceIr::BXorInt { lhs: vb, rhs: vc },
-            OpCode::Shl  => TraceIr::ShlInt  { lhs: vb, rhs: vc },
-            OpCode::Shr  => TraceIr::ShrInt  { lhs: vb, rhs: vc },
+            OpCode::Shl => TraceIr::ShlInt { lhs: vb, rhs: vc },
+            OpCode::Shr => TraceIr::ShrInt { lhs: vb, rhs: vc },
             _ => unreachable!(),
         };
         let r = self.fold_or_emit(ir);
@@ -850,7 +956,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_bitwise_rk(&mut self, instr: Instruction, pc: u32, base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_bitwise_rk(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        _stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as usize;
@@ -871,7 +983,7 @@ impl TraceRecorder {
 
         let ir = match op {
             OpCode::BAndK => TraceIr::BAndInt { lhs: vb, rhs: kval },
-            OpCode::BOrK  => TraceIr::BOrInt  { lhs: vb, rhs: kval },
+            OpCode::BOrK => TraceIr::BOrInt { lhs: vb, rhs: kval },
             OpCode::BXorK => TraceIr::BXorInt { lhs: vb, rhs: kval },
             _ => unreachable!(),
         };
@@ -880,7 +992,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_shift_ri(&mut self, instr: Instruction, pc: u32, base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_shift_ri(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        _stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let sc = instr.get_sc() as i64;
@@ -901,14 +1019,20 @@ impl TraceRecorder {
     // record_* methods — unary ops
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_unm(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_unm(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let val = &stack[base + b as usize];
         let ty = Self::detect_type(val);
         let vb = self.ensure_slot(b, ty, pc, base);
         let (ir, res_ty) = match ty {
-            IrType::Int   => (TraceIr::NegInt   { src: vb }, IrType::Int),
+            IrType::Int => (TraceIr::NegInt { src: vb }, IrType::Int),
             IrType::Float => (TraceIr::NegFloat { src: vb }, IrType::Float),
             _ => return RecordResult::Abort(AbortReason::NYI("unm non-numeric")),
         };
@@ -917,7 +1041,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_bnot(&mut self, instr: Instruction, pc: u32, base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_bnot(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        _stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let vb = self.ensure_slot(b, IrType::Int, pc, base);
@@ -926,7 +1056,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_len(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_len(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let val = &stack[base + b as usize];
@@ -939,7 +1075,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_not(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_not(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         // not x: result is always bool. We record the truthiness test.
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
@@ -959,13 +1101,22 @@ impl TraceRecorder {
     // record_* methods — table access
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_gettable(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_gettable(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as u16;
         let vt = self.ensure_slot(b, IrType::Table, pc, base);
         let vk = self.ensure_slot(c, IrType::Int, pc, base);
-        let r = self.emit(TraceIr::TabGetI { table: vt, index: vk });
+        let r = self.emit(TraceIr::TabGetI {
+            table: vt,
+            index: vk,
+        });
         // Detect result type from the actual table lookup (R[A] is stale pre-execution).
         let key_int = stack[base + c as usize].as_integer_strict().unwrap_or(0);
         let res_ty = if let Some(tbl) = stack[base + b as usize].as_table() {
@@ -980,13 +1131,22 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_geti(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_geti(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as i64; // immediate integer key
         let vt = self.ensure_slot(b, IrType::Table, pc, base);
         let vk = self.emit(TraceIr::KInt(c));
-        let r = self.emit(TraceIr::TabGetI { table: vt, index: vk });
+        let r = self.emit(TraceIr::TabGetI {
+            table: vt,
+            index: vk,
+        });
         // Detect result type from the actual table lookup (R[A] is stale pre-execution).
         let res_ty = if let Some(tbl) = stack[base + b as usize].as_table() {
             match tbl.raw_geti(c) {
@@ -1000,7 +1160,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_getfield(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_getfield(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as usize;
@@ -1027,7 +1193,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_settable(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_settable(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as usize;
@@ -1044,11 +1216,22 @@ impl TraceRecorder {
             let ty = Self::detect_type(val);
             (self.ensure_slot(c as u16, ty, pc, base), ty)
         };
-        self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc, ty });
+        self.emit(TraceIr::TabSetI {
+            table: vt,
+            index: vk,
+            val: vc,
+            ty,
+        });
         RecordResult::Continue
     }
 
-    fn record_seti(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_seti(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as i64;
         let c = instr.get_c() as usize;
@@ -1065,11 +1248,22 @@ impl TraceRecorder {
             let ty = Self::detect_type(val);
             (self.ensure_slot(c as u16, ty, pc, base), ty)
         };
-        self.emit(TraceIr::TabSetI { table: vt, index: vk, val: vc, ty });
+        self.emit(TraceIr::TabSetI {
+            table: vt,
+            index: vk,
+            val: vc,
+            ty,
+        });
         RecordResult::Continue
     }
 
-    fn record_setfield(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_setfield(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as usize; // K[B] is the string key
         let c = instr.get_c() as usize;
@@ -1091,20 +1285,36 @@ impl TraceRecorder {
             let ty = Self::detect_type(val);
             (self.ensure_slot(c as u16, ty, pc, base), ty)
         };
-        self.emit(TraceIr::TabSetS { table: vt, key_ptr, val: vc, ty });
+        self.emit(TraceIr::TabSetS {
+            table: vt,
+            key_ptr,
+            val: vc,
+            ty,
+        });
         RecordResult::Continue
     }
 
-    fn record_gettabup(&mut self, instr: Instruction, _pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
-        if self.call_depth > 0 {
-            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
-        }
+    fn record_gettabup(
+        &mut self,
+        instr: Instruction,
+        _pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let c = instr.get_c() as usize;
         // GetTabUp: R[A] = UpValue[B][K[C]]
         // Load the upvalue (which should be a table — typically _ENV).
-        let uv = self.emit(TraceIr::LoadUpval { upval_idx: b });
+        let uv = if self.call_depth > 0 {
+            let upval_base = *self.upval_base_stack.last().unwrap();
+            self.emit(TraceIr::LoadUpvalDirect {
+                upval_base,
+                upval_idx: b,
+            })
+        } else {
+            self.emit(TraceIr::LoadUpval { upval_idx: b })
+        };
         // Read the string constant key pointer from the chunk.
         let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
         let Some(key_const) = chunk.constants.get(c) else {
@@ -1114,17 +1324,20 @@ impl TraceRecorder {
         // Detect result type by performing the actual lookup on the upvalue
         // table. We cannot use stack[base + a] because recording is pre-
         // execution, so R[A] still holds the old value.
-        let res_ty = Self::detect_table_result_type(base, b, key_const, stack)
-            .unwrap_or(IrType::Nil);
+        let res_ty =
+            Self::detect_table_result_type(base, b, key_const, stack).unwrap_or(IrType::Nil);
         let r = self.emit(TraceIr::TabGetS { table: uv, key_ptr });
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
 
-    fn record_settabup(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
-        if self.call_depth > 0 {
-            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
-        }
+    fn record_settabup(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         // SetTabUp: UpValue[A][K[B]] = RK(C)
         let a = instr.get_a() as u16;
         let b = instr.get_b() as usize;
@@ -1132,7 +1345,15 @@ impl TraceRecorder {
         let k_flag = instr.get_k();
 
         // Load the upvalue table
-        let uv = self.emit(TraceIr::LoadUpval { upval_idx: a });
+        let uv = if self.call_depth > 0 {
+            let upval_base = *self.upval_base_stack.last().unwrap();
+            self.emit(TraceIr::LoadUpvalDirect {
+                upval_base,
+                upval_idx: a,
+            })
+        } else {
+            self.emit(TraceIr::LoadUpval { upval_idx: a })
+        };
 
         // Get the string key from constants
         let chunk = unsafe { &*(self.chunk_ptr as *const crate::lua_value::Chunk) };
@@ -1150,20 +1371,33 @@ impl TraceRecorder {
             let (vc, ty) = if cv.ttisinteger() {
                 (self.emit(TraceIr::KInt(unsafe { cv.value.i })), IrType::Int)
             } else if cv.ttisfloat() {
-                (self.emit(TraceIr::KFloat(unsafe { cv.value.n })), IrType::Float)
+                (
+                    self.emit(TraceIr::KFloat(unsafe { cv.value.n })),
+                    IrType::Float,
+                )
             } else if cv.is_nil() {
                 (self.emit(TraceIr::KInt(0)), IrType::Nil)
             } else {
                 return RecordResult::Abort(AbortReason::NYI("settabup const val type"));
             };
-            self.emit(TraceIr::TabSetS { table: uv, key_ptr, val: vc, ty });
+            self.emit(TraceIr::TabSetS {
+                table: uv,
+                key_ptr,
+                val: vc,
+                ty,
+            });
         } else {
             // Value is R[C]
             let c16 = c as u16;
             let val = &stack[base + c];
             let ty = Self::detect_type(val);
             let vc = self.ensure_slot(c16, ty, pc, base);
-            self.emit(TraceIr::TabSetS { table: uv, key_ptr, val: vc, ty });
+            self.emit(TraceIr::TabSetS {
+                table: uv,
+                key_ptr,
+                val: vc,
+                ty,
+            });
         }
         RecordResult::Continue
     }
@@ -1176,7 +1410,9 @@ impl TraceRecorder {
         key: &LuaValue,
         stack: &[LuaValue],
     ) -> Option<IrType> {
-        if base == 0 { return None; }
+        if base == 0 {
+            return None;
+        }
         let func = stack.get(base - 1)?;
         let lua_func = func.as_lua_function()?;
         let upval_ptr = lua_func.upvalues().get(upval_idx as usize)?;
@@ -1192,29 +1428,57 @@ impl TraceRecorder {
     // record_* methods — upvalue access
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_getupval(&mut self, instr: Instruction, _pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
-        if self.call_depth > 0 {
-            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
-        }
+    fn record_getupval(
+        &mut self,
+        instr: Instruction,
+        _pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
-        let r = self.emit(TraceIr::LoadUpval { upval_idx: b });
+        let r = if self.call_depth > 0 {
+            let upval_base = *self.upval_base_stack.last().unwrap();
+            self.emit(TraceIr::LoadUpvalDirect {
+                upval_base,
+                upval_idx: b,
+            })
+        } else {
+            self.emit(TraceIr::LoadUpval { upval_idx: b })
+        };
         let res_ty = Self::detect_upvalue_type(base, b, stack)
             .unwrap_or_else(|| Self::detect_type(&stack[base + a as usize]));
         self.write_slot(a, r, res_ty);
         RecordResult::Continue
     }
 
-    fn record_setupval(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
-        if self.call_depth > 0 {
-            return RecordResult::Abort(AbortReason::NYI("upvalue access in inlined call"));
-        }
+    fn record_setupval(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let val = &stack[base + a as usize];
         let ty = Self::detect_type(val);
         let va = self.ensure_slot(a, ty, pc, base);
-        self.emit(TraceIr::StoreUpval { upval_idx: b, val: va, ty });
+        if self.call_depth > 0 {
+            let upval_base = *self.upval_base_stack.last().unwrap();
+            self.emit(TraceIr::StoreUpvalDirect {
+                upval_base,
+                upval_idx: b,
+                val: va,
+                ty,
+            });
+        } else {
+            self.emit(TraceIr::StoreUpval {
+                upval_idx: b,
+                val: va,
+                ty,
+            });
+        }
         RecordResult::Continue
     }
 
@@ -1222,7 +1486,13 @@ impl TraceRecorder {
     // record_* methods — comparisons
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_cmp_imm(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_cmp_imm(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         // EqI / LtI / LeI / GtI / GeI — compare R[A] with sB (immediate)
         let a = instr.get_a() as u16;
         let op = instr.get_opcode();
@@ -1288,7 +1558,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_cmp_rr(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_cmp_rr(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         // Eq / Lt / Le — compare R[A] with R[B]
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
@@ -1302,8 +1578,16 @@ impl TraceRecorder {
         let op = instr.get_opcode();
         let is_float = ty_a == IrType::Float || ty_b == IrType::Float;
         let cond = if is_float {
-            let fa = if ty_a == IrType::Float { unsafe { val_a.value.n } } else { val_a.ivalue() as f64 };
-            let fb = if ty_b == IrType::Float { unsafe { val_b.value.n } } else { val_b.ivalue() as f64 };
+            let fa = if ty_a == IrType::Float {
+                unsafe { val_a.value.n }
+            } else {
+                val_a.ivalue() as f64
+            };
+            let fb = if ty_b == IrType::Float {
+                unsafe { val_b.value.n }
+            } else {
+                val_b.ivalue() as f64
+            };
             match op {
                 OpCode::Eq => fa == fb,
                 OpCode::Lt => fa < fb,
@@ -1349,7 +1633,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_eqk(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_eqk(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         // EqK: if (R[A] == K[B]) ~= k then pc++
         let a = instr.get_a() as u16;
         let b = instr.get_b() as usize;
@@ -1376,17 +1666,32 @@ impl TraceRecorder {
         } else if kv.ttisinteger() {
             let iv = unsafe { kv.value.i };
             let cmp = if cond { CmpOp::Eq } else { CmpOp::Ne };
-            self.emit(TraceIr::GuardCmpI { lhs: va, rhs_imm: iv, cmp, snap_id });
+            self.emit(TraceIr::GuardCmpI {
+                lhs: va,
+                rhs_imm: iv,
+                cmp,
+                snap_id,
+            });
         } else if kv.ttisfloat() {
             let fv = unsafe { kv.value.n };
             let rhs = self.emit(TraceIr::KFloat(fv));
             let cmp = if cond { CmpOp::Eq } else { CmpOp::Ne };
-            self.emit(TraceIr::GuardCmpF { lhs: va, rhs, cmp, snap_id });
+            self.emit(TraceIr::GuardCmpF {
+                lhs: va,
+                rhs,
+                cmp,
+                snap_id,
+            });
         } else if kv.ttisstring() {
             // Interned strings: pointer equality
             let str_bits = unsafe { kv.value.i };
             let cmp = if cond { CmpOp::Eq } else { CmpOp::Ne };
-            self.emit(TraceIr::GuardCmpI { lhs: va, rhs_imm: str_bits, cmp, snap_id });
+            self.emit(TraceIr::GuardCmpI {
+                lhs: va,
+                rhs_imm: str_bits,
+                cmp,
+                snap_id,
+            });
         } else {
             return RecordResult::Abort(AbortReason::NYI("eqk unsupported const type"));
         }
@@ -1397,7 +1702,13 @@ impl TraceRecorder {
     // record_* methods — tests
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_test(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_test(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let val_a = &stack[base + a as usize];
         let ty = Self::detect_type(val_a);
@@ -1415,7 +1726,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_testset(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_testset(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as u16;
         let b = instr.get_b() as u16;
         let val_b = &stack[base + b as usize];
@@ -1442,7 +1759,13 @@ impl TraceRecorder {
     // record_* methods — numeric for loop
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_forloop(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_forloop(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         // The ForLoop's backward jump target is (pc+1) - bx (since the
         // interpreter has already incremented pc past the instruction).
         // If that target matches our trace head, this is the trace's own
@@ -1460,7 +1783,46 @@ impl TraceRecorder {
         // Check integer vs float loop by examining R[A+1] (step) type.
         let step_val = &stack[base + a as usize + 1];
         if !step_val.ttisinteger() {
-            return RecordResult::Abort(AbortReason::NYI("float for loop"));
+            // Float for loop: R[A]=limit, R[A+1]=step, R[A+2]=idx
+            let limit_slot = a;
+            let step_slot = a + 1;
+            let idx_slot = a + 2;
+
+            let limit = self.ensure_slot(limit_slot, IrType::Float, pc, base);
+            let step = self.ensure_slot(step_slot, IrType::Float, pc, base);
+            let idx = self.ensure_slot(idx_slot, IrType::Float, pc, base);
+
+            // new_idx = idx + step
+            let new_idx = self.emit(TraceIr::AddFloat {
+                lhs: idx,
+                rhs: step,
+            });
+
+            // Guard: step > 0 ? new_idx <= limit : new_idx >= limit
+            // At recording time, we know the sign of step.
+            let step_f = unsafe { step_val.value.n };
+            self.snapshot(pc, base);
+            let snap_id = self.snapshots.len() as u32 - 1;
+            if step_f > 0.0 {
+                self.emit(TraceIr::GuardCmpF {
+                    lhs: new_idx,
+                    rhs: limit,
+                    cmp: CmpOp::Le,
+                    snap_id,
+                });
+            } else {
+                self.emit(TraceIr::GuardCmpF {
+                    lhs: new_idx,
+                    rhs: limit,
+                    cmp: CmpOp::Ge,
+                    snap_id,
+                });
+            }
+
+            // Write new_idx to idx slot
+            self.write_slot(idx_slot, new_idx, IrType::Float);
+
+            return RecordResult::Continue;
         }
 
         // Integer for loop: R[A]=counter, R[A+1]=step, R[A+2]=idx
@@ -1484,11 +1846,17 @@ impl TraceRecorder {
 
         // counter = counter - 1
         let one = self.emit(TraceIr::KInt(1));
-        let new_count = self.emit(TraceIr::SubInt { lhs: count, rhs: one });
+        let new_count = self.emit(TraceIr::SubInt {
+            lhs: count,
+            rhs: one,
+        });
         self.write_slot(count_slot, new_count, IrType::Int);
 
         // idx = idx + step
-        let new_idx = self.emit(TraceIr::AddInt { lhs: idx, rhs: step });
+        let new_idx = self.emit(TraceIr::AddInt {
+            lhs: idx,
+            rhs: step,
+        });
         self.write_slot(idx_slot, new_idx, IrType::Int);
 
         RecordResult::Continue
@@ -1498,7 +1866,13 @@ impl TraceRecorder {
     // record_* methods — calls & returns
     // ══════════════════════════════════════════════════════════════════
 
-    fn record_call(&mut self, instr: Instruction, pc: u32, base: usize, stack: &[LuaValue]) -> RecordResult {
+    fn record_call(
+        &mut self,
+        instr: Instruction,
+        pc: u32,
+        base: usize,
+        stack: &[LuaValue],
+    ) -> RecordResult {
         let a = instr.get_a() as usize;
         let _b = instr.get_b() as u8;
         let _c = instr.get_c() as i8;
@@ -1509,6 +1883,52 @@ impl TraceRecorder {
         if func_val.is_cfunction() {
             let fptr = func_val.fvalue();
             if let Some(builtin) = Self::detect_builtin(fptr) {
+                if Self::is_builtin_2arg(builtin) {
+                    // Two-argument builtin (math.min, math.max).
+                    let arg1_slot = (a + 1) as u16;
+                    let arg1_val = &stack[base + a + 1];
+                    let arg1_ty = Self::detect_type(arg1_val);
+                    let arg1 = self.ensure_slot(arg1_slot, arg1_ty, pc, base);
+
+                    let arg2_slot = (a + 2) as u16;
+                    let arg2_val = &stack[base + a + 2];
+                    let arg2_ty = Self::detect_type(arg2_val);
+                    let arg2 = self.ensure_slot(arg2_slot, arg2_ty, pc, base);
+
+                    // If both args are integers, use integer min/max (preserves type).
+                    if arg1_ty == IrType::Int && arg2_ty == IrType::Int {
+                        let result = match builtin {
+                            BuiltinFn::MathMin2 => self.emit(TraceIr::MinInt {
+                                lhs: arg1,
+                                rhs: arg2,
+                            }),
+                            BuiltinFn::MathMax2 => self.emit(TraceIr::MaxInt {
+                                lhs: arg1,
+                                rhs: arg2,
+                            }),
+                            _ => unreachable!(),
+                        };
+                        self.write_slot(a as u16, result, IrType::Int);
+                    } else {
+                        // Float path: coerce to float.
+                        let mut f1 = arg1;
+                        let mut f2 = arg2;
+                        if arg1_ty == IrType::Int {
+                            f1 = self.emit(TraceIr::IntToFloat { src: arg1 });
+                        }
+                        if arg2_ty == IrType::Int {
+                            f2 = self.emit(TraceIr::IntToFloat { src: arg2 });
+                        }
+                        let result = self.emit(TraceIr::CallBuiltin2 {
+                            func: builtin,
+                            arg1: f1,
+                            arg2: f2,
+                        });
+                        self.write_slot(a as u16, result, IrType::Float);
+                    }
+                    return RecordResult::Continue;
+                }
+
                 // Single-argument math builtin → inline it.
                 let arg_slot = (a + 1) as u16;
                 let arg_val = &stack[base + a + 1];
@@ -1563,6 +1983,11 @@ impl TraceRecorder {
         let callee_chunk = lua_func.chunk();
         self.chunk_ptr = callee_chunk as *const crate::lua_value::Chunk as *const u8;
 
+        // Capture callee's upvalue array base pointer for direct access
+        // to callee upvalues in the compiled trace.
+        let upval_base = lua_func.upvalues().as_ptr() as usize;
+        self.upval_base_stack.push(upval_base);
+
         // Shift base_offset: callee's R[0] = caller's R[a+1].
         self.base_offset += (a as u16) + 1;
 
@@ -1575,18 +2000,51 @@ impl TraceRecorder {
     fn detect_builtin(f: crate::lua_vm::CFunction) -> Option<BuiltinFn> {
         use crate::stdlib::math;
         let fp = f as *const () as usize;
-        if fp == math::math_sqrt as *const () as usize { return Some(BuiltinFn::MathSqrt); }
-        if fp == math::math_abs as *const () as usize { return Some(BuiltinFn::MathAbs); }
-        if fp == math::math_floor as *const () as usize { return Some(BuiltinFn::MathFloor); }
-        if fp == math::math_ceil as *const () as usize { return Some(BuiltinFn::MathCeil); }
-        if fp == math::math_sin as *const () as usize { return Some(BuiltinFn::MathSin); }
-        if fp == math::math_cos as *const () as usize { return Some(BuiltinFn::MathCos); }
-        if fp == math::math_exp as *const () as usize { return Some(BuiltinFn::MathExp); }
-        if fp == math::math_log as *const () as usize { return Some(BuiltinFn::MathLog); }
+        if fp == math::math_sqrt as *const () as usize {
+            return Some(BuiltinFn::MathSqrt);
+        }
+        if fp == math::math_abs as *const () as usize {
+            return Some(BuiltinFn::MathAbs);
+        }
+        if fp == math::math_floor as *const () as usize {
+            return Some(BuiltinFn::MathFloor);
+        }
+        if fp == math::math_ceil as *const () as usize {
+            return Some(BuiltinFn::MathCeil);
+        }
+        if fp == math::math_sin as *const () as usize {
+            return Some(BuiltinFn::MathSin);
+        }
+        if fp == math::math_cos as *const () as usize {
+            return Some(BuiltinFn::MathCos);
+        }
+        if fp == math::math_exp as *const () as usize {
+            return Some(BuiltinFn::MathExp);
+        }
+        if fp == math::math_log as *const () as usize {
+            return Some(BuiltinFn::MathLog);
+        }
+        if fp == math::math_max as *const () as usize {
+            return Some(BuiltinFn::MathMax2);
+        }
+        if fp == math::math_min as *const () as usize {
+            return Some(BuiltinFn::MathMin2);
+        }
         None
     }
 
-    fn record_return(&mut self, instr: Instruction, _pc: u32, _base: usize, _stack: &[LuaValue]) -> RecordResult {
+    /// Returns true if the builtin takes 2 arguments (min, max).
+    fn is_builtin_2arg(func: BuiltinFn) -> bool {
+        matches!(func, BuiltinFn::MathMax2 | BuiltinFn::MathMin2)
+    }
+
+    fn record_return(
+        &mut self,
+        instr: Instruction,
+        _pc: u32,
+        _base: usize,
+        _stack: &[LuaValue],
+    ) -> RecordResult {
         if self.call_depth == 0 {
             // Returning from the trace's root frame → abort (trace ends
             // at the loop back-edge, not a return).
@@ -1612,15 +2070,23 @@ impl TraceRecorder {
         };
 
         // Pop call info
-        let (call_slot_abs, nresults_raw) = self.call_info_stack.pop()
+        let (call_slot_abs, nresults_raw) = self
+            .call_info_stack
+            .pop()
             .expect("call_info_stack underflow");
-        let old_offset = self.base_offset_stack.pop()
+        let old_offset = self
+            .base_offset_stack
+            .pop()
             .expect("base_offset_stack underflow");
         // Restore caller's chunk_ptr.
-        self.chunk_ptr = self.chunk_ptr_stack.pop()
+        self.chunk_ptr = self
+            .chunk_ptr_stack
+            .pop()
             .expect("chunk_ptr_stack underflow");
         // Restore caller's PC (no longer inside inlined call).
         self.caller_pc_stack.pop();
+        // Pop callee's upvalue base.
+        self.upval_base_stack.pop();
 
         // Determine how many results the caller wants.
         let nresults = if nresults_raw == 0 {
@@ -1659,7 +2125,13 @@ impl TraceRecorder {
         RecordResult::Continue
     }
 
-    fn record_tforcall(&mut self, _instr: Instruction, _pc: u32, _base: usize, _stack: &[LuaValue]) -> RecordResult {
+    fn record_tforcall(
+        &mut self,
+        _instr: Instruction,
+        _pc: u32,
+        _base: usize,
+        _stack: &[LuaValue],
+    ) -> RecordResult {
         // TForCall calls the iterator function.  For now we treat
         // as NYI unless we inline it in the future.
         RecordResult::Abort(AbortReason::NYI("tforcall"))
@@ -1684,4 +2156,3 @@ fn op_name(op: OpCode) -> &'static str {
         _ => "unknown",
     }
 }
-

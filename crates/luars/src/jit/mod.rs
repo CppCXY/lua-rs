@@ -1,3 +1,4 @@
+pub mod recorder;
 /// Tracing JIT compiler for Lua.
 ///
 /// Records interpreter execution at hot backward-jump sites and
@@ -12,16 +13,14 @@
 /// - `JIT_COUNTER_COMPILED` (0xFFFE): compiled trace exists at this PC.
 /// - `1..=JIT_COUNTER_INIT`: counting down; when it reaches 0 recording
 ///   starts and the counter is reset to `JIT_COUNTER_INIT`.
-
 pub mod runtime;
 pub mod trace;
-pub mod recorder;
 pub mod trace_compiler;
 
 use std::collections::HashMap;
 
 use self::recorder::TraceRecorder;
-use self::trace::{RecordState, AbortReason};
+use self::trace::{AbortReason, RecordState};
 use self::trace_compiler::CompiledTrace;
 
 // ── Counter constants (public for use by Chunk initializer) ──────────────────
@@ -78,19 +77,20 @@ impl JitState {
         let id = self.next_trace_id;
         self.next_trace_id += 1;
         self.state = RecordState::Recording;
-        self.recorder = Some(TraceRecorder::new(
-            id,
-            pc,
-            base,
-            chunk_ptr as *const u8,
-        ));
+        self.recorder = Some(TraceRecorder::new(id, pc, base, chunk_ptr as *const u8));
     }
 
     /// Called when recording aborts.  Updates the Chunk's inline counter.
     ///
     /// `counters_ptr` is the raw pointer to the Chunk's `jit_counters` data
     /// for the trace head's chunk (NOT the current frame's chunk).
-    pub fn abort_recording(&mut self, chunk_ptr: usize, pc: u32, counters_ptr: *mut u16, _reason: AbortReason) {
+    pub fn abort_recording(
+        &mut self,
+        chunk_ptr: usize,
+        pc: u32,
+        counters_ptr: *mut u16,
+        _reason: AbortReason,
+    ) {
         self.state = RecordState::Idle;
         self.recorder = None;
         let key = (chunk_ptr, pc);
@@ -98,10 +98,14 @@ impl JitState {
         *cnt += 1;
         if *cnt >= MAX_ABORTS {
             // Blacklist: set inline counter so the dispatch loop never enters JIT path again.
-            unsafe { *counters_ptr.add(pc as usize) = JIT_COUNTER_BLACKLISTED; }
+            unsafe {
+                *counters_ptr.add(pc as usize) = JIT_COUNTER_BLACKLISTED;
+            }
         } else {
             // Reset counter for next attempt.
-            unsafe { *counters_ptr.add(pc as usize) = JIT_COUNTER_INIT; }
+            unsafe {
+                *counters_ptr.add(pc as usize) = JIT_COUNTER_INIT;
+            }
         }
     }
 
@@ -115,16 +119,22 @@ impl JitState {
             Ok(compiled) => {
                 self.compiled.insert(key, compiled);
                 // Mark counter as compiled so the dispatch loop knows to look up the trace.
-                unsafe { *counters_ptr.add(pc as usize) = JIT_COUNTER_COMPILED; }
+                unsafe {
+                    *counters_ptr.add(pc as usize) = JIT_COUNTER_COMPILED;
+                }
             }
             Err(msg) => {
                 eprintln!("[jit] trace compile failed: {msg}");
                 let cnt = self.abort_counts.entry(key).or_insert(0);
                 *cnt += 1;
                 if *cnt >= MAX_ABORTS {
-                    unsafe { *counters_ptr.add(pc as usize) = JIT_COUNTER_BLACKLISTED; }
+                    unsafe {
+                        *counters_ptr.add(pc as usize) = JIT_COUNTER_BLACKLISTED;
+                    }
                 } else {
-                    unsafe { *counters_ptr.add(pc as usize) = JIT_COUNTER_INIT; }
+                    unsafe {
+                        *counters_ptr.add(pc as usize) = JIT_COUNTER_INIT;
+                    }
                 }
             }
         }
