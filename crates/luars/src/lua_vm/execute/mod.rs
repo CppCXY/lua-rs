@@ -1070,12 +1070,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                         std::mem::transmute(fn_ptr);
                                     f(stack_ptr, base, upval_raw)
                                 };
-                                if snap_id > 0 {
-                                    if let Some(ct) =
+                                if snap_id > 0
+                                    && let Some(ct) =
                                         lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
-                                    {
-                                        pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
-                                    }
+                                {
+                                    pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
                                 }
                                 continue;
                             }
@@ -2028,14 +2027,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                                     std::mem::transmute(fn_ptr);
                                                 f(stack_ptr, base, upval_raw)
                                             };
-                                            if snap_id > 0 {
-                                                if let Some(ct) = lua_state
+                                            if snap_id > 0
+                                                && let Some(ct) = lua_state
                                                     .jit_state
                                                     .get_compiled(chunk_ptr, pc as u32)
-                                                {
-                                                    pc = ct.exit_pcs[(snap_id as usize) - 1]
-                                                        as usize;
-                                                }
+                                            {
+                                                pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
                                             }
                                             continue;
                                         }
@@ -2103,14 +2100,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                                     std::mem::transmute(fn_ptr);
                                                 f(stack_ptr, base, upval_raw)
                                             };
-                                            if snap_id > 0 {
-                                                if let Some(ct) = lua_state
+                                            if snap_id > 0
+                                                && let Some(ct) = lua_state
                                                     .jit_state
                                                     .get_compiled(chunk_ptr, pc as u32)
-                                                {
-                                                    pc = ct.exit_pcs[(snap_id as usize) - 1]
-                                                        as usize;
-                                                }
+                                            {
+                                                pc = ct.exit_pcs[(snap_id as usize) - 1] as usize;
                                             }
                                             continue;
                                         }

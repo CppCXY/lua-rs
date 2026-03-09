@@ -382,12 +382,12 @@ impl TraceRecorder {
     /// internally offset by `base_offset` for absolute positioning.
     fn ensure_slot(&mut self, slot: u16, ty: IrType, pc: u32, base: usize) -> TRef {
         let abs = slot + self.base_offset;
-        if let Some((tref, existing_ty)) = self.slot_map.get(abs) {
-            if existing_ty == ty {
-                return tref;
-            }
-            // Type changed — need a new guard.
+        if let Some((tref, existing_ty)) = self.slot_map.get(abs)
+            && existing_ty == ty
+        {
+            return tref;
         }
+        // Type changed — need a new guard.
         let snap_id = self.snapshot(pc, base);
         self.emit(TraceIr::GuardType {
             slot: abs,
@@ -508,10 +508,10 @@ impl TraceRecorder {
             } else {
                 // Third visit — loop body recorded.  Patch Phi backedges.
                 for (ops_idx, slot, _entry) in &self.phi_entries {
-                    if let Some((backedge_tref, _ty)) = self.slot_map.get(*slot) {
-                        if let TraceIr::Phi { backedge, .. } = &mut self.ops[*ops_idx] {
-                            *backedge = backedge_tref;
-                        }
+                    if let Some((backedge_tref, _ty)) = self.slot_map.get(*slot)
+                        && let TraceIr::Phi { backedge, .. } = &mut self.ops[*ops_idx]
+                    {
+                        *backedge = backedge_tref;
                     }
                 }
                 // Take a final snapshot for safety-exit writeback.
@@ -1772,7 +1772,7 @@ impl TraceRecorder {
         // loop and should be recorded.  Otherwise it's a nested for-loop
         // being unrolled inline — abort to avoid baking in a fixed
         // iteration count.
-        let bx = instr.get_bx() as u32;
+        let bx = instr.get_bx();
         let target = pc + 1 - bx;
         if target != self.head_pc || base != self.head_base {
             return RecordResult::Abort(AbortReason::NYI("nested for loop"));

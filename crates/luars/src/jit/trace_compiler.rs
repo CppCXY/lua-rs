@@ -847,15 +847,15 @@ fn emit_trace_ir(
         b.seal_block(blk);
         let snap = &trace.snapshots[i];
         for entry in &snap.entries {
-            if let super::trace::SnapValue::Ref(tref) = entry.val {
-                if (tref.index()) < vals.len() {
-                    let sv = as_i64(b, vals[tref.index()]);
-                    b.ins()
-                        .store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
-                    let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
-                    b.ins()
-                        .store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
-                }
+            if let super::trace::SnapValue::Ref(tref) = entry.val
+                && (tref.index()) < vals.len()
+            {
+                let sv = as_i64(b, vals[tref.index()]);
+                b.ins()
+                    .store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
+                let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
+                b.ins()
+                    .store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
             }
         }
         let id = b.ins().iconst(I32, (i as i64) + 1);
@@ -867,15 +867,15 @@ fn emit_trace_ir(
     b.seal_block(safety_exit);
     if let Some(last_snap) = trace.snapshots.last() {
         for entry in &last_snap.entries {
-            if let super::trace::SnapValue::Ref(tref) = entry.val {
-                if (tref.index()) < vals.len() {
-                    let sv = as_i64(b, vals[tref.index()]);
-                    b.ins()
-                        .store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
-                    let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
-                    b.ins()
-                        .store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
-                }
+            if let super::trace::SnapValue::Ref(tref) = entry.val
+                && (tref.index()) < vals.len()
+            {
+                let sv = as_i64(b, vals[tref.index()]);
+                b.ins()
+                    .store(MemFlags::trusted(), sv, sbase, val_off(entry.slot));
+                let tg = b.ins().iconst(I8, ir_type_tag(&entry.ty));
+                b.ins()
+                    .store(MemFlags::trusted(), tg, sbase, tag_off(entry.slot));
             }
         }
     }
