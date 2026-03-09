@@ -78,7 +78,12 @@ pub struct TraceRecorder {
     /// Stack base at recording start.
     head_base: usize,
     /// Raw pointer to the Chunk where the trace head lives.
+    /// NOTE: this gets overwritten during inlined calls — use
+    /// `trace_head_chunk_ptr` for the original value.
     chunk_ptr: *const u8,
+    /// The chunk_ptr that was active when recording started.
+    /// Unlike `chunk_ptr`, this is NEVER modified.
+    trace_head_chunk_ptr: *const u8,
     /// Current call depth relative to the trace entry.
     call_depth: u32,
     /// Whether we have emitted `LoopStart` yet (set on second visit to head).
@@ -128,6 +133,7 @@ impl TraceRecorder {
             head_pc,
             head_base,
             chunk_ptr,
+            trace_head_chunk_ptr: chunk_ptr,
             call_depth: 0,
             loop_started: false,
             head_visits: 0,
@@ -142,6 +148,13 @@ impl TraceRecorder {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    /// Return the chunk pointer where the trace head lives.
+    /// This is the chunk that was active when recording started (the
+    /// caller's chunk), NOT the current chunk which may be a callee's.
+    pub fn head_chunk_ptr(&self) -> usize {
+        self.trace_head_chunk_ptr as usize
+    }
 
     /// Emit an IR instruction and return its `TRef`.
     fn emit(&mut self, ir: TraceIr) -> TRef {

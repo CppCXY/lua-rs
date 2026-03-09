@@ -15,7 +15,7 @@ pub mod trace;
 pub mod recorder;
 pub mod trace_compiler;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use self::recorder::TraceRecorder;
 use self::trace::{RecordState, AbortReason};
@@ -46,6 +46,9 @@ pub struct JitState {
     /// Abort history — how many times recording failed for each site.
     abort_counts: HashMap<TraceKey, u32>,
 
+    /// Sites permanently excluded from JIT (abort count exceeded MAX_ABORTS).
+    blacklisted: HashSet<TraceKey>,
+
     /// Active recorder (Some only when `state == Recording`).
     pub recorder: Option<TraceRecorder>,
 
@@ -63,10 +66,17 @@ impl JitState {
             state: RecordState::Idle,
             hot_counts: HashMap::new(),
             abort_counts: HashMap::new(),
+            blacklisted: HashSet::new(),
             recorder: None,
             compiled: HashMap::new(),
             next_trace_id: 1,
         }
+    }
+
+    /// Fast check: is this site permanently excluded from JIT?
+    #[inline(always)]
+    pub fn is_blacklisted(&self, chunk_ptr: usize, pc: u32) -> bool {
+        self.blacklisted.contains(&(chunk_ptr, pc))
     }
 
     /// Called by the interpreter at every backward jump.
@@ -77,11 +87,8 @@ impl JitState {
             return false; // already recording
         }
         let key = (chunk_ptr, pc);
-        // Already compiled or blacklisted?
+        // Already compiled?
         if self.compiled.contains_key(&key) {
-            return false;
-        }
-        if self.abort_counts.get(&key).copied().unwrap_or(0) >= MAX_ABORTS {
             return false;
         }
         let count = self.hot_counts.entry(key).or_insert(0);
@@ -109,6 +116,9 @@ impl JitState {
         let key = (chunk_ptr, pc);
         let cnt = self.abort_counts.entry(key).or_insert(0);
         *cnt += 1;
+        if *cnt >= MAX_ABORTS {
+            self.blacklisted.insert(key);
+        }
         // Reset hot counter so we don't immediately re-trigger.
         self.hot_counts.remove(&key);
     }

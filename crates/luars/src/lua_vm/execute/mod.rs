@@ -214,14 +214,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 match result {
                     crate::jit::trace::RecordResult::Continue => { /* keep going */ }
                     crate::jit::trace::RecordResult::LoopClosed => {
-                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
-                        let head_pc = lua_state.jit_state.recorder.as_ref().unwrap().head_pc;
-                        lua_state.jit_state.finish_recording(chunk_ptr, head_pc);
+                        // Use the recorder's stored head chunk_ptr (not the current
+                        // frame_idx, which may point to an inlined callee frame).
+                        let rec = lua_state.jit_state.recorder.as_ref().unwrap();
+                        let head_chunk = rec.head_chunk_ptr();
+                        let head_pc = rec.head_pc;
+                        lua_state.jit_state.finish_recording(head_chunk, head_pc);
                     }
                     crate::jit::trace::RecordResult::Abort(reason) => {
-                        let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
-                        let head_pc = lua_state.jit_state.recorder.as_ref().unwrap().head_pc;
-                        lua_state.jit_state.abort_recording(chunk_ptr, head_pc, reason);
+                        let rec = lua_state.jit_state.recorder.as_ref().unwrap();
+                        let head_chunk = rec.head_chunk_ptr();
+                        let head_pc = rec.head_pc;
+                        lua_state.jit_state.abort_recording(head_chunk, head_pc, reason);
                     }
                 }
             }
@@ -1039,6 +1043,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     #[cfg(feature = "jit")]
                     if pc < old_pc {
                         let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                        if lua_state.jit_state.is_blacklisted(chunk_ptr, pc as u32) {
+                            // skip — permanently excluded from JIT
+                        } else {
                         // Execute compiled trace if available
                         let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
                             .map(|ct| ct.fn_ptr);
@@ -1058,6 +1065,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                         if lua_state.jit_state.count_hot(chunk_ptr, pc as u32) {
                             lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
+                        }
                         }
                     }
                 }
@@ -1956,6 +1964,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 #[cfg(feature = "jit")]
                                 if !trap && lua_state.jit_state.state != crate::jit::trace::RecordState::Recording {
                                     let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                                    if !lua_state.jit_state.is_blacklisted(chunk_ptr, pc as u32) {
                                     let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
                                         .map(|ct| ct.fn_ptr);
                                     if let Some(fn_ptr) = trace_fn_ptr {
@@ -1974,6 +1983,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     }
                                     if lua_state.jit_state.count_hot(chunk_ptr, pc as u32) {
                                         lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
+                                    }
                                     }
                                 }
                             }
@@ -2008,6 +2018,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 #[cfg(feature = "jit")]
                                 if !trap && lua_state.jit_state.state != crate::jit::trace::RecordState::Recording {
                                     let chunk_ptr = lua_state.call_stack[frame_idx].chunk_ptr as usize;
+                                    if !lua_state.jit_state.is_blacklisted(chunk_ptr, pc as u32) {
                                     let trace_fn_ptr = lua_state.jit_state.get_compiled(chunk_ptr, pc as u32)
                                         .map(|ct| ct.fn_ptr);
                                     if let Some(fn_ptr) = trace_fn_ptr {
@@ -2026,6 +2037,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     }
                                     if lua_state.jit_state.count_hot(chunk_ptr, pc as u32) {
                                         lua_state.jit_state.start_recording(chunk_ptr, pc as u32, base);
+                                    }
                                     }
                                 }
                             }
