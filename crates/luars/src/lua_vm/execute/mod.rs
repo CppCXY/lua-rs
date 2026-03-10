@@ -1000,9 +1000,51 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // else: metamethod
                 }
                 OpCode::Jmp => {
-                    // pc += sJ (pointer arithmetic, like C Lua)
                     let sj = instr.get_sj();
                     pc = (pc as isize + sj as isize) as usize;
+                    // Super-instruction: for backward loop jumps, inline the
+                    // target comparison to eliminate one dispatch cycle.
+                    // while-loop pattern: body → JMP back → LT/LE → ...
+                    if sj < 0 && !trap {
+                        let next = unsafe { *code.get_unchecked(pc) };
+                        match next.get_opcode() {
+                            OpCode::Lt => unsafe {
+                                let a2 = next.get_a() as usize;
+                                let b2 = next.get_b() as usize;
+                                let sp = lua_state.stack().as_ptr();
+                                let ra_p = sp.add(base + a2);
+                                let rb_p = sp.add(base + b2);
+                                if pttisinteger(ra_p) && pttisinteger(rb_p) {
+                                    pc += 1;
+                                    if (pivalue(ra_p) < pivalue(rb_p)) != next.get_k() {
+                                        pc += 1;
+                                    } else {
+                                        let jmp = *code.get_unchecked(pc);
+                                        pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                                    }
+                                    continue;
+                                }
+                            },
+                            OpCode::Le => unsafe {
+                                let a2 = next.get_a() as usize;
+                                let b2 = next.get_b() as usize;
+                                let sp = lua_state.stack().as_ptr();
+                                let ra_p = sp.add(base + a2);
+                                let rb_p = sp.add(base + b2);
+                                if pttisinteger(ra_p) && pttisinteger(rb_p) {
+                                    pc += 1;
+                                    if (pivalue(ra_p) <= pivalue(rb_p)) != next.get_k() {
+                                        pc += 1;
+                                    } else {
+                                        let jmp = *code.get_unchecked(pc);
+                                        pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                                    }
+                                    continue;
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
                 }
                 OpCode::Return => {
                     // return R[A], ..., R[A+B-2]
@@ -1028,7 +1070,32 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Handle return
                     return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
-                    continue 'startfunc;
+
+                    // Inline context restore (same as Return0/Return1) to avoid
+                    // full 'startfunc reload overhead on the hot path.
+                    let new_depth = lua_state.call_depth();
+                    if new_depth <= target_depth {
+                        return Ok(());
+                    }
+                    frame_idx = new_depth - 1;
+
+                    // Cold check: C frame or pending finish → full startfunc
+                    let cs = lua_state.get_call_info(frame_idx).call_status;
+                    if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
+                        continue 'startfunc;
+                    }
+
+                    // Hot path: restore caller context directly
+                    let ci = lua_state.get_call_info(frame_idx);
+                    base = ci.base;
+                    let ci_pc = ci.pc as usize;
+                    let caller_chunk = unsafe { &*ci.chunk_ptr };
+                    code = &caller_chunk.code;
+                    constants = &caller_chunk.constants;
+                    pc = ci_pc;
+                    if lua_state.hook_mask != 0 {
+                        lua_state.oldpc = (ci_pc - 1) as u32;
+                    }
                 }
                 OpCode::Return0 => {
                     // return (no values)
@@ -2427,27 +2494,40 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::Lt => {
-                    // LT fast path: inline integer/float comparison
-                    // Avoids exec_lt function call overhead for the common case
+                    // LT fast path: raw pointer ops + donextjump (like C Lua's docondjump)
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let k = instr.get_k();
 
+                    unsafe {
+                        let sp = lua_state.stack().as_ptr();
+                        let ra_ptr = sp.add(base + a);
+                        let rb_ptr = sp.add(base + b);
+
+                        if pttisinteger(ra_ptr) && pttisinteger(rb_ptr) {
+                            if (pivalue(ra_ptr) < pivalue(rb_ptr)) != k {
+                                pc += 1;
+                            } else {
+                                // donextjump: inline the JMP instruction
+                                let jmp = *code.get_unchecked(pc);
+                                pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                            }
+                            continue;
+                        }
+                        if pttisfloat(ra_ptr) && pttisfloat(rb_ptr) {
+                            if (pfltvalue(ra_ptr) < pfltvalue(rb_ptr)) != k {
+                                pc += 1;
+                            } else {
+                                let jmp = *code.get_unchecked(pc);
+                                pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                            }
+                            continue;
+                        }
+                    }
+                    // Cold path: metamethods
                     let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
                     let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
-
-                    if ra.ttisinteger() && rb.ttisinteger() {
-                        let cond = ra.ivalue() < rb.ivalue();
-                        if cond != k {
-                            pc += 1;
-                        }
-                    } else if ra.ttisfloat() && rb.ttisfloat() {
-                        let cond = ra.fltvalue() < rb.fltvalue();
-                        if cond != k {
-                            pc += 1;
-                        }
-                    } else if ra.tt == LUA_VTABLE {
-                        // Inline metatable lookup for __lt from first operand
+                    if ra.tt == LUA_VTABLE {
                         save_pc!();
                         if noinline::try_comp_meta_table(
                             lua_state,
@@ -2459,12 +2539,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )? {
                             continue 'startfunc;
                         }
-                        // Fall through: try rb's metatable or other types
                         let mut pc_idx = pc;
                         comparison_ops::exec_lt(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = pc_idx;
                     } else {
-                        // Try non-recursive metamethod fast path for rb table
                         if rb.tt == LUA_VTABLE {
                             save_pc!();
                             if cold::try_push_comp_mm_frame(
@@ -2484,26 +2562,39 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::Le => {
-                    // LE fast path: inline integer/float comparison
+                    // LE fast path: raw pointer ops + donextjump
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let k = instr.get_k();
 
+                    unsafe {
+                        let sp = lua_state.stack().as_ptr();
+                        let ra_ptr = sp.add(base + a);
+                        let rb_ptr = sp.add(base + b);
+
+                        if pttisinteger(ra_ptr) && pttisinteger(rb_ptr) {
+                            if (pivalue(ra_ptr) <= pivalue(rb_ptr)) != k {
+                                pc += 1;
+                            } else {
+                                let jmp = *code.get_unchecked(pc);
+                                pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                            }
+                            continue;
+                        }
+                        if pttisfloat(ra_ptr) && pttisfloat(rb_ptr) {
+                            if (pfltvalue(ra_ptr) <= pfltvalue(rb_ptr)) != k {
+                                pc += 1;
+                            } else {
+                                let jmp = *code.get_unchecked(pc);
+                                pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                            }
+                            continue;
+                        }
+                    }
+                    // Cold path: metamethods
                     let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
                     let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
-
-                    if ra.ttisinteger() && rb.ttisinteger() {
-                        let cond = ra.ivalue() <= rb.ivalue();
-                        if cond != k {
-                            pc += 1;
-                        }
-                    } else if ra.ttisfloat() && rb.ttisfloat() {
-                        let cond = ra.fltvalue() <= rb.fltvalue();
-                        if cond != k {
-                            pc += 1;
-                        }
-                    } else if ra.tt == LUA_VTABLE {
-                        // Inline metatable lookup for __le from first operand
+                    if ra.tt == LUA_VTABLE {
                         save_pc!();
                         if noinline::try_comp_meta_table(
                             lua_state,
@@ -2515,12 +2606,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         )? {
                             continue 'startfunc;
                         }
-                        // Fall through: try rb's metatable or other types
                         let mut pc_idx = pc;
                         comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc_idx)?;
                         pc = pc_idx;
                     } else {
-                        // Try non-recursive metamethod fast path for rb table
                         if rb.tt == LUA_VTABLE {
                             save_pc!();
                             if cold::try_push_comp_mm_frame(
@@ -2551,21 +2640,25 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::LtI => {
-                    // LTI fast path: if (R[A] < sB) ~= k then pc++
+                    // LTI fast path with donextjump
                     let a = instr.get_a() as usize;
                     let im = instr.get_sb();
                     let k = instr.get_k();
 
                     let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
                     if ra.ttisinteger() {
-                        let cond = ra.ivalue() < (im as i64);
-                        if cond != k {
+                        if (ra.ivalue() < (im as i64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else if ra.ttisfloat() {
-                        let cond = ra.fltvalue() < (im as f64);
-                        if cond != k {
+                        if (ra.fltvalue() < (im as f64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else {
                         // ra is not number, try inline metatable lookup for tables
@@ -2596,21 +2689,25 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::LeI => {
-                    // LEI fast path: if (R[A] <= sB) ~= k then pc++
+                    // LEI fast path with donextjump
                     let a = instr.get_a() as usize;
                     let im = instr.get_sb();
                     let k = instr.get_k();
 
                     let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
                     if ra.ttisinteger() {
-                        let cond = ra.ivalue() <= (im as i64);
-                        if cond != k {
+                        if (ra.ivalue() <= (im as i64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else if ra.ttisfloat() {
-                        let cond = ra.fltvalue() <= (im as f64);
-                        if cond != k {
+                        if (ra.fltvalue() <= (im as f64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else {
                         // Inline metatable lookup for __le
@@ -2641,21 +2738,25 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::GtI => {
-                    // GTI fast path
+                    // GTI fast path with donextjump
                     let a = instr.get_a() as usize;
                     let im = instr.get_sb();
                     let k = instr.get_k();
 
                     let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
                     if ra.ttisinteger() {
-                        let cond = ra.ivalue() > (im as i64);
-                        if cond != k {
+                        if (ra.ivalue() > (im as i64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else if ra.ttisfloat() {
-                        let cond = ra.fltvalue() > (im as f64);
-                        if cond != k {
+                        if (ra.fltvalue() > (im as f64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else {
                         // GTI: R[A] > im is equivalent to im < R[A]
@@ -2687,21 +2788,25 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
 
                 OpCode::GeI => {
-                    // GEI fast path
+                    // GEI fast path with donextjump
                     let a = instr.get_a() as usize;
                     let im = instr.get_sb();
                     let k = instr.get_k();
 
                     let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
                     if ra.ttisinteger() {
-                        let cond = ra.ivalue() >= (im as i64);
-                        if cond != k {
+                        if (ra.ivalue() >= (im as i64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else if ra.ttisfloat() {
-                        let cond = ra.fltvalue() >= (im as f64);
-                        if cond != k {
+                        if (ra.fltvalue() >= (im as f64)) != k {
                             pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
                         }
                     } else {
                         // GEI: R[A] >= im is equivalent to im <= R[A]
