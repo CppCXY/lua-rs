@@ -1819,6 +1819,119 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         continue;
                     }
 
+                    // Hot path #2: inline light C function call
+                    // Covers math.*, string.*, table.* etc (all light C functions).
+                    // Avoids handle_call overhead: redundant func reload, is_lua_function
+                    // recheck, 3-way type dispatch in call_c_function.
+                    if func.ttiscfunction() {
+                        let c_func = func.fvalue();
+
+                        // Compute nargs & set stack top
+                        let nargs = if b != 0 {
+                            lua_state.set_top_raw(func_idx + b);
+                            b - 1
+                        } else {
+                            let current_top = lua_state.get_top();
+                            if current_top > func_idx + 1 {
+                                current_top - func_idx - 1
+                            } else {
+                                0
+                            }
+                        };
+                        let nresults = if c == 0 { -1i32 } else { (c - 1) as i32 };
+                        let call_base = func_idx + 1;
+
+                        save_pc!();
+                        lua_state.push_c_frame(&func, call_base, nargs, nresults)?;
+
+                        // Call hook (cold — almost never set)
+                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
+                            && lua_state.allow_hook
+                        {
+                            let narg = nargs as i32;
+                            lua_state.run_hook(crate::lua_vm::LUA_HOOKCALL, -1, 1, narg)?;
+                        }
+
+                        // Direct C function call (no 3-way type dispatch)
+                        let n = c_func(lua_state)?;
+
+                        // Return hook (cold)
+                        let stack_top = lua_state.get_top();
+                        let first_result = if stack_top >= n {
+                            stack_top - n
+                        } else {
+                            call_base
+                        };
+                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0
+                            && lua_state.allow_hook
+                        {
+                            let ftransfer = (first_result - call_base + 1) as i32;
+                            lua_state.run_hook(
+                                crate::lua_vm::LUA_HOOKRET,
+                                -1,
+                                ftransfer,
+                                n as i32,
+                            )?;
+                        }
+
+                        // Pop C frame
+                        lua_state.pop_c_frame();
+
+                        // oldpc for same-line hook suppression
+                        lua_state.oldpc = (pc - 1) as u32;
+
+                        // Inline result move
+                        unsafe {
+                            let stack = lua_state.stack_mut();
+                            match nresults {
+                                1 => {
+                                    *stack.get_unchecked_mut(func_idx) = if n > 0 {
+                                        *stack.get_unchecked(first_result)
+                                    } else {
+                                        LuaValue::nil()
+                                    };
+                                }
+                                0 => {}
+                                _ if nresults > 0 => {
+                                    let wanted = nresults as usize;
+                                    let copy_count = n.min(wanted);
+                                    for i in 0..copy_count {
+                                        *stack.get_unchecked_mut(func_idx + i) =
+                                            *stack.get_unchecked(first_result + i);
+                                    }
+                                    for i in copy_count..wanted {
+                                        *stack.get_unchecked_mut(func_idx + i) = LuaValue::nil();
+                                    }
+                                }
+                                _ => {
+                                    // MULTRET
+                                    for i in 0..n {
+                                        *stack.get_unchecked_mut(func_idx + i) =
+                                            *stack.get_unchecked(first_result + i);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Restore caller top
+                        if nresults == -1 {
+                            let new_top = func_idx + n;
+                            let ci_top = lua_state.get_call_info(frame_idx).top as usize;
+                            if ci_top < new_top {
+                                lua_state.get_call_info_mut(frame_idx).top = new_top as u32;
+                            }
+                            lua_state.set_top_raw(new_top);
+                        } else {
+                            let frame_top_caller = lua_state.get_call_info(frame_idx).top as usize;
+                            lua_state.set_top_raw(frame_top_caller);
+                        }
+
+                        // Reload base (C function may have resized stack)
+                        base = lua_state.get_frame_base(frame_idx);
+                        updatetrap!();
+                        continue;
+                    }
+
                     // Semi-cold path: __call metamethod on table
                     if func.ttistable() {
                         save_pc!();
@@ -1827,7 +1940,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    // Cold path: C function or non-table __call metamethod
+                    // Cold path: cclosure, rclosure, or non-table __call metamethod
                     save_pc!();
                     match call::handle_call(lua_state, base, a, b, c, 0) {
                         Ok(FrameAction::Continue) => {
