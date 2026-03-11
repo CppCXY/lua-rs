@@ -699,3 +699,171 @@ fn call_c_function_tailcall(
 
     Ok(())
 }
+
+/// Like C Lua's `luaD_precall`
+/// Caller MUST set stack top before calling:
+///   `if b != 0 { lua_state.set_top_raw(func_idx + b); }`
+///
+/// Returns:
+///   `Ok(true)`  — Lua call: new frame pushed, caller should `continue 'startfunc`
+///   `Ok(false)` — C call: completed inline, caller should `updatetrap` + continue
+#[inline(never)]
+pub fn precall(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    nresults: i32,
+) -> LuaResult<bool> {
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+
+    // Hot path: Lua function
+    if func.is_lua_function() {
+        let lua_func = unsafe { func.as_lua_function_unchecked() };
+        let chunk = lua_func.chunk();
+        let narg = lua_state.get_top() - func_idx - 1;
+        lua_state.push_lua_frame(
+            &func,
+            func_idx + 1,
+            narg,
+            nresults,
+            chunk.param_count,
+            chunk.max_stack_size,
+            chunk as *const _,
+        )?;
+        return Ok(true);
+    }
+
+    // Hot path #2: C callable (light C function, CClosure, RClosure)
+    if func.is_c_callable() {
+        let nargs = lua_state.get_top() - func_idx - 1;
+        call_c_function(lua_state, func_idx, nargs, nresults)?;
+        return Ok(false);
+    }
+
+    // Cold: __call metamethod, userdata lua_call, or error
+    precall_meta(lua_state, func_idx, nresults)
+}
+
+/// Cold path for precall: resolve __call chain then retry.
+#[cold]
+#[inline(never)]
+fn precall_meta(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    nresults: i32,
+) -> LuaResult<bool> {
+    let nargs = lua_state.get_top() - func_idx - 1;
+    let (_, ccmt_depth) = resolve_call_chain(lua_state, func_idx, nargs)?;
+
+    // After resolution, func_idx has the real callable
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let nargs = lua_state.get_top() - func_idx - 1;
+
+    if func.is_lua_function() {
+        let lua_func = unsafe { func.as_lua_function_unchecked() };
+        let chunk = lua_func.chunk();
+        lua_state.push_lua_frame(
+            &func,
+            func_idx + 1,
+            nargs,
+            nresults,
+            chunk.param_count,
+            chunk.max_stack_size,
+            chunk as *const _,
+        )?;
+        if ccmt_depth > 0 {
+            let fi = lua_state.call_depth() - 1;
+            let status = call_status::set_ccmt_count(0, ccmt_depth);
+            lua_state.get_call_info_mut(fi).call_status |= status;
+        }
+        return Ok(true);
+    }
+
+    if func.is_c_callable() {
+        call_c_function(lua_state, func_idx, nargs, nresults)?;
+        return Ok(false);
+    }
+
+    Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
+}
+
+/// Like C Lua's `luaD_pretailcall` (ldo.c:668-713).
+/// Caller MUST set stack top and close upvalues before calling.
+///
+/// `narg1`: number of arguments + 1 (includes the function itself), matching C Lua.
+///
+/// Returns:
+///   `Ok(true)`  — Lua tail call: CI reused in place, caller should `continue 'startfunc`
+///   `Ok(false)` — C tail call: completed, caller continues (falls to next instruction)
+#[inline(never)]
+pub fn pretailcall(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    narg1: usize,
+    frame_idx: usize,
+) -> LuaResult<bool> {
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+
+    // Hot path: Lua function
+    if func.is_lua_function() {
+        let lua_func = unsafe { func.as_lua_function_unchecked() };
+        let base = lua_state.get_call_info(frame_idx).base;
+        pretailcall_lua(
+            lua_state,
+            func,
+            lua_func,
+            func_idx,
+            base,
+            narg1 - 1,
+            frame_idx,
+        )?;
+        return Ok(true);
+    }
+
+    // C callable
+    if func.is_c_callable() {
+        let base = lua_state.get_call_info(frame_idx).base;
+        call_c_function_tailcall(lua_state, func_idx, narg1 - 1, base)?;
+        return Ok(false);
+    }
+
+    // Cold: __call metamethod
+    pretailcall_meta(lua_state, func_idx, narg1, frame_idx)
+}
+
+/// Cold path for pretailcall: resolve __call chain then retry.
+#[cold]
+#[inline(never)]
+fn pretailcall_meta(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    narg1: usize,
+    frame_idx: usize,
+) -> LuaResult<bool> {
+    let nargs = narg1 - 1;
+    let (actual_nargs, _) = resolve_call_chain(lua_state, func_idx, nargs)?;
+
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+
+    if func.is_lua_function() {
+        let lua_func = unsafe { func.as_lua_function_unchecked() };
+        let base = lua_state.get_call_info(frame_idx).base;
+        pretailcall_lua(
+            lua_state,
+            func,
+            lua_func,
+            func_idx,
+            base,
+            actual_nargs,
+            frame_idx,
+        )?;
+        return Ok(true);
+    }
+
+    if func.is_c_callable() {
+        let base = lua_state.get_call_info(frame_idx).base;
+        call_c_function_tailcall(lua_state, func_idx, actual_nargs, base)?;
+        return Ok(false);
+    }
+
+    Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
+}
