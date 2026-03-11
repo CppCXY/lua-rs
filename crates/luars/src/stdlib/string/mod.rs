@@ -273,35 +273,33 @@ fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'string.lower' (string expected)".to_string()));
     };
 
+    // Simple byte-by-byte loop matching C Lua's str_lower.
+    // Lua's string.lower is byte-oriented (not Unicode-aware).
+    let bytes = s.as_bytes();
+    let len = bytes.len();
     let vm = l.vm_mut();
-    if s.is_ascii() {
-        let bytes = s.as_bytes();
-        let len = bytes.len();
-        // Stack buffer for short strings (covers most Lua strings)
-        if len <= 256 {
-            let mut buf = [0u8; 256];
-            for i in 0..len {
-                buf[i] = bytes[i].to_ascii_lowercase();
-            }
-            // SAFETY: ASCII lowercase of valid ASCII is valid UTF-8
-            let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-            let result = vm.create_string(result_str)?;
-            l.push_value(result)?;
-        } else {
-            let result = s.to_ascii_lowercase();
-            let result = vm.create_string_owned(result)?;
-            l.push_value(result)?;
+    if len <= 256 {
+        let mut buf = [0u8; 256];
+        for i in 0..len {
+            buf[i] = bytes[i].to_ascii_lowercase();
         }
+        let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+        let result = vm.create_string(result_str)?;
+        l.push_value(result)?;
     } else {
-        let result = s.to_lowercase();
-        let result = vm.create_string_owned(result)?;
+        let mut buf = vec![0u8; len];
+        for i in 0..len {
+            buf[i] = bytes[i].to_ascii_lowercase();
+        }
+        let result_str = unsafe { String::from_utf8_unchecked(buf) };
+        let result = vm.create_string_owned(result_str)?;
         l.push_value(result)?;
     }
     Ok(1)
 }
 
 /// string.upper(s) - Convert to uppercase
-/// OPTIMIZED: ASCII stack-buffer fast path, avoids heap allocation for short strings
+/// Simple byte-by-byte loop matching C Lua's str_upper.
 fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'string.upper' (string expected)".to_string())
@@ -310,27 +308,24 @@ fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'string.upper' (string expected)".to_string()));
     };
 
+    let bytes = s.as_bytes();
+    let len = bytes.len();
     let vm = l.vm_mut();
-    if s.is_ascii() {
-        let bytes = s.as_bytes();
-        let len = bytes.len();
-        if len <= 256 {
-            let mut buf = [0u8; 256];
-            for i in 0..len {
-                buf[i] = bytes[i].to_ascii_uppercase();
-            }
-            // SAFETY: ASCII uppercase of valid ASCII is valid UTF-8
-            let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-            let result = vm.create_string(result_str)?;
-            l.push_value(result)?;
-        } else {
-            let result = s.to_ascii_uppercase();
-            let result = vm.create_string_owned(result)?;
-            l.push_value(result)?;
+    if len <= 256 {
+        let mut buf = [0u8; 256];
+        for i in 0..len {
+            buf[i] = bytes[i].to_ascii_uppercase();
         }
+        let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+        let result = vm.create_string(result_str)?;
+        l.push_value(result)?;
     } else {
-        let result = s.to_uppercase();
-        let result = vm.create_string_owned(result)?;
+        let mut buf = vec![0u8; len];
+        for i in 0..len {
+            buf[i] = bytes[i].to_ascii_uppercase();
+        }
+        let result_str = unsafe { String::from_utf8_unchecked(buf) };
+        let result = vm.create_string_owned(result_str)?;
         l.push_value(result)?;
     }
     Ok(1)

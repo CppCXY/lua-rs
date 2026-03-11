@@ -103,10 +103,8 @@ pub fn call_c_function(
     // RClosure has no raw fn ptr — handled via trait object.
     let c_func: Option<CFunction> = if let Some(f) = func.as_cfunction() {
         Some(f)
-    } else if let Some(cc) = func.as_cclosure() {
-        Some(cc.func())
     } else {
-        None // RClosure — caller already verified is_c_callable
+        func.as_cclosure().map(|cc| cc.func())
     };
 
     let call_base = func_idx + 1;
