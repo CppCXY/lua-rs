@@ -17,8 +17,8 @@ use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_M
 use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 use crate::{
-    Chunk, CreateResult, GcObjectPtr, LuaRegistrable, LuaVM, StringPtr, TablePtr, ThreadPtr,
-    UpvaluePtr,
+    Chunk, CreateResult, GcObjectPtr, LuaAnyRef, LuaFunctionRef, LuaRegistrable, LuaTableRef,
+    LuaVM, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -4322,6 +4322,18 @@ impl LuaState {
             None => return 0,
         };
         lua_func.upvalues().len()
+    }
+
+    pub fn to_any_ref(&mut self, value: LuaValue) -> LuaAnyRef {
+        self.vm_mut().to_ref(value)
+    }
+
+    pub fn to_table_ref(&mut self, value: LuaValue) -> Option<LuaTableRef> {
+        self.vm_mut().to_table_ref(value)
+    }
+
+    pub fn to_function_ref(&mut self, value: LuaValue) -> Option<LuaFunctionRef> {
+        self.vm_mut().to_function_ref(value)
     }
 }
 
