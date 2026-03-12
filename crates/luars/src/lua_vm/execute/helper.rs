@@ -1,16 +1,12 @@
 use crate::{
-    Chunk, LuaResult, LuaValue,
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
-    lua_vm::{
-        LuaError, LuaState, TmKind,
-        call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL},
-        execute,
-        lua_limits::{EXTRA_STACK, MAXTAGLOOP},
-    },
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT}, lua_vm::{
+        call_info::call_status::{
+            CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
+        }, execute::{self, metamethod}, lua_limits::{EXTRA_STACK, MAXTAGLOOP}, LuaError, LuaState, TmKind
+    }, Chunk, LuaResult, LuaValue
 };
 
 /// Build hidden arguments for vararg functions
-/// Port of ltm.c:245-270 buildhiddenargs
 ///
 /// Initial stack:  func arg1 ... argn extra1 ...
 ///                 ^ ci->func                    ^ L->top
@@ -210,6 +206,22 @@ pub fn setnilvalue(v: &mut LuaValue) {
     *v = LuaValue::nil();
 }
 
+#[inline(always)]
+pub fn setobjs2s(l: &mut LuaState, a: usize, b: usize) {
+    let stack = l.stack_mut();
+    unsafe {
+        *stack.get_unchecked_mut(a) = *stack.get_unchecked(b);
+    }
+}
+
+#[inline(always)]
+pub fn setobj2s(l: &mut LuaState, a: usize, b: &LuaValue) {
+    let stack = l.stack_mut();
+    unsafe {
+        *stack.get_unchecked_mut(a) = *b;
+    }
+}
+
 /// luaV_shiftl - Shift integer x left by y positions.
 /// If y is negative, shifts right (LOGICAL/unsigned shift).
 /// Matches Lua 5.5's luaV_shiftl from lvm.c.
@@ -371,7 +383,7 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
 ///
 /// Optimized hot path: inline fasttm check for __index to avoid function call overhead.
 /// Matches Lua 5.5's luaV_finishget pattern.
-pub fn lookup_from_metatable(
+pub fn finishget(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
@@ -430,7 +442,7 @@ pub fn lookup_from_metatable(
 
         // If __index is a function, call it using call_tm_res
         if tm.is_function() {
-            let result = execute::metamethod::call_tm_res(lua_state, tm, t, *key)?;
+            let result = metamethod::call_tm_res(lua_state, tm, t, *key)?;
             return Ok(Some(result));
         }
 
@@ -966,8 +978,6 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 #[cold]
 #[inline(never)]
 pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<bool> {
-    use crate::lua_vm::call_info::call_status::{CIST_C, CIST_PENDING_FINISH};
-
     let ci = lua_state.get_call_info(frame_idx);
     if ci.call_status & CIST_C != 0 {
         finish_c_frame(lua_state, frame_idx)?;

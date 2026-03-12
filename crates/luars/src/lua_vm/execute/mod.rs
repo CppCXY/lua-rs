@@ -27,6 +27,7 @@ pub(crate) mod helper;
 mod hook;
 pub(crate) mod metamethod;
 mod return_handler;
+mod execute_loop;
 
 // Extracted opcode modules to reduce main loop size
 mod closure_vararg_ops;
@@ -220,7 +221,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
             if trap {
                 let chunk_ref = current_chunk!();
-                hook_check_instruction(lua_state, pc, chunk_ref, frame_idx)?;
+                // hook_check_instruction(lua_state, pc, chunk_ref, frame_idx)?;
                 updatetrap!();
             }
 
@@ -2044,7 +2045,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             lua_state.set_top(write_pos + 1)?;
                         }
                         save_pc!();
-                        match helper::lookup_from_metatable(lua_state, &table_value, key) {
+                        match helper::finishget(lua_state, &table_value, key) {
                             Ok(result) => {
                                 restore_state!();
                                 unsafe {

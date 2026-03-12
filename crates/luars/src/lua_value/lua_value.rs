@@ -733,6 +733,14 @@ impl LuaValue {
         }
     }
 
+    pub(crate) fn hvalue(&self) -> &LuaTable {
+        unsafe { &(*(self.value.ptr as *const GcTable)).data }
+    }
+
+    pub(crate) fn hvalue_mut(&self) -> &mut LuaTable {
+        unsafe { &mut (*(self.value.ptr as *mut GcTable)).data }
+    }
+
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_table_mut(&self) -> Option<&mut LuaTable> {
