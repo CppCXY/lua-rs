@@ -3998,6 +3998,25 @@ impl LuaState {
         Ok(work)
     }
 
+    #[inline(always)]
+    pub(crate) fn check_gc_in_loop(
+        &mut self,
+        ci: &mut CallInfo,
+        pc: usize,
+        c: usize,
+        trap: &mut bool,
+    ) {
+        let vm = unsafe { &mut *self.vm };
+        if vm.gc.gc_debt > 0 {
+            return;
+        }
+
+        ci.save_pc(pc);
+        self.set_top_raw(c);
+        vm.check_gc(self);
+        *trap = self.hook_mask != 0;
+    }
+
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
         let vm = unsafe { &mut *self.vm };
         vm.full_gc(self, false);

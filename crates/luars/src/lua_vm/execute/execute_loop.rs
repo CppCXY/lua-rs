@@ -5,6 +5,7 @@ use crate::{
         call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
         execute::{
             cold::{self},
+            concat::concat,
             helper::{
                 finishget, finishset, handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod,
                 lua_shiftl, lua_shiftr, luai_numpow, objlen, pfltvalue, pivalue, psetfltvalue,
@@ -47,7 +48,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             continue 'startfunc;
         }
 
-        let base = ci.base;
+        let mut base = ci.base;
         let pc_init = ci.pc as usize;
         let chunk = unsafe { &*ci.chunk_ptr };
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
@@ -115,14 +116,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             };
         }
 
+        macro_rules! updatebase {
+            () => {
+                base = ci.base;
+            };
+        }
+
+        macro_rules! savestate {
+            () => {
+                ci.save_pc(pc);
+                lua_state.set_top_raw(ci.top as usize);
+            };
+        }
+
         // MAINLOOP: Main instruction dispatch loop
         loop {
             let instr = unsafe { *code.get_unchecked(pc) }; // vmfetch
             pc += 1;
 
             if trap {
-                hook_check_instruction(lua_state, pc, chunk, ci)?;
-                updatetrap!();
+                trap = hook_check_instruction(lua_state, pc, chunk, ci)?;
+                updatebase!();
             }
 
             match instr.get_opcode() {
@@ -231,7 +245,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         setobj2s(lua_state, stack_id!(instr.get_a()), &value);
                     } else {
                         // Protect(luaV_finishget(L, upval, rc, ra, tag));
-                        ci.save_pc(pc);
+                        savestate!();
                         match finishget(lua_state, &upval_value, key) {
                             Ok(result) => {
                                 updatetrap!();
@@ -277,7 +291,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    ci.save_pc(pc);
+                    savestate!();
                     let result = match finishget(lua_state, &rb, &rc) {
                         Ok(result) => {
                             updatetrap!();
@@ -311,7 +325,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         continue;
                     }
 
-                    ci.save_pc(pc);
+                    savestate!();
                     let result = match finishget(lua_state, &rb, &LuaValue::integer(rc)) {
                         Ok(result) => {
                             updatetrap!();
@@ -347,7 +361,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         setobj2s(lua_state, stack_id!(instr.get_a()), &value);
                     } else {
                         // Protect(luaV_finishget(L, upval, rc, ra, tag));
-                        ci.save_pc(pc);
+                        savestate!();
                         match finishget(lua_state, &rb, key) {
                             Ok(result) => {
                                 updatetrap!();
@@ -398,7 +412,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         continue;
                     }
 
-                    ci.save_pc(pc);
+                    savestate!();
                     match finishset(lua_state, &upval_value, &key, rc) {
                         Ok(_) => {
                             updatetrap!();
@@ -449,10 +463,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             continue;
                         }
                     }
-
-                    ci.save_pc(pc);
                     let ra = ra.clone();
                     let rb = rb.clone();
+                    savestate!();
                     match finishset(lua_state, &ra, &rb, rc) {
                         Ok(_) => {
                             updatetrap!();
@@ -492,10 +505,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             continue;
                         }
                     }
-
-                    ci.save_pc(pc);
                     let ra = ra.clone();
                     let rb = LuaValue::integer(b);
+                    savestate!();
                     match finishset(lua_state, &ra, &rb, rc) {
                         Ok(_) => {
                             updatetrap!();
@@ -537,10 +549,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             continue;
                         }
                     }
-
-                    ci.save_pc(pc);
                     let ra = ra.clone();
                     let rb = rb.clone();
+                    savestate!();
                     match finishset(lua_state, &ra, &rb, rc) {
                         Ok(_) => {
                             updatetrap!();
@@ -578,18 +589,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let value = lua_state.create_table(vc as usize, vb as usize)?;
                     setobj2s(lua_state, stack_id!(a), &value);
 
-                    // Lua 5.5's OP_NEWTABLE: lower top to ra+1 then checkGC,
-                    // so the GC only scans up to the table (excludes stale
-                    // registers above). Then restore top to ci->top.
-                    // Use set_top_raw: stack was already grown by push_lua_frame.
-
-                    // TODO: try remove these save action
                     let new_top = base + a as usize + 1;
-                    ci.save_pc(pc);
-                    lua_state.set_top_raw(new_top);
-                    lua_state.check_gc()?;
-                    let frame_top = ci.top;
-                    lua_state.set_top_raw(frame_top as usize);
+                    // ci.save_pc(pc);
+                    // lua_state.set_top_raw(new_top);
+                    // lua_state.check_gc()?;
+                    // let frame_top = ci.top;
+                    // lua_state.set_top_raw(frame_top as usize);
+                    lua_state.check_gc_in_loop(ci, pc, new_top, &mut trap);
                 }
                 OpCode::Self_ => {
                     // SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
@@ -611,7 +617,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    ci.save_pc(pc);
+                    savestate!();
                     match finishget(lua_state, &rb, key) {
                         Ok(result) => {
                             updatetrap!();
@@ -1229,16 +1235,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
 
-                    let ra = stack_val!(a);
-                    let rb = stack_val!(b);
+                    let ra = *stack_val!(a);
+                    let rb = *stack_val!(b);
                     let pi = unsafe { *code.get_unchecked(pc - 2) };
                     let result_reg = pi.get_a();
 
                     let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
 
-                    ci.save_pc(pc);
+
+                    savestate!();
                     // Call metamethod (may change stack/base)
-                    match try_bin_tm(lua_state, *ra, *rb, result_reg, tm) {
+                    match try_bin_tm(lua_state, ra, rb, result_reg, tm) {
                         Ok(_) => {
                             updatetrap!();
                         }
@@ -1262,10 +1269,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Get tag method — unchecked since compiler guarantees valid TmKind in MMBIN instruction
                     let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
-
-                    ci.save_pc(pc);
                     let rb = LuaValue::integer(imm as i64);
                     let r = if flip { (rb, *ra) } else { (*ra, rb) };
+                    savestate!();
                     // Call metamethod (may change stack/base)
                     match try_bin_tm(lua_state, r.0, r.1, result_reg, tm) {
                         Ok(_) => {
@@ -1287,7 +1293,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let flip = instr.get_k();
                     let result_reg = pi.get_a();
 
-                    ci.save_pc(pc);
+                    savestate!();
                     let r = if flip { (imm, ra) } else { (ra, imm) };
                     // Call metamethod (may change stack/base)
                     match try_bin_tm(lua_state, r.0, r.1, result_reg, tm) {
@@ -1317,7 +1323,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         if tonumberns(&rb, &mut nb) {
                             setfltvalue(stack_val_mut!(a), -nb);
                         } else {
-                            ci.save_pc(pc);
+                            savestate!();
                             let result_reg = stack_id!(a);
                             // Call metamethod (may change stack/base)
                             match try_unary_tm(lua_state, rb, result_reg, TmKind::Unm) {
@@ -1345,7 +1351,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         setivalue(stack_val_mut!(a), !ib);
                     } else {
                         // Try non-recursive __bnot for tables/userdata
-                        ci.save_pc(pc);
+                        savestate!();
                         let result_reg = stack_id!(a);
                         // Fall through to recursive path (C function mm or error)
                         match try_unary_tm(lua_state, rb, result_reg, TmKind::Bnot) {
@@ -1379,6 +1385,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b();
                     let rb = *stack_val!(b);
                     objlen(lua_state, stack_id!(a), rb)?;
+                }
+                OpCode::Concat => {
+                    let a = instr.get_a();
+                    let n = instr.get_b();
+                    let concat_top = base + (a + n) as usize;
+                    lua_state.set_top_raw(concat_top);
+
+                    // ProtectNT
+                    ci.save_pc(pc);
+                    concat(lua_state, n as usize)?;
+                    updatetrap!();
+
+                    let top = lua_state.get_top();
+                    lua_state.check_gc_in_loop(ci, pc, top, &mut trap);
                 }
                 _ => {}
             }

@@ -44,7 +44,7 @@ use crate::{
         execute::{
             closure_handler::handle_closure,
             cold::{handle_close, handle_errnil, handle_getvarg, handle_len, handle_loadkx},
-            concat::handle_concat,
+            concat::concat,
             helper::{
                 handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr,
                 luai_numpow, pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
@@ -2186,7 +2186,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if concat_top > lua_state.get_top() {
                         lua_state.set_top_raw(concat_top);
                     }
-                    handle_concat(lua_state, instr, &mut base, frame_idx, pc)?;
+
+                    // concat(lua_state, instr, &mut base, frame_idx, pc)?;
                 }
 
                 OpCode::Eq => {
