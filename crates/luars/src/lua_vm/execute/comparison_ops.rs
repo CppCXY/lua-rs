@@ -11,16 +11,19 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{execute::helper::equalobj, Instruction, LuaError, LuaResult, LuaState},
+    lua_vm::{
+        Instruction, LuaError, LuaResult, LuaState,
+        execute::{
+            helper::equalobj,
+            number::{float_le_int, float_lt_int, int_le_float, int_lt_float},
+        },
+    },
 };
 
 use super::{
     cold,
-    helper::{
-        float_le_int, float_lt_int, fltvalue, int_le_float, int_lt_float, ivalue, tonumberns,
-        ttisfloat, ttisinteger, ttisstring,
-    },
-    metamethod::{self, TmKind},
+    helper::{fltvalue, ivalue, tonumberns, ttisfloat, ttisinteger, ttisstring},
+    metamethod::TmKind,
 };
 
 /// EQ: if ((R[A] == R[B]) ~= k) then pc++

@@ -101,3 +101,29 @@ pub fn lt_num(a: &LuaValue, b: &LuaValue) ->bool {
         }
     }
 }
+
+pub fn le_num(a: &LuaValue, b: &LuaValue) ->bool {
+    if ttisinteger(a) {
+        let ai = a.ivalue();
+        if ttisinteger(b) {
+            let bi = b.ivalue();
+            ai <= bi
+        } else if ttisfloat(b) {
+            int_le_float(ai, b.fltvalue())
+        } else {
+            // unrecachable: caller should have ensured both are numbers
+            false
+        }
+    } else{
+        let af = a.fltvalue();
+        if ttisfloat(b) {
+            let bf = b.fltvalue();
+            af <= bf
+        } else if ttisinteger(b) {
+            float_le_int(af, b.ivalue())
+        } else {
+            // unrecachable: caller should have ensured both are numbers
+            false
+        }
+    }
+}
