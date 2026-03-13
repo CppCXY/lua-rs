@@ -666,8 +666,8 @@ pub fn opinterror(
     l: &mut LuaState,
     p1_reg: u32,
     p2_reg: u32,
-    p1: &crate::LuaValue,
-    p2: &crate::LuaValue,
+    p1: &LuaValue,
+    p2: &LuaValue,
     op: &str,
 ) -> LuaError {
     // If p1 is not a number, blame p1; otherwise blame p2

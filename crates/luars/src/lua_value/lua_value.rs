@@ -637,7 +637,7 @@ impl LuaValue {
         if self.ttisinteger() {
             Some(self.ivalue())
         } else if self.ttisfloat() {
-            // Lua 5.4+ semantics: floats with zero fraction are integers
+            // Lua 5.5+ semantics: floats with zero fraction are integers
             // Use proper range check matching C Lua's lua_numbertointeger:
             // f must be in [i64::MIN, -(i64::MIN as f64)) since i64::MAX as f64
             // rounds up to 2^63 which is NOT representable as i64.

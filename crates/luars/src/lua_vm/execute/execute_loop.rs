@@ -1,14 +1,19 @@
 use crate::{
     CallInfo, Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LuaResult, LuaState, LuaValue, OpCode,
     lua_vm::{
-        LuaError,
-        call_info::call_status::{self, CIST_C, CIST_PENDING_FINISH},
+        LuaError, TmKind,
+        call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
         execute::{
+            cold::{self},
             helper::{
-                finishget, finishset, handle_pending_ops, setbfvalue, setbtvalue, setfltvalue,
-                setivalue, setnilvalue, setobj2s, setobjs2s,
+                finishget, finishset, handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod,
+                lua_shiftl, lua_shiftr, luai_numpow, objlen, pfltvalue, pivalue, psetfltvalue,
+                psetivalue, ptonumberns, pttisfloat, pttisinteger, setbfvalue, setbtvalue,
+                setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s, tointeger, tointegerns,
+                tonumberns, ttisinteger,
             },
             hook::{hook_check_instruction, hook_on_call},
+            metamethod::{try_bin_tm, try_unary_tm},
         },
         lua_limits::EXTRA_STACK,
     },
@@ -22,6 +27,7 @@ use crate::{
 /// Instead, each recursive CALL SITE (metamethods, pcall, resume, __close)
 /// increments/decrements n_ccalls around its call to lua_execute, mirroring
 /// Lua 5.5's luaD_call pattern.
+#[allow(unused)]
 pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<()> {
     // STARTFUNC: Function context switching point (like Lua C's startfunc label)
     'startfunc: loop {
@@ -292,8 +298,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a();
                     let b = instr.get_b();
                     let rc = instr.get_c() as i64;
-
-                    let stack = lua_state.stack();
                     let rb = stack_val!(b).clone();
                     if rb.is_table() {
                         // fast_geti
@@ -372,18 +376,26 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         key.is_short_string(),
                         "GetTabUp key must be short string for fast path"
                     );
+                    let mut hres = false;
                     // luaV_fastget
                     if upval_value.is_table() {
                         let table = upval_value.hvalue_mut();
-                        let native = &mut table.impl_table;
-                        if native.has_hash() && native.set_shortstr_unchecked(&key, rc) {
-                            if rc.is_collectable()
-                                && let Some(gc_ptr) = upval_value.as_gc_ptr()
-                            {
-                                lua_state.gc_barrier_back(gc_ptr);
+                        let meta = table.meta_ptr();
+                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
+                            let native = &mut table.impl_table;
+                            if native.has_hash() && native.set_shortstr_unchecked(&key, rc) {
+                                hres = true;
                             }
-                            continue;
                         }
+                    }
+
+                    if hres {
+                        if rc.is_collectable()
+                            && let Some(gc_ptr) = upval_value.as_gc_ptr()
+                        {
+                            lua_state.gc_barrier_back(gc_ptr);
+                        }
+                        continue;
                     }
 
                     ci.save_pc(pc);
@@ -403,101 +415,970 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // SETTABLE: R[A][R[B]] := RK(C)
                     let ra = stack_val!(instr.get_a());
                     let rb = stack_val!(instr.get_b());
-                    let rc = k_val!(instr.get_c());
-                    // if unsafe { (*ra_ptr).tt } == LUA_VTABLE {
-                    //     let table_gc = unsafe { &mut *((*ra_ptr).value.ptr as *mut GcTable) };
-                    //     let table_ref = &mut table_gc.data;
-                    //     if !table_ref.has_metatable() {
-                    //         // No metatable: try integer fast path first (t[i] = v)
-                    //         if unsafe { pttisinteger(rb_ptr) } {
-                    //             let ikey = unsafe { (*rb_ptr).value.i };
-                    //             if unsafe { table_ref.impl_table.fast_seti_ptr(ikey, val_ptr) } {
-                    //                 if unsafe { (*val_ptr).tt } & 0x40 != 0 {
-                    //                     lua_state.gc_barrier_back(unsafe {
-                    //                         (*ra_ptr).as_gc_ptr_table_unchecked()
-                    //                     });
-                    //                 }
-                    //                 continue;
-                    //             }
-                    //             let val = unsafe { *val_ptr };
-                    //             let delta = table_ref.impl_table.set_int_slow(ikey, val);
-                    //             if delta != 0 {
-                    //                 lua_state.gc_track_table_resize(
-                    //                     unsafe { (*ra_ptr).as_table_ptr_unchecked() },
-                    //                     delta,
-                    //                 );
-                    //             }
-                    //             if val.is_collectable() {
-                    //                 lua_state.gc_barrier_back(unsafe {
-                    //                     (*ra_ptr).as_gc_ptr_table_unchecked()
-                    //                 });
-                    //             }
-                    //             continue;
-                    //         }
-                    //         // Non-integer key: validate then raw_set
-                    //         let rb = unsafe { *rb_ptr };
-                    //         if rb.is_nil() {
-                    //             return Err(cold::error_table_index_nil(lua_state));
-                    //         }
-                    //         if rb.ttisfloat() && rb.fltvalue().is_nan() {
-                    //             return Err(cold::error_table_index_nan(lua_state));
-                    //         }
-                    //         let ra = unsafe { *ra_ptr };
-                    //         let val = unsafe { *val_ptr };
-                    //         lua_state.raw_set(&ra, rb, val);
-                    //         continue;
-                    //     }
-                    //     // Has metatable: if integer key with existing non-nil value
-                    //     // in array, __newindex is NOT consulted
-                    //     if unsafe { pttisinteger(rb_ptr) } {
-                    //         let val = unsafe { *val_ptr };
-                    //         if table_ref
-                    //             .impl_table
-                    //             .fast_seti_existing(unsafe { (*rb_ptr).value.i }, val)
-                    //         {
-                    //             if val.is_collectable() {
-                    //                 lua_state.gc_barrier_back(unsafe {
-                    //                     (*ra_ptr).as_gc_ptr_table_unchecked()
-                    //                 });
-                    //             }
-                    //             continue;
-                    //         }
-                    //     }
-                    //     // Generic non-integer existing key check
-                    //     let rb = unsafe { *rb_ptr };
-                    //     if let Some(existing) = table_ref.impl_table.raw_get(&rb)
-                    //         && !existing.is_nil()
-                    //     {
-                    //         let ra = unsafe { *ra_ptr };
-                    //         let val = unsafe { *val_ptr };
-                    //         lua_state.raw_set(&ra, rb, val);
-                    //         continue;
-                    //     }
-                    //     // Noinline __newindex fast path
-                    //     let meta = table_ref.meta_ptr();
-                    //     if !meta.is_null() {
-                    //         save_pc!();
-                    //         let ra = unsafe { *ra_ptr };
-                    //         let val = unsafe { *val_ptr };
-                    //         if noinline::try_newindex_meta(lua_state, meta, ra, rb, val, frame_idx)?
-                    //         {
-                    //             continue 'startfunc;
-                    //         }
-                    //     }
-                    // }
+                    let rc = k_val!(instr.get_c()).clone();
 
-                    // // Cold: metatable __newindex chain or non-table
-                    // save_pc!();
-                    // let mut pc_idx = pc;
-                    // table_ops::exec_settable(
-                    //     lua_state,
-                    //     instr,
-                    //     constants,
-                    //     base,
-                    //     frame_idx,
-                    //     &mut pc_idx,
-                    // )?;
-                    // pc = pc_idx;
+                    if ra.is_table() {
+                        let mut hres = false;
+                        let table = ra.hvalue_mut();
+                        let meta = table.meta_ptr();
+                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
+                            let native = &mut table.impl_table;
+                            if rb.ttisinteger() {
+                                if native.fast_seti(rb.ivalue(), rc) {
+                                    hres = true;
+                                }
+                            } else if rb.is_short_string()
+                                && native.has_hash()
+                                && native.set_shortstr_unchecked(rb, rc)
+                            {
+                                hres = true;
+                            } else {
+                                let rb_clone = rb.clone();
+                                if native.has_hash() && native.raw_set(&rb_clone, rc).0 {
+                                    hres = true;
+                                }
+                            }
+                        }
+
+                        if hres {
+                            if rc.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
+                        }
+                    }
+
+                    ci.save_pc(pc);
+                    let ra = ra.clone();
+                    let rb = rb.clone();
+                    match finishset(lua_state, &ra, &rb, rc) {
+                        Ok(_) => {
+                            updatetrap!();
+                        }
+                        Err(LuaError::Yield) => {
+                            ci.pending_finish_get = -2;
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                OpCode::SetI => {
+                    // SETI: R[A][B] := RK(C) (integer key)
+                    // Pointer-based: avoid 16B LuaValue copies on fast path
+                    let ra = stack_val!(instr.get_a());
+                    let b = instr.get_b() as i64;
+                    let rc = k_val!(instr.get_c()).clone();
+
+                    if ra.is_table() {
+                        let mut hres = false;
+                        let table = ra.hvalue_mut();
+                        let meta = table.meta_ptr();
+                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
+                            let native = &mut table.impl_table;
+                            if native.fast_seti(b, rc) {
+                                hres = true;
+                            }
+                        }
+
+                        if hres {
+                            if rc.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
+                        }
+                    }
+
+                    ci.save_pc(pc);
+                    let ra = ra.clone();
+                    let rb = LuaValue::integer(b);
+                    match finishset(lua_state, &ra, &rb, rc) {
+                        Ok(_) => {
+                            updatetrap!();
+                        }
+                        Err(LuaError::Yield) => {
+                            ci.pending_finish_get = -2;
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                OpCode::SetField => {
+                    // SETFIELD: R[A][K[B]:string] := RK(C)
+                    let ra = stack_val!(instr.get_a());
+                    let rb = k_val!(instr.get_b());
+                    let rc = k_val!(instr.get_c()).clone();
+                    debug_assert!(
+                        rb.is_short_string(),
+                        "SetField key must be short string for fast path"
+                    );
+                    if ra.is_table() {
+                        let mut hres = false;
+                        let table = ra.hvalue_mut();
+                        let meta = table.meta_ptr();
+                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
+                            let native = &mut table.impl_table;
+                            if native.has_hash() && native.set_shortstr_unchecked(rb, rc) {
+                                hres = true;
+                            }
+                        }
+
+                        if hres {
+                            if rc.is_collectable()
+                                && let Some(gc_ptr) = ra.as_gc_ptr()
+                            {
+                                lua_state.gc_barrier_back(gc_ptr);
+                            }
+                            continue;
+                        }
+                    }
+
+                    ci.save_pc(pc);
+                    let ra = ra.clone();
+                    let rb = rb.clone();
+                    match finishset(lua_state, &ra, &rb, rc) {
+                        Ok(_) => {
+                            updatetrap!();
+                        }
+                        Err(LuaError::Yield) => {
+                            ci.pending_finish_get = -2;
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                OpCode::NewTable => {
+                    // R[A] := {} (new table) — table ops should be inlined
+                    let a = instr.get_a();
+                    let mut vb = instr.get_vb();
+                    let mut vc = instr.get_vc();
+                    let k = instr.get_k();
+
+                    vb = if vb > 0 {
+                        if vb > 31 { 0 } else { 1 << (vb - 1) }
+                    } else {
+                        0
+                    };
+
+                    if k {
+                        let extra_instr = unsafe { *code.get_unchecked(pc) };
+                        if extra_instr.get_opcode() == OpCode::ExtraArg {
+                            vc += extra_instr.get_ax() * 1024;
+                        }
+                    }
+
+                    pc += 1; // skip EXTRAARG
+
+                    let value = lua_state.create_table(vc as usize, vb as usize)?;
+                    setobj2s(lua_state, stack_id!(a), &value);
+
+                    // Lua 5.5's OP_NEWTABLE: lower top to ra+1 then checkGC,
+                    // so the GC only scans up to the table (excludes stale
+                    // registers above). Then restore top to ci->top.
+                    // Use set_top_raw: stack was already grown by push_lua_frame.
+
+                    // TODO: try remove these save action
+                    let new_top = base + a as usize + 1;
+                    ci.save_pc(pc);
+                    lua_state.set_top_raw(new_top);
+                    lua_state.check_gc()?;
+                    let frame_top = ci.top;
+                    lua_state.set_top_raw(frame_top as usize);
+                }
+                OpCode::Self_ => {
+                    // SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
+                    let a = instr.get_a();
+                    let rb = stack_val!(instr.get_b()).clone();
+                    let key = k_val!(instr.get_c());
+
+                    debug_assert!(
+                        key.is_short_string(),
+                        "Self key must be short string for fast path"
+                    );
+                    setobj2s(lua_state, stack_id!(a + 1), &rb);
+                    // Fast path: rb is a table
+                    if rb.ttistable() {
+                        let table = rb.hvalue();
+                        if let Some(val) = table.impl_table.get_shortstr_fast(key) {
+                            setobj2s(lua_state, stack_id!(a), &val);
+                            continue;
+                        }
+                    }
+
+                    ci.save_pc(pc);
+                    match finishget(lua_state, &rb, key) {
+                        Ok(result) => {
+                            updatetrap!();
+                            setobj2s(lua_state, stack_id!(a), &result.unwrap_or(LuaValue::nil()));
+                        }
+                        Err(LuaError::Yield) => {
+                            ci.pending_finish_get = a as i32;
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                }
+                OpCode::Add => {
+                    // op_arith(L, l_addi, luai_numadd)
+                    // R[A] := R[B] + R[C]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr)));
+                            pc += 1;
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) + pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 + n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::AddI => {
+                    // op_arithI(L, l_addi, luai_numadd)
+                    // R[A] := R[B] + sC
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let sc = instr.get_sc();
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        // Fast path: integer (most common)
+                        if pttisinteger(v1_ptr) {
+                            let iv1 = pivalue(v1_ptr);
+                            psetivalue(ra_ptr, iv1.wrapping_add(sc as i64));
+                            pc += 1; // Skip metamethod on success
+                        }
+                        // Slow path: float
+                        else if pttisfloat(v1_ptr) {
+                            let nb = pfltvalue(v1_ptr);
+                            psetfltvalue(ra_ptr, nb + (sc as f64));
+                            pc += 1; // Skip metamethod on success
+                        }
+                        // else: fall through to MMBINI (next instruction)
+                    }
+                }
+                OpCode::Sub => {
+                    // op_arith(L, l_subi, luai_numsub)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
+                            pc += 1;
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) - pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 - n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::Mul => {
+                    // op_arith(L, l_muli, luai_nummul)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
+                            pc += 1;
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) * pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 * n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::Div => {
+                    // op_arithf(L, luai_numdiv) - 浮点除法
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) / pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 / n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::IDiv => {
+                    // op_arith(L, luaV_idiv, luai_numidiv) - 整数除法
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_idiv(i1, i2));
+                                pc += 1;
+                            } else {
+                                ci.save_pc(pc);
+                                return Err(cold::error_div_by_zero(lua_state));
+                            }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor());
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, (n1 / n2).floor());
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::Mod => {
+                    // op_arith(L, luaV_mod, luaV_modf)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_imod(i1, i2));
+                                pc += 1;
+                            } else {
+                                ci.save_pc(pc);
+                                return Err(cold::error_mod_by_zero(lua_state));
+                            }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, lua_fmod(n1, n2));
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::Pow => {
+                    // op_arithf(L, luai_numpow)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = sp.add(base + c) as *const LuaValue;
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, luai_numpow(n1, n2));
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::AddK => {
+                    // op_arithK(L, l_addi, luai_numadd)
+                    // R[A] := R[B] + K[C]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr)));
+                            pc += 1;
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) + pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 + n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::SubK => {
+                    // R[A] := R[B] - K[C]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
+                            pc += 1;
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) - pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 - n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::MulK => {
+                    // R[A] := R[B] * K[C]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
+                            pc += 1;
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) * pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 * n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::ModK => {
+                    // R[A] := R[B] % K[C]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_imod(i1, i2));
+                                pc += 1;
+                            } else {
+                                ci.save_pc(pc);
+                                return Err(cold::error_mod_by_zero(lua_state));
+                            }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, lua_fmod(n1, n2));
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::PowK => {
+                    // R[A] := R[B] ^ K[C] (always float)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, luai_numpow(n1, n2));
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::DivK => {
+                    // R[A] := R[B] / K[C] (float division)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) / pfltvalue(v2_ptr));
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, n1 / n2);
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::IDivK => {
+                    // R[A] := R[B] // K[C] (floor division)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    unsafe {
+                        let sp = lua_state.stack_mut().as_mut_ptr();
+                        let v1_ptr = sp.add(base + b) as *const LuaValue;
+                        let v2_ptr = constants.as_ptr().add(c);
+                        let ra_ptr = sp.add(base + a);
+
+                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                            let i1 = pivalue(v1_ptr);
+                            let i2 = pivalue(v2_ptr);
+                            if i2 != 0 {
+                                psetivalue(ra_ptr, lua_idiv(i1, i2));
+                                pc += 1;
+                            } else {
+                                ci.save_pc(pc);
+                                return Err(cold::error_div_by_zero(lua_state));
+                            }
+                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
+                            psetfltvalue(ra_ptr, (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor());
+                            pc += 1;
+                        } else {
+                            let mut n1 = 0.0;
+                            let mut n2 = 0.0;
+                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
+                                psetfltvalue(ra_ptr, (n1 / n2).floor());
+                                pc += 1;
+                            }
+                        }
+                    }
+                }
+                OpCode::BAndK => {
+                    // R[A] := R[B] & K[C]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = k_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), i1 & i2);
+                    }
+                }
+                OpCode::BOrK => {
+                    // R[A] := R[B] | K[C]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = k_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), i1 | i2);
+                    }
+                }
+                OpCode::BXorK => {
+                    // R[A] := R[B] ^ K[C] (bitwise xor)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = k_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), i1 ^ i2);
+                    }
+                }
+                OpCode::BAnd => {
+                    // op_bitwise(L, l_band)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = stack_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), i1 & i2);
+                    }
+                }
+                OpCode::BOr => {
+                    // op_bitwise(L, l_bor)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = stack_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), i1 | i2);
+                    }
+                }
+                OpCode::BXor => {
+                    // op_bitwise(L, l_bxor)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = stack_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), i1 ^ i2);
+                    }
+                }
+                OpCode::Shl => {
+                    // op_bitwise(L, luaV_shiftl)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = stack_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), lua_shiftl(i1, i2));
+                    }
+                }
+                OpCode::Shr => {
+                    // op_bitwise(L, luaV_shiftr)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let c = instr.get_c() as usize;
+
+                    let v1 = stack_val!(b);
+                    let v2 = stack_val!(c);
+
+                    let mut i1 = 0i64;
+                    let mut i2 = 0i64;
+                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
+                        pc += 1;
+                        setivalue(stack_val_mut!(a), lua_shiftr(i1, i2));
+                    }
+                }
+                OpCode::ShlI => {
+                    // R[A] := sC << R[B]
+                    // Note: In Lua 5.5, SHLI is immediate << register (not register << immediate)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let ic = instr.get_sc(); // shift amount from immediate
+
+                    let rb = stack_val!(b);
+
+                    let mut ib = 0i64;
+                    if tointegerns(rb, &mut ib) {
+                        pc += 1;
+                        // luaV_shiftl(ic, ib): shift ic left by ib
+                        setivalue(stack_val_mut!(a), lua_shiftl(ic as i64, ib));
+                    }
+                    // else: metamethod
+                }
+                OpCode::ShrI => {
+                    // R[A] := R[B] >> sC
+                    // Logical right shift (Lua 5.5: luaV_shiftr)
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let ic = instr.get_sc(); // shift amount
+
+                    let rb = stack_val!(b);
+
+                    let mut ib = 0i64;
+                    if tointegerns(rb, &mut ib) {
+                        pc += 1;
+                        // luaV_shiftr(ib, ic) = luaV_shiftl(ib, -ic)
+                        setivalue(stack_val_mut!(a), lua_shiftr(ib, ic as i64));
+                    }
+                    // else: metamethod
+                }
+                OpCode::MmBin => {
+                    // Call metamethod over R[A] and R[B]
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+
+                    let ra = stack_val!(a);
+                    let rb = stack_val!(b);
+                    let pi = unsafe { *code.get_unchecked(pc - 2) };
+                    let result_reg = pi.get_a();
+
+                    let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
+
+                    ci.save_pc(pc);
+                    // Call metamethod (may change stack/base)
+                    match try_bin_tm(lua_state, *ra, *rb, result_reg, tm) {
+                        Ok(_) => {
+                            updatetrap!();
+                        }
+                        Err(LuaError::Yield) => {
+                            ci.pending_finish_get = result_reg as i32;
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                }
+                OpCode::MmBinI => {
+                    // Call metamethod over R[A] and immediate sB
+                    let a = instr.get_a() as usize;
+                    let imm = instr.get_sb();
+                    let flip = instr.get_k();
+
+                    let ra = stack_val!(a);
+                    let pi = unsafe { *code.get_unchecked(pc - 2) };
+                    let result_reg = pi.get_a();
+
+                    // Get tag method — unchecked since compiler guarantees valid TmKind in MMBIN instruction
+                    let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
+
+                    ci.save_pc(pc);
+                    let rb = LuaValue::integer(imm as i64);
+                    let r = if flip { (rb, *ra) } else { (*ra, rb) };
+                    // Call metamethod (may change stack/base)
+                    match try_bin_tm(lua_state, r.0, r.1, result_reg, tm) {
+                        Ok(_) => {
+                            updatetrap!();
+                        }
+                        Err(LuaError::Yield) => {
+                            ci.pending_finish_get = result_reg as i32;
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                }
+                OpCode::MmBinK => {
+                    let ra = *stack_val!(instr.get_a());
+                    let pi = unsafe { *code.get_unchecked(pc - 2) };
+                    let imm = *k_val!(instr.get_b());
+                    let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
+                    let flip = instr.get_k();
+                    let result_reg = pi.get_a();
+
+                    ci.save_pc(pc);
+                    let r = if flip { (imm, ra) } else { (ra, imm) };
+                    // Call metamethod (may change stack/base)
+                    match try_bin_tm(lua_state, r.0, r.1, result_reg, tm) {
+                        Ok(_) => {
+                            updatetrap!();
+                        }
+                        Err(LuaError::Yield) => {
+                            ci.pending_finish_get = result_reg as i32;
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                }
+                OpCode::Unm => {
+                    // 取负: -value
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+
+                    let rb = stack_val!(b).clone();
+
+                    if ttisinteger(&rb) {
+                        let ib = ivalue(&rb);
+                        setivalue(stack_val_mut!(a), ib.wrapping_neg());
+                    } else {
+                        let mut nb = 0.0;
+                        if tonumberns(&rb, &mut nb) {
+                            setfltvalue(stack_val_mut!(a), -nb);
+                        } else {
+                            ci.save_pc(pc);
+                            let result_reg = stack_id!(a);
+                            // Call metamethod (may change stack/base)
+                            match try_unary_tm(lua_state, rb, result_reg, TmKind::Unm) {
+                                Ok(_) => {
+                                    updatetrap!();
+                                }
+                                Err(LuaError::Yield) => {
+                                    ci.pending_finish_get = result_reg as i32;
+                                    ci.call_status |= CIST_PENDING_FINISH;
+                                    return Err(LuaError::Yield);
+                                }
+                                Err(e) => return Err(e),
+                            };
+                        }
+                    }
+                }
+                OpCode::BNot => {
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+
+                    let rb = stack_val!(b).clone();
+
+                    let mut ib = 0i64;
+                    if tointegerns(&rb, &mut ib) {
+                        setivalue(stack_val_mut!(a), !ib);
+                    } else {
+                        // Try non-recursive __bnot for tables/userdata
+                        ci.save_pc(pc);
+                        let result_reg = stack_id!(a);
+                        // Fall through to recursive path (C function mm or error)
+                        match try_unary_tm(lua_state, rb, result_reg, TmKind::Bnot) {
+                            Ok(_) => {
+                                updatetrap!();
+                            }
+                            Err(LuaError::Yield) => {
+                                ci.pending_finish_get = result_reg as i32;
+                                ci.call_status |= CIST_PENDING_FINISH;
+                                return Err(LuaError::Yield);
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                OpCode::Not => {
+                    // R[A] := not R[B]
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+
+                    let rb = stack_val!(b);
+                    if rb.ttisfalse() || rb.is_nil() {
+                        setbtvalue(stack_val_mut!(a));
+                    } else {
+                        setbfvalue(stack_val_mut!(a));
+                    }
+                }
+                OpCode::Len => {
+                    // HOT PATH: inline table length for no-metatable case
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+                    let rb = *stack_val!(b);
+                    objlen(lua_state, stack_id!(a), rb)?;
                 }
                 _ => {}
             }

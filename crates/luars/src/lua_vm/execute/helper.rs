@@ -1,8 +1,8 @@
 use crate::{
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT}, lua_vm::{
+    lua_value::{udvalue_to_lua_value, LUA_VNUMFLT, LUA_VNUMINT}, lua_vm::{
         call_info::call_status::{
             CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
-        }, execute::{self, metamethod}, lua_limits::{EXTRA_STACK, MAXTAGLOOP}, LuaError, LuaState, TmKind
+        }, execute::{self, call_tm_res, metamethod}, lua_limits::{EXTRA_STACK, MAXTAGLOOP}, LuaError, LuaState, TmKind
     }, Chunk, LuaResult, LuaValue
 };
 
@@ -1085,4 +1085,66 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
     ci_mut.pending_finish_get = -1;
     ci_mut.call_status &= !CIST_PENDING_FINISH;
     Ok(false) // continue to hot path
+}
+
+pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult<()> {
+    if let Some(s) = value.as_str() {
+        let len = s.len();
+        setivalue(
+            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+            len as i64,
+        );
+        return Ok(());
+    } else if let Some(bytes) = value.as_binary() {
+        let len = bytes.len();
+        setivalue(
+            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+            len as i64,
+        );
+        return Ok(());
+    } else if let Some(table) = value.as_table() {
+        let meta = table.meta_ptr();
+        if !meta.is_null() {
+            let mt = &mut meta.as_mut_ref().data;
+            const TM_LEN_BIT: u8 = TmKind::Len as u8;
+            if !mt.no_tm(TM_LEN_BIT) {
+                let event_key = l.vm_mut().const_strings.get_tm_value(TmKind::Len);
+                if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
+                    let result = call_tm_res(l, mm, value, value)?;
+                    setivalue(&mut l.stack_mut()[result_reg], result.as_integer().unwrap_or(0));
+                } else {
+                    mt.set_tm_absent(TM_LEN_BIT);
+                    setivalue(&mut l.stack_mut()[result_reg], table.len() as i64);
+                }
+            } else {
+                setivalue(&mut l.stack_mut()[result_reg], table.len() as i64);
+            }
+        } else {
+            setivalue(&mut l.stack_mut()[result_reg], table.len() as i64);
+        }
+        return Ok(());
+    } else {
+        // Try trait-based __len for userdata first
+        if value.ttisfulluserdata()
+            && let Some(ud) = value.as_userdata_mut()
+            && let Some(udv) = ud.get_trait().lua_len()
+        {
+            let result = udvalue_to_lua_value(l, udv)?;
+            setivalue(
+                unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+                result.as_integer().unwrap_or(0),
+            );
+            return Ok(());
+        }
+    }
+
+    let tm = get_metamethod_event(l, &value, TmKind::Len);
+    if let Some(tm) = tm {
+        let result = call_tm_res(l, tm, value, value)?;
+        setivalue(
+            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+            result.as_integer().unwrap_or(0),
+        );
+    }
+    Ok(())
 }
