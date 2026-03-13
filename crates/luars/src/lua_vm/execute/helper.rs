@@ -1,9 +1,14 @@
 use crate::{
-    lua_value::{udvalue_to_lua_value, LUA_VNUMFLT, LUA_VNUMINT}, lua_vm::{
+    Chunk, LuaResult, LuaValue,
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT, udvalue_to_lua_value},
+    lua_vm::{
+        LuaError, LuaState, TmKind,
         call_info::call_status::{
             CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
-        }, execute::{self, call_tm_res, metamethod}, lua_limits::{EXTRA_STACK, MAXTAGLOOP}, LuaError, LuaState, TmKind
-    }, Chunk, LuaResult, LuaValue
+        },
+        execute::{self, call_tm_res},
+        lua_limits::{EXTRA_STACK, MAXTAGLOOP},
+    },
 };
 
 /// Build hidden arguments for vararg functions
@@ -442,7 +447,7 @@ pub fn finishget(
 
         // If __index is a function, call it using call_tm_res
         if tm.is_function() {
-            let result = metamethod::call_tm_res(lua_state, tm, t, *key)?;
+            let result = call_tm_res(lua_state, tm, t, *key)?;
             return Ok(Some(result));
         }
 
@@ -691,81 +696,6 @@ pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaVa
     lua_state.vm_mut().get_basic_metatable(value.kind())
 }
 
-// ============================================================
-// Integer-Float comparison helpers (Lua 5.5 semantics)
-// These handle the tricky edge cases where converting to f64
-// loses precision (e.g., i64::MAX as f64 rounds to 2^63).
-// ============================================================
-
-/// Is integer i less than float f?  (i < f)
-/// Handles NaN, infinities, and precision loss at i64 boundaries.
-#[inline]
-pub fn int_lt_float(i: i64, f: f64) -> bool {
-    if f.is_nan() {
-        return false;
-    }
-    // i64::MAX as f64 = 2^63 (rounds up), so f >= 2^63 means f > any i64
-    if f >= (i64::MAX as f64) {
-        return true;
-    }
-    // i64::MIN as f64 = -2^63 (exact), so f < -2^63 means f < any i64
-    if f < (i64::MIN as f64) {
-        return false;
-    }
-    // f is in castable range: truncate toward zero
-    let fi = f as i64;
-    if i < fi {
-        true
-    } else if i > fi {
-        false
-    } else {
-        // i == fi: true iff f has a positive fractional part beyond fi
-        f > (fi as f64)
-    }
-}
-
-/// Is float f less than integer i?  (f < i)
-#[inline]
-pub fn float_lt_int(f: f64, i: i64) -> bool {
-    if f.is_nan() {
-        return false;
-    }
-    if f >= (i64::MAX as f64) {
-        return false;
-    }
-    if f < (i64::MIN as f64) {
-        return true;
-    }
-    let fi = f as i64;
-    if fi < i {
-        true
-    } else if fi > i {
-        false
-    } else {
-        // fi == i: true iff f has a negative fractional part (truncated away)
-        f < (fi as f64)
-    }
-}
-
-/// Is integer i less than or equal to float f?  (i <= f)
-#[inline]
-pub fn int_le_float(i: i64, f: f64) -> bool {
-    // NaN: i <= NaN is always false
-    if f.is_nan() {
-        return false;
-    }
-    !float_lt_int(f, i)
-}
-
-/// Is float f less than or equal to integer i?  (f <= i)
-#[inline]
-pub fn float_le_int(f: f64, i: i64) -> bool {
-    // NaN: NaN <= i is always false
-    if f.is_nan() {
-        return false;
-    }
-    !int_lt_float(i, f)
-}
 
 /// Finish a C frame left on the call stack after yield-resume.
 /// This is the Rust equivalent of Lua 5.5's finishCcall.
@@ -1111,7 +1041,10 @@ pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult
                 let event_key = l.vm_mut().const_strings.get_tm_value(TmKind::Len);
                 if let Some(mm) = mt.impl_table.get_shortstr_fast(&event_key) {
                     let result = call_tm_res(l, mm, value, value)?;
-                    setivalue(&mut l.stack_mut()[result_reg], result.as_integer().unwrap_or(0));
+                    setivalue(
+                        &mut l.stack_mut()[result_reg],
+                        result.as_integer().unwrap_or(0),
+                    );
                 } else {
                     mt.set_tm_absent(TM_LEN_BIT);
                     setivalue(&mut l.stack_mut()[result_reg], table.len() as i64);
@@ -1147,4 +1080,72 @@ pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult
         );
     }
     Ok(())
+}
+
+/// Equality comparison - direct port of Lua 5.5's luaV_equalobj
+/// Returns true if values are equal, false otherwise
+/// Handles metamethods for tables and userdata
+pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResult<bool> {
+    // Direct port of lvm.c:582 luaV_equalobj
+    if t1 == t2 {
+        return Ok(true);
+    }
+
+    if t1.tt() != t2.tt() {
+        return Ok(false);
+    }
+
+    if t1.ttisfulluserdata() {
+        // Userdata: first check identity
+        if let (Some(u_ptr1), Some(u_ptr2)) = (t1.as_userdata_ptr(), t2.as_userdata_ptr())
+            && u_ptr1 == u_ptr2
+        {
+            return Ok(true);
+        }
+        // Try trait-based lua_eq before metatable
+        if let Some(ud1) = t1.as_userdata_mut()
+            && let Some(ud2) = t2.as_userdata_mut()
+            && let Some(result) = ud1.get_trait().lua_eq(ud2.get_trait())
+        {
+            return Ok(result);
+        }
+        // Different userdata - try __eq metamethod
+        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
+
+        if let Some(metamethod) = tm {
+            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
+            return Ok(!result.is_falsy());
+        } else {
+            return Ok(false);
+        }
+    }
+
+    if t1.ttistable() {
+        // Tables: first check identity
+        if let (Some(t_ptr1), Some(t_ptr2)) = (t1.as_table_ptr(), t2.as_table_ptr())
+            && t_ptr1 == t_ptr2
+        {
+            return Ok(true);
+        }
+        // Different tables - try __eq metamethod
+        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
+        if let Some(metamethod) = tm {
+            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
+            return Ok(!result.is_falsy());
+        } else {
+            return Ok(false);
+        }
+    }
+
+    if t1.ttiscfunction() {
+        // C functions: compare function pointers
+        return Ok(unsafe { t1.value.f == t2.value.f });
+    }
+
+    // Lua functions, threads, etc.: compare GC pointers
+    if let (Some(f_ptr1), Some(f_ptr2)) = (t1.as_function_ptr(), t2.as_function_ptr()) {
+        return Ok(f_ptr1 == f_ptr2);
+    }
+
+    Ok(false)
 }

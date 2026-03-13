@@ -11,7 +11,7 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{Instruction, LuaError, LuaResult, LuaState},
+    lua_vm::{execute::helper::equalobj, Instruction, LuaError, LuaResult, LuaState},
 };
 
 use super::{
@@ -48,7 +48,7 @@ pub fn exec_eq(
 
     // Save PC before potential metamethod call
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    let cond = match metamethod::equalobj(lua_state, ra, rb) {
+    let cond = match equalobj(lua_state, ra, rb) {
         Ok(c) => c,
         Err(LuaError::Yield) => {
             use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;

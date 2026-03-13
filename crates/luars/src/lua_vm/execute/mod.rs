@@ -28,6 +28,7 @@ mod hook;
 pub(crate) mod metamethod;
 mod return_handler;
 mod execute_loop;
+mod number;
 
 // Extracted opcode modules to reduce main loop size
 mod closure_vararg_ops;
@@ -2186,8 +2187,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if concat_top > lua_state.get_top() {
                         lua_state.set_top_raw(concat_top);
                     }
-
-                    // concat(lua_state, instr, &mut base, frame_idx, pc)?;
+                    save_pc!();
+                    concat(lua_state, n)?;
+                    updatetrap!();
+                    lua_state.check_gc()?;
                 }
 
                 OpCode::Eq => {

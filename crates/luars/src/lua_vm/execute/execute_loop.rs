@@ -1,23 +1,21 @@
 use crate::{
-    CallInfo, Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LuaResult, LuaState, LuaValue, OpCode,
     lua_vm::{
-        LuaError, TmKind,
-        call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
-        execute::{
+        call_info::call_status::{CIST_C, CIST_PENDING_FINISH}, execute::{
             cold::{self},
             concat::concat,
             helper::{
-                finishget, finishset, handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod,
-                lua_shiftl, lua_shiftr, luai_numpow, objlen, pfltvalue, pivalue, psetfltvalue,
-                psetivalue, ptonumberns, pttisfloat, pttisinteger, setbfvalue, setbtvalue,
-                setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s, tointeger, tointegerns,
-                tonumberns, ttisinteger,
+                equalobj, finishget, finishset, float_lt_int, fltvalue, handle_pending_ops,
+                int_lt_float, ivalue, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr,
+                luai_numpow, objlen, pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns,
+                pttisfloat, pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue,
+                setnilvalue, setobj2s, setobjs2s, tointeger, tointegerns, tonumberns, ttisfloat,
+                ttisinteger, ttisstring,
             },
             hook::{hook_check_instruction, hook_on_call},
-            metamethod::{try_bin_tm, try_unary_tm},
-        },
-        lua_limits::EXTRA_STACK,
-    },
+            metamethod::{try_bin_tm, try_comp_tm, try_unary_tm},
+            number::lt_num,
+        }, lua_limits::EXTRA_STACK, LuaError, TmKind
+    }, CallInfo, Instruction, LuaResult, LuaState, LuaValue, OpCode, LUA_MASKCALL, LUA_MASKCOUNT
 };
 
 /// Execute until call depth reaches target_depth
@@ -1242,7 +1240,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
 
-
                     savestate!();
                     // Call metamethod (may change stack/base)
                     match try_bin_tm(lua_state, ra, rb, result_reg, tm) {
@@ -1399,6 +1396,383 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     let top = lua_state.get_top();
                     lua_state.check_gc_in_loop(ci, pc, top, &mut trap);
+                }
+                OpCode::Close => {
+                    let a = instr.get_a();
+                    let close_from = stack_id!(a);
+
+                    ci.save_pc(pc);
+                    match lua_state.close_all(close_from) {
+                        Ok(()) => {}
+                        Err(LuaError::Yield) => {
+                            ci.pc -= 1;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                OpCode::Tbc => {
+                    // Mark variable as to-be-closed
+                    let a = instr.get_a();
+                    lua_state.mark_tbc(stack_id!(a))?;
+                }
+                OpCode::Jmp => {
+                    let sj = instr.get_sj();
+                    pc = (pc as isize + sj as isize) as usize;
+                    updatetrap!();
+                }
+                OpCode::Eq => {
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+                    let ra = *stack_val!(a);
+                    let rb = *stack_val!(b);
+                    savestate!();
+                    let cond = match equalobj(lua_state, ra, rb) {
+                        Ok(eq) => eq,
+                        Err(LuaError::Yield) => {
+                            ci.call_status |= CIST_PENDING_FINISH;
+                            return Err(LuaError::Yield);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    updatetrap!();
+                    let k = instr.get_k();
+                    if cond != k {
+                        pc += 1;
+                    } else {
+                        let jmp = unsafe { *code.get_unchecked(pc) };
+                        pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        updatetrap!();
+                    }
+                }
+
+                OpCode::Lt => {
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+
+                    let cond = {
+                        let stack = lua_state.stack_mut();
+                        let ra = unsafe { stack.get_unchecked(stack_id!(a)) };
+                        let rb = unsafe { stack.get_unchecked(stack_id!(b)) };
+
+                        if ttisinteger(ra) && ttisinteger(rb) {
+                            ivalue(ra) < ivalue(rb)
+                        } else if (ra.is_number() && rb.is_number()) {
+                            lt_num(&ra, &rb)
+                        } else if ttisstring(ra) && ttisstring(rb) {
+                            // contain binary string comparison
+                            // String comparison
+                            let sa = ra.as_str_bytes();
+                            let sb = rb.as_str_bytes();
+
+                            if let (Some(sa), Some(sb)) = (sa, sb) {
+                                sa < sb
+                            } else {
+                                false
+                            }
+                        } else {
+                            let va = *ra;
+                            let vb = *rb;
+                            match try_comp_tm(lua_state, va, vb, TmKind::Lt) {
+                                Ok(Some(result)) => {
+                                    result
+                                }
+                                Ok(None) => {
+                                    return Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb))
+                                }
+                                Err(LuaError::Yield) => {
+                                    ci.call_status |= CIST_PENDING_FINISH;
+                                    return Err(LuaError::Yield)
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    };
+
+                    let k = instr.get_k();
+                    if cond != k {
+                        pc += 1;
+                    } else {
+                        let jmp = unsafe { *code.get_unchecked(pc) };
+                        pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        updatetrap!();
+                    }
+                }
+
+                OpCode::Le => {
+                    // LE fast path: raw pointer ops + donextjump
+                    let a = instr.get_a() as usize;
+                    let b = instr.get_b() as usize;
+                    let k = instr.get_k();
+
+                    unsafe {
+                        let sp = lua_state.stack().as_ptr();
+                        let ra_ptr = sp.add(base + a);
+                        let rb_ptr = sp.add(base + b);
+
+                        if pttisinteger(ra_ptr) && pttisinteger(rb_ptr) {
+                            if (pivalue(ra_ptr) <= pivalue(rb_ptr)) != k {
+                                pc += 1;
+                            } else {
+                                let jmp = *code.get_unchecked(pc);
+                                pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                            }
+                            continue;
+                        }
+                        if pttisfloat(ra_ptr) && pttisfloat(rb_ptr) {
+                            if (pfltvalue(ra_ptr) <= pfltvalue(rb_ptr)) != k {
+                                pc += 1;
+                            } else {
+                                let jmp = *code.get_unchecked(pc);
+                                pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                            }
+                            continue;
+                        }
+                    }
+                    // Cold path: metamethods
+                    let ra = unsafe { *lua_state.stack().get_unchecked(base + a) };
+                    let rb = unsafe { *lua_state.stack().get_unchecked(base + b) };
+                    if ra.tt == LUA_VTABLE {
+                        save_pc!();
+                        if noinline::try_comp_meta_table(
+                            lua_state,
+                            ra,
+                            ra,
+                            rb,
+                            TmKind::Le,
+                            frame_idx,
+                        )? {
+                            continue 'startfunc;
+                        }
+                        let mut pc_idx = pc;
+                        comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = pc_idx;
+                    } else {
+                        if rb.tt == LUA_VTABLE {
+                            save_pc!();
+                            if cold::try_push_comp_mm_frame(
+                                lua_state,
+                                ra,
+                                rb,
+                                TmKind::Le,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
+                        let mut pc_idx = pc;
+                        comparison_ops::exec_le(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = pc_idx;
+                    }
+                }
+                OpCode::EqK => {
+                    let mut pc_idx = pc;
+                    comparison_ops::exec_eqk(lua_state, instr, constants, base, &mut pc_idx)?;
+                    pc = pc_idx;
+                }
+
+                OpCode::EqI => {
+                    let mut pc_idx = pc;
+                    comparison_ops::exec_eqi(lua_state, instr, base, &mut pc_idx)?;
+                    pc = pc_idx;
+                }
+
+                OpCode::LtI => {
+                    // LTI fast path with donextjump
+                    let a = instr.get_a() as usize;
+                    let im = instr.get_sb();
+                    let k = instr.get_k();
+
+                    let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
+                    if ra.ttisinteger() {
+                        if (ra.ivalue() < (im as i64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else if ra.ttisfloat() {
+                        if (ra.fltvalue() < (im as f64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else {
+                        // ra is not number, try inline metatable lookup for tables
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            if noinline::try_comp_meta_table(
+                                lua_state,
+                                ra_val,
+                                ra_val,
+                                imm_val,
+                                TmKind::Lt,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
+                        let mut pc_idx = pc;
+                        comparison_ops::exec_lti(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = pc_idx;
+                    }
+                }
+
+                OpCode::LeI => {
+                    // LEI fast path with donextjump
+                    let a = instr.get_a() as usize;
+                    let im = instr.get_sb();
+                    let k = instr.get_k();
+
+                    let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
+                    if ra.ttisinteger() {
+                        if (ra.ivalue() <= (im as i64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else if ra.ttisfloat() {
+                        if (ra.fltvalue() <= (im as f64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else {
+                        // Inline metatable lookup for __le
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            if noinline::try_comp_meta_table(
+                                lua_state,
+                                ra_val,
+                                ra_val,
+                                imm_val,
+                                TmKind::Le,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
+                        let mut pc_idx = pc;
+                        comparison_ops::exec_lei(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = pc_idx;
+                    }
+                }
+
+                OpCode::GtI => {
+                    // GTI fast path with donextjump
+                    let a = instr.get_a() as usize;
+                    let im = instr.get_sb();
+                    let k = instr.get_k();
+
+                    let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
+                    if ra.ttisinteger() {
+                        if (ra.ivalue() > (im as i64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else if ra.ttisfloat() {
+                        if (ra.fltvalue() > (im as f64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else {
+                        // GTI: R[A] > im is equivalent to im < R[A]
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            // swap: __lt(imm, ra)
+                            if noinline::try_comp_meta_table(
+                                lua_state,
+                                ra_val,
+                                imm_val,
+                                ra_val,
+                                TmKind::Lt,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
+                        let mut pc_idx = pc;
+                        comparison_ops::exec_gti(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = pc_idx;
+                    }
+                }
+
+                OpCode::GeI => {
+                    // GEI fast path with donextjump
+                    let a = instr.get_a() as usize;
+                    let im = instr.get_sb();
+                    let k = instr.get_k();
+
+                    let ra = unsafe { lua_state.stack().get_unchecked(base + a) };
+                    if ra.ttisinteger() {
+                        if (ra.ivalue() >= (im as i64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else if ra.ttisfloat() {
+                        if (ra.fltvalue() >= (im as f64)) != k {
+                            pc += 1;
+                        } else {
+                            let jmp = unsafe { *code.get_unchecked(pc) };
+                            pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        }
+                    } else {
+                        // GEI: R[A] >= im is equivalent to im <= R[A]
+                        let ra_val = *ra;
+                        if ra_val.tt == LUA_VTABLE {
+                            let isf = instr.get_c() != 0;
+                            let imm_val = if isf {
+                                LuaValue::float(im as f64)
+                            } else {
+                                LuaValue::integer(im as i64)
+                            };
+                            save_pc!();
+                            // swap: __le(imm, ra)
+                            if noinline::try_comp_meta_table(
+                                lua_state,
+                                ra_val,
+                                imm_val,
+                                ra_val,
+                                TmKind::Le,
+                                frame_idx,
+                            )? {
+                                continue 'startfunc;
+                            }
+                        }
+                        let mut pc_idx = pc;
+                        comparison_ops::exec_gei(lua_state, instr, base, frame_idx, &mut pc_idx)?;
+                        pc = pc_idx;
+                    }
                 }
                 _ => {}
             }
