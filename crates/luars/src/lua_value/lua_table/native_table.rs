@@ -1694,6 +1694,7 @@ impl NativeTable {
     /// - 0 for nil (first iteration)
     /// - 1..asize for array indices
     /// - (asize+1)..(asize+hashsize) for hash indices
+    #[inline]
     fn findindex(&self, key: &LuaValue) -> Option<u32> {
         // First iteration
         if key.is_nil() {
@@ -1701,11 +1702,12 @@ impl NativeTable {
         }
 
         // Check if key is in array part (Lua 5.5's keyinarray).
-        // Only checks if integer key is in [1..asize] — does NOT check whether
-        // the slot is empty. This is critical for next() iteration: after setting
-        // t[k] = nil during pairs(), the slot is empty but findindex must still
-        // return the index so iteration can continue past deleted entries.
-        if let Some(i) = key.as_integer()
+        // Only integer keys (no float-to-int coercion) — matches C Lua's ttisinteger check.
+        // Does NOT check whether the slot is empty. This is critical for next()
+        // iteration: after setting t[k] = nil during pairs(), the slot is empty
+        // but findindex must still return the index so iteration can continue
+        // past deleted entries.
+        if let Some(i) = key.as_integer_strict()
             && i >= 1
             && i <= self.asize as i64
         {
@@ -1759,6 +1761,7 @@ impl NativeTable {
     /// Port of lua5.5's luaH_next.
     /// Returns Ok(Some((key, value))) for next entry, Ok(None) for end of table,
     /// or Err(()) for invalid key (key not found in table).
+    #[inline]
     pub fn next(&self, key: &LuaValue) -> Result<Option<(LuaValue, LuaValue)>, ()> {
         let asize = self.asize;
 
@@ -1773,9 +1776,14 @@ impl NativeTable {
             unsafe {
                 let tag = *self.get_arr_tag(i as usize);
                 if tag != LUA_VNIL && tag != LUA_VEMPTY {
-                    // Found a non-empty array entry
+                    // Found a non-empty array entry — read value directly
+                    // (skip read_array's redundant bounds check and tag re-read)
                     let lua_index = (i + 1) as i64;
-                    let value = self.read_array(lua_index).unwrap();
+                    let val_ptr = self.get_arr_val(i as usize);
+                    let value = LuaValue {
+                        value: *val_ptr,
+                        tt: tag,
+                    };
                     return Ok(Some((LuaValue::integer(lua_index), value)));
                 }
             }

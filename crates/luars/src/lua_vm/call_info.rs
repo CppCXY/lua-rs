@@ -186,6 +186,10 @@ impl CallInfo {
     pub fn set_tail(&mut self) {
         self.call_status |= call_status::CIST_TAIL;
     }
+
+    pub fn save_pc(&mut self, pc: usize) {
+        self.pc = pc as u32;
+    }
 }
 
 impl Default for CallInfo {

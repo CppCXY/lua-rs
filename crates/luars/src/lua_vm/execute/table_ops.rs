@@ -14,7 +14,7 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{Instruction, LuaError, LuaResult, LuaState},
+    lua_vm::{call_info::call_status, Instruction, LuaError, LuaResult, LuaState},
 };
 
 use super::helper;
@@ -41,7 +41,7 @@ pub fn exec_gettable(
     let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    let result = match helper::lookup_from_metatable(lua_state, &rb, &rc) {
+    let result = match helper::finishget(lua_state, &rb, &rc) {
         Ok(result) => {
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {
@@ -179,7 +179,7 @@ pub fn exec_geti(
     let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    let result = match helper::lookup_from_metatable(lua_state, &rb, &key) {
+    let result = match helper::finishget(lua_state, &rb, &key) {
         Ok(result) => {
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {
@@ -323,7 +323,7 @@ pub fn exec_getfield(
     let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    let result = match helper::lookup_from_metatable(lua_state, &rb, key) {
+    let result = match helper::finishget(lua_state, &rb, key) {
         Ok(result) => {
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {
@@ -334,7 +334,7 @@ pub fn exec_getfield(
         Err(LuaError::Yield) => {
             let ci = lua_state.get_call_info_mut(frame_idx);
             ci.pending_finish_get = a as i32;
-            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+            ci.call_status |= call_status::CIST_PENDING_FINISH;
             return Err(LuaError::Yield);
         }
         Err(e) => return Err(e),
@@ -463,7 +463,7 @@ pub fn exec_self(
     let call_info_top = lua_state.get_call_info(frame_idx).top as usize;
     lua_state.set_top(call_info_top)?;
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    match helper::lookup_from_metatable(lua_state, &rb, key) {
+    match helper::finishget(lua_state, &rb, key) {
         Ok(result) => {
             let new_base = lua_state.get_frame_base(frame_idx);
             if new_base != base {

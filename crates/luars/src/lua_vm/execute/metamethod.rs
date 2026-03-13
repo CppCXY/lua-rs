@@ -1,4 +1,4 @@
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaValue, lua_value_to_udvalue, udvalue_to_lua_value};
 use crate::lua_vm::execute::call::{self, call_c_function};
 use crate::lua_vm::execute::helper::{get_binop_metamethod, lua_idiv, lua_imod, tonumberns};
 use crate::lua_vm::execute::lua_execute;
@@ -8,6 +8,7 @@ use crate::lua_vm::opcode::Instruction;
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event};
+use crate::stdlib::debug;
 
 /// Try unary metamethod (for __unm, __bnot)
 /// Port of luaT_trybinTM for unary operations
@@ -17,29 +18,13 @@ pub fn try_unary_tm(
     result_pos: usize,
     tm_kind: TmKind,
 ) -> LuaResult<()> {
-    // String coercion for arithmetic unary ops (Unm: -"10" == -10.0)
-    if tm_kind == TmKind::Unm {
-        let mut n = 0f64;
-        if tonumberns(&operand, &mut n) {
-            let stack = lua_state.stack_mut();
-            stack[result_pos] = LuaValue::float(-n);
-            return Ok(());
-        }
-    } else if tm_kind == TmKind::Bnot
-        && let Some(i) = try_to_integer(&operand)
-    {
-        let stack = lua_state.stack_mut();
-        stack[result_pos] = LuaValue::integer(!i);
-        return Ok(());
-    }
-
     // Try trait-based __unm for userdata
     if tm_kind == TmKind::Unm
         && operand.ttisfulluserdata()
         && let Some(ud) = operand.as_userdata_mut()
         && let Some(udv) = ud.get_trait().lua_unm()
     {
-        let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+        let result = udvalue_to_lua_value(lua_state, udv)?;
         let stack = lua_state.stack_mut();
         stack[result_pos] = result;
         return Ok(());
@@ -115,31 +100,6 @@ pub fn handle_mmbin(
     // Get tag method — unchecked since compiler guarantees valid TmKind in MMBIN instruction
     let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
 
-    // Call metamethod (may change stack/base)
-    let result = match try_bin_tm(lua_state, v1, v2, tm, a as u32, b as u32) {
-        Ok(r) => r,
-        Err(LuaError::Yield) => {
-            // Metamethod yielded. Save the destination register so
-            // handle_pending_ops / luaV_finishOp can store the result on resume.
-            use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-            let ci = lua_state.get_call_info_mut(frame_idx);
-            ci.pending_finish_get = result_reg as i32;
-            ci.call_status |= CIST_PENDING_FINISH;
-            return Err(LuaError::Yield);
-        }
-        Err(e) => return Err(e),
-    };
-
-    // Reload base after metamethod call as it may have changed
-    let current_base = lua_state.get_frame_base(frame_idx);
-
-    // Store result — unchecked
-    unsafe {
-        *lua_state
-            .stack_mut()
-            .get_unchecked_mut(current_base + result_reg) = result
-    };
-
     Ok(())
 }
 
@@ -169,59 +129,7 @@ pub fn handle_mmbini(
     code: &[Instruction],
     frame_idx: usize, // Frame index for accessing current base
 ) -> LuaResult<()> {
-    // Get the original arithmetic instruction — unchecked
-    let pi = unsafe { *code.get_unchecked(pc - 2) };
-    let result_reg = pi.get_a() as usize;
-
-    let base = lua_state.get_frame_base(frame_idx);
-
-    // Get operand — unchecked
-    let v1 = unsafe { *lua_state.stack_mut().get_unchecked(base + a) };
-
-    // Create integer value for immediate
-    let v2 = LuaValue::integer(sb as i64);
-
-    // Get tag method — unchecked
-    let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
-
-    // Call metamethod (flip if needed, may change stack/base)
-    let result = if k {
-        match try_bin_tm(lua_state, v2, v1, tm, u32::MAX, a as u32) {
-            Ok(r) => r,
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = result_reg as i32;
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
-    } else {
-        match try_bin_tm(lua_state, v1, v2, tm, a as u32, u32::MAX) {
-            Ok(r) => r,
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = result_reg as i32;
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
-    };
-
-    // Reload base after metamethod call
-    let current_base = lua_state.get_frame_base(frame_idx);
-
-    // Store result — unchecked
-    unsafe {
-        *lua_state
-            .stack_mut()
-            .get_unchecked_mut(current_base + result_reg) = result
-    };
-
-    Ok(())
+   todo!()
 }
 
 /// Handle MMBINK opcode
@@ -267,41 +175,41 @@ pub fn handle_mmbink(
     let tm = unsafe { TmKind::from_u8_unchecked(c as u8) };
 
     // Call metamethod (flip if needed, may change stack/base)
-    let result = if k {
-        match try_bin_tm(lua_state, v2, v1, tm, u32::MAX, a as u32) {
-            Ok(r) => r,
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = result_reg as i32;
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
-    } else {
-        match try_bin_tm(lua_state, v1, v2, tm, a as u32, u32::MAX) {
-            Ok(r) => r,
-            Err(LuaError::Yield) => {
-                use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
-                let ci = lua_state.get_call_info_mut(frame_idx);
-                ci.pending_finish_get = result_reg as i32;
-                ci.call_status |= CIST_PENDING_FINISH;
-                return Err(LuaError::Yield);
-            }
-            Err(e) => return Err(e),
-        }
-    };
+    // let result = if k {
+    //     match try_bin_tm(lua_state, v2, v1, tm, u32::MAX, a as u32) {
+    //         Ok(r) => r,
+    //         Err(LuaError::Yield) => {
+    //             use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+    //             let ci = lua_state.get_call_info_mut(frame_idx);
+    //             ci.pending_finish_get = result_reg as i32;
+    //             ci.call_status |= CIST_PENDING_FINISH;
+    //             return Err(LuaError::Yield);
+    //         }
+    //         Err(e) => return Err(e),
+    //     }
+    // } else {
+    //     match try_bin_tm(lua_state, v1, v2, tm, a as u32, u32::MAX) {
+    //         Ok(r) => r,
+    //         Err(LuaError::Yield) => {
+    //             use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
+    //             let ci = lua_state.get_call_info_mut(frame_idx);
+    //             ci.pending_finish_get = result_reg as i32;
+    //             ci.call_status |= CIST_PENDING_FINISH;
+    //             return Err(LuaError::Yield);
+    //         }
+    //         Err(e) => return Err(e),
+    //     }
+    // };
 
     // Reload base after metamethod call
-    let current_base = lua_state.get_frame_base(frame_idx);
+    // let current_base = lua_state.get_frame_base(frame_idx);
 
-    // Store result — unchecked
-    unsafe {
-        *lua_state
-            .stack_mut()
-            .get_unchecked_mut(current_base + result_reg) = result
-    };
+    // // Store result — unchecked
+    // unsafe {
+    //     *lua_state
+    //         .stack_mut()
+    //         .get_unchecked_mut(current_base + result_reg) = result
+    // };
 
     Ok(())
 }
@@ -330,121 +238,48 @@ pub fn handle_mmbink(
 /// ```
 /// Try to convert a LuaValue to integer (NO string coercion).
 /// Returns Some(i64) if the value is an integer or an integral float.
-fn value_to_integer(v: &LuaValue) -> Option<i64> {
-    if let Some(i) = v.as_integer() {
-        return Some(i);
-    }
-    if let Some(f) = v.as_number() {
-        // Integral float → integer
-        if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
-            return Some(f as i64);
-        }
-    }
-    None
-}
-
-fn try_bin_tm(
+pub fn try_bin_tm(
     lua_state: &mut LuaState,
     p1: LuaValue,
     p2: LuaValue,
+    res: u32,
     tm_kind: TmKind,
-    p1_reg: u32,
-    p2_reg: u32,
-) -> LuaResult<LuaValue> {
-    // Fast path: if BOTH values are tables (most common metamethod case),
-    // skip string coercion and userdata checks — go straight to metamethod lookup.
-    let is_table_p1 = p1.ttistable();
-    let is_table_p2 = p2.ttistable();
-    if !(is_table_p1 || is_table_p2) {
-        // Neither is a table — try string-to-number coercion
-        match tm_kind {
-            TmKind::Add | TmKind::Sub | TmKind::Mul | TmKind::Mod | TmKind::IDiv => {
-                if let (Some(i1), Some(i2)) = (value_to_integer(&p1), value_to_integer(&p2)) {
-                    let result = match tm_kind {
-                        TmKind::Add => i1.wrapping_add(i2),
-                        TmKind::Sub => i1.wrapping_sub(i2),
-                        TmKind::Mul => i1.wrapping_mul(i2),
-                        TmKind::Mod => {
-                            if i2 == 0 {
-                                return Err(lua_state.error("attempt to perform 'n%0'".to_string()));
-                            }
-                            lua_imod(i1, i2)
-                        }
-                        TmKind::IDiv => {
-                            if i2 == 0 {
-                                return Err(
-                                    lua_state.error("attempt to divide by zero".to_string())
-                                );
-                            }
-                            lua_idiv(i1, i2)
-                        }
-                        _ => unreachable!(),
-                    };
-                    return Ok(LuaValue::integer(result));
-                }
-                let mut n1 = 0.0f64;
-                let mut n2 = 0.0f64;
-                if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
-                    let result = match tm_kind {
-                        TmKind::Add => n1 + n2,
-                        TmKind::Sub => n1 - n2,
-                        TmKind::Mul => n1 * n2,
-                        TmKind::Mod => crate::lua_vm::execute::helper::lua_fmod(n1, n2),
-                        TmKind::IDiv => (n1 / n2).floor(),
-                        _ => unreachable!(),
-                    };
-                    return Ok(LuaValue::number(result));
-                }
+) -> LuaResult<()> {
+    // Try trait-based arithmetic for userdata
+    if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
+        let trait_result = if let Some(ud) = p1.as_userdata_mut() {
+            let other = lua_value_to_udvalue(&p2);
+            match tm_kind {
+                TmKind::Add => ud.get_trait().lua_add(&other),
+                TmKind::Sub => ud.get_trait().lua_sub(&other),
+                TmKind::Mul => ud.get_trait().lua_mul(&other),
+                TmKind::Div => ud.get_trait().lua_div(&other),
+                TmKind::Mod => ud.get_trait().lua_mod(&other),
+                _ => None,
             }
-            TmKind::Div | TmKind::Pow => {
-                let mut n1 = 0.0f64;
-                let mut n2 = 0.0f64;
-                if tonumberns(&p1, &mut n1) && tonumberns(&p2, &mut n2) {
-                    let result = match tm_kind {
-                        TmKind::Div => n1 / n2,
-                        TmKind::Pow => n1.powf(n2),
-                        _ => unreachable!(),
-                    };
-                    return Ok(LuaValue::number(result));
-                }
-            }
-            _ => {}
+        } else {
+            None
+        };
+        if let Some(udv) = trait_result {
+            unsafe { *lua_state.stack_mut().get_unchecked_mut(res as usize) = udvalue_to_lua_value(lua_state, udv)?; }
+            return Ok(())
         }
-
-        // Try trait-based arithmetic for userdata
-        if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
-            let trait_result = if let Some(ud) = p1.as_userdata_mut() {
-                let other = crate::lua_value::lua_value_to_udvalue(&p2);
-                match tm_kind {
-                    TmKind::Add => ud.get_trait().lua_add(&other),
-                    TmKind::Sub => ud.get_trait().lua_sub(&other),
-                    TmKind::Mul => ud.get_trait().lua_mul(&other),
-                    TmKind::Div => ud.get_trait().lua_div(&other),
-                    TmKind::Mod => ud.get_trait().lua_mod(&other),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            if let Some(udv) = trait_result {
-                return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
+        let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
+            let other = lua_value_to_udvalue(&p1);
+            match tm_kind {
+                TmKind::Add => ud.get_trait().lua_add(&other),
+                TmKind::Sub => ud.get_trait().lua_sub(&other),
+                TmKind::Mul => ud.get_trait().lua_mul(&other),
+                TmKind::Div => ud.get_trait().lua_div(&other),
+                TmKind::Mod => ud.get_trait().lua_mod(&other),
+                _ => None,
             }
-            let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
-                let other = crate::lua_value::lua_value_to_udvalue(&p1);
-                match tm_kind {
-                    TmKind::Add => ud.get_trait().lua_add(&other),
-                    TmKind::Sub => ud.get_trait().lua_sub(&other),
-                    TmKind::Mul => ud.get_trait().lua_mul(&other),
-                    TmKind::Div => ud.get_trait().lua_div(&other),
-                    TmKind::Mod => ud.get_trait().lua_mod(&other),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            if let Some(udv) = trait_result2 {
-                return crate::lua_value::udvalue_to_lua_value(lua_state, udv);
-            }
+        } else {
+            None
+        };
+        if let Some(udv) = trait_result2 {
+            unsafe { *lua_state.stack_mut().get_unchecked_mut(res as usize) = udvalue_to_lua_value(lua_state, udv)?; }
+            return Ok(())
         }
     }
 
@@ -452,7 +287,9 @@ fn try_bin_tm(
     let metamethod = get_binop_metamethod(lua_state, &p1, &p2, tm_kind);
     if let Some(mm) = metamethod {
         // Call metamethod with (p1, p2) as arguments
-        call_tm_res(lua_state, mm, p1, p2)
+        let r = call_tm_res(lua_state, mm, p1, p2)?;
+        unsafe { *lua_state.stack_mut().get_unchecked_mut(res as usize) = r; }
+        Ok(())
     } else {
         // No metamethod found, return error
         let msg = match tm_kind {
@@ -468,8 +305,8 @@ fn try_bin_tm(
                 // problematic operand (the float that can't convert to int).
                 if p1.is_number() && p2.is_number() {
                     // Blame the operand that's a float (not integer)
-                    let blame_reg = if !p1.is_integer() { p1_reg } else { p2_reg };
-                    let info = crate::stdlib::debug::varinfo_for_reg(lua_state, blame_reg);
+                    let blame_reg = res;
+                    let info = debug::varinfo_for_reg(lua_state, blame_reg);
                     return Err(
                         lua_state.error(format!("number has no integer representation{}", info))
                     );
@@ -479,28 +316,12 @@ fn try_bin_tm(
             }
             _ => "perform arithmetic on",
         };
-        Err(crate::stdlib::debug::opinterror(
-            lua_state, p1_reg, p2_reg, &p1, &p2, msg,
+        Err(debug::opinterror(
+            lua_state, res, res, &p1, &p2, msg,
         ))
     }
 }
 
-/// Try to convert a LuaValue to integer (NO string coercion)
-fn try_to_integer(v: &LuaValue) -> Option<i64> {
-    if let Some(i) = v.as_integer() {
-        return Some(i);
-    }
-    if let Some(f) = v.as_number()
-        && f == f.floor()
-        && f.is_finite()
-    {
-        // Check f is within i64 range before casting
-        if f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
-            return Some(f as i64);
-        }
-    }
-    None
-}
 
 /// Call a metamethod with two arguments
 /// Based on Lua 5.5's luaT_callTMres - returns the result value directly
@@ -695,74 +516,6 @@ pub fn try_comp_tm(
     }
 }
 
-/// Equality comparison - direct port of Lua 5.5's luaV_equalobj
-/// Returns true if values are equal, false otherwise
-/// Handles metamethods for tables and userdata
-pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResult<bool> {
-    // Direct port of lvm.c:582 luaV_equalobj
-    if t1 == t2 {
-        return Ok(true);
-    }
-
-    if t1.tt() != t2.tt() {
-        return Ok(false);
-    }
-
-    if t1.ttisfulluserdata() {
-        // Userdata: first check identity
-        if let (Some(u_ptr1), Some(u_ptr2)) = (t1.as_userdata_ptr(), t2.as_userdata_ptr())
-            && u_ptr1 == u_ptr2
-        {
-            return Ok(true);
-        }
-        // Try trait-based lua_eq before metatable
-        if let Some(ud1) = t1.as_userdata_mut()
-            && let Some(ud2) = t2.as_userdata_mut()
-            && let Some(result) = ud1.get_trait().lua_eq(ud2.get_trait())
-        {
-            return Ok(result);
-        }
-        // Different userdata - try __eq metamethod
-        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
-
-        if let Some(metamethod) = tm {
-            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
-            return Ok(!result.is_falsy());
-        } else {
-            return Ok(false);
-        }
-    }
-
-    if t1.ttistable() {
-        // Tables: first check identity
-        if let (Some(t_ptr1), Some(t_ptr2)) = (t1.as_table_ptr(), t2.as_table_ptr())
-            && t_ptr1 == t_ptr2
-        {
-            return Ok(true);
-        }
-        // Different tables - try __eq metamethod
-        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
-        if let Some(metamethod) = tm {
-            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
-            return Ok(!result.is_falsy());
-        } else {
-            return Ok(false);
-        }
-    }
-
-    if t1.ttiscfunction() {
-        // C functions: compare function pointers
-        return Ok(unsafe { t1.value.f == t2.value.f });
-    }
-
-    // Lua functions, threads, etc.: compare GC pointers
-    if let (Some(f_ptr1), Some(f_ptr2)) = (t1.as_function_ptr(), t2.as_function_ptr()) {
-        return Ok(f_ptr1 == f_ptr2);
-    }
-
-    Ok(false)
-}
-
 /// Tag Method types (TMS from ltm.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -844,5 +597,11 @@ impl TmKind {
             TmKind::ToString => "__tostring",
             TmKind::N => "__n", // Not a real metamethod
         }
+    }
+}
+
+impl From<TmKind> for u8 {
+    fn from(value: TmKind) -> Self {
+        value as u8
     }
 }

@@ -27,6 +27,8 @@ pub(crate) mod helper;
 mod hook;
 pub(crate) mod metamethod;
 mod return_handler;
+mod execute_loop;
+mod number;
 
 // Extracted opcode modules to reduce main loop size
 mod closure_vararg_ops;
@@ -34,28 +36,23 @@ mod comparison_ops;
 mod noinline;
 mod table_ops;
 
-use call::FrameAction;
-
 use crate::{
     GcTable,
     lua_value::{LUA_VFALSE, LUA_VTABLE, LuaValue},
     lua_vm::{
         Instruction, LuaError, LuaResult, LuaState, OpCode,
-        call_info::call_status::{CIST_C, CIST_PENDING_FINISH, CIST_TAIL},
+        call_info::call_status::{CIST_C, CIST_PENDING_FINISH},
         execute::{
             closure_handler::handle_closure,
-            cold::{
-                handle_call_metamethod, handle_close, handle_errnil, handle_getvarg, handle_len,
-                handle_loadkx,
-            },
-            concat::handle_concat,
+            cold::{handle_close, handle_errnil, handle_getvarg, handle_len, handle_loadkx},
+            concat::concat,
             helper::{
                 handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr,
                 luai_numpow, pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
                 pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
                 tointeger, tointegerns, tonumberns, ttisinteger,
             },
-            hook::{hook_check_instruction, hook_on_call, hook_on_return},
+            hook::{hook_on_call, hook_on_return},
         },
         lua_limits::EXTRA_STACK,
     },
@@ -185,6 +182,39 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             };
         }
 
+        // ret! — shared "return from a Lua function" logic.
+        // Matches C Lua's `ret:` label (lvm.c:1821-1826).
+        // Checks target_depth, then either returns or restores caller context.
+        macro_rules! ret {
+            () => {
+                let new_depth = lua_state.call_depth();
+                if new_depth <= target_depth {
+                    return Ok(());
+                }
+                frame_idx = new_depth - 1;
+                let cs = lua_state.get_call_info(frame_idx).call_status;
+                if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
+                    continue 'startfunc;
+                }
+                // returning: restore caller context
+                let ci = lua_state.get_call_info(frame_idx);
+                base = ci.base;
+                let ci_pc = ci.pc as usize;
+                let caller_chunk = unsafe { &*ci.chunk_ptr };
+                code = &caller_chunk.code;
+                constants = &caller_chunk.constants;
+                pc = ci_pc;
+                if lua_state.hook_mask != 0 {
+                    lua_state.oldpc = if ci_pc > 0 {
+                        (ci_pc - 1) as u32
+                    } else {
+                        u32::MAX
+                    };
+                }
+                updatetrap!();
+            };
+        }
+
         // MAINLOOP: Main instruction dispatch loop
         loop {
             let instr = unsafe { *code.get_unchecked(pc) };
@@ -192,7 +222,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
             if trap {
                 let chunk_ref = current_chunk!();
-                hook_check_instruction(lua_state, pc, chunk_ref, frame_idx)?;
+                // hook_check_instruction(lua_state, pc, chunk_ref, frame_idx)?;
                 updatetrap!();
             }
 
@@ -1052,12 +1082,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
                     let k = instr.get_k();
-
-                    // Update PC before returning
                     save_pc!();
-
-                    // Return hook (cold path — re-read hook_mask directly,
-                    // no cross-dispatch `trap` variable needed)
                     if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
                         let nres = if b != 0 {
@@ -1067,111 +1092,27 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         };
                         hook_on_return(lua_state, frame_idx, pc as u32, nres)?;
                     }
-
-                    // Handle return
                     return_handler::handle_return(lua_state, base, frame_idx, a, b, c, k)?;
-
-                    // Inline context restore (same as Return0/Return1) to avoid
-                    // full 'startfunc reload overhead on the hot path.
-                    let new_depth = lua_state.call_depth();
-                    if new_depth <= target_depth {
-                        return Ok(());
-                    }
-                    frame_idx = new_depth - 1;
-
-                    // Cold check: C frame or pending finish → full startfunc
-                    let cs = lua_state.get_call_info(frame_idx).call_status;
-                    if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
-                        continue 'startfunc;
-                    }
-
-                    // Hot path: restore caller context directly
-                    let ci = lua_state.get_call_info(frame_idx);
-                    base = ci.base;
-                    let ci_pc = ci.pc as usize;
-                    let caller_chunk = unsafe { &*ci.chunk_ptr };
-                    code = &caller_chunk.code;
-                    constants = &caller_chunk.constants;
-                    pc = ci_pc;
-                    if lua_state.hook_mask != 0 {
-                        lua_state.oldpc = (ci_pc - 1) as u32;
-                    }
+                    ret!();
                 }
                 OpCode::Return0 => {
-                    // return (no values)
-                    // Return hook (cold path)
+                    // return (no values) — hottest return for void functions
                     if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
                         hook_on_return(lua_state, frame_idx, pc as u32, 0)?;
                     }
                     return_handler::handle_return0(lua_state, frame_idx);
-
-                    // Inline context restore (like Return1) to avoid full 'startfunc
-                    // reload overhead. Critical for closures like counter.increment()
-                    // that return no values.
-                    let new_depth = lua_state.call_depth();
-                    if new_depth <= target_depth {
-                        return Ok(());
-                    }
-                    frame_idx = new_depth - 1;
-
-                    // Cold check: C frame or pending finish → full startfunc
-                    let cs = lua_state.get_call_info(frame_idx).call_status;
-                    if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
-                        continue 'startfunc;
-                    }
-
-                    // Hot path: restore caller context directly
-                    let ci = lua_state.get_call_info(frame_idx);
-                    base = ci.base;
-                    let ci_pc = ci.pc as usize;
-                    let caller_chunk = unsafe { &*ci.chunk_ptr };
-                    code = &caller_chunk.code;
-                    constants = &caller_chunk.constants;
-                    pc = ci_pc;
-                    if lua_state.hook_mask != 0 {
-                        lua_state.oldpc = (ci_pc - 1) as u32;
-                    }
+                    ret!();
                 }
                 OpCode::Return1 => {
                     // return R[A] — hottest return path
                     let a = instr.get_a() as usize;
-
-                    // Return hook (cold path)
                     if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0 && lua_state.allow_hook
                     {
                         hook_on_return(lua_state, frame_idx, pc as u32, 1)?;
                     }
-
-                    // Inline return handling + context restore to avoid
-                    // the full 'startfunc reload overhead (saves ~12 memory ops
-                    // per return, critical for small closures like sort comparators)
                     return_handler::handle_return1(lua_state, base, frame_idx, a);
-
-                    // Check if returned past target depth
-                    let new_depth = lua_state.call_depth();
-                    if new_depth <= target_depth {
-                        return Ok(());
-                    }
-                    frame_idx = new_depth - 1;
-
-                    // Cold check: C frame or pending finish → full startfunc
-                    let cs = lua_state.get_call_info(frame_idx).call_status;
-                    if cs & (CIST_C | CIST_PENDING_FINISH) != 0 {
-                        continue 'startfunc;
-                    }
-
-                    // Hot path: restore caller context directly
-                    let ci = lua_state.get_call_info(frame_idx);
-                    base = ci.base;
-                    let ci_pc = ci.pc as usize;
-                    let caller_chunk = unsafe { &*ci.chunk_ptr };
-                    code = &caller_chunk.code;
-                    constants = &caller_chunk.constants;
-                    pc = ci_pc;
-                    if lua_state.hook_mask != 0 {
-                        lua_state.oldpc = (ci_pc - 1) as u32;
-                    }
+                    ret!();
                 }
                 OpCode::GetUpval => {
                     // R[A] := UpValue[B]
@@ -1753,278 +1694,49 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::Call => {
                     // R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1])
+                    // Compact dispatch matching C Lua's OP_CALL (lvm.c:1720-1737).
+                    // All type dispatch + frame setup is in precall (#[inline(never)]).
                     let a = instr.get_a() as usize;
                     let b = instr.get_b() as usize;
                     let c = instr.get_c() as usize;
                     let func_idx = base + a;
-
-                    // Hot path: inline Lua function call
-                    // Avoids handle_call overhead (FrameAction enum, set_top_raw,
-                    // cold C/__call code in instruction cache)
-                    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
-                    if func.is_lua_function() {
-                        // Compute nargs without set_top_raw
-                        // (push_lua_frame handles stack_top directly)
-                        let nargs = if b != 0 {
-                            b - 1
-                        } else {
-                            let current_top = lua_state.get_top();
-                            if current_top > func_idx + 1 {
-                                current_top - func_idx - 1
-                            } else {
-                                0
-                            }
-                        };
-                        let nresults = if c == 0 { -1 } else { (c - 1) as i32 };
-
-                        let lua_func = unsafe { func.as_lua_function_unchecked() };
-                        let new_chunk = lua_func.chunk();
-                        let new_chunk_ptr = new_chunk as *const crate::lua_value::Chunk;
-
-                        let new_base = func_idx + 1;
-                        save_pc!();
-                        lua_state.push_lua_frame(
-                            &func,
-                            new_base,
-                            nargs,
-                            nresults,
-                            new_chunk.param_count,
-                            new_chunk.max_stack_size,
-                            new_chunk_ptr,
-                        )?;
-
-                        // Inline callee entry: use known values directly instead of
-                        // reading back from CallInfo (avoids redundant call_stack reload
-                        // + frame_idx*72 address computation + 3 loads from memory we
-                        // just wrote to — saves ~7 instructions on the hot path).
-                        frame_idx = lua_state.call_depth() - 1;
-                        base = new_base;
-                        // Use raw pointer to derive code/constants (func is local,
-                        // can't borrow new_chunk across the loop boundary).
-                        let callee_chunk = unsafe { &*new_chunk_ptr };
-                        code = &callee_chunk.code;
-                        constants = &callee_chunk.constants;
-                        pc = 0;
-
-                        // Call hook for inline Lua call (cold path)
-                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
-                            && lua_state.allow_hook
-                        {
-                            hook_on_call(lua_state, lua_state.hook_mask, 0, callee_chunk)?;
-                        }
-                        if lua_state.hook_mask != 0 {
-                            lua_state.oldpc = if callee_chunk.is_vararg { 0 } else { u32::MAX };
-                        }
-                        updatetrap!();
-                        continue;
+                    let nresults = if c == 0 { -1 } else { (c - 1) as i32 };
+                    if b != 0 {
+                        lua_state.set_top_raw(func_idx + b);
                     }
-
-                    // Hot path #2: inline light C function call
-                    // Covers math.*, string.*, table.* etc (all light C functions).
-                    // Avoids handle_call overhead: redundant func reload, is_lua_function
-                    // recheck, 3-way type dispatch in call_c_function.
-                    if func.ttiscfunction() {
-                        let c_func = func.fvalue();
-
-                        // Compute nargs & set stack top
-                        let nargs = if b != 0 {
-                            lua_state.set_top_raw(func_idx + b);
-                            b - 1
-                        } else {
-                            let current_top = lua_state.get_top();
-                            if current_top > func_idx + 1 {
-                                current_top - func_idx - 1
-                            } else {
-                                0
-                            }
-                        };
-                        let nresults = if c == 0 { -1i32 } else { (c - 1) as i32 };
-                        let call_base = func_idx + 1;
-
-                        save_pc!();
-                        lua_state.push_c_frame(&func, call_base, nargs, nresults)?;
-
-                        // Call hook (cold — almost never set)
-                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
-                            && lua_state.allow_hook
-                        {
-                            let narg = nargs as i32;
-                            lua_state.run_hook(crate::lua_vm::LUA_HOOKCALL, -1, 1, narg)?;
-                        }
-
-                        // Direct C function call (no 3-way type dispatch)
-                        let n = c_func(lua_state)?;
-
-                        // Return hook (cold)
-                        let stack_top = lua_state.get_top();
-                        let first_result = if stack_top >= n {
-                            stack_top - n
-                        } else {
-                            call_base
-                        };
-                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKRET != 0
-                            && lua_state.allow_hook
-                        {
-                            let ftransfer = (first_result - call_base + 1) as i32;
-                            lua_state.run_hook(
-                                crate::lua_vm::LUA_HOOKRET,
-                                -1,
-                                ftransfer,
-                                n as i32,
-                            )?;
-                        }
-
-                        // Pop C frame
-                        lua_state.pop_c_frame();
-
-                        // oldpc for same-line hook suppression
-                        lua_state.oldpc = (pc - 1) as u32;
-
-                        // Inline result move
-                        unsafe {
-                            let stack = lua_state.stack_mut();
-                            match nresults {
-                                1 => {
-                                    *stack.get_unchecked_mut(func_idx) = if n > 0 {
-                                        *stack.get_unchecked(first_result)
-                                    } else {
-                                        LuaValue::nil()
-                                    };
-                                }
-                                0 => {}
-                                _ if nresults > 0 => {
-                                    let wanted = nresults as usize;
-                                    let copy_count = n.min(wanted);
-                                    for i in 0..copy_count {
-                                        *stack.get_unchecked_mut(func_idx + i) =
-                                            *stack.get_unchecked(first_result + i);
-                                    }
-                                    for i in copy_count..wanted {
-                                        *stack.get_unchecked_mut(func_idx + i) = LuaValue::nil();
-                                    }
-                                }
-                                _ => {
-                                    // MULTRET
-                                    for i in 0..n {
-                                        *stack.get_unchecked_mut(func_idx + i) =
-                                            *stack.get_unchecked(first_result + i);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Restore caller top
-                        if nresults == -1 {
-                            let new_top = func_idx + n;
-                            let ci_top = lua_state.get_call_info(frame_idx).top as usize;
-                            if ci_top < new_top {
-                                lua_state.get_call_info_mut(frame_idx).top = new_top as u32;
-                            }
-                            lua_state.set_top_raw(new_top);
-                        } else {
-                            let frame_top_caller = lua_state.get_call_info(frame_idx).top as usize;
-                            lua_state.set_top_raw(frame_top_caller);
-                        }
-
-                        // Reload base (C function may have resized stack)
-                        base = lua_state.get_frame_base(frame_idx);
-                        updatetrap!();
-                        continue;
-                    }
-
-                    // Semi-cold path: __call metamethod on table
-                    if func.ttistable() {
-                        save_pc!();
-                        if handle_call_metamethod(lua_state, func, func_idx, b, c)? {
-                            continue 'startfunc;
-                        }
-                    }
-
-                    // Cold path: cclosure, rclosure, or non-table __call metamethod
                     save_pc!();
-                    match call::handle_call(lua_state, base, a, b, c, 0) {
-                        Ok(FrameAction::Continue) => {
-                            restore_state!();
-                            lua_state.oldpc = (pc - 1) as u32;
-                            updatetrap!();
-                        }
-                        Ok(FrameAction::Call) | Ok(FrameAction::TailCall) => {
-                            continue 'startfunc;
-                        }
-                        Err(e) => return Err(e),
+                    if call::precall(lua_state, func_idx, nresults)? {
+                        // Lua call: new frame pushed
+                        continue 'startfunc;
                     }
+                    // C call completed
+                    restore_state!();
+                    lua_state.oldpc = (pc - 1) as u32;
+                    updatetrap!();
                 }
                 OpCode::TailCall => {
-                    // Tail call optimization: return R[A](R[A+1], ... ,R[A+B-1])
+                    // Compact dispatch matching C Lua's OP_TAILCALL (lvm.c:1737-1760).
+                    // All type dispatch + frame reuse is in pretailcall (#[inline(never)]).
                     let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
+                    let mut b = instr.get_b() as usize;
                     let func_idx = base + a;
-
+                    if b != 0 {
+                        lua_state.set_top_raw(func_idx + b);
+                    } else {
+                        b = lua_state.get_top() - func_idx;
+                    }
                     save_pc!();
-
-                    // Hot path: Lua-to-Lua tail call
-                    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
-                    if func.is_lua_function() {
-                        let nargs = if b != 0 {
-                            b - 1
-                        } else {
-                            let current_top = lua_state.get_top();
-                            if current_top > func_idx + 1 {
-                                current_top - func_idx - 1
-                            } else {
-                                0
-                            }
-                        };
-
-                        // Close upvalues only when k bit is set (like C Lua's TESTARG_k)
-                        if instr.get_k() {
-                            lua_state.close_upvalues(base);
-                        }
-
-                        let lua_func = unsafe { func.as_lua_function_unchecked() };
-                        let new_chunk_ptr = call::pretailcall_lua(
-                            lua_state, func, lua_func, func_idx, base, nargs, frame_idx,
-                        )?;
-
-                        // Set local vars directly from known values
-                        let ci = lua_state.get_call_info(frame_idx);
-                        base = ci.base;
-                        let new_chunk = unsafe { &*new_chunk_ptr };
-                        code = &new_chunk.code;
-                        constants = &new_chunk.constants;
-                        pc = 0;
-
-                        lua_state.oldpc = if new_chunk.is_vararg { 0 } else { u32::MAX };
-
-                        // Call hook at function entry (cold path)
-                        if lua_state.hook_mask != 0 {
-                            let hook_mask = lua_state.hook_mask;
-                            if hook_mask & crate::lua_vm::LUA_MASKCALL != 0 && lua_state.allow_hook
-                            {
-                                hook_on_call(lua_state, hook_mask, CIST_TAIL, new_chunk)?;
-                            }
-                            if hook_mask & crate::lua_vm::LUA_MASKCOUNT != 0 {
-                                lua_state.hook_count = lua_state.base_hook_count;
-                            }
-                        }
-                        continue;
+                    if instr.get_k() {
+                        lua_state.close_upvalues(base);
                     }
-
-                    // Cold path: C function, __call metamethod, etc.
-                    match call::handle_tailcall(lua_state, base, a, b) {
-                        Ok(FrameAction::Continue) => {
-                            restore_state!();
-                            lua_state.oldpc = (pc - 1) as u32;
-                            updatetrap!();
-                        }
-                        Ok(FrameAction::TailCall) => {
-                            continue 'startfunc;
-                        }
-                        Ok(FrameAction::Call) => {
-                            continue 'startfunc;
-                        }
-                        Err(e) => return Err(e),
+                    if call::pretailcall(lua_state, func_idx, b, frame_idx)? {
+                        // Lua tail call: CI reused in place
+                        continue 'startfunc;
                     }
+                    // C tail call completed
+                    restore_state!();
+                    lua_state.oldpc = (pc - 1) as u32;
+                    updatetrap!();
                 }
                 OpCode::Not => {
                     // R[A] := not R[B]
@@ -2132,107 +1844,28 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     pc += bx;
                 }
                 OpCode::TForCall => {
-                    // Generic for loop call — HOT PATH for ipairs/pairs/next iterators
-                    // Call: ra+3,ra+4,...,ra+2+C := ra(ra+1, ra+2)
-                    // ra=iterator, ra+1=state, ra+2=closing, ra+3=control
+                    // Generic for loop call — matches C Lua's OP_TFORCALL.
+                    // Copy iterator+state+control to ra+3..ra+5, then precall.
                     let a = instr.get_a() as usize;
                     let c = instr.get_c() as usize;
-
-                    let ra_base = base + a;
-
-                    // Setup call args using unsafe (stack is guaranteed large enough by push_frame)
-                    let (iterator, c_func_opt) = unsafe {
+                    let ra = base + a;
+                    let func_idx = ra + 3;
+                    unsafe {
                         let stack = lua_state.stack_mut();
-                        let iterator = *stack.get_unchecked(ra_base);
-                        let state = *stack.get_unchecked(ra_base + 1);
-                        let control = *stack.get_unchecked(ra_base + 3);
-
-                        // ra+3: function, ra+4: state, ra+5: control
-                        *stack.get_unchecked_mut(ra_base + 3) = iterator;
-                        *stack.get_unchecked_mut(ra_base + 4) = state;
-                        *stack.get_unchecked_mut(ra_base + 5) = control;
-
-                        // Extract C function pointer while we have the value
-                        let c_func_opt = if let Some(cf) = iterator.as_cfunction() {
-                            Some(cf)
-                        } else {
-                            iterator.as_cclosure().map(|cc| cc.func())
-                        };
-
-                        (iterator, c_func_opt)
-                    };
-
-                    // Save PC before call
-                    lua_state.set_frame_pc(frame_idx, pc as u32);
-
-                    if let Some(c_func) = c_func_opt {
-                        // FAST PATH: C function iterator (ipairs_next, lua_next, etc.)
-                        call::call_c_function_fast(
-                            lua_state,
-                            &iterator,
-                            c_func,
-                            ra_base + 3,
-                            2, // always 2 args (state, control)
-                            c as i32 + 1,
-                        )?;
-                        restore_state!();
-                        // rethook: update oldpc after C function returns
-                        lua_state.oldpc = (pc - 1) as u32;
-                    } else if iterator.is_lua_function() {
-                        // FAST PATH: Lua closure iterator (closure-based for loops)
-                        // Inline call setup — avoids handle_call overhead, FrameAction
-                        // enum, set_top_raw, and 'startfunc full context reload.
-                        let lua_func = unsafe { iterator.as_lua_function_unchecked() };
-                        let new_chunk = lua_func.chunk();
-                        let new_chunk_ptr = new_chunk as *const crate::lua_value::Chunk;
-                        let new_base = ra_base + 4; // func at ra+3, args start at ra+4
-                        let nresults = c as i32 + 1;
-
-                        lua_state.push_lua_frame(
-                            &iterator,
-                            new_base,
-                            2, // always 2 args (state, control)
-                            nresults,
-                            new_chunk.param_count,
-                            new_chunk.max_stack_size,
-                            new_chunk_ptr,
-                        )?;
-
-                        // Inline callee entry (same as Call opcode fast path)
-                        frame_idx = lua_state.call_depth() - 1;
-                        base = new_base;
-                        let callee_chunk = unsafe { &*new_chunk_ptr };
-                        code = &callee_chunk.code;
-                        constants = &callee_chunk.constants;
-                        pc = 0;
-
-                        if lua_state.hook_mask & crate::lua_vm::LUA_MASKCALL != 0
-                            && lua_state.allow_hook
-                        {
-                            hook_on_call(lua_state, lua_state.hook_mask, 0, callee_chunk)?;
-                        }
-                        if lua_state.hook_mask != 0 {
-                            lua_state.oldpc = if callee_chunk.is_vararg { 0 } else { u32::MAX };
-                        }
-                        updatetrap!();
-                        continue;
-                    } else {
-                        // Cold path: __call metamethod
-                        match call::handle_call(lua_state, base, a + 3, 3, c + 1, 0) {
-                            Ok(FrameAction::Continue) => {
-                                restore_state!();
-                                lua_state.oldpc = (pc - 1) as u32;
-                                updatetrap!();
-                            }
-                            Ok(FrameAction::Call) => {
-                                continue 'startfunc;
-                            }
-                            Ok(FrameAction::TailCall) => {
-                                continue 'startfunc;
-                            }
-                            Err(e) => return Err(e),
-                        }
+                        *stack.get_unchecked_mut(ra + 5) = *stack.get_unchecked(ra + 3);
+                        *stack.get_unchecked_mut(ra + 4) = *stack.get_unchecked(ra + 1);
+                        *stack.get_unchecked_mut(ra + 3) = *stack.get_unchecked(ra);
                     }
+                    lua_state.set_top_raw(func_idx + 3); // func + 2 args
+                    save_pc!();
+                    if call::precall(lua_state, func_idx, c as i32 + 1)? {
+                        // Lua iterator: new frame pushed
+                        continue 'startfunc;
+                    }
+                    // C iterator completed
+                    restore_state!();
+                    lua_state.oldpc = (pc - 1) as u32;
+                    updatetrap!();
                 }
                 OpCode::TForLoop => {
                     // Generic for loop test
@@ -2413,7 +2046,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             lua_state.set_top(write_pos + 1)?;
                         }
                         save_pc!();
-                        match helper::lookup_from_metatable(lua_state, &table_value, key) {
+                        match helper::finishget(lua_state, &table_value, key) {
                             Ok(result) => {
                                 restore_state!();
                                 unsafe {
@@ -2554,7 +2187,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if concat_top > lua_state.get_top() {
                         lua_state.set_top_raw(concat_top);
                     }
-                    handle_concat(lua_state, instr, &mut base, frame_idx, pc)?;
+                    save_pc!();
+                    concat(lua_state, n)?;
+                    updatetrap!();
+                    lua_state.check_gc()?;
                 }
 
                 OpCode::Eq => {

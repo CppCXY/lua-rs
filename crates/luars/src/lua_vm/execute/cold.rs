@@ -5,7 +5,7 @@
 // ======================================================================
 
 use crate::{
-    GcTable, Instruction, LuaResult, LuaValue, OpCode,
+    Instruction, LuaResult, LuaValue, OpCode,
     lua_vm::{
         LuaError, LuaState, TmKind,
         execute::{
@@ -310,98 +310,6 @@ pub fn handle_len(
         }
     }
     Ok(())
-}
-
-/// Cold path: try __call metamethod on a table value.
-/// Returns Ok(true) if the __call was handled (new Lua frame pushed),
-/// Ok(false) if __call was not found or is not a Lua function (fall through to handle_call).
-/// The caller should `continue 'startfunc` on Ok(true) to reload all context.
-#[cold]
-#[inline(never)]
-pub fn handle_call_metamethod(
-    lua_state: &mut LuaState,
-    func: LuaValue,
-    func_idx: usize,
-    b: usize,
-    c: usize,
-) -> LuaResult<bool> {
-    let table = unsafe { &mut *(func.value.ptr as *mut GcTable) };
-    let meta = table.data.meta_ptr();
-    if meta.is_null() {
-        return Ok(false);
-    }
-    let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-    const TM_CALL_BIT: u8 = TmKind::Call as u8;
-    if mt.no_tm(TM_CALL_BIT) {
-        return Ok(false);
-    }
-    let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Call);
-    let mm = match mt.impl_table.get_shortstr_fast(&event_key) {
-        Some(mm) => mm,
-        None => {
-            // __call absent — cache it
-            mt.set_tm_absent(TM_CALL_BIT);
-            return Ok(false);
-        }
-    };
-    if !mm.is_lua_function() {
-        // __call is not a Lua function — fall to cold handle_call path
-        return Ok(false);
-    }
-
-    // Compute nargs
-    let nargs = if b != 0 {
-        b - 1
-    } else {
-        let current_top = lua_state.get_top();
-        if current_top > func_idx + 1 {
-            current_top - func_idx - 1
-        } else {
-            0
-        }
-    };
-
-    // Shift arguments right by 1 using unsafe ptr copy
-    // Layout: [func, arg1, ..., argN]  →  [mm, func, arg1, ..., argN]
-    unsafe {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        let src = sp.add(func_idx + 1);
-        std::ptr::copy(src, src.add(1), nargs);
-        *src = func; // original callable → 1st arg
-        *sp.add(func_idx) = mm; // metamethod → func slot
-    }
-
-    let new_nargs = nargs + 1;
-    let nresults = if c == 0 { -1 } else { (c - 1) as i32 };
-
-    // For b==0 case, stack_top needs +1 for shifted arg
-    if b == 0 {
-        let top = lua_state.get_top();
-        lua_state.set_top_raw(top + 1);
-    }
-
-    let lua_func = unsafe { mm.as_lua_function_unchecked() };
-    let new_chunk = lua_func.chunk();
-
-    lua_state.push_lua_frame(
-        &mm,
-        func_idx + 1,
-        new_nargs,
-        nresults,
-        new_chunk.param_count,
-        new_chunk.max_stack_size,
-        new_chunk as *const _,
-    )?;
-
-    // Track __call depth for debug.getinfo extraargs
-    {
-        use crate::lua_vm::call_info::call_status;
-        let new_fi = lua_state.call_depth() - 1;
-        let ci = lua_state.get_call_info_mut(new_fi);
-        ci.call_status = call_status::set_ccmt_count(ci.call_status, 1);
-    }
-
-    Ok(true)
 }
 
 /// Cold error: attempt to divide by zero (IDIV)

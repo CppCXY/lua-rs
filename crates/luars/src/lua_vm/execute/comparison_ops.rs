@@ -11,16 +11,19 @@
 
 use crate::{
     lua_value::LuaValue,
-    lua_vm::{Instruction, LuaError, LuaResult, LuaState},
+    lua_vm::{
+        Instruction, LuaError, LuaResult, LuaState,
+        execute::{
+            helper::equalobj,
+            number::{float_le_int, float_lt_int, int_le_float, int_lt_float},
+        },
+    },
 };
 
 use super::{
     cold,
-    helper::{
-        float_le_int, float_lt_int, fltvalue, int_le_float, int_lt_float, ivalue, tonumberns,
-        ttisfloat, ttisinteger, ttisstring,
-    },
-    metamethod::{self, TmKind},
+    helper::{fltvalue, ivalue, tonumberns, ttisfloat, ttisinteger, ttisstring},
+    metamethod::TmKind,
 };
 
 /// EQ: if ((R[A] == R[B]) ~= k) then pc++
@@ -48,7 +51,7 @@ pub fn exec_eq(
 
     // Save PC before potential metamethod call
     lua_state.set_frame_pc(frame_idx, *pc as u32);
-    let cond = match metamethod::equalobj(lua_state, ra, rb) {
+    let cond = match equalobj(lua_state, ra, rb) {
         Ok(c) => c,
         Err(LuaError::Yield) => {
             use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
