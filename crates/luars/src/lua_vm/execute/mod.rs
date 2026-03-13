@@ -52,7 +52,7 @@ use crate::{
                 pttisinteger, setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue,
                 tointeger, tointegerns, tonumberns, ttisinteger,
             },
-            hook::{hook_check_instruction, hook_on_call, hook_on_return},
+            hook::{hook_on_call, hook_on_return},
         },
         lua_limits::EXTRA_STACK,
     },

@@ -4,7 +4,10 @@
 // loses precision (e.g., i64::MAX as f64 rounds to 2^63).
 // ============================================================
 
-use crate::{lua_vm::execute::helper::{ttisfloat, ttisinteger}, LuaResult, LuaValue};
+use crate::{
+    LuaValue,
+    lua_vm::execute::helper::{ttisfloat, ttisinteger},
+};
 
 /// Is integer i less than float f?  (i < f)
 /// Handles NaN, infinities, and precision loss at i64 boundaries.
@@ -76,7 +79,7 @@ pub fn float_le_int(f: f64, i: i64) -> bool {
     !int_lt_float(i, f)
 }
 
-pub fn lt_num(a: &LuaValue, b: &LuaValue) ->bool {
+pub fn lt_num(a: &LuaValue, b: &LuaValue) -> bool {
     if ttisinteger(a) {
         let ai = a.ivalue();
         if ttisinteger(b) {
@@ -88,7 +91,7 @@ pub fn lt_num(a: &LuaValue, b: &LuaValue) ->bool {
             // unrecachable: caller should have ensured both are numbers
             false
         }
-    } else{
+    } else {
         let af = a.fltvalue();
         if ttisfloat(b) {
             let bf = b.fltvalue();
@@ -102,7 +105,7 @@ pub fn lt_num(a: &LuaValue, b: &LuaValue) ->bool {
     }
 }
 
-pub fn le_num(a: &LuaValue, b: &LuaValue) ->bool {
+pub fn le_num(a: &LuaValue, b: &LuaValue) -> bool {
     if ttisinteger(a) {
         let ai = a.ivalue();
         if ttisinteger(b) {
@@ -114,7 +117,7 @@ pub fn le_num(a: &LuaValue, b: &LuaValue) ->bool {
             // unrecachable: caller should have ensured both are numbers
             false
         }
-    } else{
+    } else {
         let af = a.fltvalue();
         if ttisfloat(b) {
             let bf = b.fltvalue();

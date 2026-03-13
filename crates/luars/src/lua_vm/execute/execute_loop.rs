@@ -1801,6 +1801,44 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         updatetrap!();
                     }
                 }
+                OpCode::Test => {
+                    let a = instr.get_a();
+                    let ra = stack_val!(a);
+                    // l_isfalse: nil or false
+                    let cond = !ra.is_nil() || ra.ttisfalse();
+
+                    let k = instr.get_k();
+                    if cond != k {
+                        pc += 1;
+                    } else {
+                        let jmp = unsafe { *code.get_unchecked(pc) };
+                        pc = ((pc + 1) as isize + jmp.get_sj() as isize) as usize;
+                        updatetrap!();
+                    }
+                }
+
+                OpCode::TestSet => {
+                    // if (l_isfalse(R[B]) == k) then pc++ else R[A] := R[B]; donextjump
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+                    let k = instr.get_k();
+
+                    let rb = *stack_val!(b);
+                    let cond = rb.is_nil() || rb.ttisfalse();
+                    if cond == k {
+                        pc += 1; // Condition failed - skip next instruction (JMP)
+                    } else {
+                        // Condition succeeded - copy value and EXECUTE next instruction (must be JMP)
+                        setobj2s(lua_state, stack_id!(a), &rb);
+                        // donextjump: fetch and execute next JMP instruction
+                        let next_instr = unsafe { *code.get_unchecked(pc) };
+                        debug_assert!(next_instr.get_opcode() == OpCode::Jmp);
+                        pc += 1; // Move past the JMP instruction
+                        let sj = next_instr.get_sj();
+                        pc = (pc as isize + sj as isize) as usize; // Execute the jump
+                        updatetrap!();
+                    }
+                }
                 _ => {}
             }
         }
