@@ -520,13 +520,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             None
                         };
-                        if table.impl_table.set_existing_int(key, rc) {
-                            if let Some(gc_ptr) = gc_ptr {
-                                lua_state.gc_barrier_back(gc_ptr);
-                            }
-                            continue;
-                        }
-
                         let meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
                             if table.impl_table.fast_seti(key, rc) {
@@ -545,6 +538,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         } else {
+                            if table.impl_table.set_existing_int(key, rc) {
+                                if let Some(gc_ptr) = gc_ptr {
+                                    lua_state.gc_barrier_back(gc_ptr);
+                                }
+                                continue;
+                            }
                             known_newindex_miss = true;
                         }
                     }
@@ -621,13 +620,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             None
                         };
-                        if table.impl_table.set_existing_int(b, rc) {
-                            if let Some(gc_ptr) = gc_ptr {
-                                lua_state.gc_barrier_back(gc_ptr);
-                            }
-                            continue;
-                        }
-
                         let meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
                             if table.impl_table.fast_seti(b, rc) {
@@ -646,6 +638,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         } else {
+                            if table.impl_table.set_existing_int(b, rc) {
+                                if let Some(gc_ptr) = gc_ptr {
+                                    lua_state.gc_barrier_back(gc_ptr);
+                                }
+                                continue;
+                            }
                             known_newindex_miss = true;
                         }
                     }

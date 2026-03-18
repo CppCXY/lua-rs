@@ -227,6 +227,27 @@ impl NativeTable {
         unsafe { self.node.add((hash as usize) & mask) }
     }
 
+    #[inline(always)]
+    fn mainposition_from_node(&self, node: *const Node) -> *mut Node {
+        debug_assert!(!self.node.is_null());
+        let mask = (1usize << self.lsizenode) - 1;
+
+        unsafe {
+            let index = match (*node).key_tt {
+                LUA_VNUMINT => ((*node).key_data.i as u64 as usize) & mask,
+                LUA_VSHRSTR => {
+                    let string = &*((*node).key_data.ptr as *const GcString);
+                    (string.data.hash as usize) & mask
+                }
+                _ => {
+                    let key = LuaValue::from_raw((*node).key_data, (*node).key_tt);
+                    (key.hash_value() as usize) & mask
+                }
+            };
+            self.node.add(index)
+        }
+    }
+
     /// Zero-copy short string lookup — writes directly to destination pointer.
     /// Assumes hash is non-empty and key is short string.
     /// Returns true if found and written.
@@ -415,7 +436,7 @@ impl NativeTable {
                 };
             }
 
-            let othern = self.mainposition(&(*mp).key());
+            let othern = self.mainposition_from_node(mp);
             if othern != mp {
                 if let Some(free_node) = self.getfreepos() {
                     let mut prev = othern;
@@ -525,7 +546,7 @@ impl NativeTable {
                 return true;
             }
 
-            let othern = self.mainposition(&(*mp).key());
+            let othern = self.mainposition_from_node(mp);
             if othern != mp {
                 if let Some(free_node) = self.getfreepos() {
                     let mut prev = othern;
@@ -1452,7 +1473,7 @@ impl NativeTable {
             // Main position is occupied by a LIVE entry.
             // Check if the occupying node belongs here.
             // Port of C Lua 5.5 newkey collision handling.
-            let othern = self.mainposition(&(*mp).key());
+            let othern = self.mainposition_from_node(mp);
 
             if othern != mp {
                 // Case 1: Colliding node is NOT at its main position (displaced).
