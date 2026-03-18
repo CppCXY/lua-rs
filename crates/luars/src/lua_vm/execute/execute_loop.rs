@@ -155,6 +155,37 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             };
         }
 
+        macro_rules! resume_caller_fast {
+            () => {{
+                let new_depth = lua_state.call_depth();
+                if new_depth <= target_depth {
+                    return Ok(());
+                }
+                let new_fi = new_depth - 1;
+                let ci_ptr = unsafe { lua_state.get_call_info_ptr(new_fi) } as *mut CallInfo;
+                ci = unsafe { &mut *ci_ptr };
+                if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
+                    continue 'startfunc;
+                }
+                base = ci.base;
+                pc = ci.pc as usize;
+                chunk = unsafe { &*ci.chunk_ptr };
+                code = &chunk.code;
+                constants = &chunk.constants;
+                trap = lua_state.hook_mask != 0;
+                if lua_state.hook_mask & LUA_MASKLINE != 0 {
+                    lua_state.oldpc = if pc > 0 {
+                        (pc - 1) as u32
+                    } else if chunk.is_vararg {
+                        0
+                    } else {
+                        u32::MAX
+                    };
+                }
+                continue;
+            }};
+        }
+
         // MAINLOOP: Main instruction dispatch loop
         loop {
             let instr = unsafe { *code.get_unchecked(pc) }; // vmfetch
@@ -1925,8 +1956,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     lua_state.set_top_raw(a_pos + n as usize);
                     poscall(lua_state, ci, n as usize, pc)?;
-                    // updatetrap!();
-                    continue 'startfunc; // goto ret
+                    resume_caller_fast!();
                 }
                 OpCode::Return0 => {
                     // return (no values)
@@ -1951,26 +1981,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state.set_top_raw(res + nresults as usize);
                     }
 
-                    // "goto returning" — skip full startfunc reload
-                    let new_depth = lua_state.call_depth();
-                    if new_depth <= target_depth {
-                        return Ok(());
-                    }
-                    let new_fi = new_depth - 1;
-                    let ci_ptr = unsafe { lua_state.get_call_info_ptr(new_fi) } as *mut CallInfo;
-                    ci = unsafe { &mut *ci_ptr };
-                    // If caller has pending metamethod finish (yield in __index etc.),
-                    // must go through startfunc to run handle_pending_ops.
-                    if ci.call_status & CIST_PENDING_FINISH != 0 {
-                        continue 'startfunc;
-                    }
-                    base = ci.base;
-                    pc = ci.pc as usize;
-                    chunk = unsafe { &*ci.chunk_ptr };
-                    code = &chunk.code;
-                    constants = &chunk.constants;
-                    trap = lua_state.hook_mask != 0;
-                    continue; // inner dispatch loop
+                    resume_caller_fast!();
                 }
                 OpCode::Return1 => {
                     // return R[A]  (single value)
@@ -2006,29 +2017,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
-                    // "goto returning" — C Lua optimization: avoid full startfunc reload.
-                    // Instead of `continue 'startfunc` (which re-checks depth, CIST_C,
-                    // oldpc, call hook), directly reload caller's frame state and
-                    // continue the dispatch loop.
-                    let new_depth = lua_state.call_depth();
-                    if new_depth <= target_depth {
-                        return Ok(());
-                    }
-                    let new_fi = new_depth - 1;
-                    let ci_ptr = unsafe { lua_state.get_call_info_ptr(new_fi) } as *mut CallInfo;
-                    ci = unsafe { &mut *ci_ptr };
-                    // If caller has pending metamethod finish (yield in __index etc.),
-                    // must go through startfunc to run handle_pending_ops.
-                    if ci.call_status & CIST_PENDING_FINISH != 0 {
-                        continue 'startfunc;
-                    }
-                    base = ci.base;
-                    pc = ci.pc as usize;
-                    chunk = unsafe { &*ci.chunk_ptr };
-                    code = &chunk.code;
-                    constants = &chunk.constants;
-                    trap = lua_state.hook_mask != 0;
-                    continue; // inner dispatch loop — skip startfunc overhead
+                    resume_caller_fast!();
                 }
                 OpCode::ForLoop => {
                     let a = instr.get_a() as usize;
