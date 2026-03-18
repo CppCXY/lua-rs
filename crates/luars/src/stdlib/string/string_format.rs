@@ -23,9 +23,8 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         (unsafe { std::slice::from_raw_parts(ptr, len) }, len)
     };
 
-    // Collect arguments
-    let args = l.get_args();
-    let mut arg_index = 1;
+    let arg_count = l.arg_count();
+    let mut arg_index = 2usize;
 
     let mut pos = 0;
 
@@ -86,32 +85,33 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         validate_format(flags, fmt_char, l)?;
 
         // Get argument
-        let arg = args.get(arg_index).ok_or_else(|| {
-            l.error(format!(
+        if arg_index > arg_count {
+            return Err(l.error(format!(
                 "bad argument #{} to 'format' (no value)",
-                arg_index + 1
-            ))
-        })?;
+                arg_index
+            )));
+        }
+        let arg = unsafe { l.get_arg_unchecked(arg_index) };
         arg_index += 1;
 
         // Format based on type
         match fmt_char {
-            'c' => format_char(&mut result, arg, flags, l)?,
-            'd' | 'i' => format_int(&mut result, arg, flags, l)?,
-            'o' => format_octal(&mut result, arg, flags, l)?,
-            'u' => format_uint(&mut result, arg, flags, l)?,
-            'x' => format_hex(&mut result, arg, flags, false, l)?,
-            'X' => format_hex(&mut result, arg, flags, true, l)?,
-            'a' => format_hex_float(&mut result, arg, flags, false, l)?,
-            'A' => format_hex_float(&mut result, arg, flags, true, l)?,
-            'e' => format_sci(&mut result, arg, flags, false, l)?,
-            'E' => format_sci(&mut result, arg, flags, true, l)?,
-            'f' => format_float(&mut result, arg, flags, l)?,
-            'g' => format_auto(&mut result, arg, flags, false, l)?,
-            'G' => format_auto(&mut result, arg, flags, true, l)?,
-            's' => format_string(&mut result, arg, flags, l)?,
-            'q' => format_quoted(&mut result, arg, l)?,
-            'p' => format_pointer(&mut result, arg, flags)?,
+            'c' => format_char(&mut result, &arg, flags, l)?,
+            'd' | 'i' => format_int(&mut result, &arg, flags, l)?,
+            'o' => format_octal(&mut result, &arg, flags, l)?,
+            'u' => format_uint(&mut result, &arg, flags, l)?,
+            'x' => format_hex(&mut result, &arg, flags, false, l)?,
+            'X' => format_hex(&mut result, &arg, flags, true, l)?,
+            'a' => format_hex_float(&mut result, &arg, flags, false, l)?,
+            'A' => format_hex_float(&mut result, &arg, flags, true, l)?,
+            'e' => format_sci(&mut result, &arg, flags, false, l)?,
+            'E' => format_sci(&mut result, &arg, flags, true, l)?,
+            'f' => format_float(&mut result, &arg, flags, l)?,
+            'g' => format_auto(&mut result, &arg, flags, false, l)?,
+            'G' => format_auto(&mut result, &arg, flags, true, l)?,
+            's' => format_string(&mut result, &arg, flags, l)?,
+            'q' => format_quoted(&mut result, &arg, l)?,
+            'p' => format_pointer(&mut result, &arg, flags)?,
             'F' => {
                 return Err(
                     l.error("invalid option '%F' to 'format' (invalid conversion)".to_string())

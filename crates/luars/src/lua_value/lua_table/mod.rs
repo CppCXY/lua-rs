@@ -128,6 +128,7 @@ impl LuaTable {
 
     /// Returns Ok(Some((key, value))) for next entry, Ok(None) for end of table,
     /// or Err(()) for invalid key.
+    #[inline]
     pub fn next(&self, input_key: &LuaValue) -> Result<Option<(LuaValue, LuaValue)>, ()> {
         self.impl_table.next(input_key)
     }

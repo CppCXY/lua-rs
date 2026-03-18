@@ -592,6 +592,7 @@ pub fn discharge_vars(fs: &mut FuncState, e: &mut ExpDesc) {
         }
         ExpKind::VVARGIND => {
             // Lua 5.5: indexed vararg parameter - generate GETVARG instruction
+            // GETVARG accesses varargs directly from the stack (no table needed)
             free_regs(fs, e.u.ind().t as u8, e.u.ind().idx as u8);
             e.u = ExpUnion::Info(code_abc(
                 fs,

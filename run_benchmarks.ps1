@@ -41,38 +41,56 @@ function Write-ColorHost {
         [string]$Color = "White"
     )
     if ($NoColor) {
-        Write-Host $Message
+        Write-Output $Message
     } else {
+        Write-Output $Message
         Write-Host $Message -ForegroundColor $Color
     }
 }
 
-Write-Host ""
+function Invoke-BenchmarkRuntime {
+    param(
+        [string]$Executable,
+        [string]$ScriptPath
+    )
+
+    $output = & $Executable $ScriptPath 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "Benchmark failed for $ScriptPath with exit code $exitCode`n$($output | Out-String)"
+    }
+
+    foreach ($line in @($output)) {
+        Write-Output $line
+    }
+}
+
+Write-Output ""
 Write-ColorHost "========================================" "Cyan"
 Write-ColorHost "  Lua-RS vs Native Lua Performance" "Cyan"
 Write-ColorHost "========================================" "Cyan"
 Write-ColorHost "Native Lua: $nativeLua" "Gray"
-Write-Host ""
+Write-Output ""
 
 foreach ($bench in $benchmarks) {
-    Write-Host ""
+    Write-Output ""
     Write-ColorHost ">>> $bench <<<" "Yellow"
-    Write-Host ""
+    Write-Output ""
     
     Write-ColorHost "--- Lua-RS ---" "Magenta"
-    & ".\target\release\lua.exe" "benchmarks\$bench"
+    Invoke-BenchmarkRuntime -Executable ".\target\release\lua.exe" -ScriptPath "benchmarks\$bench"
     
-    Write-Host ""
+    Write-Output ""
     Write-ColorHost "--- Native Lua ---" "Green"
-    & $nativeLua "benchmarks\$bench"
+    Invoke-BenchmarkRuntime -Executable $nativeLua -ScriptPath "benchmarks\$bench"
     
-    Write-Host ""
-    Write-Host "----------------------------------------"
+    Write-Output ""
+    Write-Output "----------------------------------------"
 }
 
-Write-Host ""
+Write-Output ""
 Write-ColorHost "========================================" "Cyan"
 Write-ColorHost "  Comparison Complete!" "Cyan"
 Write-ColorHost "========================================" "Cyan"
-Write-Host ""
+Write-Output ""
 Write-ColorHost "See PERFORMANCE_REPORT.md for detailed analysis" "Yellow"

@@ -52,6 +52,16 @@ jobs:
           ./run_benchmarks.sh --nocolor 2>&1 | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+      - name: Run Traditional Lua Benchmarks
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Traditional Lua Benchmark Results - Linux (ubuntu-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          chmod +x run_lua_benchmarks.sh
+          ./run_lua_benchmarks.sh --quick 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
   benchmark-windows:
     name: Benchmark (Windows)
     runs-on: windows-latest
@@ -101,6 +111,18 @@ jobs:
           .\run_benchmarks.ps1 -NoColor 2>&1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
           echo '```' >> $env:GITHUB_STEP_SUMMARY
 
+      - name: Run Traditional Lua Benchmarks
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE\lua_bin;$env:PATH"
+          $env:NATIVE_LUA = "$env:GITHUB_WORKSPACE\lua_bin\lua.exe"
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "## Traditional Lua Benchmark Results - Windows (windows-latest)" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+          .\run_lua_benchmarks.ps1 -NoColor -Quick 2>&1 | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          echo '```' >> $env:GITHUB_STEP_SUMMARY
+
   benchmark-macos:
     name: Benchmark (macOS)
     runs-on: macos-latest
@@ -140,4 +162,14 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           chmod +x run_benchmarks.sh
           ./run_benchmarks.sh --nocolor 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Run Traditional Lua Benchmarks
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Traditional Lua Benchmark Results - macOS (macos-latest)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          chmod +x run_lua_benchmarks.sh
+          ./run_lua_benchmarks.sh --quick 2>&1 | tee -a $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY

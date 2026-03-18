@@ -2093,6 +2093,19 @@ impl GC {
                 }
             }
 
+            // Mark all functions in the call stack.
+            // This ensures executing functions (and their chunks/constants)
+            // can never be GC'd, even if stack_top doesn't fully cover
+            // all function positions (e.g., during generational GC minor
+            // collections where the thread is re-traversed from grayagain).
+            for ci_idx in 0..state.call_depth() {
+                let ci_func = &state.call_stack[ci_idx].func;
+                if !ci_func.is_nil() {
+                    self.mark_value(l, ci_func);
+                    count += 1;
+                }
+            }
+
             // Mark the thread's error_object — it may be held during pcall
             // error recovery (between __close calls) and not on the stack.
             let err_obj = &state.error_object;
@@ -3555,7 +3568,7 @@ impl GC {
                         for ci_idx in 0..state.call_depth() {
                             let ci = state.get_call_info(ci_idx);
                             thread_info.push_str(&format!("\n    ci[{}]: base={}, top={}, pc={}, nresults={}, status=0x{:02X}",
-                                ci_idx, ci.base, ci.top, ci.pc, ci.nresults, ci.call_status));
+                                ci_idx, ci.base, ci.top, ci.pc, ci.nresults(), ci.call_status));
                         }
                         // Show collectable values around the slot in question
                         let start = (*slot).saturating_sub(5);

@@ -2,54 +2,53 @@
 // Handles %a, %d, %l, %u, %w, %s, %p, %c, %g, %x and their uppercase inverses
 // Also handles [set] matching
 
-/// Check if a character matches a Lua character class letter.
-/// `cl` is the class letter (lowercase): 'a','c','d','g','l','p','s','u','w','x'
+/// Check if a byte matches a Lua character class letter.
+/// `cl` is the class letter byte (lowercase): 'a','c','d','g','l','p','s','u','w','x'
 /// Uses ASCII-only classification to match C Lua's C-locale behavior.
 #[inline(always)]
-pub fn match_class(c: char, cl: char) -> bool {
-    let b = c as u32;
+pub fn match_class(c: u8, cl: u8) -> bool {
     match cl {
-        'a' => b < 128 && (b as u8).is_ascii_alphabetic(),
-        'c' => b < 128 && (b as u8).is_ascii_control(),
-        'd' => b < 128 && (b as u8).is_ascii_digit(),
-        'g' => b < 128 && (b as u8).is_ascii_graphic(),
-        'l' => b < 128 && (b as u8).is_ascii_lowercase(),
-        'p' => b < 128 && (b as u8).is_ascii_punctuation(),
-        's' => b < 128 && (b as u8).is_ascii_whitespace(),
-        'u' => b < 128 && (b as u8).is_ascii_uppercase(),
-        'w' => b < 128 && (b as u8).is_ascii_alphanumeric(),
-        'x' => b < 128 && (b as u8).is_ascii_hexdigit(),
-        'z' => c == '\0',
+        b'a' => c.is_ascii_alphabetic(),
+        b'c' => c.is_ascii_control(),
+        b'd' => c.is_ascii_digit(),
+        b'g' => c.is_ascii_graphic(),
+        b'l' => c.is_ascii_lowercase(),
+        b'p' => c.is_ascii_punctuation(),
+        b's' => c.is_ascii_whitespace(),
+        b'u' => c.is_ascii_uppercase(),
+        b'w' => c.is_ascii_alphanumeric(),
+        b'x' => c.is_ascii_hexdigit(),
+        b'z' => c == 0,
         _ => c == cl, // not a class letter, match literally
     }
 }
 
 /// Check if `cl` is a known Lua class letter (used to distinguish %x class vs %x literal).
 #[inline(always)]
-fn is_class_letter(cl: char) -> bool {
+pub(crate) fn is_class_letter(cl: u8) -> bool {
     matches!(
         cl,
-        'a' | 'c'
-            | 'd'
-            | 'g'
-            | 'l'
-            | 'p'
-            | 's'
-            | 'u'
-            | 'w'
-            | 'x'
-            | 'z'
-            | 'A'
-            | 'C'
-            | 'D'
-            | 'G'
-            | 'L'
-            | 'P'
-            | 'S'
-            | 'U'
-            | 'W'
-            | 'X'
-            | 'Z'
+        b'a' | b'c'
+            | b'd'
+            | b'g'
+            | b'l'
+            | b'p'
+            | b's'
+            | b'u'
+            | b'w'
+            | b'x'
+            | b'z'
+            | b'A'
+            | b'C'
+            | b'D'
+            | b'G'
+            | b'L'
+            | b'P'
+            | b'S'
+            | b'U'
+            | b'W'
+            | b'X'
+            | b'Z'
     )
 }
 
@@ -66,10 +65,10 @@ fn is_class_letter(cl: char) -> bool {
 /// `None` return means the character did NOT match.
 /// `Some(next_pp)` means it matched, and `next_pp` is the index past this element.
 #[inline]
-pub fn singlematch(c: char, pat: &[char], pp: usize) -> bool {
+pub fn singlematch(c: u8, pat: &[u8], pp: usize) -> bool {
     match pat[pp] {
-        '.' => true,
-        '%' => {
+        b'.' => true,
+        b'%' => {
             let cl = pat[pp + 1];
             if cl.is_ascii_uppercase() && is_class_letter(cl) {
                 // Inverted class: %A matches non-alphabetic
@@ -78,7 +77,7 @@ pub fn singlematch(c: char, pat: &[char], pp: usize) -> bool {
                 match_class(c, cl)
             }
         }
-        '[' => matchset(c, pat, pp),
+        b'[' => matchset(c, pat, pp),
         _ => c == pat[pp],
     }
 }
@@ -86,24 +85,24 @@ pub fn singlematch(c: char, pat: &[char], pp: usize) -> bool {
 /// Return the pattern index after the current single-element (past `[]`, `%x`, `.`, or literal).
 /// This does NOT consume repetition suffixes (*, +, -, ?).
 #[inline]
-pub fn element_end(pat: &[char], pp: usize) -> usize {
+pub fn element_end(pat: &[u8], pp: usize) -> usize {
     match pat[pp] {
-        '%' => {
+        b'%' => {
             // %bxy is handled separately in engine, not here
             pp + 2
         }
-        '[' => {
+        b'[' => {
             let mut i = pp + 1;
             // handle ^
-            if i < pat.len() && pat[i] == '^' {
+            if i < pat.len() && pat[i] == b'^' {
                 i += 1;
             }
             // handle ] as first char in set
-            if i < pat.len() && pat[i] == ']' {
+            if i < pat.len() && pat[i] == b']' {
                 i += 1;
             }
-            while i < pat.len() && pat[i] != ']' {
-                if pat[i] == '%' && i + 1 < pat.len() {
+            while i < pat.len() && pat[i] != b']' {
+                if pat[i] == b'%' && i + 1 < pat.len() {
                     i += 1; // skip escaped char
                 }
                 i += 1;
@@ -116,9 +115,9 @@ pub fn element_end(pat: &[char], pp: usize) -> usize {
 
 /// Match character `c` against a `[set]` starting at `pat[pp]` (pp points to `[`).
 #[inline]
-fn matchset(c: char, pat: &[char], pp: usize) -> bool {
+fn matchset(c: u8, pat: &[u8], pp: usize) -> bool {
     let mut i = pp + 1; // skip '['
-    let negated = i < pat.len() && pat[i] == '^';
+    let negated = i < pat.len() && pat[i] == b'^';
     if negated {
         i += 1;
     }
@@ -126,15 +125,15 @@ fn matchset(c: char, pat: &[char], pp: usize) -> bool {
     let mut matched = false;
 
     // Handle ']' as first char in set (literal ']')
-    if i < pat.len() && pat[i] == ']' {
-        if c == ']' {
+    if i < pat.len() && pat[i] == b']' {
+        if c == b']' {
             matched = true;
         }
         i += 1;
     }
 
-    while i < pat.len() && pat[i] != ']' {
-        if pat[i] == '%' && i + 1 < pat.len() {
+    while i < pat.len() && pat[i] != b']' {
+        if pat[i] == b'%' && i + 1 < pat.len() {
             i += 1;
             let cl = pat[i];
             if cl.is_ascii_uppercase() && is_class_letter(cl) {
@@ -145,7 +144,7 @@ fn matchset(c: char, pat: &[char], pp: usize) -> bool {
                 matched = true;
             }
             i += 1;
-        } else if i + 2 < pat.len() && pat[i + 1] == '-' && pat[i + 2] != ']' {
+        } else if i + 2 < pat.len() && pat[i + 1] == b'-' && pat[i + 2] != b']' {
             // Range: a-z
             if c >= pat[i] && c <= pat[i + 2] {
                 matched = true;
@@ -168,88 +167,88 @@ mod tests {
 
     #[test]
     fn test_match_class() {
-        assert!(match_class('a', 'a'));
-        assert!(match_class('Z', 'a'));
-        assert!(!match_class('1', 'a'));
-        assert!(match_class('5', 'd'));
-        assert!(!match_class('x', 'd'));
-        assert!(match_class(' ', 's'));
-        assert!(match_class('\t', 's'));
-        assert!(!match_class('a', 's'));
+        assert!(match_class(b'a', b'a'));
+        assert!(match_class(b'Z', b'a'));
+        assert!(!match_class(b'1', b'a'));
+        assert!(match_class(b'5', b'd'));
+        assert!(!match_class(b'x', b'd'));
+        assert!(match_class(b' ', b's'));
+        assert!(match_class(b'\t', b's'));
+        assert!(!match_class(b'a', b's'));
     }
 
     #[test]
     fn test_singlematch_dot() {
-        let p: Vec<char> = ".".chars().collect();
-        assert!(singlematch('x', &p, 0));
-        assert!(singlematch(' ', &p, 0));
+        let p = b".";
+        assert!(singlematch(b'x', p, 0));
+        assert!(singlematch(b' ', p, 0));
     }
 
     #[test]
     fn test_singlematch_class() {
-        let p: Vec<char> = "%d".chars().collect();
-        assert!(singlematch('5', &p, 0));
-        assert!(!singlematch('a', &p, 0));
+        let p = b"%d";
+        assert!(singlematch(b'5', p, 0));
+        assert!(!singlematch(b'a', p, 0));
     }
 
     #[test]
     fn test_singlematch_inverted_class() {
-        let p: Vec<char> = "%D".chars().collect();
-        assert!(!singlematch('5', &p, 0));
-        assert!(singlematch('a', &p, 0));
+        let p = b"%D";
+        assert!(!singlematch(b'5', p, 0));
+        assert!(singlematch(b'a', p, 0));
     }
 
     #[test]
     fn test_singlematch_set() {
-        let p: Vec<char> = "[abc]".chars().collect();
-        assert!(singlematch('a', &p, 0));
-        assert!(singlematch('c', &p, 0));
-        assert!(!singlematch('d', &p, 0));
+        let p = b"[abc]";
+        assert!(singlematch(b'a', p, 0));
+        assert!(singlematch(b'c', p, 0));
+        assert!(!singlematch(b'd', p, 0));
     }
 
     #[test]
     fn test_singlematch_negated_set() {
-        let p: Vec<char> = "[^abc]".chars().collect();
-        assert!(!singlematch('a', &p, 0));
-        assert!(singlematch('d', &p, 0));
+        let p = b"[^abc]";
+        assert!(!singlematch(b'a', p, 0));
+        assert!(singlematch(b'd', p, 0));
     }
 
     #[test]
     fn test_singlematch_range() {
-        let p: Vec<char> = "[a-z]".chars().collect();
-        assert!(singlematch('m', &p, 0));
-        assert!(!singlematch('M', &p, 0));
+        let p = b"[a-z]";
+        assert!(singlematch(b'm', p, 0));
+        assert!(!singlematch(b'M', p, 0));
     }
 
     #[test]
     fn test_singlematch_set_with_class() {
-        let p: Vec<char> = "[%d_]".chars().collect();
-        assert!(singlematch('5', &p, 0));
-        assert!(singlematch('_', &p, 0));
-        assert!(!singlematch('a', &p, 0));
+        let p = b"[%d_]";
+        assert!(singlematch(b'5', p, 0));
+        assert!(singlematch(b'_', p, 0));
+        assert!(!singlematch(b'a', p, 0));
     }
 
     #[test]
     fn test_element_end() {
-        let p: Vec<char> = "a".chars().collect();
-        assert_eq!(element_end(&p, 0), 1);
+        let p = b"a";
+        assert_eq!(element_end(p, 0), 1);
 
-        let p: Vec<char> = "%d".chars().collect();
-        assert_eq!(element_end(&p, 0), 2);
+        let p = b"%d";
+        assert_eq!(element_end(p, 0), 2);
 
-        let p: Vec<char> = "[abc]".chars().collect();
-        assert_eq!(element_end(&p, 0), 5);
+        let p = b"[abc]";
+        assert_eq!(element_end(p, 0), 5);
 
-        let p: Vec<char> = "[^a-z%d]".chars().collect();
-        assert_eq!(element_end(&p, 0), 8);
+        let p = b"[^a-z%d]";
+        assert_eq!(element_end(p, 0), 8);
     }
 
     #[test]
     fn test_set_bracket_first() {
         // ] as first char in set
-        let p: Vec<char> = "[]abc]".chars().collect();
-        assert!(singlematch(']', &p, 0));
-        assert!(singlematch('a', &p, 0));
-        assert!(!singlematch('x', &p, 0));
+        let p = b"[]abc]";
+        assert!(singlematch(b']', p, 0));
+        assert!(singlematch(b'a', p, 0));
+        assert!(!singlematch(b'x', p, 0));
     }
 }

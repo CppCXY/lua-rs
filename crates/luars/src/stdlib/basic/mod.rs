@@ -505,44 +505,48 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
     Ok(3)
 }
 
-/// Iterator function for ipairs - uses generic table access (respects __index)
+/// Iterator function for ipairs — like C Lua's ipairsaux.
+/// Hot path: push_c_frame already guarantees EXTRA_STACK slots,
+/// so we use push_value_unchecked throughout.
 #[inline]
 fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
     let table_val = unsafe { l.get_arg_unchecked(1) };
     let index_val = unsafe { l.get_arg_unchecked(2) };
 
-    if let Some(index) = index_val.as_integer() {
-        let next_index = index.wrapping_add(1);
+    let index = match index_val.as_integer() {
+        Some(i) => i,
+        None => return Err(l.error("ipairs iterator: invalid index".to_string())),
+    };
+    let next_index = index.wrapping_add(1);
 
-        // Fast path: no metatable → raw access avoids metamethod dispatch
-        let has_meta = table_val
-            .as_table_mut()
-            .map(|t| t.has_metatable())
-            .unwrap_or(true);
-
-        let value = if !has_meta {
-            table_val
-                .as_table_mut()
-                .unwrap()
-                .raw_geti(next_index)
-                .unwrap_or(LuaValue::nil())
+    // Single table dereference — cache it for both has_metatable + raw_geti.
+    let value = if let Some(table) = table_val.as_table_mut() {
+        if !table.has_metatable() {
+            // Hot path: no metatable → direct array access
+            table.raw_geti(next_index).unwrap_or(LuaValue::nil())
         } else {
+            // Cold: metatable present → full __index dispatch
             l.table_geti(&table_val, next_index)?
-        };
-
-        if !value.is_nil() {
-            l.push_value(LuaValue::integer(next_index))?;
-            l.push_value(value)?;
-            return Ok(2);
-        } else {
-            unsafe {
-                l.push_value_unchecked(LuaValue::nil());
-            }
-            return Ok(1);
         }
-    }
+    } else {
+        l.table_geti(&table_val, next_index)?
+    };
 
-    Err(l.error("ipairs iterator: invalid index".to_string()))
+    // push_value_unchecked is safe: push_c_frame guarantees EXTRA_STACK
+    // slots above frame_top.
+    if !value.is_nil() {
+        unsafe {
+            l.push_value_unchecked(LuaValue::integer(next_index));
+            l.push_value_unchecked(value);
+        }
+        Ok(2)
+    } else {
+        // Return nil to signal end of iteration
+        unsafe {
+            l.push_value_unchecked(LuaValue::nil());
+        }
+        Ok(1)
+    }
 }
 
 /// pairs(t) - Return iterator for all key-value pairs

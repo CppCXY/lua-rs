@@ -1,18 +1,11 @@
-/*----------------------------------------------------------------------
-  Closure and Vararg Operations Module - Extracted from main execution loop
-
-  This module contains complex but non-hot-path instructions:
-  - Closure
-  - Vararg, GetVarg, VarargPrep
-  - SetList (used in table constructors)
-
-  These operations involve complex logic but are not in critical hot paths,
-  so extracting them reduces main loop size.
-----------------------------------------------------------------------*/
-
 use crate::{
+    CallInfo,
     lua_value::{Chunk, LuaValue},
-    lua_vm::{Instruction, LuaResult, LuaState, OpCode, lua_limits::EXTRA_STACK},
+    lua_vm::{
+        LuaResult, LuaState,
+        execute::helper::{ivalue, setivalue, ttisinteger},
+        lua_limits::EXTRA_STACK,
+    },
 };
 
 use super::helper::{buildhiddenargs, setnilvalue};
@@ -52,32 +45,23 @@ fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> Lua
 /// Lua 5.5: When k flag is set, B is the register of the vararg table.
 /// The number of varargs is read from the table's "n" field (which may
 /// have been modified by user code), not from CallInfo.nextraargs.
-pub fn exec_vararg(
+pub fn get_varargs(
     lua_state: &mut LuaState,
-    instr: Instruction,
+    ci: &mut CallInfo,
     base: usize,
-    frame_idx: usize,
+    a: usize,
+    b: usize,
+    vatab: i32,
+    wanted: i32,
     chunk: &Chunk,
 ) -> LuaResult<()> {
-    let a = instr.get_a() as usize;
-    let b = instr.get_b() as usize;
-    let c = instr.get_c() as usize;
-    let k = instr.get_k();
-
-    // wanted = number of results wanted (C-1), -1 means all
-    let wanted = if c == 0 { -1 } else { (c - 1) as i32 };
-
-    // Check if using vararg table (k flag set)
-    let vatab = if k { b as i32 } else { -1 };
-
     // Get the number of vararg arguments.
     // If vatab mode, read "n" from the vararg table (user may have modified it).
     // Otherwise, use nextraargs from CallInfo.
     let nargs: usize = if vatab >= 0 {
-        get_vatab_len(lua_state, base, b)?
+        get_vatab_len(lua_state, base, vatab as usize)?
     } else {
-        let call_info = lua_state.get_call_info(frame_idx);
-        call_info.nextraargs as usize
+        ci.nextraargs as usize
     };
 
     // Calculate how many to copy
@@ -96,7 +80,7 @@ pub fn exec_vararg(
     let new_top = base + a + touse;
     lua_state.set_top(new_top)?;
 
-    let ra = base + a;
+    let ra_pos = base + a;
 
     if vatab < 0 {
         // No vararg table - get from stack
@@ -114,19 +98,16 @@ pub fn exec_vararg(
         // Varargs are stored below base, ra is at base+a, so ranges never overlap.
         // Use copy_within to avoid heap allocation.
         let stack = lua_state.stack_mut();
-        stack.copy_within(vararg_start..vararg_start + touse, ra);
+        stack.copy_within(vararg_start..vararg_start + touse, ra_pos);
     } else {
         // Get from vararg table at R[B]
-        let table_val = {
-            let stack = lua_state.stack_mut();
-            unsafe { *stack.get_unchecked(base + b) }
-        };
+        let table_val = { unsafe { *lua_state.stack().get_unchecked(base + b) } };
 
         if let Some(table) = table_val.as_table_mut() {
             let stack = lua_state.stack_mut();
             for i in 0..touse {
                 unsafe {
-                    *stack.get_unchecked_mut(ra + i) =
+                    *stack.get_unchecked_mut(ra_pos + i) =
                         table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil())
                 };
             }
@@ -134,7 +115,7 @@ pub fn exec_vararg(
             // Not a table, fill with nil
             let stack = lua_state.stack_mut();
             for i in 0..touse {
-                setnilvalue(unsafe { stack.get_unchecked_mut(ra + i) });
+                setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos + i) });
             }
         }
     }
@@ -143,17 +124,75 @@ pub fn exec_vararg(
     if wanted >= 0 {
         let stack = lua_state.stack_mut();
         for i in touse..(wanted as usize) {
-            setnilvalue(unsafe { stack.get_unchecked_mut(ra + i) });
+            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos + i) });
         }
     }
 
     Ok(())
 }
 
+pub fn get_vararg(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    base: usize,
+    ra_pos: usize,
+    rc_pos: usize,
+) -> LuaResult<()> {
+    let nextra = ci.nextraargs as usize;
+
+    // Ensure stack is large enough for rc_pos access
+    if rc_pos >= lua_state.stack_len() {
+        lua_state.grow_stack(rc_pos + 1)?;
+    }
+
+    let stack = lua_state.stack_mut();
+    let rc = stack[rc_pos];
+
+    if let Some(s) = rc.as_str() {
+        if s == "n" {
+            let stack = lua_state.stack_mut();
+            setivalue(unsafe { stack.get_unchecked_mut(ra_pos) }, nextra as i64);
+        } else {
+            let stack = lua_state.stack_mut();
+            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+        }
+    } else if ttisinteger(&rc) {
+        let n = ivalue(&rc);
+        let stack = lua_state.stack_mut();
+        if nextra > 0 && n >= 1 && (n as usize) <= nextra {
+            let slot = (base - 1) - nextra + (n as usize) - 1;
+            stack[ra_pos] = stack[slot];
+        } else {
+            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+        }
+    } else if rc.is_float() {
+        // Lua 5.5: tointegerns - convert integer-valued float to integer
+        let f = rc.as_float().unwrap();
+        let n = f as i64;
+        if (n as f64) == f {
+            // Float is integer-valued
+            let stack = lua_state.stack_mut();
+            if nextra > 0 && n >= 1 && (n as usize) <= nextra {
+                let slot = (base - 1) - nextra + (n as usize) - 1;
+                stack[ra_pos] = stack[slot];
+            } else {
+                setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+            }
+        } else {
+            let stack = lua_state.stack_mut();
+            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+        }
+    } else {
+        let stack = lua_state.stack_mut();
+        setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+    }
+    Ok(())
+}
+
 /// VARARGPREP: Adjust varargs (prepare vararg function)
 pub fn exec_varargprep(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     chunk: &Chunk,
     base: &mut usize,
 ) -> LuaResult<()> {
@@ -162,9 +201,9 @@ pub fn exec_varargprep(
     // We must NOT recalculate from stack_top because push_frame inflates
     // stack_top to frame_top (base + maxstacksize) for GC safety,
     // which would give a wrong totalargs.
-    let call_info = lua_state.get_call_info(frame_idx);
-    let nextra = call_info.nextraargs as usize;
-    let func_pos = call_info.base - 1;
+
+    let nextra = ci.nextraargs as usize;
+    let func_pos = ci.base - 1;
     let nfixparams = chunk.param_count;
     let totalargs = nfixparams + nextra;
 
@@ -231,7 +270,7 @@ pub fn exec_varargprep(
             lua_state.grow_stack(required_size)?;
         }
 
-        let new_base = buildhiddenargs(lua_state, frame_idx, chunk, totalargs, nfixparams, nextra)?;
+        let new_base = buildhiddenargs(lua_state, ci, chunk, totalargs, nfixparams, nextra)?;
         *base = new_base;
 
         // Lua 5.5: set vararg parameter register to nil (ltm.c:288)
@@ -243,108 +282,9 @@ pub fn exec_varargprep(
     // No vararg table needed and no extra args: still need to nil the vararg register
     // so it doesn't contain stale stack values
     else if chunk.is_vararg {
-        let current_base = lua_state.get_call_info(frame_idx).base;
+        let current_base = ci.base;
         let stack = lua_state.stack_mut();
         setnilvalue(unsafe { stack.get_unchecked_mut(current_base + nfixparams) });
-    }
-
-    Ok(())
-}
-
-/// SETLIST: R[A][vC+i] := R[A+i], 1 <= i <= vB
-pub fn exec_setlist(
-    lua_state: &mut LuaState,
-    instr: Instruction,
-    code: &[Instruction],
-    base: usize,
-    pc: &mut usize,
-) -> LuaResult<()> {
-    let a = instr.get_a() as usize;
-    let mut vb = instr.get_vb() as usize; // number of elements
-    let mut vc = instr.get_vc() as usize; // starting index offset
-    let k = instr.get_k();
-
-    // Check for EXTRAARG for larger starting indices
-    if k && *pc < code.len() {
-        let extra_instr = code[*pc];
-
-        if extra_instr.get_opcode() == OpCode::ExtraArg {
-            *pc += 1; // Consume EXTRAARG
-            let extra = extra_instr.get_ax() as usize;
-            // Add extra to starting index
-            vc += extra * 1024;
-        }
-    }
-
-    // If vB == 0, use all values from ra+1 to top
-    if vb == 0 {
-        let stack_top = lua_state.get_top();
-        let ra = base + a;
-        vb = if stack_top > ra + 1 {
-            stack_top - ra - 1
-        } else {
-            0
-        };
-    }
-
-    // Get table from R[A] - OPTIMIZED: Direct pointer access
-    let table_val = unsafe { *lua_state.stack_mut().get_unchecked(base + a) };
-    let mut is_collectable = false;
-    if let Some(table) = table_val.as_table_mut() {
-        unsafe {
-            let stack_ptr = lua_state.stack_mut().as_mut_ptr();
-            let impl_table = &mut table.impl_table;
-
-            // Fast path: all indices fit in the pre-allocated array.
-            // NewTable already allocated the array with the right size,
-            // so for the common case ({1,2,3,4,5}) we can write directly
-            // without bounds checks or set_int's push/rehash logic.
-            let last_index = (vc + vb) as i64;
-            if last_index >= 1 && last_index <= impl_table.asize as i64 {
-                for i in 1..=vb {
-                    let val = *stack_ptr.add(base + a + i);
-                    if val.iscollectable() {
-                        is_collectable = true;
-                    }
-                    let lua_idx = (vc + i) as i64;
-                    impl_table.write_array(lua_idx, val);
-                }
-            } else if vb > 0 {
-                // Pre-resize: ensure array is large enough for all elements at once,
-                // avoiding incremental resizes (e.g., {…} starts with asize=0)
-                if last_index > impl_table.asize as i64 {
-                    let needed = (last_index as u32).next_power_of_two().max(4);
-                    if needed > impl_table.asize {
-                        impl_table.resize_array(needed);
-                    }
-                }
-                // Now try fast path again after resize
-                if last_index >= 1 && last_index <= impl_table.asize as i64 {
-                    for i in 1..=vb {
-                        let val = *stack_ptr.add(base + a + i);
-                        if val.iscollectable() {
-                            is_collectable = true;
-                        }
-                        let lua_idx = (vc + i) as i64;
-                        impl_table.write_array(lua_idx, val);
-                    }
-                } else {
-                    // Truly slow path: indices outside valid range
-                    for i in 1..=vb {
-                        let val = *stack_ptr.add(base + a + i);
-                        if val.iscollectable() {
-                            is_collectable = true;
-                        }
-                        let index = (vc + i) as i64;
-                        table.raw_seti(index, val);
-                    }
-                }
-            }
-        }
-
-        if is_collectable {
-            lua_state.gc_barrier_back(table_val.as_gc_ptr().unwrap());
-        }
     }
 
     Ok(())

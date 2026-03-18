@@ -8,9 +8,7 @@ use std::rc::Rc;
 
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
-use crate::lua_vm::call_info::call_status::{
-    self, CIST_C, CIST_LUA, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
-};
+use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_RECST, CIST_XPCALL, CIST_YPCALL};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_MAXCSTACK};
@@ -41,7 +39,8 @@ pub struct LuaState {
     /// Call stack - one CallInfo per active function call
     /// Grows dynamically on demand (like Lua 5.4's linked list approach)
     /// Similar to Lua's CallInfo *ci in lua_State
-    pub(crate) call_stack: Vec<CallInfo>,
+    #[allow(clippy::vec_box)]
+    pub(crate) call_stack: Vec<Box<CallInfo>>,
 
     /// Current call depth (index into call_stack)
     /// This is the actual depth, NOT call_stack.len()
@@ -195,7 +194,7 @@ impl LuaState {
     #[inline(always)]
     pub fn current_frame(&self) -> Option<&CallInfo> {
         if self.call_depth > 0 {
-            self.call_stack.get(self.call_depth - 1)
+            Some(self.call_stack.get(self.call_depth - 1)?.as_ref())
         } else {
             None
         }
@@ -212,7 +211,7 @@ impl LuaState {
     #[inline(always)]
     pub fn current_frame_mut(&mut self) -> Option<&mut CallInfo> {
         if self.call_depth > 0 {
-            self.call_stack.get_mut(self.call_depth - 1)
+            Some(self.call_stack.get_mut(self.call_depth - 1)?.as_mut())
         } else {
             None
         }
@@ -271,7 +270,7 @@ impl LuaState {
                 let chunk_ptr: *const crate::lua_value::Chunk = chunk;
                 let upvalue_ptr = func_obj.upvalues().as_ptr();
                 (
-                    CIST_LUA,
+                    call_status::with_nresults(call_status::CIST_LUA, nresults),
                     chunk.max_stack_size,
                     numparams,
                     nextraargs,
@@ -281,7 +280,7 @@ impl LuaState {
             } else if func.is_c_callable() {
                 // Light C function
                 (
-                    CIST_C,
+                    call_status::with_nresults(CIST_C, nresults),
                     nparams,
                     nparams,
                     0,
@@ -328,36 +327,32 @@ impl LuaState {
         // Fast path: reuse existing CallInfo slot (most common case)
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
-            *ci = CallInfo {
+            **ci = CallInfo {
                 func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
-                nresults,
                 call_status,
                 nextraargs,
-                saved_nres: 0,
-                pending_finish_get: -1,
                 chunk_ptr: chunk_raw,
                 upvalue_ptrs: upvalue_raw,
+                aux_i32: -1,
             };
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
-            let ci = CallInfo {
+            let ci = Box::new(CallInfo {
                 func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
-                nresults,
                 call_status,
                 nextraargs,
-                saved_nres: 0,
-                pending_finish_get: -1,
                 chunk_ptr: chunk_raw,
                 upvalue_ptrs: upvalue_raw,
-            };
+                aux_i32: -1,
+            });
             self.call_stack.push(ci);
         }
 
@@ -369,7 +364,7 @@ impl LuaState {
         // stack_top stays at the CALL instruction's ra+b, which can be
         // BELOW caller-frame locals that are still live — causing the GC
         // to miss marking those objects.
-        if call_status & CIST_LUA != 0 && frame_top > self.stack_top {
+        if call_status & CIST_C == 0 && frame_top > self.stack_top {
             self.stack_top = frame_top;
         }
 
@@ -407,17 +402,17 @@ impl LuaState {
             && frame_top + EXTRA_STACK <= self.stack.len()
             && self.call_depth < self.call_stack.len()
         {
-            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) }.as_mut();
             ci.func = *func;
             ci.base = base;
             ci.func_offset = 1;
             ci.top = frame_top as u32;
             ci.pc = 0;
-            ci.nresults = nresults;
-            ci.call_status = CIST_LUA;
+            ci.call_status = call_status::with_nresults(call_status::CIST_LUA, nresults);
             ci.nextraargs = (nparams - param_count) as i32;
             ci.chunk_ptr = chunk_ptr;
             ci.upvalue_ptrs = upvalue_ptrs;
+            ci.aux_i32 = -1;
 
             self.call_depth += 1;
 
@@ -508,26 +503,24 @@ impl LuaState {
             ci.func_offset = 1;
             ci.top = frame_top as u32;
             ci.pc = 0;
-            ci.nresults = nresults;
-            ci.call_status = CIST_LUA;
+            ci.call_status = call_status::with_nresults(call_status::CIST_LUA, nresults);
             ci.nextraargs = nextraargs;
             ci.chunk_ptr = chunk_ptr;
             ci.upvalue_ptrs = upvalue_ptrs;
+            ci.aux_i32 = -1;
         } else {
-            self.call_stack.push(CallInfo {
+            self.call_stack.push(Box::new(CallInfo {
                 func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
-                nresults,
-                call_status: CIST_LUA,
+                call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
                 nextraargs,
-                saved_nres: 0,
-                pending_finish_get: -1,
                 chunk_ptr,
                 upvalue_ptrs,
-            });
+                aux_i32: -1,
+            }));
         }
 
         self.call_depth += 1;
@@ -570,30 +563,30 @@ impl LuaState {
 
         // Reuse existing CallInfo slot or allocate
         if self.call_depth < self.call_stack.len() {
-            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) }.as_mut();
             ci.func = *func;
             ci.base = base;
             ci.func_offset = 1;
             ci.top = frame_top as u32;
             ci.pc = 0;
-            ci.nresults = nresults;
-            ci.call_status = CIST_C;
+            ci.call_status = call_status::with_nresults(CIST_C, nresults);
             ci.nextraargs = 0;
+            ci.chunk_ptr = std::ptr::null();
+            ci.upvalue_ptrs = std::ptr::null();
+            ci.aux_i32 = -1;
         } else {
-            self.call_stack.push(CallInfo {
+            self.call_stack.push(Box::new(CallInfo {
                 func: *func,
                 base,
+                chunk_ptr: std::ptr::null(),
+                upvalue_ptrs: std::ptr::null(),
                 func_offset: 1,
                 top: frame_top as u32,
                 pc: 0,
-                nresults,
-                call_status: CIST_C,
+                call_status: call_status::with_nresults(CIST_C, nresults),
                 nextraargs: 0,
-                saved_nres: 0,
-                pending_finish_get: -1,
-                chunk_ptr: std::ptr::null(),
-                upvalue_ptrs: std::ptr::null(),
-            });
+                aux_i32: -1,
+            }));
         }
 
         self.call_depth += 1;
@@ -1552,7 +1545,7 @@ impl LuaState {
     pub fn get_frame(&self, frame_idx: usize) -> Option<&CallInfo> {
         // Only return frame if it's within current call_depth (valid frames)
         if frame_idx < self.call_depth {
-            self.call_stack.get(frame_idx)
+            Some(self.call_stack.get(frame_idx)?.as_ref())
         } else {
             None
         }
@@ -1757,44 +1750,6 @@ impl LuaState {
         &self.open_upvalues_list
     }
 
-    /// Set frame PC by index
-    #[inline(always)]
-    pub fn set_frame_pc(&mut self, frame_idx: usize, pc: u32) {
-        unsafe { self.call_stack.get_unchecked_mut(frame_idx).pc = pc };
-    }
-
-    /// Set frame top by index (for tail calls)
-    #[inline(always)]
-    pub fn set_frame_top(&mut self, frame_idx: usize, top: usize) {
-        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-            frame.top = top as u32;
-        }
-    }
-
-    /// Set frame function by index (for tail calls)
-    #[inline]
-    pub fn set_frame_func(&mut self, frame_idx: usize, func: LuaValue) {
-        debug_assert!(func.is_function(), "Frame func must be callable");
-
-        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-            frame.func = func;
-        }
-    }
-
-    /// Set frame nextraargs by index (for tail calls)
-    #[inline(always)]
-    pub fn set_frame_nextraargs(&mut self, frame_idx: usize, nextraargs: i32) {
-        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-            frame.nextraargs = nextraargs;
-        }
-    }
-
-    pub fn set_frame_call_status(&mut self, frame_idx: usize, call_status: u32) {
-        if let Some(frame) = self.call_stack.get_mut(frame_idx) {
-            frame.call_status = call_status;
-        }
-    }
-
     #[inline(always)]
     pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
         unsafe { &mut *self.vm }
@@ -1847,6 +1802,11 @@ impl LuaState {
     pub fn get_call_info_mut(&mut self, idx: usize) -> &mut CallInfo {
         debug_assert!(idx < self.call_stack.len());
         unsafe { self.call_stack.get_unchecked_mut(idx) }
+    }
+
+    pub(crate) unsafe fn get_call_info_ptr(&self, idx: usize) -> *const CallInfo {
+        debug_assert!(idx < self.call_stack.len());
+        unsafe { self.call_stack.get_unchecked(idx).as_ref() as *const CallInfo }
     }
 
     /// Pop the current call frame (Lua callers only — does NOT adjust VM n_ccalls)
@@ -2275,7 +2235,7 @@ impl LuaState {
             return Ok(Some(val));
         }
         // If not found, try __index metamethod
-        execute::helper::lookup_from_metatable(self, table, key)
+        execute::helper::finishget(self, table, key)
     }
 
     /// Set value in table with metamethod support (__newindex)
@@ -2320,27 +2280,15 @@ impl LuaState {
         if let Some(s) = obj.as_str() {
             return Ok(s.len() as i64);
         }
-        if let Some(table) = obj.as_table_mut() {
-            let meta = table.meta_ptr();
-            if !meta.is_null() {
-                let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                const TM_LEN_BIT: u8 = execute::TmKind::Len as u8;
-                if !mt.no_tm(TM_LEN_BIT) {
-                    let event_key = self
-                        .vm_mut()
-                        .const_strings
-                        .get_tm_value(execute::TmKind::Len);
-                    if let Some(mm) = mt.raw_get(&event_key) {
-                        let result = execute::call_tm_res(self, mm, *obj, *obj)?;
-                        return result.as_integer().ok_or_else(|| {
-                            self.error("object length is not an integer".to_string())
-                        });
-                    } else {
-                        mt.set_tm_absent(TM_LEN_BIT);
-                    }
-                }
+        if obj.ttistable() {
+            if let Some(mm) = execute::get_metamethod_event(self, obj, execute::TmKind::Len) {
+                let result = execute::call_tm_res(self, mm, *obj, *obj)?;
+                return result
+                    .as_integer()
+                    .ok_or_else(|| self.error("object length is not an integer".to_string()));
             }
-            return Ok(table.len() as i64);
+
+            return Ok(obj.as_table().unwrap().len() as i64);
         }
         if let Some(mm) = execute::get_metamethod_event(self, obj, execute::TmKind::Len) {
             let result = execute::call_tm_res(self, mm, *obj, *obj)?;
@@ -3647,7 +3595,7 @@ impl LuaState {
             // Get the yield frame info before popping
             let (func_idx, nresults) = if let Some(frame) = self.current_frame() {
                 // func_idx is base - func_offset (where the yield function was called)
-                (frame.base - frame.func_offset as usize, frame.nresults)
+                (frame.base - frame.func_offset as usize, frame.nresults())
             } else {
                 return Err(self.error("cannot resume: no frame".to_string()));
             };
@@ -3787,7 +3735,7 @@ impl LuaState {
                     // Get pcall's info before cleanup
                     let pcall_ci = self.get_call_info(pcall_frame_idx);
                     let pcall_func_pos = pcall_ci.base - pcall_ci.func_offset as usize;
-                    let pcall_nresults = pcall_ci.nresults;
+                    let pcall_nresults = pcall_ci.nresults();
                     let close_level = pcall_ci.base; // close from body position
                     let is_xpcall = pcall_ci.call_status & CIST_XPCALL != 0;
 
@@ -3993,6 +3941,25 @@ impl LuaState {
         Ok(work)
     }
 
+    #[inline(always)]
+    pub(crate) fn check_gc_in_loop(
+        &mut self,
+        ci: &mut CallInfo,
+        pc: usize,
+        c: usize,
+        trap: &mut bool,
+    ) {
+        let vm = unsafe { &mut *self.vm };
+        if vm.gc.gc_debt > 0 {
+            return;
+        }
+
+        ci.save_pc(pc);
+        self.set_top_raw(c);
+        vm.check_gc(self);
+        *trap = self.hook_mask != 0;
+    }
+
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
         let vm = unsafe { &mut *self.vm };
         vm.full_gc(self, false);
@@ -4021,7 +3988,7 @@ impl LuaState {
         ntransfer: i32,
     ) -> LuaResult<()> {
         let hook = self.hook;
-        if hook.is_nil() {
+        if hook.is_nil() || !self.allow_hook {
             return Ok(());
         }
 
@@ -4037,7 +4004,8 @@ impl LuaState {
             _ => return Ok(()),
         };
 
-        // Prevent re-entrant hooks
+        // Save and restore allow_hook (like C Lua's luaD_hook)
+        let old_allow_hook = self.allow_hook;
         self.allow_hook = false;
         // Hooks are non-yieldable
         self.nny += 1;
@@ -4063,7 +4031,7 @@ impl LuaState {
         let ci_idx = self.call_depth().wrapping_sub(1);
         if ci_idx < self.call_depth() {
             let ci = self.get_call_info_mut(ci_idx);
-            ci.call_status |= crate::lua_vm::call_info::call_status::CIST_HOOKED;
+            ci.call_status |= call_status::CIST_HOOKED;
         }
 
         // Build args: (event_name, line_or_nil)
@@ -4084,7 +4052,7 @@ impl LuaState {
         // Restore state
         self.stack_top = old_top;
         self.nny -= 1;
-        self.allow_hook = true;
+        self.allow_hook = old_allow_hook;
 
         result.map(|_| ())
     }

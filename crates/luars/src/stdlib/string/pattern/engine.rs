@@ -5,7 +5,7 @@
 // - match_impl recursively walks the pattern with backtracking
 // - Fixed capture slots (no heap alloc during matching)
 
-use super::class::{element_end, singlematch};
+use super::class::{element_end, is_class_letter, match_class, singlematch};
 use crate::lua_vm::lua_limits::{LUA_MAXCAPTURES, MAXCCALLS_PATTERN};
 
 /// Check if pattern has no special characters (can be matched as plain text).
@@ -20,49 +20,31 @@ pub fn is_plain_pattern(pat: &[u8]) -> bool {
     })
 }
 
-/// Byte offset map: ASCII identity (c2b[i]=i) or precomputed map
-#[derive(Clone, Copy)]
-pub enum ByteMap<'a> {
-    Ascii,
-    #[allow(unused)]
-    Map(&'a [usize]),
-}
-
-impl ByteMap<'_> {
-    #[inline(always)]
-    pub fn get(&self, i: usize) -> usize {
-        match self {
-            ByteMap::Ascii => i,
-            ByteMap::Map(m) => m[i],
-        }
-    }
-}
-
 /// Recursion limit to prevent stack overflow
 /// Validate a pattern for common syntax errors before matching.
 /// Returns Ok(()) if valid, Err(message) if malformed.
-fn validate_pattern(pat: &[char]) -> Result<(), String> {
-    let mut i = if !pat.is_empty() && pat[0] == '^' {
+fn validate_pattern(pat: &[u8]) -> Result<(), String> {
+    let mut i = if !pat.is_empty() && pat[0] == b'^' {
         1
     } else {
         0
     };
     while i < pat.len() {
         match pat[i] {
-            '%' => {
+            b'%' => {
                 if i + 1 >= pat.len() {
                     return Err("malformed pattern (ends with '%')".to_string());
                 }
                 match pat[i + 1] {
-                    'b' => {
+                    b'b' => {
                         if i + 3 >= pat.len() {
                             return Err("malformed pattern (missing arguments to '%b')".to_string());
                         }
                         i += 4; // skip %bxy
                     }
-                    'f' => {
+                    b'f' => {
                         i += 2; // skip %f
-                        if i >= pat.len() || pat[i] != '[' {
+                        if i >= pat.len() || pat[i] != b'[' {
                             return Err("missing '[' after '%f' in pattern".to_string());
                         }
                         // validate the set
@@ -73,10 +55,10 @@ fn validate_pattern(pat: &[char]) -> Result<(), String> {
                     }
                 }
             }
-            '[' => {
+            b'[' => {
                 i = validate_set(pat, i)?;
             }
-            '(' | ')' => {
+            b'(' | b')' => {
                 i += 1; // capture markers — validated at match time
             }
             _ => {
@@ -84,26 +66,31 @@ fn validate_pattern(pat: &[char]) -> Result<(), String> {
             }
         }
         // Skip optional repetition suffix
-        if i < pat.len() && matches!(pat[i], '*' | '+' | '-' | '?') {
+        if i < pat.len() && matches!(pat[i], b'*' | b'+' | b'-' | b'?') {
             i += 1;
         }
     }
     Ok(())
 }
 
+#[inline]
+pub fn validate(pat: &[u8]) -> Result<(), String> {
+    validate_pattern(pat)
+}
+
 /// Validate a [set] starting at pat[i] (i points to '['). Returns index past ']'.
-fn validate_set(pat: &[char], i: usize) -> Result<usize, String> {
+fn validate_set(pat: &[u8], i: usize) -> Result<usize, String> {
     let mut j = i + 1; // skip '['
     // handle ^
-    if j < pat.len() && pat[j] == '^' {
+    if j < pat.len() && pat[j] == b'^' {
         j += 1;
     }
     // handle ']' as first char in set (literal)
-    if j < pat.len() && pat[j] == ']' {
+    if j < pat.len() && pat[j] == b']' {
         j += 1;
     }
-    while j < pat.len() && pat[j] != ']' {
-        if pat[j] == '%' {
+    while j < pat.len() && pat[j] != b']' {
+        if pat[j] == b'%' {
             j += 1; // skip escape
             if j >= pat.len() {
                 return Err("malformed pattern (ends with '%')".to_string());
@@ -129,7 +116,7 @@ pub enum CapKind {
 /// A single capture slot
 #[derive(Debug, Clone, Copy)]
 pub struct Capture {
-    pub start: usize, // start index in text (char index)
+    pub start: usize, // start index in text (byte index)
     pub len: CaptureLen,
     pub kind: CapKind,
 }
@@ -144,18 +131,16 @@ pub enum CaptureLen {
 
 /// Match state — all matching context on the stack
 pub struct MatchState<'a> {
-    pub text: &'a [char], // source string as chars
-    pub pat: &'a [char],  // pattern as chars
+    pub text: &'a [u8],
+    pub pat: &'a [u8],
     pub captures: [Capture; LUA_MAXCAPTURES],
     pub num_captures: usize,
-    pub depth: usize, // recursion counter
-    // byte offsets for each char: ASCII identity or precomputed map
-    pub text_bytes: ByteMap<'a>,
+    pub depth: usize,          // recursion counter
     pub error: Option<String>, // error message if matching fails with a hard error
 }
 
 impl<'a> MatchState<'a> {
-    pub fn new(text: &'a [char], pat: &'a [char], text_bytes: ByteMap<'a>) -> Self {
+    pub fn new(text: &'a [u8], pat: &'a [u8]) -> Self {
         Self {
             text,
             pat,
@@ -166,7 +151,6 @@ impl<'a> MatchState<'a> {
             }; LUA_MAXCAPTURES],
             num_captures: 0,
             depth: 0,
-            text_bytes,
             error: None,
         }
     }
@@ -210,30 +194,30 @@ fn match_inner(ms: &mut MatchState, mut si: usize, mut pp: usize) -> Option<usiz
         }
 
         match ms.pat[pp] {
-            '(' => {
+            b'(' => {
                 // Start of capture
-                if pp + 1 < ms.pat.len() && ms.pat[pp + 1] == ')' {
+                if pp + 1 < ms.pat.len() && ms.pat[pp + 1] == b')' {
                     // Position capture ()
                     return match_position_capture(ms, si, pp + 2);
                 } else {
                     return match_open_capture(ms, si, pp + 1);
                 }
             }
-            ')' => {
+            b')' => {
                 // Close capture
                 return match_close_capture(ms, si, pp + 1);
             }
-            '$' if pp + 1 >= ms.pat.len() => {
+            b'$' if pp + 1 >= ms.pat.len() => {
                 // Anchor at end — succeed only if text exhausted
                 return if si == ms.text.len() { Some(si) } else { None };
             }
-            '%' if pp + 1 < ms.pat.len() => {
+            b'%' if pp + 1 < ms.pat.len() => {
                 match ms.pat[pp + 1] {
-                    'b' => {
+                    b'b' => {
                         // Balanced match %bxy
                         return match_balanced(ms, si, pp);
                     }
-                    'f' => {
+                    b'f' => {
                         // Frontier %f[set]
                         return match_frontier(ms, si, pp);
                     }
@@ -255,10 +239,10 @@ fn match_inner(ms: &mut MatchState, mut si: usize, mut pp: usize) -> Option<usiz
         // Check for repetition suffix
         if ep < ms.pat.len() {
             match ms.pat[ep] {
-                '*' => return match_greedy(ms, si, pp, ep + 1, 0),
-                '+' => return match_greedy(ms, si, pp, ep + 1, 1),
-                '-' => return match_lazy(ms, si, pp, ep + 1),
-                '?' => return match_optional(ms, si, pp, ep + 1),
+                b'*' => return match_greedy(ms, si, pp, ep + 1, 0),
+                b'+' => return match_greedy(ms, si, pp, ep + 1, 1),
+                b'-' => return match_lazy(ms, si, pp, ep + 1),
+                b'?' => return match_optional(ms, si, pp, ep + 1),
                 _ => {}
             }
         }
@@ -284,10 +268,7 @@ fn match_greedy(
     min: usize,
 ) -> Option<usize> {
     // Count maximum matches
-    let mut count = 0;
-    while si + count < ms.text.len() && singlematch(ms.text[si + count], ms.pat, pp) {
-        count += 1;
-    }
+    let mut count = count_max_repetition(ms.text, si, ms.pat, pp);
     // Try from most to least (greedy)
     while count >= min {
         if let Some(end) = match_impl(ms, si + count, rp) {
@@ -299,6 +280,54 @@ fn match_greedy(
         count -= 1;
     }
     None
+}
+
+#[inline(always)]
+fn count_max_repetition(text: &[u8], si: usize, pat: &[u8], pp: usize) -> usize {
+    if si >= text.len() {
+        return 0;
+    }
+
+    match pat[pp] {
+        b'.' => text.len() - si,
+        b'%' if pp + 1 < pat.len() => {
+            let cl = pat[pp + 1];
+            if is_class_letter(cl) {
+                let invert = cl.is_ascii_uppercase();
+                let class = cl.to_ascii_lowercase();
+                let mut i = si;
+                while i < text.len() {
+                    let matched = match_class(text[i], class);
+                    if matched == invert {
+                        break;
+                    }
+                    i += 1;
+                }
+                i - si
+            } else {
+                let literal = cl;
+                let mut i = si;
+                while i < text.len() && text[i] == literal {
+                    i += 1;
+                }
+                i - si
+            }
+        }
+        b'[' => {
+            let mut i = si;
+            while i < text.len() && singlematch(text[i], pat, pp) {
+                i += 1;
+            }
+            i - si
+        }
+        literal => {
+            let mut i = si;
+            while i < text.len() && text[i] == literal {
+                i += 1;
+            }
+            i - si
+        }
+    }
 }
 
 /// Lazy repetition (-)
@@ -422,18 +451,14 @@ fn match_balanced(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
 /// Frontier pattern %f[set]
 fn match_frontier(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
     // pp points to '%', pp+1 is 'f', pp+2 should be '['
-    if pp + 2 >= ms.pat.len() || ms.pat[pp + 2] != '[' {
+    if pp + 2 >= ms.pat.len() || ms.pat[pp + 2] != b'[' {
         return None; // malformed %f
     }
     let set_start = pp + 2; // points to '['
     let set_end = element_end(ms.pat, set_start); // past ']'
 
-    let prev_char = if si > 0 { ms.text[si - 1] } else { '\0' };
-    let curr_char = if si < ms.text.len() {
-        ms.text[si]
-    } else {
-        '\0'
-    };
+    let prev_char = if si > 0 { ms.text[si - 1] } else { 0 };
+    let curr_char = if si < ms.text.len() { ms.text[si] } else { 0 };
 
     let prev_matches = singlematch(prev_char, ms.pat, set_start);
     let curr_matches = singlematch(curr_char, ms.pat, set_start);
@@ -447,7 +472,7 @@ fn match_frontier(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
 
 /// Back reference %0-%9
 fn match_backref(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
-    let n = (ms.pat[pp + 1] as u32 - '0' as u32) as usize;
+    let n = (ms.pat[pp + 1] - b'0') as usize;
     // %0 is always invalid (captures are 1-indexed)
     if n == 0 || n > ms.num_captures {
         ms.error = Some(format!("invalid capture index %{}", n));
@@ -468,7 +493,7 @@ fn match_backref(ms: &mut MatchState, si: usize, pp: usize) -> Option<usize> {
         return None;
     }
 
-    // Compare chars
+    // Compare bytes
     for i in 0..cap_len {
         if ms.text[si + i] != ms.text[cap_start + i] {
             return None;
@@ -564,14 +589,11 @@ fn extract_captures(ms: &MatchState) -> CaptureResults {
         let cap = &ms.captures[i];
         match cap.len {
             CaptureLen::Position => {
-                result.data[result.count] =
-                    CaptureValue::Position(ms.text_bytes.get(cap.start) + 1);
+                result.data[result.count] = CaptureValue::Position(cap.start + 1);
                 result.count += 1;
             }
             CaptureLen::Len(len) => {
-                let byte_start = ms.text_bytes.get(cap.start);
-                let byte_end = ms.text_bytes.get(cap.start + len);
-                result.data[result.count] = CaptureValue::Substring(byte_start, byte_end);
+                result.data[result.count] = CaptureValue::Substring(cap.start, cap.start + len);
                 result.count += 1;
             }
             CaptureLen::Unfinished => {}
@@ -588,6 +610,24 @@ pub fn find(
     pat_bytes: &[u8],
     init: usize,
 ) -> Result<Option<(usize, usize, CaptureResults)>, String> {
+    find_impl(text, pat_bytes, init, true)
+}
+
+#[inline]
+pub fn find_assume_valid(
+    text: &[u8],
+    pat_bytes: &[u8],
+    init: usize,
+) -> Result<Option<(usize, usize, CaptureResults)>, String> {
+    find_impl(text, pat_bytes, init, false)
+}
+
+fn find_impl(
+    text: &[u8],
+    pat_bytes: &[u8],
+    init: usize,
+    should_validate: bool,
+) -> Result<Option<(usize, usize, CaptureResults)>, String> {
     if init > text.len() {
         return Ok(None);
     }
@@ -603,61 +643,30 @@ pub fn find(
         }
     }
 
-    // Convert bytes to chars (byte-as-char identity mapping — Lua semantics)
-    let text_heap: Vec<char>;
-    let mut text_stack = ['\0'; 256];
-    let text_chars: &[char] = if text.len() <= 256 {
-        for (i, &b) in text.iter().enumerate() {
-            text_stack[i] = b as char;
-        }
-        &text_stack[..text.len()]
-    } else {
-        text_heap = text.iter().map(|&b| b as char).collect();
-        &text_heap
-    };
+    if should_validate {
+        validate_pattern(pat_bytes)?;
+    }
 
-    let pat_heap: Vec<char>;
-    let mut pat_stack = ['\0'; 64];
-    let pat_chars: &[char] = if pat_bytes.len() <= 64 {
-        for (i, &b) in pat_bytes.iter().enumerate() {
-            pat_stack[i] = b as char;
-        }
-        &pat_stack[..pat_bytes.len()]
-    } else {
-        pat_heap = pat_bytes.iter().map(|&b| b as char).collect();
-        &pat_heap
-    };
-
-    validate_pattern(pat_chars)?;
-
-    // Byte-as-char: identity mapping (1 byte = 1 char)
-    let byte_map = ByteMap::Ascii;
-    let init_ci = init;
-
-    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
+    let pp_start = if !pat_bytes.is_empty() && pat_bytes[0] == b'^' {
         1
     } else {
         0
     };
     let anchored = pp_start == 1;
 
-    let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
-    let mut si = init_ci;
+    let mut ms = MatchState::new(text, pat_bytes);
+    let mut si = init;
     loop {
         ms.reset();
         if let Some(end_ci) = match_impl(&mut ms, si, pp_start) {
             check_captures(&ms)?;
             let caps = extract_captures(&ms);
-            return Ok(Some((
-                ms.text_bytes.get(si),
-                ms.text_bytes.get(end_ci),
-                caps,
-            )));
+            return Ok(Some((si, end_ci, caps)));
         }
         if let Some(err) = ms.error.take() {
             return Err(err);
         }
-        if anchored || si >= text_chars.len() {
+        if anchored || si >= text.len() {
             return Ok(None);
         }
         si += 1;
@@ -677,35 +686,9 @@ pub fn find_all_matches(
         return find_all_matches_plain(text, pat_bytes, init, max);
     }
 
-    let text_heap: Vec<char>;
-    let mut text_stack = ['\0'; 256];
-    let text_chars: &[char] = if text.len() <= 256 {
-        for (i, &b) in text.iter().enumerate() {
-            text_stack[i] = b as char;
-        }
-        &text_stack[..text.len()]
-    } else {
-        text_heap = text.iter().map(|&b| b as char).collect();
-        &text_heap
-    };
+    validate_pattern(pat_bytes)?;
 
-    let pat_heap: Vec<char>;
-    let mut pat_stack = ['\0'; 64];
-    let pat_chars: &[char] = if pat_bytes.len() <= 64 {
-        for (i, &b) in pat_bytes.iter().enumerate() {
-            pat_stack[i] = b as char;
-        }
-        &pat_stack[..pat_bytes.len()]
-    } else {
-        pat_heap = pat_bytes.iter().map(|&b| b as char).collect();
-        &pat_heap
-    };
-
-    validate_pattern(pat_chars)?;
-
-    let byte_map = ByteMap::Ascii;
-
-    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
+    let pp_start = if !pat_bytes.is_empty() && pat_bytes[0] == b'^' {
         1
     } else {
         0
@@ -713,11 +696,11 @@ pub fn find_all_matches(
     let anchored = pp_start == 1;
 
     let mut matches = Vec::new();
-    let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
+    let mut ms = MatchState::new(text, pat_bytes);
     let mut si = init;
     let mut last_was_nonempty = false;
 
-    while si <= text_chars.len() {
+    while si <= text.len() {
         if let Some(max_count) = max
             && matches.len() >= max_count
         {
@@ -731,7 +714,7 @@ pub fn find_all_matches(
 
             // Skip empty match right after non-empty match
             if is_empty && last_was_nonempty {
-                if si < text_chars.len() {
+                if si < text.len() {
                     si += 1;
                 }
                 last_was_nonempty = false;
@@ -740,13 +723,13 @@ pub fn find_all_matches(
 
             let caps = extract_captures(&ms);
             matches.push(MatchInfo {
-                start: ms.text_bytes.get(si),
-                end: ms.text_bytes.get(end_ci),
+                start: si,
+                end: end_ci,
                 captures: caps,
             });
 
             if is_empty {
-                if si < text_chars.len() {
+                if si < text.len() {
                     si += 1;
                 } else {
                     break;
@@ -760,7 +743,7 @@ pub fn find_all_matches(
             if let Some(err) = ms.error.take() {
                 return Err(err);
             }
-            if anchored || si >= text_chars.len() {
+            if anchored || si >= text.len() {
                 break;
             }
             si += 1;
@@ -785,35 +768,9 @@ pub fn gsub(
         return gsub_plain(text, pat_bytes, replacement, max);
     }
 
-    let text_heap: Vec<char>;
-    let mut text_stack = ['\0'; 256];
-    let text_chars: &[char] = if text.len() <= 256 {
-        for (i, &b) in text.iter().enumerate() {
-            text_stack[i] = b as char;
-        }
-        &text_stack[..text.len()]
-    } else {
-        text_heap = text.iter().map(|&b| b as char).collect();
-        &text_heap
-    };
+    validate_pattern(pat_bytes)?;
 
-    let pat_heap: Vec<char>;
-    let mut pat_stack = ['\0'; 64];
-    let pat_chars: &[char] = if pat_bytes.len() <= 64 {
-        for (i, &b) in pat_bytes.iter().enumerate() {
-            pat_stack[i] = b as char;
-        }
-        &pat_stack[..pat_bytes.len()]
-    } else {
-        pat_heap = pat_bytes.iter().map(|&b| b as char).collect();
-        &pat_heap
-    };
-
-    validate_pattern(pat_chars)?;
-
-    let byte_map = ByteMap::Ascii;
-
-    let pp_start = if !pat_chars.is_empty() && pat_chars[0] == '^' {
+    let pp_start = if !pat_bytes.is_empty() && pat_bytes[0] == b'^' {
         1
     } else {
         0
@@ -823,13 +780,13 @@ pub fn gsub(
 
     let mut result = Vec::new();
     let mut count = 0usize;
-    let mut ms = MatchState::new(text_chars, pat_chars, byte_map);
+    let mut ms = MatchState::new(text, pat_bytes);
     let mut si = 0usize;
     let mut last_was_nonempty = false;
     // Track last byte position for copying unmatched text
     let mut last_byte_end = 0usize;
 
-    while si <= text_chars.len() {
+    while si <= text.len() {
         if let Some(max_count) = max
             && count >= max_count
         {
@@ -842,9 +799,9 @@ pub fn gsub(
             let is_empty = end_ci == si;
 
             if is_empty && last_was_nonempty {
-                if si < text_chars.len() {
-                    result.push(text_chars[si] as u8);
-                    last_byte_end = ms.text_bytes.get(si + 1);
+                if si < text.len() {
+                    result.push(text[si]);
+                    last_byte_end = si + 1;
                 }
                 si += 1;
                 last_was_nonempty = false;
@@ -852,8 +809,8 @@ pub fn gsub(
             }
 
             // Copy text between last match end and this match start
-            let match_byte_start = ms.text_bytes.get(si);
-            let match_byte_end = ms.text_bytes.get(end_ci);
+            let match_byte_start = si;
+            let match_byte_end = end_ci;
             result.extend_from_slice(&text[last_byte_end..match_byte_start]);
 
             count += 1;
@@ -869,9 +826,9 @@ pub fn gsub(
             last_byte_end = match_byte_end;
 
             if is_empty {
-                if si < text_chars.len() {
-                    result.push(text_chars[si] as u8);
-                    last_byte_end = ms.text_bytes.get(si + 1);
+                if si < text.len() {
+                    result.push(text[si]);
+                    last_byte_end = si + 1;
                 }
                 si += 1;
                 last_was_nonempty = false;
@@ -883,7 +840,7 @@ pub fn gsub(
             if let Some(err) = ms.error.take() {
                 return Err(err);
             }
-            if anchored || si >= text_chars.len() {
+            if anchored || si >= text.len() {
                 break;
             }
             si += 1;
@@ -923,12 +880,10 @@ fn substitute_captures_bytes(
                         let cap = &ms.captures[n - 1];
                         match cap.len {
                             CaptureLen::Len(len) => {
-                                let byte_start = ms.text_bytes.get(cap.start);
-                                let byte_end = ms.text_bytes.get(cap.start + len);
-                                result.extend_from_slice(&text[byte_start..byte_end]);
+                                result.extend_from_slice(&text[cap.start..cap.start + len]);
                             }
                             CaptureLen::Position => {
-                                let pos_str = format!("{}", ms.text_bytes.get(cap.start) + 1);
+                                let pos_str = format!("{}", cap.start + 1);
                                 result.extend_from_slice(pos_str.as_bytes());
                             }
                             CaptureLen::Unfinished => {}

@@ -1,16 +1,17 @@
 use crate::{
-    Chunk, LuaResult, LuaValue,
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT},
+    CallInfo, Chunk, LuaResult, LuaValue,
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT, udvalue_to_lua_value},
     lua_vm::{
         LuaError, LuaState, TmKind,
-        call_info::call_status::{CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL},
-        execute,
+        call_info::call_status::{
+            CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
+        },
+        execute::{call::poscall, call_tm_res, concat::concat, metamethod::call_tm_res_into},
         lua_limits::{EXTRA_STACK, MAXTAGLOOP},
     },
 };
 
 /// Build hidden arguments for vararg functions
-/// Port of ltm.c:245-270 buildhiddenargs
 ///
 /// Initial stack:  func arg1 ... argn extra1 ...
 ///                 ^ ci->func                    ^ L->top
@@ -18,14 +19,13 @@ use crate::{
 ///                                          ^ ci->func
 pub fn buildhiddenargs(
     lua_state: &mut LuaState,
-    frame_idx: usize,
+    ci: &mut CallInfo,
     chunk: &Chunk,
     totalargs: usize,
     nfixparams: usize,
     _nextra: usize,
 ) -> LuaResult<usize> {
-    let call_info = lua_state.get_call_info(frame_idx);
-    let old_base = call_info.base;
+    let old_base = ci.base;
     let func_pos = if old_base > 0 { old_base - 1 } else { 0 };
 
     // The new function position is right after all the original arguments.
@@ -54,13 +54,9 @@ pub fn buildhiddenargs(
         }
     }
 
-    // Step 3: Update ci->func.p and ci->top.p
-    {
-        let call_info = lua_state.get_call_info_mut(frame_idx);
-        call_info.base = new_base;
-        call_info.top = (new_base + chunk.max_stack_size) as u32;
-        call_info.func_offset = (new_base - func_pos) as u32; // Distance from new_base to original func
-    }
+    ci.base = new_base;
+    ci.top = (new_base + chunk.max_stack_size) as u32;
+    ci.func_offset = (new_base - func_pos) as u32; // Distance from new_base to original func
 
     // Update lua_state.top to match call_info.top
     let new_call_info_top = new_base + chunk.max_stack_size;
@@ -68,9 +64,6 @@ pub fn buildhiddenargs(
 
     Ok(new_base)
 }
-
-// ============ Type tag检查宏 (对应 Lua 的 ttis* 宏) ============
-// OPTIMIZED: 指针版本，避免引用/解引用开销
 
 /// ttisinteger - 检查是否是整数 (最快的类型检查)
 #[inline(always)]
@@ -96,13 +89,6 @@ pub fn ttisfloat(v: &LuaValue) -> bool {
     v.ttisfloat()
 }
 
-#[allow(unused)]
-/// ttisstring - 检查是否是字符串
-#[inline(always)]
-pub unsafe fn pttisstring(v: *const LuaValue) -> bool {
-    unsafe { (*v).is_string() }
-}
-
 /// ttisstring_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn ttisstring(v: &LuaValue) -> bool {
@@ -124,6 +110,11 @@ pub fn ivalue(v: &LuaValue) -> i64 {
     v.ivalue()
 }
 
+#[inline(always)]
+pub fn chgivalue(v: &mut LuaValue, i: i64) {
+    v.value.i = i;
+}
+
 /// fltvalue - 直接获取浮点值 (调用前必须用 ttisfloat 检查)
 #[inline(always)]
 pub unsafe fn pfltvalue(v: *const LuaValue) -> f64 {
@@ -136,10 +127,14 @@ pub fn fltvalue(v: &LuaValue) -> f64 {
     v.fltvalue()
 }
 
+#[inline(always)]
+pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
+    v.value.n = n;
+}
+
 /// setivalue - 设置整数值
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setivalue macro
 #[inline(always)]
-#[allow(unused)]
 pub unsafe fn psetivalue(v: *mut LuaValue, i: i64) {
     unsafe {
         *v = LuaValue::integer(i);
@@ -161,7 +156,6 @@ pub fn luai_numpow(a: f64, b: f64) -> f64 {
 
 /// setfltvalue - 设置浮点值  
 /// OPTIMIZATION: Direct field access matching Lua 5.5's setfltvalue macro
-#[allow(unused)]
 #[inline(always)]
 pub unsafe fn psetfltvalue(v: *mut LuaValue, n: f64) {
     unsafe {
@@ -173,15 +167,6 @@ pub unsafe fn psetfltvalue(v: *mut LuaValue, n: f64) {
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
     *v = LuaValue::float(n);
-}
-
-/// setbfvalue - 设置false
-#[inline(always)]
-#[allow(unused)]
-pub unsafe fn psetbfvalue(v: *mut LuaValue) {
-    unsafe {
-        *v = LuaValue::boolean(false);
-    }
 }
 
 /// setbfvalue_ref - 引用版本（保留兼容性）
@@ -208,6 +193,22 @@ pub unsafe fn psetnilvalue(v: *mut LuaValue) {
 #[inline(always)]
 pub fn setnilvalue(v: &mut LuaValue) {
     *v = LuaValue::nil();
+}
+
+#[inline(always)]
+pub fn setobjs2s(l: &mut LuaState, a: usize, b: usize) {
+    let stack = l.stack_mut();
+    unsafe {
+        *stack.get_unchecked_mut(a) = *stack.get_unchecked(b);
+    }
+}
+
+#[inline(always)]
+pub fn setobj2s(l: &mut LuaState, a: usize, b: &LuaValue) {
+    let stack = l.stack_mut();
+    unsafe {
+        *stack.get_unchecked_mut(a) = *b;
+    }
 }
 
 /// luaV_shiftl - Shift integer x left by y positions.
@@ -319,6 +320,25 @@ pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
     unsafe { ptointegerns(v as *const LuaValue, out as *mut i64) }
 }
 
+/// tonumber - convert LuaValue to f64, including string coercion.
+/// Port of C Lua's luaV_tonumber_.
+pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
+    if tonumberns(v, out) {
+        return true;
+    }
+    if v.is_string() {
+        let result = crate::stdlib::basic::parse_number::parse_lua_number(v.as_str().unwrap_or(""));
+        if result.is_float() {
+            *out = unsafe { result.value.n };
+            return true;
+        } else if result.is_integer() {
+            *out = unsafe { result.value.i } as f64;
+            return true;
+        }
+    }
+    false
+}
+
 /// ptonumberns - 尝试转换为浮点数 (不抛出错误)
 /// Only handles float and integer (NO string coercion).
 #[inline(always)]
@@ -365,24 +385,79 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
     }
 }
 
+/// Convert a LuaValue to integer using a rounding mode.
+/// Port of C Lua 5.5's luaV_tointeger (lvm.c:157).
+/// mode: 0 = exact only, 1 = floor, 2 = ceil
+/// Handles integers, floats, and strings.
+fn tointeger_mode(v: &LuaValue, mode: i32) -> Option<i64> {
+    if v.tt() == LUA_VNUMINT {
+        return Some(unsafe { v.value.i });
+    }
+    // Get as float (including string conversion)
+    let f = if v.tt() == LUA_VNUMFLT {
+        unsafe { v.value.n }
+    } else if v.is_string() {
+        let result = crate::stdlib::basic::parse_number::parse_lua_number(v.as_str().unwrap_or(""));
+        if result.is_float() {
+            unsafe { result.value.n }
+        } else if result.is_integer() {
+            return Some(unsafe { result.value.i });
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    // Convert float to integer using mode
+    let rounded = match mode {
+        1 => f.floor(),
+        2 => f.ceil(),
+        _ => f, // mode 0: exact
+    };
+    if rounded.is_nan() {
+        return None;
+    }
+    if mode == 0 && rounded != f {
+        return None;
+    }
+    // Check range: must fit in i64
+    if rounded >= (i64::MIN as f64) && rounded < -(i64::MIN as f64) {
+        Some(rounded as i64)
+    } else {
+        None
+    }
+}
+
 /// Lookup value from object's metatable __index
 /// Returns Ok(Some(value)) if found, Ok(None) if not found in table chain,
 /// or Err if attempting to index a non-table value without __index metamethod.
 ///
 /// Optimized hot path: inline fasttm check for __index to avoid function call overhead.
 /// Matches Lua 5.5's luaV_finishget pattern.
-pub fn lookup_from_metatable(
+fn finishget_inner(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
+    skip_first_raw_lookup: bool,
 ) -> LuaResult<Option<LuaValue>> {
     const TM_INDEX_BIT: u8 = TmKind::Index as u8; // = 0
 
     let mut t = *obj;
+    let mut skip_raw_lookup = skip_first_raw_lookup;
 
     for _ in 0..MAXTAGLOOP {
         // Inline fasttm for __index on tables (hot path optimization)
         let tm = if let Some(table) = t.as_table_mut() {
+            // Try raw_get first — handles key types the caller's fast paths didn't cover
+            // (float→int normalization, long strings, etc.)
+            if !skip_raw_lookup {
+                if let Some(val) = table.raw_get(key) {
+                    return Ok(Some(val));
+                }
+            } else {
+                skip_raw_lookup = false;
+            }
+
             let meta = table.meta_ptr();
             if meta.is_null() {
                 return Ok(None); // No metatable → no __index
@@ -430,7 +505,7 @@ pub fn lookup_from_metatable(
 
         // If __index is a function, call it using call_tm_res
         if tm.is_function() {
-            let result = execute::metamethod::call_tm_res(lua_state, tm, t, *key)?;
+            let result = call_tm_res(lua_state, tm, t, *key)?;
             return Ok(Some(result));
         }
 
@@ -449,6 +524,7 @@ pub fn lookup_from_metatable(
             if let Some(value) = value {
                 return Ok(Some(value));
             }
+            skip_raw_lookup = true;
         }
 
         // If not found, loop again to check if tm has __index
@@ -456,6 +532,14 @@ pub fn lookup_from_metatable(
 
     // Too many iterations - possible loop
     Err(lua_state.error("'__index' chain too long; possible loop".to_string()))
+}
+
+pub fn finishget(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+) -> LuaResult<Option<LuaValue>> {
+    finishget_inner(lua_state, obj, key, false)
 }
 
 /// Get a metamethod from a metatable value — implements Lua 5.5's fasttm/luaT_gettm pattern.
@@ -534,15 +618,28 @@ fn get_metamethod_from_metatable(
 ///   luaG_runerror(L, "'__newindex' chain too long; possible loop");
 /// }
 /// ```
-pub fn finishset(
+fn finishset_inner(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
     value: LuaValue,
+    skip_existing_check: bool,
 ) -> LuaResult<bool> {
+    // Check for invalid keys (nil or NaN)
+    if key.is_nil() {
+        return Err(lua_state.error("table index is nil".to_string()));
+    }
+    if key.ttisfloat()
+        && let Some(f) = key.as_float()
+        && f.is_nan()
+    {
+        return Err(lua_state.error("table index is NaN".to_string()));
+    }
+
     const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8; // = 1
 
     let mut t = *obj;
+    let mut skip_existing = skip_existing_check;
 
     for _ in 0..MAXTAGLOOP {
         // Check if t is a table — use inline fasttm for __newindex
@@ -575,11 +672,15 @@ pub fn finishset(
 
             // Check if key already exists in the table.
             // If it does, do a raw set regardless of __newindex.
-            if let Some(existing) = table.raw_get(key)
-                && !existing.is_nil()
-            {
-                lua_state.raw_set(&t, *key, value);
-                return Ok(true);
+            if !skip_existing {
+                if let Some(existing) = table.raw_get(key)
+                    && !existing.is_nil()
+                {
+                    lua_state.raw_set(&t, *key, value);
+                    return Ok(true);
+                }
+            } else {
+                skip_existing = false;
             }
 
             // Key does not exist - call __newindex metamethod
@@ -634,6 +735,24 @@ pub fn finishset(
     Err(lua_state.error("'__newindex' chain too long; possible loop".to_string()))
 }
 
+pub fn finishset(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+    value: LuaValue,
+) -> LuaResult<bool> {
+    finishset_inner(lua_state, obj, key, value, false)
+}
+
+pub fn finishset_known_miss(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+    value: LuaValue,
+) -> LuaResult<bool> {
+    finishset_inner(lua_state, obj, key, value, true)
+}
+
 pub fn get_metamethod_event(
     lua_state: &mut LuaState,
     value: &LuaValue,
@@ -679,90 +798,13 @@ pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaVa
     lua_state.vm_mut().get_basic_metatable(value.kind())
 }
 
-// ============================================================
-// Integer-Float comparison helpers (Lua 5.5 semantics)
-// These handle the tricky edge cases where converting to f64
-// loses precision (e.g., i64::MAX as f64 rounds to 2^63).
-// ============================================================
-
-/// Is integer i less than float f?  (i < f)
-/// Handles NaN, infinities, and precision loss at i64 boundaries.
-#[inline]
-pub fn int_lt_float(i: i64, f: f64) -> bool {
-    if f.is_nan() {
-        return false;
-    }
-    // i64::MAX as f64 = 2^63 (rounds up), so f >= 2^63 means f > any i64
-    if f >= (i64::MAX as f64) {
-        return true;
-    }
-    // i64::MIN as f64 = -2^63 (exact), so f < -2^63 means f < any i64
-    if f < (i64::MIN as f64) {
-        return false;
-    }
-    // f is in castable range: truncate toward zero
-    let fi = f as i64;
-    if i < fi {
-        true
-    } else if i > fi {
-        false
-    } else {
-        // i == fi: true iff f has a positive fractional part beyond fi
-        f > (fi as f64)
-    }
-}
-
-/// Is float f less than integer i?  (f < i)
-#[inline]
-pub fn float_lt_int(f: f64, i: i64) -> bool {
-    if f.is_nan() {
-        return false;
-    }
-    if f >= (i64::MAX as f64) {
-        return false;
-    }
-    if f < (i64::MIN as f64) {
-        return true;
-    }
-    let fi = f as i64;
-    if fi < i {
-        true
-    } else if fi > i {
-        false
-    } else {
-        // fi == i: true iff f has a negative fractional part (truncated away)
-        f < (fi as f64)
-    }
-}
-
-/// Is integer i less than or equal to float f?  (i <= f)
-#[inline]
-pub fn int_le_float(i: i64, f: f64) -> bool {
-    // NaN: i <= NaN is always false
-    if f.is_nan() {
-        return false;
-    }
-    !float_lt_int(f, i)
-}
-
-/// Is float f less than or equal to integer i?  (f <= i)
-#[inline]
-pub fn float_le_int(f: f64, i: i64) -> bool {
-    // NaN: NaN <= i is always false
-    if f.is_nan() {
-        return false;
-    }
-    !int_lt_float(i, f)
-}
-
 /// Finish a C frame left on the call stack after yield-resume.
 /// This is the Rust equivalent of Lua 5.5's finishCcall.
 #[cold]
 #[inline(never)]
-fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
-    let ci = lua_state.get_call_info(frame_idx);
+fn finish_c_frame(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaResult<()> {
     let pcall_func_pos = ci.base - ci.func_offset as usize;
-    let nresults = ci.nresults;
+    let nresults = ci.nresults();
     let has_recst = ci.call_status & CIST_RECST != 0;
     let is_xpcall = ci.call_status & CIST_XPCALL != 0;
 
@@ -965,21 +1007,17 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 /// This is the equivalent of C Lua's luaV_finishOp.
 #[cold]
 #[inline(never)]
-pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<bool> {
-    use crate::lua_vm::call_info::call_status::{CIST_C, CIST_PENDING_FINISH};
-
-    let ci = lua_state.get_call_info(frame_idx);
+pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaResult<bool> {
     if ci.call_status & CIST_C != 0 {
-        finish_c_frame(lua_state, frame_idx)?;
+        finish_c_frame(lua_state, ci)?;
         return Ok(true); // restart startfunc
     }
     // === luaV_finishOp equivalent ===
     // The interrupted instruction is at savedpc - 1.
     // We need to check what opcode was interrupted and handle accordingly.
-    let ci = lua_state.get_call_info(frame_idx);
     let saved_pc = ci.pc as usize;
     let base_tmp = ci.base;
-    let _nresults = ci.nresults;
+    let _nresults = ci.nresults();
 
     // Get the chunk to read the interrupted instruction
     let func_value = ci.func;
@@ -1041,20 +1079,26 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
                         let k = interrupted_instr.get_k();
                         if res != k {
                             // Skip the JMP instruction
-                            let ci = lua_state.get_call_info_mut(frame_idx);
                             ci.pc += 1;
                         }
                     }
                 }
                 OpCode::Concat => {
-                    // Concat: partial concat, result of TM at stack[top-1]
+                    // Port of C Lua 5.5's finishOp for OP_CONCAT (lvm.c:882-893)
+                    // After yield in __concat metamethod, the result is at top-1.
+                    // We must copy it to concat_top - 2 and continue if elements remain.
                     let top = lua_state.get_top();
-                    if top > 1 {
-                        // Put TM result in proper position
+                    if top > 0 {
+                        let a = interrupted_instr.get_a() as usize;
+                        let n = interrupted_instr.get_b() as usize;
+                        let concat_top = base_tmp + a + n;
                         let result = lua_state.stack_mut()[top - 1];
-                        lua_state.stack_mut()[top - 3] = result;
-                        lua_state.set_top_raw(top - 1);
-                        // Continue concat (may yield again) - handled by main loop
+                        lua_state.stack_mut()[concat_top - 2] = result;
+                        let total = concat_top - 1 - (base_tmp + a);
+                        if total > 1 {
+                            lua_state.set_top_raw(concat_top - 1);
+                            concat(lua_state, total)?;
+                        }
                     }
                 }
                 _ => {
@@ -1065,14 +1109,581 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, frame_idx: usize) -> LuaResu
     }
 
     // Restore ci_top
-    let ci_top = lua_state.get_call_info(frame_idx).top as usize;
+    let ci_top = ci.top as usize;
     let current_top = lua_state.get_top();
     if current_top < ci_top {
         lua_state.set_top_raw(ci_top);
     }
 
-    let ci_mut = lua_state.get_call_info_mut(frame_idx);
-    ci_mut.pending_finish_get = -1;
-    ci_mut.call_status &= !CIST_PENDING_FINISH;
+    ci.set_pending_finish_get(-1);
+    ci.call_status &= !CIST_PENDING_FINISH;
     Ok(false) // continue to hot path
+}
+
+pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult<()> {
+    if let Some(s) = value.as_str() {
+        let len = s.len();
+        setivalue(
+            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+            len as i64,
+        );
+        return Ok(());
+    } else if let Some(bytes) = value.as_binary() {
+        let len = bytes.len();
+        setivalue(
+            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+            len as i64,
+        );
+        return Ok(());
+    } else if value.ttistable() {
+        if let Some(tm) = get_metamethod_event(l, &value, TmKind::Len) {
+            return call_tm_res_into(l, tm, value, value, result_reg);
+        }
+
+        let len = value.as_table().unwrap().len();
+        setivalue(
+            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+            len as i64,
+        );
+        return Ok(());
+    } else {
+        // Try trait-based __len for userdata first
+        if value.ttisfulluserdata()
+            && let Some(ud) = value.as_userdata_mut()
+            && let Some(udv) = ud.get_trait().lua_len()
+        {
+            let result = udvalue_to_lua_value(l, udv)?;
+            setivalue(
+                unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
+                result.as_integer().unwrap_or(0),
+            );
+            return Ok(());
+        }
+    }
+
+    let tm = get_metamethod_event(l, &value, TmKind::Len);
+    if let Some(tm) = tm {
+        call_tm_res_into(l, tm, value, value, result_reg)?;
+    } else {
+        return Err(crate::stdlib::debug::typeerror(l, &value, "get length of"));
+    }
+    Ok(())
+}
+
+/// Equality comparison - direct port of Lua 5.5's luaV_equalobj
+/// Returns true if values are equal, false otherwise
+/// Handles metamethods for tables and userdata
+pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResult<bool> {
+    // Direct port of lvm.c:582 luaV_equalobj
+    if t1 == t2 {
+        return Ok(true);
+    }
+
+    if t1.tt() != t2.tt() {
+        return Ok(false);
+    }
+
+    if t1.ttisfulluserdata() {
+        // Userdata: first check identity
+        if let (Some(u_ptr1), Some(u_ptr2)) = (t1.as_userdata_ptr(), t2.as_userdata_ptr())
+            && u_ptr1 == u_ptr2
+        {
+            return Ok(true);
+        }
+        // Try trait-based lua_eq before metatable
+        if let Some(ud1) = t1.as_userdata_mut()
+            && let Some(ud2) = t2.as_userdata_mut()
+            && let Some(result) = ud1.get_trait().lua_eq(ud2.get_trait())
+        {
+            return Ok(result);
+        }
+        // Different userdata - try __eq metamethod
+        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
+
+        if let Some(metamethod) = tm {
+            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
+            return Ok(!result.is_falsy());
+        } else {
+            return Ok(false);
+        }
+    }
+
+    if t1.ttistable() {
+        // Tables: first check identity
+        if let (Some(t_ptr1), Some(t_ptr2)) = (t1.as_table_ptr(), t2.as_table_ptr())
+            && t_ptr1 == t_ptr2
+        {
+            return Ok(true);
+        }
+        // Different tables - try __eq metamethod
+        let tm = get_binop_metamethod(lua_state, &t1, &t2, TmKind::Eq);
+        if let Some(metamethod) = tm {
+            let result = call_tm_res(lua_state, metamethod, t1, t2)?;
+            return Ok(!result.is_falsy());
+        } else {
+            return Ok(false);
+        }
+    }
+
+    if t1.ttiscfunction() {
+        // C functions: compare function pointers
+        return Ok(unsafe { t1.value.f == t2.value.f });
+    }
+
+    // Lua functions, threads, etc.: compare GC pointers
+    if let (Some(f_ptr1), Some(f_ptr2)) = (t1.as_function_ptr(), t2.as_function_ptr()) {
+        return Ok(f_ptr1 == f_ptr2);
+    }
+
+    Ok(false)
+}
+
+pub fn forprep(lua_state: &mut LuaState, ra_pos: usize) -> LuaResult<bool> {
+    let stack = lua_state.stack();
+    let init_pos = ra_pos;
+    let limit_pos = ra_pos + 1;
+    let step_pos = ra_pos + 2;
+    if ttisinteger(unsafe { stack.get_unchecked(init_pos) })
+        && ttisinteger(unsafe { stack.get_unchecked(step_pos) })
+    {
+        // Integer loop (init and step are integers)
+        let init = ivalue(unsafe { stack.get_unchecked(init_pos) });
+        let step = ivalue(unsafe { stack.get_unchecked(step_pos) });
+
+        if step == 0 {
+            return Err(lua_state.error("'for' step is zero".to_string()));
+        }
+        // forlimit: convert limit to integer per C Lua 5.5 logic
+        let limit_val = *unsafe { stack.get_unchecked(limit_pos) };
+        let (limit, should_skip) = for_limit(lua_state, limit_val, init, step)?;
+
+        if should_skip {
+            return Ok(true);
+        }
+
+        // Check if loop should be skipped based on direction
+        if step > 0 {
+            if init > limit {
+                return Ok(true); // skip: init already past limit
+            }
+        } else if limit > init {
+            return Ok(true); // skip: init already past limit (counting down)
+        }
+
+        {
+            let count = if step > 0 {
+                ((limit as u64).wrapping_sub(init as u64)) / (step as u64)
+            } else {
+                let step_abs = if step == i64::MIN {
+                    i64::MAX as u64 + 1
+                } else {
+                    (-step) as u64
+                };
+                ((init as u64).wrapping_sub(limit as u64)) / step_abs
+            };
+
+            let stack = lua_state.stack_mut();
+            chgivalue(unsafe { stack.get_unchecked_mut(ra_pos) }, count as i64);
+            setivalue(unsafe { stack.get_unchecked_mut(ra_pos + 1) }, step);
+            chgivalue(unsafe { stack.get_unchecked_mut(ra_pos + 2) }, init);
+        }
+    } else {
+        // Float loop — delegate to existing handler
+        let mut init = 0.0;
+        let mut limit = 0.0;
+        let mut step = 0.0;
+
+        // Copy values for potential error messages (avoids borrow conflict)
+        let init_val = stack[init_pos];
+        let limit_val = stack[limit_pos];
+        let step_val = stack[step_pos];
+
+        if !tonumber(&limit_val, &mut limit) {
+            let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
+            return Err(lua_state.error(format!("bad 'for' limit (number expected, got {})", t)));
+        }
+        if !tonumber(&step_val, &mut step) {
+            let t = crate::stdlib::debug::objtypename(lua_state, &step_val);
+            return Err(lua_state.error(format!("bad 'for' step (number expected, got {})", t)));
+        }
+        if !tonumber(&init_val, &mut init) {
+            let t = crate::stdlib::debug::objtypename(lua_state, &init_val);
+            return Err(lua_state.error(format!(
+                "bad 'for' initial value (number expected, got {})",
+                t
+            )));
+        }
+
+        if step == 0.0 {
+            return Err(lua_state.error("'for' step is zero".to_string()));
+        }
+
+        let should_skip = if step > 0.0 {
+            limit < init
+        } else {
+            init < limit
+        };
+
+        let stack = lua_state.stack_mut();
+        if should_skip {
+            return Ok(true);
+        } else {
+            setfltvalue(&mut stack[ra_pos], limit);
+            setfltvalue(&mut stack[ra_pos + 1], step);
+            setfltvalue(&mut stack[ra_pos + 2], init);
+        }
+    }
+
+    Ok(false)
+}
+
+fn for_limit(
+    lua_state: &mut LuaState,
+    limit_val: LuaValue,
+    init: i64,
+    step: i64,
+) -> LuaResult<(i64, bool)> {
+    // Port of C Lua 5.5's forlimit (lvm.c:181-198)
+    // Try converting the limit to integer (with floor or ceil depending on step direction)
+    let mode = if step < 0 { 2 } else { 1 }; // 1=floor, 2=ceil
+    if let Some(lim) = tointeger_mode(&limit_val, mode) {
+        // Successfully converted to integer
+        let skip = if step > 0 { init > lim } else { init < lim };
+        Ok((lim, skip))
+    } else {
+        // Not coercible to integer. Try converting to float to check bounds.
+        let mut flimit = 0.0;
+        if !tonumber(&limit_val, &mut flimit) {
+            return Err(error_for_bad_limit(lua_state, &limit_val));
+        }
+        // flim is a float out of integer bounds
+        if 0.0 < flimit {
+            // Limit is above max integer
+            if step < 0 {
+                return Ok((i64::MAX, true)); // skip
+            }
+            Ok((i64::MAX, false)) // truncate, caller checks init > limit
+        } else {
+            // Limit is below min integer
+            if step > 0 {
+                return Ok((i64::MIN, true)); // skip
+            }
+            Ok((i64::MIN, false)) // truncate, caller checks init < limit
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+pub fn float_for_loop(lua_state: &mut LuaState, ra_pos: usize) -> bool {
+    let stack = lua_state.stack_mut();
+    let step = fltvalue(unsafe { stack.get_unchecked(ra_pos + 1) });
+    let limit = fltvalue(unsafe { stack.get_unchecked(ra_pos) });
+    let mut idx = fltvalue(unsafe { stack.get_unchecked(ra_pos + 2) });
+    idx += step;
+    if (step > 0.0 && idx <= limit) || (step <= 0.0 && idx >= limit) {
+        chgfltvalue(unsafe { stack.get_unchecked_mut(ra_pos + 2) }, idx);
+        return true;
+    }
+
+    false
+}
+
+#[cold]
+#[inline(never)]
+fn error_for_bad_limit(lua_state: &mut LuaState, limit_val: &LuaValue) -> LuaError {
+    let t = crate::stdlib::debug::objtypename(lua_state, limit_val);
+    lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
+}
+
+/// Cold error: attempt to divide by zero (IDIV)
+#[cold]
+#[inline(never)]
+pub fn error_div_by_zero(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("attempt to divide by zero".to_string())
+}
+
+/// Cold error: attempt to perform 'n%0' (MOD)
+#[cold]
+#[inline(never)]
+pub fn error_mod_by_zero(lua_state: &mut LuaState) -> LuaError {
+    lua_state.error("attempt to perform 'n%0'".to_string())
+}
+
+#[cold]
+#[inline(never)]
+pub fn error_global(lua_state: &mut LuaState, global_name: &str) -> LuaError {
+    lua_state.error(format!("global '{}' already defined", global_name))
+}
+
+/// Cold path: comparison metamethod fallback for LtI/LeI/GtI/GeI/Lt/Le
+/// Extraced from execute_loop to reduce main function size and improve register allocation.
+#[cold]
+#[inline(never)]
+pub fn order_tm_fallback(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    va: LuaValue,
+    vb: LuaValue,
+    tm: TmKind,
+) -> LuaResult<bool> {
+    use crate::lua_vm::execute::metamethod::try_comp_tm;
+    match try_comp_tm(lua_state, va, vb, tm) {
+        Ok(Some(result)) => Ok(result),
+        Ok(None) => Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb)),
+        Err(LuaError::Yield) => {
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Cold path: binary metamethod fallback for MmBin/MmBinI/MmBinK
+#[cold]
+#[inline(never)]
+pub fn bin_tm_fallback(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    ra: LuaValue,
+    rb: LuaValue,
+    result_reg: u32,
+    a_reg: u32,
+    b_reg: u32,
+    tm: TmKind,
+) -> LuaResult<()> {
+    use crate::lua_vm::execute::metamethod::try_bin_tm;
+    match try_bin_tm(lua_state, ra, rb, result_reg, a_reg, b_reg, tm) {
+        Ok(_) => Ok(()),
+        Err(LuaError::Yield) => {
+            ci.set_pending_finish_get(result_reg as i32);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Cold path: unary metamethod fallback for Unm/BNot/Len
+#[cold]
+#[inline(never)]
+pub fn unary_tm_fallback(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    rb: LuaValue,
+    result_reg: usize,
+    tm: TmKind,
+) -> LuaResult<()> {
+    use crate::lua_vm::execute::metamethod::try_unary_tm;
+    match try_unary_tm(lua_state, rb, result_reg, tm) {
+        Ok(_) => Ok(()),
+        Err(LuaError::Yield) => {
+            ci.set_pending_finish_get(result_reg as i32);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// finishget wrapper for GetTabUp/GetTable/GetI/GetField/Self_
+/// Handles __index metamethod chain + yield propagation.
+/// NOT #[cold]: __index is a common OOP operation.
+#[inline(never)]
+pub fn finishget_fallback(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    obj: &LuaValue,
+    key: &LuaValue,
+    dest_reg: usize,
+) -> LuaResult<()> {
+    match finishget_to_reg_known_miss(lua_state, obj, key, dest_reg) {
+        Ok(()) => Ok(()),
+        Err(LuaError::Yield) => {
+            ci.set_pending_finish_get(dest_reg as i32);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn finishget_to_reg_inner(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+    dest_reg: usize,
+    skip_first_raw_lookup: bool,
+) -> LuaResult<()> {
+    const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+
+    let mut t = *obj;
+    let mut skip_raw_lookup = skip_first_raw_lookup;
+
+    for _ in 0..MAXTAGLOOP {
+        let tm = if let Some(table) = t.as_table_mut() {
+            if !skip_raw_lookup {
+                if let Some(val) = table.raw_get(key) {
+                    setobj2s(lua_state, dest_reg, &val);
+                    return Ok(());
+                }
+            } else {
+                skip_raw_lookup = false;
+            }
+
+            let meta = table.meta_ptr();
+            if meta.is_null() {
+                setobj2s(lua_state, dest_reg, &LuaValue::nil());
+                return Ok(());
+            }
+            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+            if mt.no_tm(TM_INDEX_BIT) {
+                setobj2s(lua_state, dest_reg, &LuaValue::nil());
+                return Ok(());
+            }
+            let vm = lua_state.vm_mut();
+            let event_key = vm.const_strings.get_tm_value(TmKind::Index);
+            match mt.impl_table.get_shortstr_fast(&event_key) {
+                Some(v) => v,
+                None => {
+                    mt.set_tm_absent(TM_INDEX_BIT);
+                    setobj2s(lua_state, dest_reg, &LuaValue::nil());
+                    return Ok(());
+                }
+            }
+        } else {
+            if t.ttisfulluserdata()
+                && let Some(ud) = t.as_userdata_mut()
+                && let Some(key_str) = key.as_str()
+                && let Some(udv) = ud.get_trait().get_field(key_str)
+            {
+                let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                setobj2s(lua_state, dest_reg, &result);
+                return Ok(());
+            }
+
+            match get_metamethod_event(lua_state, &t, TmKind::Index) {
+                Some(tm) => tm,
+                None => {
+                    return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
+                }
+            }
+        };
+
+        if tm.is_function() {
+            return call_tm_res_into(lua_state, tm, t, *key, dest_reg);
+        }
+
+        t = tm;
+        if let Some(table) = t.as_table() {
+            let value = if key.ttisinteger() {
+                table.impl_table.fast_geti(key.ivalue())
+            } else if key.is_short_string() {
+                table.impl_table.get_shortstr_fast(key)
+            } else {
+                table.raw_get(key)
+            };
+            if let Some(value) = value {
+                setobj2s(lua_state, dest_reg, &value);
+                return Ok(());
+            }
+            skip_raw_lookup = true;
+        }
+    }
+
+    Err(lua_state.error("'__index' chain too long; possible loop".to_string()))
+}
+
+fn finishget_to_reg_known_miss(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+    dest_reg: usize,
+) -> LuaResult<()> {
+    finishget_to_reg_inner(lua_state, obj, key, dest_reg, true)
+}
+
+/// finishset wrapper for SetTabUp/SetTable/SetI/SetField
+/// Handles __newindex metamethod chain + yield propagation.
+/// NOT #[cold]: __newindex is a common OOP operation.
+#[inline(never)]
+pub fn finishset_fallback(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    obj: &LuaValue,
+    key: &LuaValue,
+    value: LuaValue,
+) -> LuaResult<()> {
+    match finishset(lua_state, obj, key, value) {
+        Ok(_) => Ok(()),
+        Err(LuaError::Yield) => {
+            ci.set_pending_finish_get(-2);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[inline(never)]
+pub fn finishset_fallback_known_miss(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    obj: &LuaValue,
+    key: &LuaValue,
+    value: LuaValue,
+) -> LuaResult<()> {
+    match finishset_known_miss(lua_state, obj, key, value) {
+        Ok(_) => Ok(()),
+        Err(LuaError::Yield) => {
+            ci.set_pending_finish_get(-2);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Cold path: equality metamethod fallback for Eq
+#[inline(never)]
+pub fn eq_fallback(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    ra: LuaValue,
+    rb: LuaValue,
+) -> LuaResult<bool> {
+    match equalobj(lua_state, ra, rb) {
+        Ok(eq) => Ok(eq),
+        Err(LuaError::Yield) => {
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Cold path: Return0 with active hooks — delegates to generic poscall
+#[inline(never)]
+pub fn return0_with_hook(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    a_pos: usize,
+    pc: usize,
+) -> LuaResult<()> {
+    lua_state.set_top_raw(a_pos);
+    ci.save_pc(pc);
+    poscall(lua_state, ci, 0, pc)
+}
+
+/// Cold path: Return1 with active hooks — delegates to generic poscall
+#[inline(never)]
+pub fn return1_with_hook(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    a_pos: usize,
+    pc: usize,
+) -> LuaResult<()> {
+    lua_state.set_top_raw(a_pos + 1);
+    ci.save_pc(pc);
+    poscall(lua_state, ci, 1, pc)
 }

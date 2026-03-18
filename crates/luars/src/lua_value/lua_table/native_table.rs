@@ -1,6 +1,7 @@
 // Native Lua 5.5-style table implementation
 // Port of ltable.c with minimal abstractions for maximum performance
 
+use crate::gc::GcString;
 use crate::lua_value::{
     LuaValue,
     lua_value::{LUA_TNIL, LUA_VEMPTY, LUA_VNIL, LUA_VNUMINT, LUA_VSHRSTR, Value, novariant},
@@ -28,6 +29,12 @@ struct Node {
     next: i32,
     /// Key data (8 bytes)
     key_data: Value,
+}
+
+pub enum ShortStrSetResult {
+    Done { new_key: bool, mem_delta: isize },
+    FinishNode { new_key: bool, node_index: usize },
+    FinishNewKey,
 }
 
 impl Node {
@@ -97,18 +104,55 @@ impl NativeTable {
             lastfree: ptr::null_mut(),
         };
 
-        // Allocate array part
         if array_cap > 0 {
-            table.resize_array(array_cap);
+            table.init_array(array_cap);
         }
 
-        // Allocate hash part
         if hash_cap > 0 {
             let lsize = Self::compute_lsizenode(hash_cap);
-            table.resize_hash(lsize);
+            table.init_hash(lsize);
         }
 
         table
+    }
+
+    /// Fresh-table array allocation path.
+    /// Avoids resize bookkeeping because there is no previous storage to copy or free.
+    fn init_array(&mut self, new_size: u32) {
+        debug_assert!(self.array.is_null());
+        debug_assert_eq!(self.asize, 0);
+
+        let values_size = new_size as usize * std::mem::size_of::<Value>();
+        let lenhint_size = std::mem::size_of::<u32>();
+        let tags_size = new_size as usize;
+        let total_size = values_size + lenhint_size + tags_size;
+
+        let layout = Layout::from_size_align(total_size, std::mem::align_of::<Value>()).unwrap();
+        let start_ptr = unsafe { alloc::alloc_zeroed(layout) };
+        if start_ptr.is_null() {
+            panic!("Failed to allocate array");
+        }
+
+        self.array = unsafe { start_ptr.add(values_size) };
+        self.asize = new_size;
+    }
+
+    /// Fresh-table hash allocation path.
+    /// Avoids resize/rehash scaffolding because there are no existing nodes yet.
+    fn init_hash(&mut self, new_lsize: u8) {
+        debug_assert!(self.node.is_null());
+        debug_assert_eq!(self.lsizenode, 0);
+
+        let new_size = 1usize << new_lsize;
+        let layout = Layout::array::<Node>(new_size).unwrap();
+        let new_node = unsafe { alloc::alloc_zeroed(layout) as *mut Node };
+        if new_node.is_null() {
+            panic!("Failed to allocate hash nodes");
+        }
+
+        self.node = new_node;
+        self.lsizenode = new_lsize;
+        self.lastfree = unsafe { new_node.add(new_size) };
     }
 
     /// Compute log2(size) for hash part
@@ -173,69 +217,348 @@ impl NativeTable {
         unsafe { self.node.add((hash as usize) & mask) }
     }
 
-    /// Get main position for string keys only — skips type check in hash computation.
-    /// SAFETY: caller must guarantee key is a string AND hash is non-empty.
+    /// Get main position for short string keys only — directly reads precomputed hash.
+    /// SAFETY: caller must guarantee key is a short string AND hash is non-empty.
     #[inline(always)]
     fn mainposition_string(&self, key: &LuaValue) -> *mut Node {
-        let hash = unsafe { key.hash_string_unchecked() };
+        // Short strings always have non-zero precomputed hash — skip the hash!=0 branch
+        let hash = unsafe { (*(key.value.ptr as *const GcString)).data.hash };
         let mask = (1usize << self.lsizenode) - 1;
         unsafe { self.node.add((hash as usize) & mask) }
     }
 
-    /// Fast short string lookup — assumes hash is non-empty and key is short string.
-    /// Caller must guarantee both conditions.
-    #[inline(always)]
-    pub fn get_shortstr_unchecked(&self, key: &LuaValue) -> Option<LuaValue> {
+    /// Zero-copy short string lookup — writes directly to destination pointer.
+    /// Assumes hash is non-empty and key is short string.
+    /// Returns true if found and written.
+    pub unsafe fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
         let mut node = self.mainposition_string(key);
         let key_ptr = unsafe { key.value.i };
 
         unsafe {
-            // Unroll first iteration (most common case: found in main position)
             if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
-                let val = (*node).value();
-                return if val.is_nil() { None } else { Some(val) };
+                if (*node).val_tt != LUA_VNIL {
+                    (*dest).tt = (*node).val_tt;
+                    (*dest).value = (*node).val_data;
+                    return true;
+                }
+                return false;
             }
 
             let mut next = (*node).next;
             while next != 0 {
                 node = node.offset(next as isize);
                 if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
-                    let val = (*node).value();
-                    return if val.is_nil() { None } else { Some(val) };
+                    if (*node).val_tt != LUA_VNIL {
+                        (*dest).tt = (*node).val_tt;
+                        (*dest).value = (*node).val_data;
+                        return true;
+                    }
+                    return false;
                 }
                 next = (*node).next;
             }
-            None
+            false
         }
     }
 
-    /// Fast short string SET — assumes hash is non-empty and key is short string.
-    /// Only updates existing keys (returns false if key not found).
-    /// Caller must guarantee hash is non-empty.
-    #[inline(always)]
-    pub fn set_shortstr_unchecked(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+    /// Fast path for repeated writes to an existing integer key.
+    /// Mirrors C Lua's fastset semantics: when the key already has a live slot,
+    /// the update can ignore `__newindex` and complete in place.
+    #[inline]
+    pub fn set_existing_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+        if self.node.is_null() {
+            return false;
+        }
+
+        let mut node = self.mainposition_string(key);
+        let key_ptr = unsafe { key.value.i };
+
+        unsafe {
+            loop {
+                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                    if (*node).val_tt != LUA_VNIL {
+                        (*node).set_value(value);
+                        return true;
+                    }
+                    return false;
+                }
+
+                let next = (*node).next;
+                if next == 0 {
+                    return false;
+                }
+                node = node.offset(next as isize);
+            }
+        }
+    }
+
+    /// Fast path for repeated writes to an existing integer key.
+    /// Mirrors C Lua's fastset semantics: when the key already has a live slot,
+    /// the update can ignore `__newindex` and complete in place.
+    #[inline]
+    pub fn set_existing_int(&mut self, key: i64, value: LuaValue) -> bool {
+        let u = (key as u64).wrapping_sub(1);
+        if u < self.asize as u64 {
+            let index = u as usize;
+            unsafe {
+                let tag_ptr = self.get_arr_tag(index);
+                let tag = *tag_ptr;
+                if (tag & 0x0F) != 0 {
+                    *tag_ptr = value.tt;
+                    *self.get_arr_val(index) = value.value;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if self.node.is_null() {
+            return false;
+        }
+
+        let hash = key as u64;
+        let mask = (1usize << self.lsizenode) - 1;
+        let mut node = unsafe { self.node.add(hash as usize & mask) };
+
+        unsafe {
+            loop {
+                if (*node).key_tt == LUA_VNUMINT && (*node).key_data.i == key {
+                    if (*node).val_tt != LUA_VNIL {
+                        (*node).set_value(value);
+                        return true;
+                    }
+                    return false;
+                }
+
+                let next = (*node).next;
+                if next == 0 {
+                    return false;
+                }
+                node = node.offset(next as isize);
+            }
+        }
+    }
+
+    /// Specialized short-string set path inspired by Lua 5.5's `luaH_psetshortstr`.
+    /// Performs at most one chain walk and reports whether the operation fully
+    /// completed on the fast path or must be finished through a C-Lua-like
+    /// encoded continuation.
+    pub fn pset_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> ShortStrSetResult {
+        debug_assert!(key.is_short_string());
+
+        if self.node.is_null() {
+            return if value.is_nil() {
+                ShortStrSetResult::Done {
+                    new_key: false,
+                    mem_delta: 0,
+                }
+            } else {
+                ShortStrSetResult::FinishNewKey
+            };
+        }
+
         let mp = self.mainposition_string(key);
         let key_ptr = unsafe { key.value.i };
 
         unsafe {
-            // Check main position first
-            if (*mp).key_tt == LUA_VSHRSTR && (*mp).key_data.i == key_ptr {
+            let mut node = mp;
+            loop {
+                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                    if (*node).val_tt != LUA_VNIL {
+                        (*node).set_value(value);
+                        return ShortStrSetResult::Done {
+                            new_key: false,
+                            mem_delta: 0,
+                        };
+                    }
+                    return if value.is_nil() {
+                        ShortStrSetResult::Done {
+                            new_key: false,
+                            mem_delta: 0,
+                        }
+                    } else {
+                        ShortStrSetResult::FinishNode {
+                            new_key: true,
+                            node_index: self.node_index(node),
+                        }
+                    };
+                }
+
+                let next = (*node).next;
+                if next == 0 {
+                    break;
+                }
+                node = node.offset(next as isize);
+            }
+
+            if value.is_nil() {
+                return ShortStrSetResult::Done {
+                    new_key: false,
+                    mem_delta: 0,
+                };
+            }
+
+            if (*mp).key_tt == LUA_VNIL {
+                (*mp).set_key(*key);
+                (*mp).set_value(value);
+                (*mp).next = 0;
+                return ShortStrSetResult::Done {
+                    new_key: true,
+                    mem_delta: 0,
+                };
+            }
+
+            if (*mp).val_tt == LUA_VNIL {
+                return ShortStrSetResult::FinishNode {
+                    new_key: true,
+                    node_index: self.node_index(mp),
+                };
+            }
+
+            let othern = self.mainposition(&(*mp).key());
+            if othern != mp {
+                if let Some(free_node) = self.getfreepos() {
+                    let mut prev = othern;
+                    while prev.offset((*prev).next as isize) != mp {
+                        prev = prev.offset((*prev).next as isize);
+                    }
+                    (*prev).next = Self::node_offset(prev, free_node);
+                    *free_node = *mp;
+                    if (*free_node).next != 0 {
+                        (*free_node).next += Self::node_offset(free_node, mp);
+                    }
+                    (*mp).set_key(*key);
+                    (*mp).set_value(value);
+                    (*mp).next = 0;
+                    return ShortStrSetResult::Done {
+                        new_key: true,
+                        mem_delta: 0,
+                    };
+                }
+                return ShortStrSetResult::FinishNewKey;
+            }
+
+            if let Some(free_node) = self.getfreepos() {
+                (*free_node).set_key(*key);
+                (*free_node).set_value(value);
+                if (*mp).next != 0 {
+                    (*free_node).next =
+                        Self::node_offset(free_node, mp.offset((*mp).next as isize));
+                } else {
+                    (*free_node).next = 0;
+                }
+                (*mp).next = Self::node_offset(mp, free_node);
+                return ShortStrSetResult::Done {
+                    new_key: true,
+                    mem_delta: 0,
+                };
+            }
+        }
+
+        ShortStrSetResult::FinishNewKey
+    }
+
+    #[inline(always)]
+    fn node_index(&self, node: *mut Node) -> usize {
+        ((node as usize) - (self.node as usize)) / std::mem::size_of::<Node>()
+    }
+
+    pub fn finish_shortstr_set(
+        &mut self,
+        key: &LuaValue,
+        value: LuaValue,
+        result: ShortStrSetResult,
+    ) -> (bool, isize) {
+        match result {
+            ShortStrSetResult::Done { new_key, mem_delta } => (new_key, mem_delta),
+            ShortStrSetResult::FinishNode {
+                new_key,
+                node_index,
+            } => {
+                unsafe {
+                    let node = self.node.add(node_index);
+                    (*node).set_key(*key);
+                    (*node).set_value(value);
+                }
+                (new_key, 0)
+            }
+            ShortStrSetResult::FinishNewKey => self.insert_new_shortstr(key, value),
+        }
+    }
+
+    fn insert_new_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> (bool, isize) {
+        debug_assert!(key.is_short_string());
+        debug_assert!(!value.is_nil());
+
+        let mut mem_delta = 0;
+        if self.node.is_null() {
+            mem_delta += self.resize_hash(2);
+        }
+
+        if !self.insert_new_shortstr_no_rehash(key, value) {
+            mem_delta += self.rehash(key);
+            let inserted = self.insert_new_shortstr_no_rehash(key, value);
+            debug_assert!(inserted, "rehash must leave room for new short string key");
+        }
+
+        (true, mem_delta)
+    }
+
+    fn insert_new_shortstr_no_rehash(&mut self, key: &LuaValue, value: LuaValue) -> bool {
+        debug_assert!(self.has_hash());
+        debug_assert!(key.is_short_string());
+        debug_assert!(!value.is_nil());
+
+        unsafe {
+            let mp = self.mainposition_string(key);
+
+            if (*mp).key_tt == LUA_VNIL {
+                (*mp).set_key(*key);
+                (*mp).set_value(value);
+                (*mp).next = 0;
+                return true;
+            }
+
+            if (*mp).val_tt == LUA_VNIL {
+                (*mp).set_key(*key);
                 (*mp).set_value(value);
                 return true;
             }
 
-            // Walk collision chain
-            let mut node = mp;
-            let mut next = (*node).next;
-            while next != 0 {
-                node = node.offset(next as isize);
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
-                    (*node).set_value(value);
+            let othern = self.mainposition(&(*mp).key());
+            if othern != mp {
+                if let Some(free_node) = self.getfreepos() {
+                    let mut prev = othern;
+                    while prev.offset((*prev).next as isize) != mp {
+                        prev = prev.offset((*prev).next as isize);
+                    }
+                    (*prev).next = Self::node_offset(prev, free_node);
+                    *free_node = *mp;
+                    if (*free_node).next != 0 {
+                        (*free_node).next += Self::node_offset(free_node, mp);
+                    }
+                    (*mp).set_key(*key);
+                    (*mp).set_value(value);
+                    (*mp).next = 0;
                     return true;
                 }
-                next = (*node).next;
+                return false;
+            }
+
+            if let Some(free_node) = self.getfreepos() {
+                (*free_node).set_key(*key);
+                (*free_node).set_value(value);
+                if (*mp).next != 0 {
+                    (*free_node).next =
+                        Self::node_offset(free_node, mp.offset((*mp).next as isize));
+                } else {
+                    (*free_node).next = 0;
+                }
+                (*mp).next = Self::node_offset(mp, free_node);
+                return true;
             }
         }
+
         false
     }
 
@@ -774,6 +1097,37 @@ impl NativeTable {
         }
     }
 
+    /// Direct integer hash lookup — skips float normalization and array re-check.
+    /// Used as fallback when fast_geti_into misses (key not in array range).
+    /// Mirrors C Lua's getintfromhash() + finishnodeget().
+    #[inline(always)]
+    pub unsafe fn get_int_from_hash_into(&self, key: i64, dest: *mut LuaValue) -> bool {
+        if self.node.is_null() {
+            return false;
+        }
+        let hash = key as u64;
+        let mask = (1usize << self.lsizenode) - 1;
+        let mut node = unsafe { self.node.add(hash as usize & mask) };
+        unsafe {
+            loop {
+                if (*node).key_tt == LUA_VNUMINT && (*node).key_data.i == key {
+                    let val_tt = (*node).val_tt;
+                    if val_tt != LUA_VNIL {
+                        (*dest).tt = val_tt;
+                        (*dest).value = (*node).val_data;
+                        return true;
+                    }
+                    return false;
+                }
+                let next = (*node).next;
+                if next == 0 {
+                    return false;
+                }
+                node = node.offset(next as isize);
+            }
+        }
+    }
+
     /// Get value from array part
     /// OPTIMIZED: Inline array access for maximum performance
     #[inline(always)]
@@ -802,64 +1156,18 @@ impl NativeTable {
         false
     }
 
-    /// Pointer-based fast_seti: reads value from pointer, avoiding 16B copy at call site.
-    #[inline(always)]
-    pub unsafe fn fast_seti_ptr(&mut self, key: i64, val_ptr: *const LuaValue) -> bool {
-        let u = (key as u64).wrapping_sub(1);
-        if u < self.asize as u64 {
-            let k = u as usize;
-            unsafe {
-                *self.get_arr_tag(k) = (*val_ptr).tt;
-                *self.get_arr_val(k) = (*val_ptr).value;
-            }
-            return true;
-        }
-        false
-    }
-
-    /// Fast SETI variant that only succeeds when an existing non-nil value exists.
-    /// Safe to use when the table has a metatable, because __newindex is only
-    /// consulted for keys whose rawget() returns nil.
-    #[inline(always)]
-    pub fn fast_seti_existing(&mut self, key: i64, value: LuaValue) -> bool {
-        let u = (key as u64).wrapping_sub(1);
-        if u < self.asize as u64 {
-            let k = u as usize;
-            let old_tag = unsafe { *self.get_arr_tag(k) };
-            if old_tag != LUA_VNIL && old_tag != LUA_VEMPTY {
-                unsafe {
-                    *self.get_arr_tag(k) = value.tt;
-                    *self.get_arr_val(k) = value.value;
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Pointer-based fast_seti_existing: reads value from pointer, avoiding 16B copy.
-    #[inline(always)]
-    pub unsafe fn fast_seti_existing_ptr(&mut self, key: i64, val_ptr: *const LuaValue) -> bool {
-        let u = (key as u64).wrapping_sub(1);
-        if u < self.asize as u64 {
-            let k = u as usize;
-            unsafe {
-                let old_tag = *self.get_arr_tag(k);
-                if old_tag != LUA_VNIL && old_tag != LUA_VEMPTY {
-                    *self.get_arr_tag(k) = (*val_ptr).tt;
-                    *self.get_arr_val(k) = (*val_ptr).value;
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     /// Set value in array part. Returns memory delta from any resize.
     #[inline(always)]
     pub fn set_int(&mut self, key: i64, value: LuaValue) -> isize {
         // Try fast path first
         if self.fast_seti(key, value) {
+            return 0;
+        }
+
+        // C Lua's psetint updates an existing hash slot before considering
+        // insertion/rehash work. This avoids repeatedly paying len()/push logic
+        // for steady-state writes to sparse integer keys.
+        if self.set_existing_int(key, value) {
             return 0;
         }
 
@@ -899,173 +1207,7 @@ impl NativeTable {
 
         // Put in hash part (rehash will rebalance later if needed)
         let key_val = LuaValue::integer(key);
-        self.set_node(key_val, value)
-    }
-
-    /// Fast GETFIELD path - for short string keys (most common in field access)
-    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
-    #[inline(always)]
-    #[allow(unused)]
-    pub fn fast_getfield(&self, key: &LuaValue) -> Option<LuaValue> {
-        // GETFIELD only uses short string keys (interned)
-        if key.is_short_string() {
-            return self.get_shortstr_fast(key);
-        }
-
-        None
-    }
-
-    /// Fast SETFIELD path for NEW key insertion into a table with no metatable.
-    /// Only handles short string keys. Handles both new key insertion and
-    /// existing key update. Returns true on success.
-    /// Used by SETFIELD inline when the table has no metatable (no __newindex).
-    /// Caller MUST call invalidate_tm_cache() after success — the table
-    /// may be used as a metatable for other tables.
-    #[inline(always)]
-    pub fn fast_setfield_newkey(&mut self, key: &LuaValue, value: LuaValue) -> bool {
-        if self.node.is_null() {
-            return false;
-        }
-
-        let mp = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
-
-        unsafe {
-            // Main position is free — insert directly
-            if (*mp).key_tt == LUA_VNIL {
-                (*mp).set_key(*key);
-                (*mp).set_value(value);
-                (*mp).next = 0;
-                return true;
-            }
-
-            // Main position has a key — check if it's ours
-            if (*mp).key_tt == LUA_VSHRSTR && (*mp).key_data.i == key_ptr {
-                (*mp).set_value(value);
-                return true;
-            }
-
-            // Main position occupied by dead key — reuse slot
-            if (*mp).val_tt == LUA_VNIL {
-                (*mp).set_key(*key);
-                (*mp).set_value(value);
-                // Keep next — chains may pass through
-                return true;
-            }
-
-            // Check collision chain for existing key
-            let mut node = mp;
-            let mut next = (*node).next;
-            while next != 0 {
-                node = node.offset(next as isize);
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
-                    (*node).set_value(value);
-                    return true;
-                }
-                next = (*node).next;
-            }
-
-            // Key not found in chain — need a free slot
-            // Check if the occupying node belongs here
-            let othern = self.mainposition(&(*mp).key());
-            if othern != mp {
-                // Displaced node: move it to a free position, give mp to new key
-                if let Some(free_node) = self.getfreepos() {
-                    let mut prev = othern;
-                    while prev.offset((*prev).next as isize) != mp {
-                        prev = prev.offset((*prev).next as isize);
-                    }
-                    (*prev).next = Self::node_offset(prev, free_node);
-                    *free_node = *mp;
-                    if (*free_node).next != 0 {
-                        (*free_node).next += Self::node_offset(free_node, mp);
-                    }
-                    (*mp).set_key(*key);
-                    (*mp).set_value(value);
-                    (*mp).next = 0;
-                    return true;
-                }
-            } else {
-                // Main position node belongs here — link new key after it
-                if let Some(free_node) = self.getfreepos() {
-                    (*free_node).set_key(*key);
-                    (*free_node).set_value(value);
-                    if (*mp).next != 0 {
-                        (*free_node).next =
-                            Self::node_offset(free_node, mp.offset((*mp).next as isize));
-                    } else {
-                        (*free_node).next = 0;
-                    }
-                    (*mp).next = Self::node_offset(mp, free_node);
-                    return true;
-                }
-            }
-        }
-
-        // No free position — needs rehash, fall to slow path
-        false
-    }
-
-    /// Fast SETFIELD path - for short string keys
-    /// Returns true if successfully set in hash part (no metatable, key exists or room available)
-    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction
-    #[inline(always)]
-    pub fn fast_setfield(&mut self, key: &LuaValue, value: LuaValue) -> bool {
-        // Only handles short strings (SETFIELD always uses short string keys)
-        if !key.is_short_string() {
-            return false;
-        }
-
-        if self.node.is_null() {
-            // Need to allocate - can't do in fast path
-            return false;
-        }
-
-        // Try to find existing key or free slot in main position
-        let mp = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
-
-        unsafe {
-            // Check main position first
-            if (*mp).key_tt == LUA_VSHRSTR && (*mp).key_data.i == key_ptr {
-                // Key matches at main position
-                if (*mp).val_tt == LUA_VNIL {
-                    // Dead key (value=nil): fall through to slow path.
-                    // The slow path calls invalidate_tm_cache() which is
-                    // needed when re-inserting keys like "__eq" into metatables.
-                    return false;
-                }
-                // Live key - update value in place
-                (*mp).set_value(value);
-                return true;
-            }
-
-            // If main position is free (nil key), fall through to slow path
-            // for TM cache invalidation on new key insertion.
-            if (*mp).key_tt == LUA_VNIL {
-                return false;
-            }
-
-            // Check collision chain
-            let mut node = mp;
-            let mut next = (*node).next;
-            while next != 0 {
-                node = node.offset(next as isize);
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
-                    if (*node).val_tt == LUA_VNIL {
-                        // Dead key in chain - slow path for TM cache invalidation
-                        return false;
-                    }
-                    // Live key in chain - update value
-                    (*node).set_value(value);
-                    return true;
-                }
-                next = (*node).next;
-            }
-        }
-
-        // Key not found and complex insertion needed - use slow path
-        false
+        self.set_node(key_val, value).1
     }
 
     /// Get value from hash part - CRITICAL HOT PATH
@@ -1137,7 +1279,7 @@ impl NativeTable {
     }
 
     /// Generic get
-    #[inline(always)]
+    #[inline]
     pub fn raw_get(&self, key: &LuaValue) -> Option<LuaValue> {
         // Normalize float keys to integer if they have no fractional part
         // This ensures t[3.0] and t[3] refer to the same slot
@@ -1230,11 +1372,11 @@ impl NativeTable {
         ((to as isize - from as isize) / std::mem::size_of::<Node>() as isize) as i32
     }
 
-    fn set_node(&mut self, key: LuaValue, value: LuaValue) -> isize {
+    fn set_node(&mut self, key: LuaValue, value: LuaValue) -> (bool, isize) {
         // If setting to nil, find existing node and only clear value (keep key for next() iteration)
         if value.is_nil() {
             if self.sizenode() == 0 {
-                return 0;
+                return (false, 0);
             }
             unsafe {
                 let mp = self.mainposition(&key);
@@ -1243,11 +1385,11 @@ impl NativeTable {
                     // Skip dead keys (value nil) - avoid UAF on freed strings
                     if (*node).val_tt != LUA_VNIL && (*node).key() == key {
                         (*node).set_value(LuaValue::nil());
-                        return 0;
+                        return (false, 0);
                     }
                     let next = (*node).next;
                     if next == 0 {
-                        return 0; // Key not found, nothing to do
+                        return (false, 0); // Key not found, nothing to do
                     }
                     node = node.offset(next as isize);
                 }
@@ -1264,7 +1406,7 @@ impl NativeTable {
                 (*mp).set_value(value);
                 (*mp).next = 0;
             }
-            return delta;
+            return (true, delta);
         }
 
         let mp = self.mainposition(&key);
@@ -1280,7 +1422,7 @@ impl NativeTable {
                 (*mp).set_key(key);
                 (*mp).set_value(value);
                 (*mp).next = 0;
-                return 0;
+                return (true, 0);
             }
             if (*mp).val_tt == LUA_VNIL {
                 // Dead key: main position slot is available for reuse.
@@ -1297,14 +1439,14 @@ impl NativeTable {
                     if (*scan).val_tt != LUA_VNIL && (*scan).key() == key {
                         // Key exists alive in chain — just update value
                         (*scan).set_value(value);
-                        return 0;
+                        return (false, 0);
                     }
                 }
                 // Key not found in chain — safe to reuse this dead slot
                 (*mp).set_key(key);
                 (*mp).set_value(value);
                 // Keep (*mp).next as-is — other chains may pass through here
-                return 0;
+                return (true, 0);
             }
 
             // Main position is occupied by a LIVE entry.
@@ -1334,7 +1476,7 @@ impl NativeTable {
                     (*mp).set_key(key);
                     (*mp).set_value(value);
                     (*mp).next = 0;
-                    return 0;
+                    return (true, 0);
                 }
                 // No free position - fall through to resize
             } else {
@@ -1347,7 +1489,7 @@ impl NativeTable {
                     // Skip dead keys (value nil) to avoid UAF on freed strings
                     if (*node).val_tt != LUA_VNIL && (*node).key() == key {
                         (*node).set_value(value);
-                        return 0;
+                        return (false, 0);
                     }
                     let next = (*node).next;
                     if next == 0 {
@@ -1369,7 +1511,7 @@ impl NativeTable {
                         (*free_node).next = 0;
                     }
                     (*mp).next = Self::node_offset(mp, free_node);
-                    return 0;
+                    return (true, 0);
                 }
                 // No free position - fall through to resize
             }
@@ -1380,9 +1522,9 @@ impl NativeTable {
             // and corrupted lenhint, causing integer keys to end up in hash.
             let mut delta = self.rehash(&key);
             // After rehash, use raw_set to insert with the new layout
-            let (_, rd) = self.raw_set(&key, value);
+            let (new_key, rd) = self.raw_set(&key, value);
             delta += rd;
-            delta
+            (new_key, delta)
         }
     }
 
@@ -1475,9 +1617,7 @@ impl NativeTable {
 
         // Not in array range - use hash part
         // lua5.5's insertkey/newcheckedkey logic
-        let key_exists = self.get_from_hash(&key).is_some();
-        let delta = self.set_node(key, value);
-        (!key_exists && !value.is_nil(), delta)
+        self.set_node(key, value)
     }
 
     /// Get length (#t) — Lua 5.5 boundary algorithm (luaH_getn).
@@ -1694,6 +1834,7 @@ impl NativeTable {
     /// - 0 for nil (first iteration)
     /// - 1..asize for array indices
     /// - (asize+1)..(asize+hashsize) for hash indices
+    #[inline]
     fn findindex(&self, key: &LuaValue) -> Option<u32> {
         // First iteration
         if key.is_nil() {
@@ -1701,11 +1842,12 @@ impl NativeTable {
         }
 
         // Check if key is in array part (Lua 5.5's keyinarray).
-        // Only checks if integer key is in [1..asize] — does NOT check whether
-        // the slot is empty. This is critical for next() iteration: after setting
-        // t[k] = nil during pairs(), the slot is empty but findindex must still
-        // return the index so iteration can continue past deleted entries.
-        if let Some(i) = key.as_integer()
+        // Only integer keys (no float-to-int coercion) — matches C Lua's ttisinteger check.
+        // Does NOT check whether the slot is empty. This is critical for next()
+        // iteration: after setting t[k] = nil during pairs(), the slot is empty
+        // but findindex must still return the index so iteration can continue
+        // past deleted entries.
+        if let Some(i) = key.as_integer_strict()
             && i >= 1
             && i <= self.asize as i64
         {
@@ -1759,6 +1901,7 @@ impl NativeTable {
     /// Port of lua5.5's luaH_next.
     /// Returns Ok(Some((key, value))) for next entry, Ok(None) for end of table,
     /// or Err(()) for invalid key (key not found in table).
+    #[inline]
     pub fn next(&self, key: &LuaValue) -> Result<Option<(LuaValue, LuaValue)>, ()> {
         let asize = self.asize;
 
@@ -1773,9 +1916,14 @@ impl NativeTable {
             unsafe {
                 let tag = *self.get_arr_tag(i as usize);
                 if tag != LUA_VNIL && tag != LUA_VEMPTY {
-                    // Found a non-empty array entry
+                    // Found a non-empty array entry — read value directly
+                    // (skip read_array's redundant bounds check and tag re-read)
                     let lua_index = (i + 1) as i64;
-                    let value = self.read_array(lua_index).unwrap();
+                    let val_ptr = self.get_arr_val(i as usize);
+                    let value = LuaValue {
+                        value: *val_ptr,
+                        tt: tag,
+                    };
                     return Ok(Some((LuaValue::integer(lua_index), value)));
                 }
             }

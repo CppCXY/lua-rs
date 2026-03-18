@@ -620,8 +620,6 @@ fn test_nil_in_table() {
     let result = vm.execute(
         r#"
         local t = {1, 2, nil, 4}
-        -- In Lua 5.4, length with holes is undefined but typically gives last valid index
-        -- assert(#t == 4)  -- Most likely, but not guaranteed
         assert(t[1] == 1)
         assert(t[2] == 2)
         assert(t[3] == nil)
