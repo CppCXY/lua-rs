@@ -337,16 +337,24 @@ fn call_c_function_tailcall(
 /// Returns:
 ///   `Ok(true)`  — Lua call: new frame pushed, caller should `continue 'startfunc`
 ///   `Ok(false)` — C call: completed inline, caller should `updatetrap` + continue
-pub fn precall(lua_state: &mut LuaState, func_idx: usize, nresults: i32) -> LuaResult<bool> {
+///
+/// `nargs` is passed in by the caller so the hot CALL path does not need to
+/// recompute it from `top - func_idx - 1`.
+#[inline(always)]
+pub fn precall(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    nargs: usize,
+    nresults: i32,
+) -> LuaResult<bool> {
     let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
     if func.is_lua_function() {
         let lua_func = unsafe { func.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
-        let narg = lua_state.get_top() - func_idx - 1;
         lua_state.push_lua_frame(
             &func,
             func_idx + 1,
-            narg,
+            nargs,
             nresults,
             chunk.param_count,
             chunk.max_stack_size,
@@ -360,12 +368,17 @@ pub fn precall(lua_state: &mut LuaState, func_idx: usize, nresults: i32) -> LuaR
     }
 
     // Cold: __call metamethod, userdata lua_call, or error
-    precall_meta(lua_state, func_idx, nresults)
+    precall_meta(lua_state, func_idx, nargs, nresults)
 }
 
 /// Cold path for precall: resolve __call chain then retry.
-fn precall_meta(lua_state: &mut LuaState, func_idx: usize, nresults: i32) -> LuaResult<bool> {
-    let nargs = lua_state.get_top() - func_idx - 1;
+#[cold]
+fn precall_meta(
+    lua_state: &mut LuaState,
+    func_idx: usize,
+    nargs: usize,
+    nresults: i32,
+) -> LuaResult<bool> {
     let (nargs, ccmt_depth) = resolve_call_chain(lua_state, func_idx, nargs)?;
 
     // After resolution, func_idx has the real callable

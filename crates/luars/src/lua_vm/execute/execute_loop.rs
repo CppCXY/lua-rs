@@ -1830,11 +1830,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a();
                     let b = instr.get_b() as usize;
                     let nresults = instr.get_c() as i32 - 1;
+                    let func_idx = stack_id!(a);
+                    let nargs;
                     if b != 0 {
-                        lua_state.set_top_raw(stack_id!(a) + b);
+                        lua_state.set_top_raw(func_idx + b);
+                        nargs = b - 1;
+                    } else {
+                        nargs = lua_state.get_top() - func_idx - 1;
                     }
                     ci.save_pc(pc);
-                    if precall(lua_state, stack_id!(a), nresults)? {
+                    if precall(lua_state, func_idx, nargs, nresults)? {
                         // Lua call: new frame pushed
                         continue 'startfunc;
                     }
@@ -2100,7 +2105,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     lua_state.set_top_raw(func_idx + 3); // func + 2 args
                     ci.save_pc(pc);
-                    if precall(lua_state, func_idx, c as i32)? {
+                    if precall(lua_state, func_idx, 2, c as i32)? {
                         // Lua iterator: new frame pushed
                         continue 'startfunc;
                     }
