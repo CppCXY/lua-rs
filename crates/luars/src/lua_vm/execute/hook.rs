@@ -1,7 +1,9 @@
+use crate::CallInfo;
 use crate::LuaResult;
 use crate::lua_value::Chunk;
 use crate::lua_vm::LUA_HOOKCOUNT;
 use crate::lua_vm::LUA_HOOKLINE;
+use crate::lua_vm::LUA_HOOKRET;
 use crate::lua_vm::LUA_MASKLINE;
 use crate::lua_vm::LuaState;
 use crate::lua_vm::call_info::call_status::CIST_TAIL;
@@ -40,12 +42,11 @@ pub fn hook_on_call(
 #[inline(never)]
 pub fn hook_on_return(
     lua_state: &mut LuaState,
-    frame_idx: usize,
-    pc: u32,
+    ci: &mut CallInfo,
+    pc: usize,
     nres: i32,
 ) -> LuaResult<()> {
-    lua_state.set_frame_pc(frame_idx, pc);
-    let ci = lua_state.get_call_info(frame_idx);
+    ci.save_pc(pc);
     let base = ci.base;
     let first_res = if nres > 0 {
         lua_state.get_top() - nres as usize
@@ -53,7 +54,7 @@ pub fn hook_on_return(
         lua_state.get_top()
     };
     let ftransfer = (first_res - base + 1) as i32;
-    lua_state.run_hook(crate::lua_vm::LUA_HOOKRET, -1, ftransfer, nres)
+    lua_state.run_hook(LUA_HOOKRET, -1, ftransfer, nres)
 }
 
 /// Check count / line hooks inside the main instruction loop.
@@ -71,7 +72,7 @@ pub fn hook_check_instruction(
     lua_state: &mut LuaState,
     pc: usize,
     chunk: &Chunk,
-    frame_idx: usize,
+    ci: &mut CallInfo,
 ) -> LuaResult<bool> {
     let hook_mask = lua_state.hook_mask;
     if hook_mask == 0 {
@@ -85,7 +86,7 @@ pub fn hook_check_instruction(
         lua_state.hook_count -= 1;
         if lua_state.hook_count == 0 {
             lua_state.hook_count = lua_state.base_hook_count;
-            lua_state.set_frame_pc(frame_idx, pc as u32);
+            ci.save_pc(pc);
             lua_state.run_hook(LUA_HOOKCOUNT, -1, 0, 0)?;
         }
     }
@@ -127,7 +128,7 @@ pub fn hook_check_instruction(
                 } else {
                     line_info[line_info.len() - 1]
                 };
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                ci.save_pc(pc);
                 lua_state.run_hook(LUA_HOOKLINE, new_line as i32, 0, 0)?;
             }
             // Store current instruction index (like C Lua's L->oldpc = npci)
@@ -137,7 +138,7 @@ pub fn hook_check_instruction(
             let npci = pc.saturating_sub(1);
             let oldpc = lua_state.oldpc as usize;
             if oldpc == usize::MAX || npci < oldpc {
-                lua_state.set_frame_pc(frame_idx, pc as u32);
+                ci.save_pc(pc);
                 lua_state.run_hook(LUA_HOOKLINE, -1, 0, 0)?;
             }
             lua_state.oldpc = npci as u32;

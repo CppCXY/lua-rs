@@ -419,20 +419,51 @@ impl Chunk {
 
 /// Internal string storage for Lua strings.
 ///
-/// SmolStr 0.3 `from(String)` always converts via `&str → Arc::from(&str)`, causing
-/// an unnecessary copy for long strings. This enum avoids that:
-/// - Short strings (≤40 bytes, interned): use SmolStr for inline optimization (≤23 bytes
-///   stored directly in the struct, no heap allocation).
-/// - Long strings (>40 bytes, not interned): use `Box<str>` which can be created from
-///   an owned `String` via `into_boxed_str()` with **zero copy**.
+/// Lua short strings stay UTF-8 and are stored inline inside the GC object.
+/// Long strings keep using `Box<str>` so Rust-facing paths can borrow `&str`
+/// directly without any conversion.
 ///
 /// C Lua stores string data inline at the end of the TString struct (single allocation).
-/// This enum approximates that efficiency for our layered GC design.
+#[derive(Clone)]
+pub struct InlineShortString {
+    len: u8,
+    bytes: [u8; StringInterner::SHORT_STRING_LIMIT],
+}
+
+impl InlineShortString {
+    #[inline]
+    pub fn new(s: &str) -> Self {
+        debug_assert!(s.len() <= StringInterner::SHORT_STRING_LIMIT);
+        let mut bytes = [0; StringInterner::SHORT_STRING_LIMIT];
+        bytes[..s.len()].copy_from_slice(s.as_bytes());
+        Self {
+            len: s.len() as u8,
+            bytes,
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    #[inline(always)]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len()]
+    }
+
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        unsafe { std::str::from_utf8_unchecked(self.as_bytes()) }
+    }
+}
+
+/// UTF-8 string storage optimized for the VM's hot paths.
 #[derive(Clone)]
 pub enum LuaStrRepr {
-    /// SmolStr: ≤23 bytes inline, >23 bytes via Arc<str>. Used for short strings.
-    Smol(smol_str::SmolStr),
-    /// Owned heap string. Used for long strings to avoid SmolStr's Arc double-copy.
+    /// Inline UTF-8 short string storage for all Lua short strings (<= 40 bytes).
+    Inline(InlineShortString),
+    /// Owned heap string for long strings.
     Owned(Box<str>),
 }
 
@@ -440,7 +471,7 @@ impl LuaStrRepr {
     #[inline(always)]
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Smol(s) => s.as_str(),
+            Self::Inline(s) => s.as_str(),
             Self::Owned(s) => s,
         }
     }
@@ -448,14 +479,17 @@ impl LuaStrRepr {
     #[inline(always)]
     pub fn len(&self) -> usize {
         match self {
-            Self::Smol(s) => s.len(),
+            Self::Inline(s) => s.len(),
             Self::Owned(s) => s.len(),
         }
     }
 
     #[inline(always)]
     pub fn as_bytes(&self) -> &[u8] {
-        self.as_str().as_bytes()
+        match self {
+            Self::Inline(s) => s.as_bytes(),
+            Self::Owned(s) => s.as_bytes(),
+        }
     }
 }
 
@@ -508,10 +542,6 @@ pub struct LuaString {
     /// both in the same cache line after pointer dereference.
     /// C Lua has TString.hash at offset 12 — ours is now at offset 8.
     pub hash: u64,
-    /// Intrusive chain pointer for the string intern table (short strings only).
-    /// Forms a singly-linked list of strings sharing the same bucket.
-    /// Null for long strings (they are not interned).
-    pub next: crate::StringPtr,
     pub str: LuaStrRepr,
 }
 
@@ -526,11 +556,7 @@ impl std::fmt::Debug for LuaString {
 
 impl LuaString {
     pub fn new(s: LuaStrRepr, hash: u64) -> Self {
-        Self {
-            hash,
-            next: crate::StringPtr::null(),
-            str: s,
-        }
+        Self { hash, str: s }
     }
 
     pub fn as_str(&self) -> &str {

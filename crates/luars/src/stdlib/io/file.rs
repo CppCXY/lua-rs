@@ -967,8 +967,7 @@ fn file_gc_close(l: &mut LuaState) -> LuaResult<usize> {
     let file_val = match l.get_arg(1) {
         Some(v) => v,
         None => {
-            let nil = LuaValue::nil();
-            return Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &nil));
+            return Err(crate::stdlib::debug::arg_typeerror_novalue(l, 1, "FILE*"));
         }
     };
 
@@ -993,8 +992,7 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
     let file_val = match l.get_arg(1) {
         Some(v) => v,
         None => {
-            let nil = LuaValue::nil();
-            return Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &nil));
+            return Err(crate::stdlib::debug::arg_typeerror_novalue(l, 1, "FILE*"));
         }
     };
 

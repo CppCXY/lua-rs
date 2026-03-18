@@ -11,10 +11,6 @@ use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 /// Get the type name of an object, checking __name in metatable first.
 /// Mirrors C Lua's luaT_objtypename.
 pub fn objtypename(l: &mut LuaState, v: &LuaValue) -> String {
-    // Special case: nil is "no value" (matches C Lua's luaT_objtypename behavior)
-    if v.is_nil() {
-        return "no value".to_string();
-    }
     if let Some(mt) = get_metatable(l, v)
         && let Some(mt_table) = mt.as_table()
     {
@@ -632,6 +628,11 @@ pub fn arg_typeerror(l: &mut LuaState, narg: usize, expected: &str, val: &LuaVal
     argerror(l, narg, &format!("{} expected, got {}", expected, actual))
 }
 
+/// Like arg_typeerror but for absent arguments (LUA_TNONE).
+pub fn arg_typeerror_novalue(l: &mut LuaState, narg: usize, expected: &str) -> LuaError {
+    argerror(l, narg, &format!("{} expected, got no value", expected))
+}
+
 /// Get variable info for a specific register.
 /// Like varinfo() but for a known register number.
 pub fn varinfo_for_reg(l: &LuaState, reg: u32) -> String {
@@ -666,8 +667,8 @@ pub fn opinterror(
     l: &mut LuaState,
     p1_reg: u32,
     p2_reg: u32,
-    p1: &crate::LuaValue,
-    p2: &crate::LuaValue,
+    p1: &LuaValue,
+    p2: &LuaValue,
     op: &str,
 ) -> LuaError {
     // If p1 is not a number, blame p1; otherwise blame p2
