@@ -127,15 +127,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             };
         }
 
-        macro_rules! upval_value {
-            ($b:expr) => {
-                unsafe { *ci.upvalue_ptrs.add($b as usize) }
-                    .as_ref()
-                    .data
-                    .get_value_ref()
-            };
-        }
-
         macro_rules! updatetrap {
             () => {
                 trap = lua_state.hook_mask != 0;
@@ -263,7 +254,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := UpValue[B]
                     let a = instr.get_a();
                     let b = instr.get_b();
-                    setobj2s(lua_state, stack_id!(a), upval_value!(b));
+                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(b as usize) };
+                    let src = upvalue_ptr.as_ref().data.get_value_ref();
+                    let dest = unsafe { lua_state.stack_mut().as_mut_ptr().add(stack_id!(a)) };
+                    unsafe {
+                        (*dest).value = src.value;
+                        (*dest).tt = src.tt;
+                    }
                 }
                 OpCode::SetUpval => {
                     // UpValue[B] := R[A]
@@ -272,10 +269,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     unsafe {
                         let upvalue_ptr = *ci.upvalue_ptrs.add(b as usize);
                         let value = lua_state.stack().get_unchecked(base + a as usize);
-                        upvalue_ptr.as_mut_ref().data.set_value(*value);
+                        upvalue_ptr
+                            .as_mut_ref()
+                            .data
+                            .set_value_parts(value.value, value.tt);
 
                         // GC barrier (only for collectable values)
-                        if value.is_collectable()
+                        if value.tt & 0x40 != 0
                             && let Some(gc_ptr) = value.as_gc_ptr()
                         {
                             lua_state.gc_barrier(upvalue_ptr, gc_ptr);
@@ -285,7 +285,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::GetTabUp => {
                     // R[A] := UpValue[B][K[C]:shortstring]
                     let a = instr.get_a();
-                    let upval_value = *upval_value!(instr.get_b());
+                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(instr.get_b() as usize) };
+                    let upval_value = upvalue_ptr.as_ref().data.get_value_ref();
                     let key = k_val!(instr.get_c());
                     debug_assert!(
                         key.is_short_string(),
@@ -337,6 +338,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
                     savestate!();
+                    let upval_value = *upval_value;
                     finishget_fallback(lua_state, ci, &upval_value, key, stack_id!(a))?;
                     updatetrap!();
                 }
@@ -346,10 +348,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b();
                     let c = instr.get_c();
 
-                    let rb = *unsafe { lua_state.stack().get_unchecked(stack_id!(b)) };
+                    let rb_ptr = unsafe { lua_state.stack().as_ptr().add(stack_id!(b)) };
 
-                    if rb.is_table() {
-                        let table = rb.hvalue();
+                    if unsafe { (*rb_ptr).is_table() } {
+                        let table = unsafe { (*rb_ptr).hvalue() };
                         let rc_idx = stack_id!(c);
                         let rc_ptr = unsafe { lua_state.stack().as_ptr().add(rc_idx) };
                         let rc_tt = unsafe { (*rc_ptr).tt };
@@ -379,11 +381,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
 
                         savestate!();
+                        let rb = unsafe { *rb_ptr };
                         finishget_fallback(lua_state, ci, &rb, &rc, stack_id!(a))?;
                         updatetrap!();
                         continue;
                     }
 
+                    let rb = unsafe { *rb_ptr };
                     let rc = *unsafe { lua_state.stack().get_unchecked(stack_id!(c)) };
 
                     // Metamethod / non-table fallback
@@ -418,14 +422,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::GetField => {
                     // GETFIELD: R[A] := R[B][K[C]:string]
-                    let rb = *stack_val!(instr.get_b());
+                    let rb_ptr =
+                        unsafe { lua_state.stack().as_ptr().add(stack_id!(instr.get_b())) };
                     let key = k_val!(instr.get_c());
                     debug_assert!(
                         key.is_short_string(),
                         "GetField key must be short string for fast path"
                     );
-                    if rb.is_table() {
-                        let table = rb.hvalue();
+                    if unsafe { (*rb_ptr).is_table() } {
+                        let table = unsafe { (*rb_ptr).hvalue() };
                         if table.impl_table.has_hash() {
                             let dest = unsafe {
                                 lua_state
@@ -439,18 +444,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
                     savestate!();
+                    let rb = unsafe { *rb_ptr };
                     finishget_fallback(lua_state, ci, &rb, key, stack_id!(instr.get_a()))?;
                     updatetrap!();
                 }
                 OpCode::SetTabUp => {
                     // UpValue[A][K[B]:shortstring] := RK(C)
-                    let upval_value = *upval_value!(instr.get_a());
-                    let key = k_val!(instr.get_b());
-                    let rc = if instr.get_k() {
-                        *k_val!(instr.get_c())
-                    } else {
-                        *unsafe { lua_state.stack().get_unchecked(stack_id!(instr.get_c())) }
-                    };
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+                    let c = instr.get_c();
+                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(a as usize) };
+                    let upval_value = upvalue_ptr.as_ref().data.get_value_ref();
+                    let key = k_val!(b);
                     debug_assert!(
                         key.is_short_string(),
                         "GetTabUp key must be short string for fast path"
@@ -458,32 +463,50 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut known_newindex_miss = false;
                     if upval_value.is_table() {
                         let table = upval_value.hvalue_mut();
+                        let table_ptr = unsafe { upval_value.as_table_ptr_unchecked() };
+                        let gc_ptr = unsafe { upval_value.as_gc_ptr_table_unchecked() };
                         let meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            let pset_result = table.impl_table.pset_shortstr(key, rc);
-                            let (new_key, delta) =
-                                table.impl_table.finish_shortstr_set(key, rc, pset_result);
+                            let (new_key, delta, rc_tt) = if instr.get_k() {
+                                let rc = *k_val!(c);
+                                let pset_result = table.impl_table.pset_shortstr(key, rc);
+                                let (new_key, delta) =
+                                    table.impl_table.finish_shortstr_set(key, rc, pset_result);
+                                (new_key, delta, rc.tt)
+                            } else {
+                                let rc_ptr =
+                                    unsafe { lua_state.stack().as_ptr().add(stack_id!(c)) };
+                                let rc_tt = unsafe { (*rc_ptr).tt };
+                                let rc_value = unsafe { (*rc_ptr).value };
+                                let pset_result =
+                                    table.impl_table.pset_shortstr_parts(key, rc_value, rc_tt);
+                                let (new_key, delta) = table.impl_table.finish_shortstr_set_parts(
+                                    key,
+                                    rc_value,
+                                    rc_tt,
+                                    pset_result,
+                                );
+                                (new_key, delta, rc_tt)
+                            };
                             if new_key {
                                 table.invalidate_tm_cache();
                             }
                             if delta != 0 {
-                                lua_state.gc_track_table_resize(
-                                    unsafe { upval_value.as_table_ptr_unchecked() },
-                                    delta,
-                                );
+                                lua_state.gc_track_table_resize(table_ptr, delta);
                             }
-                            if rc.is_collectable() {
-                                lua_state.gc_barrier_back(unsafe {
-                                    upval_value.as_gc_ptr_table_unchecked()
-                                });
+                            if rc_tt & 0x40 != 0 {
+                                lua_state.gc_barrier_back(gc_ptr);
                             }
                             continue;
                         } else {
+                            let rc = if instr.get_k() {
+                                *k_val!(c)
+                            } else {
+                                *unsafe { lua_state.stack().get_unchecked(stack_id!(c)) }
+                            };
                             if table.impl_table.set_existing_shortstr(key, rc) {
                                 if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(unsafe {
-                                        upval_value.as_gc_ptr_table_unchecked()
-                                    });
+                                    lua_state.gc_barrier_back(gc_ptr);
                                 }
                                 continue;
                             }
@@ -491,6 +514,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
 
+                    let upval_value = *upval_value;
+                    let rc = if instr.get_k() {
+                        *k_val!(c)
+                    } else {
+                        *unsafe { lua_state.stack().get_unchecked(stack_id!(c)) }
+                    };
                     savestate!();
                     if known_newindex_miss {
                         finishset_fallback_known_miss(lua_state, ci, &upval_value, key, rc)?;
@@ -501,25 +530,55 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::SetTable => {
                     // SETTABLE: R[A][R[B]] := RK(C)
-                    let ra = *stack_val!(instr.get_a());
-                    let rb = *stack_val!(instr.get_b());
-                    let rc = if instr.get_k() {
-                        *k_val!(instr.get_c())
-                    } else {
-                        *stack_val!(instr.get_c())
-                    };
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+                    let c = instr.get_c();
+                    let ra_ptr = unsafe { lua_state.stack().as_ptr().add(stack_id!(a)) };
+                    let rb_ptr = unsafe { lua_state.stack().as_ptr().add(stack_id!(b)) };
 
                     // Hot path: table + integer key in array range, no __newindex
                     // Deferred computation: table_ptr and gc barrier only when needed
-                    if ra.is_table() && rb.ttisinteger() {
-                        let table = ra.hvalue_mut();
-                        let key = rb.ivalue();
+                    if unsafe { (*ra_ptr).is_table() && (*rb_ptr).ttisinteger() } {
+                        let table = unsafe { (*ra_ptr).hvalue_mut() };
+                        let key = unsafe { (*rb_ptr).ivalue() };
                         let meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
+                            if !instr.get_k() {
+                                let rc_ptr =
+                                    unsafe { lua_state.stack().as_ptr().add(stack_id!(c)) };
+                                let rc_tt = unsafe { (*rc_ptr).tt };
+                                let rc_value = unsafe { (*rc_ptr).value };
+                                if table.impl_table.fast_seti_parts(key, rc_value, rc_tt) {
+                                    if rc_tt & 0x40 != 0 {
+                                        lua_state.gc_barrier_back(unsafe {
+                                            (*ra_ptr).as_gc_ptr_table_unchecked()
+                                        });
+                                    }
+                                    continue;
+                                }
+
+                                let rc = unsafe { *rc_ptr };
+                                let delta = table.impl_table.set_int_slow(key, rc);
+                                if delta != 0 {
+                                    lua_state.gc_track_table_resize(
+                                        unsafe { (*ra_ptr).as_table_ptr_unchecked() },
+                                        delta,
+                                    );
+                                }
+                                if rc_tt & 0x40 != 0 {
+                                    lua_state.gc_barrier_back(unsafe {
+                                        (*ra_ptr).as_gc_ptr_table_unchecked()
+                                    });
+                                }
+                                continue;
+                            }
+
+                            let rc = *k_val!(c);
                             if table.impl_table.fast_seti(key, rc) {
                                 if rc.is_collectable() {
-                                    lua_state
-                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                    lua_state.gc_barrier_back(unsafe {
+                                        (*ra_ptr).as_gc_ptr_table_unchecked()
+                                    });
                                 }
                                 continue;
                             }
@@ -527,24 +586,38 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let delta = table.impl_table.set_int_slow(key, rc);
                             if delta != 0 {
                                 lua_state.gc_track_table_resize(
-                                    unsafe { ra.as_table_ptr_unchecked() },
+                                    unsafe { (*ra_ptr).as_table_ptr_unchecked() },
                                     delta,
                                 );
                             }
                             if rc.is_collectable() {
-                                lua_state
-                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                lua_state.gc_barrier_back(unsafe {
+                                    (*ra_ptr).as_gc_ptr_table_unchecked()
+                                });
                             }
                             continue;
                         } else {
+                            let rc = if instr.get_k() {
+                                *k_val!(c)
+                            } else {
+                                *stack_val!(c)
+                            };
                             if table.impl_table.set_existing_int(key, rc) {
                                 if rc.is_collectable() {
-                                    lua_state
-                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                    lua_state.gc_barrier_back(unsafe {
+                                        (*ra_ptr).as_gc_ptr_table_unchecked()
+                                    });
                                 }
                                 continue;
                             }
                             // Fall through to finishset_fallback_known_miss
+                            let ra = unsafe { *ra_ptr };
+                            let rb = unsafe { *rb_ptr };
+                            let rc = if instr.get_k() {
+                                *k_val!(c)
+                            } else {
+                                *stack_val!(c)
+                            };
                             savestate!();
                             finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
                             updatetrap!();
@@ -553,6 +626,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     // Slow path: shortstr, generic key, non-table, or metamethod
+                    let ra = unsafe { *ra_ptr };
+                    let rb = unsafe { *rb_ptr };
+                    let rc = if instr.get_k() {
+                        *k_val!(c)
+                    } else {
+                        *stack_val!(c)
+                    };
                     if ra.is_table() {
                         let table = ra.hvalue_mut();
                         let meta = table.meta_ptr();
@@ -611,11 +691,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // SETI: R[A][B] := RK(C) (integer key)
                     let ra = stack_val!(instr.get_a());
                     let b = instr.get_b() as i64;
-                    let rc = if instr.get_k() {
-                        *k_val!(instr.get_c())
-                    } else {
-                        *stack_val!(instr.get_c())
-                    };
+                    let c = instr.get_c();
 
                     // Hot path: table with no __newindex metamethod, key in array range
                     if ra.is_table() {
@@ -626,6 +702,30 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let gc_ptr = unsafe { ra.as_gc_ptr_table_unchecked() };
                         let meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
+                            if !instr.get_k() {
+                                let rc_ptr =
+                                    unsafe { lua_state.stack().as_ptr().add(stack_id!(c)) };
+                                let rc_tt = unsafe { (*rc_ptr).tt };
+                                let rc_value = unsafe { (*rc_ptr).value };
+                                if table.impl_table.fast_seti_parts(b, rc_value, rc_tt) {
+                                    if rc_tt & 0x40 != 0 {
+                                        lua_state.gc_barrier_back(gc_ptr);
+                                    }
+                                    continue;
+                                }
+
+                                let rc = unsafe { *rc_ptr };
+                                let delta = table.impl_table.set_int_slow(b, rc);
+                                if delta != 0 {
+                                    lua_state.gc_track_table_resize(table_ptr, delta);
+                                }
+                                if rc_tt & 0x40 != 0 {
+                                    lua_state.gc_barrier_back(gc_ptr);
+                                }
+                                continue;
+                            }
+
+                            let rc = *k_val!(c);
                             if table.impl_table.fast_seti(b, rc) {
                                 if rc.is_collectable() {
                                     lua_state.gc_barrier_back(gc_ptr);
@@ -642,6 +742,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             continue;
                         } else {
+                            let rc = if instr.get_k() {
+                                *k_val!(c)
+                            } else {
+                                *stack_val!(c)
+                            };
                             if table.impl_table.set_existing_int(b, rc) {
                                 if rc.is_collectable() {
                                     lua_state.gc_barrier_back(gc_ptr);
@@ -657,6 +762,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             continue;
                         }
                     }
+                    let rc = if instr.get_k() {
+                        *k_val!(c)
+                    } else {
+                        *stack_val!(c)
+                    };
                     let ra = *ra;
                     let rb = LuaValue::integer(b);
                     savestate!();
@@ -665,50 +775,79 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::SetField => {
                     // SETFIELD: R[A][K[B]:string] := RK(C)
-                    let ra = *stack_val!(instr.get_a());
-                    let key = k_val!(instr.get_b());
-                    let rc = if instr.get_k() {
-                        *k_val!(instr.get_c())
-                    } else {
-                        *stack_val!(instr.get_c())
-                    };
+                    let a = instr.get_a();
+                    let b = instr.get_b();
+                    let c = instr.get_c();
+                    let ra_ptr = unsafe { lua_state.stack().as_ptr().add(stack_id!(a)) };
+                    let key = k_val!(b);
                     debug_assert!(
                         key.is_short_string(),
                         "SetField key must be short string for fast path"
                     );
                     let mut known_newindex_miss = false;
-                    if ra.is_table() {
-                        let table = ra.hvalue_mut();
+                    if unsafe { (*ra_ptr).is_table() } {
+                        let table = unsafe { (*ra_ptr).hvalue_mut() };
                         let meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            let pset_result = table.impl_table.pset_shortstr(key, rc);
-                            let (new_key, delta) =
-                                table.impl_table.finish_shortstr_set(key, rc, pset_result);
+                            let (new_key, delta, rc_tt) = if instr.get_k() {
+                                let rc = *k_val!(c);
+                                let pset_result = table.impl_table.pset_shortstr(key, rc);
+                                let (new_key, delta) =
+                                    table.impl_table.finish_shortstr_set(key, rc, pset_result);
+                                (new_key, delta, rc.tt)
+                            } else {
+                                let rc_ptr =
+                                    unsafe { lua_state.stack().as_ptr().add(stack_id!(c)) };
+                                let rc_tt = unsafe { (*rc_ptr).tt };
+                                let rc_value = unsafe { (*rc_ptr).value };
+                                let pset_result =
+                                    table.impl_table.pset_shortstr_parts(key, rc_value, rc_tt);
+                                let (new_key, delta) = table.impl_table.finish_shortstr_set_parts(
+                                    key,
+                                    rc_value,
+                                    rc_tt,
+                                    pset_result,
+                                );
+                                (new_key, delta, rc_tt)
+                            };
                             if new_key {
                                 table.invalidate_tm_cache();
                             }
                             if delta != 0 {
                                 lua_state.gc_track_table_resize(
-                                    unsafe { ra.as_table_ptr_unchecked() },
+                                    unsafe { (*ra_ptr).as_table_ptr_unchecked() },
                                     delta,
                                 );
                             }
-                            if rc.is_collectable() {
-                                lua_state
-                                    .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                            if rc_tt & 0x40 != 0 {
+                                lua_state.gc_barrier_back(unsafe {
+                                    (*ra_ptr).as_gc_ptr_table_unchecked()
+                                });
                             }
                             continue;
                         } else {
+                            let rc = if instr.get_k() {
+                                *k_val!(c)
+                            } else {
+                                *stack_val!(c)
+                            };
                             if table.impl_table.set_existing_shortstr(key, rc) {
                                 if rc.is_collectable() {
-                                    lua_state
-                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                    lua_state.gc_barrier_back(unsafe {
+                                        (*ra_ptr).as_gc_ptr_table_unchecked()
+                                    });
                                 }
                                 continue;
                             }
                             known_newindex_miss = true;
                         }
                     }
+                    let ra = unsafe { *ra_ptr };
+                    let rc = if instr.get_k() {
+                        *k_val!(c)
+                    } else {
+                        *stack_val!(c)
+                    };
                     let rb = *key;
                     savestate!();
                     if known_newindex_miss {

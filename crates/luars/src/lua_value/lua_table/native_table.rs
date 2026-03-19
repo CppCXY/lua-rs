@@ -51,6 +51,12 @@ impl Node {
         self.val_tt = v.tt;
     }
 
+    #[inline(always)]
+    fn set_value_parts(&mut self, value: Value, tt: u8) {
+        self.val_data = value;
+        self.val_tt = tt;
+    }
+
     /// Read key as LuaValue
     #[inline(always)]
     fn key(&self) -> LuaValue {
@@ -479,6 +485,126 @@ impl NativeTable {
         ShortStrSetResult::FinishNewKey
     }
 
+    pub fn pset_shortstr_parts(
+        &mut self,
+        key: &LuaValue,
+        value: Value,
+        tt: u8,
+    ) -> ShortStrSetResult {
+        debug_assert!(key.is_short_string());
+
+        if self.node.is_null() {
+            return if tt == LUA_VNIL {
+                ShortStrSetResult::Done {
+                    new_key: false,
+                    mem_delta: 0,
+                }
+            } else {
+                ShortStrSetResult::FinishNewKey
+            };
+        }
+
+        let mp = self.mainposition_string(key);
+        let key_ptr = unsafe { key.value.i };
+
+        unsafe {
+            let mut node = mp;
+            loop {
+                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                    if (*node).val_tt != LUA_VNIL {
+                        (*node).set_value_parts(value, tt);
+                        return ShortStrSetResult::Done {
+                            new_key: false,
+                            mem_delta: 0,
+                        };
+                    }
+                    return if tt == LUA_VNIL {
+                        ShortStrSetResult::Done {
+                            new_key: false,
+                            mem_delta: 0,
+                        }
+                    } else {
+                        ShortStrSetResult::FinishNode {
+                            new_key: true,
+                            node_index: self.node_index(node),
+                        }
+                    };
+                }
+
+                let next = (*node).next;
+                if next == 0 {
+                    break;
+                }
+                node = node.offset(next as isize);
+            }
+
+            if tt == LUA_VNIL {
+                return ShortStrSetResult::Done {
+                    new_key: false,
+                    mem_delta: 0,
+                };
+            }
+
+            if (*mp).key_tt == LUA_VNIL {
+                (*mp).set_key(*key);
+                (*mp).set_value_parts(value, tt);
+                (*mp).next = 0;
+                return ShortStrSetResult::Done {
+                    new_key: true,
+                    mem_delta: 0,
+                };
+            }
+
+            if (*mp).val_tt == LUA_VNIL {
+                return ShortStrSetResult::FinishNode {
+                    new_key: true,
+                    node_index: self.node_index(mp),
+                };
+            }
+
+            let othern = self.mainposition_from_node(mp);
+            if othern != mp {
+                if let Some(free_node) = self.getfreepos() {
+                    let mut prev = othern;
+                    while prev.offset((*prev).next as isize) != mp {
+                        prev = prev.offset((*prev).next as isize);
+                    }
+                    (*prev).next = Self::node_offset(prev, free_node);
+                    *free_node = *mp;
+                    if (*free_node).next != 0 {
+                        (*free_node).next += Self::node_offset(free_node, mp);
+                    }
+                    (*mp).set_key(*key);
+                    (*mp).set_value_parts(value, tt);
+                    (*mp).next = 0;
+                    return ShortStrSetResult::Done {
+                        new_key: true,
+                        mem_delta: 0,
+                    };
+                }
+                return ShortStrSetResult::FinishNewKey;
+            }
+
+            if let Some(free_node) = self.getfreepos() {
+                (*free_node).set_key(*key);
+                (*free_node).set_value_parts(value, tt);
+                if (*mp).next != 0 {
+                    (*free_node).next =
+                        Self::node_offset(free_node, mp.offset((*mp).next as isize));
+                } else {
+                    (*free_node).next = 0;
+                }
+                (*mp).next = Self::node_offset(mp, free_node);
+                return ShortStrSetResult::Done {
+                    new_key: true,
+                    mem_delta: 0,
+                };
+            }
+        }
+
+        ShortStrSetResult::FinishNewKey
+    }
+
     #[inline(always)]
     fn node_index(&self, node: *mut Node) -> usize {
         ((node as usize) - (self.node as usize)) / std::mem::size_of::<Node>()
@@ -504,6 +630,19 @@ impl NativeTable {
                 (new_key, 0)
             }
             ShortStrSetResult::FinishNewKey => self.insert_new_shortstr(key, value),
+        }
+    }
+
+    pub fn finish_shortstr_set_parts(
+        &mut self,
+        key: &LuaValue,
+        value: Value,
+        tt: u8,
+        result: ShortStrSetResult,
+    ) -> (bool, isize) {
+        match result {
+            ShortStrSetResult::Done { new_key, mem_delta } => (new_key, mem_delta),
+            other => self.finish_shortstr_set(key, LuaValue::from_raw(value, tt), other),
         }
     }
 
@@ -1164,17 +1303,28 @@ impl NativeTable {
     /// lenhint is a lazy hint (like C Lua's alimit) — only recomputed by len().
     /// len() already handles stale hints via vicinity search + binary search.
     #[inline(always)]
-    pub fn fast_seti(&mut self, key: i64, value: LuaValue) -> bool {
+    pub fn fast_seti_parts(&mut self, key: i64, value: Value, tt: u8) -> bool {
         let u = (key as u64).wrapping_sub(1);
         if u < self.asize as u64 {
             let k = u as usize;
             unsafe {
-                *self.get_arr_tag(k) = value.tt;
-                *self.get_arr_val(k) = value.value;
+                *self.get_arr_tag(k) = tt;
+                *self.get_arr_val(k) = value;
             }
             return true;
         }
         false
+    }
+
+    /// Fast SETI path - mirrors Lua 5.5's luaH_fastseti + luaH_finishset.
+    /// CRITICAL: This must be #[inline(always)] for zero-cost abstraction.
+    ///
+    /// Writes tag+value directly to the array slot without lenhint maintenance.
+    /// lenhint is a lazy hint (like C Lua's alimit) — only recomputed by len().
+    /// len() already handles stale hints via vicinity search + binary search.
+    #[inline(always)]
+    pub fn fast_seti(&mut self, key: i64, value: LuaValue) -> bool {
+        self.fast_seti_parts(key, value.value, value.tt)
     }
 
     /// Set value in array part. Returns memory delta from any resize.

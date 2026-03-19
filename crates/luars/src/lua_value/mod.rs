@@ -11,6 +11,8 @@ use std::any::Any;
 use std::fmt;
 use std::rc::Rc;
 
+use self::lua_value::Value;
+
 pub use userdata_builder::UserDataBuilder;
 pub use userdata_trait::{
     LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData, UdValue,
@@ -160,6 +162,22 @@ impl LuaUpvalue {
             self.stack_index
         );
         unsafe { *self.v = val }
+    }
+
+    /// Set the value by raw parts to avoid constructing a temporary LuaValue.
+    #[inline(always)]
+    pub fn set_value_parts(&mut self, value: Value, tt: u8) {
+        debug_assert!(!self.v.is_null(), "upvalue set_value_parts: null pointer");
+        debug_assert!(
+            (self.v as usize) > 0x10000,
+            "upvalue set_value_parts: suspiciously low pointer {:p} (stack_index={})",
+            self.v,
+            self.stack_index
+        );
+        unsafe {
+            (*self.v).value = value;
+            (*self.v).tt = tt;
+        }
     }
 
     /// Check if a type tag is valid (used for dangling pointer detection)
