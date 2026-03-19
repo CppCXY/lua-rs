@@ -35,9 +35,10 @@ use crate::{
                 float_for_loop, fltvalue, forprep, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
                 lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen, order_tm_fallback,
                 pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
-                pttisinteger, return0_with_hook, return1_with_hook, setbfvalue, setbtvalue,
-                setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s, tointeger, tointegerns,
-                tonumberns, ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
+                pttisinteger, return0_with_hook, return1_with_hook, self_shortstr_index_chain_fast,
+                setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s,
+                tointeger, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
+                unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
             number::{le_num, lt_num},
@@ -910,6 +911,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             if unsafe { table.impl_table.get_shortstr_into(key, dest) } {
                                 continue;
                             }
+                        }
+                        if self_shortstr_index_chain_fast(lua_state, &rb, key, stack_id!(a)) {
+                            continue;
                         }
                     }
 

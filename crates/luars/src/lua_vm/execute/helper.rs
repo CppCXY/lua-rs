@@ -1508,6 +1508,58 @@ pub fn finishget_fallback(
     }
 }
 
+/// Fast path for OOP-style `SELF_` lookups where the miss is resolved by a
+/// table-only `__index` chain and the key is a short string.
+/// Returns true if a value was found and written directly to `dest_reg`.
+#[inline(never)]
+pub fn self_shortstr_index_chain_fast(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+    dest_reg: usize,
+) -> bool {
+    const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+
+    debug_assert!(key.is_short_string());
+
+    let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+    let mut current = *obj;
+
+    for _ in 0..MAXTAGLOOP {
+        let Some(table) = current.as_table_mut() else {
+            return false;
+        };
+
+        if let Some(value) = table.impl_table.get_shortstr_fast(key) {
+            setobj2s(lua_state, dest_reg, &value);
+            return true;
+        }
+
+        let meta = table.meta_ptr();
+        if meta.is_null() {
+            return false;
+        }
+
+        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+        if mt.no_tm(TM_INDEX_BIT) {
+            return false;
+        }
+
+        let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) else {
+            mt.set_tm_absent(TM_INDEX_BIT);
+            return false;
+        };
+
+        if tm.is_function() || !tm.is_table() {
+            return false;
+        }
+
+        current = tm;
+    }
+
+    false
+}
+
 fn finishget_to_reg_inner(
     lua_state: &mut LuaState,
     obj: &LuaValue,

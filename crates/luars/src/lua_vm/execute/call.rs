@@ -322,8 +322,20 @@ fn call_c_function_tailcall(
     // For tail call, move results to func_idx
     unsafe {
         let stack = lua_state.stack_mut();
-        for i in 0..n {
-            *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
+        match n {
+            0 => {}
+            1 => {
+                *stack.get_unchecked_mut(func_idx) = *stack.get_unchecked(first_result);
+            }
+            2 => {
+                *stack.get_unchecked_mut(func_idx) = *stack.get_unchecked(first_result);
+                *stack.get_unchecked_mut(func_idx + 1) = *stack.get_unchecked(first_result + 1);
+            }
+            _ => {
+                for i in 0..n {
+                    *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
+                }
+            }
         }
     }
 
@@ -362,7 +374,6 @@ pub fn precall(
         )?;
         return Ok(true);
     } else if func.is_c_callable() {
-        let nargs = lua_state.get_top() - func_idx - 1;
         call_c_function(lua_state, func_idx, nargs, nresults)?;
         return Ok(false);
     }
