@@ -1866,13 +1866,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let b = instr.get_b() as usize;
                     let nresults = instr.get_c() as i32 - 1;
                     let func_idx = stack_id!(a);
-                    let nargs;
-                    if b != 0 {
+                    let nargs = if b != 0 {
                         lua_state.set_top_raw(func_idx + b);
-                        nargs = b - 1;
+                        b - 1
                     } else {
-                        nargs = lua_state.get_top() - func_idx - 1;
-                    }
+                        lua_state.get_top() - func_idx - 1
+                    };
                     ci.save_pc(pc);
                     if precall(lua_state, func_idx, nargs, nresults)? {
                         // Lua call: new frame pushed
