@@ -7,7 +7,7 @@ use std::fmt;
 // ==================== Test structs ====================
 
 /// A simple 2D point — demonstrates field access and metamethods
-#[derive(LuaUserData, PartialEq, PartialOrd)]
+#[derive(Clone, LuaUserData, PartialEq, PartialOrd)]
 #[lua_impl(Display, PartialEq, PartialOrd)]
 struct Point {
     pub x: f64,
@@ -742,6 +742,22 @@ fn test_register_type_equality() {
     assert_eq!(results[1].as_boolean(), Some(false));
 }
 
+#[test]
+fn test_userdata_derive_into_lua_for_typed_call() {
+    let mut vm = setup_point_class_vm();
+    vm.execute("function sum_point(p) return p.x + p.y end").unwrap();
+
+    let func = vm.get_global("sum_point").unwrap().unwrap();
+    let point = Point {
+        x: 3.0,
+        y: 4.0,
+        _id: 7,
+    };
+
+    let result: f64 = vm.call1(func, point).unwrap();
+    assert_eq!(result, 7.0);
+}
+
 // ==================== Enum export tests ====================
 
 #[allow(unused)]
@@ -768,6 +784,44 @@ enum MixedDisc {
     C,      // 11
     D = 20, // 20
     E,      // 21
+}
+
+#[derive(LuaUserData, Clone, PartialEq)]
+enum Shape {
+    Circle { radius: f64 },
+    Rect { width: f64, height: f64 },
+    Unit,
+}
+
+#[lua_methods]
+impl Shape {
+    pub fn circle(radius: f64) -> Self {
+        Self::Circle { radius }
+    }
+
+    pub fn rect(width: f64, height: f64) -> Self {
+        Self::Rect { width, height }
+    }
+
+    pub fn unit() -> Self {
+        Self::Unit
+    }
+
+    pub fn kind(&self) -> String {
+        match self {
+            Self::Circle { .. } => "circle".to_string(),
+            Self::Rect { .. } => "rect".to_string(),
+            Self::Unit => "unit".to_string(),
+        }
+    }
+
+    pub fn area(&self) -> f64 {
+        match self {
+            Self::Circle { radius } => std::f64::consts::PI * radius * radius,
+            Self::Rect { width, height } => width * height,
+            Self::Unit => 0.0,
+        }
+    }
 }
 
 #[test]
@@ -855,6 +909,49 @@ fn test_enum_iteration_in_lua() {
         )
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(3));
+}
+
+#[test]
+fn test_data_enum_userdata_methods() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Shape>("Shape").unwrap();
+
+    let results = vm
+        .execute(
+            r#"
+        local a = Shape.circle(2)
+        local b = Shape.rect(3, 4)
+        local c = Shape.unit()
+        return a:kind(), a:area(), b:kind(), b:area(), c:kind(), c:area()
+    "#,
+        )
+        .unwrap();
+
+    assert_eq!(results[0].as_str(), Some("circle"));
+    assert!(matches!(results[1].as_number(), Some(n) if (n - std::f64::consts::PI * 4.0).abs() < 1e-9));
+    assert_eq!(results[2].as_str(), Some("rect"));
+    assert_eq!(results[3].as_number(), Some(12.0));
+    assert_eq!(results[4].as_str(), Some("unit"));
+    assert_eq!(results[5].as_number(), Some(0.0));
+}
+
+#[test]
+fn test_data_enum_userdata_instance_method_lookup() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let shape = LuaUserdata::new(Shape::Rect {
+        width: 5.0,
+        height: 6.0,
+    });
+    let state = vm.main_state();
+    let shape_val = state.create_userdata(shape).unwrap();
+    state.set_global("shape", shape_val).unwrap();
+
+    let results = vm.execute("return shape:kind(), shape:area()").unwrap();
+    assert_eq!(results[0].as_str(), Some("rect"));
+    assert_eq!(results[1].as_number(), Some(30.0));
 }
 
 // ==================== Arithmetic operator tests ====================

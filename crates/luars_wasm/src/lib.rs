@@ -196,7 +196,7 @@ impl LuaWasm {
         args: Option<js_sys::Array>,
     ) -> Result<JsValue, JsValue> {
         let lua_args = self.js_array_to_lua_args(args)?;
-        match self.vm.call_global(name, lua_args) {
+        match self.vm.call_global_raw(name, lua_args) {
             Ok(results) => Ok(self.lua_results_to_js_array(&results)),
             Err(e) => {
                 let msg = self.vm.get_error_message(e);
@@ -221,7 +221,7 @@ impl LuaWasm {
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?
             .ok_or_else(|| JsValue::from_str(&format!("global '{}' not found", func_name)))?;
         let lua_args = self.js_array_to_lua_args(args)?;
-        match self.vm.call(func, lua_args) {
+        match self.vm.call_raw(func, lua_args) {
             Ok(results) => Ok(self.lua_results_to_js_array(&results)),
             Err(e) => {
                 let msg = self.vm.get_error_message(e);

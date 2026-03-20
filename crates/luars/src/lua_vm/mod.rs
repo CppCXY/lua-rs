@@ -15,6 +15,7 @@ pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::GC;
+use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua, collect_into_lua_values};
 use crate::lua_value::{
     Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
 };
@@ -25,7 +26,8 @@ use crate::lua_vm::execute::lua_execute;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
 pub use crate::lua_vm::lua_ref::{
-    LUA_NOREF, LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef, RefId,
+    LUA_NOREF, LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef,
+    RefId, UserDataRef,
 };
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
@@ -46,6 +48,124 @@ pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
 /// Now takes LuaContext instead of LuaVM for better ergonomics
 pub type CFunction = fn(&mut LuaState) -> LuaResult<usize>;
+
+#[doc(hidden)]
+pub trait LuaTypedCallback<Args, R>: 'static {
+    fn invoke_typed(&self, state: &mut LuaState) -> LuaResult<usize>;
+}
+
+#[doc(hidden)]
+pub trait LuaTypedAsyncCallback<Args, R>: 'static {
+    fn invoke_typed_async(&self, state: &mut LuaState) -> LuaResult<async_thread::AsyncFuture>;
+}
+
+fn typed_callback_arg<T: FromLua>(state: &mut LuaState, index: usize) -> LuaResult<T> {
+    let value = state.get_arg(index).unwrap_or(LuaValue::nil());
+    match T::from_lua(value, state) {
+        Ok(value) => Ok(value),
+        Err(msg) => Err(state.error(msg)),
+    }
+}
+
+impl<Func, R> LuaTypedCallback<(), R> for Func
+where
+    Func: Fn() -> R + 'static,
+    R: IntoLua,
+{
+    fn invoke_typed(&self, state: &mut LuaState) -> LuaResult<usize> {
+        match (self)().into_lua(state) {
+            Ok(count) => Ok(count),
+            Err(msg) => Err(state.error(msg)),
+        }
+    }
+}
+
+macro_rules! impl_lua_typed_callback {
+    ($(($(($ty:ident, $value:ident) => $index:literal),+)),* $(,)?) => {
+        $(
+            impl<Func, R, $($ty),+> LuaTypedCallback<($($ty,)+), R> for Func
+            where
+                Func: Fn($($ty),+) -> R + 'static,
+                R: IntoLua,
+                $($ty: FromLua),+
+            {
+                fn invoke_typed(&self, state: &mut LuaState) -> LuaResult<usize> {
+                    $(
+                        let $value = typed_callback_arg::<$ty>(state, $index)?;
+                    )+
+
+                    match (self)($($value),+).into_lua(state) {
+                        Ok(count) => Ok(count),
+                        Err(msg) => Err(state.error(msg)),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_lua_typed_callback!(
+    ((A, a) => 1),
+    ((A, a) => 1, (B, b) => 2),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5, (T6, t6) => 6),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5, (T6, t6) => 6, (T7, t7) => 7),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5, (T6, t6) => 6, (T7, t7) => 7, (T8, t8) => 8)
+);
+
+impl<Func, Fut, R> LuaTypedAsyncCallback<(), R> for Func
+where
+    Func: Fn() -> Fut + 'static,
+    Fut: Future<Output = LuaResult<R>> + 'static,
+    R: async_thread::IntoAsyncLua,
+{
+    fn invoke_typed_async(&self, _state: &mut LuaState) -> LuaResult<async_thread::AsyncFuture> {
+        let future = (self)();
+        Ok(Box::pin(async move {
+            let value = future.await?;
+            Ok(value.into_async_lua())
+        }))
+    }
+}
+
+macro_rules! impl_lua_typed_async_callback {
+    ($(($(($ty:ident, $value:ident) => $index:literal),+)),* $(,)?) => {
+        $(
+            impl<Func, Fut, R, $($ty),+> LuaTypedAsyncCallback<($($ty,)+), R> for Func
+            where
+                Func: Fn($($ty),+) -> Fut + 'static,
+                Fut: Future<Output = LuaResult<R>> + 'static,
+                R: async_thread::IntoAsyncLua,
+                $($ty: FromLua),+
+            {
+                fn invoke_typed_async(&self, state: &mut LuaState) -> LuaResult<async_thread::AsyncFuture> {
+                    $(
+                        let $value = typed_callback_arg::<$ty>(state, $index)?;
+                    )+
+
+                    let future = (self)($($value),+);
+                    Ok(Box::pin(async move {
+                        let value = future.await?;
+                        Ok(value.into_async_lua())
+                    }))
+                }
+            }
+        )*
+    };
+}
+
+impl_lua_typed_async_callback!(
+    ((A, a) => 1),
+    ((A, a) => 1, (B, b) => 2),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5, (T6, t6) => 6),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5, (T6, t6) => 6, (T7, t7) => 7),
+    ((A, a) => 1, (B, b) => 2, (C, c) => 3, (D, d) => 4, (E, e) => 5, (T6, t6) => 6, (T7, t7) => 7, (T8, t8) => 8)
+);
 
 // Debug hook event types
 pub const LUA_HOOKCALL: i32 = 0;
@@ -405,9 +525,27 @@ impl LuaVM {
     ///
     /// ```ignore
     /// let func = vm.get_global("process")?.unwrap();
-    /// let results = vm.call(func, vec![LuaValue::integer(42)])?;
+    /// let result: i64 = vm.call1(func, 42)?;
     /// ```
-    pub fn call(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+    pub fn call<A: IntoLua, R: FromLuaMulti>(&mut self, func: LuaValue, args: A) -> LuaResult<R> {
+        let args = collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
+        let results = self.call_raw(func, args)?;
+        R::from_lua_multi(results, self.main_state_ref()).map_err(|msg| self.error(msg))
+    }
+
+    /// Call a function value with arguments and return the first result.
+    pub fn call1<A: IntoLua, R: FromLua>(&mut self, func: LuaValue, args: A) -> LuaResult<R> {
+        let args = collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
+        let result = self
+            .call_raw(func, args)?
+            .into_iter()
+            .next()
+            .unwrap_or(LuaValue::nil());
+        R::from_lua(result, self.main_state_ref()).map_err(|msg| self.error(msg))
+    }
+
+    /// Call a function value with pre-built Lua arguments (raw API).
+    pub fn call_raw(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         self.execute_function(func, args)
     }
 
@@ -418,13 +556,29 @@ impl LuaVM {
     /// # Example
     ///
     /// ```ignore
-    /// let results = vm.call_global("greet", vec![vm.create_string("World")?])?;
+    /// let result: String = vm.call1_global("greet", "World")?;
     /// ```
-    pub fn call_global(&mut self, name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+    pub fn call_global<A: IntoLua, R: FromLuaMulti>(&mut self, name: &str, args: A) -> LuaResult<R> {
         let func = self
             .get_global(name)?
             .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
         self.call(func, args)
+    }
+
+    /// Look up a global function by name, call it, and return the first result.
+    pub fn call1_global<A: IntoLua, R: FromLua>(&mut self, name: &str, args: A) -> LuaResult<R> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.call1(func, args)
+    }
+
+    /// Look up a global function by name and call it with pre-built Lua arguments.
+    pub fn call_global_raw(&mut self, name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.call_raw(func, args)
     }
 
     /// Register a synchronous Rust closure as a Lua global function.
@@ -446,6 +600,37 @@ impl LuaVM {
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
         let closure_val = self.create_closure(f)?;
+        self.set_global(name, closure_val)
+    }
+
+    /// Register a typed Rust closure as a Lua global function.
+    ///
+    /// Arguments are extracted via `FromLua`, and the return value is pushed via
+    /// `IntoLua`. This currently supports callbacks with up to 4 arguments.
+    pub fn register_function_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: LuaTypedCallback<Args, R>,
+    {
+        self.register_function(name, move |state| f.invoke_typed(state))
+    }
+
+    /// Register a typed async Rust closure as a Lua global function.
+    ///
+    /// Arguments are extracted via `FromLua`, and the awaited return value is
+    /// converted via `IntoAsyncLua`. This currently supports callbacks with up to
+    /// 8 arguments.
+    pub fn register_async_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: LuaTypedAsyncCallback<Args, R>,
+    {
+        let wrapper = move |state: &mut LuaState| {
+            let future = f.invoke_typed_async(state)?;
+            state.set_pending_future(future);
+            state.do_yield(vec![async_thread::async_sentinel_value()])?;
+            Ok(0)
+        };
+
+        let closure_val = self.create_closure(wrapper)?;
         self.set_global(name, closure_val)
     }
 
@@ -511,6 +696,16 @@ impl LuaVM {
         let ref_id = lua_ref::store_in_registry(self, value);
         let vm_ptr = self as *mut LuaVM;
         Some(LuaStringRef::from_raw(ref_id, vm_ptr))
+    }
+
+    /// Wrap a userdata `LuaValue` into a typed `UserDataRef<T>`.
+    /// Returns `None` if the value is not userdata or the inner Rust type does not match `T`.
+    pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<UserDataRef<T>> {
+        let userdata = value.as_userdata_mut()?;
+        userdata.downcast_ref::<T>()?;
+        let ref_id = lua_ref::store_in_registry(self, value);
+        let vm_ptr = self as *mut LuaVM;
+        Some(UserDataRef::from_raw(ref_id, vm_ptr))
     }
 
     /// Create a new empty table and return it as a `LuaTableRef`.

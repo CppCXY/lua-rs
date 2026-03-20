@@ -15,6 +15,42 @@ This directory contains the complete documentation for luars async features.
 
 ## Core Concept Overview
 
+## Typed-First API
+
+For most embedding code, prefer `register_async_typed` over the raw `register_async` API.
+
+```rust
+use luars::{LuaVM, SafeOption, Stdlib};
+
+let mut vm = LuaVM::new(SafeOption::default());
+vm.open_stdlib(Stdlib::All)?;
+
+vm.register_async_typed("fetch_len", |url: String| async move {
+      let body = reqwest::get(&url).await?.text().await?;
+      Ok(body.len() as i64)
+})?;
+
+let results = vm.execute_async("return fetch_len('https://example.com')").await?;
+assert!(results[0].as_integer().unwrap_or(0) > 0);
+```
+
+Typed async callbacks use:
+
+- `FromLua` to decode arguments
+- `IntoAsyncLua` to encode awaited return values
+- tuple returns for Lua multi-return values
+- `UserDataRef<T>` for typed userdata parameters
+
+Example with multiple return values:
+
+```rust
+vm.register_async_typed("split_stats", |s: String| async move {
+      Ok((s.len() as i64, s.to_uppercase()))
+})?;
+```
+
+Keep `register_async` for cases where you already want to manually work with `Vec<LuaValue>` and `Vec<AsyncReturnValue>`.
+
 ```text
 Rust async runtime (tokio)
   └── AsyncThread::poll()          ← Driver: implements Future trait

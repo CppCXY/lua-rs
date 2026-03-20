@@ -51,14 +51,16 @@ use crate::lua_vm::SafeOption;
 pub use gc::*;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::RustCallback;
-pub use lua_value::lua_convert::{FromLua, IntoLua};
+pub use lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
 pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
-pub use lua_vm::async_thread::{AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread};
+pub use lua_vm::async_thread::{
+    AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread, IntoAsyncLua,
+};
 pub use lua_vm::lua_error::LuaFullError;
 pub use lua_vm::table_builder::TableBuilder;
 pub use lua_vm::{
     CFunction, CallInfo, DebugInfo, Instruction, LuaAnyRef, LuaFunctionRef, LuaResult, LuaState,
-    LuaStringRef, LuaTableRef, LuaVM, OpCode,
+    LuaStringRef, LuaTableRef, LuaVM, OpCode, UserDataRef,
 };
 pub use lua_vm::{LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET};
 pub use stdlib::Stdlib;

@@ -4,8 +4,11 @@
 /// This is useful for keeping values alive across GC cycles and for passing values between Rust and Lua.
 use std::marker::PhantomData;
 
+use crate::lua_value::lua_convert::collect_into_lua_values;
+use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
 use crate::lua_value::LuaValue;
 use crate::lua_value::LuaValueKind;
+use crate::{LuaResult, LuaVM};
 
 /// A reference ID in the registry.
 /// Similar to Lua's luaL_ref return value.
@@ -403,34 +406,56 @@ impl std::fmt::Debug for LuaTableRef {
 ///
 /// ```ignore
 /// let greet = vm.get_global_function("greet")?.unwrap();
-/// let result = greet.call(vec![vm.create_string("World")?])?;
+/// let result: String = greet.call1("World")?;
 /// ```
 pub struct LuaFunctionRef {
     inner: RefInner,
 }
 
 impl LuaFunctionRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
         LuaFunctionRef {
             inner: RefInner::new(ref_id, vm),
         }
     }
 
     /// Call the function synchronously.
-    pub fn call(&self, args: Vec<LuaValue>) -> super::LuaResult<Vec<LuaValue>> {
+    pub fn call_raw(&self, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         let vm = self.inner.vm_mut();
         let func = self.inner.to_value();
         vm.call(func, args)
     }
 
     /// Call the function and return the first result (or nil if no results).
-    pub fn call1(&self, args: Vec<LuaValue>) -> super::LuaResult<LuaValue> {
-        let results = self.call(args)?;
+    pub fn call1_raw(&self, args: Vec<LuaValue>) -> LuaResult<LuaValue> {
+        let results = self.call_raw(args)?;
         Ok(results.into_iter().next().unwrap_or(LuaValue::nil()))
     }
 
+    /// Call the function with Rust arguments and convert all results into a Rust type.
+    pub fn call<A: IntoLua, R: FromLuaMulti>(&self, args: A) -> LuaResult<R> {
+        let vm = self.inner.vm_mut();
+        let args = collect_into_lua_values(vm.main_state(), args).map_err(|msg| vm.error(msg))?;
+        let func = self.inner.to_value();
+        let results = vm.call_raw(func, args)?;
+        R::from_lua_multi(results, vm.main_state_ref()).map_err(|msg| vm.error(msg))
+    }
+
+    /// Call the function with Rust arguments and convert the first result into a Rust type.
+    pub fn call1<A: IntoLua, R: FromLua>(&self, args: A) -> LuaResult<R> {
+        let vm = self.inner.vm_mut();
+        let args = collect_into_lua_values(vm.main_state(), args).map_err(|msg| vm.error(msg))?;
+        let func = self.inner.to_value();
+        let result = vm
+            .call_raw(func, args)?
+            .into_iter()
+            .next()
+            .unwrap_or(LuaValue::nil());
+        R::from_lua(result, vm.main_state_ref()).map_err(|msg| vm.error(msg))
+    }
+
     /// Call the function asynchronously.
-    pub async fn call_async(&self, args: Vec<LuaValue>) -> super::LuaResult<Vec<LuaValue>> {
+    pub async fn call_async(&self, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         let vm = self.inner.vm_mut();
         let func = self.inner.to_value();
         vm.call_async(func, args).await
@@ -525,6 +550,118 @@ impl std::fmt::Display for LuaStringRef {
 }
 
 // ============================================================================
+// UserDataRef<T>
+// ============================================================================
+
+/// A typed user-facing reference to Lua userdata.
+///
+/// Holds the userdata in the VM registry so it stays alive across Rust calls,
+/// and provides typed downcast access to the wrapped Rust value.
+pub struct UserDataRef<T: 'static> {
+    inner: RefInner,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> UserDataRef<T> {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+        UserDataRef {
+            inner: RefInner::new(ref_id, vm),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Get an immutable typed view of the underlying userdata.
+    pub fn get(&self) -> super::LuaResult<&T> {
+        let value = self.inner.to_value();
+        let expected = std::any::type_name::<T>();
+        let Some(userdata) = value.as_userdata_mut() else {
+            let vm = self.inner.vm_mut();
+            return Err(vm.error(format!("expected userdata {}, got {}", expected, value.type_name())));
+        };
+
+        let Some(inner) = userdata.downcast_ref::<T>() else {
+            let actual = userdata.type_name();
+            let vm = self.inner.vm_mut();
+            return Err(vm.error(format!("expected userdata {}, got {}", expected, actual)));
+        };
+
+        Ok(unsafe { &*(inner as *const T) })
+    }
+
+    /// Get a mutable typed view of the underlying userdata.
+    pub fn get_mut(&mut self) -> super::LuaResult<&mut T> {
+        let value = self.inner.to_value();
+        let expected = std::any::type_name::<T>();
+        let Some(userdata) = value.as_userdata_mut() else {
+            let vm = self.inner.vm_mut();
+            return Err(vm.error(format!("expected userdata {}, got {}", expected, value.type_name())));
+        };
+
+        let Some(inner) = userdata.downcast_mut::<T>() else {
+            let actual = userdata.type_name();
+            let vm = self.inner.vm_mut();
+            return Err(vm.error(format!("expected userdata {}, got {}", expected, actual)));
+        };
+
+        Ok(unsafe { &mut *(inner as *mut T) })
+    }
+
+    /// Get the wrapped type name reported by the userdata.
+    pub fn type_name(&self) -> super::LuaResult<&'static str> {
+        let value = self.inner.to_value();
+        let Some(userdata) = value.as_userdata_mut() else {
+            let vm = self.inner.vm_mut();
+            return Err(vm.error(format!(
+                "expected userdata {}, got {}",
+                std::any::type_name::<T>(),
+                value.type_name()
+            )));
+        };
+        Ok(userdata.type_name())
+    }
+
+    /// Get the underlying LuaValue.
+    pub fn to_value(&self) -> LuaValue {
+        self.inner.to_value()
+    }
+
+    /// Get the registry reference ID.
+    pub fn ref_id(&self) -> RefId {
+        self.inner.ref_id
+    }
+}
+
+impl<T: 'static> FromLua for UserDataRef<T> {
+    fn from_lua(value: LuaValue, state: &super::LuaState) -> Result<Self, String> {
+        let expected = std::any::type_name::<T>();
+        let Some(userdata) = value.as_userdata_mut() else {
+            return Err(format!("expected userdata {}, got {}", expected, value.type_name()));
+        };
+
+        if userdata.downcast_ref::<T>().is_none() {
+            return Err(format!("expected userdata {}, got {}", expected, userdata.type_name()));
+        }
+
+        let vm = unsafe { &mut *state.vm_ptr() };
+        let ref_id = store_in_registry(vm, value);
+        Ok(UserDataRef::from_raw(ref_id, vm as *mut super::LuaVM))
+    }
+}
+
+impl<T: 'static> IntoLua for UserDataRef<T> {
+    fn into_lua(self, state: &mut super::LuaState) -> Result<usize, String> {
+        state.push_value(self.to_value()).map_err(|e| format!("{:?}", e))?;
+        Ok(1)
+    }
+}
+
+impl<T: 'static> std::fmt::Debug for UserDataRef<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UserDataRef<{}>(ref_id={})", std::any::type_name::<T>(), self.inner.ref_id)
+    }
+}
+
+// ============================================================================
 // LuaAnyRef
 // ============================================================================
 
@@ -591,6 +728,16 @@ impl LuaAnyRef {
         let vm = self.inner.vm_mut();
         let ref_id = store_in_registry(vm, value);
         Some(LuaStringRef::from_raw(ref_id, self.inner.vm))
+    }
+
+    /// Try to convert to a typed userdata ref.
+    pub fn as_userdata<T: 'static>(&self) -> Option<UserDataRef<T>> {
+        let value = self.inner.to_value();
+        let userdata = value.as_userdata_mut()?;
+        userdata.downcast_ref::<T>()?;
+        let vm = self.inner.vm_mut();
+        let ref_id = store_in_registry(vm, value);
+        Some(UserDataRef::from_raw(ref_id, self.inner.vm))
     }
 
     /// Get the value's type kind.

@@ -1,4 +1,4 @@
-//! `#[derive(LuaUserData)]` — auto-generate `UserDataTrait` for Rust structs.
+//! `#[derive(LuaUserData)]` — auto-generate `UserDataTrait` for Rust structs/enums.
 //!
 //! Exposes public fields to Lua via `get_field` / `set_field`.
 //! Methods are handled separately by `#[lua_methods]`.
@@ -10,12 +10,33 @@
 //!
 //! # Struct attributes
 //! - `#[lua_impl(Display, PartialEq, PartialOrd)]` — map Rust traits to Lua metamethods
+//!
+//! # Enum support
+//! - C-like enums still implement `LuaEnum` for `register_enum::<T>()`
+//! - Enums with payloads implement a fieldless `UserDataTrait`, so they can still be
+//!   passed into Lua as userdata and expose methods via `#[lua_methods]`
+//! - All derived userdata types also implement `IntoLua`, so typed call APIs can accept
+//!   them directly without manual `LuaUserdata::new(...)` wrapping
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, Ident, Meta};
 
 use crate::type_utils::{field_to_udvalue, ref_to_udvalue, udvalue_to_field};
+
+fn gen_lua_convert_impls(name: &Ident) -> proc_macro2::TokenStream {
+    quote! {
+        impl luars::IntoLua for #name {
+            fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
+                let userdata = state
+                    .create_userdata(luars::LuaUserdata::new(self))
+                    .map_err(|e| format!("{:?}", e))?;
+                state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
+                Ok(1)
+            }
+        }
+    }
+}
 
 /// Internal field metadata collected during parsing.
 struct FieldInfo {
@@ -59,10 +80,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
             Fields::Named(fields) => Some(&fields.named),
             _ => None, // tuple or unit struct — no field export
         },
-        Data::Enum(data) => {
-            // Delegate to enum-specific codegen
-            return derive_lua_enum_impl(name, data);
-        }
+        Data::Enum(data) => return derive_lua_enum_userdata_impl(name, data, &trait_impls),
         _ => {
             return syn::Error::new_spanned(
                 &input.ident,
@@ -204,6 +222,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     };
 
     let type_name_str = name.to_string();
+    let lua_convert_impls = gen_lua_convert_impls(name);
 
     let expanded = quote! {
         impl luars::lua_value::userdata_trait::UserDataTrait for #name {
@@ -245,6 +264,8 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
                 self
             }
         }
+
+        #lua_convert_impls
     };
 
     expanded.into()
@@ -378,6 +399,7 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
 fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
     let type_name_str = name.to_string();
     let metamethod_impls = gen_metamethods(name, trait_impls);
+    let lua_convert_impls = gen_lua_convert_impls(name);
 
     let expanded = quote! {
         impl luars::lua_value::userdata_trait::UserDataTrait for #name {
@@ -401,6 +423,8 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
                 self
             }
         }
+
+        #lua_convert_impls
     };
 
     expanded.into()
@@ -408,24 +432,26 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
 
 // ==================== Enum impl ====================
 
+/// Generate `UserDataTrait` for enums, plus `LuaEnum` for C-like enums.
+fn derive_lua_enum_userdata_impl(
+    name: &Ident,
+    data: &syn::DataEnum,
+    trait_impls: &[String],
+) -> TokenStream {
+    let mut tokens = proc_macro2::TokenStream::from(gen_minimal_impl(name, trait_impls));
+
+    if data.variants.iter().all(|variant| variant.fields.is_empty()) {
+        tokens.extend(gen_lua_enum_impl(name, data));
+    }
+
+    tokens.into()
+}
+
 /// Generate `LuaEnum` implementation for C-like enums.
 ///
-/// Produces a compile error if any variant has fields (data enums not supported).
 /// Each variant gets its discriminant value (explicit or auto-incremented from 0).
-fn derive_lua_enum_impl(name: &Ident, data: &syn::DataEnum) -> TokenStream {
+fn gen_lua_enum_impl(name: &Ident, data: &syn::DataEnum) -> proc_macro2::TokenStream {
     let type_name_str = name.to_string();
-
-    // Validate: all variants must be unit (no fields)
-    for variant in &data.variants {
-        if !variant.fields.is_empty() {
-            return syn::Error::new_spanned(
-                &variant.ident,
-                "LuaUserData enum export only supports C-like enums (no fields on variants)",
-            )
-            .to_compile_error()
-            .into();
-        }
-    }
 
     // Collect variant names and discriminant values
     let mut entries = Vec::new();
@@ -436,14 +462,14 @@ fn derive_lua_enum_impl(name: &Ident, data: &syn::DataEnum) -> TokenStream {
         let disc_value = if let Some((_, expr)) = &variant.discriminant {
             match parse_discriminant_expr(expr) {
                 Ok(v) => {
-                    next_discriminant = v + 1;
+                    next_discriminant = v.saturating_add(1);
                     v
                 }
-                Err(e) => return e.to_compile_error().into(),
+                Err(e) => return e.to_compile_error(),
             }
         } else {
             let v = next_discriminant;
-            next_discriminant += 1;
+            next_discriminant = next_discriminant.saturating_add(1);
             v
         };
 
@@ -453,7 +479,7 @@ fn derive_lua_enum_impl(name: &Ident, data: &syn::DataEnum) -> TokenStream {
     let variant_names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
     let variant_values: Vec<i64> = entries.iter().map(|(_, v)| *v).collect();
 
-    let expanded = quote! {
+    quote! {
         impl luars::lua_value::userdata_trait::LuaEnum for #name {
             fn variants() -> &'static [(&'static str, i64)] {
                 &[#( (#variant_names, #variant_values) ),*]
@@ -463,9 +489,7 @@ fn derive_lua_enum_impl(name: &Ident, data: &syn::DataEnum) -> TokenStream {
                 #type_name_str
             }
         }
-    };
-
-    expanded.into()
+    }
 }
 
 /// Parse an enum discriminant expression to i64.

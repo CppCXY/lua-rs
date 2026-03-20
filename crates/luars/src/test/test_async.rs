@@ -51,6 +51,18 @@ async fn test_async_no_args() {
 }
 
 #[tokio::test]
+async fn test_async_typed_no_args() {
+    let mut vm = new_vm();
+
+    vm.register_async_typed("async_hello_typed", || async move { Ok("hello") })
+        .unwrap();
+
+    let results = vm.execute_async("return async_hello_typed()").await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_str(), Some("hello"));
+}
+
+#[tokio::test]
 async fn test_async_multiple_returns() {
     let mut vm = new_vm();
 
@@ -64,6 +76,21 @@ async fn test_async_multiple_returns() {
     .unwrap();
 
     let results = vm.execute_async("return async_multi()").await.unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_integer(), Some(1));
+    assert_eq!(results[1].as_integer(), Some(2));
+    assert_eq!(results[2].as_integer(), Some(3));
+}
+
+#[tokio::test]
+async fn test_async_typed_multiple_returns() {
+    let mut vm = new_vm();
+
+    vm.register_async_typed("async_multi_typed", || async move { Ok((1_i64, 2_i64, 3_i64)) })
+        .unwrap();
+
+    let results = vm.execute_async("return async_multi_typed()").await.unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_integer(), Some(1));
@@ -121,6 +148,26 @@ async fn test_async_sequential_calls() {
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_integer(), Some(40)); // 5*2*2*2
+}
+
+#[tokio::test]
+async fn test_async_typed_high_arity() {
+    let mut vm = new_vm();
+
+    vm.register_async_typed(
+        "async_sum8",
+        |a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64| async move {
+            Ok(a + b + c + d + e + f + g + h)
+        },
+    )
+    .unwrap();
+
+    let results = vm
+        .execute_async("return async_sum8(1, 2, 3, 4, 5, 6, 7, 8)")
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_integer(), Some(36));
 }
 
 // ============ Async with actual .await (tokio::time::sleep) ============
@@ -262,6 +309,11 @@ impl AsyncPoint {
     }
 }
 
+#[derive(LuaUserData)]
+struct AsyncCounter {
+    pub count: i64,
+}
+
 #[tokio::test]
 async fn test_async_return_userdata() {
     let mut vm = new_vm();
@@ -370,6 +422,36 @@ async fn test_async_return_mixed_userdata_and_values() {
     assert_eq!(results[0].as_number(), Some(1.0));
     assert_eq!(results[1].as_str(), Some("ok"));
     assert_eq!(results[2].as_integer(), Some(42));
+}
+
+#[tokio::test]
+async fn test_async_typed_userdata_ref_arg() {
+    let mut vm = new_vm();
+
+    let counter = vm.push_any(AsyncCounter { count: 5 }).unwrap();
+    vm.set_global("counter", counter).unwrap();
+
+    vm.register_async_typed(
+        "async_increment_counter",
+        |mut counter: UserDataRef<AsyncCounter>, delta: i64| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let counter_ref = counter.get_mut().unwrap();
+            counter_ref.count += delta;
+            Ok(counter_ref.count)
+        },
+    )
+    .unwrap();
+
+    let results = vm
+        .execute_async("return async_increment_counter(counter, 7)")
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].as_integer(), Some(12));
+
+    let counter: UserDataRef<AsyncCounter> = vm.get_global_as("counter").unwrap().unwrap();
+    assert_eq!(counter.get().unwrap().count, 12);
 }
 
 // ============ call_async tests ============

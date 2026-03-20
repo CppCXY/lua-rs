@@ -1,6 +1,12 @@
 // Tests for the user-facing Ref API and related features
 use crate::lua_vm::SafeOption;
-use crate::{LuaVM, LuaValue, Stdlib};
+use crate::lua_value::userdata_trait::LuaMethodProvider;
+use crate::{LuaUserData, LuaVM, LuaValue, Stdlib, UserDataRef};
+
+#[derive(LuaUserData)]
+struct ApiCounter {
+    pub count: i64,
+}
 
 // ============================================================================
 // LuaTableRef tests
@@ -127,7 +133,7 @@ fn test_function_ref_call() {
 
     let add = vm.get_global_function("add").unwrap().unwrap();
     let results = add
-        .call(vec![LuaValue::integer(3), LuaValue::integer(4)])
+        .call_raw(vec![LuaValue::integer(3), LuaValue::integer(4)])
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(7));
 }
@@ -146,8 +152,59 @@ fn test_function_ref_call1() {
 
     let greet = vm.get_global_function("greet").unwrap().unwrap();
     let name = vm.create_string("World").unwrap();
-    let result = greet.call1(vec![name]).unwrap();
+    let result = greet.call1_raw(vec![name]).unwrap();
     assert_eq!(result.as_str(), Some("Hello, World"));
+}
+
+#[test]
+fn test_function_ref_call1_typed() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.execute(
+        r#"
+        function greet(name)
+            return "Hello, " .. name
+        end
+    "#,
+    )
+    .unwrap();
+
+    let greet = vm.get_global_function("greet").unwrap().unwrap();
+    let result: String = greet.call1("World").unwrap();
+    assert_eq!(result, "Hello, World");
+}
+
+#[test]
+fn test_function_ref_call_typed_multi_return() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.execute(
+        r#"
+        function stats(a, b)
+            return a + b, a * b, a - b
+        end
+    "#,
+    )
+    .unwrap();
+
+    let stats = vm.get_global_function("stats").unwrap().unwrap();
+    let result: (i64, i64, i64) = stats.call((7, 3)).unwrap();
+    assert_eq!(result, (10, 21, 4));
+}
+
+#[test]
+fn test_function_ref_call_typed_no_args() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.execute(
+        r#"
+        function ping()
+            return 42
+        end
+    "#,
+    )
+    .unwrap();
+
+    let ping = vm.get_global_function("ping").unwrap().unwrap();
+    let result: i64 = ping.call1(()).unwrap();
+    assert_eq!(result, 42);
 }
 
 #[test]
@@ -165,9 +222,9 @@ fn test_function_ref_multiple_calls() {
     .unwrap();
 
     let inc = vm.get_global_function("inc").unwrap().unwrap();
-    assert_eq!(inc.call1(vec![]).unwrap().as_integer(), Some(1));
-    assert_eq!(inc.call1(vec![]).unwrap().as_integer(), Some(2));
-    assert_eq!(inc.call1(vec![]).unwrap().as_integer(), Some(3));
+    assert_eq!(inc.call1_raw(vec![]).unwrap().as_integer(), Some(1));
+    assert_eq!(inc.call1_raw(vec![]).unwrap().as_integer(), Some(2));
+    assert_eq!(inc.call1_raw(vec![]).unwrap().as_integer(), Some(3));
 }
 
 #[test]
@@ -237,7 +294,7 @@ fn test_any_ref_function() {
     let val = vm.get_global("f").unwrap().unwrap();
     let any = vm.to_ref(val);
     let func = any.as_function().unwrap();
-    let result = func.call1(vec![]).unwrap();
+    let result = func.call1_raw(vec![]).unwrap();
     assert_eq!(result.as_integer(), Some(99));
 }
 
@@ -259,6 +316,36 @@ fn test_any_ref_wrong_type() {
     assert!(any.as_function().is_none());
     assert!(any.as_string().is_none());
     assert!(any.as_table().is_some());
+}
+
+#[test]
+fn test_any_ref_userdata_typed() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let userdata = vm
+        .create_userdata(crate::lua_value::LuaUserdata::new(ApiCounter { count: 5 }))
+        .unwrap();
+
+    let any = vm.to_ref(userdata);
+    let counter = any.as_userdata::<ApiCounter>().unwrap();
+    assert_eq!(counter.get().unwrap().count, 5);
+    assert_eq!(counter.type_name().unwrap(), "ApiCounter");
+}
+
+#[test]
+fn test_userdata_ref_from_lua_and_mutate() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let userdata = vm
+        .create_userdata(crate::lua_value::LuaUserdata::new(ApiCounter { count: 11 }))
+        .unwrap();
+    vm.set_global("counter", userdata).unwrap();
+
+    let mut counter: UserDataRef<ApiCounter> = vm.get_global_as("counter").unwrap().unwrap();
+    assert_eq!(counter.get().unwrap().count, 11);
+
+    counter.get_mut().unwrap().count += 9;
+
+    let results = vm.execute("return counter.count").unwrap();
+    assert_eq!(results[0].as_integer(), Some(20));
 }
 
 // ============================================================================

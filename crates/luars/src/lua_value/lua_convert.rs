@@ -14,6 +14,10 @@
 //! parameter and `IntoLua::into_lua` for the return value, keeping the codegen
 //! type-agnostic and user-extensible.
 //!
+//! For multi-value Lua function calls, [`FromLuaMulti`] converts Lua return
+//! lists into Rust values. Single-value returns are covered automatically via
+//! the existing [`FromLua`] impls, while tuples map to multiple return values.
+//!
 //! # User extensibility
 //! Users can implement `FromLua` / `IntoLua` for their own types:
 //! ```ignore
@@ -27,6 +31,32 @@
 use crate::lua_value::LuaValue;
 use crate::lua_vm::LuaState;
 
+pub(crate) fn collect_into_lua_values<T: IntoLua>(
+    state: &mut LuaState,
+    value: T,
+) -> Result<Vec<LuaValue>, String> {
+    let base_top = state.get_top();
+    let pushed = match value.into_lua(state) {
+        Ok(pushed) => pushed,
+        Err(err) => {
+            state.set_top_raw(base_top);
+            return Err(err);
+        }
+    };
+
+    let mut values = Vec::with_capacity(pushed);
+    for index in base_top..base_top + pushed {
+        let Some(value) = state.stack_get(index) else {
+            state.set_top_raw(base_top);
+            return Err("internal error: failed to collect Lua values from stack".to_owned());
+        };
+        values.push(value);
+    }
+
+    state.set_top_raw(base_top);
+    Ok(values)
+}
+
 /// Convert a `LuaValue` into a Rust type.
 ///
 /// Implementors define how a Lua value is converted to `Self`.
@@ -36,6 +66,16 @@ pub trait FromLua: Sized {
     ///
     /// `state` is provided for operations that need GC access (e.g. string interning).
     fn from_lua(value: LuaValue, state: &LuaState) -> Result<Self, String>;
+}
+
+/// Convert a Lua multi-return list into a Rust type.
+///
+/// This is used by typed call helpers that need to map `Vec<LuaValue>` into a
+/// Rust return type. Single-value returns are supported automatically for every
+/// `T: FromLua`, and tuples map positionally.
+pub trait FromLuaMulti: Sized {
+    /// Convert a list of Lua values to `Self`.
+    fn from_lua_multi(values: Vec<LuaValue>, state: &LuaState) -> Result<Self, String>;
 }
 
 /// Convert a Rust type into a `LuaValue` and push it.
@@ -79,6 +119,21 @@ impl IntoLua for () {
     #[inline]
     fn into_lua(self, _state: &mut LuaState) -> Result<usize, String> {
         Ok(0)
+    }
+}
+
+impl<T: FromLua> FromLuaMulti for T {
+    #[inline]
+    fn from_lua_multi(values: Vec<LuaValue>, state: &LuaState) -> Result<Self, String> {
+        let value = values.into_iter().next().unwrap_or(LuaValue::nil());
+        T::from_lua(value, state)
+    }
+}
+
+impl FromLuaMulti for Vec<LuaValue> {
+    #[inline]
+    fn from_lua_multi(values: Vec<LuaValue>, _state: &LuaState) -> Result<Self, String> {
+        Ok(values)
     }
 }
 
@@ -256,3 +311,41 @@ impl<T: IntoLua> IntoLua for Vec<T> {
         Ok(count)
     }
 }
+
+macro_rules! impl_lua_tuple_conversions {
+    ($(($(($ty:ident, $value:ident)),+)),* $(,)?) => {
+        $(
+            impl<$($ty: IntoLua),+> IntoLua for ($($ty,)+) {
+                #[inline]
+                fn into_lua(self, state: &mut LuaState) -> Result<usize, String> {
+                    let ($($value,)+) = self;
+                    let mut pushed = 0;
+                    $(
+                        pushed += $value.into_lua(state)?;
+                    )+
+                    Ok(pushed)
+                }
+            }
+
+            impl<$($ty: FromLua),+> FromLuaMulti for ($($ty,)+) {
+                #[inline]
+                fn from_lua_multi(values: Vec<LuaValue>, state: &LuaState) -> Result<Self, String> {
+                    let mut iter = values.into_iter();
+                    Ok(($(
+                        $ty::from_lua(iter.next().unwrap_or(LuaValue::nil()), state)?,
+                    )+))
+                }
+            }
+        )*
+    };
+}
+
+impl_lua_tuple_conversions!(
+    ((A, a), (B, b)),
+    ((A, a), (B, b), (C, c)),
+    ((A, a), (B, b), (C, c), (D, d)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g), (H, h))
+);

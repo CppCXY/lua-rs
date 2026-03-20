@@ -12,8 +12,19 @@ fn test_call_lua_function() {
 
     vm.execute("function add(a, b) return a + b end").unwrap();
     let func = vm.get_global("add").unwrap().unwrap();
+    let result: i64 = vm.call1(func, (3, 4)).unwrap();
+    assert_eq!(result, 7);
+}
+
+#[test]
+fn test_call_lua_function_raw() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    vm.execute("function add(a, b) return a + b end").unwrap();
+    let func = vm.get_global("add").unwrap().unwrap();
     let results = vm
-        .call(func, vec![LuaValue::integer(3), LuaValue::integer(4)])
+        .call_raw(func, vec![LuaValue::integer(3), LuaValue::integer(4)])
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(7));
 }
@@ -25,15 +36,14 @@ fn test_call_global() {
 
     vm.execute("function greet(name) return 'Hello, ' .. name end")
         .unwrap();
-    let name = vm.create_string("World").unwrap();
-    let results = vm.call_global("greet", vec![name]).unwrap();
-    assert_eq!(results[0].as_str(), Some("Hello, World"));
+    let result: String = vm.call1_global("greet", "World").unwrap();
+    assert_eq!(result, "Hello, World");
 }
 
 #[test]
 fn test_call_global_not_found() {
     let mut vm = LuaVM::new(SafeOption::default());
-    let result = vm.call_global("nonexistent", vec![]);
+    let result: LuaResult<Vec<LuaValue>> = vm.call_global("nonexistent", ());
     assert!(result.is_err());
 }
 
@@ -58,6 +68,62 @@ fn test_register_function() {
     assert_eq!(results[0].as_integer(), Some(30));
 }
 
+#[test]
+fn test_register_function_typed() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    vm.register_function_typed("rust_add_typed", |a: i64, b: i64| a + b)
+        .unwrap();
+
+    let results = vm.execute("return rust_add_typed(10, 20)").unwrap();
+    assert_eq!(results[0].as_integer(), Some(30));
+}
+
+#[test]
+fn test_register_function_typed_userdata_ref() {
+    #[derive(Debug)]
+    struct Counter {
+        count: i64,
+    }
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let counter = vm.push_any(Counter { count: 1 }).unwrap();
+    vm.set_global("counter", counter).unwrap();
+
+    vm.register_function_typed("increment_typed", |mut counter: UserDataRef<Counter>, delta: i64| {
+        let counter_ref = counter.get_mut().unwrap();
+        counter_ref.count += delta;
+        counter_ref.count
+    })
+    .unwrap();
+
+    let results = vm.execute("return increment_typed(counter, 9)").unwrap();
+    assert_eq!(results[0].as_integer(), Some(10));
+
+    let counter: UserDataRef<Counter> = vm.get_global_as("counter").unwrap().unwrap();
+    assert_eq!(counter.get().unwrap().count, 10);
+}
+
+#[test]
+fn test_register_function_typed_high_arity() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    vm.register_function_typed(
+        "sum8",
+        |a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64| {
+            a + b + c + d + e + f + g + h
+        },
+    )
+    .unwrap();
+
+    let results = vm.execute("return sum8(1, 2, 3, 4, 5, 6, 7, 8)").unwrap();
+    assert_eq!(results[0].as_integer(), Some(36));
+}
+
 // ============================
 // P3: load / load_with_name
 // ============================
@@ -68,8 +134,8 @@ fn test_load_and_call() {
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let func = vm.load("return 42").unwrap();
-    let results = vm.call(func, vec![]).unwrap();
-    assert_eq!(results[0].as_integer(), Some(42));
+    let result: i64 = vm.call1(func, ()).unwrap();
+    assert_eq!(result, 42);
 }
 
 #[test]
@@ -78,8 +144,8 @@ fn test_load_with_name() {
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let func = vm.load_with_name("return 'hello'", "@my_script").unwrap();
-    let results = vm.call(func, vec![]).unwrap();
-    assert_eq!(results[0].as_str(), Some("hello"));
+    let result: String = vm.call1(func, ()).unwrap();
+    assert_eq!(result, "hello");
 }
 
 #[test]
@@ -419,11 +485,11 @@ fn test_call_global_error_recovery() {
     vm.execute("function bad() error('nope') end").unwrap();
     vm.execute("function good() return 99 end").unwrap();
 
-    let err = vm.call_global("bad", vec![]);
+    let err: LuaResult<Vec<LuaValue>> = vm.call_global("bad", ());
     assert!(err.is_err());
 
     // Should still work after the error
-    let results = vm.call_global("good", vec![]).unwrap();
+    let results: Vec<LuaValue> = vm.call_global("good", ()).unwrap();
     assert_eq!(results[0].as_integer(), Some(99));
 }
 
@@ -477,7 +543,7 @@ fn test_deep_call_error_recovery() {
     )
     .unwrap();
 
-    let err = vm.call_global("a", vec![]);
+    let err: LuaResult<Vec<LuaValue>> = vm.call_global("a", ());
     assert!(err.is_err());
 
     // After deep error, simple calls should work
@@ -486,6 +552,6 @@ fn test_deep_call_error_recovery() {
 
     // And function calls too
     vm.execute("function simple() return 42 end").unwrap();
-    let results = vm.call_global("simple", vec![]).unwrap();
+    let results: Vec<LuaValue> = vm.call_global("simple", ()).unwrap();
     assert_eq!(results[0].as_integer(), Some(42));
 }

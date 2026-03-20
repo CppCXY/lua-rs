@@ -112,7 +112,8 @@ impl UdValue {
 ///
 /// This trait provides rich, typed access to struct fields, methods, and standard
 /// operations. The `#[derive(LuaUserData)]` macro auto-implements this trait by
-/// exposing public fields. Methods are exposed via `#[lua_methods]` attribute macro
+/// exposing public fields for structs, or by creating a fieldless userdata facade for
+/// enums and tuple/unit structs. Methods are exposed via `#[lua_methods]` attribute macro
 /// on impl blocks, which generates static C wrapper functions returned from `get_field`
 /// as `UdValue::Function(cfunction)`.
 ///

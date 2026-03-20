@@ -45,8 +45,7 @@ A comprehensive guide to embedding the luars Lua 5.5 runtime in your Rust applic
 ## Quick Example
 
 ```rust
-use luars::lua_vm::{LuaVM, SafeOption};
-use luars::Stdlib;
+use luars::{LuaVM, SafeOption, Stdlib};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create a VM
@@ -65,6 +64,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     "#)?;
 
     println!("Sum = {:?}", results[0].as_integer()); // Some(5050)
+    Ok(())
+}
+```
+
+## Typed-First Embedding Style
+
+The public embedding API is now typed-first.
+
+Prefer these methods in application code:
+
+- `call` / `call1`
+- `call_global` / `call1_global`
+- `register_function_typed`
+- `register_async_typed`
+- `UserDataRef<T>` for typed userdata access inside Rust callbacks
+
+Use the raw fallbacks only when you intentionally want to manipulate `LuaValue` vectors yourself:
+
+- `call_raw`
+- `call_global_raw`
+- `register_function`
+- `register_async`
+
+Example:
+
+```rust
+use luars::{LuaUserData, LuaVM, SafeOption, Stdlib, UserDataRef, lua_methods};
+
+#[derive(LuaUserData)]
+struct Counter {
+    pub count: i64,
+}
+
+#[lua_methods]
+impl Counter {
+    pub fn new(count: i64) -> Self {
+        Self { count }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All)?;
+
+    vm.execute("function add(a, b) return a + b end")?;
+    let sum: i64 = vm.call1_global("add", (10, 20))?;
+    assert_eq!(sum, 30);
+
+    vm.register_function_typed("bump", |mut counter: UserDataRef<Counter>, delta: i64| {
+        let counter_ref = counter.get_mut().unwrap();
+        counter_ref.count += delta;
+        counter_ref.count
+    })?;
+
+    vm.register_async_typed("double_async", |n: i64| async move {
+        Ok(n * 2)
+    })?;
+
     Ok(())
 }
 ```

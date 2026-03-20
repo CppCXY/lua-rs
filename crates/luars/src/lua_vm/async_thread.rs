@@ -67,6 +67,14 @@ pub enum AsyncReturnValue {
     Table(Vec<(AsyncReturnValue, AsyncReturnValue)>),
 }
 
+/// Convert a Rust value into async Lua return values without access to a live LuaState.
+///
+/// This mirrors `IntoLua`, but uses `AsyncReturnValue` so futures can produce
+/// values before they are materialized back into `LuaValue` by the VM.
+pub trait IntoAsyncLua {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue>;
+}
+
 impl AsyncReturnValue {
     /// Create a nil return value
     #[inline]
@@ -149,6 +157,128 @@ impl From<LuaUserdata> for AsyncReturnValue {
         AsyncReturnValue::UserData(ud)
     }
 }
+
+impl IntoAsyncLua for () {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        Vec::new()
+    }
+}
+
+impl IntoAsyncLua for AsyncReturnValue {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        vec![self]
+    }
+}
+
+impl IntoAsyncLua for LuaValue {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        vec![AsyncReturnValue::from(self)]
+    }
+}
+
+impl IntoAsyncLua for LuaUserdata {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        vec![AsyncReturnValue::from(self)]
+    }
+}
+
+impl<T: UserDataTrait> IntoAsyncLua for T {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        vec![AsyncReturnValue::userdata(self)]
+    }
+}
+
+impl IntoAsyncLua for bool {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        vec![AsyncReturnValue::boolean(self)]
+    }
+}
+
+macro_rules! impl_into_async_lua_int {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl IntoAsyncLua for $ty {
+                fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+                    vec![AsyncReturnValue::integer(self as i64)]
+                }
+            }
+        )*
+    };
+}
+
+impl_into_async_lua_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+macro_rules! impl_into_async_lua_float {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl IntoAsyncLua for $ty {
+                fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+                    vec![AsyncReturnValue::float(self as f64)]
+                }
+            }
+        )*
+    };
+}
+
+impl_into_async_lua_float!(f32, f64);
+
+impl IntoAsyncLua for String {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        vec![AsyncReturnValue::String(self)]
+    }
+}
+
+impl IntoAsyncLua for &str {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        vec![AsyncReturnValue::string(self)]
+    }
+}
+
+impl<T: IntoAsyncLua> IntoAsyncLua for Option<T> {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        match self {
+            Some(value) => value.into_async_lua(),
+            None => vec![AsyncReturnValue::nil()],
+        }
+    }
+}
+
+impl<T: IntoAsyncLua> IntoAsyncLua for Vec<T> {
+    fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+        let mut values = Vec::new();
+        for item in self {
+            values.extend(item.into_async_lua());
+        }
+        values
+    }
+}
+
+macro_rules! impl_into_async_lua_tuple {
+    ($(($(($ty:ident, $value:ident)),+)),* $(,)?) => {
+        $(
+            impl<$($ty: IntoAsyncLua),+> IntoAsyncLua for ($($ty,)+) {
+                fn into_async_lua(self) -> Vec<AsyncReturnValue> {
+                    let ($($value,)+) = self;
+                    let mut values = Vec::new();
+                    $(
+                        values.extend($value.into_async_lua());
+                    )+
+                    values
+                }
+            }
+        )*
+    };
+}
+
+impl_into_async_lua_tuple!(
+    ((A, a), (B, b)),
+    ((A, a), (B, b), (C, c)),
+    ((A, a), (B, b), (C, c), (D, d)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g)),
+    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g), (H, h))
+);
 
 // ============ Async Future type alias ============
 

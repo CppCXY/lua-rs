@@ -9,7 +9,7 @@ A Lua 5.5 interpreter written in pure Rust — embeddable, async-capable, with d
 
 - **Lua 5.5** — full language semantics: compiler, register-based VM, GC
 - **Pure Rust** — no C dependencies, no `unsafe` FFI
-- **Ergonomic API** — `call_global`, `register_function`, `load`, `dofile`, `TableBuilder`, typed getters
+- **Ergonomic API** — typed-first `call`, `call1`, `call_global`, `call1_global`, typed callback registration, `TableBuilder`, typed getters
 - **UserData** — derive macros to expose Rust structs/enums to Lua (fields, methods, operators)
 - **Async** — run async Rust functions from Lua via transparent coroutine bridging
 - **Closures** — register Rust closures with captured state as Lua globals
@@ -45,16 +45,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     vm.set_global("x", LuaValue::integer(42))?;
     let x: i64 = vm.get_global_as::<i64>("x")?.unwrap();
 
-    // Call a Lua function
+    // Call a Lua function with typed arguments / returns
     vm.execute("function add(a,b) return a+b end")?;
-    let sum = vm.call_global("add", vec![LuaValue::integer(1), LuaValue::integer(2)])?;
-    assert_eq!(sum[0].as_integer(), Some(3));
+    let sum: i64 = vm.call1_global("add", (1, 2))?;
+    assert_eq!(sum, 3);
 
     Ok(())
 }
 ```
 
 ### Register Rust Functions
+
+```rust
+vm.register_function_typed("add", |a: i64, b: i64| a + b)?;
+let result: i64 = vm.call1_global("add", (10, 20))?;
+assert_eq!(result, 30);
+```
+
+Raw callbacks remain available when you want direct stack access:
 
 ```rust
 vm.register_function("greet", |state| {
@@ -73,10 +81,13 @@ vm.execute("print(greet('Rust'))")?;  // Hello, Rust!
 ```rust
 // Compile without executing
 let f = vm.load("return 1 + 1")?;
-let results = vm.call(f, vec![])?;
+let result: i64 = vm.call1(f, ())?;
 
 // Load named source
 let f = vm.load_with_name("return 42", "my_chunk")?;
+
+// Raw fallback when you already have LuaValue vectors
+let results = vm.call_raw(f, vec![])?;
 
 // Execute a file
 vm.dofile("scripts/init.lua")?;
@@ -138,6 +149,15 @@ vm.execute(r#"
 "#)?;
 ```
 
+Use `UserDataRef<T>` when Rust callbacks need typed access to userdata values:
+
+```rust
+vm.register_function_typed("shift_x", |mut point: UserDataRef<Point>, delta: f64| {
+    point.get_mut()?.x += delta;
+    point.get()?.x
+})?;
+```
+
 ### Error Handling
 
 ```rust
@@ -171,16 +191,15 @@ vm.open_stdlibs(&[Stdlib::Base, Stdlib::String])?;     // specific set
 ### Async
 
 ```rust
-use luars::AsyncReturnValue;
-
-vm.register_async("fetch", |args| async move {
-    let url = args[0].as_str().unwrap_or("").to_string();
+vm.register_async_typed("fetch", |url: String| async move {
     let body = reqwest::get(&url).await?.text().await?;
-    Ok(vec![AsyncReturnValue::string(body)])
+    Ok(body)
 })?;
 
 let results = vm.execute_async("return fetch('https://example.com')").await?;
 ```
+
+If you need full manual control, `register_async` still accepts and returns raw `LuaValue`/`AsyncReturnValue` vectors.
 
 ## Known Limitations
 

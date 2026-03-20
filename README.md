@@ -14,7 +14,7 @@ A Lua 5.5 interpreter written in pure Rust. Faithfully ported from the official 
 - **Lua 5.5** — compiler, VM, and standard libraries implement the Lua 5.5 specification
 - **Pure Rust** — no C dependencies, no `unsafe` FFI — the entire runtime is self-contained Rust
 - **Official Test Suite** — passes 28 of 30 official Lua 5.5 test files (see [Compatibility](#compatibility))
-- **Ergonomic Rust API** — `call_global`, `register_function`, `load`, `dofile`, `TableBuilder`, typed getters
+- **Ergonomic Rust API** — typed-first `call`, `call1`, `call_global`, `call1_global`, typed callback registration, `TableBuilder`, typed getters
 - **UserData** — derive macros to expose Rust structs/enums to Lua with fields, methods, operators
 - **Async** — run async Rust functions from Lua via transparent coroutine-based bridging
 - **WASM** — browser-targeted `luars_wasm` module builds and runs successfully via `wasm-pack`
@@ -60,8 +60,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 vm.execute("return 42")?;                          // compile & run a string
 vm.dofile("scripts/init.lua")?;                    // compile & run a file
 let f = vm.load("return 1+1")?;                    // compile without running
-let results = vm.call(f, vec![])?;                 // call a function value
-let results = vm.call_global("func", vec![])?;     // look up global & call
+let value: i64 = vm.call1(f, ())?;                 // typed single-return call
+let pair: (i64, i64) = vm.call_global("divmod", (9, 4))?;
+
+// Raw fallback when you already have prebuilt LuaValue arguments
+let results = vm.call_raw(f, vec![])?;
+let results = vm.call_global_raw("func", vec![])?;
 ```
 
 ### Globals & Types
@@ -70,7 +74,7 @@ let results = vm.call_global("func", vec![])?;     // look up global & call
 vm.set_global("x", LuaValue::integer(42))?;
 let x: i64 = vm.get_global_as::<i64>("x")?.unwrap();
 
-vm.register_function("add", |s| { /* ... */ Ok(1) })?;
+vm.register_function_typed("add", |a: i64, b: i64| a + b)?;
 vm.register_type_of::<Point>("Point")?;
 vm.register_enum::<Color>("Color")?;
 ```
@@ -112,13 +116,14 @@ match vm.execute("error('boom')") {
 ### Async
 
 ```rust
-vm.register_async("fetch", |args| async move {
-    let url = args[0].as_str().unwrap_or("").to_string();
+vm.register_async_typed("fetch", |url: String| async move {
     let body = reqwest::get(&url).await?.text().await?;
-    Ok(vec![AsyncReturnValue::string(body)])
+    Ok(body)
 })?;
 
 let results = vm.execute_async("return fetch('https://example.com')").await?;
+
+// Raw fallback is still available when you want direct LuaValue control.
 ```
 
 ### UserData
@@ -137,6 +142,16 @@ impl Point {
 }
 
 vm.register_type_of::<Point>("Point")?;
+```
+
+```rust
+let p = vm.push_any(Point { x: 3.0, y: 4.0 })?;
+vm.set_global("p", p)?;
+
+vm.register_function_typed("shift_x", |mut point: UserDataRef<Point>, delta: f64| {
+    point.get_mut()?.x += delta;
+    point.get()?.x
+})?;
 ```
 
 ```lua

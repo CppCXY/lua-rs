@@ -2130,6 +2130,23 @@ impl LuaState {
         self.vm_mut().register_function(name, f)
     }
 
+    pub fn register_function_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: crate::lua_vm::LuaTypedCallback<Args, R>,
+    {
+        self.vm_mut().register_function_typed(name, f)
+    }
+
+    /// Register a typed async Rust closure as a Lua global function.
+    ///
+    /// See [`LuaVM::register_async_typed`] for details.
+    pub fn register_async_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
+    where
+        F: crate::lua_vm::LuaTypedAsyncCallback<Args, R>,
+    {
+        self.vm_mut().register_async_typed(name, f)
+    }
+
     // ===== Async Support =====
 
     /// Register an async function as a Lua global (convenience proxy for `LuaVM::register_async`).
@@ -4302,6 +4319,10 @@ impl LuaState {
 
     pub fn to_function_ref(&mut self, value: LuaValue) -> Option<LuaFunctionRef> {
         self.vm_mut().to_function_ref(value)
+    }
+
+    pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<crate::UserDataRef<T>> {
+        self.vm_mut().to_userdata_ref(value)
     }
 }
 
