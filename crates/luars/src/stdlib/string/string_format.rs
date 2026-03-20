@@ -655,7 +655,7 @@ fn format_sci(
     l: &mut LuaState,
 ) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
-    let precision = spec.precision.map(|p| if p == 0 { 6 } else { p });
+    let precision = spec.precision;
 
     // Format the number
     let mut result = if let Some(prec) = precision {
