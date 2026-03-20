@@ -319,6 +319,34 @@ impl NativeTable {
         }
     }
 
+    #[inline]
+    pub fn set_existing_shortstr_parts(&mut self, key: &LuaValue, value: Value, tt: u8) -> bool {
+        if self.node.is_null() {
+            return false;
+        }
+
+        let mut node = self.mainposition_string(key);
+        let key_ptr = unsafe { key.value.i };
+
+        unsafe {
+            loop {
+                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                    if (*node).val_tt != LUA_VNIL {
+                        (*node).set_value_parts(value, tt);
+                        return true;
+                    }
+                    return false;
+                }
+
+                let next = (*node).next;
+                if next == 0 {
+                    return false;
+                }
+                node = node.offset(next as isize);
+            }
+        }
+    }
+
     /// Fast path for repeated writes to an existing integer key.
     /// Mirrors C Lua's fastset semantics: when the key already has a live slot,
     /// the update can ignore `__newindex` and complete in place.

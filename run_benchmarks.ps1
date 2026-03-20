@@ -43,7 +43,6 @@ function Write-ColorHost {
     if ($NoColor) {
         Write-Output $Message
     } else {
-        Write-Output $Message
         Write-Host $Message -ForegroundColor $Color
     }
 }
