@@ -860,10 +860,7 @@ fn io_tmpfile(l: &mut LuaState) -> LuaResult<usize> {
     let temp_dir = std::env::temp_dir();
 
     // Generate a unique filename using timestamp and process ID
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let timestamp = crate::platform_time::unix_nanos();
     let pid = std::process::id();
     let filename = format!("lua_tmp_{}_{}.tmp", pid, timestamp);
     let temp_path = temp_dir.join(filename);

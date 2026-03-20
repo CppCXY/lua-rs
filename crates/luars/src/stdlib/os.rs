@@ -5,6 +5,7 @@
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::{LuaResult, LuaState};
+use crate::platform_time;
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 
 pub fn create_os_lib() -> LibraryModule {
@@ -25,23 +26,18 @@ pub fn create_os_lib() -> LibraryModule {
 
 fn os_clock(l: &mut LuaState) -> LuaResult<usize> {
     // Use VM's start_time for consistent measurements
-    let elapsed = l.vm_mut().start_time.elapsed().as_secs_f64();
+    let elapsed = l.vm_mut().start_time.elapsed_secs_f64();
     l.push_value(LuaValue::float(elapsed))?;
     Ok(1)
 }
 
 fn os_time(l: &mut LuaState) -> LuaResult<usize> {
-    use std::time::SystemTime;
-
     let arg = l.get_arg(1);
 
     if let Some(table_val) = arg {
         if table_val.is_nil() {
             // os.time() with nil = current time
-            let timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let timestamp = platform_time::unix_secs();
             l.push_value(LuaValue::integer(timestamp as i64))?;
             return Ok(1);
         }
@@ -186,10 +182,7 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // No argument: return current time
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = platform_time::unix_secs();
 
     l.push_value(LuaValue::integer(timestamp as i64))?;
     Ok(1)
@@ -279,10 +272,7 @@ fn os_date(l: &mut LuaState) -> LuaResult<usize> {
             return Err(l.error("bad argument #2 to 'date' (number expected)".to_string()));
         }
     } else {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
+        platform_time::unix_secs() as i64
     };
 
     // Parse format string (default is "%c" which gives a readable date/time)
@@ -641,12 +631,7 @@ fn os_setlocale(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn os_tmpname(l: &mut LuaState) -> LuaResult<usize> {
-    use std::time::SystemTime;
-
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    let timestamp = platform_time::unix_nanos();
 
     let tmpname = format!("/tmp/lua_tmp_{}", timestamp);
     let result = l.create_string(&tmpname)?;

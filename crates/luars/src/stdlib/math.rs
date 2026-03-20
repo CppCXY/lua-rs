@@ -5,6 +5,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
+use crate::platform_time;
 use crate::lua_vm::LuaError;
 use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaState;
@@ -490,10 +491,7 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
 
     let (n1, n2) = if argc == 0 || (argc >= 1 && l.get_arg(1).is_none_or(|v| v.is_nil())) {
         // No argument or nil: use time-based seed
-        let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let time = platform_time::unix_nanos();
         (time as i64, 0i64)
     } else {
         let seed1 = l.get_arg(1).and_then(|v| v.as_integer()).ok_or_else(|| {

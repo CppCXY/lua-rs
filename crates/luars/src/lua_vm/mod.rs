@@ -29,6 +29,7 @@ pub use crate::lua_vm::lua_ref::{
 };
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
+use crate::platform_time::{PlatformInstant, unix_nanos};
 use crate::stdlib::Stdlib;
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::{
@@ -40,7 +41,6 @@ pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
 use std::future::Future;
 use std::rc::Rc;
-use std::time::Instant;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
@@ -107,7 +107,7 @@ pub struct LuaVM {
     pub(crate) rng: LuaRng,
 
     /// Start time for os.clock() measurements
-    pub(crate) start_time: Instant,
+    pub(crate) start_time: PlatformInstant,
 
     pub const_strings: ConstString,
 
@@ -122,10 +122,7 @@ impl LuaVM {
         gc.set_temporary_memory_limit(isize::MAX / 2);
         let mut object_allocator = ObjectAllocator::new();
         let cs = ConstString::new(&mut object_allocator, &mut gc);
-        let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let time = unix_nanos();
 
         let mut vm = Box::new(LuaVM {
             global: LuaValue::nil(),
@@ -144,7 +141,7 @@ impl LuaVM {
             // Initialize RNG with a deterministic seed for reproducibility
             rng: LuaRng::from_seed_time(time),
             // Record start time for os.clock()
-            start_time: Instant::now(),
+            start_time: PlatformInstant::now(),
             const_strings: cs,
             io_default_output: None,
             io_default_input: None,

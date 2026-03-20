@@ -27,6 +27,7 @@ pub mod compiler;
 pub mod gc;
 pub mod lib_registry;
 pub mod lua_value;
+mod platform_time;
 pub mod lua_vm;
 pub mod stdlib;
 

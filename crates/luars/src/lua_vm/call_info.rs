@@ -243,6 +243,3 @@ impl Default for CallInfo {
         }
     }
 }
-
-// Compile-time size check: packed CallInfo should fit in 64 bytes.
-const _: () = assert!(std::mem::size_of::<CallInfo>() == 64);

@@ -17,6 +17,7 @@ A Lua 5.5 interpreter written in pure Rust. Faithfully ported from the official 
 - **Ergonomic Rust API** — `call_global`, `register_function`, `load`, `dofile`, `TableBuilder`, typed getters
 - **UserData** — derive macros to expose Rust structs/enums to Lua with fields, methods, operators
 - **Async** — run async Rust functions from Lua via transparent coroutine-based bridging
+- **WASM** — browser-targeted `luars_wasm` module builds and runs successfully via `wasm-pack`
 
 ## Quick Start
 
@@ -151,6 +152,7 @@ print(p.x, p:distance())   -- 3.0  5.0
 | **[UserData Guide](docs/UserGuide.md)** | Derive macros, fields, methods, constructors, type conversion |
 | **[Async Guide](docs/Async.md)** | Async Rust functions in Lua, architecture, HTTP server example |
 | **[Differences](docs/Different.md)** | All known behavioral differences from C Lua 5.5 |
+| **[WASM Quick Start](crates/luars_wasm/QUICKSTART.md)** | Build, run, and test the browser-targeted WASM package |
 
 ## Architecture
 

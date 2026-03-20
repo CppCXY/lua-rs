@@ -2,6 +2,12 @@
 name = "luars_wasm"
 version = "0.1.0"
 edition = "2021"
+description = "WebAssembly bindings for the luars Lua 5.5 runtime"
+license = "MIT"
+repository = "https://github.com/CppCXY/lua-rs"
+readme = "README.md"
+keywords = ["lua", "wasm", "webassembly", "browser", "interpreter"]
+categories = ["wasm", "development-tools"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

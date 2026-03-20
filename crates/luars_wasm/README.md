@@ -2,13 +2,16 @@
 
 WebAssembly bindings for the Lua interpreter, allowing you to run Lua code in the browser and interact with JavaScript.
 
+The module has been verified to build and run successfully with `wasm-pack build --target web` and can be packaged as an npm dependency from the generated `pkg/` directory.
+The recommended published package name is `luars-wasm`.
+
 ## Features
 
-- ✅ Execute Lua 5.4 code in the browser
+- ✅ Execute Lua 5.5 code in the browser
 - ✅ Register JavaScript functions callable from Lua
 - ✅ Set and get global variables
 - ✅ Bidirectional Lua ↔ JavaScript value conversion
-- ✅ Full standard library support (except IO)
+- ✅ Full standard library support with the usual browser limitations around filesystem/process IO
 
 ## Building
 
@@ -28,6 +31,8 @@ wasm-pack build --target web
 ```
 
 This will generate the WASM files in the `pkg/` directory.
+
+The generated `pkg/` directory is also the npm package payload.
 
 ## Running the Demo
 
@@ -50,6 +55,44 @@ basic-http-server .
 ```
 
 Then open http://localhost:8000 in your browser.
+
+## npm Packaging
+
+After building, `pkg/` contains an ESM package that can be published directly to npm.
+
+To normalize `pkg/package.json` into the recommended npm form, run:
+
+```bash
+./prepare_npm_package.ps1
+```
+
+```bash
+cd pkg
+npm publish --access public
+```
+
+For local verification before publishing:
+
+```bash
+npm pack
+```
+
+Consumers can then install and use it as a normal npm dependency:
+
+```bash
+npm install luars-wasm
+```
+
+```javascript
+import init, { LuaWasm } from 'luars-wasm';
+
+await init();
+
+const lua = new LuaWasm();
+console.log(lua.execute('return math.sqrt(81)'));
+```
+
+For the step-by-step release flow, see [NPM_PUBLISH.md](NPM_PUBLISH.md).
 
 ## API
 
@@ -162,7 +205,7 @@ lua.execute(`
 - IO operations are not available in WASM environment
 - FFI (Foreign Function Interface) is disabled for WASM
 - File system operations are not supported
-- Some OS-specific functions may not work
+- Some OS-specific functions are stubbed or browser-dependent
 
 ## Architecture
 
@@ -170,7 +213,7 @@ The WASM module uses:
 - `wasm-bindgen` for JavaScript interop
 - `js-sys` for JavaScript standard library access
 - `web-sys` for Web APIs
-- The core `luars` interpreter with `wasm` feature enabled
+- The core `luars` interpreter with platform time shims for browser-safe runtime behavior
 
 ## Development
 
