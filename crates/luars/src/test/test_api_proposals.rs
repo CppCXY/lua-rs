@@ -93,11 +93,14 @@ fn test_register_function_typed_userdata_ref() {
     let counter = vm.push_any(Counter { count: 1 }).unwrap();
     vm.set_global("counter", counter).unwrap();
 
-    vm.register_function_typed("increment_typed", |mut counter: UserDataRef<Counter>, delta: i64| {
-        let counter_ref = counter.get_mut().unwrap();
-        counter_ref.count += delta;
-        counter_ref.count
-    })
+    vm.register_function_typed(
+        "increment_typed",
+        |mut counter: UserDataRef<Counter>, delta: i64| {
+            let counter_ref = counter.get_mut().unwrap();
+            counter_ref.count += delta;
+            counter_ref.count
+        },
+    )
     .unwrap();
 
     let results = vm.execute("return increment_typed(counter, 9)").unwrap();

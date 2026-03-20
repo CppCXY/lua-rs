@@ -745,7 +745,8 @@ fn test_register_type_equality() {
 #[test]
 fn test_userdata_derive_into_lua_for_typed_call() {
     let mut vm = setup_point_class_vm();
-    vm.execute("function sum_point(p) return p.x + p.y end").unwrap();
+    vm.execute("function sum_point(p) return p.x + p.y end")
+        .unwrap();
 
     let func = vm.get_global("sum_point").unwrap().unwrap();
     let point = Point {
@@ -929,7 +930,9 @@ fn test_data_enum_userdata_methods() {
         .unwrap();
 
     assert_eq!(results[0].as_str(), Some("circle"));
-    assert!(matches!(results[1].as_number(), Some(n) if (n - std::f64::consts::PI * 4.0).abs() < 1e-9));
+    assert!(
+        matches!(results[1].as_number(), Some(n) if (n - std::f64::consts::PI * 4.0).abs() < 1e-9)
+    );
     assert_eq!(results[2].as_str(), Some("rect"));
     assert_eq!(results[3].as_number(), Some(12.0));
     assert_eq!(results[4].as_str(), Some("unit"));

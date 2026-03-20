@@ -1,6 +1,6 @@
 // Tests for the user-facing Ref API and related features
-use crate::lua_vm::SafeOption;
 use crate::lua_value::userdata_trait::LuaMethodProvider;
+use crate::lua_vm::SafeOption;
 use crate::{LuaUserData, LuaVM, LuaValue, Stdlib, UserDataRef};
 
 #[derive(LuaUserData)]

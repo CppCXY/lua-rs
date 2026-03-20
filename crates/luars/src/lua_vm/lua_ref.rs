@@ -4,10 +4,10 @@
 /// This is useful for keeping values alive across GC cycles and for passing values between Rust and Lua.
 use std::marker::PhantomData;
 
-use crate::lua_value::lua_convert::collect_into_lua_values;
-use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
 use crate::lua_value::LuaValue;
 use crate::lua_value::LuaValueKind;
+use crate::lua_value::lua_convert::collect_into_lua_values;
+use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
 use crate::{LuaResult, LuaVM};
 
 /// A reference ID in the registry.
@@ -576,7 +576,11 @@ impl<T: 'static> UserDataRef<T> {
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
             let vm = self.inner.vm_mut();
-            return Err(vm.error(format!("expected userdata {}, got {}", expected, value.type_name())));
+            return Err(vm.error(format!(
+                "expected userdata {}, got {}",
+                expected,
+                value.type_name()
+            )));
         };
 
         let Some(inner) = userdata.downcast_ref::<T>() else {
@@ -594,7 +598,11 @@ impl<T: 'static> UserDataRef<T> {
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
             let vm = self.inner.vm_mut();
-            return Err(vm.error(format!("expected userdata {}, got {}", expected, value.type_name())));
+            return Err(vm.error(format!(
+                "expected userdata {}, got {}",
+                expected,
+                value.type_name()
+            )));
         };
 
         let Some(inner) = userdata.downcast_mut::<T>() else {
@@ -635,11 +643,19 @@ impl<T: 'static> FromLua for UserDataRef<T> {
     fn from_lua(value: LuaValue, state: &super::LuaState) -> Result<Self, String> {
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
-            return Err(format!("expected userdata {}, got {}", expected, value.type_name()));
+            return Err(format!(
+                "expected userdata {}, got {}",
+                expected,
+                value.type_name()
+            ));
         };
 
         if userdata.downcast_ref::<T>().is_none() {
-            return Err(format!("expected userdata {}, got {}", expected, userdata.type_name()));
+            return Err(format!(
+                "expected userdata {}, got {}",
+                expected,
+                userdata.type_name()
+            ));
         }
 
         let vm = unsafe { &mut *state.vm_ptr() };
@@ -650,14 +666,21 @@ impl<T: 'static> FromLua for UserDataRef<T> {
 
 impl<T: 'static> IntoLua for UserDataRef<T> {
     fn into_lua(self, state: &mut super::LuaState) -> Result<usize, String> {
-        state.push_value(self.to_value()).map_err(|e| format!("{:?}", e))?;
+        state
+            .push_value(self.to_value())
+            .map_err(|e| format!("{:?}", e))?;
         Ok(1)
     }
 }
 
 impl<T: 'static> std::fmt::Debug for UserDataRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "UserDataRef<{}>(ref_id={})", std::any::type_name::<T>(), self.inner.ref_id)
+        write!(
+            f,
+            "UserDataRef<{}>(ref_id={})",
+            std::any::type_name::<T>(),
+            self.inner.ref_id
+        )
     }
 }
 

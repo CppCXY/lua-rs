@@ -440,7 +440,11 @@ fn derive_lua_enum_userdata_impl(
 ) -> TokenStream {
     let mut tokens = proc_macro2::TokenStream::from(gen_minimal_impl(name, trait_impls));
 
-    if data.variants.iter().all(|variant| variant.fields.is_empty()) {
+    if data
+        .variants
+        .iter()
+        .all(|variant| variant.fields.is_empty())
+    {
         tokens.extend(gen_lua_enum_impl(name, data));
     }
 

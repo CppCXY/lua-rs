@@ -60,7 +60,7 @@ pub trait LuaTypedAsyncCallback<Args, R>: 'static {
 }
 
 fn typed_callback_arg<T: FromLua>(state: &mut LuaState, index: usize) -> LuaResult<T> {
-    let value = state.get_arg(index).unwrap_or(LuaValue::nil());
+    let value = state.get_arg(index).unwrap_or_default();
     match T::from_lua(value, state) {
         Ok(value) => Ok(value),
         Err(msg) => Err(state.error(msg)),
@@ -528,14 +528,16 @@ impl LuaVM {
     /// let result: i64 = vm.call1(func, 42)?;
     /// ```
     pub fn call<A: IntoLua, R: FromLuaMulti>(&mut self, func: LuaValue, args: A) -> LuaResult<R> {
-        let args = collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
+        let args =
+            collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
         let results = self.call_raw(func, args)?;
         R::from_lua_multi(results, self.main_state_ref()).map_err(|msg| self.error(msg))
     }
 
     /// Call a function value with arguments and return the first result.
     pub fn call1<A: IntoLua, R: FromLua>(&mut self, func: LuaValue, args: A) -> LuaResult<R> {
-        let args = collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
+        let args =
+            collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
         let result = self
             .call_raw(func, args)?
             .into_iter()
@@ -558,7 +560,11 @@ impl LuaVM {
     /// ```ignore
     /// let result: String = vm.call1_global("greet", "World")?;
     /// ```
-    pub fn call_global<A: IntoLua, R: FromLuaMulti>(&mut self, name: &str, args: A) -> LuaResult<R> {
+    pub fn call_global<A: IntoLua, R: FromLuaMulti>(
+        &mut self,
+        name: &str,
+        args: A,
+    ) -> LuaResult<R> {
         let func = self
             .get_global(name)?
             .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;

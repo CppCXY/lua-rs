@@ -57,7 +57,10 @@ async fn test_async_typed_no_args() {
     vm.register_async_typed("async_hello_typed", || async move { Ok("hello") })
         .unwrap();
 
-    let results = vm.execute_async("return async_hello_typed()").await.unwrap();
+    let results = vm
+        .execute_async("return async_hello_typed()")
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("hello"));
 }
@@ -87,10 +90,16 @@ async fn test_async_multiple_returns() {
 async fn test_async_typed_multiple_returns() {
     let mut vm = new_vm();
 
-    vm.register_async_typed("async_multi_typed", || async move { Ok((1_i64, 2_i64, 3_i64)) })
-        .unwrap();
+    vm.register_async_typed(
+        "async_multi_typed",
+        || async move { Ok((1_i64, 2_i64, 3_i64)) },
+    )
+    .unwrap();
 
-    let results = vm.execute_async("return async_multi_typed()").await.unwrap();
+    let results = vm
+        .execute_async("return async_multi_typed()")
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_integer(), Some(1));

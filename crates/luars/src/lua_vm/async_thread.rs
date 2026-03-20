@@ -277,7 +277,16 @@ impl_into_async_lua_tuple!(
     ((A, a), (B, b), (C, c), (D, d), (E, e)),
     ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f)),
     ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g)),
-    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g), (H, h))
+    (
+        (A, a),
+        (B, b),
+        (C, c),
+        (D, d),
+        (E, e),
+        (F, f),
+        (G, g),
+        (H, h)
+    )
 );
 
 // ============ Async Future type alias ============

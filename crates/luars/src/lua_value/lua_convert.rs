@@ -125,7 +125,7 @@ impl IntoLua for () {
 impl<T: FromLua> FromLuaMulti for T {
     #[inline]
     fn from_lua_multi(values: Vec<LuaValue>, state: &LuaState) -> Result<Self, String> {
-        let value = values.into_iter().next().unwrap_or(LuaValue::nil());
+        let value = values.into_iter().next().unwrap_or_default();
         T::from_lua(value, state)
     }
 }
@@ -347,5 +347,14 @@ impl_lua_tuple_conversions!(
     ((A, a), (B, b), (C, c), (D, d), (E, e)),
     ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f)),
     ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g)),
-    ((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g), (H, h))
+    (
+        (A, a),
+        (B, b),
+        (C, c),
+        (D, d),
+        (E, e),
+        (F, f),
+        (G, g),
+        (H, h)
+    )
 );

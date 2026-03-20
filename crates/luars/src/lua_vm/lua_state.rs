@@ -4321,7 +4321,10 @@ impl LuaState {
         self.vm_mut().to_function_ref(value)
     }
 
-    pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<crate::UserDataRef<T>> {
+    pub fn to_userdata_ref<T: 'static>(
+        &mut self,
+        value: LuaValue,
+    ) -> Option<crate::UserDataRef<T>> {
         self.vm_mut().to_userdata_ref(value)
     }
 }
