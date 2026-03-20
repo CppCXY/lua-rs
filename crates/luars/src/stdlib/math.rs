@@ -5,10 +5,10 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::platform_time;
 use crate::lua_vm::LuaError;
 use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaState;
+use crate::platform_time;
 
 /// Check that argument at position `n` is a number, with proper error message.
 /// SAFETY: push_c_frame guarantees EXTRA_STACK (5) slots above frame_top,

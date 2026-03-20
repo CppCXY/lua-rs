@@ -149,6 +149,10 @@ fn test_string_format() {
         assert(string.format("%d", 42) == "42")
         assert(string.format("%s", "hello") == "hello")
         assert(string.format("%d %s", 10, "test") == "10 test")
+        assert(string.format("%s", 1.0) == "1.0")
+        assert(string.format("%s", 1.25) == "1.25")
+        assert(string.format("%f", 1.5) == "1.500000")
+        assert(string.format("%q", 1.5) == "1.5")
     "#,
     );
 

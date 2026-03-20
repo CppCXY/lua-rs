@@ -85,7 +85,9 @@ impl ObjectAllocator {
         end: usize,
     ) -> CreateResult {
         // Get bytes - handle both string and binary types
-        let bytes = if let Some(s) = s_value.as_str() {
+        let source_str = s_value.as_str();
+        let source_is_ascii = source_str.is_some_and(str::is_ascii);
+        let bytes = if let Some(s) = source_str {
             s.as_bytes()
         } else if let Some(b) = s_value.as_binary() {
             b
@@ -113,15 +115,22 @@ impl ObjectAllocator {
         // If source is already a valid UTF-8 string, use unchecked conversion
         // since a substring of valid UTF-8 at valid char boundaries is also valid.
         // For arbitrary byte indices (Lua semantics), validate.
-        match std::str::from_utf8(substring_bytes) {
-            Ok(valid_str) => {
-                // Valid UTF-8 - intern as string
-                self.create_string(gc, valid_str)
-            }
-            Err(_) => {
-                // Invalid UTF-8 - create binary value to preserve original bytes
-                // This is important for binary data like bytecode
-                self.create_binary(gc, substring_bytes.to_vec())
+        if source_is_ascii {
+            // SAFETY: a substring of ASCII bytes is always valid ASCII/UTF-8.
+            self.create_string(gc, unsafe {
+                std::str::from_utf8_unchecked(substring_bytes)
+            })
+        } else {
+            match std::str::from_utf8(substring_bytes) {
+                Ok(valid_str) => {
+                    // Valid UTF-8 - intern as string
+                    self.create_string(gc, valid_str)
+                }
+                Err(_) => {
+                    // Invalid UTF-8 - create binary value to preserve original bytes
+                    // This is important for binary data like bytecode
+                    self.create_binary(gc, substring_bytes.to_vec())
+                }
             }
         }
     }

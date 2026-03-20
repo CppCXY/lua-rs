@@ -27,8 +27,8 @@ pub mod compiler;
 pub mod gc;
 pub mod lib_registry;
 pub mod lua_value;
-mod platform_time;
 pub mod lua_vm;
+mod platform_time;
 pub mod stdlib;
 
 #[cfg(feature = "serde")]

@@ -1,8 +1,19 @@
-use crate::{LuaResult, LuaValue, lua_vm::LuaState};
+use crate::{LuaResult, LuaValue, lua_vm::LuaState, stdlib::basic::lua_float_to_string};
 /// Optimized string.format implementation
 /// Reduced from 400+ lines to ~200 lines with better performance
 /// Uses std::fmt::Write for zero-allocation formatting directly to buffer
 use std::fmt::Write as FmtWrite;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct FormatSpec {
+    left_align: bool,
+    plus_sign: bool,
+    space_sign: bool,
+    alt_form: bool,
+    zero_pad: bool,
+    width: Option<usize>,
+    precision: Option<usize>,
+}
 
 /// string.format(formatstring, ...) - Format with various specifiers
 pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
@@ -71,8 +82,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
                 break;
             }
         }
-        // SAFETY: format string is valid UTF-8, flag chars are ASCII
-        let flags = unsafe { std::str::from_utf8_unchecked(&fmt_bytes[flags_start..pos]) };
+        let spec = parse_format_spec(&fmt_bytes[flags_start..pos]);
 
         // Get format character
         if pos >= fmt_len {
@@ -82,7 +92,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         pos += 1;
 
         // Validate format specifier and flags combination
-        validate_format(flags, fmt_char, l)?;
+        validate_format(&spec, fmt_char, l)?;
 
         // Get argument
         if arg_index > arg_count {
@@ -96,22 +106,22 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
 
         // Format based on type
         match fmt_char {
-            'c' => format_char(&mut result, &arg, flags, l)?,
-            'd' | 'i' => format_int(&mut result, &arg, flags, l)?,
-            'o' => format_octal(&mut result, &arg, flags, l)?,
-            'u' => format_uint(&mut result, &arg, flags, l)?,
-            'x' => format_hex(&mut result, &arg, flags, false, l)?,
-            'X' => format_hex(&mut result, &arg, flags, true, l)?,
-            'a' => format_hex_float(&mut result, &arg, flags, false, l)?,
-            'A' => format_hex_float(&mut result, &arg, flags, true, l)?,
-            'e' => format_sci(&mut result, &arg, flags, false, l)?,
-            'E' => format_sci(&mut result, &arg, flags, true, l)?,
-            'f' => format_float(&mut result, &arg, flags, l)?,
-            'g' => format_auto(&mut result, &arg, flags, false, l)?,
-            'G' => format_auto(&mut result, &arg, flags, true, l)?,
-            's' => format_string(&mut result, &arg, flags, l)?,
+            'c' => format_char(&mut result, &arg, &spec, l)?,
+            'd' | 'i' => format_int(&mut result, &arg, &spec, l)?,
+            'o' => format_octal(&mut result, &arg, &spec, l)?,
+            'u' => format_uint(&mut result, &arg, &spec, l)?,
+            'x' => format_hex(&mut result, &arg, &spec, false, l)?,
+            'X' => format_hex(&mut result, &arg, &spec, true, l)?,
+            'a' => format_hex_float(&mut result, &arg, &spec, false, l)?,
+            'A' => format_hex_float(&mut result, &arg, &spec, true, l)?,
+            'e' => format_sci(&mut result, &arg, &spec, false, l)?,
+            'E' => format_sci(&mut result, &arg, &spec, true, l)?,
+            'f' => format_float(&mut result, &arg, &spec, l)?,
+            'g' => format_auto(&mut result, &arg, &spec, false, l)?,
+            'G' => format_auto(&mut result, &arg, &spec, true, l)?,
+            's' => format_string(&mut result, &arg, &spec, l)?,
             'q' => format_quoted(&mut result, &arg, l)?,
-            'p' => format_pointer(&mut result, &arg, flags)?,
+            'p' => format_pointer(&mut result, &arg, &spec)?,
             'F' => {
                 return Err(
                     l.error("invalid option '%F' to 'format' (invalid conversion)".to_string())
@@ -131,10 +141,51 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
+#[inline]
+fn parse_format_spec(flags: &[u8]) -> FormatSpec {
+    let mut spec = FormatSpec::default();
+    let mut pos = 0;
+
+    while pos < flags.len() {
+        match flags[pos] {
+            b'-' => spec.left_align = true,
+            b'+' => spec.plus_sign = true,
+            b' ' => spec.space_sign = true,
+            b'#' => spec.alt_form = true,
+            b'0' => spec.zero_pad = true,
+            _ => break,
+        }
+        pos += 1;
+    }
+
+    let width_start = pos;
+    let mut width = 0usize;
+    while pos < flags.len() && flags[pos].is_ascii_digit() {
+        width = width * 10 + (flags[pos] - b'0') as usize;
+        pos += 1;
+    }
+    if pos > width_start {
+        spec.width = Some(width);
+    }
+
+    if pos < flags.len() && flags[pos] == b'.' {
+        pos += 1;
+        let precision_start = pos;
+        let mut precision = 0usize;
+        while pos < flags.len() && flags[pos].is_ascii_digit() {
+            precision = precision * 10 + (flags[pos] - b'0') as usize;
+            pos += 1;
+        }
+        spec.precision = Some(if pos == precision_start { 0 } else { precision });
+    }
+
+    spec
+}
+
 // Validate format specifier and flags combination
-fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<()> {
+fn validate_format(spec: &FormatSpec, fmt_char: char, l: &mut LuaState) -> LuaResult<()> {
     // Fast path: no flags (most common case)
-    if flags.is_empty() {
+    if *spec == FormatSpec::default() {
         return Ok(());
     }
 
@@ -145,20 +196,13 @@ fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<(
         );
     }
 
-    // Parse flags properly
-    let has_zero_flag = flags.starts_with('0')
-        || flags.chars().find(|c| !matches!(c, '-' | '+' | ' ' | '#')) == Some('0');
-    let has_hash = flags.contains('#');
-
-    let (width, precision) = parse_width_precision(flags);
-
     // Check width/precision limits (max 99)
-    if let Some(w) = width
+    if let Some(w) = spec.width
         && w > 99
     {
         return Err(l.error("invalid format (invalid conversion)".to_string()));
     }
-    if let Some(p) = precision
+    if let Some(p) = spec.precision
         && p > 99
     {
         return Err(l.error("invalid format (invalid conversion)".to_string()));
@@ -168,28 +212,28 @@ fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<(
     match fmt_char {
         'c' => {
             // %c cannot have precision or 0 flag
-            if precision.is_some() {
+            if spec.precision.is_some() {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
-            if has_zero_flag {
+            if spec.zero_pad {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
         }
         's' => {
             // %s cannot have 0 flag
-            if has_zero_flag {
+            if spec.zero_pad {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
         }
         'd' | 'i' => {
             // %d/%i cannot have # flag
-            if has_hash {
+            if spec.alt_form {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
         }
         'p' => {
             // %p cannot have precision
-            if precision.is_some() {
+            if spec.precision.is_some() {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
         }
@@ -197,60 +241,6 @@ fn validate_format(flags: &str, fmt_char: char, l: &mut LuaState) -> LuaResult<(
     }
 
     Ok(())
-}
-
-// Parse width and precision from flags string — zero allocation
-fn parse_width_precision(flags: &str) -> (Option<usize>, Option<usize>) {
-    let bytes = flags.as_bytes();
-    let mut width = None;
-    let mut precision = None;
-
-    if let Some(dot_pos) = flags.find('.') {
-        // Parse width before dot: skip non-digits, then read digits
-        let before_dot = &bytes[..dot_pos];
-        let mut i = 0;
-        while i < before_dot.len() && !before_dot[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i < before_dot.len() {
-            let mut n = 0usize;
-            while i < before_dot.len() && before_dot[i].is_ascii_digit() {
-                n = n * 10 + (before_dot[i] - b'0') as usize;
-                i += 1;
-            }
-            width = Some(n);
-        }
-
-        // Parse precision after dot
-        let after_dot = &bytes[dot_pos + 1..];
-        if !after_dot.is_empty() && after_dot[0].is_ascii_digit() {
-            let mut n = 0usize;
-            let mut j = 0;
-            while j < after_dot.len() && after_dot[j].is_ascii_digit() {
-                n = n * 10 + (after_dot[j] - b'0') as usize;
-                j += 1;
-            }
-            precision = Some(n);
-        } else {
-            precision = Some(0); // "." without digits means precision 0
-        }
-    } else {
-        // No dot, only width: skip non-digits, then read digits
-        let mut i = 0;
-        while i < bytes.len() && !bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i < bytes.len() {
-            let mut n = 0usize;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                n = n * 10 + (bytes[i] - b'0') as usize;
-                i += 1;
-            }
-            width = Some(n);
-        }
-    }
-
-    (width, precision)
 }
 
 // Helper functions - all inline for performance
@@ -270,7 +260,12 @@ fn get_int(arg: &LuaValue, _l: &LuaState) -> Result<i64, String> {
 }
 
 #[inline]
-fn format_char(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+fn format_char(
+    buf: &mut String,
+    arg: &LuaValue,
+    spec: &FormatSpec,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
     if !(0..=255).contains(&num) {
         return Err(l.error("bad argument to 'format' (value out of range for %c)".to_string()));
@@ -278,19 +273,9 @@ fn format_char(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) 
 
     let ch = num as u8 as char;
 
-    // Parse flags for width and left align
-    let left_align = flags.contains('-');
-    let width = flags
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse::<usize>()
-        .ok();
-
-    if let Some(w) = width {
+    if let Some(w) = spec.width {
         if w > 1 {
-            if left_align {
+            if spec.left_align {
                 buf.push(ch);
                 buf.extend(std::iter::repeat_n(' ', w - 1));
             } else {
@@ -308,52 +293,22 @@ fn format_char(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) 
 }
 
 #[inline]
-fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+fn format_int(
+    buf: &mut String,
+    arg: &LuaValue,
+    spec: &FormatSpec,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
 
     // Fast path: no flags (most common case: %d or %i)
-    if flags.is_empty() {
+    if *spec == FormatSpec::default() {
         let mut itoa_buf = itoa::Buffer::new();
         buf.push_str(itoa_buf.format(num));
         return Ok(());
     }
-
-    // Parse flags: look for -, +, 0, width, and precision
-    let mut left_align = false;
-    let mut zero_pad = false;
-    let mut plus_sign = false;
-    let mut width = 0;
-    let mut parsing_width = false;
-
-    let chars = flags.chars().peekable();
-    for ch in chars {
-        match ch {
-            '-' if !parsing_width => left_align = true,
-            '+' if !parsing_width => plus_sign = true,
-            '0' if !parsing_width && width == 0 => zero_pad = true,
-            '1'..='9' if !parsing_width => {
-                parsing_width = true;
-                width = ch.to_digit(10).unwrap() as usize;
-            }
-            '0'..='9' if parsing_width => {
-                width = width * 10 + ch.to_digit(10).unwrap() as usize;
-            }
-            '.' => break,
-            _ => {}
-        }
-    }
-
-    // Parse precision
-    let precision = if let Some(dot_pos) = flags.find('.') {
-        flags[dot_pos + 1..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse::<usize>()
-            .ok()
-    } else {
-        None
-    };
+    let width = spec.width.unwrap_or(0);
+    let mut zero_pad = spec.zero_pad;
 
     // Extract sign and absolute value
     let is_negative = num < 0;
@@ -368,13 +323,13 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
     let num_str = itoa_buf.format(abs_num);
 
     // Apply precision (minimum digits) — needs owned buffer only if formatting needed
-    if let Some(prec) = precision {
+    if let Some(prec) = spec.precision {
         if num_str.len() < prec {
             // Need to prepend zeros — use a small stack buffer
             let padding = prec - num_str.len();
             let sign = if is_negative {
                 "-"
-            } else if plus_sign {
+            } else if spec.plus_sign {
                 "+"
             } else {
                 ""
@@ -382,7 +337,7 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
             let total_len = sign.len() + prec;
             if width > total_len {
                 let w_padding = width - total_len;
-                if left_align {
+                if spec.left_align {
                     buf.push_str(sign);
                     buf.extend(std::iter::repeat_n('0', padding));
                     buf.push_str(num_str);
@@ -406,7 +361,7 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
     // Add sign
     let sign = if is_negative {
         "-"
-    } else if plus_sign {
+    } else if spec.plus_sign {
         "+"
     } else {
         ""
@@ -416,7 +371,7 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
 
     if width > total_len {
         let padding = width - total_len;
-        if left_align {
+        if spec.left_align {
             buf.push_str(sign);
             buf.push_str(num_str);
             buf.extend(std::iter::repeat_n(' ', padding));
@@ -438,48 +393,30 @@ fn format_int(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -
 }
 
 #[inline]
-fn format_octal(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+fn format_octal(
+    buf: &mut String,
+    arg: &LuaValue,
+    spec: &FormatSpec,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
-
-    // Parse flags: look for -, #, 0, and width
-    let mut left_align = false;
-    let mut zero_pad = false;
-    let mut alt_form = false;
-    let mut width = 0;
-    let mut parsing_flags = true;
-
-    for ch in flags.chars() {
-        if parsing_flags {
-            match ch {
-                '-' => left_align = true,
-                '#' => alt_form = true,
-                '0' if width == 0 => zero_pad = true,
-                '1'..='9' => {
-                    parsing_flags = false;
-                    width = ch.to_digit(10).unwrap() as usize;
-                }
-                _ => {}
-            }
-        } else if ch.is_ascii_digit() {
-            width = width * 10 + ch.to_digit(10).unwrap() as usize;
-        }
-    }
+    let width = spec.width.unwrap_or(0);
 
     // Format the octal number
     let mut octal_str = format!("{:o}", num);
 
     // Add prefix if # flag and non-zero
-    if alt_form && num != 0 && !octal_str.starts_with('0') {
+    if spec.alt_form && num != 0 && !octal_str.starts_with('0') {
         octal_str.insert(0, '0');
     }
 
     let num_len = octal_str.len();
     if width > num_len {
         let padding = width - num_len;
-        if left_align {
+        if spec.left_align {
             buf.push_str(&octal_str);
             buf.extend(std::iter::repeat_n(' ', padding));
-        } else if zero_pad {
+        } else if spec.zero_pad {
             buf.extend(std::iter::repeat_n('0', padding));
             buf.push_str(&octal_str);
         } else {
@@ -494,24 +431,16 @@ fn format_octal(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState)
 }
 
 #[inline]
-fn format_uint(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+fn format_uint(
+    buf: &mut String,
+    arg: &LuaValue,
+    spec: &FormatSpec,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     let num = get_int(arg, l).map_err(|e| l.error(e))?;
 
-    // Parse precision (e.g., ".0" or just ".")
-    let precision = if let Some(dot_pos) = flags.find('.') {
-        let prec_str = &flags[dot_pos + 1..];
-        let prec_str = prec_str.trim_end_matches(|c: char| !c.is_ascii_digit());
-        if prec_str.is_empty() {
-            Some(0) // "." without number means precision 0
-        } else {
-            prec_str.parse::<usize>().ok()
-        }
-    } else {
-        None
-    };
-
     // If precision is 0 and value is 0, output empty string
-    if precision == Some(0) && num == 0 {
+    if spec.precision == Some(0) && num == 0 {
         return Ok(());
     }
 
@@ -523,7 +452,7 @@ fn format_uint(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) 
 fn format_hex(
     buf: &mut String,
     arg: &LuaValue,
-    flags: &str,
+    spec: &FormatSpec,
     upper: bool,
     l: &mut LuaState,
 ) -> LuaResult<()> {
@@ -536,31 +465,10 @@ fn format_hex(
         format!("{:x}", num)
     };
 
-    // Parse flags for width and zero-padding
-    let mut zero_pad = false;
-    let mut left_align = false;
-    let mut width = 0;
-    let mut parsing_flags = true;
-
-    for ch in flags.chars() {
-        if parsing_flags {
-            match ch {
-                '0' if width == 0 => zero_pad = true,
-                '-' => left_align = true,
-                '#' => {}
-                '1'..='9' => {
-                    parsing_flags = false;
-                    width = ch.to_digit(10).unwrap() as usize;
-                }
-                _ => {}
-            }
-        } else if ch.is_ascii_digit() {
-            width = width * 10 + ch.to_digit(10).unwrap() as usize;
-        }
-    }
+    let width = spec.width.unwrap_or(0);
 
     // Add prefix if needed
-    let prefix = if flags.contains('#') && num != 0 {
+    let prefix = if spec.alt_form && num != 0 {
         if upper { "0X" } else { "0x" }
     } else {
         ""
@@ -570,11 +478,11 @@ fn format_hex(
 
     if width > total_len {
         let padding = width - total_len;
-        if left_align {
+        if spec.left_align {
             buf.push_str(prefix);
             buf.push_str(&hex_str);
             buf.extend(std::iter::repeat_n(' ', padding));
-        } else if zero_pad {
+        } else if spec.zero_pad {
             buf.push_str(prefix);
             buf.extend(std::iter::repeat_n('0', padding));
             buf.push_str(&hex_str);
@@ -596,24 +504,12 @@ fn format_hex(
 fn format_hex_float(
     buf: &mut String,
     arg: &LuaValue,
-    flags: &str,
+    spec: &FormatSpec,
     upper: bool,
     l: &mut LuaState,
 ) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
-
-    // Parse flags for + sign
-    let plus_sign = flags.contains('+');
-
-    // Parse precision (number of hex digits after decimal point)
-    let precision = if let Some(dot_pos) = flags.find('.') {
-        flags[dot_pos + 1..]
-            .trim_end_matches(|c: char| !c.is_ascii_digit())
-            .parse::<usize>()
-            .ok()
-    } else {
-        None
-    };
+    let precision = spec.precision;
 
     // Handle special cases
     if num.is_nan() {
@@ -623,7 +519,7 @@ fn format_hex_float(
 
     if num.is_infinite() {
         if num.is_sign_positive() {
-            if plus_sign {
+            if spec.plus_sign {
                 buf.push('+');
             }
             buf.push_str(if upper { "INF" } else { "inf" });
@@ -638,7 +534,7 @@ fn format_hex_float(
         // Check for negative zero
         if num.is_sign_negative() {
             buf.push('-');
-        } else if plus_sign {
+        } else if spec.plus_sign {
             buf.push('+');
         }
 
@@ -662,7 +558,7 @@ fn format_hex_float(
 
     if is_negative {
         buf.push('-');
-    } else if plus_sign {
+    } else if spec.plus_sign {
         buf.push('+');
     }
 
@@ -754,31 +650,12 @@ fn format_hex_fraction(
 fn format_sci(
     buf: &mut String,
     arg: &LuaValue,
-    flags: &str,
+    spec: &FormatSpec,
     upper: bool,
     l: &mut LuaState,
 ) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
-
-    // Parse flags
-    let plus_sign = flags.contains('+');
-    let space_sign = flags.contains(' ');
-
-    // Parse precision
-    let precision = if let Some(dot_pos) = flags.find('.') {
-        let prec_str = &flags[dot_pos + 1..];
-        let prec_str = prec_str
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>();
-        if prec_str.is_empty() {
-            Some(6)
-        } else {
-            prec_str.parse::<usize>().ok()
-        }
-    } else {
-        None
-    };
+    let precision = spec.precision.map(|p| if p == 0 { 6 } else { p });
 
     // Format the number
     let mut result = if let Some(prec) = precision {
@@ -816,9 +693,9 @@ fn format_sci(
 
     // Add sign
     if !result.starts_with('-') {
-        if plus_sign {
+        if spec.plus_sign {
             result.insert(0, '+');
-        } else if space_sign {
+        } else if spec.space_sign {
             result.insert(0, ' ');
         }
     }
@@ -828,65 +705,39 @@ fn format_sci(
 }
 
 #[inline]
-fn format_float(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+fn format_float(
+    buf: &mut String,
+    arg: &LuaValue,
+    spec: &FormatSpec,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
 
-    // Parse flags
-    let plus_sign = flags.contains('+');
-    let alt_form = flags.contains('#');
-    let zero_pad = flags.contains('0');
-    let left_align = flags.contains('-');
-
-    // Parse width
-    let width = flags
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit() && *c != '.')
-        .collect::<String>()
-        .parse::<usize>()
-        .ok();
-
-    // Parse precision
-    let precision = if let Some(dot_pos) = flags.find('.') {
-        let prec_str = &flags[dot_pos + 1..];
-        let prec_str = prec_str
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>();
-        if prec_str.is_empty() {
-            Some(0)
-        } else {
-            prec_str.parse::<usize>().ok()
-        }
-    } else {
-        None
-    };
-
     // Format the number
-    let mut result = if let Some(prec) = precision {
+    let mut result = if let Some(prec) = spec.precision {
         format!("{:.prec$}", num, prec = prec)
     } else {
-        format!("{}", num)
+        format!("{:.6}", num)
     };
 
     // Add decimal point if # flag and no decimal point
-    if alt_form && !result.contains('.') && !result.contains('e') && !result.contains('E') {
+    if spec.alt_form && !result.contains('.') && !result.contains('e') && !result.contains('E') {
         result.push('.');
     }
 
     // Add sign
-    if !result.starts_with('-') && plus_sign {
+    if !result.starts_with('-') && spec.plus_sign {
         result.insert(0, '+');
     }
 
     // Apply width
-    if let Some(w) = width
+    if let Some(w) = spec.width
         && result.len() < w
     {
         let padding = w - result.len();
-        if left_align {
+        if spec.left_align {
             result.push_str(&" ".repeat(padding));
-        } else if zero_pad {
+        } else if spec.zero_pad {
             let sign_char = if result.starts_with('-') || result.starts_with('+') {
                 Some(result.remove(0))
             } else {
@@ -911,31 +762,12 @@ fn format_float(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState)
 fn format_auto(
     buf: &mut String,
     arg: &LuaValue,
-    flags: &str,
+    spec: &FormatSpec,
     upper: bool,
     l: &mut LuaState,
 ) -> LuaResult<()> {
     let num = get_num(arg, l).map_err(|e| l.error(e))?;
-
-    // Parse flags
-    let plus_sign = flags.contains('+');
-    let space_sign = flags.contains(' ');
-
-    // Parse precision (for %g, precision is significant figures, default 6, minimum 1)
-    let precision = if let Some(dot_pos) = flags.find('.') {
-        let prec_str = &flags[dot_pos + 1..];
-        let prec_str = prec_str
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>();
-        if prec_str.is_empty() {
-            6
-        } else {
-            prec_str.parse::<usize>().unwrap_or(6).max(1)
-        }
-    } else {
-        6
-    };
+    let precision = spec.precision.unwrap_or(6).max(1);
 
     // Determine if we should use scientific notation
     // %g uses scientific notation if exponent < -4 or >= precision
@@ -993,9 +825,9 @@ fn format_auto(
 
     // Add sign
     if !result.starts_with('-') {
-        if plus_sign {
+        if spec.plus_sign {
             result.insert(0, '+');
-        } else if space_sign {
+        } else if spec.space_sign {
             result.insert(0, ' ');
         }
     }
@@ -1005,11 +837,20 @@ fn format_auto(
 }
 
 #[inline]
-fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState) -> LuaResult<()> {
+fn format_string(
+    buf: &mut String,
+    arg: &LuaValue,
+    spec: &FormatSpec,
+    l: &mut LuaState,
+) -> LuaResult<()> {
     // Fast path: no flags (most common: bare %s)
-    if flags.is_empty() {
+    if *spec == FormatSpec::default() {
         if let Some(s) = arg.as_str() {
             buf.push_str(s);
+            return Ok(());
+        }
+        if arg.is_float() {
+            buf.push_str(&lua_float_to_string(arg.as_number().unwrap()));
             return Ok(());
         }
         if let Some(n) = arg.as_integer() {
@@ -1018,7 +859,7 @@ fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState
             return Ok(());
         }
         if let Some(n) = arg.as_number() {
-            write!(buf, "{}", n).unwrap();
+            buf.push_str(&lua_float_to_string(n));
             return Ok(());
         }
         let s_content = l.to_string(arg)?;
@@ -1029,17 +870,18 @@ fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState
     // Slow path: has width/precision modifiers
     let s_content = if let Some(s) = arg.as_str() {
         s.to_string()
+    } else if arg.is_float() {
+        lua_float_to_string(arg.as_number().unwrap())
     } else if let Some(n) = arg.as_integer() {
         format!("{}", n)
     } else if let Some(n) = arg.as_number() {
-        format!("{}", n)
+        lua_float_to_string(n)
     } else {
         l.to_string(arg)?
     };
 
     // Check if format has width or precision
-    let has_modifiers =
-        !flags.is_empty() && (flags.chars().any(|c| c.is_ascii_digit()) || flags.contains('.'));
+    let has_modifiers = spec.width.is_some() || spec.precision.is_some();
 
     // If there's width/precision modifiers and string contains \0, error
     if has_modifiers && s_content.contains('\0') {
@@ -1047,18 +889,7 @@ fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState
     }
 
     // Check for precision (e.g., %.20s means max 20 chars, %.s means 0 chars)
-    let final_str = if let Some(dot_pos) = flags.find('.') {
-        let prec_str = &flags[dot_pos + 1..];
-        let prec_str = prec_str
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>();
-        let precision = if prec_str.is_empty() {
-            0 // "." without number means precision 0
-        } else {
-            prec_str.parse::<usize>().unwrap_or(s_content.len())
-        };
-
+    let final_str = if let Some(precision) = spec.precision {
         if precision < s_content.len() {
             &s_content[..precision]
         } else {
@@ -1069,7 +900,7 @@ fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState
     };
 
     // Apply width formatting if specified
-    apply_width_format(buf, final_str, flags);
+    apply_width_format(buf, final_str, spec);
     Ok(())
 }
 
@@ -1077,15 +908,8 @@ fn format_string(buf: &mut String, arg: &LuaValue, flags: &str, l: &mut LuaState
 fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResult<()> {
     // For numbers and booleans and nil, output without quotes
     if arg.is_number() || arg.is_integer() {
-        if let Some(i) = arg.as_integer() {
-            // Special case for mininteger: Lua parser can't handle -9223372036854775808 as integer literal
-            if i == i64::MIN {
-                buf.push_str("(-9223372036854775807-1)");
-            } else {
-                write!(buf, "{}", i).unwrap();
-            }
-        } else if let Some(f) = arg.as_number() {
-            // Special cases for inf and nan
+        if arg.is_float() {
+            let f = arg.as_number().unwrap();
             if f.is_infinite() {
                 if f.is_sign_positive() {
                     buf.push_str("(1/0)");
@@ -1095,7 +919,14 @@ fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
             } else if f.is_nan() {
                 buf.push_str("(0/0)");
             } else {
-                write!(buf, "{}", f).unwrap();
+                buf.push_str(&lua_float_to_string(f));
+            }
+        } else if let Some(i) = arg.as_integer() {
+            // Special case for mininteger: Lua parser can't handle -9223372036854775808 as integer literal
+            if i == i64::MIN {
+                buf.push_str("(-9223372036854775807-1)");
+            } else {
+                write!(buf, "{}", i).unwrap();
             }
         }
         return Ok(());
@@ -1165,7 +996,7 @@ fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
 }
 
 /// Format pointer (%p) - shows address for tables/functions, "(null)" for others
-fn format_pointer(buf: &mut String, arg: &LuaValue, flags: &str) -> LuaResult<()> {
+fn format_pointer(buf: &mut String, arg: &LuaValue, spec: &FormatSpec) -> LuaResult<()> {
     use crate::lua_value::LuaValueKind;
 
     // Format the pointer value first
@@ -1184,26 +1015,17 @@ fn format_pointer(buf: &mut String, arg: &LuaValue, flags: &str) -> LuaResult<()
     };
 
     // Apply width formatting if specified
-    apply_width_format(buf, &ptr_str, flags);
+    apply_width_format(buf, &ptr_str, spec);
     Ok(())
 }
 
 /// Apply width formatting to a string (handles %10s, %-10s etc.)
-fn apply_width_format(buf: &mut String, s: &str, flags: &str) {
-    // Parse width - find the numeric part
-    let left_align = flags.starts_with('-');
-    let width_str = flags
-        .trim_start_matches('-')
-        .trim_start_matches('+')
-        .trim_start_matches(' ')
-        .trim_start_matches('#')
-        .trim_start_matches('0');
-
-    if let Ok(width) = width_str.parse::<usize>() {
+fn apply_width_format(buf: &mut String, s: &str, spec: &FormatSpec) {
+    if let Some(width) = spec.width {
         let s_len = s.len();
         if width > s_len {
             let padding = width - s_len;
-            if left_align {
+            if spec.left_align {
                 // Left align: string then spaces
                 buf.push_str(s);
                 buf.extend(std::iter::repeat_n(' ', padding));
@@ -1216,7 +1038,6 @@ fn apply_width_format(buf: &mut String, s: &str, flags: &str) {
             buf.push_str(s);
         }
     } else {
-        // No width specified or parse failed, just append
         buf.push_str(s);
     }
 }

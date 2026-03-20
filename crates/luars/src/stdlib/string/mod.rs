@@ -281,17 +281,14 @@ fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
     let vm = l.vm_mut();
     if len <= 256 {
         let mut buf = [0u8; 256];
-        for i in 0..len {
-            buf[i] = bytes[i].to_ascii_lowercase();
-        }
+        buf[..len].copy_from_slice(bytes);
+        buf[..len].make_ascii_lowercase();
         let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
         let result = vm.create_string(result_str)?;
         l.push_value(result)?;
     } else {
-        let mut buf = vec![0u8; len];
-        for i in 0..len {
-            buf[i] = bytes[i].to_ascii_lowercase();
-        }
+        let mut buf = bytes.to_vec();
+        buf.make_ascii_lowercase();
         let result_str = unsafe { String::from_utf8_unchecked(buf) };
         let result = vm.create_string_owned(result_str)?;
         l.push_value(result)?;
@@ -314,17 +311,14 @@ fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
     let vm = l.vm_mut();
     if len <= 256 {
         let mut buf = [0u8; 256];
-        for i in 0..len {
-            buf[i] = bytes[i].to_ascii_uppercase();
-        }
+        buf[..len].copy_from_slice(bytes);
+        buf[..len].make_ascii_uppercase();
         let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
         let result = vm.create_string(result_str)?;
         l.push_value(result)?;
     } else {
-        let mut buf = vec![0u8; len];
-        for i in 0..len {
-            buf[i] = bytes[i].to_ascii_uppercase();
-        }
+        let mut buf = bytes.to_vec();
+        buf.make_ascii_uppercase();
         let result_str = unsafe { String::from_utf8_unchecked(buf) };
         let result = vm.create_string_owned(result_str)?;
         l.push_value(result)?;
@@ -444,6 +438,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
 
     let vm = l.vm_mut();
     let len = s_bytes.len();
+    let is_ascii = s_bytes.is_ascii();
 
     // Stack buffer for short strings (most common case)
     let result = if is_binary {
@@ -452,10 +447,9 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         vm.create_binary(reversed)?
     } else if len <= 256 {
         let mut buf = [0u8; 256];
-        for i in 0..len {
-            buf[i] = s_bytes[len - 1 - i];
-        }
-        if s_bytes.is_ascii() {
+        buf[..len].copy_from_slice(s_bytes);
+        buf[..len].reverse();
+        if is_ascii {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
             vm.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..len]) })?
         } else {
@@ -468,7 +462,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     } else {
         let mut reversed = s_bytes.to_vec();
         reversed.reverse();
-        if s_bytes.is_ascii() {
+        if is_ascii {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
             vm.create_string_owned(unsafe { String::from_utf8_unchecked(reversed) })?
         } else {
