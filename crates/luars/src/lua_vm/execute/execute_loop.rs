@@ -20,7 +20,7 @@
 
 use crate::{
     CallInfo, Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult,
-    LuaState, LuaValue, OpCode,
+    LuaState, LuaValue, OpCode, TablePtr,
     lua_value::LUA_VNUMINT,
     lua_vm::{
         LuaError, TmKind,
@@ -32,21 +32,49 @@ use crate::{
             helper::{
                 bin_tm_fallback, eq_fallback, error_div_by_zero, error_global, error_mod_by_zero,
                 finishget_fallback, finishset_fallback, finishset_fallback_known_miss,
-                float_for_loop, fltvalue, forprep, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
-                lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen, order_tm_fallback,
-                pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
-                pttisinteger, return0_with_hook, return1_with_hook, self_shortstr_index_chain_fast,
-                setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s,
-                tointeger, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
-                unary_tm_fallback,
+                float_for_loop, fltvalue, forprep, get_metamethod_from_meta_ptr,
+                handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr,
+                luai_numpow, objlen, order_tm_fallback, pfltvalue, pivalue, psetfltvalue,
+                psetivalue, ptonumberns, pttisfloat, pttisinteger, return0_with_hook,
+                return1_with_hook, self_shortstr_index_chain_fast, setbfvalue, setbtvalue,
+                setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s, tointeger, tointegerns,
+                tonumberns, ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
+            metamethod::call_tm,
             number::{le_num, lt_num},
             vararg::{exec_varargprep, get_vararg, get_varargs},
         },
         lua_limits::EXTRA_STACK,
     },
 };
+
+#[inline(always)]
+fn call_newindex_tm_fast(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    obj: LuaValue,
+    meta: TablePtr,
+    key: LuaValue,
+    value: LuaValue,
+) -> LuaResult<bool> {
+    let Some(tm) = get_metamethod_from_meta_ptr(lua_state, meta, TmKind::NewIndex) else {
+        return Ok(false);
+    };
+    if !tm.is_function() {
+        return Ok(false);
+    }
+
+    match call_tm(lua_state, tm, obj, key, value) {
+        Ok(()) => Ok(true),
+        Err(LuaError::Yield) => {
+            ci.set_pending_finish_get(-2);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
+    }
+}
 
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
@@ -462,11 +490,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         "GetTabUp key must be short string for fast path"
                     );
                     let mut known_newindex_miss = false;
+                    let mut meta = TablePtr::null();
                     if upval_value.is_table() {
                         let table = upval_value.hvalue_mut();
                         let table_ptr = unsafe { upval_value.as_table_ptr_unchecked() };
                         let gc_ptr = unsafe { upval_value.as_gc_ptr_table_unchecked() };
-                        let meta = table.meta_ptr();
+                        meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
                             let (new_key, delta, rc_tt) = if instr.get_k() {
                                 let rc = *k_val!(c);
@@ -538,6 +567,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
                     savestate!();
                     if known_newindex_miss {
+                        if call_newindex_tm_fast(lua_state, ci, upval_value, meta, *key, rc)? {
+                            updatetrap!();
+                            continue;
+                        }
                         finishset_fallback_known_miss(lua_state, ci, &upval_value, key, rc)?;
                     } else {
                         finishset_fallback(lua_state, ci, &upval_value, key, rc)?;
@@ -635,6 +668,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 *stack_val!(c)
                             };
                             savestate!();
+                            if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                                updatetrap!();
+                                continue;
+                            }
                             finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
                             updatetrap!();
                             continue;
@@ -702,6 +739,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 continue;
                             }
                             savestate!();
+                            if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                                updatetrap!();
+                                continue;
+                            }
                             finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
                             updatetrap!();
                             continue;
@@ -781,6 +822,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let ra = *ra;
                             let rb = LuaValue::integer(b);
                             savestate!();
+                            if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                                updatetrap!();
+                                continue;
+                            }
                             finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
                             updatetrap!();
                             continue;
@@ -809,9 +854,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         "SetField key must be short string for fast path"
                     );
                     let mut known_newindex_miss = false;
+                    let mut meta = TablePtr::null();
                     if unsafe { (*ra_ptr).is_table() } {
                         let table = unsafe { (*ra_ptr).hvalue_mut() };
-                        let meta = table.meta_ptr();
+                        meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
                             let (new_key, delta, rc_tt) = if instr.get_k() {
                                 let rc = *k_val!(c);
@@ -894,6 +940,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = *key;
                     savestate!();
                     if known_newindex_miss {
+                        if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                            updatetrap!();
+                            continue;
+                        }
                         finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
                     } else {
                         finishset_fallback(lua_state, ci, &ra, &rb, rc)?;

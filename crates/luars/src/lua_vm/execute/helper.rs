@@ -1,5 +1,5 @@
 use crate::{
-    CallInfo, Chunk, LuaResult, LuaValue,
+    CallInfo, Chunk, LuaResult, LuaValue, TablePtr,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT, udvalue_to_lua_value},
     lua_vm::{
         LuaError, LuaState, TmKind,
@@ -440,8 +440,6 @@ fn finishget_inner(
     key: &LuaValue,
     skip_first_raw_lookup: bool,
 ) -> LuaResult<Option<LuaValue>> {
-    const TM_INDEX_BIT: u8 = TmKind::Index as u8; // = 0
-
     let mut t = *obj;
     let mut skip_raw_lookup = skip_first_raw_lookup;
 
@@ -458,24 +456,9 @@ fn finishget_inner(
                 skip_raw_lookup = false;
             }
 
-            let meta = table.meta_ptr();
-            if meta.is_null() {
-                return Ok(None); // No metatable → no __index
-            }
-            let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-            // fasttm: check cached bit
-            if mt.no_tm(TM_INDEX_BIT) {
-                return Ok(None); // __index known absent
-            }
-            // Slow path: hash lookup (use get_shortstr_fast — TM keys are always interned strings)
-            let vm = lua_state.vm_mut();
-            let event_key = vm.const_strings.get_tm_value(TmKind::Index);
-            match mt.impl_table.get_shortstr_fast(&event_key) {
+            match get_metamethod_from_meta_ptr(lua_state, table.meta_ptr(), TmKind::Index) {
                 Some(v) => v,
-                None => {
-                    mt.set_tm_absent(TM_INDEX_BIT); // Cache absence
-                    return Ok(None);
-                }
+                None => return Ok(None),
             }
         } else {
             // Non-table (string, userdata): check trait-based field access first
@@ -551,29 +534,36 @@ fn get_metamethod_from_metatable(
     metatable: LuaValue,
     tm_kind: TmKind,
 ) -> Option<LuaValue> {
-    if let Some(mt) = metatable.as_table_mut() {
-        let tm_idx = tm_kind as u8;
+    metatable
+        .as_table_ptr()
+        .and_then(|meta_ptr| get_metamethod_from_meta_ptr(lua_state, meta_ptr, tm_kind))
+}
 
-        // fasttm: check bit-flag cache — now covers all 26 TmKind values
-        if mt.no_tm(tm_idx) {
-            return None; // Known absent — skip hash lookup entirely
-        }
-
-        let vm = lua_state.vm_mut();
-        let event_key = vm.const_strings.get_tm_value(tm_kind);
-        // TM keys are always interned short strings — use get_shortstr_fast
-        // to skip float normalization and integer check in raw_get
-        let result = mt.impl_table.get_shortstr_fast(&event_key);
-
-        if result.is_none() {
-            // Cache that this TM is absent (luaT_gettm pattern)
-            mt.set_tm_absent(tm_idx);
-        }
-
-        return result;
+#[inline]
+pub(crate) fn get_metamethod_from_meta_ptr(
+    lua_state: &mut LuaState,
+    meta_ptr: TablePtr,
+    tm_kind: TmKind,
+) -> Option<LuaValue> {
+    if meta_ptr.is_null() {
+        return None;
     }
 
-    None
+    let mt = unsafe { &mut (*meta_ptr.as_mut_ptr()).data };
+    let tm_idx = tm_kind as u8;
+    if mt.no_tm(tm_idx) {
+        return None;
+    }
+
+    let vm = lua_state.vm_mut();
+    let event_key = vm.const_strings.get_tm_value(tm_kind);
+    let result = mt.impl_table.get_shortstr_fast(&event_key);
+
+    if result.is_none() {
+        mt.set_tm_absent(tm_idx);
+    }
+
+    result
 }
 
 /// Port of Lua 5.5's luaV_finishset from lvm.c:334
@@ -636,33 +626,14 @@ fn finishset_inner(
         return Err(lua_state.error("table index is NaN".to_string()));
     }
 
-    const TM_NEWINDEX_BIT: u8 = TmKind::NewIndex as u8; // = 1
-
     let mut t = *obj;
     let mut skip_existing = skip_existing_check;
 
     for _ in 0..MAXTAGLOOP {
         // Check if t is a table — use inline fasttm for __newindex
         if let Some(table) = t.as_table_mut() {
-            let meta = table.meta_ptr();
-            let tm_val = if meta.is_null() {
-                None
-            } else {
-                let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
-                // fasttm: check cached bit for __newindex
-                if mt.no_tm(TM_NEWINDEX_BIT) {
-                    None
-                } else {
-                    let vm = lua_state.vm_mut();
-                    let event_key = vm.const_strings.get_tm_value(TmKind::NewIndex);
-                    // TM keys are always interned short strings
-                    let result = mt.impl_table.get_shortstr_fast(&event_key);
-                    if result.is_none() {
-                        mt.set_tm_absent(TM_NEWINDEX_BIT);
-                    }
-                    result
-                }
-            };
+            let tm_val =
+                get_metamethod_from_meta_ptr(lua_state, table.meta_ptr(), TmKind::NewIndex);
 
             if tm_val.is_none() {
                 // No metamethod - set directly
