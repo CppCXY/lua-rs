@@ -350,6 +350,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rules-engine-demo"
+version = "0.1.0"
+dependencies = [
+ "luars",
+]
+
+[[package]]
 name = "rust-bind-bench"
 version = "0.1.0"
 dependencies = [

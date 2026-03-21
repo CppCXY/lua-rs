@@ -405,7 +405,9 @@ impl LuaState {
         };
 
         self.call_depth += 1;
-        self.stack_top = frame_top;
+        if self.stack_top < frame_top {
+            self.stack_top = frame_top;
+        }
         Ok(true)
     }
 
@@ -451,7 +453,9 @@ impl LuaState {
 
             self.call_depth += 1;
 
-            self.stack_top = frame_top;
+            if self.stack_top < frame_top {
+                self.stack_top = frame_top;
+            }
 
             return Ok(());
         }
@@ -555,7 +559,9 @@ impl LuaState {
 
         self.call_depth += 1;
 
-        self.stack_top = frame_top;
+        if self.stack_top < frame_top {
+            self.stack_top = frame_top;
+        }
 
         Ok(())
     }
@@ -617,7 +623,9 @@ impl LuaState {
 
         self.call_depth += 1;
 
-        self.stack_top = frame_top;
+        if self.stack_top < frame_top {
+            self.stack_top = frame_top;
+        }
 
         Ok(())
     }

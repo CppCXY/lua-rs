@@ -182,6 +182,13 @@ print(p.x, p:distance())   -- 3.0  5.0
 | **[Differences](docs/Different.md)** | All known behavioral differences from C Lua 5.5 |
 | **[WASM Quick Start](crates/luars_wasm/QUICKSTART.md)** | Build, run, and test the browser-targeted WASM package |
 
+## Examples
+
+- **[rules-engine-demo](examples/rules-engine-demo/README.md)** — realistic checkout rules engine where Rust owns inventory/risk/logistics and Lua drives approval, discount, and shipping policy
+- **[http-server](examples/http-server/)** — async multi-VM HTTP server handled by Lua scripts
+- **[luars-example](examples/luars-example/)** — UserData, methods, fields, and metamethod examples
+- **[rust-bind-bench](examples/rust-bind-bench/)** — Rust binding microbenchmarks against table-based Lua baselines
+
 ## Architecture
 
 ```

@@ -1718,6 +1718,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_count_hook_preserves_multret_unpack_results() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(Stdlib::All).unwrap();
+
+        let results = vm
+            .execute(
+                r#"
+                local count = 0
+                local function f(...) return #({...}), ... end
+                local a = {}
+                for i = 1, 30 do a[i] = i end
+
+                debug.sethook(function() count = count + 1 end, '', 1)
+                local t = {f(table.unpack(a, 1, 30))}
+                debug.sethook()
+
+                return #t, t[#t], count > 0
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_integer(), Some(31));
+        assert_eq!(results[1].as_integer(), Some(30));
+        assert_eq!(results[2].as_bool(), Some(true));
+    }
+
+    #[test]
     fn test_lua_ref_mechanism() {
         let mut vm = LuaVM::new(SafeOption::default());
 
