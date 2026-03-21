@@ -305,7 +305,6 @@ impl<T> HasGcHeader for Gc<T> {
 }
 
 pub type GcString = Gc<LuaString>;
-pub type GcBinary = Gc<Vec<u8>>;
 pub type GcTable = Gc<LuaTable>;
 pub type GcFunction = Gc<LuaFunction>;
 pub type GcCClosure = Gc<CClosureFunction>;
@@ -401,7 +400,6 @@ impl<T: HasGcHeader> GcPtr<T> {
 }
 
 pub type UpvaluePtr = GcPtr<GcUpvalue>;
-pub type BinaryPtr = GcPtr<GcBinary>;
 pub type TablePtr = GcPtr<GcTable>;
 pub type StringPtr = GcPtr<GcString>;
 pub type FunctionPtr = GcPtr<GcFunction>;
@@ -454,8 +452,6 @@ impl GcObjectPtr {
     const TAG_UPVALUE: u64 = 5;
     const TAG_THREAD: u64 = 6;
     const TAG_USERDATA: u64 = 7;
-    const TAG_BINARY: u64 = 8;
-
     #[inline(always)]
     fn new_tagged(ptr: u64, tag: u64) -> Self {
         debug_assert!(
@@ -569,12 +565,6 @@ impl GcObjectPtr {
         UserdataPtr::from_raw(self.raw_ptr())
     }
 
-    #[inline(always)]
-    pub fn as_binary_ptr(&self) -> BinaryPtr {
-        debug_assert!(self.tag() == Self::TAG_BINARY as u8);
-        BinaryPtr::from_raw(self.raw_ptr())
-    }
-
     // ============ Pattern matching helpers (for code that still uses if-let) ============
 
     #[inline(always)]
@@ -616,24 +606,12 @@ impl GcObjectPtr {
     pub fn is_userdata(&self) -> bool {
         self.tag() == Self::TAG_USERDATA as u8
     }
-
-    #[inline(always)]
-    pub fn is_binary(&self) -> bool {
-        self.tag() == Self::TAG_BINARY as u8
-    }
 }
 
 impl From<StringPtr> for GcObjectPtr {
     #[inline(always)]
     fn from(ptr: StringPtr) -> Self {
         Self::new_tagged(ptr.as_u64(), Self::TAG_STRING)
-    }
-}
-
-impl From<BinaryPtr> for GcObjectPtr {
-    #[inline(always)]
-    fn from(ptr: BinaryPtr) -> Self {
-        Self::new_tagged(ptr.as_u64(), Self::TAG_BINARY)
     }
 }
 
@@ -696,7 +674,6 @@ pub enum GcObjectOwner {
     Userdata(Box<GcUserdata>),
     CClosure(Box<GcCClosure>),
     RClosure(Box<GcRClosure>),
-    Binary(Box<GcBinary>),
 }
 
 impl GcObjectOwner {
@@ -706,7 +683,6 @@ impl GcObjectOwner {
     pub fn compute_size(&self) -> usize {
         match self {
             GcObjectOwner::String(s) => std::mem::size_of::<GcString>() + s.data.str.len(),
-            GcObjectOwner::Binary(b) => std::mem::size_of::<GcBinary>() + b.data.len(),
             GcObjectOwner::Table(t) => {
                 let base = std::mem::size_of::<GcTable>();
                 let asize = t.data.impl_table.asize as usize;
@@ -750,7 +726,6 @@ impl GcObjectOwner {
             GcObjectOwner::Upvalue(u) => &u.header,
             GcObjectOwner::Thread(t) => &t.header,
             GcObjectOwner::Userdata(u) => &u.header,
-            GcObjectOwner::Binary(b) => &b.header,
         }) as _
     }
 
@@ -764,7 +739,6 @@ impl GcObjectOwner {
             GcObjectOwner::Upvalue(u) => &mut u.header,
             GcObjectOwner::Thread(t) => &mut t.header,
             GcObjectOwner::Userdata(u) => &mut u.header,
-            GcObjectOwner::Binary(b) => &mut b.header,
         }) as _
     }
 
@@ -812,13 +786,6 @@ impl GcObjectOwner {
         }
     }
 
-    pub fn as_binary_ptr(&self) -> Option<BinaryPtr> {
-        match self {
-            GcObjectOwner::Binary(b) => Some(BinaryPtr::new(b.as_ref() as *const GcBinary)),
-            _ => None,
-        }
-    }
-
     pub fn as_closure_ptr(&self) -> Option<CClosurePtr> {
         match self {
             GcObjectOwner::CClosure(c) => Some(CClosurePtr::new(c.as_ref() as *const GcCClosure)),
@@ -852,9 +819,6 @@ impl GcObjectOwner {
             }
             GcObjectOwner::Userdata(u) => {
                 GcObjectPtr::from(UserdataPtr::new(u.as_ref() as *const GcUserdata))
-            }
-            GcObjectOwner::Binary(b) => {
-                GcObjectPtr::from(BinaryPtr::new(b.as_ref() as *const GcBinary))
             }
             GcObjectOwner::CClosure(c) => {
                 GcObjectPtr::from(CClosurePtr::new(c.as_ref() as *const GcCClosure))

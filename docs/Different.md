@@ -24,16 +24,17 @@ luars is a pure Rust implementation with no C API (`lua_State*`, `lua_pushintege
 
 ---
 
-## 2. String model: UTF-8 only, no arbitrary binary bytes
+## 2. Rust host API string view
 
-luars strings are UTF-8. Lua escape sequences like `\255` that produce non-UTF-8 bytes are not representable in the `string` type. A separate `binary` type exists for raw bytes but does not interoperate with string functions.
+At the Lua level, luars now stores strings as raw byte strings, so arbitrary bytes are preserved just like in C Lua.
 
-Affected tests:
-- `pm.lua` (~L356, ~L413) — patterns using `\255`, pointer-identity test
-- `utf8.lua` (~L130–L224) — invalid-byte / continuation-byte / extended-codepoint tests
-- `strings.lua` (~L211) — `string.format("%c", ...)` tests
-- `literals.lua` (~L125) — variable-name characters via binary find
-- `files.lua` (~L572) — BOM byte-level comparison
+The remaining difference is on the Rust host side:
+
+- `LuaValue::as_str()` only returns `Some(&str)` when the underlying bytes are valid UTF-8.
+- `LuaValue::as_bytes()` should be used when exact byte preservation matters.
+- `LuaState::create_bytes()` can be used to create Lua strings from arbitrary bytes without forcing UTF-8.
+
+This is an embedding/API difference, not a Lua-language semantic difference.
 
 ---
 
@@ -62,6 +63,8 @@ The `debug` library is partially implemented. `debug.setuservalue` and `debug.ge
 ## 6. Bytecode format
 
 luars uses its own bytecode format, incompatible with C Lua binary chunks. `string.dump` output can only be loaded by luars itself. Upvalue names are not included in the dump.
+
+The on-disk format still distinguishes UTF-8 string constants from raw byte-string constants so luars can round-trip non-UTF-8 data through `string.dump` and `load`, even though the runtime no longer has a separate `binary` value tag.
 
 Affected: `calls.lua` (~L484) — binary-chunk header tests skipped.
 

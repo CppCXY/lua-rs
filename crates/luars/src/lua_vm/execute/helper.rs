@@ -1121,14 +1121,7 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaRes
 }
 
 pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult<()> {
-    if let Some(s) = value.as_str() {
-        let len = s.len();
-        setivalue(
-            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-            len as i64,
-        );
-        return Ok(());
-    } else if let Some(bytes) = value.as_binary() {
+    if let Some(bytes) = value.as_bytes() {
         let len = bytes.len();
         setivalue(
             unsafe { l.stack_mut().get_unchecked_mut(result_reg) },

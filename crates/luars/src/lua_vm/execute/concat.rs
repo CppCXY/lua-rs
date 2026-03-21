@@ -181,7 +181,7 @@ fn isemptystr(v: &LuaValue) -> bool {
 fn copy2buff(stack: &[LuaValue], top: usize, n: usize, buff: &mut Vec<u8>) {
     for i in (1..=n).rev() {
         let v = unsafe { stack.get_unchecked(top - i) };
-        if let Some(bytes) = v.as_str_bytes() {
+        if let Some(bytes) = v.as_bytes() {
             buff.extend_from_slice(bytes);
         }
     }
@@ -221,13 +221,13 @@ pub fn concat(lua_state: &mut LuaState, mut total: usize) -> LuaResult<()> {
                 // At least two string values; collect as many consecutive convertible values as possible
                 let mut tl: usize = {
                     let s = unsafe { lua_state.stack().get_unchecked(top - 1) };
-                    s.as_str_bytes().map_or(0, |b| b.len())
+                    s.as_bytes().map_or(0, |b| b.len())
                 };
 
                 let mut nn = 1usize;
                 while nn < total && tostring_inplace(lua_state, top - nn - 1)? {
                     let l = unsafe { lua_state.stack().get_unchecked(top - nn - 1) }
-                        .as_str_bytes()
+                        .as_bytes()
                         .map_or(0, |b| b.len());
                     if l >= usize::MAX - tl {
                         return Err(lua_state.error("string length overflow".to_string()));
@@ -240,12 +240,7 @@ pub fn concat(lua_state: &mut LuaState, mut total: usize) -> LuaResult<()> {
                 let mut buff = Vec::with_capacity(tl);
                 copy2buff(lua_state.stack(), top, nn, &mut buff);
 
-                // Create the result string (interned if short, long otherwise)
-                let result = if let Ok(s) = std::str::from_utf8(&buff) {
-                    lua_state.create_string(s)?
-                } else {
-                    lua_state.create_binary(buff)?
-                };
+                let result = lua_state.create_bytes(&buff)?;
                 unsafe {
                     *lua_state.stack_mut().get_unchecked_mut(top - nn) = result;
                 }

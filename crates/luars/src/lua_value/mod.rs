@@ -194,7 +194,6 @@ impl LuaUpvalue {
                 | LUA_VNUMFLT
                 | LUA_VSHRSTR
                 | LUA_VLNGSTR
-                | LUA_VBINARY
                 | LUA_VTABLE
                 | LUA_VFUNCTION
                 | LUA_CCLOSURE
@@ -435,13 +434,10 @@ impl Chunk {
     }
 }
 
-/// Internal string storage for Lua strings.
+/// Internal inline byte storage for short Lua strings.
 ///
-/// Lua short strings stay UTF-8 and are stored inline inside the GC object.
-/// Long strings keep using `Box<str>` so Rust-facing paths can borrow `&str`
-/// directly without any conversion.
-///
-/// C Lua stores string data inline at the end of the TString struct (single allocation).
+/// Lua strings are byte sequences; UTF-8 validity is tracked separately on
+/// `LuaString` rather than encoded in the storage representation itself.
 #[derive(Clone)]
 pub struct InlineShortString {
     len: u8,
@@ -450,14 +446,19 @@ pub struct InlineShortString {
 
 impl InlineShortString {
     #[inline]
-    pub fn new(s: &str) -> Self {
-        debug_assert!(s.len() <= StringInterner::SHORT_STRING_LIMIT);
-        let mut bytes = [0; StringInterner::SHORT_STRING_LIMIT];
-        bytes[..s.len()].copy_from_slice(s.as_bytes());
+    pub fn new(bytes: &[u8]) -> Self {
+        debug_assert!(bytes.len() <= StringInterner::SHORT_STRING_LIMIT);
+        let mut storage = [0; StringInterner::SHORT_STRING_LIMIT];
+        storage[..bytes.len()].copy_from_slice(bytes);
         Self {
-            len: s.len() as u8,
-            bytes,
+            len: bytes.len() as u8,
+            bytes: storage,
         }
+    }
+
+    #[inline]
+    pub fn new_str(s: &str) -> Self {
+        Self::new(s.as_bytes())
     }
 
     #[inline(always)]
@@ -469,31 +470,18 @@ impl InlineShortString {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len()]
     }
-
-    #[inline(always)]
-    pub fn as_str(&self) -> &str {
-        unsafe { std::str::from_utf8_unchecked(self.as_bytes()) }
-    }
 }
 
-/// UTF-8 string storage optimized for the VM's hot paths.
+/// Immutable byte storage for Lua strings.
 #[derive(Clone)]
 pub enum LuaStrRepr {
-    /// Inline UTF-8 short string storage for all Lua short strings (<= 40 bytes).
+    /// Inline short string storage for all Lua short strings (<= 40 bytes).
     Inline(InlineShortString),
-    /// Owned heap string for long strings.
-    Owned(Box<str>),
+    /// Owned heap bytes for long strings.
+    Owned(Box<[u8]>),
 }
 
 impl LuaStrRepr {
-    #[inline(always)]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Inline(s) => s.as_str(),
-            Self::Owned(s) => s,
-        }
-    }
-
     #[inline(always)]
     pub fn len(&self) -> usize {
         match self {
@@ -506,37 +494,35 @@ impl LuaStrRepr {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Inline(s) => s.as_bytes(),
-            Self::Owned(s) => s.as_bytes(),
+            Self::Owned(s) => s.as_ref(),
         }
     }
 }
 
-impl std::ops::Deref for LuaStrRepr {
-    type Target = str;
-    #[inline(always)]
-    fn deref(&self) -> &str {
-        self.as_str()
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Utf8State {
+    Valid,
+    Invalid,
 }
 
 impl PartialEq for LuaStrRepr {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
+        self.as_bytes() == other.as_bytes()
     }
 }
 
 impl PartialEq<str> for LuaStrRepr {
     #[inline(always)]
     fn eq(&self, other: &str) -> bool {
-        self.as_str() == other
+        self.as_bytes() == other.as_bytes()
     }
 }
 
 impl PartialEq<&str> for LuaStrRepr {
     #[inline(always)]
     fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
+        self.as_bytes() == other.as_bytes()
     }
 }
 
@@ -544,13 +530,19 @@ impl Eq for LuaStrRepr {}
 
 impl std::fmt::Debug for LuaStrRepr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.as_str())
+        match std::str::from_utf8(self.as_bytes()) {
+            Ok(s) => write!(f, "{:?}", s),
+            Err(_) => write!(f, "{:?}", self.as_bytes()),
+        }
     }
 }
 
 impl std::fmt::Display for LuaStrRepr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+        match std::str::from_utf8(self.as_bytes()) {
+            Ok(s) => write!(f, "{}", s),
+            Err(_) => write!(f, "{}", String::from_utf8_lossy(self.as_bytes())),
+        }
     }
 }
 
@@ -560,6 +552,7 @@ pub struct LuaString {
     /// both in the same cache line after pointer dereference.
     /// C Lua has TString.hash at offset 12 — ours is now at offset 8.
     pub hash: u64,
+    pub utf8: Utf8State,
     pub str: LuaStrRepr,
 }
 
@@ -568,17 +561,47 @@ impl std::fmt::Debug for LuaString {
         f.debug_struct("LuaString")
             .field("str", &self.str)
             .field("hash", &self.hash)
+            .field("utf8", &self.utf8)
             .finish()
     }
 }
 
 impl LuaString {
-    pub fn new(s: LuaStrRepr, hash: u64) -> Self {
-        Self { hash, str: s }
+    pub fn new(s: LuaStrRepr, hash: u64, utf8: Utf8State) -> Self {
+        Self { hash, utf8, str: s }
     }
 
-    pub fn as_str(&self) -> &str {
-        self.str.as_str()
+    #[inline(always)]
+    pub fn from_utf8(s: LuaStrRepr, hash: u64) -> Self {
+        Self::new(s, hash, Utf8State::Valid)
+    }
+
+    #[inline(always)]
+    pub fn from_bytes(s: LuaStrRepr, hash: u64) -> Self {
+        let utf8 = if std::str::from_utf8(s.as_bytes()).is_ok() {
+            Utf8State::Valid
+        } else {
+            Utf8State::Invalid
+        };
+        Self::new(s, hash, utf8)
+    }
+
+    #[inline(always)]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.str.as_bytes()
+    }
+
+    #[inline(always)]
+    pub fn as_str(&self) -> Option<&str> {
+        match self.utf8 {
+            Utf8State::Valid => Some(unsafe { std::str::from_utf8_unchecked(self.as_bytes()) }),
+            Utf8State::Invalid => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_utf8(&self) -> bool {
+        self.utf8 == Utf8State::Valid
     }
 
     pub fn is_short(&self) -> bool {

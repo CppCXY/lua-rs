@@ -326,6 +326,32 @@ fn test_load() {
 }
 
 #[test]
+fn test_string_dump_load_binary_constant() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local src = function()
+            return string.char(255, 0, 65), 42
+        end
+
+        local dumped = string.dump(src)
+        local restored = assert(load(dumped))
+        local payload, n = restored()
+
+        assert(n == 42)
+        assert(#payload == 3)
+        assert(string.byte(payload, 1) == 255)
+        assert(string.byte(payload, 2) == 0)
+        assert(string.byte(payload, 3) == 65)
+    "#,
+    );
+
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_warn() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();

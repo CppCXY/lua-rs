@@ -1332,6 +1332,11 @@ impl LuaVM {
         self.object_allocator.create_binary(&mut self.gc, data)
     }
 
+    #[inline]
+    pub fn create_bytes(&mut self, bytes: &[u8]) -> CreateResult {
+        self.object_allocator.create_bytes(&mut self.gc, bytes)
+    }
+
     /// Create string from owned String (avoids clone for non-interned strings)
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> CreateResult {
@@ -1672,7 +1677,7 @@ impl LuaVM {
 
     pub fn get_basic_metatable(&self, kind: LuaValueKind) -> Option<LuaValue> {
         match kind {
-            LuaValueKind::String | LuaValueKind::Binary => self.string_mt,
+            LuaValueKind::String => self.string_mt,
             LuaValueKind::Integer | LuaValueKind::Float => self.number_mt,
             LuaValueKind::Boolean => self.bool_mt,
             LuaValueKind::Nil => self.nil_mt,
@@ -1682,7 +1687,7 @@ impl LuaVM {
 
     pub fn set_basic_metatable(&mut self, kind: LuaValueKind, mt: Option<LuaValue>) {
         match kind {
-            LuaValueKind::String | LuaValueKind::Binary => self.string_mt = mt,
+            LuaValueKind::String => self.string_mt = mt,
             LuaValueKind::Integer | LuaValueKind::Float => self.number_mt = mt,
             LuaValueKind::Boolean => self.bool_mt = mt,
             LuaValueKind::Nil => self.nil_mt = mt,

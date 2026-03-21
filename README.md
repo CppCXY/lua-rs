@@ -9,6 +9,8 @@
 
 A Lua 5.5 interpreter written in pure Rust. Faithfully ported from the official C Lua source code architecture — register-based VM, incremental/generational GC, string interning — and **passes the official Lua 5.5 test suite** (`all.lua` — 28/30 test files, 435 unit tests).
 
+Lua strings in luars are stored as byte strings with an optional UTF-8 text view. At the Lua level this matches Lua's byte-oriented string semantics; on the Rust side you can choose `as_str()` for text or `as_bytes()` / `create_bytes()` when exact bytes matter.
+
 ## Highlights
 
 - **Lua 5.5** — compiler, VM, and standard libraries implement the Lua 5.5 specification
@@ -77,6 +79,17 @@ let x: i64 = vm.get_global_as::<i64>("x")?.unwrap();
 vm.register_function_typed("add", |a: i64, b: i64| a + b)?;
 vm.register_type_of::<Point>("Point")?;
 vm.register_enum::<Color>("Color")?;
+```
+
+### Strings And Bytes
+
+```rust
+let text = vm.create_string("hello")?;
+assert_eq!(text.as_str(), Some("hello"));
+
+let raw = vm.create_bytes(&[0xff, 0x00, b'A'])?;
+assert_eq!(raw.as_str(), None);
+assert_eq!(raw.as_bytes(), Some(&[0xff, 0x00, b'A'][..]));
 ```
 
 ### Tables
@@ -236,7 +249,7 @@ For the full list of behavioral differences, see [docs/Different.md](docs/Differ
 - **No C API / C module loading** — pure Rust, no `lua_State*` interface
 - **No debug hooks** — `debug.sethook` is a stub; `getinfo` / `getlocal` / `traceback` work
 - **Own bytecode format** — `string.dump` output is not compatible with C Lua
-- **UTF-8 strings** — no arbitrary binary bytes (use the separate `binary` type)
+- **Rust text view is explicit** — Lua strings are byte strings, but Rust-side `as_str()` only succeeds for valid UTF-8; use `as_bytes()` for exact byte access
 
 ## Building
 

@@ -12,7 +12,6 @@ fn lua_type_to_value_type(v: &LuaValue) -> ValueType {
         LuaValueKind::Integer => ValueType::TNUMBER,
         LuaValueKind::Float => ValueType::TNUMBER,
         LuaValueKind::String => ValueType::TSTRING,
-        LuaValueKind::Binary => ValueType::TSTRING,
         LuaValueKind::Table => ValueType::TTABLE,
         LuaValueKind::Function => ValueType::TFUNCTION,
         LuaValueKind::CFunction => ValueType::TFUNCTION,

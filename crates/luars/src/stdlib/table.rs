@@ -69,19 +69,25 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'concat' (table expected)".to_string()))?;
 
     let sep_value = l.get_arg(2);
-    let sep_owned: String;
-    let sep: &str = match &sep_value {
+    let sep_owned: Vec<u8>;
+    let sep_text_owned: String;
+    let (sep_bytes, sep_text): (&[u8], Option<&str>) = match &sep_value {
         Some(v) => {
             if v.is_nil() {
-                ""
-            } else if let Some(s) = v.as_str() {
-                sep_owned = s.to_string();
-                &sep_owned
+                (&[], Some(""))
+            } else if let Some(bytes) = v.as_bytes() {
+                sep_owned = bytes.to_vec();
+                if let Some(s) = v.as_str() {
+                    sep_text_owned = s.to_string();
+                    (&sep_owned, Some(&sep_text_owned))
+                } else {
+                    (&sep_owned, None)
+                }
             } else {
                 return Err(l.error("bad argument #2 to 'concat' (string expected)".to_string()));
             }
         }
-        None => "",
+        None => (&[], Some("")),
     };
 
     if !table_val.is_table() {
@@ -117,20 +123,18 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     if !has_meta {
         // ---- Fast path: raw access, no metamethod overhead ----
         let table = table_val.as_table_mut().unwrap();
-        let sep_total = sep.len().saturating_mul(count.saturating_sub(1));
+        let sep_total = sep_bytes.len().saturating_mul(count.saturating_sub(1));
 
         // Phase 1: scan types + compute exact string length
         let mut total_len: usize = sep_total;
-        let mut has_binary = false;
+        let mut needs_bytes = sep_text.is_none();
         let mut has_numbers = false;
 
         for idx in i..=j {
             let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
-            if let Some(s) = value.as_str() {
-                total_len += s.len();
-            } else if let Some(b) = value.as_binary() {
-                total_len += b.len();
-                has_binary = true;
+            if let Some(bytes) = value.as_bytes() {
+                total_len += bytes.len();
+                needs_bytes |= value.as_str().is_none();
             } else if value.as_integer().is_some() {
                 total_len += 20; // max i64 string width
                 has_numbers = true;
@@ -146,18 +150,16 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         // Phase 2: build result with a single allocation
         let table = table_val.as_table_mut().unwrap();
 
-        if has_binary {
-            // Binary path: concatenate as raw bytes
+        if needs_bytes {
+            // Byte path: concatenate as raw bytes when any piece lacks a UTF-8 view
             let mut buf: Vec<u8> = Vec::with_capacity(total_len);
             for idx in i..=j {
                 if idx > i {
-                    buf.extend_from_slice(sep.as_bytes());
+                    buf.extend_from_slice(sep_bytes);
                 }
                 let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
-                if let Some(s) = value.as_str() {
-                    buf.extend_from_slice(s.as_bytes());
-                } else if let Some(b) = value.as_binary() {
-                    buf.extend_from_slice(b);
+                if let Some(bytes) = value.as_bytes() {
+                    buf.extend_from_slice(bytes);
                 } else if let Some(ival) = value.as_integer() {
                     let mut itoa_buf = itoa::Buffer::new();
                     buf.extend_from_slice(itoa_buf.format(ival).as_bytes());
@@ -165,15 +167,12 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                     buf.extend_from_slice(lua_float_to_string(f).as_bytes());
                 }
             }
-            // Try converting to UTF-8 string; if not valid, keep as binary
-            let result = match String::from_utf8(buf) {
-                Ok(s) => l.create_string_owned(s)?,
-                Err(e) => l.create_binary(e.into_bytes())?,
-            };
+            let result = l.create_bytes(&buf)?;
             l.push_value(result)?;
         } else if !has_numbers {
             // Ultra-fast path: all strings — zero intermediate allocations
             let mut result = String::with_capacity(total_len);
+            let sep = sep_text.unwrap_or("");
             for idx in i..=j {
                 if idx > i {
                     result.push_str(sep);
@@ -186,6 +185,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
         } else {
             // Strings + numbers path: single allocation, itoa for integers
             let mut result = String::with_capacity(total_len);
+            let sep = sep_text.unwrap_or("");
             for idx in i..=j {
                 if idx > i {
                     result.push_str(sep);
@@ -206,16 +206,14 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
     } else {
         // ---- Metamethod path: uses table_geti / obj_len ----
         // Still two-pass for pre-sizing optimization
-        let mut total_len: usize = sep.len().saturating_mul(count.saturating_sub(1));
-        let mut has_binary = false;
+        let mut total_len: usize = sep_bytes.len().saturating_mul(count.saturating_sub(1));
+        let mut needs_bytes = sep_text.is_none();
 
         for idx in i..=j {
             let value = l.table_geti(&table_val, idx)?;
-            if let Some(s) = value.as_str() {
-                total_len += s.len();
-            } else if let Some(b) = value.as_binary() {
-                total_len += b.len();
-                has_binary = true;
+            if let Some(bytes) = value.as_bytes() {
+                total_len += bytes.len();
+                needs_bytes |= value.as_str().is_none();
             } else if value.as_integer().is_some() {
                 total_len += 20;
             } else if value.as_number().is_some() {
@@ -226,17 +224,15 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
             }
         }
 
-        if has_binary {
+        if needs_bytes {
             let mut buf: Vec<u8> = Vec::with_capacity(total_len);
             for idx in i..=j {
                 if idx > i {
-                    buf.extend_from_slice(sep.as_bytes());
+                    buf.extend_from_slice(sep_bytes);
                 }
                 let value = l.table_geti(&table_val, idx)?;
-                if let Some(s) = value.as_str() {
-                    buf.extend_from_slice(s.as_bytes());
-                } else if let Some(b) = value.as_binary() {
-                    buf.extend_from_slice(b);
+                if let Some(bytes) = value.as_bytes() {
+                    buf.extend_from_slice(bytes);
                 } else if let Some(ival) = value.as_integer() {
                     let mut itoa_buf = itoa::Buffer::new();
                     buf.extend_from_slice(itoa_buf.format(ival).as_bytes());
@@ -244,13 +240,11 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                     buf.extend_from_slice(lua_float_to_string(f).as_bytes());
                 }
             }
-            let result = match String::from_utf8(buf) {
-                Ok(s) => l.create_string_owned(s)?,
-                Err(e) => l.create_binary(e.into_bytes())?,
-            };
+            let result = l.create_bytes(&buf)?;
             l.push_value(result)?;
         } else {
             let mut result = String::with_capacity(total_len);
+            let sep = sep_text.unwrap_or("");
             for idx in i..=j {
                 if idx > i {
                     result.push_str(sep);

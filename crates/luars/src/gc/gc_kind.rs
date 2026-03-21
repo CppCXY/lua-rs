@@ -9,5 +9,4 @@ pub enum GcObjectKind {
     Upvalue = 5,
     Thread = 6,
     Userdata = 7,
-    Binary = 8,
 }

@@ -772,7 +772,7 @@ impl GC {
     /// For other objects: returns true if white (will be collected)
     fn is_cleared(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) -> bool {
         match gc_ptr.kind() {
-            GcObjectKind::String | GcObjectKind::Binary => {
+            GcObjectKind::String => {
                 self.mark_object(l, gc_ptr);
                 false
             }
@@ -3383,8 +3383,8 @@ impl GC {
                             );
                         }
                     }
-                    // String/Binary have no GC references
-                    GcObjectOwner::String(_) | GcObjectOwner::Binary(_) => {}
+                    // Strings have no GC references
+                    GcObjectOwner::String(_) => {}
                 }
             }
         }
@@ -3543,7 +3543,6 @@ impl GC {
             GcObjectOwner::CClosure(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::RClosure(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::String(b) => b.as_ref() as *const _ as u64,
-            GcObjectOwner::Binary(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Thread(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Upvalue(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Userdata(b) => b.as_ref() as *const _ as u64,
@@ -3969,7 +3968,7 @@ impl GC {
     /// ```.
     fn really_mark_object(&mut self, l: &mut LuaState, gc_ptr: GcObjectPtr) {
         self.gc_marked += 64; // fixed estimate; exact size unavailable from GcObjectPtr
-        if gc_ptr.is_string() || gc_ptr.is_binary() {
+        if gc_ptr.is_string() {
             gc_ptr.header_mut().unwrap().make_black(); // Leaves become black immediately
         } else if gc_ptr.is_upvalue() {
             let uv_ptr = gc_ptr.as_upvalue_ptr();

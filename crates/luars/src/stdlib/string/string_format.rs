@@ -948,12 +948,7 @@ fn format_quoted(buf: &mut String, arg: &LuaValue, l: &mut LuaState) -> LuaResul
         return Err(l.error("no literal representation for value in 'format'".to_string()));
     }
 
-    // For strings, get bytes - handle both string and binary types
-    let bytes = if let Some(s) = arg.as_str() {
-        s.as_bytes()
-    } else if let Some(b) = arg.as_binary() {
-        b
-    } else {
+    let Some(bytes) = arg.as_bytes() else {
         return Err(l.error("no literal representation for value in 'format'".to_string()));
     };
 
@@ -1002,7 +997,6 @@ fn format_pointer(buf: &mut String, arg: &LuaValue, spec: &FormatSpec) -> LuaRes
     // Format the pointer value first
     let ptr_str = match arg.kind() {
         LuaValueKind::String
-        | LuaValueKind::Binary
         | LuaValueKind::Table
         | LuaValueKind::Function
         | LuaValueKind::CFunction

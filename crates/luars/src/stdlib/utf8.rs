@@ -109,11 +109,7 @@ fn utf8_len(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'len' (string expected)".to_string()))?;
-    let bytes: &[u8] = if let Some(s) = s_value.as_str() {
-        s.as_bytes()
-    } else if let Some(b) = s_value.as_binary() {
-        b
-    } else {
+    let Some(bytes) = s_value.as_bytes() else {
         return Err(l.error("bad argument #1 to 'len' (string expected)".to_string()));
     };
 
@@ -192,11 +188,7 @@ fn utf8_char(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    // Try to create as UTF-8 string, fallback to binary
-    let val = match String::from_utf8(result_bytes.clone()) {
-        Ok(s) => l.create_string(&s)?,
-        Err(_) => l.create_binary(result_bytes)?,
-    };
+    let val = l.create_bytes(&result_bytes)?;
     l.push_value(val)?;
     Ok(1)
 }
@@ -206,7 +198,7 @@ fn utf8_codes(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'codes' (string expected)".to_string()))?;
-    if !s_value.is_string() && s_value.as_binary().is_none() {
+    if s_value.as_bytes().is_none() {
         return Err(l.error("bad argument #1 to 'codes' (string expected)".to_string()));
     }
 
@@ -245,11 +237,7 @@ fn utf8_codes_iterator(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Accept both string and binary
-    let bytes: &[u8] = if let Some(s) = s_val.as_str() {
-        s.as_bytes()
-    } else if let Some(b) = s_val.as_binary() {
-        b
-    } else {
+    let Some(bytes) = s_val.as_bytes() else {
         return Err(l.error("utf8.codes iterator: invalid string".to_string()));
     };
 
@@ -291,11 +279,7 @@ fn utf8_codepoint(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'codepoint' (string expected)".to_string()))?;
     // Accept both string and binary values
-    let bytes: &[u8] = if let Some(s) = s_value.as_str() {
-        s.as_bytes()
-    } else if let Some(b) = s_value.as_binary() {
-        b
-    } else {
+    let Some(bytes) = s_value.as_bytes() else {
         return Err(l.error("bad argument #1 to 'codepoint' (string expected)".to_string()));
     };
 
@@ -341,11 +325,7 @@ fn utf8_offset(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'offset' (string expected)".to_string()))?;
-    let bytes: &[u8] = if let Some(s) = s_value.as_str() {
-        s.as_bytes()
-    } else if let Some(b) = s_value.as_binary() {
-        b
-    } else {
+    let Some(bytes) = s_value.as_bytes() else {
         return Err(l.error("bad argument #1 to 'offset' (string expected)".to_string()));
     };
 

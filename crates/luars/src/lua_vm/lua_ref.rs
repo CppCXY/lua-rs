@@ -511,14 +511,24 @@ impl LuaStringRef {
         })
     }
 
+    /// Get the raw bytes of the underlying Lua string value.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        let value = self.inner.to_value();
+        value
+            .as_bytes()
+            .map(|bytes| unsafe { &*(bytes as *const [u8]) })
+    }
+
     /// Copy the string content into an owned String.
     pub fn to_string_lossy(&self) -> String {
-        self.as_str().unwrap_or("").to_owned()
+        self.as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| String::from_utf8_lossy(self.as_bytes().unwrap_or(&[])).into_owned())
     }
 
     /// Get the byte length.
     pub fn byte_len(&self) -> usize {
-        self.as_str().map(|s| s.len()).unwrap_or(0)
+        self.as_bytes().map(|s| s.len()).unwrap_or(0)
     }
 
     /// Get the underlying LuaValue.
@@ -545,7 +555,7 @@ impl std::fmt::Debug for LuaStringRef {
 
 impl std::fmt::Display for LuaStringRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str().unwrap_or(""))
+        write!(f, "{}", self.to_string_lossy())
     }
 }
 

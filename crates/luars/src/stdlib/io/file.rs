@@ -879,20 +879,12 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
             let mut i = 2;
             while let Some(val) = l.get_arg(i) {
                 let write_result = match val.kind() {
-                    LuaValueKind::String => {
-                        if let Some(s) = val.as_str() {
-                            lua_file.write(s)
-                        } else {
+                    LuaValueKind::String => match val.as_bytes() {
+                        Some(bytes) => lua_file.write_bytes(bytes),
+                        None => {
                             return Err(l.error("write expects strings or numbers".to_string()));
                         }
-                    }
-                    LuaValueKind::Binary => {
-                        if let Some(b) = val.as_binary() {
-                            lua_file.write_bytes(b)
-                        } else {
-                            return Err(l.error("write expects strings or numbers".to_string()));
-                        }
-                    }
+                    },
                     LuaValueKind::Integer => {
                         if let Some(n) = val.as_integer() {
                             lua_file.write(&n.to_string())

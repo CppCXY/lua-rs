@@ -153,6 +153,8 @@ fn test_string_format() {
         assert(string.format("%s", 1.25) == "1.25")
         assert(string.format("%f", 1.5) == "1.500000")
         assert(string.format("%q", 1.5) == "1.5")
+        local quoted = string.format("%q", string.char(255, 0, 49))
+        assert(quoted == '"\\255\\0001"')
     "#,
     );
 
@@ -267,5 +269,30 @@ fn test_string_packsize() {
     "#,
     );
 
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_string_pack_short_byte_string_equality() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local lstr = "\1\2\3\4\5\6\7\8"
+        local lnum = 0x0807060504030201
+
+        for i = 1, 8 do
+            local n = lnum & (~(-1 << (i * 8)))
+            local s = string.sub(lstr, 1, i)
+            assert(string.pack("<i" .. i, n) == s)
+            assert(string.pack(">i" .. i, n) == s:reverse())
+        end
+    "#,
+    );
+
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }

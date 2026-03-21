@@ -31,9 +31,9 @@
 use crate::lua_value::{CClosureFunction, LuaUserdata, RClosureFunction};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    BinaryPtr, CClosurePtr, FunctionPtr, GcBinary, GcCClosure, GcFunction, GcObjectPtr, GcRClosure,
-    GcString, GcTable, GcThread, GcUserdata, LuaFunction, LuaTable, RClosurePtr, StringPtr,
-    TablePtr, ThreadPtr, UserdataPtr,
+    CClosurePtr, FunctionPtr, GcCClosure, GcFunction, GcObjectPtr, GcRClosure, GcString, GcTable,
+    GcThread, GcUserdata, LuaFunction, LuaTable, RClosurePtr, StringPtr, TablePtr, ThreadPtr,
+    UserdataPtr,
 };
 
 // ============ Basic type tags (bits 0-3) ============
@@ -77,7 +77,6 @@ pub const BIT_ISCOLLECTABLE: u8 = 1 << 6;
 // String variants (like Lua 5.5: LUA_VSHRSTR and LUA_VLNGSTR)
 pub const LUA_VSHRSTR: u8 = LUA_TSTRING | BIT_ISCOLLECTABLE; // 0x44 - short string (interned)
 pub const LUA_VLNGSTR: u8 = makevariant!(LUA_TSTRING, 1) | BIT_ISCOLLECTABLE; // 0x54 - long string (not interned)
-pub const LUA_VBINARY: u8 = makevariant!(LUA_TSTRING, 2) | BIT_ISCOLLECTABLE; // 0x64 - binary data
 
 // Table
 pub const LUA_VTABLE: u8 = LUA_TTABLE | BIT_ISCOLLECTABLE; // 0x45
@@ -244,16 +243,6 @@ impl LuaValue {
                 ptr: ptr.as_ptr() as *const u8,
             },
             tt: LUA_VLNGSTR,
-        }
-    }
-
-    #[inline(always)]
-    pub fn binary(ptr: BinaryPtr) -> Self {
-        Self {
-            value: Value {
-                ptr: ptr.as_ptr() as *const u8,
-            },
-            tt: LUA_VBINARY,
         }
     }
 
@@ -434,11 +423,6 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub(crate) fn ttisbinary(&self) -> bool {
-        self.checktag(LUA_VBINARY)
-    }
-
-    #[inline(always)]
     pub(crate) fn ttistable(&self) -> bool {
         self.checktag(LUA_VTABLE)
     }
@@ -556,7 +540,7 @@ impl LuaValue {
 
     #[inline(always)]
     pub fn is_binary(&self) -> bool {
-        self.ttisbinary()
+        self.ttisstring() && self.as_str().is_none()
     }
 
     #[inline(always)]
@@ -674,13 +658,12 @@ impl LuaValue {
 
     #[inline(always)]
     pub fn as_str(&self) -> Option<&str> {
-        // String type but not binary
-        if self.ttisstring() && !self.ttisbinary() {
-            Some(unsafe {
+        if self.ttisstring() {
+            unsafe {
                 let ptr = self.value.ptr;
                 let s: &GcString = &*(ptr as *const GcString);
                 s.data.as_str()
-            })
+            }
         } else {
             None
         }
@@ -688,11 +671,11 @@ impl LuaValue {
 
     #[inline(always)]
     pub fn as_binary(&self) -> Option<&[u8]> {
-        if self.ttisbinary() {
+        if self.ttisstring() && self.as_str().is_none() {
             Some(unsafe {
                 let ptr = self.value.ptr;
-                let v: &GcBinary = &*(ptr as *const GcBinary);
-                v.data.as_slice()
+                let v: &GcString = &*(ptr as *const GcString);
+                v.data.as_bytes()
             })
         } else {
             None
@@ -705,22 +688,21 @@ impl LuaValue {
     /// unified access regardless of whether the value is internally
     /// stored as UTF-8 string or raw binary.
     #[inline(always)]
-    pub fn as_str_bytes(&self) -> Option<&[u8]> {
-        if self.ttisstring() && !self.ttisbinary() {
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        if self.ttisstring() {
             Some(unsafe {
                 let ptr = self.value.ptr;
                 let s: &GcString = &*(ptr as *const GcString);
-                s.data.as_str().as_bytes()
-            })
-        } else if self.ttisbinary() {
-            Some(unsafe {
-                let ptr = self.value.ptr;
-                let v: &GcBinary = &*(ptr as *const GcBinary);
-                v.data.as_slice()
+                s.data.as_bytes()
             })
         } else {
             None
         }
+    }
+
+    #[inline(always)]
+    pub fn as_str_bytes(&self) -> Option<&[u8]> {
+        self.as_bytes()
     }
 
     #[inline(always)]
@@ -887,15 +869,6 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    pub fn as_binary_ptr(&self) -> Option<BinaryPtr> {
-        if self.ttisbinary() {
-            Some(BinaryPtr::new(unsafe { self.value.ptr as *mut GcBinary }))
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
     pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
         if self.ttisfunction() {
             Some(FunctionPtr::new(unsafe {
@@ -945,7 +918,6 @@ impl LuaValue {
             LuaValueKind::CClosure => self.as_cclosure_ptr().map(GcObjectPtr::from),
             LuaValueKind::RClosure => self.as_rclosure_ptr().map(GcObjectPtr::from),
             LuaValueKind::String => self.as_string_ptr().map(GcObjectPtr::from),
-            LuaValueKind::Binary => self.as_binary_ptr().map(GcObjectPtr::from),
             LuaValueKind::Thread => self.as_thread_ptr().map(GcObjectPtr::from),
             LuaValueKind::Userdata => self.as_userdata_ptr().map(GcObjectPtr::from),
             _ => None,
@@ -970,7 +942,6 @@ impl LuaValue {
                     GcObjectPtr::from(RClosurePtr::new(ptr as *mut GcRClosure))
                 }
                 LuaValueKind::String => GcObjectPtr::from(StringPtr::new(ptr as *mut GcString)),
-                LuaValueKind::Binary => GcObjectPtr::from(BinaryPtr::new(ptr as *mut GcBinary)),
                 LuaValueKind::Thread => GcObjectPtr::from(ThreadPtr::new(ptr as *mut GcThread)),
                 LuaValueKind::Userdata => {
                     GcObjectPtr::from(UserdataPtr::new(ptr as *mut GcUserdata))
@@ -1036,13 +1007,7 @@ impl LuaValue {
                     LuaValueKind::Float
                 }
             }
-            LUA_TSTRING => {
-                if self.ttisbinary() {
-                    LuaValueKind::Binary
-                } else {
-                    LuaValueKind::String
-                }
-            }
+            LUA_TSTRING => LuaValueKind::String,
             LUA_TTABLE => LuaValueKind::Table,
             LUA_TFUNCTION => {
                 if self.ttiscfunction() {
@@ -1181,11 +1146,6 @@ impl PartialEq for LuaValue {
                     // Skip hash comparison for long strings (hash may be 0 = lazy)
                     s1.data.str == s2.data.str
                 }
-                LUA_VBINARY => {
-                    let b1 = unsafe { &*(self.value.ptr as *const GcBinary) };
-                    let b2 = unsafe { &*(other.value.ptr as *const GcBinary) };
-                    b1.data == b2.data
-                }
                 _ => false,
             };
         } else if tt == LUA_VNUMINT && other_tt == LUA_VNUMFLT {
@@ -1197,36 +1157,6 @@ impl PartialEq for LuaValue {
             let f = self.fltvalue();
             let i = other.ivalue();
             return lua_float_eq_int(f, i);
-        } else if (tt == LUA_VSHRSTR || tt == LUA_VLNGSTR) && other_tt == LUA_VBINARY {
-            // Compare string with binary - compare bytes
-            let str_bytes = if tt == LUA_VSHRSTR {
-                unsafe { &*(self.value.ptr as *const GcString) }
-                    .data
-                    .str
-                    .as_bytes()
-            } else {
-                unsafe { &*(self.value.ptr as *const GcString) }
-                    .data
-                    .str
-                    .as_bytes()
-            };
-            let binary_bytes = &unsafe { &*(other.value.ptr as *const GcBinary) }.data;
-            return str_bytes == binary_bytes.as_slice();
-        } else if tt == LUA_VBINARY && (other_tt == LUA_VSHRSTR || other_tt == LUA_VLNGSTR) {
-            // Compare binary with string - compare bytes
-            let binary_bytes = &unsafe { &*(self.value.ptr as *const GcBinary) }.data;
-            let str_bytes = if other_tt == LUA_VSHRSTR {
-                unsafe { &*(other.value.ptr as *const GcString) }
-                    .data
-                    .str
-                    .as_bytes()
-            } else {
-                unsafe { &*(other.value.ptr as *const GcString) }
-                    .data
-                    .str
-                    .as_bytes()
-            };
-            return binary_bytes.as_slice() == str_bytes;
         }
         false
     }
@@ -1259,7 +1189,6 @@ pub enum LuaValueKind {
     Integer,
     Float,
     String,
-    Binary,
     Table,
     Function,
     CFunction,
@@ -1278,6 +1207,21 @@ impl Default for LuaValue {
     }
 }
 
+fn fmt_binary_bytes(
+    f: &mut std::fmt::Formatter<'_>,
+    bytes: &[u8],
+    prefix: &str,
+) -> std::fmt::Result {
+    write!(f, "{}(len={}, [", prefix, bytes.len())?;
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 {
+            write!(f, " ")?;
+        }
+        write!(f, "{:02x}", b)?;
+    }
+    write!(f, "])")
+}
+
 impl std::fmt::Debug for LuaValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind() {
@@ -1286,18 +1230,11 @@ impl std::fmt::Debug for LuaValue {
             LuaValueKind::Integer => write!(f, "{}", self.ivalue()),
             LuaValueKind::Float => write!(f, "{}", self.fltvalue()),
             LuaValueKind::String => {
-                write!(f, "{}", self.as_str().unwrap_or("<invalid string>"))
-            }
-            LuaValueKind::Binary => {
-                let data = self.as_binary().unwrap_or(&[]);
-                write!(f, "binary(len={}, [", data.len())?;
-                for (i, &b) in data.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{:02x}", b)?;
+                if let Some(s) = self.as_str() {
+                    write!(f, "{}", s)
+                } else {
+                    fmt_binary_bytes(f, self.as_bytes().unwrap_or(&[]), "string")
                 }
-                write!(f, "])")
             }
             LuaValueKind::Table => write!(f, "table(0x{:#x})", self.raw_ptr_repr() as usize),
             LuaValueKind::Function => write!(f, "function(0x{:#x})", self.raw_ptr_repr() as usize),
@@ -1330,7 +1267,13 @@ impl std::fmt::Display for LuaValue {
                     write!(f, "{}", n)
                 }
             }
-            LuaValueKind::String => write!(f, "{}", self.as_str().unwrap_or("<invalid string>")),
+            LuaValueKind::String => {
+                if let Some(s) = self.as_str() {
+                    write!(f, "{}", s)
+                } else {
+                    fmt_binary_bytes(f, self.as_bytes().unwrap_or(&[]), "string")
+                }
+            }
             LuaValueKind::Table => write!(f, "table: 0x{:x}", unsafe { self.value.ptr as usize }),
             LuaValueKind::Function => {
                 write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
@@ -1347,17 +1290,6 @@ impl std::fmt::Display for LuaValue {
             }
             LuaValueKind::Thread => {
                 write!(f, "thread: 0x{:x}", unsafe { self.value.ptr as usize })
-            }
-            LuaValueKind::Binary => {
-                let data = self.as_binary().unwrap_or(&[]);
-                write!(f, "binary(len={}, [", data.len())?;
-                for (i, &b) in data.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{:02x}", b)?;
-                }
-                write!(f, "])")
             }
         }
     }

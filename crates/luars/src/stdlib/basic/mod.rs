@@ -77,7 +77,6 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
         LuaValueKind::Boolean => cs.str_boolean,
         LuaValueKind::Integer | LuaValueKind::Float => cs.str_number,
         LuaValueKind::String => cs.str_string,
-        LuaValueKind::Binary => cs.str_string, // Binary is also a string type
         LuaValueKind::Table => cs.str_table,
         LuaValueKind::Function
         | LuaValueKind::CFunction
@@ -1244,14 +1243,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 break;
             }
 
-            // Get raw bytes - support both string and binary types
-            // IMPORTANT: Use as_binary() first to avoid UTF-8 conversion issues
-            // when reading binary bytecode one byte at a time
-            let bytes_opt = if let Some(b) = result.as_binary() {
-                Some(b)
-            } else {
-                result.as_str().map(|s| s.as_bytes())
-            };
+            // Get raw bytes from either textual or binary Lua strings.
+            let bytes_opt = result.as_bytes();
 
             if let Some(bytes) = bytes_opt {
                 if bytes.is_empty() {
@@ -1283,13 +1276,9 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         (accumulated, is_binary)
-    } else if let Some(b) = chunk_val.as_binary() {
-        let is_binary = b.first() == Some(&0x1B);
-        (b.to_vec(), is_binary)
-    } else if let Some(s) = chunk_val.as_str() {
-        // Check if this is binary bytecode by looking at first byte
-        let is_binary = s.as_bytes().first() == Some(&0x1B);
-        (s.as_bytes().to_vec(), is_binary)
+    } else if let Some(bytes) = chunk_val.as_bytes() {
+        let is_binary = bytes.first() == Some(&0x1B);
+        (bytes.to_vec(), is_binary)
     } else {
         return Err(l.error("bad argument #1 to 'load' (function or string expected)".to_string()));
     };

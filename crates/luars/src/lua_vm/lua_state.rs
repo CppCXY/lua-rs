@@ -2006,6 +2006,11 @@ impl LuaState {
         self.vm_mut().create_binary(data)
     }
 
+    #[inline]
+    pub fn create_bytes(&mut self, bytes: &[u8]) -> CreateResult {
+        self.vm_mut().create_bytes(bytes)
+    }
+
     /// Create userdata
     pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.vm_mut().create_userdata(data)
@@ -2277,8 +2282,8 @@ impl LuaState {
         }
         // String (including binary): compare raw bytes
         if a.is_string() && b.is_string() {
-            let ba = a.as_str().map(|s| s.as_bytes()).or_else(|| a.as_binary());
-            let bb = b.as_str().map(|s| s.as_bytes()).or_else(|| b.as_binary());
+            let ba = a.as_bytes();
+            let bb = b.as_bytes();
             if let (Some(ba), Some(bb)) = (ba, bb) {
                 return Ok(ba < bb);
             }
@@ -2294,8 +2299,8 @@ impl LuaState {
     /// Get object length with metamethod support (__len)
     /// Returns the length as i64, going through __len if available.
     pub fn obj_len(&mut self, obj: &LuaValue) -> LuaResult<i64> {
-        if let Some(s) = obj.as_str() {
-            return Ok(s.len() as i64);
+        if let Some(bytes) = obj.as_bytes() {
+            return Ok(bytes.len() as i64);
         }
         if obj.ttistable() {
             if let Some(mm) = execute::get_metamethod_event(self, obj, execute::TmKind::Len) {
@@ -4077,11 +4082,6 @@ impl LuaState {
     pub fn to_string(&mut self, value: &LuaValue) -> LuaResult<String> {
         // Fast path: simple types without metamethods
         match value.kind() {
-            LuaValueKind::Binary => {
-                if let Some(s) = value.as_binary() {
-                    return Ok(format!("<binary: {} bytes>", s.len()));
-                }
-            }
             LuaValueKind::Nil => return Ok("nil".to_string()),
             LuaValueKind::Boolean => {
                 if let Some(b) = value.as_boolean() {
@@ -4105,6 +4105,9 @@ impl LuaState {
             LuaValueKind::String => {
                 if let Some(s) = value.as_str() {
                     return Ok(s.to_string());
+                }
+                if let Some(bytes) = value.as_bytes() {
+                    return Ok(String::from_utf8_lossy(bytes).into_owned());
                 }
             }
             LuaValueKind::Function | LuaValueKind::CFunction => {

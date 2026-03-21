@@ -77,12 +77,12 @@ impl StringInterner {
     }
 
     #[inline(always)]
-    fn hash_matches(ptr: StringPtr, hash: u64, s: &str) -> bool {
+    fn hash_matches(ptr: StringPtr, hash: u64, s: &[u8]) -> bool {
         let gc_str = ptr.as_ref();
-        gc_str.data.hash == hash && gc_str.data.str.len() == s.len() && gc_str.data.str == s
+        gc_str.data.hash == hash && gc_str.data.as_bytes() == s
     }
 
-    fn find_slot(&self, hash: u64, s: &str) -> Result<usize, usize> {
+    fn find_slot(&self, hash: u64, s: &[u8]) -> Result<usize, usize> {
         let mask = self.size() - 1;
         let mut index = self.slot_index(hash);
         let mut first_tombstone = None;
@@ -107,45 +107,22 @@ impl StringInterner {
 
     #[inline]
     pub fn intern(&mut self, s: &str, gc: &mut GC) -> CreateResult {
-        let current_white = gc.current_white;
-        let slen = s.len();
-
-        if slen > Self::SHORT_STRING_LIMIT {
-            let size = Self::long_string_size(slen);
-            let lua_string = LuaString::new(LuaStrRepr::Owned(Box::from(s)), 0);
-            let gc_string =
-                GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
-            let ptr = gc_string.as_str_ptr().unwrap();
-            gc.trace_object(gc_string)?;
-            return Ok(LuaValue::longstring(ptr));
-        }
-
-        let hash = self.hash_string(s);
-
-        if let Ok(index) = self.find_slot(hash, s)
-            && let Some(ts) = self.slots[index].occupied()
-        {
-            let gc_str = ts.as_ref();
-            if gc_str.header.is_white() {
-                ts.as_mut_ref().header.make_black();
-            }
-            return Ok(LuaValue::shortstring(ts));
-        }
-
-        if self.should_grow() {
-            self.grow(gc);
-        }
-        self.create_short_string(InlineShortString::new(s), hash, current_white, gc)
+        self.intern_bytes(s.as_bytes(), gc)
     }
 
     #[inline]
     pub fn intern_owned(&mut self, s: String, gc: &mut GC) -> CreateResult {
+        self.intern_bytes_owned(s.into_bytes(), gc)
+    }
+
+    #[inline]
+    pub fn intern_bytes(&mut self, bytes: &[u8], gc: &mut GC) -> CreateResult {
         let current_white = gc.current_white;
-        let slen = s.len();
+        let slen = bytes.len();
 
         if slen > Self::SHORT_STRING_LIMIT {
             let size = Self::long_string_size(slen);
-            let lua_string = LuaString::new(LuaStrRepr::Owned(s.into_boxed_str()), 0);
+            let lua_string = LuaString::from_bytes(LuaStrRepr::Owned(Box::<[u8]>::from(bytes)), 0);
             let gc_string =
                 GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
             let ptr = gc_string.as_str_ptr().unwrap();
@@ -153,9 +130,9 @@ impl StringInterner {
             return Ok(LuaValue::longstring(ptr));
         }
 
-        let hash = self.hash_string(&s);
+        let hash = self.hash_bytes(bytes);
 
-        if let Ok(index) = self.find_slot(hash, &s)
+        if let Ok(index) = self.find_slot(hash, bytes)
             && let Some(ts) = self.slots[index].occupied()
         {
             let gc_str = ts.as_ref();
@@ -168,7 +145,40 @@ impl StringInterner {
         if self.should_grow() {
             self.grow(gc);
         }
-        self.create_short_string(InlineShortString::new(&s), hash, current_white, gc)
+        self.create_short_string(InlineShortString::new(bytes), hash, current_white, gc)
+    }
+
+    #[inline]
+    pub fn intern_bytes_owned(&mut self, bytes: Vec<u8>, gc: &mut GC) -> CreateResult {
+        let current_white = gc.current_white;
+        let slen = bytes.len();
+
+        if slen > Self::SHORT_STRING_LIMIT {
+            let size = Self::long_string_size(slen);
+            let lua_string = LuaString::from_bytes(LuaStrRepr::Owned(bytes.into_boxed_slice()), 0);
+            let gc_string =
+                GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
+            let ptr = gc_string.as_str_ptr().unwrap();
+            gc.trace_object(gc_string)?;
+            return Ok(LuaValue::longstring(ptr));
+        }
+
+        let hash = self.hash_bytes(&bytes);
+
+        if let Ok(index) = self.find_slot(hash, &bytes)
+            && let Some(ts) = self.slots[index].occupied()
+        {
+            let gc_str = ts.as_ref();
+            if gc_str.header.is_white() {
+                ts.as_mut_ref().header.make_black();
+            }
+            return Ok(LuaValue::shortstring(ts));
+        }
+
+        if self.should_grow() {
+            self.grow(gc);
+        }
+        self.create_short_string(InlineShortString::new(&bytes), hash, current_white, gc)
     }
 
     #[inline]
@@ -180,12 +190,12 @@ impl StringInterner {
         gc: &mut GC,
     ) -> CreateResult {
         let size = Self::short_string_size();
-        let lua_string = LuaString::new(LuaStrRepr::Inline(s), hash);
+        let lua_string = LuaString::from_bytes(LuaStrRepr::Inline(s), hash);
         let gc_string =
             GcObjectOwner::String(Box::new(GcString::new(lua_string, current_white, size)));
         let ptr = gc_string.as_str_ptr().unwrap();
 
-        let slot = match self.find_slot(hash, ptr.as_ref().data.str.as_str()) {
+        let slot = match self.find_slot(hash, ptr.as_ref().data.as_bytes()) {
             Ok(index) | Err(index) => index,
         };
         if matches!(self.slots[slot], StringSlot::Tombstone) {
@@ -199,7 +209,7 @@ impl StringInterner {
     }
 
     #[inline(always)]
-    fn hash_string(&self, s: &str) -> u64 {
+    fn hash_bytes(&self, s: &[u8]) -> u64 {
         self.hashbuilder.hash_one(s)
     }
 

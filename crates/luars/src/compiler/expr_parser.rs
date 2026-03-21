@@ -134,10 +134,7 @@ fn simpleexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             let string_content = parse_string_token_value(text, fs.lexer.current_token());
             match string_content {
                 Ok(bytes) => {
-                    let string = match String::from_utf8(bytes.clone()) {
-                        Ok(s) => fs.vm.create_string(&s).unwrap(),
-                        Err(_) => fs.vm.create_binary(bytes).unwrap(),
-                    };
+                    let string = fs.vm.create_bytes(&bytes).unwrap();
                     // Create VKSTR expression (not VK!) - will convert to VK when needed
                     *v = ExpDesc::new_vkstr(string);
                 }

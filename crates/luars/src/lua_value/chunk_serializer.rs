@@ -646,7 +646,7 @@ const TAG_FLOAT: u8 = 0x03; // LUA_VNUMFLT
 const TAG_INTEGER: u8 = 0x13; // LUA_VNUMINT
 const TAG_SHORT_STRING: u8 = 0x04; // LUA_VSHRSTR
 const TAG_LONG_STRING: u8 = 0x14; // LUA_VLNGSTR
-const TAG_BINARY: u8 = 0x24; // LUA_VBINARY (custom tag for binary data)
+const TAG_BINARY: u8 = 0x24; // legacy luars tag for non-UTF-8 byte-string constants
 
 #[allow(dead_code)]
 fn write_constant_with_pool(buf: &mut Vec<u8>, value: &LuaValue) -> Result<(), String> {
@@ -689,19 +689,24 @@ fn write_constant_with_dedup(
     } else if let Some(f) = value.as_float() {
         buf.push(TAG_FLOAT);
         write_f64(buf, f);
-    } else if let Some(lua_string) = value.as_str() {
-        // Use short string tag for strings <= LUAI_MAXSHORTLEN bytes, long string otherwise
-        if lua_string.len() <= LUAI_MAXSHORTLEN {
-            buf.push(TAG_SHORT_STRING);
+    } else if let Some(bytes) = value.as_bytes() {
+        if value.as_str().is_none() {
+            buf.push(TAG_BINARY);
+            write_u32(buf, bytes.len() as u32);
+            buf.extend_from_slice(bytes);
+        } else if let Some(lua_string) = value.as_str() {
+            // Use short string tag for strings <= LUAI_MAXSHORTLEN bytes, long string otherwise
+            if bytes.len() <= LUAI_MAXSHORTLEN {
+                buf.push(TAG_SHORT_STRING);
+            } else {
+                buf.push(TAG_LONG_STRING);
+            }
+            write_string_with_dedup(buf, lua_string, string_table)?;
         } else {
-            buf.push(TAG_LONG_STRING);
+            return Err(
+                "byte-string constant is missing both UTF-8 and raw-byte views".to_string(),
+            );
         }
-        write_string_with_dedup(buf, lua_string, string_table)?;
-    } else if let Some(binary) = value.as_binary() {
-        // Binary data: write as TAG_BINARY with raw bytes
-        buf.push(TAG_BINARY);
-        write_u32(buf, binary.len() as u32);
-        buf.extend_from_slice(binary);
     } else {
         buf.push(TAG_NIL);
     }
@@ -900,8 +905,7 @@ fn read_constant_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<L
         TAG_FLOAT => Ok(LuaValue::number(read_f64(cursor)?)),
         TAG_SHORT_STRING | TAG_LONG_STRING => {
             let s = read_string(cursor)?;
-            // Directly create string with VM
-            vm.create_string_owned(s)
+            vm.create_bytes(s.as_bytes())
                 .map_err(|e| format!("failed to create string: {}", e))
         }
         _ => Err(format!("unknown constant tag: {}", tag)),
@@ -1015,19 +1019,17 @@ fn read_constant_with_vm_dedup(
         TAG_FLOAT => Ok(LuaValue::number(read_f64(cursor)?)),
         TAG_SHORT_STRING | TAG_LONG_STRING => {
             let s = read_string_with_dedup(cursor, string_table)?;
-            // Directly create string with VM
-            vm.create_string_owned(s)
+            vm.create_bytes(s.as_bytes())
                 .map_err(|e| format!("failed to create string: {}", e))
         }
         TAG_BINARY => {
-            // Read binary data
+            // Read a non-UTF-8 byte-string constant from the legacy dump format.
             let len = read_u32(cursor)? as usize;
             let mut bytes = vec![0u8; len];
             cursor
                 .read_exact(&mut bytes)
                 .map_err(|e| format!("failed to read binary data: {}", e))?;
-            // Create binary value with VM
-            vm.create_binary(bytes)
+            vm.create_bytes(&bytes)
                 .map_err(|e| format!("failed to create binary: {}", e))
         }
         _ => Err(format!("unknown constant tag: {}", tag)),

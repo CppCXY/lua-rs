@@ -63,6 +63,28 @@ fn test_table_concat() {
 }
 
 #[test]
+fn test_table_concat_binary_separator() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local sep = string.char(255)
+        local t = {"A", "B", "C"}
+        local out = table.concat(t, sep)
+        assert(#out == 5)
+        assert(string.byte(out, 1) == 65)
+        assert(string.byte(out, 2) == 255)
+        assert(string.byte(out, 3) == 66)
+        assert(string.byte(out, 4) == 255)
+        assert(string.byte(out, 5) == 67)
+    "#,
+    );
+
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_table_sort() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
@@ -97,6 +119,28 @@ fn test_table_sort_with_comparator() {
     "#,
     );
 
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_table_sort_byte_strings() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local t = {"\xE1lo", "\0first :-)", "alo", "then this one", "45", "and a new"}
+        table.sort(t)
+
+        for i = #t, 2, -1 do
+          assert(not (t[i] < t[i - 1]))
+        end
+    "#,
+    );
+
+    if let Err(e) = &result {
+        eprintln!("Error: {}", e);
+    }
     assert!(result.is_ok());
 }
 

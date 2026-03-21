@@ -15,7 +15,7 @@ use crate::lua_value::{
 };
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    GC, GcBinary, GcCClosure, GcFunction, GcObjectOwner, GcRClosure, GcTable, GcThread, GcUpvalue,
+    GC, GcCClosure, GcFunction, GcObjectOwner, GcRClosure, GcTable, GcThread, GcUpvalue,
     GcUserdata, LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
 };
 use std::rc::Rc;
@@ -59,17 +59,18 @@ impl ObjectAllocator {
         self.strings.intern_owned(s, gc)
     }
 
-    /// Create a binary value from Vec<u8>
-    ///
+    /// Create a Lua string-like value from raw bytes.
+    /// All short byte strings are interned so Lua string equality keeps its fast path.
+    #[inline]
+    pub fn create_bytes(&mut self, gc: &mut GC, bytes: &[u8]) -> CreateResult {
+        self.strings.intern_bytes(bytes, gc)
+    }
+
+    /// Create a raw byte string from Vec<u8> without requiring UTF-8.
+    /// This compatibility path now uses the same byte-string interning rules as `create_bytes`.
     #[inline]
     pub fn create_binary(&mut self, gc: &mut GC, data: Vec<u8>) -> CreateResult {
-        let current_white = gc.current_white;
-        let size = (std::mem::size_of::<GcBinary>() + data.len()) as u32;
-        let gc_ptr = Box::new(GcBinary::new(data, current_white, size));
-        let gc_binary = GcObjectOwner::Binary(gc_ptr);
-        let ptr = gc_binary.as_binary_ptr().unwrap();
-        gc.trace_object(gc_binary)?;
-        Ok(LuaValue::binary(ptr))
+        self.strings.intern_bytes_owned(data, gc)
     }
 
     /// Create a substring from an existing string (optimized for string.sub)
@@ -84,14 +85,8 @@ impl ObjectAllocator {
         start: usize,
         end: usize,
     ) -> CreateResult {
-        // Get bytes - handle both string and binary types
-        let source_str = s_value.as_str();
-        let source_is_ascii = source_str.is_some_and(str::is_ascii);
-        let bytes = if let Some(s) = source_str {
-            s.as_bytes()
-        } else if let Some(b) = s_value.as_binary() {
-            b
-        } else {
+        let source_is_ascii = s_value.as_str().is_some_and(str::is_ascii);
+        let Some(bytes) = s_value.as_bytes() else {
             return self.create_string(gc, "");
         };
 
@@ -121,17 +116,7 @@ impl ObjectAllocator {
                 std::str::from_utf8_unchecked(substring_bytes)
             })
         } else {
-            match std::str::from_utf8(substring_bytes) {
-                Ok(valid_str) => {
-                    // Valid UTF-8 - intern as string
-                    self.create_string(gc, valid_str)
-                }
-                Err(_) => {
-                    // Invalid UTF-8 - create binary value to preserve original bytes
-                    // This is important for binary data like bytecode
-                    self.create_binary(gc, substring_bytes.to_vec())
-                }
-            }
+            self.create_bytes(gc, substring_bytes)
         }
     }
 

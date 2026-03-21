@@ -549,11 +549,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 let s_value = l.get_arg(value_idx).ok_or_else(|| {
                     l.error("bad argument to 'pack' (string expected)".to_string())
                 })?;
-                let bytes = if let Some(s_str) = s_value.as_str() {
-                    s_str.as_bytes()
-                } else if let Some(bin) = s_value.as_binary() {
-                    bin
-                } else {
+                let Some(bytes) = s_value.as_bytes() else {
                     return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
                 };
                 // Check for embedded null characters
@@ -592,11 +588,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 let s_value = l.get_arg(value_idx).ok_or_else(|| {
                     l.error("bad argument to 'pack' (string expected)".to_string())
                 })?;
-                let bytes = if let Some(s_str) = s_value.as_str() {
-                    s_str.as_bytes()
-                } else if let Some(bin) = s_value.as_binary() {
-                    bin
-                } else {
+                let Some(bytes) = s_value.as_bytes() else {
                     return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
                 };
 
@@ -642,11 +634,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 let s_value = l.get_arg(value_idx).ok_or_else(|| {
                     l.error("bad argument to 'pack' (string expected)".to_string())
                 })?;
-                let bytes = if let Some(s_str) = s_value.as_str() {
-                    s_str.as_bytes()
-                } else if let Some(bin) = s_value.as_binary() {
-                    bin
-                } else {
+                let Some(bytes) = s_value.as_bytes() else {
                     return Err(l.error("bad argument to 'pack' (string expected)".to_string()));
                 };
                 let str_len = bytes.len();
@@ -1063,11 +1051,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(2)
         .ok_or_else(|| l.error("bad argument #2 to 'unpack' (string expected)".to_string()))?;
 
-    let bytes: &[u8] = if let Some(binary) = s_value.as_binary() {
-        binary
-    } else if let Some(string) = s_value.as_str() {
-        string.as_bytes()
-    } else {
+    let Some(bytes) = s_value.as_bytes() else {
         return Err(l.error("bad argument #2 to 'unpack' (string expected)".to_string()));
     };
 
@@ -1467,12 +1451,8 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx >= bytes.len() {
                     return Err(l.error("unfinished string for format 'z'".to_string()));
                 }
-                // Create string if valid UTF-8, otherwise binary
                 let str_bytes = &bytes[start..idx];
-                let val = match std::str::from_utf8(str_bytes) {
-                    Ok(valid_str) => l.create_string(valid_str)?,
-                    Err(_) => l.create_binary(str_bytes.to_vec())?,
-                };
+                let val = l.create_bytes(str_bytes)?;
                 results.push(val);
                 idx += 1; // Skip null terminator
             }
@@ -1497,12 +1477,8 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + size > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                // Create string if valid UTF-8, otherwise binary
                 let str_bytes = &bytes[idx..idx + size];
-                let val = match std::str::from_utf8(str_bytes) {
-                    Ok(valid_str) => l.create_string(valid_str)?,
-                    Err(_) => l.create_binary(str_bytes.to_vec())?,
-                };
+                let val = l.create_bytes(str_bytes)?;
                 results.push(val);
                 idx += size;
             }
@@ -1583,12 +1559,8 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                     return Err(l.error("data string too short".to_string()));
                 }
 
-                // Create string if valid UTF-8, otherwise binary
                 let str_bytes = &bytes[idx..idx + str_len];
-                let val = match std::str::from_utf8(str_bytes) {
-                    Ok(valid_str) => l.create_string(valid_str)?,
-                    Err(_) => l.create_binary(str_bytes.to_vec())?,
-                };
+                let val = l.create_bytes(str_bytes)?;
                 results.push(val);
                 idx += str_len;
             }

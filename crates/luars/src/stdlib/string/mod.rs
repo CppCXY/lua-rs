@@ -62,11 +62,7 @@ pub fn create_string_lib() -> LibraryModule {
 /// Create a LuaValue from a byte slice: string if valid UTF-8, binary otherwise.
 #[inline]
 fn create_string_or_binary(l: &mut LuaState, bytes: &[u8]) -> LuaResult<LuaValue> {
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        l.create_string(s)
-    } else {
-        l.create_binary(bytes.to_vec())
-    }
+    l.create_bytes(bytes)
 }
 
 /// string.byte(s [, i [, j]]) - Return byte values
@@ -79,12 +75,7 @@ fn string_byte(l: &mut LuaState) -> LuaResult<usize> {
     let i = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
     let j = l.get_arg(3).and_then(|v| v.as_integer()).unwrap_or(i);
 
-    // Get bytes - works for both string and binary
-    let bytes = if let Some(s) = s_value.as_str() {
-        s.as_bytes()
-    } else if let Some(b) = s_value.as_binary() {
-        b
-    } else {
+    let Some(bytes) = s_value.as_bytes() else {
         return Err(l.error("bad argument #1 to 'string.byte' (string expected)".to_string()));
     };
 
@@ -167,10 +158,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
             l.vm_mut()
                 .create_string(unsafe { std::str::from_utf8_unchecked(&buf[..nargs]) })?
         } else {
-            match std::str::from_utf8(&buf[..nargs]) {
-                Ok(s) => l.vm_mut().create_string(s)?,
-                Err(_) => l.vm_mut().create_binary(buf[..nargs].to_vec())?,
-            }
+            l.create_bytes(&buf[..nargs])?
         };
         l.push_value(result)?;
         return Ok(1);
@@ -205,10 +193,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
         l.vm_mut()
             .create_string_owned(unsafe { String::from_utf8_unchecked(bytes) })?
     } else {
-        match String::from_utf8(bytes) {
-            Ok(s) => l.vm_mut().create_string_owned(s)?,
-            Err(e) => l.vm_mut().create_binary(e.into_bytes())?,
-        }
+        l.create_bytes(&bytes)?
     };
     l.push_value(result)?;
     Ok(1)
@@ -252,10 +237,8 @@ fn string_len(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'string.len' (string expected)".to_string()))?;
 
-    let len = if let Some(s) = s_value.as_str() {
-        s.len()
-    } else if let Some(b) = s_value.as_binary() {
-        b.len()
+    let len = if let Some(bytes) = s_value.as_bytes() {
+        bytes.len()
     } else {
         return Err(l.error("bad argument #1 to 'string.len' (string expected)".to_string()));
     };
@@ -334,13 +317,10 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("bad argument #1 to 'string.rep' (string expected)".to_string()))?;
 
     // Get raw byte slice WITHOUT cloning to owned Vec
-    let (s_bytes, is_binary) = if let Some(s_str) = s_value.as_str() {
-        (s_str.as_bytes(), false)
-    } else if let Some(binary) = s_value.as_binary() {
-        (binary, true)
-    } else {
+    let Some(s_bytes) = s_value.as_bytes() else {
         return Err(l.error("bad argument #1 to 'string.rep' (string expected)".to_string()));
     };
+    let input_is_text = s_value.as_str().is_some();
 
     // Get parameters
     let n_value = l.get_arg(2);
@@ -372,14 +352,9 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     // Get separator bytes WITHOUT cloning
     // Bind sep_value to extend its lifetime past the borrow
     let sep_owned = sep_value;
+    let sep_is_text = sep_owned.as_ref().is_none_or(|v| v.as_str().is_some());
     let sep_bytes: &[u8] = if let Some(ref v) = sep_owned {
-        if let Some(s) = v.as_str() {
-            s.as_bytes()
-        } else if let Some(b) = v.as_binary() {
-            b
-        } else {
-            &[]
-        }
+        v.as_bytes().unwrap_or(&[])
     } else {
         &[]
     };
@@ -407,14 +382,13 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    // Return binary if input was binary, otherwise string
-    let result_val = if is_binary {
-        vm.create_binary(result)?
-    } else {
+    let result_val = if input_is_text && sep_is_text {
         // Input was valid UTF-8, repetition is also valid UTF-8
         // SAFETY: repeating valid UTF-8 produces valid UTF-8
         let s = unsafe { String::from_utf8_unchecked(result) };
         vm.create_string_owned(s)?
+    } else {
+        l.create_bytes(&result)?
     };
     l.push_value(result_val)?;
     Ok(1)
@@ -427,12 +401,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         l.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
     })?;
 
-    // Accept both string and binary types
-    let (s_bytes, is_binary) = if let Some(s) = s_value.as_str() {
-        (s.as_bytes(), false)
-    } else if let Some(bytes) = s_value.as_binary() {
-        (bytes, true)
-    } else {
+    let Some(s_bytes) = s_value.as_bytes() else {
         return Err(l.error("bad argument #1 to 'string.reverse' (string expected)".to_string()));
     };
 
@@ -441,11 +410,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     let is_ascii = s_bytes.is_ascii();
 
     // Stack buffer for short strings (most common case)
-    let result = if is_binary {
-        let mut reversed = s_bytes.to_vec();
-        reversed.reverse();
-        vm.create_binary(reversed)?
-    } else if len <= 256 {
+    let result = if len <= 256 {
         let mut buf = [0u8; 256];
         buf[..len].copy_from_slice(s_bytes);
         buf[..len].reverse();
@@ -453,11 +418,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
             vm.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..len]) })?
         } else {
-            // Non-ASCII: reversed bytes may not be valid UTF-8
-            match std::str::from_utf8(&buf[..len]) {
-                Ok(s) => vm.create_string(s)?,
-                Err(_) => vm.create_binary(buf[..len].to_vec())?,
-            }
+            l.create_bytes(&buf[..len])?
         }
     } else {
         let mut reversed = s_bytes.to_vec();
@@ -466,10 +427,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
             vm.create_string_owned(unsafe { String::from_utf8_unchecked(reversed) })?
         } else {
-            match String::from_utf8(reversed) {
-                Ok(s) => vm.create_string_owned(s)?,
-                Err(e) => vm.create_binary(e.into_bytes())?,
-            }
+            l.create_bytes(&reversed)?
         }
     };
 
@@ -484,12 +442,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| crate::stdlib::debug::argerror(l, 1, "string expected"))?;
 
-    // Get string data - handle both string and binary types
-    let s_bytes = if let Some(s) = s_value.as_str() {
-        s.as_bytes()
-    } else if let Some(bytes) = s_value.as_binary() {
-        bytes
-    } else {
+    let Some(s_bytes) = s_value.as_bytes() else {
         return Err(crate::stdlib::debug::arg_typeerror(
             l, 1, "string", &s_value,
         ));

@@ -1757,10 +1757,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else if ra.is_number() && rb.is_number() {
                             lt_num(ra, rb)
                         } else if ttisstring(ra) && ttisstring(rb) {
-                            // contain binary string comparison
-                            // String comparison
-                            let sa = ra.as_str_bytes();
-                            let sb = rb.as_str_bytes();
+                            let sa = ra.as_bytes();
+                            let sb = rb.as_bytes();
 
                             if let (Some(sa), Some(sb)) = (sa, sb) {
                                 sa < sb
@@ -1800,10 +1798,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else if ra.is_number() && rb.is_number() {
                             le_num(ra, rb)
                         } else if ttisstring(ra) && ttisstring(rb) {
-                            // contain binary string comparison
-                            // String comparison
-                            let sa = ra.as_str_bytes();
-                            let sb = rb.as_str_bytes();
+                            let sa = ra.as_bytes();
+                            let sb = rb.as_bytes();
 
                             if let (Some(sa), Some(sb)) = (sa, sb) {
                                 sa <= sb

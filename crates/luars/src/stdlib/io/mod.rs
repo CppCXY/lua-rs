@@ -12,10 +12,7 @@ use std::io::{self, Write};
 /// Create a LuaValue from raw bytes. If valid UTF-8 and ASCII-only, creates a string.
 /// Otherwise creates a binary value to preserve exact byte values.
 fn bytes_to_lua_value(l: &mut LuaState, bytes: Vec<u8>) -> LuaResult<LuaValue> {
-    match String::from_utf8(bytes.clone()) {
-        Ok(s) => l.create_string(&s),
-        Err(_) => l.create_binary(bytes),
-    }
+    l.create_bytes(&bytes)
 }
 
 pub fn create_io_lib() -> LibraryModule {
@@ -209,14 +206,12 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
             // Write all arguments
             let mut i = 1;
             while let Some(arg) = l.get_arg(i) {
-                let write_result = if let Some(s) = arg.as_str() {
-                    lua_file.write(s)
+                let write_result = if let Some(bytes) = arg.as_bytes() {
+                    lua_file.write_bytes(bytes)
                 } else if let Some(n) = arg.as_integer() {
                     lua_file.write(&n.to_string())
                 } else if let Some(n) = arg.as_float() {
                     lua_file.write(&n.to_string())
-                } else if let Some(b) = arg.as_binary() {
-                    lua_file.write_bytes(b)
                 } else {
                     return Err(crate::stdlib::debug::arg_typeerror(
                         l,

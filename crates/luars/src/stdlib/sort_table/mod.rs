@@ -135,8 +135,8 @@ fn sort_buffer(
             // All strings
             if buf[0].is_string() {
                 buf.sort_unstable_by(|a, b| {
-                    let sa = a.as_str().unwrap_or("");
-                    let sb = b.as_str().unwrap_or("");
+                    let sa = a.as_bytes().unwrap_or(&[]);
+                    let sb = b.as_bytes().unwrap_or(&[]);
                     sa.cmp(sb)
                 });
                 return Ok(());
