@@ -216,8 +216,9 @@ fn coroutine_wrap(l: &mut LuaState) -> LuaResult<usize> {
 fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
     // Get the thread from upvalue
     let mut thread_val = LuaValue::nil();
-    if let Some(frame) = l.current_frame()
-        && let Some(cclosure) = frame.func.as_cclosure()
+    if let Some(frame_idx) = l.call_depth().checked_sub(1)
+        && let Some(func_val) = l.get_frame_func(frame_idx)
+        && let Some(cclosure) = func_val.as_cclosure()
     {
         // Check if it's a C closure (coroutine.wrap creates a C closure)
 
@@ -225,7 +226,7 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
             // Upvalue should be closed with the thread value
             thread_val = *upval;
         }
-    };
+    }
 
     if !thread_val.is_thread() {
         return Err(l.error("invalid wrapped coroutine".to_string()));

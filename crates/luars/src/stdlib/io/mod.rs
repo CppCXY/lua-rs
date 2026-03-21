@@ -580,10 +580,14 @@ fn io_lines_next(l: &mut LuaState) -> LuaResult<usize> {
         Some(v) if v.is_table() => v,
         _ => {
             // Get from upvalue (standalone call)
-            if let Some(frame) = l.current_frame() {
-                if let Some(cclosure) = frame.func.as_cclosure() {
-                    if let Some(upval) = cclosure.upvalues().first() {
-                        *upval
+            if let Some(frame_idx) = l.call_depth().checked_sub(1) {
+                if let Some(func_val) = l.get_frame_func(frame_idx) {
+                    if let Some(cclosure) = func_val.as_cclosure() {
+                        if let Some(upval) = cclosure.upvalues().first() {
+                            *upval
+                        } else {
+                            return Err(l.error("iterator state not found".to_string()));
+                        }
                     } else {
                         return Err(l.error("iterator state not found".to_string()));
                     }

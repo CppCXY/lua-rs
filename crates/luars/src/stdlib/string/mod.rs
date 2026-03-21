@@ -891,9 +891,12 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
 /// Mirrors C Lua's gmatch_aux: skips matches whose end == lastmatch
 /// to avoid infinite loops with empty patterns.
 fn gmatch_iterator_lazy(l: &mut LuaState) -> LuaResult<usize> {
+    let frame_idx = l
+        .call_depth()
+        .checked_sub(1)
+        .ok_or_else(|| l.error("gmatch iterator: no active call frame".to_string()))?;
     let func_val = l
-        .current_frame()
-        .map(|frame| frame.func)
+        .get_frame_func(frame_idx)
         .ok_or_else(|| l.error("gmatch iterator: no active call frame".to_string()))?;
 
     let cclosure = func_val

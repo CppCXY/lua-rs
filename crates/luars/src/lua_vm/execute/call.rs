@@ -2,7 +2,7 @@
 ///
 /// Implements CALL and TAILCALL opcodes via `precall` / `pretailcall`.
 use crate::{
-    CallInfo, Chunk, LUA_MASKCALL, LUA_MASKRET, LuaFunction, LuaValue,
+    CallInfo, Chunk, LUA_MASKCALL, LUA_MASKRET, LuaValue,
     lua_vm::{
         CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, TmKind, call_info::call_status,
         execute::hook::hook_on_return, get_metamethod_event, lua_limits::EXTRA_STACK,
@@ -121,7 +121,7 @@ pub fn call_c_function(
     let call_base = func_idx + 1;
 
     // Push C frame (lean path)
-    lua_state.push_c_frame(&func, call_base, nargs, nresults)?;
+    lua_state.push_c_frame(call_base, nargs, nresults)?;
 
     // Call hook (cold — almost never fires)
     if lua_state.hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
@@ -214,15 +214,15 @@ pub fn call_c_function(
 pub fn pretailcall_lua(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
-    func: LuaValue,
-    lua_func: &LuaFunction,
     func_idx: usize,
     base: usize,
     nargs: usize,
+    numparams: usize,
+    max_stack_size: usize,
+    chunk_ptr: *const Chunk,
+    upvalue_ptrs: *const crate::gc::UpvaluePtr,
 ) -> LuaResult<*const Chunk> {
-    let chunk = lua_func.chunk();
-    let new_chunk_ptr = chunk as *const Chunk;
-    let numparams = chunk.param_count;
+    let new_chunk_ptr = chunk_ptr;
 
     // Get current frame's func position (handles vararg func_offset)
     let func_offset = ci.func_offset;
@@ -246,7 +246,7 @@ pub fn pretailcall_lua(
     }
 
     let actual_nargs = nargs.max(numparams);
-    let frame_top = func_pos + 1 + chunk.max_stack_size;
+    let frame_top = func_pos + 1 + max_stack_size;
 
     // Ensure physical stack is large enough
     let needed_physical = frame_top + EXTRA_STACK;
@@ -255,7 +255,6 @@ pub fn pretailcall_lua(
     }
 
     // Batch update CI fields (reuse current frame, no push/pop)
-    ci.func = func;
     ci.base = new_base;
     ci.func_offset = 1;
     ci.top = frame_top as u32;
@@ -267,7 +266,7 @@ pub fn pretailcall_lua(
     };
     ci.call_status |= call_status::CIST_TAIL;
     ci.chunk_ptr = new_chunk_ptr;
-    ci.upvalue_ptrs = unsafe { func.as_lua_function_unchecked().upvalues().as_ptr() };
+    ci.upvalue_ptrs = upvalue_ptrs;
 
     lua_state.set_top_raw(new_base + actual_nargs);
 
@@ -298,7 +297,7 @@ fn call_c_function_tailcall(
     let call_base = func_idx + 1;
 
     // Use lean push_c_frame
-    lua_state.push_c_frame(&func, call_base, nargs, -1)?;
+    lua_state.push_c_frame(call_base, nargs, -1)?;
 
     // Call the function
     let n = if let Some(c_func) = c_func {
@@ -359,18 +358,37 @@ pub fn precall(
     nargs: usize,
     nresults: i32,
 ) -> LuaResult<bool> {
-    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
     if func.is_lua_function() {
-        let lua_func = unsafe { func.as_lua_function_unchecked() };
-        let chunk = lua_func.chunk();
+        let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
+            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let chunk = lua_func.chunk();
+            (
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                lua_func.upvalues().as_ptr(),
+            )
+        };
+        if nargs == param_count
+            && lua_state.try_push_lua_frame_exact(
+                func_idx + 1,
+                nresults,
+                max_stack_size,
+                chunk_ptr,
+                upvalue_ptrs,
+            )?
+        {
+            return Ok(true);
+        }
         lua_state.push_lua_frame(
-            &func,
             func_idx + 1,
             nargs,
             nresults,
-            chunk.param_count,
-            chunk.max_stack_size,
-            chunk as *const _,
+            param_count,
+            max_stack_size,
+            chunk_ptr,
+            upvalue_ptrs,
         )?;
         return Ok(true);
     } else if func.is_c_callable() {
@@ -393,19 +411,43 @@ fn precall_meta(
     let (nargs, ccmt_depth) = resolve_call_chain(lua_state, func_idx, nargs)?;
 
     // After resolution, func_idx has the real callable
-    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
 
     if func.is_lua_function() {
-        let lua_func = unsafe { func.as_lua_function_unchecked() };
-        let chunk = lua_func.chunk();
+        let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
+            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let chunk = lua_func.chunk();
+            (
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                lua_func.upvalues().as_ptr(),
+            )
+        };
+        if nargs == param_count
+            && lua_state.try_push_lua_frame_exact(
+                func_idx + 1,
+                nresults,
+                max_stack_size,
+                chunk_ptr,
+                upvalue_ptrs,
+            )?
+        {
+            if ccmt_depth > 0 {
+                let fi = lua_state.call_depth() - 1;
+                let status = call_status::set_ccmt_count(0, ccmt_depth);
+                lua_state.get_call_info_mut(fi).call_status |= status;
+            }
+            return Ok(true);
+        }
         lua_state.push_lua_frame(
-            &func,
             func_idx + 1,
             nargs,
             nresults,
-            chunk.param_count,
-            chunk.max_stack_size,
-            chunk as *const _,
+            param_count,
+            max_stack_size,
+            chunk_ptr,
+            upvalue_ptrs,
         )?;
         if ccmt_depth > 0 {
             let fi = lua_state.call_depth() - 1;
@@ -420,6 +462,7 @@ fn precall_meta(
         return Ok(false);
     }
 
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
     Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
 }
 
@@ -437,11 +480,30 @@ pub fn pretailcall(
     func_idx: usize,
     narg1: usize,
 ) -> LuaResult<bool> {
-    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
     if func.is_lua_function() {
-        let lua_func = unsafe { func.as_lua_function_unchecked() };
+        let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
+            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let chunk = lua_func.chunk();
+            (
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                lua_func.upvalues().as_ptr(),
+            )
+        };
         let base = ci.base;
-        pretailcall_lua(lua_state, ci, func, lua_func, func_idx, base, narg1 - 1)?;
+        pretailcall_lua(
+            lua_state,
+            ci,
+            func_idx,
+            base,
+            narg1 - 1,
+            param_count,
+            max_stack_size,
+            chunk_ptr,
+            upvalue_ptrs,
+        )?;
         return Ok(true);
     } else if func.is_c_callable() {
         call_c_function_tailcall(lua_state, func_idx, narg1 - 1)?;
@@ -462,12 +524,31 @@ fn pretailcall_meta(
     let nargs = narg1 - 1;
     let (actual_nargs, _) = resolve_call_chain(lua_state, func_idx, nargs)?;
 
-    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
 
     if func.is_lua_function() {
-        let lua_func = unsafe { func.as_lua_function_unchecked() };
+        let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
+            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let chunk = lua_func.chunk();
+            (
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                lua_func.upvalues().as_ptr(),
+            )
+        };
         let base = ci.base;
-        pretailcall_lua(lua_state, ci, func, lua_func, func_idx, base, actual_nargs)?;
+        pretailcall_lua(
+            lua_state,
+            ci,
+            func_idx,
+            base,
+            actual_nargs,
+            param_count,
+            max_stack_size,
+            chunk_ptr,
+            upvalue_ptrs,
+        )?;
         return Ok(true);
     }
 
@@ -476,6 +557,7 @@ fn pretailcall_meta(
         return Ok(false);
     }
 
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
     Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
 }
 

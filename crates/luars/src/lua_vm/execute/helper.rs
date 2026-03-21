@@ -1020,9 +1020,8 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaRes
     let _nresults = ci.nresults();
 
     // Get the chunk to read the interrupted instruction
-    let func_value = ci.func;
-    if let Some(lua_func) = func_value.as_lua_function() {
-        let chunk = lua_func.chunk();
+    if !ci.chunk_ptr.is_null() {
+        let chunk = unsafe { &*ci.chunk_ptr };
         let code = &chunk.code;
 
         if saved_pc > 0 && saved_pc <= code.len() {

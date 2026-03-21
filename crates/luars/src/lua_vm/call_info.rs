@@ -2,7 +2,7 @@
 // Equivalent to CallInfo structure in Lua C API (lstate.h)
 
 use crate::gc::UpvaluePtr;
-use crate::lua_value::{Chunk, LuaValue};
+use crate::lua_value::Chunk;
 
 /// Call status flags (equivalent to Lua's CIST_* flags)
 pub mod call_status {
@@ -84,11 +84,8 @@ pub mod call_status {
 /// This is similar to CallInfo in lstate.h
 #[derive(Clone)]
 pub struct CallInfo {
-    /// The function being called (contains FunctionId or CFunction)
-    pub func: LuaValue,
-
     /// Base index in the stack for this call frame's registers
-    /// Equivalent to Lua's CallInfo.func (but we store index, not pointer)
+    /// Combined with `func_offset`, this recovers the frame's function slot.
     /// NOTE: This may be updated by VARARGPREP after stack rearrangement
     pub base: usize,
 
@@ -137,9 +134,8 @@ pub struct CallInfo {
 
 impl CallInfo {
     /// Create a new call frame for a Lua function
-    pub fn new_lua(func: LuaValue, base: usize, nparams: usize) -> Self {
+    pub fn new_lua(base: usize, nparams: usize) -> Self {
         Self {
-            func,
             base,
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
@@ -153,9 +149,8 @@ impl CallInfo {
     }
 
     /// Create a new call frame for a C function
-    pub fn new_c(func: LuaValue, base: usize, nparams: usize) -> Self {
+    pub fn new_c(base: usize, nparams: usize) -> Self {
         Self {
-            func,
             base,
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),
@@ -225,12 +220,16 @@ impl CallInfo {
     pub fn set_pending_finish_get(&mut self, value: i32) {
         self.aux_i32 = value;
     }
+
+    #[inline(always)]
+    pub fn func_index(&self) -> usize {
+        self.base - self.func_offset as usize
+    }
 }
 
 impl Default for CallInfo {
     fn default() -> Self {
         Self {
-            func: LuaValue::nil(),
             base: 0,
             chunk_ptr: std::ptr::null(),
             upvalue_ptrs: std::ptr::null(),

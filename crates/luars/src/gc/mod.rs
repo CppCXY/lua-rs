@@ -2099,9 +2099,8 @@ impl GC {
             // all function positions (e.g., during generational GC minor
             // collections where the thread is re-traversed from grayagain).
             for ci_idx in 0..state.call_depth() {
-                let ci_func = &state.call_stack[ci_idx].func;
-                if !ci_func.is_nil() {
-                    self.mark_value(l, ci_func);
+                if let Some(ci_func) = state.get_frame_func(ci_idx) {
+                    self.mark_value(l, &ci_func);
                     count += 1;
                 }
             }

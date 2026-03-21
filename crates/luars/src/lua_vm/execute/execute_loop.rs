@@ -2350,10 +2350,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let proto_idx = instr.get_bx() as usize;
                     savestate!();
-                    let upvalue_ptrs = unsafe {
-                        let lf: *const _ = ci.func.as_lua_function_unchecked();
-                        (&*lf).upvalues()
-                    };
+                    let upvalue_ptrs =
+                        unsafe { std::slice::from_raw_parts(ci.upvalue_ptrs, chunk.upvalue_count) };
                     push_closure(lua_state, base, a, proto_idx, chunk, upvalue_ptrs)?;
 
                     lua_state.check_gc_in_loop(ci, pc, base + a + 1, &mut trap);

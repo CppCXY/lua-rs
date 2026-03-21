@@ -328,7 +328,6 @@ impl LuaState {
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
             **ci = CallInfo {
-                func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
@@ -342,7 +341,6 @@ impl LuaState {
         } else {
             // Slow path: allocate new CallInfo (first time reaching this depth)
             let ci = Box::new(CallInfo {
-                func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
@@ -375,15 +373,52 @@ impl LuaState {
     /// Caller MUST already know `func` is a Lua function and provide the chunk metadata.
     /// Skips the function-type dispatch entirely.
     #[inline(always)]
+    pub(crate) fn try_push_lua_frame_exact(
+        &mut self,
+        base: usize,
+        nresults: i32,
+        max_stack_size: usize,
+        chunk_ptr: *const crate::lua_value::Chunk,
+        upvalue_ptrs: *const crate::gc::UpvaluePtr,
+    ) -> LuaResult<bool> {
+        if self.call_depth >= self.safe_state.max_call_depth {
+            self.push_lua_frame_overflow()?;
+            return Ok(false);
+        }
+
+        let frame_top = base + max_stack_size;
+        if frame_top + EXTRA_STACK > self.stack.len() || self.call_depth >= self.call_stack.len() {
+            return Ok(false);
+        }
+
+        let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+        **ci = CallInfo {
+            base,
+            func_offset: 1,
+            top: frame_top as u32,
+            pc: 0,
+            call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
+            nextraargs: 0,
+            chunk_ptr,
+            upvalue_ptrs,
+            aux_i32: -1,
+        };
+
+        self.call_depth += 1;
+        self.stack_top = frame_top;
+        Ok(true)
+    }
+
+    #[inline(always)]
     pub(crate) fn push_lua_frame(
         &mut self,
-        func: &LuaValue,
         base: usize,
         nparams: usize,
         nresults: i32,
         param_count: usize,
         max_stack_size: usize,
         chunk_ptr: *const crate::lua_value::Chunk,
+        upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<()> {
         // Check stack depth (cold — almost never triggers)
         if self.call_depth >= self.safe_state.max_call_depth {
@@ -392,7 +427,6 @@ impl LuaState {
 
         // Pre-compute common values
         let frame_top = base + max_stack_size;
-        let upvalue_ptrs = unsafe { func.as_lua_function_unchecked().upvalues().as_ptr() };
 
         // Fast path for the common case: enough params (no nil filling needed),
         // stack already large enough, call_stack slot available for reuse.
@@ -403,30 +437,27 @@ impl LuaState {
             && self.call_depth < self.call_stack.len()
         {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) }.as_mut();
-            ci.func = *func;
-            ci.base = base;
-            ci.func_offset = 1;
-            ci.top = frame_top as u32;
-            ci.pc = 0;
-            ci.call_status = call_status::with_nresults(call_status::CIST_LUA, nresults);
-            ci.nextraargs = (nparams - param_count) as i32;
-            ci.chunk_ptr = chunk_ptr;
-            ci.upvalue_ptrs = upvalue_ptrs;
-            ci.aux_i32 = -1;
+            *ci = CallInfo {
+                base,
+                func_offset: 1,
+                top: frame_top as u32,
+                pc: 0,
+                call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
+                nextraargs: (nparams - param_count) as i32,
+                chunk_ptr,
+                upvalue_ptrs,
+                aux_i32: -1,
+            };
 
             self.call_depth += 1;
 
-            // Set stack_top to frame_top for GC safety
-            if frame_top > self.stack_top {
-                self.stack_top = frame_top;
-            }
+            self.stack_top = frame_top;
 
             return Ok(());
         }
 
         // Slow path: handle extra args, nil filling, stack resize, new slot allocation
         self.push_lua_frame_slow(
-            func,
             base,
             nparams,
             nresults,
@@ -458,7 +489,6 @@ impl LuaState {
     #[inline(never)]
     fn push_lua_frame_slow(
         &mut self,
-        func: &LuaValue,
         base: usize,
         nparams: usize,
         nresults: i32,
@@ -498,19 +528,19 @@ impl LuaState {
         // Reuse existing CallInfo slot or allocate new one
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
-            ci.func = *func;
-            ci.base = base;
-            ci.func_offset = 1;
-            ci.top = frame_top as u32;
-            ci.pc = 0;
-            ci.call_status = call_status::with_nresults(call_status::CIST_LUA, nresults);
-            ci.nextraargs = nextraargs;
-            ci.chunk_ptr = chunk_ptr;
-            ci.upvalue_ptrs = upvalue_ptrs;
-            ci.aux_i32 = -1;
+            **ci = CallInfo {
+                base,
+                func_offset: 1,
+                top: frame_top as u32,
+                pc: 0,
+                call_status: call_status::with_nresults(call_status::CIST_LUA, nresults),
+                nextraargs,
+                chunk_ptr,
+                upvalue_ptrs,
+                aux_i32: -1,
+            };
         } else {
             self.call_stack.push(Box::new(CallInfo {
-                func: *func,
                 base,
                 func_offset: 1,
                 top: frame_top as u32,
@@ -525,10 +555,7 @@ impl LuaState {
 
         self.call_depth += 1;
 
-        // Set stack_top to frame_top for GC safety
-        if frame_top > self.stack_top {
-            self.stack_top = frame_top;
-        }
+        self.stack_top = frame_top;
 
         Ok(())
     }
@@ -539,7 +566,6 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn push_c_frame(
         &mut self,
-        func: &LuaValue,
         base: usize,
         nargs: usize,
         nresults: i32,
@@ -564,19 +590,19 @@ impl LuaState {
         // Reuse existing CallInfo slot or allocate
         if self.call_depth < self.call_stack.len() {
             let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) }.as_mut();
-            ci.func = *func;
-            ci.base = base;
-            ci.func_offset = 1;
-            ci.top = frame_top as u32;
-            ci.pc = 0;
-            ci.call_status = call_status::with_nresults(CIST_C, nresults);
-            ci.nextraargs = 0;
-            ci.chunk_ptr = std::ptr::null();
-            ci.upvalue_ptrs = std::ptr::null();
-            ci.aux_i32 = -1;
+            *ci = CallInfo {
+                base,
+                chunk_ptr: std::ptr::null(),
+                upvalue_ptrs: std::ptr::null(),
+                func_offset: 1,
+                top: frame_top as u32,
+                pc: 0,
+                call_status: call_status::with_nresults(CIST_C, nresults),
+                nextraargs: 0,
+                aux_i32: -1,
+            };
         } else {
             self.call_stack.push(Box::new(CallInfo {
-                func: *func,
                 base,
                 chunk_ptr: std::ptr::null(),
                 upvalue_ptrs: std::ptr::null(),
@@ -591,14 +617,7 @@ impl LuaState {
 
         self.call_depth += 1;
 
-        // Raise stack_top to cover the frame's arguments (like push_lua_frame).
-        // C functions use push_value_unchecked which writes to stack_top,
-        // so stack_top must be at least frame_top to avoid overwriting
-        // caller's registers that happen to sit above the old stack_top.
-        // This matches C Lua's `L->top.p = cb + 3` before calling C iterators.
-        if frame_top > self.stack_top {
-            self.stack_top = frame_top;
-        }
+        self.stack_top = frame_top;
 
         Ok(())
     }
@@ -781,9 +800,9 @@ impl LuaState {
         let mut location = String::new();
         if let Some(ci) = self.current_frame()
             && ci.is_lua()
-            && let Some(func_obj) = ci.func.as_lua_function()
+            && !ci.chunk_ptr.is_null()
         {
-            let chunk = func_obj.chunk();
+            let chunk = unsafe { &*ci.chunk_ptr };
             let source = match chunk.source_name.as_deref() {
                 Some(raw) => crate::compiler::format_source(raw),
                 None => "?".to_string(), // stripped debug info
@@ -819,9 +838,9 @@ impl LuaState {
             let idx = depth - 1 - level;
             if let Some(ci) = self.get_frame(idx)
                 && ci.is_lua()
-                && let Some(func_obj) = ci.func.as_lua_function()
+                && !ci.chunk_ptr.is_null()
             {
-                let chunk = func_obj.chunk();
+                let chunk = unsafe { &*ci.chunk_ptr };
                 let source = match chunk.source_name.as_deref() {
                     Some(raw) => crate::compiler::format_source(raw),
                     None => "?".to_string(),
@@ -889,8 +908,8 @@ impl LuaState {
             if ci.is_lua() {
                 // Lua function - get source and line info
 
-                if let Some(func_obj) = ci.func.as_lua_function() {
-                    let chunk = func_obj.chunk();
+                if !ci.chunk_ptr.is_null() {
+                    let chunk = unsafe { &*ci.chunk_ptr };
                     let source = chunk.source_name.as_deref().unwrap_or("[string]");
 
                     // Format source name (strip @ prefix if present)
@@ -1028,8 +1047,10 @@ impl LuaState {
         if !ci.is_lua() {
             return None;
         }
-        let func_obj = ci.func.as_lua_function()?;
-        let chunk = func_obj.chunk();
+        if ci.chunk_ptr.is_null() {
+            return None;
+        }
+        let chunk = unsafe { &*ci.chunk_ptr };
         let reg = stack_index.checked_sub(ci.base)?;
         // Use ci.pc (next instruction) as the PC for lookup,
         // because at TBC instruction, the variable's startpc equals the TBC PC
@@ -1534,7 +1555,8 @@ impl LuaState {
     pub fn get_frame_func(&self, frame_idx: usize) -> Option<LuaValue> {
         // Only return frame if it's within current call_depth (valid frames)
         if frame_idx < self.call_depth {
-            self.call_stack.get(frame_idx).map(|f| f.func)
+            let ci = self.call_stack.get(frame_idx)?.as_ref();
+            self.stack.get(ci.func_index()).copied()
         } else {
             None
         }
@@ -2489,13 +2511,13 @@ impl LuaState {
             let base = func_idx + 1;
 
             self.push_lua_frame(
-                &func,
                 base,
                 2, // nparams
                 1, // nresults — we only need the boolean
                 chunk.param_count,
                 chunk.max_stack_size,
                 chunk as *const _,
+                lua_func.upvalues().as_ptr(),
             )?;
 
             self.inc_n_ccalls()?;
