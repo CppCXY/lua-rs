@@ -71,8 +71,7 @@ pub fn resolve_call_chain(
                 LuaValue::cfunction(call_fn),
                 func,
             )?;
-            // CFunction is callable — will match on next iteration
-            continue;
+            return Ok((current_arg_count, ccmt_depth));
         }
 
         // Try to get __call metamethod
@@ -86,6 +85,10 @@ pub fn resolve_call_chain(
 
             current_arg_count =
                 insert_callable_before_args(lua_state, func_idx, current_arg_count, mm, func)?;
+
+            if mm.is_c_callable() || mm.is_lua_function() {
+                return Ok((current_arg_count, ccmt_depth));
+            }
 
             // Continue loop to check if mm also needs __call resolution
         } else {

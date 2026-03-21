@@ -228,25 +228,100 @@ pub fn call_tm_res(
     if metamethod.is_lua_function() {
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
+        let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
 
-        lua_state.push_lua_frame(
-            new_base,
-            2,
-            1,
-            chunk.param_count,
-            chunk.max_stack_size,
-            chunk as *const _,
-            lua_func.upvalues().as_ptr(),
-        )?;
+        if !(chunk.param_count == 2
+            && lua_state.try_push_lua_frame_exact(
+                new_base,
+                1,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?)
+        {
+            lua_state.push_lua_frame(
+                new_base,
+                2,
+                1,
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?;
+        }
         lua_state.inc_n_ccalls()?;
         let r = lua_execute(lua_state, caller_depth);
         lua_state.dec_n_ccalls();
         r?;
     } else if metamethod.is_cfunction() {
         call_c_function(lua_state, func_pos, 2, 1)?;
+    } else {
+        return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
+    }
+
+    let result_val = unsafe { *lua_state.stack_mut().as_ptr().add(func_pos) };
+    lua_state.set_top_raw(func_pos);
+
+    Ok(result_val)
+}
+
+pub fn call_tm_res1(
+    lua_state: &mut LuaState,
+    metamethod: LuaValue,
+    arg1: LuaValue,
+) -> LuaResult<LuaValue> {
+    let func_pos = {
+        let ci_top = lua_state.current_frame_top_unchecked();
+        let top = lua_state.get_top();
+        if top != ci_top {
+            lua_state.set_top_raw(ci_top);
+        }
+        ci_top
+    };
+
+    unsafe {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        *sp.add(func_pos) = metamethod;
+        *sp.add(func_pos + 1) = arg1;
+    }
+    lua_state.set_top_raw(func_pos + 2);
+
+    if metamethod.is_lua_function() {
+        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
+        let chunk = lua_func.chunk();
+        let upvalue_ptrs = lua_func.upvalues().as_ptr();
+
+        let new_base = func_pos + 1;
+        let caller_depth = lua_state.call_depth();
+
+        if !(chunk.param_count == 1
+            && lua_state.try_push_lua_frame_exact(
+                new_base,
+                1,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?)
+        {
+            lua_state.push_lua_frame(
+                new_base,
+                1,
+                1,
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?;
+        }
+        lua_state.inc_n_ccalls()?;
+        let r = lua_execute(lua_state, caller_depth);
+        lua_state.dec_n_ccalls();
+        r?;
+    } else if metamethod.is_cfunction() {
+        call_c_function(lua_state, func_pos, 1, 1)?;
     } else {
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
@@ -284,19 +359,30 @@ pub fn call_tm_res_into(
     if metamethod.is_lua_function() {
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
+        let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
 
-        lua_state.push_lua_frame(
-            new_base,
-            2,
-            1,
-            chunk.param_count,
-            chunk.max_stack_size,
-            chunk as *const _,
-            lua_func.upvalues().as_ptr(),
-        )?;
+        if !(chunk.param_count == 2
+            && lua_state.try_push_lua_frame_exact(
+                new_base,
+                1,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?)
+        {
+            lua_state.push_lua_frame(
+                new_base,
+                2,
+                1,
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?;
+        }
         lua_state.inc_n_ccalls()?;
         let r = lua_execute(lua_state, caller_depth);
         lua_state.dec_n_ccalls();
@@ -364,19 +450,30 @@ pub fn call_tm(
     if metamethod.is_lua_function() {
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
+        let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
         let new_base = func_pos + 1;
         let caller_depth = lua_state.call_depth();
 
-        lua_state.push_lua_frame(
-            new_base,
-            3,
-            0,
-            chunk.param_count,
-            chunk.max_stack_size,
-            chunk as *const _,
-            lua_func.upvalues().as_ptr(),
-        )?;
+        if !(chunk.param_count == 3
+            && lua_state.try_push_lua_frame_exact(
+                new_base,
+                0,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?)
+        {
+            lua_state.push_lua_frame(
+                new_base,
+                3,
+                0,
+                chunk.param_count,
+                chunk.max_stack_size,
+                chunk as *const _,
+                upvalue_ptrs,
+            )?;
+        }
         lua_state.inc_n_ccalls()?;
         let r = lua_execute(lua_state, caller_depth);
         lua_state.dec_n_ccalls();

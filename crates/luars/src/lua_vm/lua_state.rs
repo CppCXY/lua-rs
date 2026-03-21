@@ -4154,22 +4154,11 @@ impl LuaState {
                 }
                 // Check for __tostring metamethod
                 if let Some(mm) = get_metamethod_event(self, value, TmKind::ToString) {
-                    // Call __tostring metamethod
-                    let (succ, results) = self.pcall(mm, vec![*value])?;
-                    if !succ {
-                        return Err(self.error("error in __tostring metamethod".to_string()));
+                    let result = execute::call_tm_res1(self, mm, *value)?;
+                    if let Some(s) = result.as_str() {
+                        return Ok(s.to_string());
                     }
-                    if let Some(result) = results.first() {
-                        if let Some(s) = result.as_str() {
-                            return Ok(s.to_string());
-                        }
-                        // __tostring must return a string
-                        return Err(self.error("'__tostring' must return a string".to_string()));
-                    } else {
-                        return Err(
-                            self.error("error in __tostring metamethod: no result".to_string())
-                        );
-                    }
+                    return Err(self.error("'__tostring' must return a string".to_string()));
                 }
             }
         }
