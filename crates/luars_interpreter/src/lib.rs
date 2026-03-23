@@ -1,6 +1,8 @@
 use luars::LuaLanguageLevel;
 use luars::LuaVM;
 use luars::LuaValue;
+#[cfg(feature = "jit")]
+use luars::lua_vm::jit::TraceBackendKind;
 use luars::lua_vm::SafeOption;
 use luars::stdlib;
 use std::env;
@@ -411,6 +413,9 @@ fn lua_main() -> i32 {
     let mut vm = LuaVM::new(safe_option);
     if opts.luajit_mode {
         vm.set_language_level(LuaLanguageLevel::LuaJIT);
+        #[cfg(feature = "jit")]
+        vm.jit_runtime_mut()
+            .set_backend_kind(TraceBackendKind::Cranelift);
     }
     vm.open_stdlib(stdlib::Stdlib::All).unwrap();
 

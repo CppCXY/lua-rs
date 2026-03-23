@@ -46,6 +46,9 @@ pub struct TraceSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFallback {
+    MmBin {
+        tm: TmKind,
+    },
     MmBinI {
         imm: i64,
         tm: TmKind,

@@ -122,6 +122,19 @@ impl<'a> TraceRecorder<'a> {
                 | OpCode::Le
                 | OpCode::Test
                 | OpCode::TestSet => {
+                    if let Some(plan) = self.try_finish_tail_control_loop(
+                        trace_id,
+                        &instructions,
+                        &live_regs,
+                        &mut snapshots,
+                        &mut guards,
+                        &mut exits,
+                        pc,
+                        instr,
+                        opcode,
+                    )? {
+                        return Ok(plan);
+                    }
                     let (next_pc, guard, exit) =
                         self.record_conditional_guard(pc, instr, opcode, &mut snapshots)?;
                     guards.push(guard);
@@ -141,6 +154,72 @@ impl<'a> TraceRecorder<'a> {
         }
 
         Err(TraceAbortReason::TraceTooLong)
+    }
+
+    fn try_finish_tail_control_loop(
+        &self,
+        trace_id: TraceId,
+        instructions: &[TraceInstruction],
+        live_regs: &[u8],
+        snapshots: &mut Vec<TraceSnapshot>,
+        guards: &mut Vec<TraceGuard>,
+        exits: &mut Vec<TraceExit>,
+        pc: usize,
+        instr: Instruction,
+        opcode: OpCode,
+    ) -> Result<Option<TracePlan>, TraceAbortReason> {
+        let jmp_pc = pc + 1;
+        let Some(jmp) = self.chunk.code.get(jmp_pc).copied() else {
+            return Ok(None);
+        };
+        if jmp.get_opcode() != OpCode::Jmp || jmp.get_sj() >= 0 {
+            return Ok(None);
+        }
+
+        let target = Self::jump_target(jmp_pc, jmp)?;
+        if target != self.request.anchor_pc {
+            return Ok(None);
+        }
+
+        let exit_snapshot_index = snapshots.len();
+        snapshots.push(TraceSnapshot {
+            kind: TraceSnapshotKind::SideExit,
+            pc,
+            resume_pc: jmp_pc + 1,
+            base: self.request.base,
+            frame_depth: self.request.frame_depth,
+            live_regs: Vec::new(),
+        });
+
+        let (kind, operands, continue_when, actions) = Self::guard_metadata(instr, opcode)?;
+        guards.push(TraceGuard {
+            pc,
+            mode: TraceGuardMode::Control,
+            kind,
+            operands,
+            continue_when: !continue_when,
+            exit_snapshot_index,
+        });
+        exits.push(TraceExit {
+            kind: TraceExitKind::GuardExit,
+            source_pc: pc,
+            target_pc: jmp_pc + 1,
+            snapshot_index: exit_snapshot_index,
+            actions,
+        });
+
+        Self::finalize_live_regs(snapshots, live_regs);
+        Ok(Some(TracePlan {
+            id: trace_id,
+            chunk_key: self.request.chunk_key,
+            anchor_pc: self.request.anchor_pc,
+            end_pc: pc,
+            anchor_kind: self.request.anchor_kind,
+            instructions: instructions.to_vec(),
+            snapshots: snapshots.clone(),
+            guards: guards.clone(),
+            exits: exits.clone(),
+        }))
     }
 
     fn record_conditional_guard(
@@ -525,6 +604,11 @@ impl<'a> TraceRecorder<'a> {
         }
 
         let fallback = match fallback_opcode {
+            OpCode::MmBin => TraceFallback::MmBin {
+                tm: unsafe {
+                    crate::lua_vm::TmKind::from_u8_unchecked(fallback_instr.get_c() as u8)
+                },
+            },
             OpCode::MmBinI => TraceFallback::MmBinI {
                 imm: fallback_instr.get_sb() as i64,
                 tm: unsafe {
@@ -547,6 +631,13 @@ impl<'a> TraceRecorder<'a> {
 
     fn expected_fallback_opcode(opcode: OpCode) -> Option<OpCode> {
         match opcode {
+            OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Mod
+            | OpCode::Pow
+            | OpCode::Div
+            | OpCode::IDiv => Some(OpCode::MmBin),
             OpCode::AddI | OpCode::ShlI | OpCode::ShrI => Some(OpCode::MmBinI),
             OpCode::AddK
             | OpCode::SubK
@@ -810,7 +901,43 @@ mod tests {
                 .iter()
                 .all(|exit| exit.kind == TraceExitKind::GuardExit)
         );
-        assert!(plan.exits.iter().all(|exit| exit.target_pc == 1));
+    }
+
+    #[test]
+    fn records_add_with_mmbin_companion() {
+        let chunk = Chunk {
+            code: vec![
+                Instruction::create_abc(OpCode::Add, 0, 0, 1),
+                Instruction::create_abc(OpCode::MmBin, 0, 0, crate::lua_vm::TmKind::Add as u32),
+                Instruction::create_sj(OpCode::Jmp, -3),
+            ],
+            ..Chunk::new()
+        };
+
+        let trace = TraceRecorder::new(
+            JitPolicy::default(),
+            &chunk,
+            RecordingRequest {
+                chunk_key: &chunk as *const Chunk as usize,
+                anchor_pc: 0,
+                current_pc: 0,
+                base: 0,
+                frame_depth: 0,
+                anchor_kind: TraceAnchorKind::LoopBackedge,
+            },
+        )
+        .record(TraceId(12))
+        .expect("add trace should record across mmbin companion");
+
+        assert_eq!(trace.instructions.len(), 2);
+        assert_eq!(trace.instructions[0].opcode, OpCode::Add);
+        assert_eq!(
+            trace.instructions[0].fallback,
+            Some(TraceFallback::MmBin {
+                tm: crate::lua_vm::TmKind::Add,
+            })
+        );
+        assert_eq!(trace.instructions[1].opcode, OpCode::Jmp);
     }
 
     #[test]
@@ -926,6 +1053,36 @@ mod tests {
     }
 
     #[test]
+    fn records_tail_control_loop_trace() {
+        let mut chunk = Chunk::new();
+        chunk.code = vec![
+            Instruction::create_abc(OpCode::Add, 0, 0, 1),
+            Instruction::create_abc(OpCode::AddI, 1, 1, 127 + 1),
+            Instruction::create_abck(OpCode::Le, 1, 2, 0, false),
+            Instruction::create_sj(OpCode::Jmp, -4),
+        ];
+
+        let recorder = TraceRecorder::new(JitPolicy::default(), &chunk, recording_request(0));
+        let plan = recorder
+            .record(TraceId(17))
+            .expect("tail-control loop trace should record");
+
+        assert_eq!(plan.instructions.len(), 3);
+        assert_eq!(plan.instructions[0].opcode, OpCode::Add);
+        assert_eq!(plan.instructions[1].opcode, OpCode::AddI);
+        assert_eq!(plan.instructions[2].opcode, OpCode::Le);
+        assert!(plan.guards.iter().any(|guard| {
+            guard.mode == TraceGuardMode::Control
+                && guard.kind == TraceGuardKind::Le
+                && guard.operands == TraceGuardOperands::Registers { lhs: 1, rhs: 2 }
+                && !guard.continue_when
+        }));
+        assert!(plan.exits.iter().any(|exit| {
+            exit.kind == TraceExitKind::GuardExit && exit.source_pc == 2 && exit.target_pc == 4
+        }));
+    }
+
+    #[test]
     fn records_testset_guard_exit_action() {
         let mut chunk = Chunk::new();
         chunk.code = vec![
@@ -1034,6 +1191,7 @@ mod tests {
                 flip: false,
             })
         );
+
         assert_eq!(plan.instructions[1].opcode, OpCode::Jmp);
     }
 

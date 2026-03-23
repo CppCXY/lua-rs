@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 default = ["jit"]
 serde = ["luars/serde"]
-jit = ["luars/jit"]
+jit = ["luars/jit", "luars/jit-cranelift"]
 
 [dependencies]
 luars.workspace = true

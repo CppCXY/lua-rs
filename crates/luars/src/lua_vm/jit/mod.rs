@@ -3,14 +3,22 @@ use std::collections::HashMap;
 
 mod artifact;
 mod backend;
+#[cfg(feature = "jit-cranelift")]
+mod cranelift;
 mod lowering;
 mod record;
 mod recorder;
 mod replay;
 
+pub use artifact::{CompiledTraceArtifact, CompiledTraceExit, CompiledTraceGuard, CompiledTraceStep};
 pub use artifact::NativeTraceStub;
 pub use artifact::TraceArtifact;
-pub use backend::{NoopTraceBackend, TraceBackend, TraceBackendError, TraceCompilationUnit};
+pub use backend::{
+    LoweredTraceBackend, NoopTraceBackend, TraceBackend, TraceBackendError, TraceBackendKind,
+    TraceCompilationUnit, make_trace_backend,
+};
+#[cfg(feature = "jit-cranelift")]
+pub use cranelift::CraneliftTraceBackend;
 pub use lowering::{LoweredTrace, LoweredTraceAnchor, LoweredTraceInstruction};
 pub use record::{
     RecordingRequest, RecordingResult, TraceAnchorKind, TraceExit, TraceExitAction, TraceExitKind,
@@ -51,7 +59,7 @@ impl Default for JitPolicy {
         Self {
             hotloop_threshold: 57,
             max_trace_instructions: 256,
-            max_trace_replays: 16,
+            max_trace_replays: u16::MAX,
         }
     }
 }
@@ -92,6 +100,13 @@ impl JitRuntime {
         Self::default()
     }
 
+    pub fn with_backend_kind(kind: TraceBackendKind) -> Self {
+        Self {
+            backend: make_trace_backend(kind),
+            ..Self::default()
+        }
+    }
+
     pub fn with_backend(backend: Box<dyn TraceBackend>) -> Self {
         Self {
             backend,
@@ -107,8 +122,16 @@ impl JitRuntime {
         self.backend.name()
     }
 
+    pub fn backend_kind(&self) -> TraceBackendKind {
+        self.backend.kind()
+    }
+
     pub fn set_backend(&mut self, backend: Box<dyn TraceBackend>) {
         self.backend = backend;
+    }
+
+    pub fn set_backend_kind(&mut self, kind: TraceBackendKind) {
+        self.backend = make_trace_backend(kind);
     }
 
     fn compile_trace_artifact(&self, plan: TracePlan) -> TraceArtifact {
@@ -256,7 +279,7 @@ impl Default for JitRuntime {
             chunk_states: HashMap::new(),
             traces: Vec::new(),
             next_trace_id: 0,
-            backend: Box::new(NoopTraceBackend),
+            backend: make_trace_backend(TraceBackendKind::Lowered),
         }
     }
 }
@@ -283,6 +306,10 @@ mod tests {
     impl TraceBackend for PlaceholderBackend {
         fn name(&self) -> &'static str {
             "placeholder"
+        }
+
+        fn kind(&self) -> TraceBackendKind {
+            TraceBackendKind::Noop
         }
 
         fn compile(
@@ -337,6 +364,17 @@ mod tests {
         );
         assert_eq!(plan.exits.len(), 2);
         assert!(plan.exits.iter().all(|exit| exit.target_pc == 1));
+
+        let artifact = runtime
+            .trace_artifact(trace_id)
+            .expect("trace artifact missing");
+        match artifact {
+            TraceArtifact::Compiled(compiled) => {
+                assert_eq!(compiled.unit.lowered.id, trace_id);
+                assert_eq!(compiled.steps.len(), 2);
+            }
+            _ => panic!("expected compiled trace artifact"),
+        }
     }
 
     #[test]
@@ -379,8 +417,11 @@ mod tests {
             .expect("trace artifact missing");
         assert_eq!(artifact.plan(), &plan);
         match artifact {
+            TraceArtifact::Compiled(compiled) => {
+                assert_eq!(compiled.unit.lowered.anchor.pc, 1);
+            }
             TraceArtifact::NativePlaceholder(_) => {}
-            _ => panic!("expected native placeholder artifact"),
+            _ => panic!("expected compiled-capable artifact"),
         }
     }
 
@@ -427,5 +468,24 @@ mod tests {
             }
             _ => panic!("expected native placeholder artifact"),
         }
+    }
+
+    #[test]
+    fn runtime_can_switch_backend_kind() {
+        let mut runtime = JitRuntime::with_backend_kind(TraceBackendKind::Lowered);
+        assert_eq!(runtime.backend_kind(), TraceBackendKind::Lowered);
+        assert_eq!(runtime.backend_name(), "lowered");
+
+        runtime.set_backend_kind(TraceBackendKind::Noop);
+        assert_eq!(runtime.backend_kind(), TraceBackendKind::Noop);
+        assert_eq!(runtime.backend_name(), "noop");
+    }
+
+    #[cfg(feature = "jit-cranelift")]
+    #[test]
+    fn runtime_can_switch_to_cranelift_backend_kind() {
+        let runtime = JitRuntime::with_backend_kind(TraceBackendKind::Cranelift);
+        assert_eq!(runtime.backend_kind(), TraceBackendKind::Cranelift);
+        assert_eq!(runtime.backend_name(), "cranelift");
     }
 }

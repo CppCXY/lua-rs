@@ -5,9 +5,15 @@ use crate::lua_vm::execute::helper::{
 use crate::{Chunk, Instruction, LuaState, LuaValue, OpCode};
 
 use super::{
-    JitPolicy, TraceAbortReason, TraceExitAction, TraceGuard, TraceGuardKind, TraceGuardMode,
-    TraceGuardOperands, TracePlan,
+    CompiledTraceArtifact, CompiledTraceExit, JitPolicy, TraceAbortReason, TraceExitAction,
+    TraceGuard, TraceGuardKind, TraceGuardMode, TraceGuardOperands, TracePlan,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompiledTraceIterationOutcome {
+    LoopContinue,
+    ReturnPc(usize),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct MaterializedReg {
@@ -140,6 +146,138 @@ pub fn execute_trace(
     }
 
     Ok(plan.anchor_pc)
+}
+
+pub fn execute_compiled_trace(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    compiled: &CompiledTraceArtifact,
+    base: usize,
+    policy: JitPolicy,
+) -> Result<usize, TraceAbortReason> {
+    let replay_budget = policy.max_trace_replays.max(1) as usize;
+
+    for _ in 0..replay_budget {
+        match execute_compiled_trace_iteration(lua_state, chunk, compiled, base)? {
+            CompiledTraceIterationOutcome::LoopContinue => {}
+            CompiledTraceIterationOutcome::ReturnPc(next_pc) => return Ok(next_pc),
+        }
+    }
+
+    Ok(compiled.unit.plan.anchor_pc)
+}
+
+pub(crate) fn execute_compiled_trace_iteration(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    compiled: &CompiledTraceArtifact,
+    base: usize,
+) -> Result<CompiledTraceIterationOutcome, TraceAbortReason> {
+    execute_compiled_trace_iteration_from_step(lua_state, chunk, compiled, base, 0)
+}
+
+pub(crate) fn execute_compiled_trace_iteration_from_step(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    compiled: &CompiledTraceArtifact,
+    base: usize,
+    start_step: usize,
+) -> Result<CompiledTraceIterationOutcome, TraceAbortReason> {
+    for step in compiled.steps.iter().skip(start_step) {
+        let mut has_control_guard = false;
+        for compiled_guard in &step.guards {
+            has_control_guard |= compiled_guard.guard.mode == TraceGuardMode::Control;
+            if !evaluate_guard(lua_state, chunk, base, &compiled_guard.guard)? {
+                let materialized_exit = materialize_compiled_exit_state(
+                    lua_state,
+                    &compiled.unit.plan,
+                    &compiled_guard.exit,
+                    base,
+                )?;
+                commit_materialized_exit(lua_state, base, &materialized_exit);
+                return Ok(CompiledTraceIterationOutcome::ReturnPc(
+                    materialized_exit.target_pc,
+                ));
+            }
+        }
+        if has_control_guard {
+            continue;
+        }
+
+        let instr = *chunk
+            .code
+            .get(step.instruction.pc)
+            .ok_or(TraceAbortReason::UnsupportedControlFlow)?;
+        match step.instruction.opcode {
+            OpCode::Move => execute_move(lua_state, base, instr),
+            OpCode::LoadI => execute_loadi(lua_state, base, instr),
+            OpCode::LoadF => execute_loadf(lua_state, base, instr),
+            OpCode::LoadK => execute_loadk(lua_state, chunk, base, instr)?,
+            OpCode::LoadFalse => execute_loadfalse(lua_state, base, instr),
+            OpCode::LoadTrue => execute_loadtrue(lua_state, base, instr),
+            OpCode::LoadNil => execute_loadnil(lua_state, base, instr),
+            OpCode::AddI => execute_addi(lua_state, base, instr)?,
+            OpCode::AddK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::Add)?,
+            OpCode::SubK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::Sub)?,
+            OpCode::MulK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::Mul)?,
+            OpCode::ModK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::Mod)?,
+            OpCode::PowK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::Pow)?,
+            OpCode::DivK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::Div)?,
+            OpCode::IDivK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::IDiv)?,
+            OpCode::BAndK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::BAnd)?,
+            OpCode::BOrK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::BOr)?,
+            OpCode::BXorK => execute_binary_k(lua_state, chunk, base, instr, NumericOp::BXor)?,
+            OpCode::ShlI => execute_shli(lua_state, base, instr)?,
+            OpCode::ShrI => execute_shri(lua_state, base, instr)?,
+            OpCode::Add => execute_binary_rr(lua_state, base, instr, NumericOp::Add)?,
+            OpCode::Sub => execute_binary_rr(lua_state, base, instr, NumericOp::Sub)?,
+            OpCode::Mul => execute_binary_rr(lua_state, base, instr, NumericOp::Mul)?,
+            OpCode::Mod => execute_binary_rr(lua_state, base, instr, NumericOp::Mod)?,
+            OpCode::Pow => execute_binary_rr(lua_state, base, instr, NumericOp::Pow)?,
+            OpCode::Div => execute_binary_rr(lua_state, base, instr, NumericOp::Div)?,
+            OpCode::IDiv => execute_binary_rr(lua_state, base, instr, NumericOp::IDiv)?,
+            OpCode::BAnd => execute_binary_rr(lua_state, base, instr, NumericOp::BAnd)?,
+            OpCode::BOr => execute_binary_rr(lua_state, base, instr, NumericOp::BOr)?,
+            OpCode::BXor => execute_binary_rr(lua_state, base, instr, NumericOp::BXor)?,
+            OpCode::Shl => execute_binary_rr(lua_state, base, instr, NumericOp::Shl)?,
+            OpCode::Shr => execute_binary_rr(lua_state, base, instr, NumericOp::Shr)?,
+            OpCode::Unm => execute_unm(lua_state, base, instr)?,
+            OpCode::BNot => execute_bnot(lua_state, base, instr)?,
+            OpCode::Not => execute_not(lua_state, base, instr),
+            OpCode::Jmp => {
+                let target = jump_target(step.instruction.pc, instr)?;
+                if target != compiled.unit.plan.anchor_pc {
+                    return Err(TraceAbortReason::UnsupportedControlFlow);
+                }
+                return Ok(CompiledTraceIterationOutcome::LoopContinue);
+            }
+            OpCode::ForLoop => {
+                let target = for_loop_target(step.instruction.pc, instr)?;
+                if target != compiled.unit.plan.anchor_pc {
+                    return Err(TraceAbortReason::UnsupportedControlFlow);
+                }
+                if execute_for_loop(lua_state, base, instr) {
+                    return Ok(CompiledTraceIterationOutcome::LoopContinue);
+                }
+
+                let exit = step
+                    .loop_exit
+                    .as_ref()
+                    .ok_or(TraceAbortReason::UnsupportedControlFlow)?;
+                let materialized_exit =
+                    materialize_compiled_exit_state(lua_state, &compiled.unit.plan, exit, base)?;
+                commit_materialized_exit(lua_state, base, &materialized_exit);
+                return Ok(CompiledTraceIterationOutcome::ReturnPc(
+                    materialized_exit.target_pc,
+                ));
+            }
+            _ => return Err(TraceAbortReason::UnsupportedOpcode),
+        }
+    }
+
+    Ok(CompiledTraceIterationOutcome::ReturnPc(
+        compiled.unit.plan.anchor_pc,
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -323,6 +461,34 @@ fn materialize_exit_state(
     let snapshot = plan
         .snapshots
         .get(snapshot_index)
+        .ok_or(TraceAbortReason::UnsupportedControlFlow)?;
+    let mut materialized = MaterializedTraceExit {
+        target_pc: exit.target_pc,
+        resume_pc: snapshot.resume_pc,
+        base: snapshot.base,
+        frame_depth: snapshot.frame_depth,
+        regs: snapshot
+            .live_regs
+            .iter()
+            .map(|&reg| MaterializedReg {
+                reg,
+                value: *stack_value(lua_state, base, reg),
+            })
+            .collect(),
+    };
+    apply_exit_actions(&mut materialized, lua_state, base, &exit.actions)?;
+    Ok(materialized)
+}
+
+fn materialize_compiled_exit_state(
+    lua_state: &LuaState,
+    plan: &TracePlan,
+    exit: &CompiledTraceExit,
+    base: usize,
+) -> Result<MaterializedTraceExit, TraceAbortReason> {
+    let snapshot = plan
+        .snapshots
+        .get(exit.snapshot_index)
         .ok_or(TraceAbortReason::UnsupportedControlFlow)?;
     let mut materialized = MaterializedTraceExit {
         target_pc: exit.target_pc,
@@ -769,8 +935,9 @@ mod tests {
     use super::*;
     use crate::lua_vm::Instruction;
     use crate::lua_vm::jit::{
-        TraceAnchorKind, TraceExit, TraceExitAction, TraceExitKind, TraceGuard, TraceGuardKind,
-        TraceGuardMode, TraceGuardOperands, TraceId, TraceInstruction, TracePlan, TraceSnapshot,
+        LoweredTraceBackend, TraceAnchorKind, TraceBackend, TraceCompilationUnit, TraceExit,
+        TraceExitAction, TraceExitKind, TraceGuard, TraceGuardKind, TraceGuardMode,
+        TraceGuardOperands, TraceId, TraceInstruction, TracePlan, TraceSnapshot,
         TraceSnapshotKind,
     };
 
@@ -823,6 +990,13 @@ mod tests {
                 base: 0,
                 frame_depth: 0,
                 live_regs: vec![0, 1],
+            }, TraceSnapshot {
+                kind: TraceSnapshotKind::SideExit,
+                pc: 0,
+                resume_pc: 0,
+                base: 0,
+                frame_depth: 0,
+                live_regs: vec![0, 1],
             }],
             guards: vec![
                 TraceGuard {
@@ -831,7 +1005,7 @@ mod tests {
                     kind: TraceGuardKind::IsNumber,
                     operands: TraceGuardOperands::Register { reg: 0 },
                     continue_when: true,
-                    exit_snapshot_index: 0,
+                    exit_snapshot_index: 1,
                 },
                 TraceGuard {
                     pc: 0,
@@ -839,10 +1013,16 @@ mod tests {
                     kind: TraceGuardKind::IsNumber,
                     operands: TraceGuardOperands::Register { reg: 1 },
                     continue_when: true,
-                    exit_snapshot_index: 0,
+                    exit_snapshot_index: 1,
                 },
             ],
-            exits: Vec::new(),
+            exits: vec![TraceExit {
+                kind: TraceExitKind::GuardExit,
+                source_pc: 0,
+                target_pc: 0,
+                snapshot_index: 1,
+                actions: Vec::new(),
+            }],
         };
 
         let next_pc = execute_trace(
@@ -857,6 +1037,112 @@ mod tests {
             },
         )
         .expect("replay should succeed");
+
+        assert_eq!(next_pc, 0);
+        assert_eq!(state.stack()[0].as_integer_strict(), Some(7));
+    }
+
+    #[test]
+    fn compiled_trace_runs_multiple_iterations_until_budget() {
+        let mut vm = setup_state(8);
+        let state = vm.main_state();
+        state.stack_mut()[0] = LuaValue::integer(1);
+        state.stack_mut()[1] = LuaValue::integer(2);
+
+        let mut chunk = Chunk::new();
+        chunk.code = vec![
+            Instruction::create_abc(OpCode::Add, 0, 0, 1),
+            Instruction::create_sj(OpCode::Jmp, -2),
+        ];
+
+        let plan = TracePlan {
+            id: TraceId(11),
+            chunk_key: &chunk as *const Chunk as usize,
+            anchor_pc: 0,
+            end_pc: 1,
+            anchor_kind: TraceAnchorKind::LoopBackedge,
+            instructions: vec![
+                TraceInstruction {
+                    pc: 0,
+                    opcode: OpCode::Add,
+                    line: None,
+                    fallback: None,
+                },
+                TraceInstruction {
+                    pc: 1,
+                    opcode: OpCode::Jmp,
+                    line: None,
+                    fallback: None,
+                },
+            ],
+            snapshots: vec![
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::Entry,
+                    pc: 0,
+                    resume_pc: 0,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![0, 1],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 0,
+                    resume_pc: 0,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![0, 1],
+                },
+            ],
+            guards: vec![
+                TraceGuard {
+                    pc: 0,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 0 },
+                    continue_when: true,
+                    exit_snapshot_index: 1,
+                },
+                TraceGuard {
+                    pc: 0,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 1 },
+                    continue_when: true,
+                    exit_snapshot_index: 1,
+                },
+            ],
+            exits: vec![TraceExit {
+                kind: TraceExitKind::GuardExit,
+                source_pc: 0,
+                target_pc: 0,
+                snapshot_index: 1,
+                actions: Vec::new(),
+            }],
+        };
+
+        let backend = LoweredTraceBackend;
+        let artifact = backend
+            .compile(&TraceCompilationUnit::new(plan))
+            .expect("compile should succeed")
+            .expect("backend should produce artifact");
+
+        let compiled = match artifact {
+            crate::lua_vm::jit::TraceArtifact::Compiled(compiled) => compiled,
+            _ => panic!("expected compiled trace artifact"),
+        };
+
+        let next_pc = execute_compiled_trace(
+            state,
+            &chunk,
+            &compiled,
+            0,
+            JitPolicy {
+                hotloop_threshold: 1,
+                max_trace_instructions: 16,
+                max_trace_replays: 3,
+            },
+        )
+        .expect("compiled trace should succeed");
 
         assert_eq!(next_pc, 0);
         assert_eq!(state.stack()[0].as_integer_strict(), Some(7));
