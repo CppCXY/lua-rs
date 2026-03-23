@@ -1,13 +1,15 @@
 use crate::lua_value::{LuaValue, lua_value_to_udvalue, udvalue_to_lua_value};
+use crate::lua_vm::call_info::call_status::CIST_PENDING_FINISH;
 use crate::lua_vm::execute::call::{self, call_c_function};
 use crate::lua_vm::execute::execute_loop::lua_execute;
-use crate::lua_vm::execute::helper::get_binop_metamethod;
+use crate::lua_vm::execute::helper::{get_binop_metamethod, get_metamethod_from_meta_ptr};
 /// Metamethod operations
 ///
 /// Implements MMBIN, MMBINI, MMBINK opcodes
 /// Based on Lua 5.5 ltm.c
-use crate::lua_vm::{LuaResult, LuaState, get_metamethod_event};
+use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event};
 use crate::stdlib::debug;
+use crate::{CallInfo, TablePtr};
 
 /// Try unary metamethod (for __unm, __bnot)
 /// Port of luaT_trybinTM for unary operations
@@ -520,6 +522,33 @@ pub fn try_comp_tm(
         Ok(Some(!result.is_falsy()))
     } else {
         Ok(None)
+    }
+}
+
+#[inline(always)]
+pub fn call_newindex_tm_fast(
+    lua_state: &mut LuaState,
+    ci: &mut CallInfo,
+    obj: LuaValue,
+    meta: TablePtr,
+    key: LuaValue,
+    value: LuaValue,
+) -> LuaResult<bool> {
+    let Some(tm) = get_metamethod_from_meta_ptr(lua_state, meta, TmKind::NewIndex) else {
+        return Ok(false);
+    };
+    if !tm.is_function() {
+        return Ok(false);
+    }
+
+    match call_tm(lua_state, tm, obj, key, value) {
+        Ok(()) => Ok(true),
+        Err(LuaError::Yield) => {
+            ci.set_pending_finish_get(-2);
+            ci.call_status |= CIST_PENDING_FINISH;
+            Err(LuaError::Yield)
+        }
+        Err(e) => Err(e),
     }
 }
 

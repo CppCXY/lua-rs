@@ -1,3 +1,4 @@
+use luars::LuaLanguageLevel;
 use luars::LuaVM;
 use luars::LuaValue;
 use luars::lua_vm::SafeOption;
@@ -16,6 +17,8 @@ fn print_usage() {
     eprintln!("  -e stat   execute string 'stat'");
     eprintln!("  -i        enter interactive mode after executing 'script'");
     eprintln!("  -l mod    require library 'mod' into global 'mod'");
+    #[cfg(feature = "jit")]
+    eprintln!("  -j        run in LuaJIT language mode with the dedicated JIT execute loop");
     eprintln!("  -v        show version information");
     eprintln!("  -E        ignore environment variables");
     eprintln!("  -W        turn warnings on");
@@ -23,8 +26,12 @@ fn print_usage() {
     eprintln!("  -         stop handling options and execute stdin");
 }
 
-fn print_version() {
-    println!("{}", VERSION);
+fn print_version(luajit_mode: bool) {
+    if luajit_mode {
+        println!("{} [LuaJIT mode]", VERSION);
+    } else {
+        println!("{}", VERSION);
+    }
     println!("{}", COPYRIGHT);
 }
 
@@ -32,6 +39,7 @@ fn print_version() {
 struct Options {
     execute_strings: Vec<String>,
     interactive: bool,
+    luajit_mode: bool,
     script_file: Option<String>,
     script_args: Vec<String>,
     require_modules: Vec<String>,
@@ -61,6 +69,19 @@ fn parse_args() -> Result<Options, String> {
                 }
                 "-i" => {
                     opts.interactive = true;
+                }
+                "-j" => {
+                    #[cfg(feature = "jit")]
+                    {
+                        opts.luajit_mode = true;
+                    }
+                    #[cfg(not(feature = "jit"))]
+                    {
+                        return Err(
+                            "'-j' requires building luars_interpreter with the 'jit' feature"
+                                .to_string(),
+                        );
+                    }
                 }
                 "-l" => {
                     i += 1;
@@ -373,7 +394,7 @@ fn lua_main() -> i32 {
 
     // Show version if requested
     if opts.show_version {
-        print_version();
+        print_version(opts.luajit_mode);
         if opts.execute_strings.is_empty() && opts.script_file.is_none() && !opts.read_stdin {
             return 0;
         }
@@ -388,6 +409,9 @@ fn lua_main() -> i32 {
     };
 
     let mut vm = LuaVM::new(safe_option);
+    if opts.luajit_mode {
+        vm.set_language_level(LuaLanguageLevel::LuaJIT);
+    }
     vm.open_stdlib(stdlib::Stdlib::All).unwrap();
 
     // Register the built-in debugger (require "emmy_core")

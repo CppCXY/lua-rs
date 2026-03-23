@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["jit"]
 serde = ["luars/serde"]
+jit = ["luars/jit"]
 
 [dependencies]
 luars.workspace = true

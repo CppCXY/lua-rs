@@ -48,6 +48,7 @@ pub use lua_value::userdata_trait::{
 
 #[cfg(test)]
 use crate::lua_vm::SafeOption;
+pub use compiler::LuaLanguageLevel;
 pub use gc::*;
 pub use lib_registry::LibraryRegistry;
 pub use lua_value::RustCallback;

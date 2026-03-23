@@ -45,9 +45,71 @@ use crate::{
             number::{le_num, lt_num},
             vararg::{exec_varargprep, get_vararg, get_varargs},
         },
+        jit::{HotLoopAction, RecordingRequest, TraceAnchorKind},
         lua_limits::EXTRA_STACK,
     },
 };
+
+#[inline(always)]
+fn maybe_handle_hot_loop(
+    lua_state: &mut LuaState,
+    chunk: &crate::Chunk,
+    anchor_pc: usize,
+    current_pc: usize,
+    base: usize,
+    frame_depth: usize,
+    anchor_kind: TraceAnchorKind,
+) -> Option<usize> {
+    let vm = lua_state.vm_mut();
+    let chunk_key = chunk as *const crate::Chunk as usize;
+    let code_len = chunk.code.len();
+    match vm
+        .jit_runtime_mut()
+        .on_loop_backedge(chunk_key, code_len, anchor_pc)
+    {
+        HotLoopAction::None => None,
+        HotLoopAction::StartRecording { anchor_pc } => {
+            let result = vm.jit_runtime_mut().try_start_recording(
+                chunk,
+                RecordingRequest {
+                    chunk_key,
+                    anchor_pc,
+                    current_pc,
+                    base,
+                    frame_depth,
+                    anchor_kind,
+                },
+            );
+            vm.jit_runtime_mut()
+                .finish_recording(chunk_key, code_len, anchor_pc, result);
+            None
+        }
+        HotLoopAction::RunTrace { trace_id } => {
+            let (trace_artifact, policy) = {
+                let vm = lua_state.vm_mut();
+                (
+                    vm.jit_runtime().trace_artifact(trace_id).cloned(),
+                    vm.jit_runtime().policy(),
+                )
+            };
+
+            let Some(trace_artifact) = trace_artifact else {
+                return None;
+            };
+
+            match trace_artifact.execute(lua_state, chunk, base, policy) {
+                Ok(next_pc) => Some(next_pc),
+                Err(reason) => {
+                    lua_state
+                        .vm_mut()
+                        .jit_runtime_mut()
+                        .abort_trace(chunk_key, code_len, anchor_pc, reason);
+                    None
+                }
+            }
+        }
+    }
+}
 
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
@@ -1747,6 +1809,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Jmp => {
                     let sj = instr.get_sj();
                     pc = (pc as isize + sj as isize) as usize;
+                    if sj < 0 {
+                        if let Some(next_pc) = maybe_handle_hot_loop(
+                            lua_state,
+                            chunk,
+                            pc,
+                            pc,
+                            base,
+                            current_depth,
+                            TraceAnchorKind::LoopBackedge,
+                        ) {
+                            pc = next_pc;
+                        }
+                    }
                     updatetrap!();
                 }
                 OpCode::Eq => {
@@ -2251,12 +2326,34 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Jump back
                                 pc -= bx;
+                                if let Some(next_pc) = maybe_handle_hot_loop(
+                                    lua_state,
+                                    chunk,
+                                    pc,
+                                    pc,
+                                    base,
+                                    current_depth,
+                                    TraceAnchorKind::ForLoop,
+                                ) {
+                                    pc = next_pc;
+                                }
                             }
                             // else: counter expired, exit loop
                         } else if float_for_loop(lua_state, base + a) {
                             // Float loop with non-integer step
                             // Jump back if loop continues
                             pc -= bx;
+                            if let Some(next_pc) = maybe_handle_hot_loop(
+                                lua_state,
+                                chunk,
+                                pc,
+                                pc,
+                                base,
+                                current_depth,
+                                TraceAnchorKind::ForLoop,
+                            ) {
+                                pc = next_pc;
+                            }
                         }
                     }
 

@@ -5,6 +5,8 @@ pub mod call_info;
 mod const_string;
 pub mod debug_info;
 mod execute;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod lua_error;
 pub mod lua_limits;
 mod lua_ref;
@@ -234,6 +236,9 @@ pub struct LuaVM {
     /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
     pub(crate) io_default_output: Option<LuaValue>,
     pub(crate) io_default_input: Option<LuaValue>,
+
+    #[cfg(feature = "jit")]
+    pub(crate) jit_runtime: Box<crate::lua_vm::jit::JitRuntime>,
 }
 
 impl LuaVM {
@@ -265,6 +270,8 @@ impl LuaVM {
             const_strings: cs,
             io_default_output: None,
             io_default_input: None,
+            #[cfg(feature = "jit")]
+            jit_runtime: Box::new(crate::lua_vm::jit::JitRuntime::new()),
         });
 
         let ptr_vm = vm.as_mut() as *mut LuaVM;
@@ -295,6 +302,24 @@ impl LuaVM {
 
     pub fn main_state(&mut self) -> &mut LuaState {
         &mut self.main_state.as_mut_ref().data
+    }
+
+    pub fn language_level(&self) -> LuaLanguageLevel {
+        self.version
+    }
+
+    pub fn set_language_level(&mut self, level: LuaLanguageLevel) {
+        self.version = level;
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_runtime(&self) -> &crate::lua_vm::jit::JitRuntime {
+        &self.jit_runtime
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_runtime_mut(&mut self) -> &mut crate::lua_vm::jit::JitRuntime {
+        &mut self.jit_runtime
     }
 
     pub fn main_state_ref(&self) -> &LuaState {
