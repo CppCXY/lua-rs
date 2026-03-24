@@ -32,49 +32,22 @@ use crate::{
             helper::{
                 bin_tm_fallback, eq_fallback, error_div_by_zero, error_global, error_mod_by_zero,
                 finishget_fallback, finishset_fallback, finishset_fallback_known_miss,
-                float_for_loop, fltvalue, forprep, get_metamethod_from_meta_ptr,
-                handle_pending_ops, ivalue, lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr,
-                luai_numpow, objlen, order_tm_fallback, pfltvalue, pivalue, psetfltvalue,
-                psetivalue, ptonumberns, pttisfloat, pttisinteger, return0_with_hook,
-                return1_with_hook, self_shortstr_index_chain_fast, setbfvalue, setbtvalue,
-                setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s, tointeger, tointegerns,
-                tonumberns, ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
+                float_for_loop, fltvalue, forprep, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
+                lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen, order_tm_fallback,
+                pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns, pttisfloat,
+                pttisinteger, return0_with_hook, return1_with_hook, self_shortstr_index_chain_fast,
+                setbfvalue, setbtvalue, setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s,
+                tointeger, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
+                unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
-            metamethod::call_tm,
+            metamethod::call_newindex_tm_fast,
             number::{le_num, lt_num},
             vararg::{exec_varargprep, get_vararg, get_varargs},
         },
         lua_limits::EXTRA_STACK,
     },
 };
-
-#[inline(always)]
-fn call_newindex_tm_fast(
-    lua_state: &mut LuaState,
-    ci: &mut CallInfo,
-    obj: LuaValue,
-    meta: TablePtr,
-    key: LuaValue,
-    value: LuaValue,
-) -> LuaResult<bool> {
-    let Some(tm) = get_metamethod_from_meta_ptr(lua_state, meta, TmKind::NewIndex) else {
-        return Ok(false);
-    };
-    if !tm.is_function() {
-        return Ok(false);
-    }
-
-    match call_tm(lua_state, tm, obj, key, value) {
-        Ok(()) => Ok(true),
-        Err(LuaError::Yield) => {
-            ci.set_pending_finish_get(-2);
-            ci.call_status |= CIST_PENDING_FINISH;
-            Err(LuaError::Yield)
-        }
-        Err(e) => Err(e),
-    }
-}
 
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
