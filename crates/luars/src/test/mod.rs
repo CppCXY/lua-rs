@@ -22,4 +22,6 @@ pub mod test_c_functions;
 pub mod test_functions;
 pub mod test_gc_metamethods;
 pub mod test_rclosure;
+#[cfg(feature = "sandbox")]
+pub mod test_sandbox;
 pub mod test_user_api;

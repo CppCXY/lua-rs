@@ -53,6 +53,8 @@ pub use lib_registry::LibraryRegistry;
 pub use lua_value::RustCallback;
 pub use lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
 pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
+#[cfg(feature = "sandbox")]
+pub use lua_vm::SandboxConfig;
 pub use lua_vm::async_thread::{
     AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread, IntoAsyncLua,
 };

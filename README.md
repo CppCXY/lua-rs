@@ -7,7 +7,7 @@
 
 > **Note**: This is an experimental **Lua 5.5** interpreter crafted primarily through AI-assisted programming.
 
-A Lua 5.5 interpreter written in pure Rust. Faithfully ported from the official C Lua source code architecture — register-based VM, incremental/generational GC, string interning — and **passes the official Lua 5.5 test suite** (`all.lua` — 28/30 test files, 435 unit tests).
+A Lua 5.5 interpreter written in pure Rust. Faithfully ported from the official C Lua source code architecture — register-based VM, incremental/generational GC, string interning — and **passes the official Lua 5.5 test suite** (`all.lua` — 29/30 test files, 500+ unit tests).
 
 Lua strings in luars are stored as byte strings with an optional UTF-8 text view. At the Lua level this matches Lua's byte-oriented string semantics; on the Rust side you can choose `as_str()` for text or `as_bytes()` / `create_bytes()` when exact bytes matter.
 
@@ -15,7 +15,7 @@ Lua strings in luars are stored as byte strings with an optional UTF-8 text view
 
 - **Lua 5.5** — compiler, VM, and standard libraries implement the Lua 5.5 specification
 - **Pure Rust** — no C dependencies, no `unsafe` FFI — the entire runtime is self-contained Rust
-- **Official Test Suite** — passes 28 of 30 official Lua 5.5 test files (see [Compatibility](#compatibility))
+- **Official Test Suite** — passes 29 of 30 official Lua 5.5 test files (see [Compatibility](#compatibility))
 - **Ergonomic Rust API** — typed-first `call`, `call1`, `call_global`, `call1_global`, typed callback registration, `TableBuilder`, typed getters
 - **UserData** — derive macros to expose Rust structs/enums to Lua with fields, methods, operators
 - **Async** — run async Rust functions from Lua via transparent coroutine-based bridging
@@ -25,7 +25,7 @@ Lua strings in luars are stored as byte strings with an optional UTF-8 text view
 
 ```toml
 [dependencies]
-luars = "0.12"
+luars = "0.16"
 ```
 
 ```rust
@@ -254,7 +254,6 @@ For the full list of behavioral differences, see [docs/Different.md](docs/Differ
 ### Key Differences from C Lua
 
 - **No C API / C module loading** — pure Rust, no `lua_State*` interface
-- **No debug hooks** — `debug.sethook` is a stub; `getinfo` / `getlocal` / `traceback` work
 - **Own bytecode format** — `string.dump` output is not compatible with C Lua
 - **Rust text view is explicit** — Lua strings are byte strings, but Rust-side `as_str()` only succeeds for valid UTF-8; use `as_bytes()` for exact byte access
 
@@ -307,10 +306,55 @@ cd lua_tests/testes && ../../target/release/lua all.lua
 | Feature | Description |
 |---------|-------------|
 | `serde` | Lua ↔ JSON serialization via `serde` / `serde_json` |
+| `sandbox` | Enables the sandbox API, environment isolation, injected globals, and runtime limits |
 
 ```bash
 cargo build --release --features serde
+cargo build --release --features sandbox
 ```
+
+### Sandbox Feature
+
+Sandbox support is intentionally feature-gated so the default build keeps the original hot path with no sandbox-specific runtime checks compiled in.
+
+```toml
+luars = { version = "0.16.1", features = ["sandbox"] }
+```
+
+```rust
+use luars::{LuaVM, SandboxConfig, Stdlib};
+use luars::lua_vm::SafeOption;
+use std::time::Duration;
+
+let mut vm = LuaVM::new(SafeOption::default());
+vm.open_stdlib(Stdlib::All)?;
+
+let config = SandboxConfig::default()
+    .with_global("answer", luars::LuaValue::integer(42))
+    .with_instruction_limit(100_000)
+    .with_timeout(Duration::from_millis(10));
+
+let results = vm.execute_sandboxed("return answer, require, _G == _ENV", &config)?;
+assert_eq!(results[0].as_integer(), Some(42));
+assert!(results[1].is_nil());
+assert_eq!(results[2].bvalue(), true);
+```
+
+Current sandbox guarantees:
+
+- Separate `_ENV` table for sandboxed chunks
+- Safe basic subset by default; `require`, `load`, `loadfile`, `dofile`, `collectgarbage`, `io`, `os`, `package`, `debug`, and `coroutine` stay disabled unless explicitly enabled
+- Optional injected globals for capability-style exposure
+- Optional instruction limit, temporary memory limit, and timeout for `execute_sandboxed`
+
+Current validation coverage:
+
+- global isolation from the main VM
+- dangerous loaders blocked by default
+- explicit opt-in for `package` and `require`
+- injected globals visible only inside the sandbox env
+- infinite loops stopped by instruction limit / timeout
+- runtime allocations stopped by memory limit
 
 ## Contributing
 

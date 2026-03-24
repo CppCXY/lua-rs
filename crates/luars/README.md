@@ -15,6 +15,7 @@ A Lua 5.5 interpreter written in pure Rust — embeddable, async-capable, with d
 - **Closures** — register Rust closures with captured state as Lua globals
 - **FromLua / IntoLua** — automatic type conversion for seamless Rust ↔ Lua interop
 - **Optional Serde** — JSON serialization via `serde` / `serde_json` (feature-gated)
+- **Optional Sandbox** — feature-gated env isolation, injected globals, and runtime limits
 - **Standard Libraries** — `basic`, `string`, `table`, `math`, `io`, `os`, `coroutine`, `utf8`, `package`, partial `debug`
 
 ## Usage
@@ -25,6 +26,9 @@ luars = "0.12"
 
 # With JSON support:
 luars = { version = "0.12", features = ["serde"] }
+
+# With sandbox support:
+luars = { version = "0.12", features = ["sandbox"] }
 ```
 
 ### Basic Example

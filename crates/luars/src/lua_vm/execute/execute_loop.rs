@@ -94,7 +94,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
+        #[cfg(not(feature = "sandbox"))]
         let mut trap = lua_state.hook_mask != 0;
+
+        #[cfg(feature = "sandbox")]
+        let mut trap = lua_state.has_active_instruction_watch();
         if pc == 0 && trap {
             let hook_mask = lua_state.hook_mask;
             if hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
@@ -131,7 +135,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         macro_rules! updatetrap {
             () => {
-                trap = lua_state.hook_mask != 0;
+                #[cfg(not(feature = "sandbox"))]
+                {
+                    trap = lua_state.hook_mask != 0;
+                }
+
+                #[cfg(feature = "sandbox")]
+                {
+                    trap = lua_state.has_active_instruction_watch();
+                }
             };
         }
 

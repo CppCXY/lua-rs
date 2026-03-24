@@ -43,6 +43,206 @@ pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
 use std::future::Future;
 use std::rc::Rc;
+#[cfg(feature = "sandbox")]
+use std::time::Duration;
+
+#[cfg(feature = "sandbox")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxConfig {
+    pub basic: bool,
+    pub math: bool,
+    pub string: bool,
+    pub table: bool,
+    pub utf8: bool,
+    pub coroutine: bool,
+    pub os: bool,
+    pub io: bool,
+    pub package: bool,
+    pub debug: bool,
+    pub allow_require: bool,
+    pub allow_load: bool,
+    pub allow_loadfile: bool,
+    pub allow_dofile: bool,
+    pub allow_collectgarbage: bool,
+    pub injected_globals: Vec<(String, LuaValue)>,
+    pub instruction_limit: Option<u64>,
+    pub memory_limit_bytes: Option<isize>,
+    pub timeout: Option<Duration>,
+}
+
+#[cfg(feature = "sandbox")]
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            basic: true,
+            math: true,
+            string: true,
+            table: true,
+            utf8: true,
+            coroutine: false,
+            os: false,
+            io: false,
+            package: false,
+            debug: false,
+            allow_require: false,
+            allow_load: false,
+            allow_loadfile: false,
+            allow_dofile: false,
+            allow_collectgarbage: false,
+            injected_globals: Vec::new(),
+            instruction_limit: None,
+            memory_limit_bytes: None,
+            timeout: None,
+        }
+    }
+}
+
+#[cfg(feature = "sandbox")]
+impl SandboxConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_stdlib(mut self, lib: Stdlib) -> Self {
+        match lib {
+            Stdlib::Basic => self.basic = true,
+            Stdlib::Math => self.math = true,
+            Stdlib::String => self.string = true,
+            Stdlib::Table => self.table = true,
+            Stdlib::Utf8 => self.utf8 = true,
+            Stdlib::Coroutine => self.coroutine = true,
+            Stdlib::Os => self.os = true,
+            Stdlib::Io => self.io = true,
+            Stdlib::Package => self.package = true,
+            Stdlib::Debug => self.debug = true,
+            Stdlib::All => {
+                self.basic = true;
+                self.math = true;
+                self.string = true;
+                self.table = true;
+                self.utf8 = true;
+                self.coroutine = true;
+                self.os = true;
+                self.io = true;
+                self.package = true;
+                self.debug = true;
+            }
+        }
+        self
+    }
+
+    pub fn allow_loading(mut self) -> Self {
+        self.allow_load = true;
+        self.allow_loadfile = true;
+        self.allow_dofile = true;
+        self
+    }
+
+    pub fn allow_require(mut self) -> Self {
+        self.allow_require = true;
+        self
+    }
+
+    pub fn allow_collectgarbage(mut self) -> Self {
+        self.allow_collectgarbage = true;
+        self
+    }
+
+    pub fn with_global(mut self, name: impl Into<String>, value: LuaValue) -> Self {
+        self.injected_globals.push((name.into(), value));
+        self
+    }
+
+    pub fn insert_global(&mut self, name: impl Into<String>, value: LuaValue) -> &mut Self {
+        self.injected_globals.push((name.into(), value));
+        self
+    }
+
+    pub fn with_instruction_limit(mut self, limit: u64) -> Self {
+        self.instruction_limit = Some(limit);
+        self
+    }
+
+    pub fn with_memory_limit(mut self, limit_bytes: isize) -> Self {
+        self.memory_limit_bytes = Some(limit_bytes);
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    fn runtime_limits(&self) -> Option<SandboxRuntimeLimits> {
+        let deadline_nanos = self.timeout.map(|timeout| {
+            let timeout_nanos = timeout.as_nanos().min(u64::MAX as u128) as u64;
+            unix_nanos().saturating_add(timeout_nanos)
+        });
+
+        if self.instruction_limit.is_none()
+            && self.memory_limit_bytes.is_none()
+            && deadline_nanos.is_none()
+        {
+            return None;
+        }
+
+        Some(SandboxRuntimeLimits {
+            remaining_instructions: self.instruction_limit,
+            memory_limit_bytes: self.memory_limit_bytes,
+            deadline_nanos,
+            instructions_until_time_check: SANDBOX_TIMEOUT_CHECK_INTERVAL,
+        })
+    }
+}
+
+#[cfg(feature = "sandbox")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SandboxRuntimeLimits {
+    pub remaining_instructions: Option<u64>,
+    pub memory_limit_bytes: Option<isize>,
+    pub deadline_nanos: Option<u64>,
+    pub instructions_until_time_check: u32,
+}
+
+#[cfg(feature = "sandbox")]
+pub(crate) const SANDBOX_TIMEOUT_CHECK_INTERVAL: u32 = 1024;
+
+#[cfg(feature = "sandbox")]
+const SANDBOX_SAFE_BASIC_GLOBALS: &[&str] = &[
+    "_VERSION",
+    "assert",
+    "error",
+    "getmetatable",
+    "ipairs",
+    "next",
+    "pairs",
+    "pcall",
+    "print",
+    "rawequal",
+    "rawget",
+    "rawlen",
+    "rawset",
+    "select",
+    "setmetatable",
+    "tonumber",
+    "tostring",
+    "type",
+    "warn",
+    "xpcall",
+];
+
+#[cfg(feature = "sandbox")]
+const SANDBOX_LIB_GLOBALS: &[(Stdlib, &str)] = &[
+    (Stdlib::Math, "math"),
+    (Stdlib::String, "string"),
+    (Stdlib::Table, "table"),
+    (Stdlib::Utf8, "utf8"),
+    (Stdlib::Coroutine, "coroutine"),
+    (Stdlib::Os, "os"),
+    (Stdlib::Io, "io"),
+    (Stdlib::Package, "package"),
+    (Stdlib::Debug, "debug"),
+];
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
@@ -466,9 +666,35 @@ impl LuaVM {
         self.execute_function(func, vec![])
     }
 
+    #[cfg(feature = "sandbox")]
+    fn execute_chunk_with_env(
+        &mut self,
+        chunk: Rc<Chunk>,
+        env: LuaValue,
+    ) -> LuaResult<Vec<LuaValue>> {
+        let env_upval = self.create_upvalue_closed(env)?;
+        let func = self.create_function(chunk, UpvalueStore::from_single(env_upval))?;
+        self.execute_function(func, vec![])
+    }
+
     pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.compile(source)?;
         self.execute_chunk(Rc::new(chunk))
+    }
+
+    #[cfg(feature = "sandbox")]
+    pub fn execute_sandboxed(
+        &mut self,
+        source: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<Vec<LuaValue>> {
+        let chunk = self.compile(source)?;
+        let env = self.create_sandbox_env(config)?;
+        let limits = config.runtime_limits();
+        self.main_state()
+            .with_sandbox_runtime_limits(limits, |state| {
+                state.vm_mut().execute_chunk_with_env(Rc::new(chunk), env)
+            })
     }
 
     /// Compile source code and return a callable function value with _ENV wired.
@@ -490,12 +716,33 @@ impl LuaVM {
         self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
     }
 
+    #[cfg(feature = "sandbox")]
+    pub fn load_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<LuaValue> {
+        let chunk = self.compile(source)?;
+        let env = self.create_sandbox_env(config)?;
+        let env_upval = self.create_upvalue_closed(env)?;
+        self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
+    }
+
     /// Compile source code with a chunk name and return a callable function value.
     ///
     /// The chunk name is used in error messages (e.g. `@script.lua`).
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
         let chunk = self.compile_with_name(source, chunk_name)?;
         let env_upval = self.create_upvalue_closed(self.global)?;
+        self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
+    }
+
+    #[cfg(feature = "sandbox")]
+    pub fn load_with_name_sandboxed(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<LuaValue> {
+        let chunk = self.compile_with_name(source, chunk_name)?;
+        let env = self.create_sandbox_env(config)?;
+        let env_upval = self.create_upvalue_closed(env)?;
         self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
     }
 
@@ -929,6 +1176,74 @@ impl LuaVM {
         let global = self.global;
         self.raw_set(&global, key, value);
 
+        Ok(())
+    }
+
+    #[cfg(feature = "sandbox")]
+    pub fn create_sandbox_env(&mut self, config: &SandboxConfig) -> LuaResult<LuaValue> {
+        let env = self.create_table(0, 24)?;
+        let g_key = self.create_string("_G")?;
+        let env_key = self.create_string("_ENV")?;
+
+        self.copy_global_into_table(&env, "_G")?;
+        self.copy_global_into_table(&env, "_ENV")?;
+        self.raw_set(&env, g_key, env);
+        self.raw_set(&env, env_key, env);
+
+        if config.basic {
+            for &name in SANDBOX_SAFE_BASIC_GLOBALS {
+                self.copy_global_into_table(&env, name)?;
+            }
+            if config.allow_require {
+                self.copy_global_into_table(&env, "require")?;
+            }
+            if config.allow_load {
+                self.copy_global_into_table(&env, "load")?;
+            }
+            if config.allow_loadfile {
+                self.copy_global_into_table(&env, "loadfile")?;
+            }
+            if config.allow_dofile {
+                self.copy_global_into_table(&env, "dofile")?;
+            }
+            if config.allow_collectgarbage {
+                self.copy_global_into_table(&env, "collectgarbage")?;
+            }
+        }
+
+        for &(lib, global_name) in SANDBOX_LIB_GLOBALS {
+            let enabled = match lib {
+                Stdlib::Math => config.math,
+                Stdlib::String => config.string,
+                Stdlib::Table => config.table,
+                Stdlib::Utf8 => config.utf8,
+                Stdlib::Coroutine => config.coroutine,
+                Stdlib::Os => config.os,
+                Stdlib::Io => config.io,
+                Stdlib::Package => config.package,
+                Stdlib::Debug => config.debug,
+                Stdlib::Basic | Stdlib::All => false,
+            };
+
+            if enabled {
+                self.copy_global_into_table(&env, global_name)?;
+            }
+        }
+
+        for (name, value) in &config.injected_globals {
+            let key = self.create_string(name)?;
+            self.raw_set(&env, key, *value);
+        }
+
+        Ok(env)
+    }
+
+    #[cfg(feature = "sandbox")]
+    fn copy_global_into_table(&mut self, table: &LuaValue, name: &str) -> LuaResult<()> {
+        let key = self.create_string(name)?;
+        if let Some(value) = self.raw_get(&self.global, &key) {
+            self.raw_set(table, key, value);
+        }
         Ok(())
     }
 

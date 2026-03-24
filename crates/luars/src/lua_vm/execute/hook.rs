@@ -75,9 +75,25 @@ pub fn hook_check_instruction(
     ci: &mut CallInfo,
 ) -> LuaResult<bool> {
     let hook_mask = lua_state.hook_mask;
+
+    #[cfg(not(feature = "sandbox"))]
     if hook_mask == 0 {
         return Ok(false);
     }
+
+    #[cfg(feature = "sandbox")]
+    if hook_mask == 0 && !lua_state.has_active_instruction_watch() {
+        return Ok(false);
+    }
+
+    #[cfg(feature = "sandbox")]
+    lua_state.check_sandbox_runtime_limits()?;
+
+    #[cfg(feature = "sandbox")]
+    if hook_mask == 0 {
+        return Ok(lua_state.has_active_instruction_watch());
+    }
+
     if !lua_state.allow_hook {
         return Ok(true);
     }
@@ -144,5 +160,13 @@ pub fn hook_check_instruction(
             lua_state.oldpc = npci as u32;
         }
     }
-    Ok(lua_state.hook_mask != 0)
+    #[cfg(not(feature = "sandbox"))]
+    {
+        Ok(lua_state.hook_mask != 0)
+    }
+
+    #[cfg(feature = "sandbox")]
+    {
+        Ok(lua_state.has_active_instruction_watch())
+    }
 }

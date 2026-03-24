@@ -13,6 +13,7 @@ categories = ["development-tools"]
 [features]
 default = []
 serde = ["dep:serde", "dep:serde_json"]
+sandbox = []
 
 [dependencies]
 # local

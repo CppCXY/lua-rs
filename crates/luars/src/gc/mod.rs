@@ -681,6 +681,14 @@ impl GC {
         self.tmp_max_memory_limit = Some(current_total_bytes.saturating_add(limit));
     }
 
+    pub fn temporary_memory_limit(&self) -> Option<isize> {
+        self.tmp_max_memory_limit
+    }
+
+    pub fn restore_temporary_memory_limit(&mut self, limit: Option<isize>) {
+        self.tmp_max_memory_limit = limit;
+    }
+
     pub fn clear_temporary_memory_limit(&mut self) {
         self.tmp_max_memory_limit = None;
     }

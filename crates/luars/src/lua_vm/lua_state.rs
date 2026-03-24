@@ -14,9 +14,13 @@ use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_MAXCSTACK};
 use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
+#[cfg(feature = "sandbox")]
+use crate::lua_vm::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxRuntimeLimits};
+#[cfg(feature = "sandbox")]
+use crate::platform_time::unix_nanos;
 use crate::{
-    Chunk, CreateResult, GcObjectPtr, LuaAnyRef, LuaFunctionRef, LuaRegistrable, LuaTableRef,
-    LuaVM, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
+    AsyncReturnValue, Chunk, CreateResult, GcObjectPtr, LuaAnyRef, LuaFunctionRef, LuaRegistrable,
+    LuaTableRef, LuaVM, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -129,11 +133,11 @@ pub struct LuaState {
     /// it here, then yields with ASYNC_SENTINEL. The AsyncThread polls this future
     /// and resumes the coroutine when it completes.
     /// `Option<Pin<Box<...>>>` is null-pointer-optimized: zero overhead when None.
-    pub(crate) pending_future: Option<
-        Pin<
-            Box<dyn Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>>>,
-        >,
-    >,
+    pub(crate) pending_future:
+        Option<Pin<Box<dyn Future<Output = LuaResult<Vec<AsyncReturnValue>>>>>>,
+
+    #[cfg(feature = "sandbox")]
+    pub(crate) sandbox_limits: Option<SandboxRuntimeLimits>,
 }
 
 impl LuaState {
@@ -171,6 +175,8 @@ impl LuaState {
             is_closing: false,
             nny: if is_main { 1 } else { 0 },
             pending_future: None,
+            #[cfg(feature = "sandbox")]
+            sandbox_limits: None,
         }
     }
 
@@ -2119,11 +2125,31 @@ impl LuaState {
         self.vm_mut().load(source)
     }
 
+    #[cfg(feature = "sandbox")]
+    pub fn load_sandboxed(
+        &mut self,
+        source: &str,
+        config: &crate::lua_vm::SandboxConfig,
+    ) -> LuaResult<LuaValue> {
+        self.vm_mut().load_sandboxed(source, config)
+    }
+
     /// Compile source code with a chunk name and return a callable function value.
     ///
     /// See [`LuaVM::load_with_name`] for details.
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
         self.vm_mut().load_with_name(source, chunk_name)
+    }
+
+    #[cfg(feature = "sandbox")]
+    pub fn load_with_name_sandboxed(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+        config: &crate::lua_vm::SandboxConfig,
+    ) -> LuaResult<LuaValue> {
+        self.vm_mut()
+            .load_with_name_sandboxed(source, chunk_name, config)
     }
 
     /// Read a file, compile it, and execute it.
@@ -2210,6 +2236,15 @@ impl LuaState {
     /// ```
     pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         self.vm_mut().execute(source)
+    }
+
+    #[cfg(feature = "sandbox")]
+    pub fn execute_sandboxed(
+        &mut self,
+        source: &str,
+        config: &crate::lua_vm::SandboxConfig,
+    ) -> LuaResult<Vec<LuaValue>> {
+        self.vm_mut().execute_sandboxed(source, config)
     }
 
     /// Execute a pre-compiled chunk, returning results.
@@ -4016,6 +4051,70 @@ impl LuaState {
         let vm = unsafe { &mut *self.vm };
         vm.full_gc(self, false);
         Ok(())
+    }
+
+    #[cfg(feature = "sandbox")]
+    #[inline(always)]
+    pub(crate) fn has_active_instruction_watch(&self) -> bool {
+        self.hook_mask != 0 || self.sandbox_limits.is_some()
+    }
+
+    #[cfg(feature = "sandbox")]
+    pub(crate) fn check_sandbox_runtime_limits(&mut self) -> LuaResult<()> {
+        let Some(mut limits) = self.sandbox_limits else {
+            return Ok(());
+        };
+
+        if let Some(remaining) = limits.remaining_instructions {
+            if remaining == 0 {
+                return Err(self.error("sandbox instruction limit exceeded".to_string()));
+            }
+            limits.remaining_instructions = Some(remaining - 1);
+        }
+
+        if let Some(deadline_nanos) = limits.deadline_nanos {
+            if limits.instructions_until_time_check == 0 {
+                limits.instructions_until_time_check = SANDBOX_TIMEOUT_CHECK_INTERVAL;
+                if unix_nanos() >= deadline_nanos {
+                    return Err(self.error("sandbox timeout exceeded".to_string()));
+                }
+            } else {
+                limits.instructions_until_time_check -= 1;
+            }
+        }
+
+        self.sandbox_limits = Some(limits);
+        Ok(())
+    }
+
+    #[cfg(feature = "sandbox")]
+    pub(crate) fn with_sandbox_runtime_limits<T, F>(
+        &mut self,
+        limits: Option<SandboxRuntimeLimits>,
+        f: F,
+    ) -> LuaResult<T>
+    where
+        F: FnOnce(&mut LuaState) -> LuaResult<T>,
+    {
+        let saved_limits = self.sandbox_limits;
+        let saved_memory_limit = unsafe { &mut *self.vm }.gc.temporary_memory_limit();
+
+        self.sandbox_limits = limits;
+
+        if let Some(memory_limit_bytes) = limits.and_then(|limit| limit.memory_limit_bytes) {
+            unsafe { &mut *self.vm }
+                .gc
+                .set_temporary_memory_limit(memory_limit_bytes);
+        }
+
+        let result = f(self);
+
+        self.sandbox_limits = saved_limits;
+        unsafe { &mut *self.vm }
+            .gc
+            .restore_temporary_memory_limit(saved_memory_limit);
+
+        result
     }
 
     // ===== Debug Hook Support =====
