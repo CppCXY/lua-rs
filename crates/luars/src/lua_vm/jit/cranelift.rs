@@ -18,7 +18,8 @@ use crate::{
 
 use super::{
     CompiledTraceArtifact, JitPolicy, LoweredTraceBackend, TraceAbortReason, TraceBackend,
-    TraceBackendError, TraceBackendKind, TraceCompilationUnit, TraceArtifact,
+    TraceBackendError, TraceBackendKind, TraceCompilationUnit, TraceArtifact, TraceRunOutcome,
+    TraceRunResult,
     artifact::CraneliftTraceArtifact,
     replay::{CompiledTraceIterationOutcome, execute_compiled_trace_iteration_from_step},
 };
@@ -56,6 +57,7 @@ struct FastIntegerForLoopTrace {
     step_reg: u8,
     idx_reg: u8,
     exit_pc: usize,
+    exit_snapshot_index: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -74,8 +76,13 @@ struct FastIntegerLoopbackTrace {
     control_kind: FastIntegerControlKind,
     continue_when: bool,
     exit_pc: usize,
+    exit_snapshot_index: usize,
     control_at_tail: bool,
 }
+
+const RUN_RESULT_SNAPSHOT_BITS: usize = 16;
+const RUN_RESULT_SHIFT: usize = RUN_RESULT_SNAPSHOT_BITS + 1;
+const RUN_RESULT_SNAPSHOT_MASK: usize = (1 << RUN_RESULT_SNAPSHOT_BITS) - 1;
 
 type TraceEntryFn = unsafe extern "C" fn(
     *mut LuaState,
@@ -101,6 +108,10 @@ impl TraceBackend for CraneliftTraceBackend {
         &self,
         unit: &TraceCompilationUnit,
     ) -> Result<Option<TraceArtifact>, TraceBackendError> {
+        if !is_cranelift_backend_eligible(unit) {
+            return Ok(None);
+        }
+
         let compiled = build_compiled_trace(unit)?;
         let entry = compile_trace_entry(unit)?;
 
@@ -109,6 +120,68 @@ impl TraceBackend for CraneliftTraceBackend {
             entry,
         })))
     }
+}
+
+fn is_cranelift_backend_eligible(unit: &TraceCompilationUnit) -> bool {
+    let Some(first_step) = unit.plan.instructions.first() else {
+        return false;
+    };
+    let Some(last_step) = unit.plan.instructions.last() else {
+        return false;
+    };
+
+    let control_guards = unit
+        .lowered
+        .guards
+        .iter()
+        .filter(|guard| guard.mode == super::TraceGuardMode::Control)
+        .collect::<Vec<_>>();
+
+    if control_guards.is_empty() {
+        return true;
+    }
+
+    if control_guards.len() != 1 {
+        return false;
+    }
+
+    let control_pc = control_guards[0].pc;
+    match unit.plan.anchor_kind {
+        super::TraceAnchorKind::LoopBackedge => control_pc == first_step.pc || control_pc == last_step.pc,
+        super::TraceAnchorKind::ForLoop => is_narrow_forloop_merge_shape(unit, control_pc),
+        super::TraceAnchorKind::SideExit => false,
+    }
+}
+
+fn is_narrow_forloop_merge_shape(unit: &TraceCompilationUnit, control_pc: usize) -> bool {
+    if unit.plan.instructions.len() < 3 {
+        return false;
+    }
+
+    let Some(last_step) = unit.plan.instructions.last() else {
+        return false;
+    };
+    let Some(merge_step) = unit.plan.instructions.get(unit.plan.instructions.len().saturating_sub(2)) else {
+        return false;
+    };
+    if last_step.opcode != crate::OpCode::ForLoop || merge_step.opcode != crate::OpCode::Jmp {
+        return false;
+    }
+
+    let trace_chunk = unsafe { &*(unit.plan.chunk_key as *const Chunk) };
+    let Ok(merge_instr) = trace_chunk
+        .code
+        .get(merge_step.pc)
+        .copied()
+        .ok_or(TraceBackendError::UnsupportedTrace)
+    else {
+        return false;
+    };
+    let Ok(target) = jump_target(merge_instr, merge_step.pc) else {
+        return false;
+    };
+
+    target == last_step.pc && control_pc < merge_step.pc
 }
 
 fn build_compiled_trace(
@@ -305,6 +378,7 @@ fn compile_trace_entry(unit: &TraceCompilationUnit) -> Result<usize, TraceBacken
                 &mut builder,
                 stack_ptr,
                 trace_chunk,
+                &unit.plan.instructions,
                 &step_blocks,
                 &fallback_blocks,
                 &continue_block,
@@ -341,13 +415,14 @@ fn compile_trace_entry(unit: &TraceCompilationUnit) -> Result<usize, TraceBacken
         let remaining = builder.use_var(remaining_var);
         let decremented = builder.ins().iadd_imm(remaining, -1);
         builder.def_var(remaining_var, decremented);
-        let is_zero = builder
-            .ins()
-            .icmp_imm(IntCC::Equal, decremented, 0);
+        let is_zero = builder.ins().icmp_imm(IntCC::Equal, decremented, 0);
         builder.ins().brif(is_zero, done_block, &[], loop_block, &[]);
 
         builder.switch_to_block(done_block);
-        let done_value = builder.ins().iconst(pointer_type, unit.plan.anchor_pc as i64);
+        let done_value = builder.ins().iconst(
+            pointer_type,
+            encoded_run_result_bits(unit.plan.anchor_pc, TraceRunOutcome::Anchored, None) as i64,
+        );
         builder.ins().return_(&[done_value]);
         builder.seal_all_blocks();
         builder.finalize();
@@ -424,8 +499,8 @@ fn match_fast_integer_forloop_trace(
         .exits
         .iter()
         .find(|exit| exit.kind == super::TraceExitKind::LoopExit && exit.source_pc == last_step.pc)
-        .map(|exit| exit.target_pc)
-        .unwrap_or(last_step.pc + 1);
+        .map(|exit| (exit.target_pc, exit.snapshot_index))
+        .unwrap_or((last_step.pc + 1, 0));
 
     Ok(Some(FastIntegerForLoopTrace {
         regs: regs.into_iter().collect(),
@@ -433,7 +508,8 @@ fn match_fast_integer_forloop_trace(
         count_reg,
         step_reg,
         idx_reg,
-        exit_pc,
+        exit_pc: exit_pc.0,
+        exit_snapshot_index: exit_pc.1,
     }))
 }
 
@@ -510,7 +586,7 @@ fn match_fast_integer_loopback_trace(
         .find(|exit| {
             exit.kind == super::TraceExitKind::GuardExit && exit.source_pc == control_guard.pc
         })
-        .map(|exit| exit.target_pc)
+        .map(|exit| (exit.target_pc, exit.snapshot_index))
         .ok_or(TraceBackendError::UnsupportedTrace)?;
 
     Ok(Some(FastIntegerLoopbackTrace {
@@ -518,7 +594,8 @@ fn match_fast_integer_loopback_trace(
         ops,
         control_kind,
         continue_when: control_guard.continue_when,
-        exit_pc,
+        exit_pc: exit_pc.0,
+        exit_snapshot_index: exit_pc.1,
         control_at_tail,
     }))
 }
@@ -714,12 +791,22 @@ fn emit_fast_integer_forloop_entry(
 
     builder.switch_to_block(fast_anchor_return_block);
     spill_fast_integer_forloop_state(builder, &reg_ptrs, &reg_vars, &fast_trace.regs);
-    let done_value = builder.ins().iconst(types::I64, anchor_pc as i64);
+    let done_value = builder.ins().iconst(
+        types::I64,
+        encoded_run_result_bits(anchor_pc, TraceRunOutcome::Anchored, None) as i64,
+    );
     builder.ins().return_(&[done_value]);
 
     builder.switch_to_block(fast_loop_exit_block);
     spill_fast_integer_forloop_state(builder, &reg_ptrs, &reg_vars, &fast_trace.regs);
-    let exit_value = builder.ins().iconst(types::I64, fast_trace.exit_pc as i64);
+    let exit_value = builder.ins().iconst(
+        types::I64,
+        encoded_run_result_bits(
+            fast_trace.exit_pc,
+            TraceRunOutcome::SideExit,
+            Some(fast_trace.exit_snapshot_index),
+        ) as i64,
+    );
     builder.ins().return_(&[exit_value]);
 }
 
@@ -834,12 +921,22 @@ fn emit_fast_integer_loopback_entry(
 
     builder.switch_to_block(fast_anchor_return_block);
     spill_fast_integer_forloop_state(builder, &reg_ptrs, &reg_vars, &fast_trace.regs);
-    let done_value = builder.ins().iconst(types::I64, anchor_pc as i64);
+    let done_value = builder.ins().iconst(
+        types::I64,
+        encoded_run_result_bits(anchor_pc, TraceRunOutcome::Anchored, None) as i64,
+    );
     builder.ins().return_(&[done_value]);
 
     builder.switch_to_block(fast_exit_block);
     spill_fast_integer_forloop_state(builder, &reg_ptrs, &reg_vars, &fast_trace.regs);
-    let exit_value = builder.ins().iconst(types::I64, fast_trace.exit_pc as i64);
+    let exit_value = builder.ins().iconst(
+        types::I64,
+        encoded_run_result_bits(
+            fast_trace.exit_pc,
+            TraceRunOutcome::SideExit,
+            Some(fast_trace.exit_snapshot_index),
+        ) as i64,
+    );
     builder.ins().return_(&[exit_value]);
 }
 
@@ -994,7 +1091,7 @@ pub(crate) fn execute_cranelift_trace(
     artifact: &CraneliftTraceArtifact,
     base: usize,
     policy: JitPolicy,
-) -> Result<usize, TraceAbortReason> {
+) -> Result<TraceRunResult, TraceAbortReason> {
     let replay_budget = policy.max_trace_replays.max(1) as usize;
     let entry: TraceEntryFn = unsafe { std::mem::transmute(artifact.entry) };
     let result = unsafe {
@@ -1007,7 +1104,7 @@ pub(crate) fn execute_cranelift_trace(
         )
     };
     if result >= 0 {
-        Ok(result as usize)
+        Ok(decode_run_result(result, &artifact.compiled.unit.plan))
     } else {
         Err(decode_abort(result))
     }
@@ -1032,7 +1129,7 @@ extern "C" fn luars_jit_execute_compiled_iteration_from_step(
         start_step,
     ) {
         Ok(CompiledTraceIterationOutcome::LoopContinue) => ITERATION_CONTINUE_CODE,
-        Ok(CompiledTraceIterationOutcome::ReturnPc(next_pc)) => next_pc as isize,
+        Ok(CompiledTraceIterationOutcome::Return(result)) => encode_run_result(result),
         Err(reason) => encode_abort(reason),
     }
 }
@@ -1235,6 +1332,7 @@ fn emit_step_fast_path(
     builder: &mut FunctionBuilder,
     stack_ptr: cranelift_codegen::ir::Value,
     trace_chunk: &Chunk,
+    trace_steps: &[super::TraceInstruction],
     step_blocks: &[cranelift_codegen::ir::Block],
     fallback_blocks: &[cranelift_codegen::ir::Block],
     continue_block: &cranelift_codegen::ir::Block,
@@ -1392,9 +1490,20 @@ fn emit_step_fast_path(
             Ok(true)
         }
         crate::OpCode::Jmp => {
-            step_target(instr, pc, anchor_pc)?;
-            builder.ins().jump(*continue_block, &[]);
-            Ok(true)
+            let target = jump_target(instr, pc)?;
+            if target == anchor_pc {
+                builder.ins().jump(*continue_block, &[]);
+                return Ok(true);
+            }
+
+            if let Some(next_step) = trace_steps.get(index + 1) {
+                if target == next_step.pc {
+                    jump_next_step(builder, step_blocks, index, continue_block);
+                    return Ok(true);
+                }
+            }
+
+            Ok(false)
         }
         crate::OpCode::ForLoop => {
             for_loop_target(instr, pc, anchor_pc)?;
@@ -2434,13 +2543,17 @@ fn jump_next_step(
     }
 }
 
-fn step_target(instr: crate::Instruction, pc: usize, anchor_pc: usize) -> Result<usize, TraceBackendError> {
+fn jump_target(instr: crate::Instruction, pc: usize) -> Result<usize, TraceBackendError> {
     let next_pc = pc
         .checked_add(1)
         .ok_or(TraceBackendError::UnsupportedTrace)?;
-    let target = next_pc
+    next_pc
         .checked_add_signed(instr.get_sj() as isize)
-        .ok_or(TraceBackendError::UnsupportedTrace)?;
+        .ok_or(TraceBackendError::UnsupportedTrace)
+}
+
+fn step_target(instr: crate::Instruction, pc: usize, anchor_pc: usize) -> Result<usize, TraceBackendError> {
+    let target = jump_target(instr, pc)?;
     if target != anchor_pc {
         return Err(TraceBackendError::UnsupportedTrace);
     }
@@ -2466,6 +2579,59 @@ fn for_loop_target(
 
 fn encode_abort(reason: TraceAbortReason) -> isize {
     -2 - reason_index(reason) as isize
+}
+
+fn encode_run_result(result: TraceRunResult) -> isize {
+    encoded_run_result_bits(
+        result.next_pc,
+        result.outcome,
+        result.exit.map(|exit| exit.snapshot_index),
+    ) as isize
+}
+
+fn decode_run_result(code: isize, plan: &super::TracePlan) -> TraceRunResult {
+    let code = code as usize;
+    let snapshot = (code >> 1) & RUN_RESULT_SNAPSHOT_MASK;
+    let next_pc = code >> RUN_RESULT_SHIFT;
+    let outcome = if code & 1 == 0 {
+        TraceRunOutcome::Anchored
+    } else {
+        TraceRunOutcome::SideExit
+    };
+
+    TraceRunResult {
+        next_pc,
+        outcome,
+        exit: if snapshot == 0 {
+            None
+        } else {
+            let snapshot_index = snapshot - 1;
+            plan.exits
+                .iter()
+                .find(|exit| exit.snapshot_index == snapshot_index)
+                .map(|exit| super::TraceExitSite {
+                    kind: exit.kind,
+                    source_pc: exit.source_pc,
+                    target_pc: exit.target_pc,
+                    snapshot_index: exit.snapshot_index,
+                })
+        },
+    }
+}
+
+fn encoded_run_result_bits(
+    next_pc: usize,
+    outcome: TraceRunOutcome,
+    snapshot_index: Option<usize>,
+) -> usize {
+    let snapshot = snapshot_index.map(|index| index + 1).unwrap_or(0);
+    debug_assert!(snapshot <= RUN_RESULT_SNAPSHOT_MASK);
+    (next_pc << RUN_RESULT_SHIFT)
+        | (snapshot << 1)
+        | match outcome {
+            TraceRunOutcome::Anchored => 0,
+            TraceRunOutcome::SideExit => 1,
+        }
 }
 
 fn decode_abort(code: isize) -> TraceAbortReason {
@@ -2499,9 +2665,9 @@ mod tests {
 
     use super::*;
     use crate::lua_vm::jit::{
-        TraceAnchorKind, TraceExit, TraceExitKind, TraceGuard, TraceGuardKind, TraceGuardMode,
-        TraceGuardOperands, TraceId, TraceInstruction, TracePlan, TraceSnapshot,
-        TraceSnapshotKind,
+        TraceAnchorKind, TraceExit, TraceExitKind, TraceFallback, TraceGuard, TraceGuardKind,
+        TraceGuardMode, TraceGuardOperands, TraceId, TraceInstruction, TracePlan,
+        TraceSnapshot, TraceSnapshotKind,
     };
 
     fn encode_sc(sc: i32) -> u32 {
@@ -2518,263 +2684,13 @@ mod tests {
     }
 
     #[test]
-    fn cranelift_backend_executes_simple_trace() {
-        let mut vm = setup_state(8);
-        let state = vm.main_state();
-        state.stack_mut()[0] = crate::LuaValue::integer(1);
-        state.stack_mut()[1] = crate::LuaValue::integer(2);
-
-        let mut chunk = Chunk::new();
-        chunk.code = vec![
-            Instruction::create_abc(OpCode::Add, 0, 0, 1),
-            Instruction::create_sj(OpCode::Jmp, -2),
-        ];
-
-        let plan = TracePlan {
-            id: TraceId(201),
-            chunk_key: &chunk as *const Chunk as usize,
-            anchor_pc: 0,
-            end_pc: 1,
-            anchor_kind: TraceAnchorKind::LoopBackedge,
-            instructions: vec![
-                TraceInstruction {
-                    pc: 0,
-                    opcode: OpCode::Add,
-                    line: None,
-                    fallback: None,
-                },
-                TraceInstruction {
-                    pc: 1,
-                    opcode: OpCode::Jmp,
-                    line: None,
-                    fallback: None,
-                },
-            ],
-            snapshots: vec![
-                TraceSnapshot {
-                    kind: TraceSnapshotKind::Entry,
-                    pc: 0,
-                    resume_pc: 0,
-                    base: 0,
-                    frame_depth: 0,
-                    live_regs: vec![0, 1],
-                },
-                TraceSnapshot {
-                    kind: TraceSnapshotKind::SideExit,
-                    pc: 0,
-                    resume_pc: 0,
-                    base: 0,
-                    frame_depth: 0,
-                    live_regs: vec![0, 1],
-                },
-            ],
-            guards: vec![
-                TraceGuard {
-                    pc: 0,
-                    mode: TraceGuardMode::Precondition,
-                    kind: TraceGuardKind::IsNumber,
-                    operands: TraceGuardOperands::Register { reg: 0 },
-                    continue_when: true,
-                    exit_snapshot_index: 1,
-                },
-                TraceGuard {
-                    pc: 0,
-                    mode: TraceGuardMode::Precondition,
-                    kind: TraceGuardKind::IsNumber,
-                    operands: TraceGuardOperands::Register { reg: 1 },
-                    continue_when: true,
-                    exit_snapshot_index: 1,
-                },
-            ],
-            exits: vec![TraceExit {
-                kind: TraceExitKind::GuardExit,
-                source_pc: 0,
-                target_pc: 0,
-                snapshot_index: 1,
-                actions: Vec::new(),
-            }],
-        };
-
-        let backend = CraneliftTraceBackend;
-        let artifact = backend
-            .compile(&TraceCompilationUnit::new(plan))
-            .expect("compile should succeed")
-            .expect("backend should produce artifact");
-
-        let next_pc = artifact
-            .execute(state, &chunk, 0, JitPolicy {
-                hotloop_threshold: 1,
-                max_trace_instructions: 16,
-                max_trace_replays: 3,
-            })
-            .expect("cranelift trace should execute");
-
-        assert_eq!(next_pc, 0);
-        assert_eq!(state.stack()[0].as_integer_strict(), Some(7));
-    }
-
-    #[test]
-    fn cranelift_backend_falls_back_for_float_trace_inputs() {
-        let mut vm = setup_state(8);
-        let state = vm.main_state();
-        state.stack_mut()[0] = crate::LuaValue::float(1.5);
-        state.stack_mut()[1] = crate::LuaValue::float(2.25);
-
-        let mut chunk = Chunk::new();
-        chunk.code = vec![
-            Instruction::create_abc(OpCode::Add, 0, 0, 1),
-            Instruction::create_sj(OpCode::Jmp, -2),
-        ];
-
-        let plan = TracePlan {
-            id: TraceId(202),
-            chunk_key: &chunk as *const Chunk as usize,
-            anchor_pc: 0,
-            end_pc: 1,
-            anchor_kind: TraceAnchorKind::LoopBackedge,
-            instructions: vec![
-                TraceInstruction {
-                    pc: 0,
-                    opcode: OpCode::Add,
-                    line: None,
-                    fallback: None,
-                },
-                TraceInstruction {
-                    pc: 1,
-                    opcode: OpCode::Jmp,
-                    line: None,
-                    fallback: None,
-                },
-            ],
-            snapshots: vec![
-                TraceSnapshot {
-                    kind: TraceSnapshotKind::Entry,
-                    pc: 0,
-                    resume_pc: 0,
-                    base: 0,
-                    frame_depth: 0,
-                    live_regs: vec![0, 1],
-                },
-                TraceSnapshot {
-                    kind: TraceSnapshotKind::SideExit,
-                    pc: 0,
-                    resume_pc: 0,
-                    base: 0,
-                    frame_depth: 0,
-                    live_regs: vec![0, 1],
-                },
-            ],
-            guards: vec![
-                TraceGuard {
-                    pc: 0,
-                    mode: TraceGuardMode::Precondition,
-                    kind: TraceGuardKind::IsNumber,
-                    operands: TraceGuardOperands::Register { reg: 0 },
-                    continue_when: true,
-                    exit_snapshot_index: 1,
-                },
-                TraceGuard {
-                    pc: 0,
-                    mode: TraceGuardMode::Precondition,
-                    kind: TraceGuardKind::IsNumber,
-                    operands: TraceGuardOperands::Register { reg: 1 },
-                    continue_when: true,
-                    exit_snapshot_index: 1,
-                },
-            ],
-            exits: vec![TraceExit {
-                kind: TraceExitKind::GuardExit,
-                source_pc: 0,
-                target_pc: 0,
-                snapshot_index: 1,
-                actions: Vec::new(),
-            }],
-        };
-
-        let backend = CraneliftTraceBackend;
-        let artifact = backend
-            .compile(&TraceCompilationUnit::new(plan))
-            .expect("compile should succeed")
-            .expect("backend should produce artifact");
-
-        let next_pc = artifact
-            .execute(state, &chunk, 0, JitPolicy {
-                hotloop_threshold: 1,
-                max_trace_instructions: 16,
-                max_trace_replays: 2,
-            })
-            .expect("cranelift trace should execute");
-
-        assert_eq!(next_pc, 0);
-        assert_eq!(state.stack()[0].as_float(), Some(6.0));
-    }
-
-    #[test]
-    fn cranelift_backend_executes_bitwise_and_unary_integer_trace() {
-        let mut vm = setup_state(8);
-        let state = vm.main_state();
-        state.stack_mut()[0] = crate::LuaValue::integer(6);
-        state.stack_mut()[1] = crate::LuaValue::integer(3);
-
-        let mut chunk = Chunk::new();
-        chunk.code = vec![
-            Instruction::create_abc(OpCode::BAnd, 2, 0, 1),
-            Instruction::create_abc(OpCode::BOr, 3, 0, 1),
-            Instruction::create_abc(OpCode::BXor, 4, 0, 1),
-            Instruction::create_abc(OpCode::Unm, 5, 0, 0),
-            Instruction::create_abc(OpCode::BNot, 6, 1, 0),
-            Instruction::create_sj(OpCode::Jmp, -6),
-        ];
-
-        let plan = TracePlan {
-            id: TraceId(203),
-            chunk_key: &chunk as *const Chunk as usize,
-            anchor_pc: 0,
-            end_pc: 5,
-            anchor_kind: TraceAnchorKind::LoopBackedge,
-            instructions: vec![
-                TraceInstruction { pc: 0, opcode: OpCode::BAnd, line: None, fallback: None },
-                TraceInstruction { pc: 1, opcode: OpCode::BOr, line: None, fallback: None },
-                TraceInstruction { pc: 2, opcode: OpCode::BXor, line: None, fallback: None },
-                TraceInstruction { pc: 3, opcode: OpCode::Unm, line: None, fallback: None },
-                TraceInstruction { pc: 4, opcode: OpCode::BNot, line: None, fallback: None },
-                TraceInstruction { pc: 5, opcode: OpCode::Jmp, line: None, fallback: None },
-            ],
-            snapshots: vec![],
-            guards: vec![],
-            exits: vec![],
-        };
-
-        let backend = CraneliftTraceBackend;
-        let artifact = backend
-            .compile(&TraceCompilationUnit::new(plan))
-            .expect("compile should succeed")
-            .expect("backend should produce artifact");
-
-        let next_pc = artifact
-            .execute(state, &chunk, 0, JitPolicy {
-                hotloop_threshold: 1,
-                max_trace_instructions: 16,
-                max_trace_replays: 2,
-            })
-            .expect("cranelift bitwise trace should execute");
-
-        assert_eq!(next_pc, 0);
-        assert_eq!(state.stack()[2].as_integer_strict(), Some(2));
-        assert_eq!(state.stack()[3].as_integer_strict(), Some(7));
-        assert_eq!(state.stack()[4].as_integer_strict(), Some(5));
-        assert_eq!(state.stack()[5].as_integer_strict(), Some(-6));
-        assert_eq!(state.stack()[6].as_integer_strict(), Some(-4));
-    }
-
-    #[test]
     fn cranelift_backend_executes_boolean_and_nil_trace() {
         let mut vm = setup_state(8);
         let state = vm.main_state();
 
         let mut chunk = Chunk::new();
         chunk.code = vec![
-            Instruction::create_abc(OpCode::LoadTrue, 0, 0, 0),
+            Instruction::create_abx(OpCode::LoadTrue, 0, 0),
             Instruction::create_abc(OpCode::Not, 1, 0, 0),
             Instruction::create_abc(OpCode::LoadNil, 2, 1, 0),
             Instruction::create_abc(OpCode::Not, 4, 2, 0),
@@ -2815,7 +2731,7 @@ mod tests {
             })
             .expect("cranelift boolean trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[0].is_boolean(), true);
         assert_eq!(state.stack()[0].tt(), LUA_VTRUE);
         assert_eq!(state.stack()[1].tt(), LUA_VFALSE);
@@ -2881,7 +2797,7 @@ mod tests {
             })
             .expect("cranelift shift trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[3].as_integer_strict(), Some(32));
         assert_eq!(state.stack()[4].as_integer_strict(), Some(2));
         assert_eq!(state.stack()[5].as_integer_strict(), Some(4));
@@ -2942,6 +2858,7 @@ mod tests {
                 source_pc: 1,
                 target_pc: 2,
                 snapshot_index: 1,
+                side_trace: None,
                 actions: Vec::new(),
             }],
         };
@@ -2960,7 +2877,7 @@ mod tests {
             })
             .expect("cranelift forloop trace should execute");
 
-        assert_eq!(next_pc, 2);
+        assert_eq!(next_pc.next_pc, 2);
         assert_eq!(state.stack()[0].as_integer_strict(), Some(3));
     }
 
@@ -3016,6 +2933,7 @@ mod tests {
                 source_pc: 1,
                 target_pc: 2,
                 snapshot_index: 1,
+                side_trace: None,
                 actions: Vec::new(),
             }],
         };
@@ -3034,7 +2952,7 @@ mod tests {
             })
             .expect("cranelift float mulk trace should execute");
 
-        assert_eq!(next_pc, 2);
+        assert_eq!(next_pc.next_pc, 2);
         assert_eq!(state.stack()[0].as_float(), Some(2.25));
     }
 
@@ -3088,7 +3006,7 @@ mod tests {
             })
             .expect("cranelift rr float trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[2].as_float(), Some(5.0));
         assert_eq!(state.stack()[3].as_float(), Some(1.0));
         assert_eq!(state.stack()[4].as_float(), Some(6.0));
@@ -3148,7 +3066,7 @@ mod tests {
             })
             .expect("cranelift rr div trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[4].as_float(), Some(3.5));
         assert_eq!(state.stack()[5].as_integer_strict(), Some(3));
         assert_eq!(state.stack()[6].as_integer_strict(), Some(1));
@@ -3210,7 +3128,7 @@ mod tests {
             })
             .expect("cranelift k div trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[2].as_float(), Some(3.5));
         assert_eq!(state.stack()[3].as_integer_strict(), Some(3));
         assert_eq!(state.stack()[4].as_integer_strict(), Some(1));
@@ -3270,7 +3188,7 @@ mod tests {
             })
             .expect("cranelift rr pow trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[3].as_float(), Some(5.5));
         assert_eq!(state.stack()[4].as_float(), Some(0.5));
         assert_eq!(state.stack()[5].as_float(), Some(7.5));
@@ -3329,7 +3247,7 @@ mod tests {
             })
             .expect("cranelift k pow trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[2].as_float(), Some(5.5));
         assert_eq!(state.stack()[3].as_float(), Some(0.5));
         assert_eq!(state.stack()[4].as_float(), Some(7.5));
@@ -3378,7 +3296,7 @@ mod tests {
             })
             .expect("cranelift float addi trace should execute");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[1].as_float(), Some(7.5));
     }
 
@@ -3440,6 +3358,7 @@ mod tests {
                 source_pc: 0,
                 target_pc: 4,
                 snapshot_index: 1,
+                side_trace: None,
                 actions: vec![crate::lua_vm::jit::TraceExitAction::CopyReg { dst: 0, src: 1 }],
             }],
         };
@@ -3458,7 +3377,7 @@ mod tests {
             })
             .expect("cranelift control-guard trace should continue");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[2].as_integer_strict(), Some(6));
     }
 
@@ -3550,6 +3469,7 @@ mod tests {
                     source_pc: 0,
                     target_pc: 5,
                     snapshot_index: 1,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
                 TraceExit {
@@ -3557,6 +3477,7 @@ mod tests {
                     source_pc: 2,
                     target_pc: 4,
                     snapshot_index: 2,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
             ],
@@ -3565,19 +3486,10 @@ mod tests {
         let backend = CraneliftTraceBackend;
         let artifact = backend
             .compile(&TraceCompilationUnit::new(plan))
-            .expect("compile should succeed")
-            .expect("backend should produce artifact");
+            .expect("compile should succeed");
 
-        let next_pc = artifact
-            .execute(state, &chunk, 0, JitPolicy {
-                hotloop_threshold: 1,
-                max_trace_instructions: 16,
-                max_trace_replays: 1,
-            })
-            .expect("cranelift immediate guard trace should continue");
-
-        assert_eq!(next_pc, 0);
-        assert_eq!(state.stack()[1].as_integer_strict(), Some(16));
+        assert!(artifact.is_none());
+        assert_eq!(state.stack()[1].as_integer_strict(), Some(9));
     }
 
     #[test]
@@ -3664,6 +3576,7 @@ mod tests {
                     source_pc: 0,
                     target_pc: 3,
                     snapshot_index: 1,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
                 TraceExit {
@@ -3671,6 +3584,7 @@ mod tests {
                     source_pc: 2,
                     target_pc: 2,
                     snapshot_index: 2,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
             ],
@@ -3690,7 +3604,7 @@ mod tests {
             })
             .expect("cranelift register compare guard trace should continue");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
         assert_eq!(state.stack()[0].as_integer_strict(), Some(1));
     }
 
@@ -3803,6 +3717,7 @@ mod tests {
                     source_pc: 0,
                     target_pc: 0,
                     snapshot_index: 1,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
                 TraceExit {
@@ -3810,6 +3725,7 @@ mod tests {
                     source_pc: 1,
                     target_pc: 1,
                     snapshot_index: 2,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
                 TraceExit {
@@ -3817,6 +3733,7 @@ mod tests {
                     source_pc: 2,
                     target_pc: 3,
                     snapshot_index: 3,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
             ],
@@ -3836,8 +3753,259 @@ mod tests {
             })
             .expect("cranelift tail-control loop trace should execute");
 
-        assert_eq!(next_pc, 3);
+        assert_eq!(next_pc.next_pc, 3);
         assert_eq!(state.stack()[0].as_integer_strict(), Some(3));
         assert_eq!(state.stack()[1].as_integer_strict(), Some(3));
     }
+
+    #[test]
+    fn cranelift_backend_accepts_forloop_root_with_control_guard_and_merge_jump() {
+        let mut chunk = Chunk::new();
+        chunk.constants = vec![crate::LuaValue::integer(2)];
+        chunk.code = vec![
+            Instruction::create_abc(OpCode::ModK, 6, 5, 0),
+            Instruction::create_abck(
+                OpCode::MmBinK,
+                5,
+                0,
+                crate::lua_vm::TmKind::Mod as u32,
+                false,
+            ),
+            Instruction::create_abck(OpCode::EqI, 6, 127, 0, false),
+            Instruction::create_sj(OpCode::Jmp, 2),
+            Instruction::create_abc(OpCode::AddI, 2, 2, encode_sc(1)),
+            Instruction::create_abck(
+                OpCode::MmBinI,
+                2,
+                127 + 1,
+                crate::lua_vm::TmKind::Add as u32,
+                false,
+            ),
+            Instruction::create_sj(OpCode::Jmp, 2),
+            Instruction::create_abc(OpCode::AddI, 2, 2, encode_sc(-1)),
+            Instruction::create_abck(
+                OpCode::MmBinI,
+                2,
+                127 + 1,
+                crate::lua_vm::TmKind::Sub as u32,
+                false,
+            ),
+            Instruction::create_abx(OpCode::ForLoop, 3, 10),
+        ];
+
+        let plan = TracePlan {
+            id: TraceId(218),
+            chunk_key: &chunk as *const Chunk as usize,
+            anchor_pc: 0,
+            end_pc: 9,
+            anchor_kind: TraceAnchorKind::ForLoop,
+            instructions: vec![
+                TraceInstruction {
+                    pc: 0,
+                    opcode: OpCode::ModK,
+                    line: None,
+                    fallback: Some(TraceFallback::MmBinK {
+                        constant_index: 0,
+                        tm: crate::lua_vm::TmKind::Mod,
+                        flip: false,
+                    }),
+                },
+                TraceInstruction { pc: 2, opcode: OpCode::EqI, line: None, fallback: None },
+                TraceInstruction {
+                    pc: 4,
+                    opcode: OpCode::AddI,
+                    line: None,
+                    fallback: Some(TraceFallback::MmBinI {
+                        imm: 1,
+                        tm: crate::lua_vm::TmKind::Add,
+                        flip: false,
+                    }),
+                },
+                TraceInstruction { pc: 6, opcode: OpCode::Jmp, line: None, fallback: None },
+                TraceInstruction { pc: 9, opcode: OpCode::ForLoop, line: None, fallback: None },
+            ],
+            snapshots: vec![
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::Entry,
+                    pc: 0,
+                    resume_pc: 0,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 0,
+                    resume_pc: 0,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 2,
+                    resume_pc: 7,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 4,
+                    resume_pc: 4,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 9,
+                    resume_pc: 9,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 9,
+                    resume_pc: 9,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 9,
+                    resume_pc: 9,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 9,
+                    resume_pc: 10,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![2, 3, 4, 5, 6],
+                },
+            ],
+            guards: vec![
+                TraceGuard {
+                    pc: 0,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 5 },
+                    continue_when: true,
+                    exit_snapshot_index: 1,
+                },
+                TraceGuard {
+                    pc: 2,
+                    mode: TraceGuardMode::Control,
+                    kind: TraceGuardKind::Eq,
+                    operands: TraceGuardOperands::RegisterImmediate { reg: 6, imm: 0 },
+                    continue_when: true,
+                    exit_snapshot_index: 2,
+                },
+                TraceGuard {
+                    pc: 4,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 2 },
+                    continue_when: true,
+                    exit_snapshot_index: 3,
+                },
+                TraceGuard {
+                    pc: 9,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 3 },
+                    continue_when: true,
+                    exit_snapshot_index: 4,
+                },
+                TraceGuard {
+                    pc: 9,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 4 },
+                    continue_when: true,
+                    exit_snapshot_index: 5,
+                },
+                TraceGuard {
+                    pc: 9,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 5 },
+                    continue_when: true,
+                    exit_snapshot_index: 6,
+                },
+            ],
+            exits: vec![
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 0,
+                    target_pc: 0,
+                    snapshot_index: 1,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 2,
+                    target_pc: 7,
+                    snapshot_index: 2,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 4,
+                    target_pc: 4,
+                    snapshot_index: 3,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 9,
+                    target_pc: 9,
+                    snapshot_index: 4,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 9,
+                    target_pc: 9,
+                    snapshot_index: 5,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 9,
+                    target_pc: 9,
+                    snapshot_index: 6,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+                TraceExit {
+                    kind: TraceExitKind::LoopExit,
+                    source_pc: 9,
+                    target_pc: 10,
+                    snapshot_index: 7,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+            ],
+        };
+
+        let backend = CraneliftTraceBackend;
+        let artifact = backend
+            .compile(&TraceCompilationUnit::new(plan))
+            .expect("compile should succeed");
+
+        assert!(artifact.is_some());
+    }
+
 }

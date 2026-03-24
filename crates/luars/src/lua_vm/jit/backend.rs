@@ -104,6 +104,7 @@ impl TraceBackend for LoweredTraceBackend {
                             exit: CompiledTraceExit {
                                 target_pc: exit.target_pc,
                                 snapshot_index: exit.snapshot_index,
+                                side_trace: exit.side_trace,
                                 actions: exit.actions.clone(),
                             },
                         })
@@ -122,6 +123,7 @@ impl TraceBackend for LoweredTraceBackend {
                     .map(|exit| CompiledTraceExit {
                         target_pc: exit.target_pc,
                         snapshot_index: exit.snapshot_index,
+                        side_trace: exit.side_trace,
                         actions: exit.actions.clone(),
                     });
 

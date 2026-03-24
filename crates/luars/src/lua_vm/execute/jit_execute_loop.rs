@@ -74,10 +74,12 @@ fn maybe_handle_hot_loop(
                 RecordingRequest {
                     chunk_key,
                     anchor_pc,
+                    start_pc: anchor_pc,
                     current_pc,
                     base,
                     frame_depth,
                     anchor_kind,
+                    parent_side_trace: None,
                 },
             );
             vm.jit_runtime_mut()
@@ -97,8 +99,40 @@ fn maybe_handle_hot_loop(
                 return None;
             };
 
-            match trace_artifact.execute(lua_state, chunk, base, policy) {
-                Ok(next_pc) => Some(next_pc),
+            match trace_artifact.execute_tree(lua_state, chunk, base, policy) {
+                Ok(dispatch_result) => {
+                    let run_result = dispatch_result.run_result;
+                    let side_trace_request = {
+                        let runtime = lua_state.vm_mut().jit_runtime_mut();
+                        runtime.note_trace_side_exit(
+                            dispatch_result.trace_id,
+                            run_result,
+                            base,
+                            frame_depth,
+                        )
+                    };
+
+                    if let Some((side_key, request)) = side_trace_request {
+                        let result = lua_state
+                            .vm_mut()
+                            .jit_runtime_mut()
+                            .try_start_recording(chunk, request);
+                        lua_state
+                            .vm_mut()
+                            .jit_runtime_mut()
+                            .finish_side_trace_recording(side_key, result);
+                    }
+
+                    lua_state.vm_mut().jit_runtime_mut().report_trace_result(
+                        chunk_key,
+                        code_len,
+                        anchor_pc,
+                        trace_id,
+                        run_result,
+                    );
+
+                    Some(run_result.next_pc)
+                }
                 Err(reason) => {
                     lua_state
                         .vm_mut()

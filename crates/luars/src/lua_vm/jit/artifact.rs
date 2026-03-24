@@ -1,14 +1,15 @@
 use crate::{Chunk, LuaState};
 
 use super::{
-    JitPolicy, LoweredTraceInstruction, TraceAbortReason, TraceCompilationUnit, TraceExitAction,
-    TraceGuard, TraceId, TracePlan,
+    JitPolicy, LoweredTraceInstruction, TraceAbortReason, TraceCompilationUnit,
+    TraceDispatchResult, TraceExitAction, TraceGuard, TraceId, TracePlan, TraceRunResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledTraceExit {
     pub target_pc: usize,
     pub snapshot_index: usize,
+    pub side_trace: Option<TraceId>,
     pub actions: Vec<TraceExitAction>,
 }
 
@@ -79,7 +80,7 @@ impl TraceArtifact {
         chunk: &Chunk,
         base: usize,
         policy: JitPolicy,
-    ) -> Result<usize, TraceAbortReason> {
+    ) -> Result<TraceRunResult, TraceAbortReason> {
         match self {
             Self::Replay(plan) => {
                 super::replay::execute_trace(lua_state, chunk, plan, base, policy)
@@ -94,4 +95,97 @@ impl TraceArtifact {
             Self::NativePlaceholder(_) => Err(TraceAbortReason::NotImplemented),
         }
     }
+
+    pub fn execute_tree(
+        &self,
+        lua_state: &mut LuaState,
+        chunk: &Chunk,
+        base: usize,
+        policy: JitPolicy,
+    ) -> Result<TraceDispatchResult, TraceAbortReason> {
+        match self {
+            Self::Replay(plan) => {
+                super::replay::execute_trace_tree(lua_state, chunk, plan, base, policy)
+            }
+            Self::Compiled(compiled) => {
+                super::replay::execute_compiled_trace_tree(lua_state, chunk, compiled, base, policy)
+            }
+            #[cfg(feature = "jit-cranelift")]
+            Self::Cranelift(artifact) => super::replay::execute_cranelift_trace_tree(
+                lua_state,
+                chunk,
+                artifact,
+                base,
+                policy,
+            ),
+            Self::NativePlaceholder(_) => Err(TraceAbortReason::NotImplemented),
+        }
+    }
+
+    pub fn link_side_trace(&mut self, snapshot_index: usize, side_trace_id: TraceId) -> bool {
+        match self {
+            Self::Replay(plan) => link_plan_exit(&mut plan.exits, snapshot_index, side_trace_id),
+            Self::Compiled(compiled) => {
+                let mut linked = link_plan_exit(
+                    &mut compiled.unit.plan.exits,
+                    snapshot_index,
+                    side_trace_id,
+                );
+                linked |= link_compiled_steps(&mut compiled.steps, snapshot_index, side_trace_id);
+                linked
+            }
+            #[cfg(feature = "jit-cranelift")]
+            Self::Cranelift(artifact) => {
+                let mut linked = link_plan_exit(
+                    &mut artifact.compiled.unit.plan.exits,
+                    snapshot_index,
+                    side_trace_id,
+                );
+                linked |= link_compiled_steps(
+                    &mut artifact.compiled.steps,
+                    snapshot_index,
+                    side_trace_id,
+                );
+                linked
+            }
+            Self::NativePlaceholder(stub) => {
+                link_plan_exit(&mut stub.unit.plan.exits, snapshot_index, side_trace_id)
+            }
+        }
+    }
+}
+
+fn link_plan_exit(exits: &mut [super::TraceExit], snapshot_index: usize, side_trace_id: TraceId) -> bool {
+    if let Some(exit) = exits
+        .iter_mut()
+        .find(|exit| exit.snapshot_index == snapshot_index)
+    {
+        exit.side_trace = Some(side_trace_id);
+        true
+    } else {
+        false
+    }
+}
+
+fn link_compiled_steps(
+    steps: &mut [CompiledTraceStep],
+    snapshot_index: usize,
+    side_trace_id: TraceId,
+) -> bool {
+    let mut linked = false;
+    for step in steps {
+        for guard in &mut step.guards {
+            if guard.exit.snapshot_index == snapshot_index {
+                guard.exit.side_trace = Some(side_trace_id);
+                linked = true;
+            }
+        }
+        if let Some(loop_exit) = &mut step.loop_exit {
+            if loop_exit.snapshot_index == snapshot_index {
+                loop_exit.side_trace = Some(side_trace_id);
+                linked = true;
+            }
+        }
+    }
+    linked
 }

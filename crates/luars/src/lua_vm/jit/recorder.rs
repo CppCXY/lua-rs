@@ -22,7 +22,7 @@ impl<'a> TraceRecorder<'a> {
     }
 
     pub fn record(&self, trace_id: TraceId) -> Result<TracePlan, TraceAbortReason> {
-        if self.request.anchor_pc >= self.chunk.code.len() {
+        if self.request.start_pc >= self.chunk.code.len() {
             return Err(TraceAbortReason::InvalidAnchor);
         }
 
@@ -30,7 +30,7 @@ impl<'a> TraceRecorder<'a> {
         let mut live_regs = Vec::new();
         let mut snapshots = vec![TraceSnapshot {
             kind: TraceSnapshotKind::Entry,
-            pc: self.request.anchor_pc,
+            pc: self.request.start_pc,
             resume_pc: self.request.current_pc,
             base: self.request.base,
             frame_depth: self.request.frame_depth,
@@ -38,7 +38,7 @@ impl<'a> TraceRecorder<'a> {
         }];
         let mut guards = Vec::new();
         let mut exits = Vec::new();
-        let mut pc = self.request.anchor_pc;
+        let mut pc = self.request.start_pc;
         let max_len = self.policy.max_trace_instructions as usize;
 
         for _ in 0..max_len {
@@ -75,6 +75,10 @@ impl<'a> TraceRecorder<'a> {
                             exits,
                         });
                     }
+                    if target > pc {
+                        pc = target;
+                        continue;
+                    }
                     return Err(TraceAbortReason::UnsupportedControlFlow);
                 }
                 OpCode::ForLoop => {
@@ -94,6 +98,7 @@ impl<'a> TraceRecorder<'a> {
                             source_pc: pc,
                             target_pc: pc + 1,
                             snapshot_index: exit_snapshot_index,
+                            side_trace: None,
                             actions: Vec::new(),
                         });
                         Self::finalize_live_regs(&mut snapshots, &live_regs);
@@ -205,6 +210,7 @@ impl<'a> TraceRecorder<'a> {
             source_pc: pc,
             target_pc: jmp_pc + 1,
             snapshot_index: exit_snapshot_index,
+            side_trace: None,
             actions,
         });
 
@@ -265,6 +271,7 @@ impl<'a> TraceRecorder<'a> {
             source_pc: pc,
             target_pc: exit_target,
             snapshot_index: exit_snapshot_index,
+            side_trace: None,
             actions,
         };
 
@@ -570,6 +577,7 @@ impl<'a> TraceRecorder<'a> {
             source_pc: pc,
             target_pc: pc,
             snapshot_index: exit_snapshot_index,
+            side_trace: None,
             actions: Vec::new(),
         });
         guards.push(TraceGuard {
@@ -856,10 +864,12 @@ mod tests {
         RecordingRequest {
             chunk_key: 0x1234,
             anchor_pc,
+            start_pc: anchor_pc,
             current_pc: anchor_pc,
             base: 8,
             frame_depth: 2,
             anchor_kind: TraceAnchorKind::LoopBackedge,
+            parent_side_trace: None,
         }
     }
 
@@ -920,10 +930,12 @@ mod tests {
             RecordingRequest {
                 chunk_key: &chunk as *const Chunk as usize,
                 anchor_pc: 0,
+                start_pc: 0,
                 current_pc: 0,
                 base: 0,
                 frame_depth: 0,
                 anchor_kind: TraceAnchorKind::LoopBackedge,
+                parent_side_trace: None,
             },
         )
         .record(TraceId(12))
@@ -994,6 +1006,47 @@ mod tests {
         assert_eq!(plan.exits.len(), 4);
         assert!(plan.exits.iter().any(|exit| exit.target_pc == 0));
         assert!(plan.exits.iter().any(|exit| exit.target_pc == 3));
+    }
+
+    #[test]
+    fn records_branch_loop_with_forward_merge_jump() {
+        let mut chunk = Chunk::new();
+        chunk.code = vec![
+            Instruction::create_abck(OpCode::EqI, 1, 127, 0, false),
+            Instruction::create_sj(OpCode::Jmp, 3),
+            Instruction::create_abc(OpCode::AddI, 0, 0, 127 + 1),
+            Instruction::create_abck(
+                OpCode::MmBinI,
+                0,
+                127 + 1,
+                crate::lua_vm::TmKind::Add as u32,
+                false,
+            ),
+            Instruction::create_sj(OpCode::Jmp, 2),
+            Instruction::create_abc(OpCode::AddI, 0, 0, 127 - 1),
+            Instruction::create_abck(
+                OpCode::MmBinI,
+                0,
+                127 + 1,
+                crate::lua_vm::TmKind::Sub as u32,
+                false,
+            ),
+            Instruction::create_sj(OpCode::Jmp, -8),
+        ];
+
+        let recorder = TraceRecorder::new(JitPolicy::default(), &chunk, recording_request(0));
+        let plan = recorder
+            .record(TraceId(21))
+            .expect("branch loop trace should record");
+
+        assert_eq!(plan.instructions.len(), 4);
+        assert_eq!(plan.instructions[0].pc, 0);
+        assert_eq!(plan.instructions[1].pc, 2);
+        assert_eq!(plan.instructions[2].pc, 4);
+        assert_eq!(plan.instructions[2].opcode, OpCode::Jmp);
+        assert_eq!(plan.instructions[3].pc, 7);
+        assert_eq!(plan.instructions[3].opcode, OpCode::Jmp);
+        assert!(plan.exits.iter().any(|exit| exit.target_pc == 5));
     }
 
     #[test]
@@ -1129,10 +1182,12 @@ mod tests {
         let request = RecordingRequest {
             chunk_key: 0x88,
             anchor_pc: 0,
+            start_pc: 0,
             current_pc: 0,
             base: 16,
             frame_depth: 3,
             anchor_kind: TraceAnchorKind::ForLoop,
+            parent_side_trace: None,
         };
 
         let recorder = TraceRecorder::new(JitPolicy::default(), &chunk, request);

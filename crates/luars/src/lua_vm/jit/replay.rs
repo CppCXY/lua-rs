@@ -5,14 +5,24 @@ use crate::lua_vm::execute::helper::{
 use crate::{Chunk, Instruction, LuaState, LuaValue, OpCode};
 
 use super::{
-    CompiledTraceArtifact, CompiledTraceExit, JitPolicy, TraceAbortReason, TraceExitAction,
-    TraceGuard, TraceGuardKind, TraceGuardMode, TraceGuardOperands, TracePlan,
+    CompiledTraceArtifact, CompiledTraceExit, JitPolicy, TraceAbortReason, TraceArtifact,
+    TraceDispatchResult, TraceExitAction, TraceExitKind, TraceExitSite, TraceGuard,
+    TraceGuardKind, TraceGuardMode, TraceGuardOperands, TraceId, TracePlan, TraceRunOutcome,
+    TraceRunResult,
 };
+#[cfg(feature = "jit-cranelift")]
+use super::artifact::CraneliftTraceArtifact;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompiledTraceIterationOutcome {
     LoopContinue,
-    ReturnPc(usize),
+    Return(TraceRunResult),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceTreeStep {
+    Return(TraceRunResult),
+    JumpToChild(TraceId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,7 +46,37 @@ pub fn execute_trace(
     plan: &TracePlan,
     base: usize,
     policy: JitPolicy,
-) -> Result<usize, TraceAbortReason> {
+) -> Result<TraceRunResult, TraceAbortReason> {
+    match execute_trace_inner(lua_state, chunk, plan, base, policy, false)? {
+        TraceTreeStep::Return(result) => Ok(result),
+        TraceTreeStep::JumpToChild(_) => Err(TraceAbortReason::UnsupportedControlFlow),
+    }
+}
+
+pub fn execute_trace_tree(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    plan: &TracePlan,
+    base: usize,
+    policy: JitPolicy,
+) -> Result<TraceDispatchResult, TraceAbortReason> {
+    execute_tree_artifact(
+        lua_state,
+        chunk,
+        TraceArtifact::Replay(plan.clone()),
+        base,
+        policy,
+    )
+}
+
+fn execute_trace_inner(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    plan: &TracePlan,
+    base: usize,
+    policy: JitPolicy,
+    follow_linked_side_traces: bool,
+) -> Result<TraceTreeStep, TraceAbortReason> {
     let replay_budget = policy.max_trace_replays.max(1) as usize;
 
     for _ in 0..replay_budget {
@@ -56,10 +96,31 @@ pub fn execute_trace(
                         .iter()
                         .find(|exit| exit.snapshot_index == guard.exit_snapshot_index)
                         .ok_or(TraceAbortReason::UnsupportedControlFlow)?;
-                    let materialized_exit =
-                        materialize_exit_state(lua_state, plan, exit.snapshot_index, exit, base)?;
-                    commit_materialized_exit(lua_state, base, &materialized_exit);
-                    return Ok(materialized_exit.target_pc);
+                    if follow_linked_side_traces {
+                        if let Some(side_trace_id) = exit.side_trace {
+                            apply_exit_actions_direct(lua_state, base, &exit.actions)?;
+                            return Ok(TraceTreeStep::JumpToChild(side_trace_id));
+                        }
+                    }
+                    let target_pc = if exit.side_trace.is_some() {
+                        apply_exit_actions_direct(lua_state, base, &exit.actions)?;
+                        exit.target_pc
+                    } else {
+                        let materialized_exit =
+                            materialize_exit_state(lua_state, plan, exit.snapshot_index, exit, base)?;
+                        commit_materialized_exit(lua_state, base, &materialized_exit);
+                        materialized_exit.target_pc
+                    };
+                    return Ok(TraceTreeStep::Return(TraceRunResult {
+                        next_pc: target_pc,
+                        outcome: TraceRunOutcome::SideExit,
+                        exit: Some(TraceExitSite {
+                            kind: exit.kind,
+                            source_pc: exit.source_pc,
+                            target_pc: exit.target_pc,
+                            snapshot_index: exit.snapshot_index,
+                        }),
+                    }));
                 }
             }
             if has_control_guard {
@@ -109,6 +170,9 @@ pub fn execute_trace(
                 OpCode::Jmp => {
                     let target = jump_target(trace_instr.pc, instr)?;
                     if target != plan.anchor_pc {
+                        if target > trace_instr.pc {
+                            continue;
+                        }
                         return Err(TraceAbortReason::UnsupportedControlFlow);
                     }
                     loop_completed = true;
@@ -134,18 +198,35 @@ pub fn execute_trace(
                     let materialized_exit =
                         materialize_exit_state(lua_state, plan, exit.snapshot_index, exit, base)?;
                     commit_materialized_exit(lua_state, base, &materialized_exit);
-                    return Ok(materialized_exit.target_pc);
+                    return Ok(TraceTreeStep::Return(TraceRunResult {
+                        next_pc: materialized_exit.target_pc,
+                        outcome: TraceRunOutcome::SideExit,
+                        exit: Some(TraceExitSite {
+                            kind: exit.kind,
+                            source_pc: exit.source_pc,
+                            target_pc: exit.target_pc,
+                            snapshot_index: exit.snapshot_index,
+                        }),
+                    }));
                 }
                 _ => return Err(TraceAbortReason::UnsupportedOpcode),
             }
         }
 
         if !loop_completed {
-            return Ok(plan.anchor_pc);
+            return Ok(TraceTreeStep::Return(TraceRunResult {
+                next_pc: plan.anchor_pc,
+                outcome: TraceRunOutcome::Anchored,
+                exit: None,
+            }));
         }
     }
 
-    Ok(plan.anchor_pc)
+    Ok(TraceTreeStep::Return(TraceRunResult {
+        next_pc: plan.anchor_pc,
+        outcome: TraceRunOutcome::Anchored,
+        exit: None,
+    }))
 }
 
 pub fn execute_compiled_trace(
@@ -154,17 +235,173 @@ pub fn execute_compiled_trace(
     compiled: &CompiledTraceArtifact,
     base: usize,
     policy: JitPolicy,
-) -> Result<usize, TraceAbortReason> {
+) -> Result<TraceRunResult, TraceAbortReason> {
+    match execute_compiled_trace_inner(lua_state, chunk, compiled, base, policy, false)? {
+        TraceTreeStep::Return(result) => Ok(result),
+        TraceTreeStep::JumpToChild(_) => Err(TraceAbortReason::UnsupportedControlFlow),
+    }
+}
+
+pub fn execute_compiled_trace_tree(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    compiled: &CompiledTraceArtifact,
+    base: usize,
+    policy: JitPolicy,
+) -> Result<TraceDispatchResult, TraceAbortReason> {
+    execute_tree_artifact(
+        lua_state,
+        chunk,
+        TraceArtifact::Compiled(compiled.clone()),
+        base,
+        policy,
+    )
+}
+
+#[cfg(feature = "jit-cranelift")]
+pub fn execute_cranelift_trace_tree(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    artifact: &CraneliftTraceArtifact,
+    base: usize,
+    policy: JitPolicy,
+) -> Result<TraceDispatchResult, TraceAbortReason> {
+    execute_tree_artifact(
+        lua_state,
+        chunk,
+        TraceArtifact::Cranelift(artifact.clone()),
+        base,
+        policy,
+    )
+}
+
+#[cfg(feature = "jit-cranelift")]
+fn execute_cranelift_trace_inner(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    artifact: &CraneliftTraceArtifact,
+    base: usize,
+    policy: JitPolicy,
+    follow_linked_side_traces: bool,
+) -> Result<TraceTreeStep, TraceAbortReason> {
+    let result = super::cranelift::execute_cranelift_trace(lua_state, chunk, artifact, base, policy)?;
+    if follow_linked_side_traces {
+        if let Some(exit) = result.exit {
+            if exit.kind == TraceExitKind::GuardExit {
+                if let Some(side_trace_id) = artifact
+                    .compiled
+                    .unit
+                    .plan
+                    .exits
+                    .iter()
+                    .find(|candidate| candidate.snapshot_index == exit.snapshot_index)
+                    .and_then(|candidate| candidate.side_trace)
+                {
+                    return Ok(TraceTreeStep::JumpToChild(side_trace_id));
+                }
+            }
+        }
+    }
+
+    Ok(TraceTreeStep::Return(result))
+}
+
+fn execute_compiled_trace_inner(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    compiled: &CompiledTraceArtifact,
+    base: usize,
+    policy: JitPolicy,
+    follow_linked_side_traces: bool,
+) -> Result<TraceTreeStep, TraceAbortReason> {
     let replay_budget = policy.max_trace_replays.max(1) as usize;
 
     for _ in 0..replay_budget {
         match execute_compiled_trace_iteration(lua_state, chunk, compiled, base)? {
             CompiledTraceIterationOutcome::LoopContinue => {}
-            CompiledTraceIterationOutcome::ReturnPc(next_pc) => return Ok(next_pc),
+            CompiledTraceIterationOutcome::Return(result) => {
+                if follow_linked_side_traces {
+                    if let Some(exit) = result.exit {
+                        if exit.kind == TraceExitKind::GuardExit {
+                            if let Some(side_trace_id) = compiled
+                                .unit
+                                .plan
+                                .exits
+                                .iter()
+                                .find(|candidate| candidate.snapshot_index == exit.snapshot_index)
+                                .and_then(|candidate| candidate.side_trace)
+                            {
+                                return Ok(TraceTreeStep::JumpToChild(side_trace_id));
+                            }
+                        }
+                    }
+                }
+                return Ok(TraceTreeStep::Return(result));
+            }
         }
     }
 
-    Ok(compiled.unit.plan.anchor_pc)
+    Ok(TraceTreeStep::Return(TraceRunResult {
+        next_pc: compiled.unit.plan.anchor_pc,
+        outcome: TraceRunOutcome::Anchored,
+        exit: None,
+    }))
+}
+
+fn execute_tree_artifact(
+    lua_state: &mut LuaState,
+    chunk: &Chunk,
+    root: TraceArtifact,
+    base: usize,
+    policy: JitPolicy,
+) -> Result<TraceDispatchResult, TraceAbortReason> {
+    const MAX_TRACE_TREE_DEPTH: usize = 32;
+
+    let mut current = root;
+    for _ in 0..MAX_TRACE_TREE_DEPTH {
+        let trace_id = current.id();
+        let step = match &current {
+            TraceArtifact::Replay(plan) => {
+                execute_trace_inner(lua_state, chunk, plan, base, policy, true)?
+            }
+            TraceArtifact::Compiled(compiled) => {
+                execute_compiled_trace_inner(lua_state, chunk, compiled, base, policy, true)?
+            }
+            #[cfg(feature = "jit-cranelift")]
+            TraceArtifact::Cranelift(artifact) => {
+                execute_cranelift_trace_inner(lua_state, chunk, artifact, base, policy, true)?
+            }
+            TraceArtifact::NativePlaceholder(_) => return Err(TraceAbortReason::NotImplemented),
+        };
+
+        match step {
+            TraceTreeStep::Return(run_result) => {
+                return Ok(TraceDispatchResult {
+                    trace_id,
+                    run_result,
+                });
+            }
+            TraceTreeStep::JumpToChild(next_trace_id) => {
+                let Some(next_artifact) = lua_state
+                    .vm_mut()
+                    .jit_runtime()
+                    .trace_artifact(next_trace_id)
+                    .cloned()
+                else {
+                    return Err(TraceAbortReason::UnsupportedControlFlow);
+                };
+
+                current = next_artifact;
+            }
+        }
+    }
+
+    let trace_id = current.id();
+    let run_result = current.execute(lua_state, chunk, base, policy)?;
+    Ok(TraceDispatchResult {
+        trace_id,
+        run_result,
+    })
 }
 
 pub(crate) fn execute_compiled_trace_iteration(
@@ -188,16 +425,29 @@ pub(crate) fn execute_compiled_trace_iteration_from_step(
         for compiled_guard in &step.guards {
             has_control_guard |= compiled_guard.guard.mode == TraceGuardMode::Control;
             if !evaluate_guard(lua_state, chunk, base, &compiled_guard.guard)? {
-                let materialized_exit = materialize_compiled_exit_state(
-                    lua_state,
-                    &compiled.unit.plan,
-                    &compiled_guard.exit,
-                    base,
-                )?;
-                commit_materialized_exit(lua_state, base, &materialized_exit);
-                return Ok(CompiledTraceIterationOutcome::ReturnPc(
-                    materialized_exit.target_pc,
-                ));
+                let target_pc = if compiled_guard.exit.side_trace.is_some() {
+                    apply_exit_actions_direct(lua_state, base, &compiled_guard.exit.actions)?;
+                    compiled_guard.exit.target_pc
+                } else {
+                    let materialized_exit = materialize_compiled_exit_state(
+                        lua_state,
+                        &compiled.unit.plan,
+                        &compiled_guard.exit,
+                        base,
+                    )?;
+                    commit_materialized_exit(lua_state, base, &materialized_exit);
+                    materialized_exit.target_pc
+                };
+                return Ok(CompiledTraceIterationOutcome::Return(TraceRunResult {
+                    next_pc: target_pc,
+                    outcome: TraceRunOutcome::SideExit,
+                    exit: Some(TraceExitSite {
+                        kind: TraceExitKind::GuardExit,
+                        source_pc: compiled_guard.guard.pc,
+                        target_pc: compiled_guard.exit.target_pc,
+                        snapshot_index: compiled_guard.exit.snapshot_index,
+                    }),
+                }));
             }
         }
         if has_control_guard {
@@ -247,6 +497,9 @@ pub(crate) fn execute_compiled_trace_iteration_from_step(
             OpCode::Jmp => {
                 let target = jump_target(step.instruction.pc, instr)?;
                 if target != compiled.unit.plan.anchor_pc {
+                    if target > step.instruction.pc {
+                        continue;
+                    }
                     return Err(TraceAbortReason::UnsupportedControlFlow);
                 }
                 return Ok(CompiledTraceIterationOutcome::LoopContinue);
@@ -267,17 +520,26 @@ pub(crate) fn execute_compiled_trace_iteration_from_step(
                 let materialized_exit =
                     materialize_compiled_exit_state(lua_state, &compiled.unit.plan, exit, base)?;
                 commit_materialized_exit(lua_state, base, &materialized_exit);
-                return Ok(CompiledTraceIterationOutcome::ReturnPc(
-                    materialized_exit.target_pc,
-                ));
+                return Ok(CompiledTraceIterationOutcome::Return(TraceRunResult {
+                    next_pc: materialized_exit.target_pc,
+                    outcome: TraceRunOutcome::SideExit,
+                    exit: Some(TraceExitSite {
+                        kind: TraceExitKind::LoopExit,
+                        source_pc: step.instruction.pc,
+                        target_pc: exit.target_pc,
+                        snapshot_index: exit.snapshot_index,
+                    }),
+                }));
             }
             _ => return Err(TraceAbortReason::UnsupportedOpcode),
         }
     }
 
-    Ok(CompiledTraceIterationOutcome::ReturnPc(
-        compiled.unit.plan.anchor_pc,
-    ))
+    Ok(CompiledTraceIterationOutcome::Return(TraceRunResult {
+        next_pc: compiled.unit.plan.anchor_pc,
+        outcome: TraceRunOutcome::Anchored,
+        exit: None,
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -520,6 +782,22 @@ fn apply_exit_actions(
                 let value = materialized_reg_value(materialized, src)
                     .unwrap_or_else(|| *stack_value(lua_state, base, src));
                 set_materialized_reg(materialized, dst, value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_exit_actions_direct(
+    lua_state: &mut LuaState,
+    base: usize,
+    actions: &[TraceExitAction],
+) -> Result<(), TraceAbortReason> {
+    for action in actions {
+        match *action {
+            TraceExitAction::CopyReg { dst, src } => {
+                let value = *stack_value(lua_state, base, src);
+                *stack_value_mut(lua_state, base, dst) = value;
             }
         }
     }
@@ -936,9 +1214,9 @@ mod tests {
     use crate::lua_vm::Instruction;
     use crate::lua_vm::jit::{
         LoweredTraceBackend, TraceAnchorKind, TraceBackend, TraceCompilationUnit, TraceExit,
-        TraceExitAction, TraceExitKind, TraceGuard, TraceGuardKind, TraceGuardMode,
-        TraceGuardOperands, TraceId, TraceInstruction, TracePlan, TraceSnapshot,
-        TraceSnapshotKind,
+        TraceExitAction, TraceExitKind, TraceFallback, TraceGuard, TraceGuardKind,
+        TraceGuardMode, TraceGuardOperands, TraceId, TraceInstruction, TracePlan,
+        TraceSnapshot, TraceSnapshotKind,
     };
 
     fn setup_state(stack_size: usize) -> Box<LuaVM> {
@@ -1021,6 +1299,7 @@ mod tests {
                 source_pc: 0,
                 target_pc: 0,
                 snapshot_index: 1,
+                side_trace: None,
                 actions: Vec::new(),
             }],
         };
@@ -1038,7 +1317,8 @@ mod tests {
         )
         .expect("replay should succeed");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
+        assert_eq!(next_pc.outcome, TraceRunOutcome::Anchored);
         assert_eq!(state.stack()[0].as_integer_strict(), Some(7));
     }
 
@@ -1116,6 +1396,7 @@ mod tests {
                 source_pc: 0,
                 target_pc: 0,
                 snapshot_index: 1,
+                side_trace: None,
                 actions: Vec::new(),
             }],
         };
@@ -1144,7 +1425,8 @@ mod tests {
         )
         .expect("compiled trace should succeed");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
+        assert_eq!(next_pc.outcome, TraceRunOutcome::Anchored);
         assert_eq!(state.stack()[0].as_integer_strict(), Some(7));
     }
 
@@ -1220,6 +1502,7 @@ mod tests {
                 source_pc: 0,
                 target_pc: 4,
                 snapshot_index: 1,
+                side_trace: None,
                 actions: vec![TraceExitAction::CopyReg { dst: 0, src: 1 }],
             }],
         };
@@ -1227,7 +1510,8 @@ mod tests {
         let next_pc = execute_trace(state, &chunk, &plan, 0, JitPolicy::default())
             .expect("replay should exit");
 
-        assert_eq!(next_pc, 4);
+        assert_eq!(next_pc.next_pc, 4);
+        assert_eq!(next_pc.outcome, TraceRunOutcome::SideExit);
         assert_eq!(state.stack()[0].as_boolean(), Some(false));
     }
 
@@ -1295,6 +1579,7 @@ mod tests {
                 source_pc: 0,
                 target_pc: 0,
                 snapshot_index: 1,
+                side_trace: None,
                 actions: Vec::new(),
             }],
         };
@@ -1302,7 +1587,8 @@ mod tests {
         let next_pc = execute_trace(state, &chunk, &plan, 0, JitPolicy::default())
             .expect("precondition exit should succeed");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
+        assert_eq!(next_pc.outcome, TraceRunOutcome::SideExit);
         assert!(state.stack()[0].is_nil());
     }
 
@@ -1417,6 +1703,7 @@ mod tests {
                     source_pc: 0,
                     target_pc: 5,
                     snapshot_index: 1,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
                 crate::lua_vm::jit::TraceExit {
@@ -1424,6 +1711,7 @@ mod tests {
                     source_pc: 2,
                     target_pc: 4,
                     snapshot_index: 2,
+                    side_trace: None,
                     actions: Vec::new(),
                 },
             ],
@@ -1442,7 +1730,181 @@ mod tests {
         )
         .expect("replay should handle constant and immediate guards");
 
-        assert_eq!(next_pc, 0);
+        assert_eq!(next_pc.next_pc, 0);
+        assert_eq!(next_pc.outcome, TraceRunOutcome::Anchored);
         assert_eq!(state.stack()[1].as_integer_strict(), Some(16));
+    }
+
+    #[test]
+    fn replay_and_compiled_support_forward_merge_jump() {
+        let mut vm = setup_state(8);
+        let state = vm.main_state();
+        state.stack_mut()[0] = LuaValue::integer(0);
+        state.stack_mut()[1] = LuaValue::integer(0);
+
+        let mut chunk = Chunk::new();
+        chunk.code = vec![
+            Instruction::create_abck(OpCode::EqI, 1, 127, 0, false),
+            Instruction::create_sj(OpCode::Jmp, 3),
+            Instruction::create_abc(OpCode::AddI, 0, 0, 127 + 1),
+            Instruction::create_abck(
+                OpCode::MmBinI,
+                0,
+                127 + 1,
+                crate::lua_vm::TmKind::Add as u32,
+                false,
+            ),
+            Instruction::create_sj(OpCode::Jmp, 2),
+            Instruction::create_abc(OpCode::AddI, 0, 0, 127 - 1),
+            Instruction::create_abck(
+                OpCode::MmBinI,
+                0,
+                127 + 1,
+                crate::lua_vm::TmKind::Sub as u32,
+                false,
+            ),
+            Instruction::create_sj(OpCode::Jmp, -8),
+        ];
+
+        let plan = TracePlan {
+            id: TraceId(31),
+            chunk_key: &chunk as *const Chunk as usize,
+            anchor_pc: 0,
+            end_pc: 7,
+            anchor_kind: TraceAnchorKind::LoopBackedge,
+            instructions: vec![
+                TraceInstruction {
+                    pc: 0,
+                    opcode: OpCode::EqI,
+                    line: None,
+                    fallback: None,
+                },
+                TraceInstruction {
+                    pc: 2,
+                    opcode: OpCode::AddI,
+                    line: None,
+                    fallback: Some(TraceFallback::MmBinI {
+                        imm: 1,
+                        tm: crate::lua_vm::TmKind::Add,
+                        flip: false,
+                    }),
+                },
+                TraceInstruction {
+                    pc: 4,
+                    opcode: OpCode::Jmp,
+                    line: None,
+                    fallback: None,
+                },
+                TraceInstruction {
+                    pc: 7,
+                    opcode: OpCode::Jmp,
+                    line: None,
+                    fallback: None,
+                },
+            ],
+            snapshots: vec![
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::Entry,
+                    pc: 0,
+                    resume_pc: 0,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![0, 1],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 0,
+                    resume_pc: 5,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![0, 1],
+                },
+                TraceSnapshot {
+                    kind: TraceSnapshotKind::SideExit,
+                    pc: 2,
+                    resume_pc: 2,
+                    base: 0,
+                    frame_depth: 0,
+                    live_regs: vec![0, 1],
+                },
+            ],
+            guards: vec![
+                TraceGuard {
+                    pc: 0,
+                    mode: TraceGuardMode::Control,
+                    kind: TraceGuardKind::Eq,
+                    operands: TraceGuardOperands::RegisterImmediate { reg: 1, imm: 0 },
+                    continue_when: true,
+                    exit_snapshot_index: 1,
+                },
+                TraceGuard {
+                    pc: 2,
+                    mode: TraceGuardMode::Precondition,
+                    kind: TraceGuardKind::IsNumber,
+                    operands: TraceGuardOperands::Register { reg: 0 },
+                    continue_when: true,
+                    exit_snapshot_index: 2,
+                },
+            ],
+            exits: vec![
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 0,
+                    target_pc: 5,
+                    snapshot_index: 1,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+                TraceExit {
+                    kind: TraceExitKind::GuardExit,
+                    source_pc: 2,
+                    target_pc: 2,
+                    snapshot_index: 2,
+                    side_trace: None,
+                    actions: Vec::new(),
+                },
+            ],
+        };
+
+        let replay_result = execute_trace(
+            state,
+            &chunk,
+            &plan,
+            0,
+            JitPolicy {
+                hotloop_threshold: 1,
+                max_trace_instructions: 16,
+                max_trace_replays: 3,
+            },
+        )
+        .expect("replay should handle forward merge jump");
+
+        assert_eq!(replay_result.outcome, TraceRunOutcome::Anchored);
+        assert_eq!(state.stack()[0].as_integer_strict(), Some(3));
+
+        state.stack_mut()[0] = LuaValue::integer(0);
+        let compiled = LoweredTraceBackend
+            .compile(&TraceCompilationUnit::new(plan))
+            .expect("lowered compile should succeed")
+            .expect("compiled artifact should exist");
+        let TraceArtifact::Compiled(compiled) = compiled else {
+            panic!("expected lowered compiled artifact");
+        };
+
+        let compiled_result = execute_compiled_trace(
+            state,
+            &chunk,
+            &compiled,
+            0,
+            JitPolicy {
+                hotloop_threshold: 1,
+                max_trace_instructions: 16,
+                max_trace_replays: 3,
+            },
+        )
+        .expect("compiled execution should handle forward merge jump");
+
+        assert_eq!(compiled_result.outcome, TraceRunOutcome::Anchored);
+        assert_eq!(state.stack()[0].as_integer_strict(), Some(3));
     }
 }

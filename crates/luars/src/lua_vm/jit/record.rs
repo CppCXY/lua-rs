@@ -3,23 +3,32 @@ use crate::{
     lua_vm::{TmKind, jit::TraceAbortReason},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TraceId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceAnchorKind {
     LoopBackedge,
     ForLoop,
+    SideExit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SideTraceKey {
+    pub parent_trace: TraceId,
+    pub exit_snapshot_index: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct RecordingRequest {
     pub chunk_key: usize,
     pub anchor_pc: usize,
+    pub start_pc: usize,
     pub current_pc: usize,
     pub base: usize,
     pub frame_depth: usize,
     pub anchor_kind: TraceAnchorKind,
+    pub parent_side_trace: Option<SideTraceKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +133,7 @@ pub struct TraceExit {
     pub source_pc: usize,
     pub target_pc: usize,
     pub snapshot_index: usize,
+    pub side_trace: Option<TraceId>,
     pub actions: Vec<TraceExitAction>,
 }
 
