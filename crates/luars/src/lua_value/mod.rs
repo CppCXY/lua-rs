@@ -428,18 +428,25 @@ impl Chunk {
         use std::mem::size_of;
         let instr_size = self.code.len() * size_of::<crate::lua_vm::Instruction>();
         let const_size = self.constants.len() * size_of::<LuaValue>();
-        let child_size = self.child_protos.len() * size_of::<Self>();
+        let child_size = self.child_protos.len() * size_of::<ProtoPtr>();
         let line_size = self.line_info.len() * size_of::<u32>();
         self.proto_data_size = (instr_size + const_size + child_size + line_size) as u32;
     }
 
     #[cfg(feature = "shared-proto")]
-    pub fn share_proto_strings(&mut self) -> usize {
+    pub fn share_constant_strings(&mut self) -> usize {
         let mut shared_count = 0;
 
         for constant in &mut self.constants {
             shared_count += usize::from(crate::gc::share_lua_value(constant));
         }
+
+        shared_count
+    }
+
+    #[cfg(feature = "shared-proto")]
+    pub fn share_proto_strings(&mut self) -> usize {
+        let mut shared_count = self.share_constant_strings();
 
         for child in &mut self.child_protos {
             shared_count += child.as_mut_ref().data.share_proto_strings();

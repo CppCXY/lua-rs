@@ -422,6 +422,14 @@ impl GC {
         l.remove_dead_string(str_ptr);
     }
 
+    fn release_or_detach_object(obj: GcObjectOwner) {
+        if obj.header().is_shared() {
+            std::mem::forget(obj);
+        } else {
+            drop(obj);
+        }
+    }
+
     /// Change to incremental mode (like minor2inc in Lua 5.5)
     ///
     /// Port of Lua 5.5 lgc.c minor2inc:
@@ -4283,6 +4291,53 @@ impl GC {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(feature = "shared-proto")]
+pub fn share_proto(proto_ptr: ProtoPtr) -> usize {
+    fn mark_proto(proto_ptr: ProtoPtr) -> usize {
+        let (child_protos, shared_strings) = {
+            let gc_proto = proto_ptr.as_mut_ref();
+            if gc_proto.header.is_shared() {
+                return 0;
+            }
+
+            gc_proto.header.make_shared();
+            gc_proto.header.make_black();
+            gc_proto.header.make_old();
+
+            let shared_strings = gc_proto.data.share_constant_strings();
+            (gc_proto.data.child_protos.clone(), shared_strings)
+        };
+
+        let mut shared_count = 1 + shared_strings;
+        for child_proto in child_protos {
+            shared_count += mark_proto(child_proto);
+        }
+        shared_count
+    }
+
+    mark_proto(proto_ptr)
+}
+
+impl Drop for GC {
+    fn drop(&mut self) {
+        for obj in self.allgc.take_all() {
+            Self::release_or_detach_object(obj);
+        }
+        for obj in self.survival.take_all() {
+            Self::release_or_detach_object(obj);
+        }
+        for obj in self.old1.take_all() {
+            Self::release_or_detach_object(obj);
+        }
+        for obj in self.old.take_all() {
+            Self::release_or_detach_object(obj);
+        }
+        for obj in self.fixed_list.take_all() {
+            Self::release_or_detach_object(obj);
+        }
     }
 }
 

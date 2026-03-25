@@ -44,6 +44,55 @@ pub use opcode::{Instruction, OpCode};
 use std::future::Future;
 #[cfg(feature = "sandbox")]
 use std::time::Duration;
+#[cfg(feature = "shared-proto")]
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, time::SystemTime};
+
+#[cfg(feature = "shared-proto")]
+#[derive(Clone)]
+struct SharedFileProtoEntry {
+    proto: crate::ProtoPtr,
+    len: u64,
+    modified: Option<SystemTime>,
+    version: LuaLanguageLevel,
+}
+
+#[cfg(feature = "shared-proto")]
+thread_local! {
+    static SHARED_FILE_PROTO_CACHE: RefCell<HashMap<PathBuf, SharedFileProtoEntry>> =
+        RefCell::new(HashMap::new());
+}
+
+struct FileChunkLayout {
+    skip_offset: usize,
+    text_start: usize,
+    is_binary: bool,
+}
+
+fn inspect_file_chunk_layout(file_bytes: &[u8]) -> FileChunkLayout {
+    let mut skip_offset = 0;
+
+    if file_bytes.first() == Some(&b'#') {
+        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
+            skip_offset = pos + 1;
+        } else {
+            skip_offset = file_bytes.len();
+        }
+    }
+
+    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
+        skip_offset += 3;
+    }
+
+    FileChunkLayout {
+        skip_offset,
+        text_start: if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            3
+        } else {
+            0
+        },
+        is_binary: file_bytes.get(skip_offset) == Some(&0x1B),
+    }
+}
 
 #[cfg(feature = "sandbox")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,10 +718,11 @@ impl LuaVM {
     pub(crate) fn prepare_loaded_chunk(&mut self, chunk: Chunk) -> crate::ProtoPtr {
         #[cfg(feature = "shared-proto")]
         {
-            let mut chunk = chunk;
-            chunk.share_proto_strings();
-            self.create_proto(chunk)
-                .expect("failed to allocate proto for loaded chunk")
+            let proto = self
+                .create_proto(chunk)
+                .expect("failed to allocate proto for loaded chunk");
+            crate::gc::share_proto(proto);
+            proto
         }
 
         #[cfg(not(feature = "shared-proto"))]
@@ -787,11 +837,8 @@ impl LuaVM {
     /// let results = vm.dofile("scripts/init.lua")?;
     /// ```
     pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
-        let chunk_name = format!("@{}", path);
-        let chunk = self.compile_with_name(&source, &chunk_name)?;
-        self.execute_loaded_chunk(chunk)
+        let proto = self.load_proto_from_file(path)?;
+        self.execute_chunk(proto)
     }
 
     /// Call a function value with arguments (synchronous).
@@ -1193,6 +1240,69 @@ impl LuaVM {
         self.gc.enable_memory_check();
         self.gc.check_memory()?;
         Ok(chunk)
+    }
+
+    pub(crate) fn load_proto_from_file(&mut self, path: &str) -> LuaResult<crate::ProtoPtr> {
+        use crate::lua_value::chunk_serializer;
+
+        let resolved_path = std::fs::canonicalize(path)
+            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+
+        #[cfg(feature = "shared-proto")]
+        {
+            let metadata = std::fs::metadata(&resolved_path)
+                .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+            let len = metadata.len();
+            let modified = metadata.modified().ok();
+            let version = self.version;
+            if let Some(proto) = SHARED_FILE_PROTO_CACHE.with(|cache| {
+                let cache = cache.borrow();
+                cache.get(&resolved_path).and_then(|entry| {
+                    (entry.len == len && entry.modified == modified && entry.version == version)
+                        .then_some(entry.proto)
+                })
+            }) {
+                return Ok(proto);
+            }
+        }
+
+        let file_bytes = std::fs::read(&resolved_path)
+            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+        let layout = inspect_file_chunk_layout(&file_bytes);
+        let chunk_name = format!("@{}", resolved_path.display());
+
+        let chunk = if layout.is_binary {
+            chunk_serializer::deserialize_chunk_with_strings_vm(
+                &file_bytes[layout.skip_offset..],
+                self,
+            )
+            .map_err(|e| self.error(format!("binary load error: {}", e)))?
+        } else {
+            let code_str = String::from_utf8(file_bytes[layout.text_start..].to_vec())
+                .map_err(|_| self.error("source file is not valid UTF-8".to_string()))?;
+            self.compile_with_name(&code_str, &chunk_name)?
+        };
+
+        let proto = self.prepare_loaded_chunk(chunk);
+
+        #[cfg(feature = "shared-proto")]
+        {
+            let metadata = std::fs::metadata(&resolved_path)
+                .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+            SHARED_FILE_PROTO_CACHE.with(|cache| {
+                cache.borrow_mut().insert(
+                    resolved_path,
+                    SharedFileProtoEntry {
+                        proto,
+                        len: metadata.len(),
+                        modified: metadata.modified().ok(),
+                        version: self.version,
+                    },
+                );
+            });
+        }
+
+        Ok(proto)
     }
 
     pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {

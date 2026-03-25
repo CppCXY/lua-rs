@@ -1390,8 +1390,6 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
 /// loadfile([filename [, mode [, env]]]) - Load a file as a chunk
 fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
-    use crate::lua_value::chunk_serializer;
-
     let filename = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'loadfile' (value expected)".to_string()))?;
@@ -1459,39 +1457,9 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    let chunkname = format!("@{}", filename_str);
-
-    let chunk_result = if is_binary {
-        // Deserialize binary bytecode (skip shebang/BOM)
-        let vm = l.vm_mut();
-        chunk_serializer::deserialize_chunk_with_strings_vm(&file_bytes[skip_offset..], vm)
-            .map_err(|e| format!("binary load error: {}", e))
-    } else {
-        // For text, strip BOM but keep shebang (tokenizer handles it)
-        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            3
-        } else {
-            0
-        };
-        // Source files must be valid UTF-8
-        let code_str = match String::from_utf8(file_bytes[text_start..].to_vec()) {
-            Ok(s) => s,
-            Err(_) => {
-                // loadfile returns nil + error message on failure
-                let err_msg = l.create_string("source file is not valid UTF-8")?;
-                l.push_value(LuaValue::nil())?;
-                l.push_value(err_msg)?;
-                return Ok(2);
-            }
-        };
-        let vm = l.vm_mut();
-        vm.compile_with_name(&code_str, &chunkname)
-            .map_err(|e| vm.get_error_message(e))
-    };
-
-    match chunk_result {
-        Ok(chunk) => {
-            let upvalue_count = chunk.upvalue_count;
+    match l.vm_mut().load_proto_from_file(&filename_str) {
+        Ok(proto) => {
+            let upvalue_count = proto.as_ref().data.upvalue_count;
             let mut upvalues = Vec::with_capacity(upvalue_count);
 
             for i in 0..upvalue_count {
@@ -1511,7 +1479,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
 
             let func = l
                 .vm_mut()
-                .create_loaded_function(chunk, UpvalueStore::from_vec(upvalues))?;
+                .create_function(proto, UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1542,55 +1510,13 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
     };
 
-    // Load from file as bytes
-    let file_bytes = match std::fs::read(&filename_str) {
-        Ok(b) => b,
-        Err(e) => {
-            return Err(l.error(format!("cannot open {}: {}", filename_str, e)));
-        }
-    };
-
-    // Determine content after skipping shebang/BOM for binary detection
-    let mut skip_offset = 0;
-    if file_bytes.first() == Some(&b'#') {
-        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
-            skip_offset = pos + 1;
-        } else {
-            skip_offset = file_bytes.len();
-        }
-    }
-    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
-        skip_offset += 3;
-    }
-
-    let is_binary = file_bytes.get(skip_offset) == Some(&0x1B);
-
-    // Compile/load the code
-    let chunkname = format!("@{}", filename_str);
-    let chunk = if is_binary {
-        use crate::lua_value::chunk_serializer;
-        let vm = l.vm_mut();
-        chunk_serializer::deserialize_chunk_with_strings_vm(&file_bytes[skip_offset..], vm)
-            .map_err(|e| l.error(format!("binary load error: {}", e)))?
-    } else {
-        let text_start = if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            3
-        } else {
-            0
-        };
-        let code_str = String::from_utf8(file_bytes[text_start..].to_vec())
-            .map_err(|_| l.error("source file is not valid UTF-8".to_string()))?;
-        l.vm_mut()
-            .compile_with_name(&code_str, &chunkname)
-            .map_err(|e| l.error(format!("error loading {}: {}", filename_str, e)))?
-    };
-
+    let proto = l.vm_mut().load_proto_from_file(&filename_str)?;
     let global = l.vm_mut().global;
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;
     let func = l
         .vm_mut()
-        .create_loaded_function(chunk, UpvalueStore::from_single(env_upvalue))?;
+        .create_function(proto, UpvalueStore::from_single(env_upvalue))?;
 
     // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
     // C Lua does lua_settop(L, 1) to keep only the filename, then pushes the chunk at slot 2.

@@ -187,27 +187,12 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("file path must be a string".to_string()));
     };
 
-    if std::fs::metadata(filepath_str).is_err() {
-        return Ok(0);
-    }
-
-    // Read the file
-    let source = match std::fs::read_to_string(filepath_str) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(l.error(format!("cannot open file '{}': {}", filepath_str, e)));
-        }
-    };
-
     let vm = l.vm_mut();
-
-    // Compile it using VM's string pool with chunk name
-    let chunkname = format!("@{}", filepath_str);
-    let chunk = vm.compile_with_name(&source, &chunkname)?;
+    let proto = vm.load_proto_from_file(filepath_str)?;
 
     // Create a function from the chunk with _ENV upvalue
     let env_upvalue = vm.create_upvalue_closed(vm.global)?;
-    let func = vm.create_loaded_function(chunk, UpvalueStore::from_single(env_upvalue))?;
+    let func = vm.create_function(proto, UpvalueStore::from_single(env_upvalue))?;
 
     // Call the function to execute the module and get its return value
     // The module should return its exports (usually a table)
