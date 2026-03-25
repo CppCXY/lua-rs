@@ -43,7 +43,7 @@ use std::collections::HashSet;
 
 use crate::{
     LuaResult, LuaTable,
-    lua_value::{Chunk, LuaValue},
+    lua_value::LuaValue,
     lua_vm::{LuaError, LuaState, SafeOption, TmKind},
 };
 pub use gc_kind::*;
@@ -1711,22 +1711,22 @@ impl GC {
         self.mark_object(l, gc_ptr);
     }
 
-    /// Mark all constants in a chunk and its nested chunks (like Lua 5.5's traverseproto)
-    fn mark_chunk_constants(&mut self, l: &mut LuaState, chunk: &Chunk) -> usize {
-        // Mark all constants in this chunk
+    fn traverse_proto(&mut self, l: &mut LuaState, proto_ptr: ProtoPtr) -> usize {
+        let gc_proto = proto_ptr.as_mut_ref();
+        gc_proto.header.make_black();
+
+        let chunk = &gc_proto.data;
         for constant in &chunk.constants {
             if let Some(gc_ptr) = constant.as_gc_ptr() {
                 self.mark_object(l, gc_ptr);
             }
         }
-        let mut count = chunk.constants.len();
 
-        // Recursively mark constants in child protos (nested functions)
-        for child_chunk in &chunk.child_protos {
-            count += self.mark_chunk_constants(l, child_chunk);
+        for child_proto in &chunk.child_protos {
+            self.mark_object(l, (*child_proto).into());
         }
 
-        count
+        1 + chunk.constants.len() + chunk.child_protos.len()
     }
 
     // ============ Weak Table Traversal Functions (Port of Lua 5.5) ============
@@ -2009,8 +2009,8 @@ impl GC {
             self.mark_object(l, (*upval_ptr).into());
         }
 
-        // Mark all constants in the chunk and nested chunks (like Lua 5.5's traverseproto)
-        count += self.mark_chunk_constants(l, gc_func.data.chunk());
+        self.mark_object(l, gc_func.data.proto().into());
+        count += 1;
 
         count // Estimate of work done
     }
@@ -2232,6 +2232,8 @@ impl GC {
             self.traverse_cclosure(l, gc_ptr.as_cclosure_ptr())
         } else if gc_ptr.is_rclosure() {
             self.traverse_rclosure(l, gc_ptr.as_rclosure_ptr())
+        } else if gc_ptr.is_proto() {
+            self.traverse_proto(l, gc_ptr.as_proto_ptr())
         } else if gc_ptr.is_userdata() {
             // Userdata: mark the userdata itself and its metatable if any
             let ud_ptr = gc_ptr.as_userdata_ptr();
@@ -3390,6 +3392,38 @@ impl GC {
                             );
                         }
                     }
+                    GcObjectOwner::Proto(p) => {
+                        for (i, constant) in p.data.constants.iter().enumerate() {
+                            check_value(
+                                constant,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                &format!("proto_constant[{}]", i),
+                            );
+                        }
+                        for (i, child_proto) in p.data.child_protos.iter().enumerate() {
+                            let child_gc: GcObjectPtr = (*child_proto).into();
+                            if is_dead_ptr(child_gc) {
+                                let ref_header = child_gc.header().unwrap();
+                                panic!(
+                                    "GC INVARIANT VIOLATION: alive {:?} at {:#x} (age={}, marked=0x{:02X}) \
+                                     references DEAD Proto at {:#x} (age={}, marked=0x{:02X}) via child_proto[{}]. \
+                                     current_white={}",
+                                    container_kind,
+                                    container_ptr,
+                                    container_age,
+                                    container_marked,
+                                    child_gc.header().map(|h| h as *const _ as u64).unwrap_or(0),
+                                    ref_header.age(),
+                                    ref_header.marked(),
+                                    i,
+                                    self.current_white,
+                                );
+                            }
+                        }
+                    }
                     // Strings have no GC references
                     GcObjectOwner::String(_) => {}
                 }
@@ -3553,6 +3587,7 @@ impl GC {
             GcObjectOwner::Thread(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Upvalue(b) => b.as_ref() as *const _ as u64,
             GcObjectOwner::Userdata(b) => b.as_ref() as *const _ as u64,
+            GcObjectOwner::Proto(b) => b.as_ref() as *const _ as u64,
         };
         if let Some((thread_name, slot, top, thread_marked)) = stack_ptrs.get(&raw_ptr) {
             let kind = gc_owner.as_gc_ptr().kind();

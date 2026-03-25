@@ -162,6 +162,29 @@ fn test_load_does_not_execute() {
     assert!(x.is_none());
 }
 
+#[cfg(feature = "shared-proto")]
+#[test]
+fn test_load_marks_chunk_short_strings_shared() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let func = vm
+        .load("local key = '0123456789abcdefghijklmnopqr'; return key")
+        .unwrap();
+
+    let function = func.as_function_ptr().unwrap();
+    let chunk = function.as_ref().data.chunk();
+    let key = chunk
+        .constants
+        .iter()
+        .copied()
+        .find(|value| value.as_str() == Some("0123456789abcdefghijklmnopqr"))
+        .unwrap();
+
+    assert!(key.is_short_string());
+    assert!(key.as_string_ptr().unwrap().as_ref().header.is_shared());
+}
+
 // ============================
 // P4: register_type_of on LuaVM (tested implicitly via existing userdata tests)
 // ============================

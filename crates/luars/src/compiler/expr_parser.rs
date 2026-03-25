@@ -983,7 +983,8 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     // lparser.c:1005: Add child proto to parent (addprototype)
     let proto_idx = fs.chunk.child_protos.len();
-    fs.chunk.child_protos.push(std::rc::Rc::new(child_chunk));
+    let child_proto = fs.vm.create_proto(child_chunk).unwrap();
+    fs.chunk.child_protos.push(child_proto);
 
     // lparser.c:722-726: Generate CLOSURE instruction (codeclosure)
     // static void codeclosure (LexState *ls, expdesc *v) {

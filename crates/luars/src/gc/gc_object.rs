@@ -1,5 +1,5 @@
 use crate::{
-    GcObjectKind, LuaFunction, LuaTable, LuaValue,
+    Chunk, GcObjectKind, LuaFunction, LuaTable, LuaValue,
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
 };
@@ -20,6 +20,7 @@ pub const WHITE0BIT: u8 = 3; // Object is white (type 0)
 pub const WHITE1BIT: u8 = 4; // Object is white (type 1)
 pub const BLACKBIT: u8 = 5; // Object is black
 pub const FINALIZEDBIT: u8 = 6; // Object has been marked for finalization
+pub const SHAREDBIT: u8 = 7; // Object is shared across VMs and never collected
 
 // Bit masks
 pub const WHITEBITS: u8 = (1 << WHITE0BIT) | (1 << WHITE1BIT);
@@ -181,6 +182,11 @@ impl GcHeader {
     }
 
     #[inline(always)]
+    pub fn is_shared(&self) -> bool {
+        (self.marked() & (1 << SHAREDBIT)) != 0
+    }
+
+    #[inline(always)]
     pub fn set_finalized(&mut self) {
         self.set_marked_bits(self.marked() | (1 << FINALIZEDBIT));
     }
@@ -188,6 +194,11 @@ impl GcHeader {
     #[inline(always)]
     pub fn clear_finalized(&mut self) {
         self.set_marked_bits(self.marked() & !(1 << FINALIZEDBIT));
+    }
+
+    #[inline(always)]
+    pub fn make_shared(&mut self) {
+        self.set_marked_bits(self.marked() | (1 << SHAREDBIT));
     }
 
     // ============ Color Transitions ============
@@ -227,6 +238,9 @@ impl GcHeader {
             other_white == 0 || other_white == 1,
             "other_white must be 0 or 1"
         );
+        if self.is_shared() {
+            return false;
+        }
         (self.marked() & (1 << (WHITE0BIT + other_white))) != 0
     }
 
@@ -290,6 +304,15 @@ pub struct Gc<T> {
     pub data: T,
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for Gc<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gc")
+            .field("header", &self.header)
+            .field("data", &self.data)
+            .finish()
+    }
+}
+
 impl<T> Gc<T> {
     pub fn new(data: T, current_white: u8, size: u32) -> Self {
         let mut header = GcHeader::with_white(current_white);
@@ -312,6 +335,7 @@ pub type GcRClosure = Gc<RClosureFunction>;
 pub type GcUpvalue = Gc<LuaUpvalue>;
 pub type GcThread = Gc<LuaState>;
 pub type GcUserdata = Gc<LuaUserdata>;
+pub type GcProto = Gc<Chunk>;
 
 #[derive(Debug)]
 pub struct GcPtr<T: HasGcHeader> {
@@ -407,6 +431,7 @@ pub type CClosurePtr = GcPtr<GcCClosure>;
 pub type RClosurePtr = GcPtr<GcRClosure>;
 pub type UserdataPtr = GcPtr<GcUserdata>;
 pub type ThreadPtr = GcPtr<GcThread>;
+pub type ProtoPtr = GcPtr<GcProto>;
 
 /// Compressed GcObjectPtr — tagged pointer in a single `u64` (8 bytes, was 16).
 ///
@@ -452,6 +477,7 @@ impl GcObjectPtr {
     const TAG_UPVALUE: u64 = 5;
     const TAG_THREAD: u64 = 6;
     const TAG_USERDATA: u64 = 7;
+    const TAG_PROTO: u64 = 8;
     #[inline(always)]
     fn new_tagged(ptr: u64, tag: u64) -> Self {
         debug_assert!(
@@ -565,6 +591,12 @@ impl GcObjectPtr {
         UserdataPtr::from_raw(self.raw_ptr())
     }
 
+    #[inline(always)]
+    pub fn as_proto_ptr(&self) -> ProtoPtr {
+        debug_assert!(self.tag() == Self::TAG_PROTO as u8);
+        ProtoPtr::from_raw(self.raw_ptr())
+    }
+
     // ============ Pattern matching helpers (for code that still uses if-let) ============
 
     #[inline(always)]
@@ -605,6 +637,11 @@ impl GcObjectPtr {
     #[inline(always)]
     pub fn is_userdata(&self) -> bool {
         self.tag() == Self::TAG_USERDATA as u8
+    }
+
+    #[inline(always)]
+    pub fn is_proto(&self) -> bool {
+        self.tag() == Self::TAG_PROTO as u8
     }
 }
 
@@ -664,6 +701,13 @@ impl From<RClosurePtr> for GcObjectPtr {
     }
 }
 
+impl From<ProtoPtr> for GcObjectPtr {
+    #[inline(always)]
+    fn from(ptr: ProtoPtr) -> Self {
+        Self::new_tagged(ptr.as_u64(), Self::TAG_PROTO)
+    }
+}
+
 // ============ GC-managed Objects ============
 pub enum GcObjectOwner {
     String(Box<GcString>),
@@ -674,6 +718,7 @@ pub enum GcObjectOwner {
     Userdata(Box<GcUserdata>),
     CClosure(Box<GcCClosure>),
     RClosure(Box<GcRClosure>),
+    Proto(Box<GcProto>),
 }
 
 impl GcObjectOwner {
@@ -694,7 +739,7 @@ impl GcObjectOwner {
                 base + array_bytes + hash_bytes
             }
             GcObjectOwner::Function(f) => {
-                f.data.chunk().proto_data_size as usize + std::mem::size_of_val(f.data.upvalues())
+                std::mem::size_of::<GcFunction>() + std::mem::size_of_val(f.data.upvalues())
             }
             GcObjectOwner::CClosure(c) => {
                 std::mem::size_of::<GcCClosure>()
@@ -707,6 +752,9 @@ impl GcObjectOwner {
             GcObjectOwner::Upvalue(_) => 64, // fixed estimate
             GcObjectOwner::Thread(t) => std::mem::size_of::<GcThread>() + t.data.stack.len() * 16,
             GcObjectOwner::Userdata(_) => std::mem::size_of::<GcUserdata>(),
+            GcObjectOwner::Proto(p) => {
+                std::mem::size_of::<GcProto>() + p.data.proto_data_size as usize
+            }
         }
     }
 
@@ -726,6 +774,7 @@ impl GcObjectOwner {
             GcObjectOwner::Upvalue(u) => &u.header,
             GcObjectOwner::Thread(t) => &t.header,
             GcObjectOwner::Userdata(u) => &u.header,
+            GcObjectOwner::Proto(p) => &p.header,
         }) as _
     }
 
@@ -739,6 +788,7 @@ impl GcObjectOwner {
             GcObjectOwner::Upvalue(u) => &mut u.header,
             GcObjectOwner::Thread(t) => &mut t.header,
             GcObjectOwner::Userdata(u) => &mut u.header,
+            GcObjectOwner::Proto(p) => &mut p.header,
         }) as _
     }
 
@@ -800,6 +850,13 @@ impl GcObjectOwner {
         }
     }
 
+    pub fn as_proto_ptr(&self) -> Option<ProtoPtr> {
+        match self {
+            GcObjectOwner::Proto(p) => Some(ProtoPtr::new(p.as_ref() as *const GcProto)),
+            _ => None,
+        }
+    }
+
     pub fn as_gc_ptr(&self) -> GcObjectPtr {
         match self {
             GcObjectOwner::String(s) => {
@@ -825,6 +882,9 @@ impl GcObjectOwner {
             }
             GcObjectOwner::RClosure(r) => {
                 GcObjectPtr::from(RClosurePtr::new(r.as_ref() as *const GcRClosure))
+            }
+            GcObjectOwner::Proto(p) => {
+                GcObjectPtr::from(ProtoPtr::new(p.as_ref() as *const GcProto))
             }
         }
     }
@@ -874,6 +934,13 @@ impl GcObjectOwner {
     pub fn as_rclosure_mut(&mut self) -> Option<&mut RClosureFunction> {
         match self {
             GcObjectOwner::RClosure(r) => Some(&mut r.data),
+            _ => None,
+        }
+    }
+
+    pub fn as_proto_mut(&mut self) -> Option<&mut Chunk> {
+        match self {
+            GcObjectOwner::Proto(p) => Some(&mut p.data),
             _ => None,
         }
     }

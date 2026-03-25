@@ -1,11 +1,12 @@
 // Native Lua 5.5-style table implementation
 // Port of ltable.c with minimal abstractions for maximum performance
 
-use crate::gc::GcString;
 use crate::lua_value::{
     LuaValue,
     lua_value::{LUA_TNIL, LUA_VEMPTY, LUA_VNIL, LUA_VNUMINT, LUA_VSHRSTR, Value, novariant},
+    short_string_ptr_eq,
 };
+use crate::{StringPtr, gc::GcString};
 
 use std::alloc::{self, Layout};
 use std::ptr;
@@ -259,10 +260,15 @@ impl NativeTable {
     /// Returns true if found and written.
     pub unsafe fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
         let mut node = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
+        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
 
         unsafe {
-            if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+            if (*node).key_tt == LUA_VSHRSTR
+                && short_string_ptr_eq(
+                    StringPtr::new((*node).key_data.ptr as *mut GcString),
+                    key_ptr,
+                )
+            {
                 if (*node).val_tt != LUA_VNIL {
                     (*dest).tt = (*node).val_tt;
                     (*dest).value = (*node).val_data;
@@ -274,7 +280,12 @@ impl NativeTable {
             let mut next = (*node).next;
             while next != 0 {
                 node = node.offset(next as isize);
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                if (*node).key_tt == LUA_VSHRSTR
+                    && short_string_ptr_eq(
+                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        key_ptr,
+                    )
+                {
                     if (*node).val_tt != LUA_VNIL {
                         (*dest).tt = (*node).val_tt;
                         (*dest).value = (*node).val_data;
@@ -298,11 +309,16 @@ impl NativeTable {
         }
 
         let mut node = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
+        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
 
         unsafe {
             loop {
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                if (*node).key_tt == LUA_VSHRSTR
+                    && short_string_ptr_eq(
+                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        key_ptr,
+                    )
+                {
                     if (*node).val_tt != LUA_VNIL {
                         (*node).set_value(value);
                         return true;
@@ -326,11 +342,16 @@ impl NativeTable {
         }
 
         let mut node = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
+        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
 
         unsafe {
             loop {
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                if (*node).key_tt == LUA_VSHRSTR
+                    && short_string_ptr_eq(
+                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        key_ptr,
+                    )
+                {
                     if (*node).val_tt != LUA_VNIL {
                         (*node).set_value_parts(value, tt);
                         return true;
@@ -1454,11 +1475,16 @@ impl NativeTable {
             return None;
         }
         let mut node = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
+        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
 
         unsafe {
             // Unroll first iteration (most common case: found in main position)
-            if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+            if (*node).key_tt == LUA_VSHRSTR
+                && short_string_ptr_eq(
+                    StringPtr::new((*node).key_data.ptr as *mut GcString),
+                    key_ptr,
+                )
+            {
                 let val = (*node).value();
                 return if val.is_nil() { None } else { Some(val) };
             }
@@ -1466,8 +1492,12 @@ impl NativeTable {
             let mut next = (*node).next;
             while next != 0 {
                 node = node.offset(next as isize);
-                // Short strings: pointer comparison only (interned)
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                if (*node).key_tt == LUA_VSHRSTR
+                    && short_string_ptr_eq(
+                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        key_ptr,
+                    )
+                {
                     let val = (*node).value();
                     return if val.is_nil() { None } else { Some(val) };
                 }
@@ -2203,6 +2233,13 @@ impl Drop for NativeTable {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "shared-proto")]
+    use crate::gc::share_lua_value;
+    #[cfg(feature = "shared-proto")]
+    use crate::lua_vm::SafeOption;
+    #[cfg(feature = "shared-proto")]
+    use crate::{GC, StringInterner};
+
     #[test]
     fn test_native_table_basic() {
         let mut t = NativeTable::new(4, 4);
@@ -2280,5 +2317,26 @@ mod tests {
         let elapsed = start.elapsed();
         println!("NativeTable integer ops (20k ops): {:?}", elapsed);
         println!("Per-op: {:?}", elapsed / 20000);
+    }
+
+    #[cfg(feature = "shared-proto")]
+    #[test]
+    fn test_shared_short_string_lookup_with_local_query() {
+        let key = "0123456789abcdefghijklmnopqr";
+        let mut shared_interner = StringInterner::new();
+        let mut local_interner = StringInterner::new();
+        let mut shared_gc = GC::new(SafeOption::default());
+        let mut local_gc = GC::new(SafeOption::default());
+
+        let mut shared_key = shared_interner.intern(key, &mut shared_gc).unwrap();
+        let local_key = local_interner.intern(key, &mut local_gc).unwrap();
+        let value = LuaValue::integer(123);
+
+        assert!(share_lua_value(&mut shared_key));
+
+        let mut table = NativeTable::new(0, 4);
+        table.raw_set(&shared_key, value);
+
+        assert_eq!(table.raw_get(&local_key), Some(value));
     }
 }

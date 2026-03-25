@@ -4,7 +4,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
@@ -19,8 +18,8 @@ use crate::lua_vm::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxRuntimeLimits};
 #[cfg(feature = "sandbox")]
 use crate::platform_time::unix_nanos;
 use crate::{
-    AsyncReturnValue, Chunk, CreateResult, GcObjectPtr, LuaAnyRef, LuaFunctionRef, LuaRegistrable,
-    LuaTableRef, LuaVM, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
+    AsyncReturnValue, CreateResult, GcObjectPtr, LuaAnyRef, LuaFunctionRef, LuaRegistrable,
+    LuaTableRef, LuaVM, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -2010,7 +2009,7 @@ impl LuaState {
 
     /// Create function closure
     #[inline]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: UpvalueStore) -> CreateResult {
+    pub fn create_function(&mut self, chunk: ProtoPtr, upvalues: UpvalueStore) -> CreateResult {
         self.vm_mut().create_function(chunk, upvalues)
     }
 
@@ -2250,7 +2249,7 @@ impl LuaState {
     /// Execute a pre-compiled chunk, returning results.
     ///
     /// This is a convenience proxy for `LuaVM::execute`.
-    pub fn execute_chunk(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
+    pub fn execute_chunk(&mut self, chunk: ProtoPtr) -> LuaResult<Vec<LuaValue>> {
         self.vm_mut().execute_chunk(chunk)
     }
 

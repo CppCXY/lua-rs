@@ -5,8 +5,6 @@
 pub mod parse_number;
 mod require;
 
-use std::rc::Rc;
-
 use crate::gc::{code_param, decode_param};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind, UpvalueStore};
@@ -1374,7 +1372,9 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            let func = l.create_function(Rc::new(chunk), UpvalueStore::from_vec(upvalues))?;
+            let func = l
+                .vm_mut()
+                .create_loaded_function(chunk, UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1509,8 +1509,9 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
                 }
             }
 
-            let func =
-                l.create_function(std::rc::Rc::new(chunk), UpvalueStore::from_vec(upvalues))?;
+            let func = l
+                .vm_mut()
+                .create_loaded_function(chunk, UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
         }
@@ -1587,10 +1588,9 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
     let global = l.vm_mut().global;
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;
-    let func = l.create_function(
-        std::rc::Rc::new(chunk),
-        UpvalueStore::from_single(env_upvalue),
-    )?;
+    let func = l
+        .vm_mut()
+        .create_loaded_function(chunk, UpvalueStore::from_single(env_upvalue))?;
 
     // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
     // C Lua does lua_settop(L, 1) to keep only the filename, then pushes the chunk at slot 2.

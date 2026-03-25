@@ -5,7 +5,6 @@ use luars::stdlib;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
-use std::rc::Rc;
 
 const VERSION: &str = "Lua-RS 5.5 (compatible)";
 const COPYRIGHT: &str = "Copyright (C) 2026 lua-rs CppCXY";
@@ -133,8 +132,8 @@ fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
     let code = format!("{} = require('{}')", module, module);
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute_chunk(Rc::new(chunk))
-                .map_err(|e| format!("{}", e))?;
+            let proto = vm.create_proto(chunk).unwrap();
+            vm.execute_chunk(proto).map_err(|e| format!("{}", e))?;
             Ok(())
         }
         Err(e) => Err(format!("failed to load module '{}': {}", module, e)),
@@ -147,7 +146,8 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
 
     match vm.compile_with_name(&code, &format!("@{}", filename)) {
         Ok(chunk) => {
-            match vm.execute_chunk(Rc::new(chunk)) {
+            let proto = vm.create_proto(chunk).unwrap();
+            match vm.execute_chunk(proto) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     // execute_chunk already generates traceback before unwinding,
@@ -169,8 +169,8 @@ fn execute_stdin(vm: &mut LuaVM) -> Result<(), String> {
 
     match vm.compile(&code) {
         Ok(chunk) => {
-            vm.execute_chunk(Rc::new(chunk))
-                .map_err(|e| format!("{}", e))?;
+            let proto = vm.create_proto(chunk).unwrap();
+            vm.execute_chunk(proto).map_err(|e| format!("{}", e))?;
             Ok(())
         }
         Err(e) => Err(format!("stdin: {}", e)),
@@ -226,7 +226,8 @@ fn run_repl(vm: &mut LuaVM) {
         // Try to compile and execute
         match vm.compile(&code_to_run) {
             Ok(chunk) => {
-                match vm.execute_chunk(Rc::new(chunk)) {
+                let proto = vm.create_proto(chunk).unwrap();
+                match vm.execute_chunk(proto) {
                     Ok(results) => {
                         // Print non-nil first result
                         if let Some(first) = results.into_iter().next()
@@ -411,7 +412,8 @@ fn lua_main() -> i32 {
                 resolved.replace('\\', "\\\\").replace('\'', "\\'")
             );
             if let Ok(chunk) = vm.compile(&code) {
-                let _ = vm.execute_chunk(Rc::new(chunk));
+                let proto = vm.create_proto(chunk).unwrap();
+                let _ = vm.execute_chunk(proto);
             }
         }
         // Override package.cpath from LUA_CPATH_5_5 or LUA_CPATH
@@ -426,7 +428,8 @@ fn lua_main() -> i32 {
                 resolved.replace('\\', "\\\\").replace('\'', "\\'")
             );
             if let Ok(chunk) = vm.compile(&code) {
-                let _ = vm.execute_chunk(Rc::new(chunk));
+                let proto = vm.create_proto(chunk).unwrap();
+                let _ = vm.execute_chunk(proto);
             }
         }
     }
@@ -447,7 +450,8 @@ fn lua_main() -> i32 {
             // Execute string
             match vm.compile(&init) {
                 Ok(chunk) => {
-                    if let Err(e) = vm.execute_chunk(Rc::new(chunk)) {
+                    let proto = vm.create_proto(chunk).unwrap();
+                    if let Err(e) = vm.execute_chunk(proto) {
                         let error_msg = vm.get_error_message(e);
                         eprintln!("lua: {}", error_msg);
                         return 1;
@@ -465,7 +469,8 @@ fn lua_main() -> i32 {
     if opts.warnings_on
         && let Ok(chunk) = vm.compile("warn('@on')")
     {
-        let _ = vm.execute_chunk(Rc::new(chunk));
+        let proto = vm.create_proto(chunk).unwrap();
+        let _ = vm.execute_chunk(proto);
     }
 
     // Setup arg table
@@ -489,7 +494,8 @@ fn lua_main() -> i32 {
     for code in &opts.execute_strings {
         match vm.compile(code) {
             Ok(chunk) => {
-                if let Err(e) = vm.execute_chunk(Rc::new(chunk)) {
+                let proto = vm.create_proto(chunk).unwrap();
+                if let Err(e) = vm.execute_chunk(proto) {
                     let error_msg = vm.get_error_message(e);
                     eprintln!("lua: Runtime Error: {}", error_msg);
                     return 1;
@@ -518,7 +524,8 @@ fn lua_main() -> i32 {
                 dir = dir.replace('\\', "/")
             );
             if let Ok(chunk) = vm.compile(&set_path) {
-                let _ = vm.execute_chunk(Rc::new(chunk));
+                let proto = vm.create_proto(chunk).unwrap();
+                let _ = vm.execute_chunk(proto);
             }
         }
         if let Err(e) = execute_file(&mut vm, filename) {

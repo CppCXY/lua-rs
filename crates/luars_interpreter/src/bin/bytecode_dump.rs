@@ -707,11 +707,12 @@ fn dump_chunk(
     // Recursively dump child protos
     if !chunk.child_protos.is_empty() {
         for child in chunk.child_protos.iter() {
+            let child_chunk = &child.as_ref().data;
             dump_chunk(
-                child,
+                child_chunk,
                 filename,
-                child.linedefined,
-                child.lastlinedefined,
+                child_chunk.linedefined,
+                child_chunk.lastlinedefined,
                 false,
                 vm,
             );
