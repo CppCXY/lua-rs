@@ -15,10 +15,9 @@ use crate::lua_value::{
 };
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    GC, GcCClosure, GcFunction, GcObjectOwner, GcRClosure, GcTable, GcThread, GcUpvalue,
-    GcUserdata, LuaFunction, LuaResult, LuaTable, LuaValue, StringPtr, UpvaluePtr,
+    GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcTable, GcThread, GcUpvalue,
+    GcUserdata, LuaFunction, LuaResult, LuaTable, LuaValue, ProtoPtr, StringPtr, UpvaluePtr,
 };
-use std::rc::Rc;
 
 pub type CreateResult = LuaResult<LuaValue>;
 
@@ -167,6 +166,16 @@ impl ObjectAllocator {
 
     // ==================== Function Operations ====================
 
+    #[inline(always)]
+    pub fn create_proto(&mut self, gc: &mut GC, chunk: Chunk) -> LuaResult<ProtoPtr> {
+        let current_white = gc.current_white;
+        let size = std::mem::size_of::<GcProto>() as u32 + chunk.proto_data_size;
+        let gc_proto = GcObjectOwner::Proto(Box::new(GcProto::new(chunk, current_white, size)));
+        let ptr = gc_proto.as_proto_ptr().unwrap();
+        gc.trace_object(gc_proto)?;
+        Ok(ptr)
+    }
+
     /// Create a Lua function (closure with bytecode chunk)
     /// Now caches upvalue pointers for direct access
     ///
@@ -174,12 +183,12 @@ impl ObjectAllocator {
     pub fn create_function(
         &mut self,
         gc: &mut GC,
-        chunk: Rc<Chunk>,
+        chunk: ProtoPtr,
         upvalue_store: UpvalueStore,
     ) -> CreateResult {
         let current_white = gc.current_white;
         let upval_size = upvalue_store.len() * std::mem::size_of::<UpvaluePtr>();
-        let size = chunk.proto_data_size + upval_size as u32;
+        let size = std::mem::size_of::<GcFunction>() as u32 + upval_size as u32;
 
         let gc_func = GcObjectOwner::Function(Box::new(GcFunction::new(
             LuaFunction::new(chunk, upvalue_store),

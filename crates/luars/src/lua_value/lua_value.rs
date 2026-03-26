@@ -28,7 +28,7 @@
 // - Bits 0-3: 基础类型 (LUA_TNIL, LUA_TBOOLEAN, LUA_TNUMBER, etc.)
 // - Bits 4-5: variant bits (区分子类型,如integer/float, short/long string)
 // - Bit 6: BIT_ISCOLLECTABLE (标记是否是GC对象)
-use crate::lua_value::{CClosureFunction, LuaUserdata, RClosureFunction};
+use crate::lua_value::{CClosureFunction, LuaUserdata, RClosureFunction, short_string_ptr_eq};
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
     CClosurePtr, FunctionPtr, GcCClosure, GcFunction, GcObjectPtr, GcRClosure, GcString, GcTable,
@@ -1139,7 +1139,11 @@ impl PartialEq for LuaValue {
                 return true;
             }
             return match tt {
-                LUA_VSHRSTR => false, // different pointers, different interned strings
+                LUA_VSHRSTR => {
+                    let left = StringPtr::new(unsafe { self.value.ptr as *mut GcString });
+                    let right = StringPtr::new(unsafe { other.value.ptr as *mut GcString });
+                    short_string_ptr_eq(left, right)
+                }
                 LUA_VLNGSTR => {
                     let s1 = unsafe { &*(self.value.ptr as *const GcString) };
                     let s2 = unsafe { &*(other.value.ptr as *const GcString) };
@@ -1412,6 +1416,38 @@ mod tests {
         assert_eq!(LuaValue::nil(), LuaValue::nil());
         assert_eq!(LuaValue::integer(42), LuaValue::integer(42));
         assert_ne!(LuaValue::integer(42), LuaValue::integer(43));
+    }
+
+    #[cfg(feature = "shared-proto")]
+    #[test]
+    fn test_shared_short_string_equals_local_short_string() {
+        use crate::gc::share_lua_value;
+        use crate::lua_vm::SafeOption;
+        use crate::{GC, StringInterner};
+
+        let key = "0123456789abcdefghijklmnopqr";
+        let mut left_interner = StringInterner::new();
+        let mut right_interner = StringInterner::new();
+        let mut left_gc = GC::new(SafeOption::default());
+        let mut right_gc = GC::new(SafeOption::default());
+
+        let mut shared_value = left_interner.intern(key, &mut left_gc).unwrap();
+        let local_value = right_interner.intern(key, &mut right_gc).unwrap();
+
+        assert!(share_lua_value(&mut shared_value));
+        assert_eq!(shared_value, local_value);
+        assert_eq!(local_value, shared_value);
+
+        let local_ptr = local_value.as_string_ptr().unwrap();
+        assert_eq!(
+            local_ptr.as_ref().data.short_id(),
+            shared_value
+                .as_string_ptr()
+                .unwrap()
+                .as_ref()
+                .data
+                .short_id()
+        );
     }
 
     #[test]

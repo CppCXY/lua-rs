@@ -162,6 +162,119 @@ fn test_load_does_not_execute() {
     assert!(x.is_none());
 }
 
+#[cfg(feature = "shared-proto")]
+#[test]
+fn test_load_marks_chunk_short_strings_shared() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let func = vm
+        .load("local key = '0123456789abcdefghijklmnopqr'; return key")
+        .unwrap();
+
+    let function = func.as_function_ptr().unwrap();
+    let chunk = function.as_ref().data.chunk();
+    let key = chunk
+        .constants
+        .iter()
+        .copied()
+        .find(|value| value.as_str() == Some("0123456789abcdefghijklmnopqr"))
+        .unwrap();
+
+    assert!(key.is_short_string());
+    assert!(key.as_string_ptr().unwrap().as_ref().header.is_shared());
+    assert!(function.as_ref().data.proto().as_ref().header.is_shared());
+}
+
+#[cfg(feature = "shared-proto")]
+#[test]
+fn test_shared_proto_survives_vm_drop() {
+    let proto = {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(Stdlib::All).unwrap();
+
+        let func = vm
+            .load("local key = '0123456789abcdefghijklmnopqr'; return key")
+            .unwrap();
+
+        func.as_function_ptr().unwrap().as_ref().data.proto()
+    };
+
+    assert!(proto.as_ref().header.is_shared());
+
+    let key = proto
+        .as_ref()
+        .data
+        .constants
+        .iter()
+        .copied()
+        .find(|value| value.as_str() == Some("0123456789abcdefghijklmnopqr"))
+        .unwrap();
+
+    assert!(key.as_string_ptr().unwrap().as_ref().header.is_shared());
+}
+
+#[cfg(feature = "shared-proto")]
+#[test]
+fn test_shared_proto_reuses_same_file_across_vms() {
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join("lua_rs_shared_proto_cache.lua");
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "return 'shared-proto-cache'").unwrap();
+    }
+
+    let proto1 = {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(Stdlib::All).unwrap();
+        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+    };
+
+    let proto2 = {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(Stdlib::All).unwrap();
+        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+    };
+
+    assert_eq!(proto1, proto2);
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[cfg(feature = "shared-proto")]
+#[test]
+fn test_shared_proto_reloads_when_file_changes() {
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join("lua_rs_shared_proto_reload.lua");
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "return 1").unwrap();
+    }
+
+    let proto1 = {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(Stdlib::All).unwrap();
+        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+    };
+
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "return 123456789").unwrap();
+    }
+
+    let proto2 = {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(Stdlib::All).unwrap();
+        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+    };
+
+    assert_ne!(proto1, proto2);
+
+    std::fs::remove_file(&path).ok();
+}
+
 // ============================
 // P4: register_type_of on LuaVM (tested implicitly via existing userdata tests)
 // ============================

@@ -42,9 +42,57 @@ pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use opcode::{Instruction, OpCode};
 use std::future::Future;
-use std::rc::Rc;
 #[cfg(feature = "sandbox")]
 use std::time::Duration;
+#[cfg(feature = "shared-proto")]
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, time::SystemTime};
+
+#[cfg(feature = "shared-proto")]
+#[derive(Clone)]
+struct SharedFileProtoEntry {
+    proto: crate::ProtoPtr,
+    len: u64,
+    modified: Option<SystemTime>,
+    version: LuaLanguageLevel,
+}
+
+#[cfg(feature = "shared-proto")]
+thread_local! {
+    static SHARED_FILE_PROTO_CACHE: RefCell<HashMap<PathBuf, SharedFileProtoEntry>> =
+        RefCell::new(HashMap::new());
+}
+
+struct FileChunkLayout {
+    skip_offset: usize,
+    text_start: usize,
+    is_binary: bool,
+}
+
+fn inspect_file_chunk_layout(file_bytes: &[u8]) -> FileChunkLayout {
+    let mut skip_offset = 0;
+
+    if file_bytes.first() == Some(&b'#') {
+        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
+            skip_offset = pos + 1;
+        } else {
+            skip_offset = file_bytes.len();
+        }
+    }
+
+    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
+        skip_offset += 3;
+    }
+
+    FileChunkLayout {
+        skip_offset,
+        text_start: if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            3
+        } else {
+            0
+        },
+        is_binary: file_bytes.get(skip_offset) == Some(&0x1B),
+    }
+}
 
 #[cfg(feature = "sandbox")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,7 +706,7 @@ impl LuaVM {
     }
 
     /// Execute a chunk in the main thread
-    pub fn execute_chunk(&mut self, chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>> {
+    pub fn execute_chunk(&mut self, chunk: crate::ProtoPtr) -> LuaResult<Vec<LuaValue>> {
         // Main chunk needs _ENV upvalue pointing to global table
         // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
         let env_upval = self.create_upvalue_closed(self.global)?;
@@ -666,10 +714,42 @@ impl LuaVM {
         self.execute_function(func, vec![])
     }
 
+    #[inline]
+    pub(crate) fn prepare_loaded_chunk(&mut self, chunk: Chunk) -> crate::ProtoPtr {
+        #[cfg(feature = "shared-proto")]
+        {
+            let proto = self
+                .create_proto(chunk)
+                .expect("failed to allocate proto for loaded chunk");
+            crate::gc::share_proto(proto);
+            proto
+        }
+
+        #[cfg(not(feature = "shared-proto"))]
+        self.create_proto(chunk)
+            .expect("failed to allocate proto for loaded chunk")
+    }
+
+    #[inline]
+    pub(crate) fn create_loaded_function(
+        &mut self,
+        chunk: Chunk,
+        upvalues: UpvalueStore,
+    ) -> LuaResult<LuaValue> {
+        let chunk = self.prepare_loaded_chunk(chunk);
+        self.create_function(chunk, upvalues)
+    }
+
+    #[inline]
+    pub(crate) fn execute_loaded_chunk(&mut self, chunk: Chunk) -> LuaResult<Vec<LuaValue>> {
+        let chunk = self.prepare_loaded_chunk(chunk);
+        self.execute_chunk(chunk)
+    }
+
     #[cfg(feature = "sandbox")]
     fn execute_chunk_with_env(
         &mut self,
-        chunk: Rc<Chunk>,
+        chunk: crate::ProtoPtr,
         env: LuaValue,
     ) -> LuaResult<Vec<LuaValue>> {
         let env_upval = self.create_upvalue_closed(env)?;
@@ -679,7 +759,7 @@ impl LuaVM {
 
     pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.compile(source)?;
-        self.execute_chunk(Rc::new(chunk))
+        self.execute_loaded_chunk(chunk)
     }
 
     #[cfg(feature = "sandbox")]
@@ -693,7 +773,8 @@ impl LuaVM {
         let limits = config.runtime_limits();
         self.main_state()
             .with_sandbox_runtime_limits(limits, |state| {
-                state.vm_mut().execute_chunk_with_env(Rc::new(chunk), env)
+                let chunk = state.vm_mut().prepare_loaded_chunk(chunk);
+                state.vm_mut().execute_chunk_with_env(chunk, env)
             })
     }
 
@@ -713,7 +794,7 @@ impl LuaVM {
     pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
         let chunk = self.compile(source)?;
         let env_upval = self.create_upvalue_closed(self.global)?;
-        self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
+        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     #[cfg(feature = "sandbox")]
@@ -721,7 +802,7 @@ impl LuaVM {
         let chunk = self.compile(source)?;
         let env = self.create_sandbox_env(config)?;
         let env_upval = self.create_upvalue_closed(env)?;
-        self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
+        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     /// Compile source code with a chunk name and return a callable function value.
@@ -730,7 +811,7 @@ impl LuaVM {
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
         let chunk = self.compile_with_name(source, chunk_name)?;
         let env_upval = self.create_upvalue_closed(self.global)?;
-        self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
+        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     #[cfg(feature = "sandbox")]
@@ -743,7 +824,7 @@ impl LuaVM {
         let chunk = self.compile_with_name(source, chunk_name)?;
         let env = self.create_sandbox_env(config)?;
         let env_upval = self.create_upvalue_closed(env)?;
-        self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))
+        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     /// Read a file, compile it, and execute it.
@@ -756,11 +837,8 @@ impl LuaVM {
     /// let results = vm.dofile("scripts/init.lua")?;
     /// ```
     pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
-        let chunk_name = format!("@{}", path);
-        let chunk = self.compile_with_name(&source, &chunk_name)?;
-        self.execute_chunk(Rc::new(chunk))
+        let proto = self.load_proto_from_file(path)?;
+        self.execute_chunk(proto)
     }
 
     /// Call a function value with arguments (synchronous).
@@ -1164,6 +1242,69 @@ impl LuaVM {
         Ok(chunk)
     }
 
+    pub(crate) fn load_proto_from_file(&mut self, path: &str) -> LuaResult<crate::ProtoPtr> {
+        use crate::lua_value::chunk_serializer;
+
+        let resolved_path = std::fs::canonicalize(path)
+            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+
+        #[cfg(feature = "shared-proto")]
+        {
+            let metadata = std::fs::metadata(&resolved_path)
+                .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+            let len = metadata.len();
+            let modified = metadata.modified().ok();
+            let version = self.version;
+            if let Some(proto) = SHARED_FILE_PROTO_CACHE.with(|cache| {
+                let cache = cache.borrow();
+                cache.get(&resolved_path).and_then(|entry| {
+                    (entry.len == len && entry.modified == modified && entry.version == version)
+                        .then_some(entry.proto)
+                })
+            }) {
+                return Ok(proto);
+            }
+        }
+
+        let file_bytes = std::fs::read(&resolved_path)
+            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+        let layout = inspect_file_chunk_layout(&file_bytes);
+        let chunk_name = format!("@{}", resolved_path.display());
+
+        let chunk = if layout.is_binary {
+            chunk_serializer::deserialize_chunk_with_strings_vm(
+                &file_bytes[layout.skip_offset..],
+                self,
+            )
+            .map_err(|e| self.error(format!("binary load error: {}", e)))?
+        } else {
+            let code_str = String::from_utf8(file_bytes[layout.text_start..].to_vec())
+                .map_err(|_| self.error("source file is not valid UTF-8".to_string()))?;
+            self.compile_with_name(&code_str, &chunk_name)?
+        };
+
+        let proto = self.prepare_loaded_chunk(chunk);
+
+        #[cfg(feature = "shared-proto")]
+        {
+            let metadata = std::fs::metadata(&resolved_path)
+                .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+            SHARED_FILE_PROTO_CACHE.with(|cache| {
+                cache.borrow_mut().insert(
+                    resolved_path,
+                    SharedFileProtoEntry {
+                        proto,
+                        len: metadata.len(),
+                        modified: metadata.modified().ok(),
+                        version: self.version,
+                    },
+                );
+            });
+        }
+
+        Ok(proto)
+    }
+
     pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
         let key = self.create_string(name)?;
         Ok(self.raw_get(&self.global, &key))
@@ -1430,8 +1571,7 @@ impl LuaVM {
     ) -> LuaResult<async_thread::AsyncThread> {
         // Main chunk needs _ENV upvalue pointing to global table
         let env_upval = self.create_upvalue_closed(self.global)?;
-        let func_val =
-            self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))?;
+        let func_val = self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
         let thread_val = self.create_thread(func_val)?;
         let vm_ptr = self as *mut LuaVM;
         Ok(async_thread::AsyncThread::new(thread_val, vm_ptr, args))
@@ -1523,7 +1663,7 @@ impl LuaVM {
         let chunk = self.compile(async_thread::ASYNC_CALL_RUNNER)?;
         let env_upval = self.create_upvalue_closed(self.global)?;
         let runner_func =
-            self.create_function(Rc::new(chunk), UpvalueStore::from_single(env_upval))?;
+            self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
         let thread_val = self.create_thread(runner_func)?;
         let vm_ptr = self as *mut LuaVM;
         async_thread::AsyncCallHandle::new(thread_val, vm_ptr, func)
@@ -1682,9 +1822,18 @@ impl LuaVM {
         self.object_allocator.create_userdata(&mut self.gc, data)
     }
 
+    #[inline(always)]
+    pub fn create_proto(&mut self, chunk: Chunk) -> LuaResult<crate::ProtoPtr> {
+        self.object_allocator.create_proto(&mut self.gc, chunk)
+    }
+
     /// Create a function in object pool
     #[inline(always)]
-    pub fn create_function(&mut self, chunk: Rc<Chunk>, upvalues: UpvalueStore) -> CreateResult {
+    pub fn create_function(
+        &mut self,
+        chunk: crate::ProtoPtr,
+        upvalues: UpvalueStore,
+    ) -> CreateResult {
         self.object_allocator
             .create_function(&mut self.gc, chunk, upvalues)
     }

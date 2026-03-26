@@ -3,12 +3,17 @@
 
 use super::{Chunk, LocVar, LuaValue, UpvalueDesc};
 use crate::Instruction;
-use crate::gc::ObjectAllocator;
+use crate::gc::{GcProto, ObjectAllocator};
 use crate::lua_vm::LuaVM;
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use std::rc::Rc;
+
+fn detached_proto(chunk: Chunk) -> crate::ProtoPtr {
+    let size = std::mem::size_of::<GcProto>() as u32 + chunk.proto_data_size;
+    let boxed = Box::new(GcProto::new(chunk, 0, size));
+    crate::ProtoPtr::new(Box::leak(boxed) as *const GcProto)
+}
 
 // Magic number for lua-rs bytecode (different from official Lua)
 const LUARS_MAGIC: &[u8] = b"\x1bLuaRS";
@@ -204,7 +209,7 @@ fn write_chunk(
     // Write child prototypes
     write_u32(buf, chunk.child_protos.len() as u32);
     for child in &chunk.child_protos {
-        write_chunk(buf, child, strip, pool)?;
+        write_chunk(buf, &child.as_ref().data, strip, pool)?;
     }
 
     // Write debug info (if not stripped)
@@ -278,7 +283,7 @@ fn write_chunk_with_dedup(
     // Write child prototypes
     write_u32(buf, chunk.child_protos.len() as u32);
     for child in &chunk.child_protos {
-        write_chunk_with_dedup(buf, child, strip, pool, string_table)?;
+        write_chunk_with_dedup(buf, &child.as_ref().data, strip, pool, string_table)?;
     }
 
     // Write debug info (if not stripped)
@@ -353,7 +358,7 @@ fn write_chunk_no_pool_with_dedup(
     // Write child prototypes
     write_u32(buf, chunk.child_protos.len() as u32);
     for child in &chunk.child_protos {
-        write_chunk_no_pool_with_dedup(buf, child, strip, string_table)?;
+        write_chunk_no_pool_with_dedup(buf, &child.as_ref().data, strip, string_table)?;
     }
 
     // Write debug info with deduplication
@@ -424,7 +429,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
     // Write child prototypes
     write_u32(buf, chunk.child_protos.len() as u32);
     for child in &chunk.child_protos {
-        write_chunk_no_pool(buf, child, strip)?;
+        write_chunk_no_pool(buf, &child.as_ref().data, strip)?;
     }
 
     // Write debug info
@@ -498,7 +503,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
     let child_len = read_u32(cursor)? as usize;
     let mut child_protos = Vec::with_capacity(child_len);
     for _ in 0..child_len {
-        child_protos.push(Rc::new(read_chunk(cursor)?));
+        child_protos.push(detached_proto(read_chunk(cursor)?));
     }
 
     // Read debug info
@@ -590,7 +595,7 @@ fn read_chunk_with_dedup(
     let child_len = read_u32(cursor)? as usize;
     let mut child_protos = Vec::with_capacity(child_len);
     for _ in 0..child_len {
-        child_protos.push(Rc::new(read_chunk_with_dedup(cursor, string_table)?));
+        child_protos.push(detached_proto(read_chunk_with_dedup(cursor, string_table)?));
     }
 
     // Read debug info with string deduplication
@@ -847,7 +852,8 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
     let child_len = read_u32(cursor)? as usize;
     let mut child_protos = Vec::with_capacity(child_len);
     for _ in 0..child_len {
-        child_protos.push(Rc::new(read_chunk_with_vm(cursor, vm)?));
+        let child_chunk = read_chunk_with_vm(cursor, vm)?;
+        child_protos.push(vm.create_proto(child_chunk).map_err(|e| e.to_string())?);
     }
 
     // Read debug info
@@ -958,7 +964,8 @@ fn read_chunk_with_vm_dedup(
     let child_len = read_u32(cursor)? as usize;
     let mut child_protos = Vec::with_capacity(child_len);
     for _ in 0..child_len {
-        child_protos.push(Rc::new(read_chunk_with_vm_dedup(cursor, vm, string_table)?));
+        let child_chunk = read_chunk_with_vm_dedup(cursor, vm, string_table)?;
+        child_protos.push(vm.create_proto(child_chunk).map_err(|e| e.to_string())?);
     }
 
     // Read debug info with deduplication
@@ -1081,7 +1088,7 @@ fn read_chunk_with_strings(
     let child_len = read_u32(cursor)? as usize;
     let mut child_protos = Vec::with_capacity(child_len);
     for _ in 0..child_len {
-        child_protos.push(Rc::new(read_chunk_with_strings(cursor, strings)?));
+        child_protos.push(detached_proto(read_chunk_with_strings(cursor, strings)?));
     }
 
     // Read debug info

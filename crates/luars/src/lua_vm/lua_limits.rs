@@ -42,9 +42,6 @@ pub const CSTACKERR: usize = 30;
 
 /// Maximum length for "short" strings (interned in hash table).
 /// Matches Lua 5.5's LUAI_MAXSHORTLEN.
-#[cfg(feature = "shared-string")]
-pub const LUAI_MAXSHORTLEN: usize = 60;
-#[cfg(not(feature = "shared-string"))]
 pub const LUAI_MAXSHORTLEN: usize = 40;
 
 // ===== Compiler =====

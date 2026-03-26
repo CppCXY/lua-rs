@@ -20,10 +20,10 @@ pub fn push_closure(
     if bx >= current_chunk.child_protos.len() {
         return Err(LuaError::RuntimeError);
     }
-    let proto = current_chunk.child_protos[bx].clone();
+    let proto = current_chunk.child_protos[bx];
 
     // Get upvalue descriptors
-    let upvalue_descs = &proto.upvalue_descs;
+    let upvalue_descs = &proto.as_ref().data.upvalue_descs;
     let num_upvalues = upvalue_descs.len();
 
     // Build UpvalueStore — avoid heap allocation for 0-1 upvalues

@@ -11,7 +11,6 @@ pub mod userdata_trait;
 use self::lua_value::Value;
 use std::any::Any;
 use std::fmt;
-use std::rc::Rc;
 
 pub use lua_string::*;
 pub use userdata_builder::UserDataBuilder;
@@ -31,7 +30,7 @@ pub use lua_value::{
 };
 
 use crate::lua_vm::CFunction;
-use crate::{Instruction, RefUserData, TablePtr, UpvaluePtr};
+use crate::{Instruction, ProtoPtr, RefUserData, TablePtr, UpvaluePtr};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LuaValuePtr {
@@ -387,13 +386,13 @@ pub struct Chunk {
     pub needs_vararg_table: bool, // Whether function needs vararg table (PF_VATAB in Lua 5.5)
     pub use_hidden_vararg: bool,  // Whether function uses hidden vararg args (PF_VAHID in Lua 5.5)
     pub max_stack_size: usize,
-    pub child_protos: Vec<Rc<Chunk>>, // Nested function prototypes
+    pub child_protos: Vec<ProtoPtr>,     // Nested function prototypes
     pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
-    pub source_name: Option<String>,  // Source file/chunk name for debugging
-    pub line_info: Vec<u32>,          // Line number for each instruction (for debug)
-    pub linedefined: usize,           // Line where function starts (0 for main)
-    pub lastlinedefined: usize,       // Line where function ends (0 for main)
-    pub proto_data_size: u32,         // Cached size for GC (code+constants+children+lines)
+    pub source_name: Option<String>,     // Source file/chunk name for debugging
+    pub line_info: Vec<u32>,             // Line number for each instruction (for debug)
+    pub linedefined: usize,              // Line where function starts (0 for main)
+    pub lastlinedefined: usize,          // Line where function ends (0 for main)
+    pub proto_data_size: u32,            // Cached size for GC (code+constants+children+lines)
 }
 
 impl Default for Chunk {
@@ -429,9 +428,31 @@ impl Chunk {
         use std::mem::size_of;
         let instr_size = self.code.len() * size_of::<crate::lua_vm::Instruction>();
         let const_size = self.constants.len() * size_of::<LuaValue>();
-        let child_size = self.child_protos.len() * size_of::<Self>();
+        let child_size = self.child_protos.len() * size_of::<ProtoPtr>();
         let line_size = self.line_info.len() * size_of::<u32>();
         self.proto_data_size = (instr_size + const_size + child_size + line_size) as u32;
+    }
+
+    #[cfg(feature = "shared-proto")]
+    pub fn share_constant_strings(&mut self) -> usize {
+        let mut shared_count = 0;
+
+        for constant in &mut self.constants {
+            shared_count += usize::from(crate::gc::share_lua_value(constant));
+        }
+
+        shared_count
+    }
+
+    #[cfg(feature = "shared-proto")]
+    pub fn share_proto_strings(&mut self) -> usize {
+        let mut shared_count = self.share_constant_strings();
+
+        for child in &mut self.child_protos {
+            shared_count += child.as_mut_ref().data.share_proto_strings();
+        }
+
+        shared_count
     }
 }
 
@@ -488,12 +509,12 @@ impl UpvalueStore {
 }
 
 pub struct LuaFunction {
-    chunk: Rc<Chunk>,
+    chunk: ProtoPtr,
     upvalue_store: UpvalueStore,
 }
 
 impl LuaFunction {
-    pub fn new(chunk: Rc<Chunk>, upvalue_store: UpvalueStore) -> Self {
+    pub fn new(chunk: ProtoPtr, upvalue_store: UpvalueStore) -> Self {
         LuaFunction {
             chunk,
             upvalue_store,
@@ -503,7 +524,12 @@ impl LuaFunction {
     /// Get the chunk if this is a Lua function
     #[inline(always)]
     pub fn chunk(&self) -> &Chunk {
-        &self.chunk
+        &self.chunk.as_ref().data
+    }
+
+    #[inline(always)]
+    pub fn proto(&self) -> ProtoPtr {
+        self.chunk
     }
 
     /// Get upvalue pointers as a slice.

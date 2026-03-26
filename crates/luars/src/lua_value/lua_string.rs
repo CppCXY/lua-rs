@@ -1,7 +1,10 @@
-#[cfg(feature = "shared-string")]
-use std::sync::Arc;
+#[cfg(feature = "shared-proto")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::StringInterner;
+use crate::{StringInterner, StringPtr};
+
+#[cfg(feature = "shared-proto")]
+static SHARED_SHORT_STRING_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Internal inline byte storage for short Lua strings.
 ///
@@ -86,15 +89,20 @@ impl InlineShortString {
 }
 
 /// Immutable byte storage for Lua strings.
-#[derive(Clone)]
 pub enum LuaStrRepr {
     /// Compact inline storage for the hottest very short strings.
     Smol(InlineShortString),
-    /// Shared storage for short strings that exceed the inline threshold.
-    #[cfg(feature = "shared-string")]
-    Shared(Arc<[u8]>),
     /// Heap-backed storage for any non-inline string payload.
     Heap(Box<[u8]>),
+}
+
+impl Clone for LuaStrRepr {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Smol(value) => Self::Smol(value.clone()),
+            Self::Heap(value) => Self::Heap(value.clone()),
+        }
+    }
 }
 
 impl LuaStrRepr {
@@ -102,8 +110,6 @@ impl LuaStrRepr {
     pub fn len(&self) -> usize {
         match self {
             Self::Smol(s) => s.len(),
-            #[cfg(feature = "shared-string")]
-            Self::Shared(s) => s.len(),
             Self::Heap(s) => s.len(),
         }
     }
@@ -112,19 +118,7 @@ impl LuaStrRepr {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Smol(s) => s.as_bytes(),
-            #[cfg(feature = "shared-string")]
-            Self::Shared(s) => s.as_ref(),
             Self::Heap(s) => s.as_ref(),
-        }
-    }
-
-    #[cfg(feature = "shared-string")]
-    #[allow(unused)]
-    #[inline(always)]
-    pub(crate) fn shared_ptr(&self) -> Option<*const [u8]> {
-        match self {
-            Self::Shared(shared) => Some(Arc::as_ptr(shared)),
-            _ => None,
         }
     }
 }
@@ -176,29 +170,50 @@ impl std::fmt::Display for LuaStrRepr {
     }
 }
 
-#[derive(Clone)]
 pub struct LuaString {
     /// Hash comes first for cache locality: GcHeader(8B) + hash(8B) = 16B,
     /// both in the same cache line after pointer dereference.
     /// C Lua has TString.hash at offset 12 — ours is now at offset 8.
     pub hash: u64,
     pub utf8: Utf8State,
+    #[cfg(feature = "shared-proto")]
+    short_id: AtomicUsize,
     pub str: LuaStrRepr,
+}
+
+impl Clone for LuaString {
+    fn clone(&self) -> Self {
+        Self {
+            hash: self.hash,
+            utf8: self.utf8,
+            #[cfg(feature = "shared-proto")]
+            short_id: AtomicUsize::new(self.short_id()),
+            str: self.str.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for LuaString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LuaString")
-            .field("str", &self.str)
-            .field("hash", &self.hash)
-            .field("utf8", &self.utf8)
-            .finish()
+        let mut debug = f.debug_struct("LuaString");
+        debug.field("str", &self.str);
+        debug.field("hash", &self.hash);
+        debug.field("utf8", &self.utf8);
+        #[cfg(feature = "shared-proto")]
+        debug.field("short_id", &self.short_id());
+        debug.finish()
     }
 }
 
 impl LuaString {
     pub fn new(s: LuaStrRepr, hash: u64, utf8: Utf8State) -> Self {
-        Self { hash, utf8, str: s }
+        Self {
+            hash,
+            utf8,
+            #[cfg(feature = "shared-proto")]
+            short_id: AtomicUsize::new(0),
+            str: s,
+        }
     }
 
     #[inline(always)]
@@ -241,6 +256,73 @@ impl LuaString {
     pub fn is_long(&self) -> bool {
         self.str.len() > StringInterner::SHORT_STRING_LIMIT
     }
+
+    #[cfg(feature = "shared-proto")]
+    #[inline(always)]
+    pub fn short_id(&self) -> usize {
+        self.short_id.load(Ordering::Relaxed)
+    }
+
+    #[cfg(not(feature = "shared-proto"))]
+    #[inline(always)]
+    pub fn short_id(&self) -> usize {
+        0
+    }
+
+    #[cfg(feature = "shared-proto")]
+    pub fn ensure_short_id(&self) -> usize {
+        let current = self.short_id();
+        if current != 0 {
+            return current;
+        }
+
+        let allocated = SHARED_SHORT_STRING_ID.fetch_add(1, Ordering::Relaxed);
+        match self
+            .short_id
+            .compare_exchange(0, allocated, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => allocated,
+            Err(existing) => existing,
+        }
+    }
+
+    #[cfg(feature = "shared-proto")]
+    pub fn merge_short_ids(&self, other: &Self) {
+        let left = self.short_id();
+        let right = other.short_id();
+        let merged = left.max(right);
+        if merged == 0 {
+            return;
+        }
+        self.short_id.store(merged, Ordering::Relaxed);
+        other.short_id.store(merged, Ordering::Relaxed);
+    }
+}
+
+#[inline(always)]
+pub fn short_string_ptr_eq(left: StringPtr, right: StringPtr) -> bool {
+    if left == right {
+        return true;
+    }
+
+    #[cfg(feature = "shared-proto")]
+    {
+        let left_string = &left.as_ref().data;
+        let right_string = &right.as_ref().data;
+        let left_id = left_string.short_id();
+        let right_id = right_string.short_id();
+
+        if left_id != 0 && left_id == right_id {
+            return true;
+        }
+
+        if left_string.hash == right_string.hash && left_string.str == right_string.str {
+            left_string.merge_short_ids(right_string);
+            return true;
+        }
+    }
+
+    false
 }
 
 impl Eq for LuaString {}

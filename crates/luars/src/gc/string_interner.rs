@@ -1,60 +1,34 @@
 use ahash::RandomState;
-#[cfg(feature = "shared-string")]
-use std::collections::HashMap;
-#[cfg(feature = "shared-string")]
-use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::lua_value::{InlineShortString, LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use crate::{CreateResult, GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
-#[cfg(feature = "shared-string")]
-static SHARED_SHORT_STRING_POOL: LazyLock<Mutex<SharedShortStringPool>> =
-    LazyLock::new(|| Mutex::new(SharedShortStringPool::default()));
+const STRING_HASH_SEED_1: u64 = 0x243f_6a88_85a3_08d3;
+const STRING_HASH_SEED_2: u64 = 0x1319_8a2e_0370_7344;
+const STRING_HASH_SEED_3: u64 = 0xa409_3822_299f_31d0;
+const STRING_HASH_SEED_4: u64 = 0x082e_fa98_ec4e_6c89;
 
-#[cfg(feature = "shared-string")]
-struct SharedShortStringPool {
-    entries: HashMap<Vec<u8>, Weak<[u8]>>,
-    cleanup_threshold: usize,
-}
+#[cfg(feature = "shared-proto")]
+pub fn share_lua_value(value: &mut LuaValue) -> bool {
+    match value.as_string_ptr() {
+        Some(ptr) => {
+            let gc_string = ptr.as_mut_ref();
+            if gc_string.header.is_shared() {
+                return false;
+            }
 
-#[cfg(feature = "shared-string")]
-impl Default for SharedShortStringPool {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-            cleanup_threshold: 1024,
+            gc_string.header.make_shared();
+            gc_string.header.make_black();
+            gc_string.header.make_old();
+
+            if value.is_short_string() {
+                gc_string.data.ensure_short_id();
+            }
+
+            true
         }
-    }
-}
-
-#[cfg(feature = "shared-string")]
-impl SharedShortStringPool {
-    fn intern(&mut self, bytes: &[u8]) -> Arc<[u8]> {
-        if let Some(existing) = self.entries.get(bytes)
-            && let Some(shared) = existing.upgrade()
-        {
-            return shared;
-        }
-
-        let shared = Arc::<[u8]>::from(bytes);
-        self.entries
-            .insert(shared.as_ref().to_vec(), Arc::downgrade(&shared));
-
-        self.maybe_cleanup();
-
-        shared
-    }
-
-    fn maybe_cleanup(&mut self) {
-        if self.entries.len() < self.cleanup_threshold {
-            return;
-        }
-
-        self.entries.retain(|_, weak| weak.strong_count() > 0);
-
-        let grown = self.entries.len().saturating_mul(2).max(1024);
-        self.cleanup_threshold = grown.next_power_of_two();
+        None => false,
     }
 }
 
@@ -78,10 +52,10 @@ impl StringSlot {
 /// Open-addressed intern table for short strings.
 pub struct StringInterner {
     slots: Vec<StringSlot>,
+    hasher: RandomState,
     /// Number of interned strings
     nuse: usize,
     ndead: usize,
-    hashbuilder: RandomState,
 }
 
 impl Default for StringInterner {
@@ -99,9 +73,14 @@ impl StringInterner {
     pub fn new() -> Self {
         Self {
             slots: vec![StringSlot::Empty; Self::INITIAL_SIZE],
+            hasher: RandomState::with_seeds(
+                STRING_HASH_SEED_1,
+                STRING_HASH_SEED_2,
+                STRING_HASH_SEED_3,
+                STRING_HASH_SEED_4,
+            ),
             nuse: 0,
             ndead: 0,
-            hashbuilder: RandomState::new(),
         }
     }
 
@@ -131,19 +110,7 @@ impl StringInterner {
             return LuaStrRepr::Smol(InlineShortString::new(bytes));
         }
 
-        #[cfg(feature = "shared-string")]
-        {
-            let shared = SHARED_SHORT_STRING_POOL
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .intern(bytes);
-            return LuaStrRepr::Shared(shared);
-        }
-
-        #[cfg(not(feature = "shared-string"))]
-        {
-            LuaStrRepr::Heap(Box::<[u8]>::from(bytes))
-        }
+        LuaStrRepr::Heap(Box::<[u8]>::from(bytes))
     }
 
     #[inline(always)]
@@ -290,7 +257,7 @@ impl StringInterner {
 
     #[inline(always)]
     fn hash_bytes(&self, s: &[u8]) -> u64 {
-        self.hashbuilder.hash_one(s)
+        self.hasher.hash_one(s)
     }
 
     pub fn remove_dead_intern(&mut self, ptr: StringPtr) {
@@ -363,82 +330,18 @@ impl StringInterner {
     }
 }
 
-#[cfg(all(test, feature = "shared-string"))]
+#[cfg(test)]
 mod tests {
     use super::StringInterner;
-    use std::sync::Arc;
+    #[cfg(feature = "shared-proto")]
+    use super::share_lua_value;
 
     use crate::GC;
     use crate::lua_value::LuaStrRepr;
     use crate::lua_vm::SafeOption;
 
     #[test]
-    fn shared_short_strings_reuse_arc_storage_across_interners() {
-        let key = "0123456789abcdefghijklmnopqr";
-        let mut left_interner = StringInterner::new();
-        let mut right_interner = StringInterner::new();
-        let mut left_gc = GC::new(SafeOption::default());
-        let mut right_gc = GC::new(SafeOption::default());
-
-        let left = left_interner.intern(key, &mut left_gc).unwrap();
-        let right = right_interner.intern(key, &mut right_gc).unwrap();
-
-        let left_ptr = left.as_string_ptr().unwrap();
-        let right_ptr = right.as_string_ptr().unwrap();
-
-        match (&left_ptr.as_ref().data.str, &right_ptr.as_ref().data.str) {
-            (LuaStrRepr::Shared(left), LuaStrRepr::Shared(right)) => {
-                assert_eq!(left.as_ref(), right.as_ref());
-                assert_eq!(Arc::as_ptr(left), Arc::as_ptr(right));
-            }
-            (left, right) => panic!("expected short strings, got {left:?} and {right:?}"),
-        }
-    }
-
-    #[test]
-    fn shared_string_storage_boundaries_follow_feature_thresholds() {
-        let mut interner = StringInterner::new();
-        let mut gc = GC::new(SafeOption::default());
-
-        let smol = interner.intern(&"a".repeat(23), &mut gc).unwrap();
-        let shared_24 = interner.intern(&"b".repeat(24), &mut gc).unwrap();
-        let shared_60 = interner.intern(&"c".repeat(60), &mut gc).unwrap();
-        let heap_61 = interner.intern(&"d".repeat(61), &mut gc).unwrap();
-
-        assert!(smol.is_short_string());
-        assert!(shared_24.is_short_string());
-        assert!(shared_60.is_short_string());
-        assert!(!heap_61.is_short_string());
-
-        assert!(matches!(
-            smol.as_string_ptr().unwrap().as_ref().data.str,
-            LuaStrRepr::Smol(_)
-        ));
-        assert!(matches!(
-            shared_24.as_string_ptr().unwrap().as_ref().data.str,
-            LuaStrRepr::Shared(_)
-        ));
-        assert!(matches!(
-            shared_60.as_string_ptr().unwrap().as_ref().data.str,
-            LuaStrRepr::Shared(_)
-        ));
-        assert!(matches!(
-            heap_61.as_string_ptr().unwrap().as_ref().data.str,
-            LuaStrRepr::Heap(_)
-        ));
-    }
-}
-
-#[cfg(all(test, not(feature = "shared-string")))]
-mod non_shared_tests {
-    use super::StringInterner;
-
-    use crate::GC;
-    use crate::lua_value::LuaStrRepr;
-    use crate::lua_vm::SafeOption;
-
-    #[test]
-    fn non_shared_storage_boundaries_follow_default_thresholds() {
+    fn short_string_storage_boundaries_stay_local_by_default() {
         let mut interner = StringInterner::new();
         let mut gc = GC::new(SafeOption::default());
 
@@ -468,5 +371,40 @@ mod non_shared_tests {
             heap_41.as_string_ptr().unwrap().as_ref().data.str,
             LuaStrRepr::Heap(_)
         ));
+    }
+
+    #[cfg(feature = "shared-proto")]
+    #[test]
+    fn explicit_share_marks_existing_string_as_shared() {
+        let key = "0123456789abcdefghijklmnopqr";
+        let mut interner = StringInterner::new();
+        let mut gc = GC::new(SafeOption::default());
+
+        let mut value = interner.intern(key, &mut gc).unwrap();
+        let ptr_before = value.as_string_ptr().unwrap().as_u64();
+
+        assert!(share_lua_value(&mut value));
+
+        let ptr = value.as_string_ptr().unwrap();
+        assert_eq!(ptr.as_u64(), ptr_before);
+        assert!(ptr.as_ref().header.is_shared());
+        assert_ne!(ptr.as_ref().data.short_id(), 0);
+    }
+
+    #[cfg(feature = "shared-proto")]
+    #[test]
+    fn shared_and_local_short_strings_keep_same_bytes() {
+        let key = "0123456789abcdefghijklmnopqr";
+        let mut left_interner = StringInterner::new();
+        let mut right_interner = StringInterner::new();
+        let mut left_gc = GC::new(SafeOption::default());
+        let mut right_gc = GC::new(SafeOption::default());
+
+        let mut shared_value = left_interner.intern(key, &mut left_gc).unwrap();
+        let local_value = right_interner.intern(key, &mut right_gc).unwrap();
+
+        assert!(share_lua_value(&mut shared_value));
+
+        assert_eq!(shared_value.as_bytes(), local_value.as_bytes());
     }
 }
