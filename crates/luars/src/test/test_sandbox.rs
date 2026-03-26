@@ -15,7 +15,7 @@ fn test_execute_sandboxed_isolates_globals() {
         .unwrap();
 
     assert_eq!(results[0].as_integer(), Some(42));
-    assert_eq!(results[1].bvalue(), true);
+    assert!(results[1].bvalue());
     assert!(vm.get_global("sandbox_value").unwrap().is_none());
 }
 
@@ -84,7 +84,7 @@ fn test_sandbox_can_inject_custom_globals() {
         .unwrap();
 
     assert_eq!(results[0].as_integer(), Some(99));
-    assert_eq!(results[1].bvalue(), true);
+    assert!(results[1].bvalue());
     assert!(vm.get_global("answer").unwrap().is_none());
 }
 

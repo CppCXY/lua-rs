@@ -25,7 +25,7 @@ Lua strings in luars are stored as byte strings with an optional UTF-8 text view
 
 ```toml
 [dependencies]
-luars = "0.16"
+luars = "0.17"
 ```
 
 ```rust
@@ -314,7 +314,7 @@ cd lua_tests/testes && ../../target/release/lua all.lua
 Sandbox support is intentionally feature-gated so the default build keeps the original hot path with no sandbox-specific runtime checks compiled in.
 
 ```toml
-luars = { version = "0.16.1", features = ["sandbox"] }
+luars = { version = "0.17.0", features = ["sandbox"] }
 ```
 
 ```rust
