@@ -5,12 +5,19 @@ pub mod call_info;
 mod const_string;
 pub mod debug_info;
 mod execute;
+mod file_layout;
 pub mod lua_error;
 pub mod lua_limits;
 mod lua_ref;
+mod lua_rng;
 mod lua_state;
 pub mod opcode;
 mod safe_option;
+#[cfg(feature = "sandbox")]
+mod sandbox;
+#[cfg(feature = "shared-proto")]
+mod shared_proto;
+mod string_arth;
 pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
@@ -23,6 +30,7 @@ pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
 use crate::lua_vm::execute::lua_execute;
+use crate::lua_vm::file_layout::inspect_file_chunk_layout;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
 pub use crate::lua_vm::lua_ref::{
@@ -31,266 +39,20 @@ pub use crate::lua_vm::lua_ref::{
 };
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
+#[cfg(feature = "sandbox")]
+pub use crate::lua_vm::sandbox::SandboxConfig;
 use crate::platform_time::{PlatformInstant, unix_nanos};
 use crate::stdlib::Stdlib;
-use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::{
     CreateResult, GcKind, LuaEnum, LuaRegistrable, ObjectAllocator, OpaqueUserData, RustCallback,
     TableBuilder, ThreadPtr, UpvaluePtr, lib_registry,
 };
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
+pub use lua_rng::LuaRng;
 pub use opcode::{Instruction, OpCode};
 use std::future::Future;
-#[cfg(feature = "sandbox")]
-use std::time::Duration;
-#[cfg(feature = "shared-proto")]
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, time::SystemTime};
-
-#[cfg(feature = "shared-proto")]
-#[derive(Clone)]
-struct SharedFileProtoEntry {
-    proto: crate::ProtoPtr,
-    len: u64,
-    modified: Option<SystemTime>,
-    version: LuaLanguageLevel,
-}
-
-#[cfg(feature = "shared-proto")]
-thread_local! {
-    static SHARED_FILE_PROTO_CACHE: RefCell<HashMap<PathBuf, SharedFileProtoEntry>> =
-        RefCell::new(HashMap::new());
-}
-
-struct FileChunkLayout {
-    skip_offset: usize,
-    text_start: usize,
-    is_binary: bool,
-}
-
-fn inspect_file_chunk_layout(file_bytes: &[u8]) -> FileChunkLayout {
-    let mut skip_offset = 0;
-
-    if file_bytes.first() == Some(&b'#') {
-        if let Some(pos) = file_bytes.iter().position(|&b| b == b'\n') {
-            skip_offset = pos + 1;
-        } else {
-            skip_offset = file_bytes.len();
-        }
-    }
-
-    if file_bytes[skip_offset..].starts_with(&[0xEF, 0xBB, 0xBF]) {
-        skip_offset += 3;
-    }
-
-    FileChunkLayout {
-        skip_offset,
-        text_start: if file_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            3
-        } else {
-            0
-        },
-        is_binary: file_bytes.get(skip_offset) == Some(&0x1B),
-    }
-}
-
-#[cfg(feature = "sandbox")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxConfig {
-    pub basic: bool,
-    pub math: bool,
-    pub string: bool,
-    pub table: bool,
-    pub utf8: bool,
-    pub coroutine: bool,
-    pub os: bool,
-    pub io: bool,
-    pub package: bool,
-    pub debug: bool,
-    pub allow_require: bool,
-    pub allow_load: bool,
-    pub allow_loadfile: bool,
-    pub allow_dofile: bool,
-    pub allow_collectgarbage: bool,
-    pub injected_globals: Vec<(String, LuaValue)>,
-    pub instruction_limit: Option<u64>,
-    pub memory_limit_bytes: Option<isize>,
-    pub timeout: Option<Duration>,
-}
-
-#[cfg(feature = "sandbox")]
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            basic: true,
-            math: true,
-            string: true,
-            table: true,
-            utf8: true,
-            coroutine: false,
-            os: false,
-            io: false,
-            package: false,
-            debug: false,
-            allow_require: false,
-            allow_load: false,
-            allow_loadfile: false,
-            allow_dofile: false,
-            allow_collectgarbage: false,
-            injected_globals: Vec::new(),
-            instruction_limit: None,
-            memory_limit_bytes: None,
-            timeout: None,
-        }
-    }
-}
-
-#[cfg(feature = "sandbox")]
-impl SandboxConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_stdlib(mut self, lib: Stdlib) -> Self {
-        match lib {
-            Stdlib::Basic => self.basic = true,
-            Stdlib::Math => self.math = true,
-            Stdlib::String => self.string = true,
-            Stdlib::Table => self.table = true,
-            Stdlib::Utf8 => self.utf8 = true,
-            Stdlib::Coroutine => self.coroutine = true,
-            Stdlib::Os => self.os = true,
-            Stdlib::Io => self.io = true,
-            Stdlib::Package => self.package = true,
-            Stdlib::Debug => self.debug = true,
-            Stdlib::All => {
-                self.basic = true;
-                self.math = true;
-                self.string = true;
-                self.table = true;
-                self.utf8 = true;
-                self.coroutine = true;
-                self.os = true;
-                self.io = true;
-                self.package = true;
-                self.debug = true;
-            }
-        }
-        self
-    }
-
-    pub fn allow_loading(mut self) -> Self {
-        self.allow_load = true;
-        self.allow_loadfile = true;
-        self.allow_dofile = true;
-        self
-    }
-
-    pub fn allow_require(mut self) -> Self {
-        self.allow_require = true;
-        self
-    }
-
-    pub fn allow_collectgarbage(mut self) -> Self {
-        self.allow_collectgarbage = true;
-        self
-    }
-
-    pub fn with_global(mut self, name: impl Into<String>, value: LuaValue) -> Self {
-        self.injected_globals.push((name.into(), value));
-        self
-    }
-
-    pub fn insert_global(&mut self, name: impl Into<String>, value: LuaValue) -> &mut Self {
-        self.injected_globals.push((name.into(), value));
-        self
-    }
-
-    pub fn with_instruction_limit(mut self, limit: u64) -> Self {
-        self.instruction_limit = Some(limit);
-        self
-    }
-
-    pub fn with_memory_limit(mut self, limit_bytes: isize) -> Self {
-        self.memory_limit_bytes = Some(limit_bytes);
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
-    fn runtime_limits(&self) -> Option<SandboxRuntimeLimits> {
-        let deadline_nanos = self.timeout.map(|timeout| {
-            let timeout_nanos = timeout.as_nanos().min(u64::MAX as u128) as u64;
-            unix_nanos().saturating_add(timeout_nanos)
-        });
-
-        if self.instruction_limit.is_none()
-            && self.memory_limit_bytes.is_none()
-            && deadline_nanos.is_none()
-        {
-            return None;
-        }
-
-        Some(SandboxRuntimeLimits {
-            remaining_instructions: self.instruction_limit,
-            memory_limit_bytes: self.memory_limit_bytes,
-            deadline_nanos,
-            instructions_until_time_check: SANDBOX_TIMEOUT_CHECK_INTERVAL,
-        })
-    }
-}
-
-#[cfg(feature = "sandbox")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SandboxRuntimeLimits {
-    pub remaining_instructions: Option<u64>,
-    pub memory_limit_bytes: Option<isize>,
-    pub deadline_nanos: Option<u64>,
-    pub instructions_until_time_check: u32,
-}
-
-#[cfg(feature = "sandbox")]
-pub(crate) const SANDBOX_TIMEOUT_CHECK_INTERVAL: u32 = 1024;
-
-#[cfg(feature = "sandbox")]
-const SANDBOX_SAFE_BASIC_GLOBALS: &[&str] = &[
-    "_VERSION",
-    "assert",
-    "error",
-    "getmetatable",
-    "ipairs",
-    "next",
-    "pairs",
-    "pcall",
-    "print",
-    "rawequal",
-    "rawget",
-    "rawlen",
-    "rawset",
-    "select",
-    "setmetatable",
-    "tonumber",
-    "tostring",
-    "type",
-    "warn",
-    "xpcall",
-];
-
-#[cfg(feature = "sandbox")]
-const SANDBOX_LIB_GLOBALS: &[(Stdlib, &str)] = &[
-    (Stdlib::Math, "math"),
-    (Stdlib::String, "string"),
-    (Stdlib::Table, "table"),
-    (Stdlib::Utf8, "utf8"),
-    (Stdlib::Coroutine, "coroutine"),
-    (Stdlib::Os, "os"),
-    (Stdlib::Io, "io"),
-    (Stdlib::Package, "package"),
-    (Stdlib::Debug, "debug"),
-];
+pub use string_arth::*;
 
 pub type LuaResult<T> = Result<T, LuaError>;
 /// C Function type - Rust function callable from Lua
@@ -715,19 +477,16 @@ impl LuaVM {
     }
 
     #[inline]
-    pub(crate) fn prepare_loaded_chunk(&mut self, chunk: Chunk) -> crate::ProtoPtr {
+    pub(crate) fn prepare_loaded_chunk(&mut self, chunk: Chunk) -> LuaResult<crate::ProtoPtr> {
         #[cfg(feature = "shared-proto")]
         {
-            let proto = self
-                .create_proto(chunk)
-                .expect("failed to allocate proto for loaded chunk");
+            let proto = self.create_proto(chunk)?;
             crate::gc::share_proto(proto);
-            proto
+            Ok(proto)
         }
 
         #[cfg(not(feature = "shared-proto"))]
         self.create_proto(chunk)
-            .expect("failed to allocate proto for loaded chunk")
     }
 
     #[inline]
@@ -736,13 +495,13 @@ impl LuaVM {
         chunk: Chunk,
         upvalues: UpvalueStore,
     ) -> LuaResult<LuaValue> {
-        let chunk = self.prepare_loaded_chunk(chunk);
+        let chunk = self.prepare_loaded_chunk(chunk)?;
         self.create_function(chunk, upvalues)
     }
 
     #[inline]
     pub(crate) fn execute_loaded_chunk(&mut self, chunk: Chunk) -> LuaResult<Vec<LuaValue>> {
-        let chunk = self.prepare_loaded_chunk(chunk);
+        let chunk = self.prepare_loaded_chunk(chunk)?;
         self.execute_chunk(chunk)
     }
 
@@ -773,7 +532,7 @@ impl LuaVM {
         let limits = config.runtime_limits();
         self.main_state()
             .with_sandbox_runtime_limits(limits, |state| {
-                let chunk = state.vm_mut().prepare_loaded_chunk(chunk);
+                let chunk = state.vm_mut().prepare_loaded_chunk(chunk)?;
                 state.vm_mut().execute_chunk_with_env(chunk, env)
             })
     }
@@ -1250,6 +1009,8 @@ impl LuaVM {
 
         #[cfg(feature = "shared-proto")]
         {
+            use crate::lua_vm::shared_proto::SHARED_FILE_PROTO_CACHE;
+
             let metadata = std::fs::metadata(&resolved_path)
                 .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
             let len = metadata.len();
@@ -1283,13 +1044,17 @@ impl LuaVM {
             self.compile_with_name(&code_str, &chunk_name)?
         };
 
-        let proto = self.prepare_loaded_chunk(chunk);
+        let proto = self.prepare_loaded_chunk(chunk)?;
 
         #[cfg(feature = "shared-proto")]
         {
+            use crate::lua_vm::shared_proto::SHARED_FILE_PROTO_CACHE;
+
             let metadata = std::fs::metadata(&resolved_path)
                 .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
             SHARED_FILE_PROTO_CACHE.with(|cache| {
+                use crate::lua_vm::shared_proto::SharedFileProtoEntry;
+
                 cache.borrow_mut().insert(
                     resolved_path,
                     SharedFileProtoEntry {
@@ -1322,6 +1087,8 @@ impl LuaVM {
 
     #[cfg(feature = "sandbox")]
     pub fn create_sandbox_env(&mut self, config: &SandboxConfig) -> LuaResult<LuaValue> {
+        use crate::lua_vm::sandbox::SANDBOX_LIB_GLOBALS;
+
         let env = self.create_table(0, 24)?;
         let g_key = self.create_string("_G")?;
         let env_key = self.create_string("_ENV")?;
@@ -1332,6 +1099,8 @@ impl LuaVM {
         self.raw_set(&env, env_key, env);
 
         if config.basic {
+            use crate::lua_vm::sandbox::SANDBOX_SAFE_BASIC_GLOBALS;
+
             for &name in SANDBOX_SAFE_BASIC_GLOBALS {
                 self.copy_global_into_table(&env, name)?;
             }
@@ -2425,7 +2194,6 @@ mod tests {
         let lua_val = vm.deserialize_from_json(&json).unwrap();
         assert!(lua_val.is_table());
 
-        let key1 = vm.create_string("1").unwrap();
         let val1 = vm.raw_get(&lua_val, &LuaValue::number(1.0)).unwrap();
         assert_eq!(val1.as_number(), Some(1.0));
 
@@ -2481,275 +2249,5 @@ mod tests {
         assert_eq!(count.as_number(), Some(42.0));
 
         println!("✓ JSON roundtrip test passed");
-    }
-}
-
-// ============================================================
-// String arithmetic metamethods (Lua 5.5 string-to-number coercion)
-// These are set as __add, __sub, etc. on the string metatable.
-// Matches lstrlib.c: arith() + tonum()
-// ============================================================
-
-/// Try to convert a LuaValue to a number (integer or float).
-/// Returns the numeric value, or None if conversion fails.
-/// Matches C Lua's `tonum()` in lstrlib.c — uses lua_stringtonumber
-/// which handles decimals, hex integers, hex floats, signs, whitespace.
-fn string_arith_tonum(v: &LuaValue) -> Option<LuaValue> {
-    if v.is_integer() || v.is_float() {
-        return Some(*v);
-    }
-    if v.is_string() {
-        let result = parse_lua_number(v.as_str().unwrap_or(""));
-        if !result.is_nil() {
-            return Some(result);
-        }
-    }
-    None
-}
-
-/// Perform a binary arithmetic operation, converting strings to numbers.
-/// Matches C Lua's arith() + trymt() in lstrlib.c:
-/// - If both operands convert to numbers, do the arithmetic
-/// - Otherwise, if the second operand is also a string, error
-/// - Otherwise, try the second operand's metamethod for this operation
-/// - If no metamethod found, error
-fn string_arith_bin(
-    l: &mut LuaState,
-    op_name: &str,
-    tm_kind: TmKind,
-    op: fn(LuaValue, LuaValue) -> Option<LuaValue>,
-) -> LuaResult<usize> {
-    let v1 = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("attempt to perform arithmetic on a nil value".to_string()))?;
-    let v2 = l
-        .get_arg(2)
-        .ok_or_else(|| l.error("attempt to perform arithmetic on a nil value".to_string()))?;
-
-    let n1 = string_arith_tonum(&v1);
-    let n2 = string_arith_tonum(&v2);
-
-    if let (Some(a), Some(b)) = (n1, n2)
-        && let Some(result) = op(a, b)
-    {
-        l.push_value(result)?;
-        return Ok(1);
-    }
-
-    // Conversion failed — implement trymt() from C Lua:
-    // If the second operand is a string, both are strings and both failed → error.
-    // Otherwise, try the second operand's metamethod.
-    if !v2.is_string()
-        && let Some(mt) = execute::get_metatable(l, &v2)
-    {
-        let tm_key = l.vm_mut().const_strings.get_tm_value(tm_kind);
-        if let Some(mm) = mt.as_table().and_then(|t| t.raw_get(&tm_key)) {
-            // Call the other operand's metamethod with original args
-            let results = l.call_function(mm, vec![v1, v2])?;
-            if let Some(r) = results.into_iter().next() {
-                l.push_value(r)?;
-            } else {
-                l.push_value(LuaValue::nil())?;
-            }
-            return Ok(1);
-        }
-    }
-
-    let t1 = v1.type_name();
-    let t2 = v2.type_name();
-    Err(l.error(format!("attempt to {} a '{}' with a '{}'", op_name, t1, t2)))
-}
-
-fn arith_add(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
-    match (a.as_integer(), b.as_integer()) {
-        (Some(x), Some(y)) => Some(LuaValue::integer(x.wrapping_add(y))),
-        _ => {
-            let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
-            let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-            Some(LuaValue::float(fa + fb))
-        }
-    }
-}
-
-fn arith_sub(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
-    match (a.as_integer(), b.as_integer()) {
-        (Some(x), Some(y)) => Some(LuaValue::integer(x.wrapping_sub(y))),
-        _ => {
-            let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
-            let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-            Some(LuaValue::float(fa - fb))
-        }
-    }
-}
-
-fn arith_mul(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
-    match (a.as_integer(), b.as_integer()) {
-        (Some(x), Some(y)) => Some(LuaValue::integer(x.wrapping_mul(y))),
-        _ => {
-            let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
-            let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-            Some(LuaValue::float(fa * fb))
-        }
-    }
-}
-
-fn arith_mod(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
-    match (a.as_integer(), b.as_integer()) {
-        (Some(x), Some(y)) => {
-            if y == 0 {
-                return Some(LuaValue::float(f64::NAN));
-            }
-            // Lua mod: a - floor(a/b)*b
-            let r = x.wrapping_rem(y);
-            if r != 0 && (r ^ y) < 0 {
-                Some(LuaValue::integer(r.wrapping_add(y)))
-            } else {
-                Some(LuaValue::integer(r))
-            }
-        }
-        _ => {
-            let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
-            let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-            let r = fa % fb;
-            // Lua float mod semantics
-            if r != 0.0 && r.is_sign_negative() != fb.is_sign_negative() {
-                Some(LuaValue::float(r + fb))
-            } else {
-                Some(LuaValue::float(r))
-            }
-        }
-    }
-}
-
-fn arith_pow(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
-    let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
-    let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-    Some(LuaValue::float(fa.powf(fb)))
-}
-
-fn arith_div(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
-    // Division always returns float in Lua
-    let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
-    let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-    Some(LuaValue::float(fa / fb))
-}
-
-fn arith_idiv(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
-    match (a.as_integer(), b.as_integer()) {
-        (Some(x), Some(y)) => {
-            if y == 0 {
-                return Some(LuaValue::float(f64::NAN));
-            }
-            // Lua floor division
-            let d = x.wrapping_div(y);
-            if (x ^ y) < 0 && d * y != x {
-                Some(LuaValue::integer(d - 1))
-            } else {
-                Some(LuaValue::integer(d))
-            }
-        }
-        _ => {
-            let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
-            let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-            Some(LuaValue::float((fa / fb).floor()))
-        }
-    }
-}
-
-fn string_arith_add(l: &mut LuaState) -> LuaResult<usize> {
-    string_arith_bin(l, "add", TmKind::Add, arith_add)
-}
-
-fn string_arith_sub(l: &mut LuaState) -> LuaResult<usize> {
-    string_arith_bin(l, "sub", TmKind::Sub, arith_sub)
-}
-
-fn string_arith_mul(l: &mut LuaState) -> LuaResult<usize> {
-    string_arith_bin(l, "mul", TmKind::Mul, arith_mul)
-}
-
-fn string_arith_mod(l: &mut LuaState) -> LuaResult<usize> {
-    string_arith_bin(l, "mod", TmKind::Mod, arith_mod)
-}
-
-fn string_arith_pow(l: &mut LuaState) -> LuaResult<usize> {
-    string_arith_bin(l, "pow", TmKind::Pow, arith_pow)
-}
-
-fn string_arith_div(l: &mut LuaState) -> LuaResult<usize> {
-    string_arith_bin(l, "div", TmKind::Div, arith_div)
-}
-
-fn string_arith_idiv(l: &mut LuaState) -> LuaResult<usize> {
-    string_arith_bin(l, "idiv", TmKind::IDiv, arith_idiv)
-}
-
-fn string_arith_unm(l: &mut LuaState) -> LuaResult<usize> {
-    let v1 = l
-        .get_arg(1)
-        .ok_or_else(|| l.error("attempt to perform arithmetic on a nil value".to_string()))?;
-
-    if let Some(n) = string_arith_tonum(&v1) {
-        if let Some(i) = n.as_integer() {
-            l.push_value(LuaValue::integer(i.wrapping_neg()))?;
-        } else if let Some(f) = n.as_number() {
-            l.push_value(LuaValue::float(-f))?;
-        }
-        return Ok(1);
-    }
-
-    Err(l.error(format!(
-        "attempt to perform arithmetic on a '{}' value",
-        v1.type_name()
-    )))
-}
-
-/// xoshiro256** RNG matching C Lua's implementation exactly
-#[derive(Debug, Clone)]
-pub(crate) struct LuaRng {
-    pub state: [u64; 4],
-}
-
-impl LuaRng {
-    /// Seed from two integers, matching C Lua's setseed
-    pub fn from_seed(n1: i64, n2: i64) -> Self {
-        let mut rng = LuaRng {
-            state: [n1 as u64, 0xff, n2 as u64, 0],
-        };
-        // Warm up: discard 16 values to spread the seed
-        for _ in 0..16 {
-            rng.next_rand();
-        }
-        rng
-    }
-
-    /// Seed from a time value (for default initialization)
-    pub fn from_seed_time(time: u64) -> Self {
-        Self::from_seed(time as i64, 0)
-    }
-
-    /// Generate next random u64 using xoshiro256**
-    pub fn next_rand(&mut self) -> u64 {
-        let s = &mut self.state;
-        let s0 = s[0];
-        let s1 = s[1];
-        let s2 = s[2] ^ s0;
-        let s3 = s[3] ^ s1;
-        // result = s1 * 5, rotate left 7, then * 9
-        let res = s1.wrapping_mul(5).rotate_left(7).wrapping_mul(9);
-        s[0] = s0 ^ s3;
-        s[1] = s1 ^ s2;
-        s[2] = s2 ^ (s1 << 17);
-        s[3] = s3.rotate_left(45);
-        res
-    }
-
-    /// Convert random u64 to float in [0, 1)
-    /// Takes the top 53 bits (DBL_MANT_DIG) and scales to [0,1)
-    pub fn next_float(&mut self) -> f64 {
-        let rv = self.next_rand();
-        // Take top 53 bits
-        let mantissa = rv >> (64 - 53); // = rv >> 11
-        (mantissa as f64) * f64::from_bits(0x3CA0000000000000) // 2^-53
     }
 }

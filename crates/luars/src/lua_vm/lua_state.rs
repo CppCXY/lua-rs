@@ -12,9 +12,9 @@ use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_MAXCSTACK};
 use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
-use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 #[cfg(feature = "sandbox")]
-use crate::lua_vm::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxRuntimeLimits};
+use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, SandboxRuntimeLimits};
+use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 #[cfg(feature = "sandbox")]
 use crate::platform_time::unix_nanos;
 use crate::{
@@ -2125,11 +2125,7 @@ impl LuaState {
     }
 
     #[cfg(feature = "sandbox")]
-    pub fn load_sandboxed(
-        &mut self,
-        source: &str,
-        config: &crate::lua_vm::SandboxConfig,
-    ) -> LuaResult<LuaValue> {
+    pub fn load_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<LuaValue> {
         self.vm_mut().load_sandboxed(source, config)
     }
 
@@ -2145,7 +2141,7 @@ impl LuaState {
         &mut self,
         source: &str,
         chunk_name: &str,
-        config: &crate::lua_vm::SandboxConfig,
+        config: &SandboxConfig,
     ) -> LuaResult<LuaValue> {
         self.vm_mut()
             .load_with_name_sandboxed(source, chunk_name, config)
@@ -2241,7 +2237,7 @@ impl LuaState {
     pub fn execute_sandboxed(
         &mut self,
         source: &str,
-        config: &crate::lua_vm::SandboxConfig,
+        config: &SandboxConfig,
     ) -> LuaResult<Vec<LuaValue>> {
         self.vm_mut().execute_sandboxed(source, config)
     }

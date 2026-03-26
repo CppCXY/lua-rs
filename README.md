@@ -307,11 +307,7 @@ cd lua_tests/testes && ../../target/release/lua all.lua
 |---------|-------------|
 | `serde` | Lua ↔ JSON serialization via `serde` / `serde_json` |
 | `sandbox` | Enables the sandbox API, environment isolation, injected globals, and runtime limits |
-
-```bash
-cargo build --release --features serde
-cargo build --release --features sandbox
-```
+| `shared-proto` | Enables shared function prototypes for reduced memory usage at the cost of file load |
 
 ### Sandbox Feature
 

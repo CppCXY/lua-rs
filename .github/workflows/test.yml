@@ -42,8 +42,8 @@ jobs:
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
         
     - name: Run tests
-      run: cargo test --lib -- --skip test_io
+      run: cargo test -p luars --all-features --lib -- --skip test_io
       
     - name: Run tests (verbose on failure)
       if: failure()
-      run: cargo test --lib -- --skip test_io --nocapture
+      run: cargo test -p luars --all-features --lib -- --skip test_io --nocapture

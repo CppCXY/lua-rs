@@ -5,9 +5,9 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
-use crate::lua_vm::LuaError;
 use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaState;
+use crate::lua_vm::{LuaError, LuaRng};
 use crate::platform_time;
 
 /// Check that argument at position `n` is a number, with proper error message.
@@ -486,7 +486,6 @@ fn project(rv: u64, low: u64, up: u64) -> LuaResult<i64> {
 }
 
 fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
-    use crate::lua_vm::LuaRng;
     let argc = l.arg_count();
 
     let (n1, n2) = if argc == 0 || (argc >= 1 && l.get_arg(1).is_none_or(|v| v.is_nil())) {
