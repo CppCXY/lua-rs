@@ -127,41 +127,18 @@ The project is continuously validated against the official Lua 5.5 test suite. T
 ./run_benchmarks.sh
 ```
 
-The benchmark scripts cover arithmetic, control flow, coroutines, functions, iterators, metatables, strings, tables, and more. The README snapshot below comes from `run_benchmarks.ps1` on Windows with a Ryzen 7 5800X, comparing luars against native Lua 5.5 on the same machine.
+The benchmark scripts cover arithmetic, control flow, coroutines, functions, iterators, metatables, strings, tables, and more. The Windows snapshot linked below comes from `run_benchmarks.ps1` on Windows with a Ryzen 7 5800X, comparing luars against native Lua 5.5 on the same machine.
 
-On this project, Linux results are typically about 10% lower than the Windows snapshot below, while macOS tends to perform better on most workloads.
+On this project, Linux results are typically about 10% lower than the Windows snapshot, while macOS tends to perform better on most workloads.
 
 ### Benchmark Snapshot
 
-The chart below is a script-level summary from the current Windows run of `run_benchmarks.ps1`. Values are shown as `luars / native Lua * 100`, so `100` means parity with native Lua, `120` means luars is about 20% faster, and `80` means it is about 20% slower.
+The platform snapshots now live in dedicated documents:
 
-```mermaid
-xychart-beta
-    title "luars vs native Lua 5.5 on Windows (Ryzen 7 5800X)"
-    x-axis [arith, control, locals, funcs, closures, multiret, tables, tablelib, iters, math, meta, oop, coroutines, errors]
-    y-axis "Relative throughput (%)" 0 --> 160
-    bar [111, 87, 132, 92, 80, 78, 92, 118, 93, 98, 78, 92, 152, 103]
-    line [100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100]
-```
+- [windows.md](docs/benchmarks/windows.md): the Windows snapshot with Ryzen 7 5800X
+- [macos.md](docs/benchmarks/macos.md): the macOS snapshot with an Apple M4 by @Bruce
 
-| Script | Relative throughput |
-|--------|---------------------|
-| `bench_arithmetic.lua` | 111% |
-| `bench_control_flow.lua` | 87% |
-| `bench_locals.lua` | 132% |
-| `bench_functions.lua` | 92% |
-| `bench_closures.lua` | 80% |
-| `bench_multiret.lua` | 78% |
-| `bench_tables.lua` | 92% |
-| `bench_table_lib.lua` | 118% |
-| `bench_iterators.lua` | 93% |
-| `bench_math.lua` | 98% |
-| `bench_metatables.lua` | 78% |
-| `bench_oop.lua` | 92% |
-| `bench_coroutines.lua` | 152% |
-| `bench_errors.lua` | 103% |
-
-String-heavy microbenchmarks are intentionally left out of the chart because several subtests complete too quickly on Windows timer resolution, which can produce distorted summary ratios. For full raw output, run `run_benchmarks.ps1` directly and inspect the per-subtest numbers.
+If you want the raw terminal output instead of the summarized charts, run `run_benchmarks.ps1` on Windows or `./run_benchmarks.sh` on macOS/Linux and inspect the per-subtest numbers directly.
 
 ## Cargo Features
 
