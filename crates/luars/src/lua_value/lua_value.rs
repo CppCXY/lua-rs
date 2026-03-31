@@ -144,7 +144,6 @@ impl Value {
 
 // ============ TValue ============
 /// Lua 5.5 TValue structure (16 bytes)
-/// Now with embedded GC ID for direct pointer access
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct LuaValue {

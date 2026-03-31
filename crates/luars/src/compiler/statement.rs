@@ -1,7 +1,7 @@
 use crate::compiler::expr_parser::buildglobal;
 use expr_parser::{body, expr, suffixedexp};
-// Statement parsing - Port from lparser.c (Lua 5.4.8)
-// This file corresponds to statement parsing parts of lua-5.4.8/src/lparser.c
+// Statement parsing - Port from lparser.c (Lua 5.5)
+// This file corresponds to statement parsing parts of lua-5.5/src/lparser.c
 use crate::Instruction;
 use crate::compiler::func_state::{BlockCnt, FuncState, LabelDesc, LhsAssign, LhsAssignId};
 use crate::compiler::parser::LuaTokenKind;

@@ -185,7 +185,7 @@ impl Default for LibraryRegistry {
     }
 }
 
-/// Create a standard Lua 5.4 library registry with all standard libraries
+/// Create a standard Lua 5.5 library registry with all standard libraries
 pub fn create_standard_registry(open_lib: Stdlib) -> LibraryRegistry {
     let mut registry = LibraryRegistry::new();
 

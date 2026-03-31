@@ -297,8 +297,7 @@ impl LuaVM {
         vm.set_global("_G", globals_value).unwrap();
         vm.set_global("_ENV", globals_value).unwrap();
 
-        // Store globals in registry (like Lua's LUA_RIDX_GLOBALS)
-        vm.registry_seti(1, globals_value);
+
         vm.gc.clear_temporary_memory_limit();
         vm
     }
@@ -317,7 +316,7 @@ impl LuaVM {
     pub fn register_preload(
         &mut self,
         name: &str,
-        loader: crate::lua_vm::CFunction,
+        loader: CFunction,
     ) -> LuaResult<()> {
         let preload_val = self.registry_get("_PRELOAD")?;
         if let Some(preload) = preload_val
@@ -470,7 +469,7 @@ impl LuaVM {
     /// Execute a chunk in the main thread
     pub fn execute_chunk(&mut self, chunk: crate::ProtoPtr) -> LuaResult<Vec<LuaValue>> {
         // Main chunk needs _ENV upvalue pointing to global table
-        // This matches Lua 5.4+ behavior where all chunks have _ENV as upvalue[0]
+        // This matches Lua 5.5+ behavior where all chunks have _ENV as upvalue[0]
         let env_upval = self.create_upvalue_closed(self.global)?;
         let func = self.create_function(chunk, UpvalueStore::from_single(env_upval))?;
         self.execute_function(func, vec![])

@@ -40,7 +40,7 @@ pub struct LuaState {
     pub(crate) stack_top: usize,
 
     /// Call stack - one CallInfo per active function call
-    /// Grows dynamically on demand (like Lua 5.4's linked list approach)
+    /// Grows dynamically on demand (like Lua 5.5's linked list approach)
     /// Similar to Lua's CallInfo *ci in lua_State
     #[allow(clippy::vec_box)]
     pub(crate) call_stack: Vec<Box<CallInfo>>,

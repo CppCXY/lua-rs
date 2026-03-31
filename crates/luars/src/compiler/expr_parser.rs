@@ -1,4 +1,4 @@
-// Expression parsing - Port from lparser.c (Lua 5.4.8)
+// Expression parsing - Port from lparser.c (Lua 5.5)
 // This file corresponds to expression parsing parts of lua-5.5.0/src/lparser.c
 use crate::compiler::expression::{ExpDesc, ExpKind, ExpUnion};
 use crate::compiler::func_state::{BlockCnt, FuncState};
@@ -967,7 +967,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     let child_upvalues = child_fs.upvalues;
 
     // Port of lparser.c:722-726 (codeclosure)
-    // In Lua 5.4, upvalue information is stored in Proto.upvalues[], NOT as pseudo-instructions
+    // In Lua 5.5, upvalue information is stored in Proto.upvalues[], NOT as pseudo-instructions
     // This is different from Lua 5.1 which used pseudo-instructions after OP_CLOSURE
     for upval in &child_upvalues {
         child_chunk.upvalue_descs.push(UpvalueDesc {

@@ -1,7 +1,7 @@
 // String pack/unpack functions
 // Implements: string.pack, string.unpack, string.packsize
 //
-// Supports Lua 5.4+ binary data packing:
+// Supports Lua 5.5+ binary data packing:
 // - b/B: signed/unsigned byte (1 byte)
 // - h/H: signed/unsigned short (2 bytes)
 // - i/I: signed/unsigned int (4 bytes)

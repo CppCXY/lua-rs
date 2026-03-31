@@ -1,4 +1,4 @@
-// Lua 5.4 compatible value representation
+// Lua 5.5 compatible value representation
 // 16 bytes, no pointer caching, all GC objects accessed via ID
 pub mod chunk_serializer;
 pub mod lua_convert;

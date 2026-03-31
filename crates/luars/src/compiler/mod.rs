@@ -1,5 +1,5 @@
 // Lua bytecode compiler - Main module
-// Port of Lua 5.4 lparser.c and lcode.c
+// Port of Lua 5.5 lparser.c and lcode.c
 
 // Submodules
 mod code; // Code generation (lcode.c)
@@ -80,7 +80,7 @@ pub fn compile_code_with_name(
         fs.lexer.line = saved_line;
     }
 
-    // Main function in Lua 5.4 has _ENV as first upvalue (lparser.c:1928-1931)
+    // Main function in Lua 5.5 has _ENV as first upvalue (lparser.c:1928-1931)
     // env = allocupvalue(fs);
     // env->instack = 1;
     // env->idx = 0;
