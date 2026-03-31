@@ -438,7 +438,7 @@ impl LuaFunctionRef {
         let args = collect_into_lua_values(vm.main_state(), args).map_err(|msg| vm.error(msg))?;
         let func = self.inner.to_value();
         let results = vm.call_raw(func, args)?;
-        R::from_lua_multi(results, vm.main_state_ref()).map_err(|msg| vm.error(msg))
+        R::from_lua_multi(results, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Call the function with Rust arguments and convert the first result into a Rust type.
@@ -451,7 +451,7 @@ impl LuaFunctionRef {
             .into_iter()
             .next()
             .unwrap_or(LuaValue::nil());
-        R::from_lua(result, vm.main_state_ref()).map_err(|msg| vm.error(msg))
+        R::from_lua(result, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Call the function asynchronously.
@@ -650,7 +650,7 @@ impl<T: 'static> UserDataRef<T> {
 }
 
 impl<T: 'static> FromLua for UserDataRef<T> {
-    fn from_lua(value: LuaValue, state: &super::LuaState) -> Result<Self, String> {
+    fn from_lua(value: LuaValue, state: &mut super::LuaState) -> Result<Self, String> {
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
             return Err(format!(
@@ -668,7 +668,7 @@ impl<T: 'static> FromLua for UserDataRef<T> {
             ));
         }
 
-        let vm = unsafe { &mut *state.vm_ptr() };
+        let vm = state.vm_mut();
         let ref_id = store_in_registry(vm, value);
         Ok(UserDataRef::from_raw(ref_id, vm as *mut super::LuaVM))
     }

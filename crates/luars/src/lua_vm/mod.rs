@@ -614,7 +614,7 @@ impl LuaVM {
         let args =
             collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
         let results = self.call_raw(func, args)?;
-        R::from_lua_multi(results, self.main_state_ref()).map_err(|msg| self.error(msg))
+        R::from_lua_multi(results, self.main_state()).map_err(|msg| self.error(msg))
     }
 
     /// Call a function value with arguments and return the first result.
@@ -626,7 +626,7 @@ impl LuaVM {
             .into_iter()
             .next()
             .unwrap_or(LuaValue::nil());
-        R::from_lua(result, self.main_state_ref()).map_err(|msg| self.error(msg))
+        R::from_lua(result, self.main_state()).map_err(|msg| self.error(msg))
     }
 
     /// Call a function value with pre-built Lua arguments (raw API).
@@ -1475,7 +1475,7 @@ impl LuaVM {
     /// vm.register_enum::<Color>("Color")?;
     /// // Lua: Color.Red == 0, Color.Green == 1, Color.Blue == 2
     /// ```
-    pub fn register_enum<T: LuaEnum>(&mut self, name: &str) -> LuaResult<()> {
+    pub fn register_enum_of<T: LuaEnum>(&mut self, name: &str) -> LuaResult<()> {
         let variants = T::variants();
         let table = self.create_table(0, variants.len())?;
         for &(vname, value) in variants {

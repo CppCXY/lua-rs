@@ -16,6 +16,7 @@ The goal is not just to "run Lua", but to provide a practical embedding stack fo
 | Path | Description |
 |------|-------------|
 | `crates/luars` | Core library crate: compiler, VM, GC, standard library, and embedding API |
+| `crates/luars_safe` | Safe, embedding-oriented wrapper crate that sits above `luars` |
 | `crates/luars_interpreter` | CLI interpreter and bytecode disassembler |
 | `crates/luars-derive` | Derive and attribute macros such as `LuaUserData` and `lua_methods` |
 | `crates/luars_debugger` | `require("emmy_core")` debugger integration |
@@ -42,6 +43,7 @@ The goal is not just to "run Lua", but to provide a practical embedding stack fo
 ```toml
 [dependencies]
 luars = "0.17"
+luars_safe = { path = "crates/luars_safe" }
 ```
 
 ```rust
@@ -63,6 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 For the full embedding API, see [crates/luars/README.md](crates/luars/README.md) and [docs/Guide.md](docs/Guide.md).
+
+If you want a narrower, safer host-facing API that wraps `luars` instead of replacing it, start with [crates/luars_safe/README.md](crates/luars_safe/README.md).
 
 ### Use as an Interpreter
 
