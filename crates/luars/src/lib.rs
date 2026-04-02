@@ -26,7 +26,7 @@ mod compiler;
 mod gc;
 mod lib_registry;
 mod lua_api;
-pub mod lua_value;
+mod lua_value;
 mod lua_vm;
 mod platform_time;
 mod stdlib;
@@ -51,7 +51,7 @@ pub use lib_registry::LibraryRegistry;
 pub use lua_api::*;
 pub use lua_value::RustCallback;
 pub use lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
-pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
+pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue, LuaValueKind, chunk_serializer::*};
 pub use lua_vm::SafeOption;
 #[cfg(feature = "sandbox")]
 pub use lua_vm::SandboxConfig;

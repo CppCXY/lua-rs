@@ -6,8 +6,8 @@
 //   3. Calculator — Result<T, E> returns and pcall error handling
 //   4. Multi-type interaction — multiple UserData types working together
 
-use luars::lua_vm::{LuaVM, SafeOption};
 use luars::{LuaResult, LuaUserData, LuaUserdata, Stdlib, lua_methods};
+use luars::{LuaVM, SafeOption};
 use std::fmt;
 use std::ops;
 

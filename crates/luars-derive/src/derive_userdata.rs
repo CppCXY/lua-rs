@@ -201,20 +201,20 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
         let field_ident = &iter_info.ident;
         let elem_conversion = ref_to_udvalue(&iter_info.element_type, quote!(__elem));
         quote! {
-            fn lua_next(&self, __control: &luars::lua_value::userdata_trait::UdValue) -> Option<(luars::lua_value::userdata_trait::UdValue, luars::lua_value::userdata_trait::UdValue)> {
+            fn lua_next(&self, __control: &luars::UdValue) -> Option<(luars::UdValue, luars::UdValue)> {
                 let __idx = match __control {
-                    luars::lua_value::userdata_trait::UdValue::Nil => 0usize,
-                    luars::lua_value::userdata_trait::UdValue::Integer(__i) => *__i as usize,
+                    luars::UdValue::Nil => 0usize,
+                    luars::UdValue::Integer(__i) => *__i as usize,
                     _ => return None,
                 };
                 self.#field_ident.get(__idx).map(|__elem| (
-                    luars::lua_value::userdata_trait::UdValue::Integer((__idx + 1) as i64),
+                    luars::UdValue::Integer((__idx + 1) as i64),
                     #elem_conversion,
                 ))
             }
 
-            fn lua_len(&self) -> Option<luars::lua_value::userdata_trait::UdValue> {
-                Some(luars::lua_value::userdata_trait::UdValue::Integer(self.#field_ident.len() as i64))
+            fn lua_len(&self) -> Option<luars::UdValue> {
+                Some(luars::UdValue::Integer(self.#field_ident.len() as i64))
             }
         }
     } else {
@@ -225,22 +225,22 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
     let lua_convert_impls = gen_lua_convert_impls(name);
 
     let expanded = quote! {
-        impl luars::lua_value::userdata_trait::UserDataTrait for #name {
+        impl luars::UserDataTrait for #name {
             fn type_name(&self) -> &'static str {
                 #type_name_str
             }
 
-            fn get_field(&self, key: &str) -> Option<luars::lua_value::userdata_trait::UdValue> {
+            fn get_field(&self, key: &str) -> Option<luars::UdValue> {
                 match key {
                     #(#get_field_arms)*
                     // Fall through to method lookup (inherent method from #[lua_methods]
                     // shadows the blanket LuaMethodProvider trait default)
                     _ => Self::__lua_lookup_method(key)
-                        .map(luars::lua_value::userdata_trait::UdValue::Function),
+                        .map(luars::UdValue::Function),
                 }
             }
 
-            fn set_field(&mut self, key: &str, value: luars::lua_value::userdata_trait::UdValue) -> Option<Result<(), String>> {
+            fn set_field(&mut self, key: &str, value: luars::UdValue) -> Option<Result<(), String>> {
                 match key {
                     #(#set_field_arms)*
                     #(#readonly_set_arms)*
@@ -320,7 +320,7 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
     // PartialEq → lua_eq
     if trait_impls.contains(&"PartialEq".to_string()) {
         methods.push(quote! {
-            fn lua_eq(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
+            fn lua_eq(&self, other: &dyn luars::UserDataTrait) -> Option<bool> {
                 other.as_any().downcast_ref::<#name>().map(|o| self == o)
             }
         });
@@ -329,12 +329,12 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
     // PartialOrd → lua_lt, lua_le
     if trait_impls.contains(&"PartialOrd".to_string()) {
         methods.push(quote! {
-            fn lua_lt(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
+            fn lua_lt(&self, other: &dyn luars::UserDataTrait) -> Option<bool> {
                 other.as_any().downcast_ref::<#name>()
                     .and_then(|o| self.partial_cmp(o))
                     .map(|c| c == std::cmp::Ordering::Less)
             }
-            fn lua_le(&self, other: &dyn luars::lua_value::userdata_trait::UserDataTrait) -> Option<bool> {
+            fn lua_le(&self, other: &dyn luars::UserDataTrait) -> Option<bool> {
                 other.as_any().downcast_ref::<#name>()
                     .and_then(|o| self.partial_cmp(o))
                     .map(|c| c != std::cmp::Ordering::Greater)
@@ -368,10 +368,10 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
             };
 
             methods.push(quote! {
-                fn #method_ident(&self, other: &luars::lua_value::userdata_trait::UdValue) -> Option<luars::lua_value::userdata_trait::UdValue> {
+                fn #method_ident(&self, other: &luars::UdValue) -> Option<luars::UdValue> {
                     other.as_userdata_ref::<#name>().map(|o| {
                         let result: #name = #op_expr;
-                        luars::lua_value::userdata_trait::UdValue::from_userdata(result)
+                        luars::UdValue::from_userdata(result)
                     })
                 }
             });
@@ -381,9 +381,9 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
     // Neg → lua_unm (unary negation)
     if trait_impls.contains(&"Neg".to_string()) {
         methods.push(quote! {
-            fn lua_unm(&self) -> Option<luars::lua_value::userdata_trait::UdValue> {
+            fn lua_unm(&self) -> Option<luars::UdValue> {
                 let result: #name = std::ops::Neg::neg(self.clone());
-                Some(luars::lua_value::userdata_trait::UdValue::from_userdata(result))
+                Some(luars::UdValue::from_userdata(result))
             }
         });
     }
@@ -402,15 +402,15 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
     let lua_convert_impls = gen_lua_convert_impls(name);
 
     let expanded = quote! {
-        impl luars::lua_value::userdata_trait::UserDataTrait for #name {
+        impl luars::UserDataTrait for #name {
             fn type_name(&self) -> &'static str {
                 #type_name_str
             }
 
-            fn get_field(&self, key: &str) -> Option<luars::lua_value::userdata_trait::UdValue> {
+            fn get_field(&self, key: &str) -> Option<luars::UdValue> {
                 // No named fields — only method lookup
                 Self::__lua_lookup_method(key)
-                    .map(luars::lua_value::userdata_trait::UdValue::Function)
+                    .map(luars::UdValue::Function)
             }
 
             #metamethod_impls
@@ -484,7 +484,7 @@ fn gen_lua_enum_impl(name: &Ident, data: &syn::DataEnum) -> proc_macro2::TokenSt
     let variant_values: Vec<i64> = entries.iter().map(|(_, v)| *v).collect();
 
     quote! {
-        impl luars::lua_value::userdata_trait::LuaEnum for #name {
+        impl luars::LuaEnum for #name {
             fn variants() -> &'static [(&'static str, i64)] {
                 &[#( (#variant_names, #variant_values) ),*]
             }

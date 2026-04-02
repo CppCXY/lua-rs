@@ -1,5 +1,5 @@
-use luars::{Instruction, OpCode, SafeOption};
 use luars::{Chunk, LuaVM};
+use luars::{Instruction, OpCode, SafeOption};
 use std::env;
 use std::fs;
 

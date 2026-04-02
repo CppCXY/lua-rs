@@ -11,8 +11,8 @@
 // 8. Mixed workload (realistic game loop pattern)
 // 9. Baseline Lua table comparison
 
-use luars::lua_vm::{LuaVM, SafeOption};
 use luars::{LuaResult, LuaUserData, Stdlib, lua_methods};
+use luars::{LuaVM, SafeOption};
 use std::fmt;
 
 // ---- Benchmark types ----

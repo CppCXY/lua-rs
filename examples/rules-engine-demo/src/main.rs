@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use luars::lua_vm::{LuaVM, SafeOption};
+use luars::{LuaVM, SafeOption};
 use luars::{LuaValue, Stdlib, TableBuilder};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;

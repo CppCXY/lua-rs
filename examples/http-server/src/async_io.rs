@@ -8,7 +8,7 @@
 //! - `json_encode(table_string)` / `json_decode(json_string)` — helpers
 //! - `time()` — current unix timestamp (sync, but useful for benchmarks)
 
-use luars::lua_vm::async_thread::AsyncReturnValue;
+use luars::AsyncReturnValue;
 use luars::{LuaResult, LuaVM};
 use std::time::Duration;
 

@@ -1,5 +1,6 @@
 use crate::LuaValue;
 
+#[allow(clippy::upper_case_acronyms)]
 // Port of expdesc from lcode.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpKind {

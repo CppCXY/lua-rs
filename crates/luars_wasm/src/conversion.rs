@@ -274,10 +274,7 @@ pub fn lua_to_js_basic(value: &LuaValue) -> JsValue {
     }
 }
 
-pub fn js_to_lua_basic(
-    state: &mut luars::LuaState,
-    value: &JsValue,
-) -> Result<LuaValue, String> {
+pub fn js_to_lua_basic(state: &mut luars::LuaState, value: &JsValue) -> Result<LuaValue, String> {
     if value.is_null() || value.is_undefined() {
         Ok(LuaValue::nil())
     } else if let Some(b) = value.as_bool() {

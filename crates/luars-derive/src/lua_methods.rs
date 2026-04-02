@@ -224,7 +224,7 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
         .map(|m| {
             let lua_name = &m.lua_name;
             let wrapper_name = format_ident!("__lua_static_{}", m.rust_name);
-            quote! { (#lua_name, #wrapper_name as luars::lua_vm::CFunction), }
+            quote! { (#lua_name, #wrapper_name as luars::CFunction), }
         })
         .collect();
 
@@ -239,7 +239,7 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
             /// This inherent method shadows the blanket `LuaMethodProvider` trait default,
             /// so `#[derive(LuaUserData)]`'s `get_field` will find methods here.
             #[allow(unused)]
-            pub fn __lua_lookup_method(key: &str) -> Option<luars::lua_vm::CFunction> {
+            pub fn __lua_lookup_method(key: &str) -> Option<luars::CFunction> {
                 #(#instance_wrapper_fns)*
 
                 match key {
@@ -254,7 +254,7 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
             /// trait default, providing entries for `register_type` to populate
             /// the class table (e.g. `Point.new`).
             #[allow(unused)]
-            pub fn __lua_static_methods() -> &'static [(&'static str, luars::lua_vm::CFunction)] {
+            pub fn __lua_static_methods() -> &'static [(&'static str, luars::CFunction)] {
                 #(#static_wrapper_fns)*
 
                 &[#(#static_entries)*]
@@ -265,7 +265,7 @@ pub fn lua_methods_impl(input: TokenStream) -> TokenStream {
         // Unlike the blanket LuaStaticMethodProvider, this dispatches to the
         // actual generated methods rather than returning &[].
         impl luars::LuaRegistrable for #self_ty {
-            fn lua_static_methods() -> &'static [(&'static str, luars::lua_vm::CFunction)] {
+            fn lua_static_methods() -> &'static [(&'static str, luars::CFunction)] {
                 #self_ty::__lua_static_methods()
             }
         }
@@ -299,7 +299,7 @@ fn gen_instance_wrapper_fn(self_ty: &syn::Type, method: &MethodInfo) -> proc_mac
     };
 
     quote! {
-        fn #wrapper_name(__l: &mut luars::lua_vm::LuaState) -> luars::lua_vm::LuaResult<usize> {
+        fn #wrapper_name(__l: &mut luars::LuaState) -> luars::LuaResult<usize> {
             #(#param_extractions)*
             #call_and_return
         }
@@ -328,7 +328,7 @@ fn gen_static_wrapper_fn(self_ty: &syn::Type, method: &MethodInfo) -> proc_macro
     let call_and_push = gen_static_call(self_ty, rust_name, &param_names, &method.return_type);
 
     quote! {
-        fn #wrapper_name(__l: &mut luars::lua_vm::LuaState) -> luars::lua_vm::LuaResult<usize> {
+        fn #wrapper_name(__l: &mut luars::LuaState) -> luars::LuaResult<usize> {
             #(#param_extractions)*
             #call_and_push
         }

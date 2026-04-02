@@ -5,8 +5,8 @@
 //! - Async I/O functions (sleep, read_file, write_file, etc.)
 //! - A `handle_request(method, path, headers_str, body)` entry point driven from Rust
 
-use luars::lua_vm::{LuaVM, SafeOption};
 use luars::{LuaResult, LuaValue, Stdlib};
+use luars::{LuaVM, SafeOption};
 
 use crate::async_io;
 

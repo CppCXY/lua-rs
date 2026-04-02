@@ -1,4 +1,4 @@
-use luars::{SafeOption, Stdlib, LuaVM, LuaValue};
+use luars::{LuaVM, LuaValue, SafeOption, Stdlib};
 use wasm_bindgen::prelude::*;
 
 mod conversion;

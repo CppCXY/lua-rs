@@ -14,20 +14,12 @@ use std::fmt;
 
 pub use lua_string::*;
 pub use userdata_builder::UserDataBuilder;
-pub use userdata_trait::{
-    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData, UdValue,
-    UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value,
-};
+pub use userdata_trait::{UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value};
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
+pub use lua_value::{LUA_VNUMFLT, LUA_VNUMINT};
 pub use lua_value::{LuaValue, LuaValueKind};
-
-// Re-export type tag constants for VM execution
-pub use lua_value::{
-    LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT,
-    LUA_VNUMINT, LUA_VTABLE, LUA_VTRUE,
-};
 
 use crate::lua_vm::CFunction;
 use crate::{Instruction, ProtoPtr, RefUserData, TablePtr, UpvaluePtr};

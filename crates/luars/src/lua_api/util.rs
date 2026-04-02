@@ -39,9 +39,8 @@ pub(crate) fn collect_values<T: IntoLua>(
         for index in base_top..base_top + pushed {
             let Some(value) = state.stack_get(index) else {
                 state.set_top_raw(base_top);
-                return Err(state.error(
-                    "internal error: failed to collect Lua values from stack".to_owned(),
-                ));
+                return Err(state
+                    .error("internal error: failed to collect Lua values from stack".to_owned()));
             };
             values.push(value);
         }
