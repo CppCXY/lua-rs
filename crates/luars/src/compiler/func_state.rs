@@ -133,6 +133,7 @@ pub struct LabelDesc {
 
 // Port of Vardesc from lparser.c
 // Variable kinds
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarKind {
     VDKREG = 0,     // regular local variable
