@@ -1,6 +1,6 @@
 use crate::{
     CallInfo,
-    lua_value::{Chunk, LuaValue},
+    lua_value::{LuaProto, LuaValue},
     lua_vm::{
         LuaResult, LuaState,
         execute::helper::{ivalue, setivalue, ttisinteger},
@@ -53,7 +53,7 @@ pub fn get_varargs(
     b: usize,
     vatab: i32,
     wanted: i32,
-    chunk: &Chunk,
+    chunk: &LuaProto,
 ) -> LuaResult<()> {
     // Get the number of vararg arguments.
     // If vatab mode, read "n" from the vararg table (user may have modified it).
@@ -193,7 +193,7 @@ pub fn get_vararg(
 pub fn exec_varargprep(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
-    chunk: &Chunk,
+    chunk: &LuaProto,
     base: &mut usize,
 ) -> LuaResult<()> {
     // Use the nextraargs already computed correctly by push_frame,

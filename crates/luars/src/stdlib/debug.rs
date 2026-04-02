@@ -4,7 +4,7 @@
 use crate::Instruction;
 use crate::compiler::format_source;
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{Chunk, LuaValue};
+use crate::lua_value::{LuaProto, LuaValue};
 use crate::lua_vm::opcode::OpCode;
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 
@@ -32,7 +32,7 @@ pub fn objtypename(l: &mut LuaState, v: &LuaValue) -> String {
 /// Get the name of the Nth active local variable at the given PC.
 /// Mirrors Lua 5.5's luaF_getlocalname.
 /// local_number is 1-based.
-fn getlocalname(chunk: &Chunk, local_number: usize, pc: usize) -> Option<&str> {
+fn getlocalname(chunk: &LuaProto, local_number: usize, pc: usize) -> Option<&str> {
     let mut n = local_number;
     for locvar in &chunk.locals {
         if (locvar.startpc as usize) > pc {
@@ -117,7 +117,7 @@ fn test_mm_mode(op: OpCode) -> bool {
 }
 
 /// Get the upvalue name from chunk
-fn upvalname(chunk: &Chunk, uv: usize) -> String {
+fn upvalname(chunk: &LuaProto, uv: usize) -> String {
     if uv < chunk.upvalue_descs.len() {
         chunk.upvalue_descs[uv].name.clone()
     } else {
@@ -126,7 +126,7 @@ fn upvalname(chunk: &Chunk, uv: usize) -> String {
 }
 
 /// Get a constant name (if it's a string)
-fn kname(chunk: &Chunk, index: usize) -> Option<String> {
+fn kname(chunk: &LuaProto, index: usize) -> Option<String> {
     if index < chunk.constants.len()
         && let Some(s) = chunk.constants[index].as_str()
     {
@@ -138,7 +138,7 @@ fn kname(chunk: &Chunk, index: usize) -> Option<String> {
 /// Find the last instruction before lastpc that sets register reg.
 /// Returns -1 if not found.
 /// Mirrors Lua 5.5's findsetreg.
-fn findsetreg(chunk: &Chunk, lastpc: usize, reg: u32) -> i32 {
+fn findsetreg(chunk: &LuaProto, lastpc: usize, reg: u32) -> i32 {
     let mut setreg: i32 = -1;
     let mut jmptarget: usize = 0;
 
@@ -180,7 +180,7 @@ fn findsetreg(chunk: &Chunk, lastpc: usize, reg: u32) -> i32 {
 /// Basic object name resolution.
 /// Returns (kind, name) or None.
 /// Mirrors Lua 5.5's basicgetobjname.
-fn basicgetobjname(chunk: &Chunk, pc: &mut i32, reg: u32) -> Option<(&'static str, String)> {
+fn basicgetobjname(chunk: &LuaProto, pc: &mut i32, reg: u32) -> Option<(&'static str, String)> {
     let pc_val = *pc as usize;
 
     // First try: is reg a local variable at this PC?
@@ -229,7 +229,7 @@ fn basicgetobjname(chunk: &Chunk, pc: &mut i32, reg: u32) -> Option<(&'static st
 }
 
 /// Get a register name for rname helper
-fn rname(chunk: &Chunk, pc: usize, c: u32) -> String {
+fn rname(chunk: &LuaProto, pc: usize, c: u32) -> String {
     let mut ppc = pc as i32;
     if let Some((kind, name)) = basicgetobjname(chunk, &mut ppc, c)
         && kind == "constant"
@@ -240,7 +240,7 @@ fn rname(chunk: &Chunk, pc: usize, c: u32) -> String {
 }
 
 /// Check if the table operand names _ENV (making it a "global")
-fn is_env(chunk: &Chunk, pc: usize, i: Instruction, isup: bool) -> &'static str {
+fn is_env(chunk: &LuaProto, pc: usize, i: Instruction, isup: bool) -> &'static str {
     let t = i.get_b();
     let name = if isup {
         Some(upvalname(chunk, t as usize))
@@ -259,7 +259,7 @@ fn is_env(chunk: &Chunk, pc: usize, i: Instruction, isup: bool) -> &'static str 
 
 /// Extended object name resolution (handles table accesses).
 /// Mirrors Lua 5.5's getobjname.
-fn getobjname(chunk: &Chunk, lastpc: usize, reg: u32) -> Option<(&'static str, String)> {
+fn getobjname(chunk: &LuaProto, lastpc: usize, reg: u32) -> Option<(&'static str, String)> {
     let mut pc = lastpc as i32;
     if let Some(result) = basicgetobjname(chunk, &mut pc, reg) {
         return Some(result);
@@ -301,7 +301,7 @@ fn getobjname(chunk: &Chunk, lastpc: usize, reg: u32) -> Option<(&'static str, S
 
 /// Determine function name from bytecode at the calling instruction.
 /// Mirrors Lua 5.5's funcnamefromcode.
-fn funcnamefromcode(chunk: &Chunk, pc: usize) -> Option<(&'static str, String)> {
+fn funcnamefromcode(chunk: &LuaProto, pc: usize) -> Option<(&'static str, String)> {
     if pc >= chunk.code.len() {
         return None;
     }

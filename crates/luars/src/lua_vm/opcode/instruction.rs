@@ -19,10 +19,6 @@
   maximum value for the corresponding unsigned argument.
 ----------------------------------------------------------------------*/
 
-// ============ Instruction Decoding Macros ============
-// These macros are guaranteed to be inlined and produce optimal code.
-// Use these instead of Instruction::get_* functions in hot paths.
-
 use crate::OpCode;
 
 /// Zero-cost abstraction for Lua 5.5 instruction encoding

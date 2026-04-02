@@ -272,7 +272,7 @@ impl LuaState {
                 } else {
                     0
                 };
-                let chunk_ptr: *const crate::lua_value::Chunk = chunk;
+                let chunk_ptr: *const crate::lua_value::LuaProto = chunk;
                 let upvalue_ptr = func_obj.upvalues().as_ptr();
                 (
                     call_status::with_nresults(call_status::CIST_LUA, nresults),
@@ -383,7 +383,7 @@ impl LuaState {
         base: usize,
         nresults: i32,
         max_stack_size: usize,
-        chunk_ptr: *const crate::lua_value::Chunk,
+        chunk_ptr: *const crate::lua_value::LuaProto,
         upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<bool> {
         if self.call_depth >= self.safe_state.max_call_depth {
@@ -424,7 +424,7 @@ impl LuaState {
         nresults: i32,
         param_count: usize,
         max_stack_size: usize,
-        chunk_ptr: *const crate::lua_value::Chunk,
+        chunk_ptr: *const crate::lua_value::LuaProto,
         upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<()> {
         // Check stack depth (cold — almost never triggers)
@@ -504,7 +504,7 @@ impl LuaState {
         param_count: usize,
         _max_stack_size: usize,
         frame_top: usize,
-        chunk_ptr: *const crate::lua_value::Chunk,
+        chunk_ptr: *const crate::lua_value::LuaProto,
         upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<()> {
         let nextraargs = if nparams > param_count {

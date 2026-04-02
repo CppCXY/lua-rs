@@ -1,6 +1,6 @@
 use crate::CallInfo;
 use crate::LuaResult;
-use crate::lua_value::Chunk;
+use crate::lua_value::LuaProto;
 use crate::lua_vm::LUA_HOOKCOUNT;
 use crate::lua_vm::LUA_HOOKLINE;
 use crate::lua_vm::LUA_HOOKRET;
@@ -18,7 +18,7 @@ pub fn hook_on_call(
     lua_state: &mut LuaState,
     hook_mask: u8,
     call_status: u32,
-    chunk: &Chunk,
+    chunk: &LuaProto,
 ) -> LuaResult<()> {
     if hook_mask & LUA_MASKCALL != 0 {
         let event = if call_status & CIST_TAIL != 0 {
@@ -71,7 +71,7 @@ pub fn hook_on_return(
 pub fn hook_check_instruction(
     lua_state: &mut LuaState,
     pc: usize,
-    chunk: &Chunk,
+    chunk: &LuaProto,
     ci: &mut CallInfo,
 ) -> LuaResult<bool> {
     let hook_mask = lua_state.hook_mask;

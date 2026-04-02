@@ -1,5 +1,5 @@
 use crate::{
-    Chunk, GcObjectKind, LuaFunction, LuaTable, LuaValue,
+    GcObjectKind, LuaFunction, LuaProto, LuaTable, LuaValue,
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
 };
@@ -335,7 +335,7 @@ pub type GcRClosure = Gc<RClosureFunction>;
 pub type GcUpvalue = Gc<LuaUpvalue>;
 pub type GcThread = Gc<LuaState>;
 pub type GcUserdata = Gc<LuaUserdata>;
-pub type GcProto = Gc<Chunk>;
+pub type GcProto = Gc<LuaProto>;
 
 #[derive(Debug)]
 pub struct GcPtr<T: HasGcHeader> {
@@ -938,7 +938,7 @@ impl GcObjectOwner {
         }
     }
 
-    pub fn as_proto_mut(&mut self) -> Option<&mut Chunk> {
+    pub fn as_proto_mut(&mut self) -> Option<&mut LuaProto> {
         match self {
             GcObjectOwner::Proto(p) => Some(&mut p.data),
             _ => None,

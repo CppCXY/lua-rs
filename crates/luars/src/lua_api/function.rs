@@ -1,6 +1,7 @@
 use crate::{FromLua, FromLuaMulti, IntoLua, LuaFunctionRef, LuaResult, LuaValue};
 
 /// Safe wrapper around a callable Lua function handle.
+#[derive(Clone, Debug)]
 pub struct Function {
     pub(crate) inner: LuaFunctionRef,
 }

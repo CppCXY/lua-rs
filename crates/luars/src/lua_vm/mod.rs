@@ -24,7 +24,7 @@ use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::GC;
 use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua, collect_into_lua_values};
 use crate::lua_value::{
-    Chunk, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
+    LuaProto, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
 };
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
@@ -471,7 +471,7 @@ impl LuaVM {
     }
 
     #[inline]
-    pub(crate) fn prepare_loaded_chunk(&mut self, chunk: Chunk) -> LuaResult<crate::ProtoPtr> {
+    pub(crate) fn prepare_loaded_chunk(&mut self, chunk: LuaProto) -> LuaResult<crate::ProtoPtr> {
         #[cfg(feature = "shared-proto")]
         {
             let proto = self.create_proto(chunk)?;
@@ -486,7 +486,7 @@ impl LuaVM {
     #[inline]
     pub(crate) fn create_loaded_function(
         &mut self,
-        chunk: Chunk,
+        chunk: LuaProto,
         upvalues: UpvalueStore,
     ) -> LuaResult<LuaValue> {
         let chunk = self.prepare_loaded_chunk(chunk)?;
@@ -494,7 +494,7 @@ impl LuaVM {
     }
 
     #[inline]
-    pub(crate) fn execute_loaded_chunk(&mut self, chunk: Chunk) -> LuaResult<Vec<LuaValue>> {
+    pub(crate) fn execute_loaded_chunk(&mut self, chunk: LuaProto) -> LuaResult<Vec<LuaValue>> {
         let chunk = self.prepare_loaded_chunk(chunk)?;
         self.execute_chunk(chunk)
     }
@@ -698,6 +698,15 @@ impl LuaVM {
         self.register_function(name, move |state| f.invoke_typed(state))
     }
 
+    /// Create a typed Rust closure as a standalone Lua function handle.
+    pub fn create_function_typed<F, Args, R>(&mut self, f: F) -> LuaResult<LuaFunctionRef>
+    where
+        F: LuaTypedCallback<Args, R>,
+    {
+        let closure_val = self.create_closure(move |state| f.invoke_typed(state))?;
+        Ok(self.to_function_ref(closure_val).unwrap())
+    }
+
     /// Register a typed async Rust closure as a Lua global function.
     ///
     /// Arguments are extracted via `FromLua`, and the awaited return value is
@@ -815,6 +824,12 @@ impl LuaVM {
             Some(val) if val.is_table() => Ok(self.to_table_ref(val)),
             _ => Ok(None),
         }
+    }
+
+    /// Get a handle to the current global environment table.
+    pub fn globals_table(&mut self) -> LuaTableRef {
+        self.to_table_ref(self.global)
+            .expect("global environment must be a table")
     }
 
     /// Get a global variable as a `LuaFunctionRef`.
@@ -965,7 +980,7 @@ impl LuaVM {
     }
 
     /// Compile source code using VM's string pool
-    pub fn compile(&mut self, source: &str) -> LuaResult<Chunk> {
+    pub fn compile(&mut self, source: &str) -> LuaResult<LuaProto> {
         self.gc.disable_memory_check();
         let chunk = match compile_code(source, self) {
             Ok(c) => c,
@@ -980,7 +995,7 @@ impl LuaVM {
         Ok(chunk)
     }
 
-    pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<Chunk> {
+    pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaProto> {
         self.gc.disable_memory_check();
         let chunk = match compile_code_with_name(source, self, chunk_name) {
             Ok(c) => c,
@@ -1329,7 +1344,7 @@ impl LuaVM {
     /// ```
     pub fn create_async_thread(
         &mut self,
-        chunk: Chunk,
+        chunk: LuaProto,
         args: Vec<LuaValue>,
     ) -> LuaResult<async_thread::AsyncThread> {
         // Main chunk needs _ENV upvalue pointing to global table
@@ -1586,7 +1601,7 @@ impl LuaVM {
     }
 
     #[inline(always)]
-    pub fn create_proto(&mut self, chunk: Chunk) -> LuaResult<crate::ProtoPtr> {
+    pub fn create_proto(&mut self, chunk: LuaProto) -> LuaResult<crate::ProtoPtr> {
         self.object_allocator.create_proto(&mut self.gc, chunk)
     }
 

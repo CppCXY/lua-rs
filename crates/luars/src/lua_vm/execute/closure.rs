@@ -1,5 +1,5 @@
 use crate::{
-    Chunk, UpvaluePtr,
+    LuaProto, UpvaluePtr,
     lua_value::{UpvalueDesc, UpvalueStore},
     lua_vm::{LuaError, LuaResult, LuaState},
 };
@@ -13,7 +13,7 @@ pub fn push_closure(
     base: usize,
     a: usize,
     bx: usize,
-    current_chunk: &Chunk,
+    current_chunk: &LuaProto,
     parent_upvalues: &[UpvaluePtr],
 ) -> LuaResult<()> {
     // Get child prototype

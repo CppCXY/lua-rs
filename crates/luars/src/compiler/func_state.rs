@@ -1,6 +1,6 @@
 use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
 use crate::lua_vm::lua_limits::{MAX_SRC_LEN, MAXCCALLS, MAXUPVAL, MAXVARS};
-use crate::{Chunk, LuaVM};
+use crate::{LuaProto, LuaVM};
 use crate::{LuaValue, compiler::parser::LuaLexer};
 
 // Upvalue descriptor
@@ -14,7 +14,7 @@ pub struct Upvaldesc {
 
 // Port of FuncState from lparser.h
 pub struct FuncState<'a> {
-    pub chunk: Chunk,
+    pub chunk: LuaProto,
     pub prev: Option<&'a mut FuncState<'a>>, // parent function state
     pub lexer: &'a mut LuaLexer<'a>,
     pub vm: &'a mut LuaVM,
@@ -191,7 +191,7 @@ impl<'a> FuncState<'a> {
         // Create kcache table for constant deduplication (like Lua 5.5's open_func)
         let kcache = vm.create_table(0, 0).unwrap();
         FuncState {
-            chunk: Chunk::new(),
+            chunk: LuaProto::new(),
             prev: None,
             lexer,
             vm,
@@ -312,7 +312,7 @@ impl<'a> FuncState<'a> {
         // Create new kcache table for child function
         let kcache = parent.vm.create_table(0, 0).unwrap();
         FuncState {
-            chunk: Chunk::new(),
+            chunk: LuaProto::new(),
             prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
             lexer: parent.lexer,
             vm: parent.vm,

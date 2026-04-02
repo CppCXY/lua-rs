@@ -1,5 +1,5 @@
-use luars::{Chunk, LuaVM};
 use luars::{Instruction, OpCode, SafeOption};
+use luars::{LuaProto, LuaVM};
 use std::env;
 use std::fs;
 
@@ -49,7 +49,7 @@ fn main() {
 }
 
 /// 格式化常量值为luac格式的字符串（对齐luac的PrintConstant）
-fn format_constant(chunk: &Chunk, idx: u32, _vm: &LuaVM) -> String {
+fn format_constant(chunk: &LuaProto, idx: u32, _vm: &LuaVM) -> String {
     if let Some(val) = chunk.constants.get(idx as usize) {
         // 根据值类型格式化
         if val.is_nil() {
@@ -109,7 +109,7 @@ fn format_constant(chunk: &Chunk, idx: u32, _vm: &LuaVM) -> String {
 }
 
 fn dump_chunk(
-    chunk: &Chunk,
+    chunk: &LuaProto,
     filename: &str,
     linedefined: usize,
     lastlinedefined: usize,

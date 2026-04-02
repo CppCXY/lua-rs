@@ -14,7 +14,7 @@ mod statement; // Statement parsing (lparser.c)
 use crate::LuaVM;
 pub use crate::compiler::parser::LuaLanguageLevel;
 use crate::compiler::parser::{LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig};
-use crate::lua_value::{Chunk, UpvalueDesc};
+use crate::lua_value::{LuaProto, UpvalueDesc};
 use crate::lua_vm::OpCode;
 pub use code::*;
 pub use expression::*;
@@ -23,7 +23,7 @@ pub use func_state::*;
 // Structures are now in separate files (func_state.rs, expression.rs)
 
 // Port of luaY_parser from lparser.c
-pub fn compile_code(source: &str, vm: &mut LuaVM) -> Result<Chunk, String> {
+pub fn compile_code(source: &str, vm: &mut LuaVM) -> Result<LuaProto, String> {
     compile_code_with_name(source, vm, "@chunk")
 }
 
@@ -31,7 +31,7 @@ pub fn compile_code_with_name(
     source: &str,
     vm: &mut LuaVM,
     chunk_name: &str,
-) -> Result<Chunk, String> {
+) -> Result<LuaProto, String> {
     let level = vm.version;
     let tokenize_result = {
         let mut lexer = LuaTokenize::new(

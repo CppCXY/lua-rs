@@ -11,7 +11,7 @@
 use crate::gc::string_interner::StringInterner;
 use crate::lua_value::UpvalueStore;
 use crate::lua_value::{
-    CClosureFunction, Chunk, LuaUpvalue, LuaUserdata, RClosureFunction, RustCallback,
+    CClosureFunction, LuaProto, LuaUpvalue, LuaUserdata, RClosureFunction, RustCallback,
 };
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
@@ -167,7 +167,7 @@ impl ObjectAllocator {
     // ==================== Function Operations ====================
 
     #[inline(always)]
-    pub fn create_proto(&mut self, gc: &mut GC, chunk: Chunk) -> LuaResult<ProtoPtr> {
+    pub fn create_proto(&mut self, gc: &mut GC, chunk: LuaProto) -> LuaResult<ProtoPtr> {
         let current_white = gc.current_white;
         let size = std::mem::size_of::<GcProto>() as u32 + chunk.proto_data_size;
         let gc_proto = GcObjectOwner::Proto(Box::new(GcProto::new(chunk, current_white, size)));

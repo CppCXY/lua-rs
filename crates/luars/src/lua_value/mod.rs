@@ -368,7 +368,7 @@ pub struct LocVar {
 
 /// Compiled chunk (bytecode + metadata)
 #[derive(Debug, Clone)]
-pub struct Chunk {
+pub struct LuaProto {
     pub code: Vec<Instruction>,
     pub constants: Vec<LuaValue>,
     pub locals: Vec<LocVar>,
@@ -387,15 +387,15 @@ pub struct Chunk {
     pub proto_data_size: u32,            // Cached size for GC (code+constants+children+lines)
 }
 
-impl Default for Chunk {
+impl Default for LuaProto {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Chunk {
+impl LuaProto {
     pub fn new() -> Self {
-        Chunk {
+        LuaProto {
             code: Vec::new(),
             constants: Vec::new(),
             locals: Vec::new(),
@@ -515,7 +515,7 @@ impl LuaFunction {
 
     /// Get the chunk if this is a Lua function
     #[inline(always)]
-    pub fn chunk(&self) -> &Chunk {
+    pub fn chunk(&self) -> &LuaProto {
         &self.chunk.as_ref().data
     }
 

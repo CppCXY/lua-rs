@@ -252,7 +252,33 @@ impl std::fmt::Debug for RefInner {
     }
 }
 
+impl Clone for RefInner {
+    fn clone(&self) -> Self {
+        let vm = self.vm_mut();
+        let value = self.to_value();
+        let ref_id = store_in_registry(vm, value);
+        RefInner::new(ref_id, self.vm)
+    }
+}
+
 // ---- helper: create a registry ref for a LuaValue ---------------------------
+
+fn collect_single_value<T: IntoLua>(
+    vm: &mut LuaVM,
+    value: T,
+    context: &str,
+) -> LuaResult<LuaValue> {
+    let mut values =
+        collect_into_lua_values(vm.main_state(), value).map_err(|msg| vm.error(msg))?;
+    if values.len() != 1 {
+        return Err(vm.error(format!(
+            "{} expects exactly one Lua value, got {}",
+            context,
+            values.len()
+        )));
+    }
+    Ok(values.pop().unwrap())
+}
 
 /// Store a LuaValue in the VM registry and return its RefId.
 pub(crate) fn store_in_registry(vm: &mut super::LuaVM, value: LuaValue) -> RefId {
@@ -324,6 +350,21 @@ impl LuaTableRef {
         T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
+    /// Get a value by arbitrary Rust-convertible key and convert it to `T`.
+    pub fn get_typed<K: IntoLua, T: crate::FromLua>(&self, key: K) -> super::LuaResult<T> {
+        let vm = self.inner.vm_mut();
+        let key = collect_single_value(vm, key, "LuaTableRef::get_typed(key)")?;
+        let table = self.inner.to_value();
+        let value = vm.raw_get(&table, &key).unwrap_or_default();
+        T::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
+    }
+
+    /// Returns true if the table contains a non-nil value for the given key.
+    pub fn contains_key<K: IntoLua>(&self, key: K) -> super::LuaResult<bool> {
+        let value: LuaValue = self.get_typed(key)?;
+        Ok(!value.is_nil())
+    }
+
     // ==================== Write ====================
 
     /// Set a string-keyed value.
@@ -351,6 +392,16 @@ impl LuaTableRef {
         Ok(())
     }
 
+    /// Set an arbitrary key-value pair from Rust-convertible values.
+    pub fn set_typed<K: IntoLua, V: IntoLua>(&self, key: K, value: V) -> super::LuaResult<()> {
+        let vm = self.inner.vm_mut();
+        let key = collect_single_value(vm, key, "LuaTableRef::set_typed(key)")?;
+        let value = collect_single_value(vm, value, "LuaTableRef::set_typed(value)")?;
+        let table = self.inner.to_value();
+        vm.raw_set(&table, key, value);
+        Ok(())
+    }
+
     // ==================== Iteration ====================
 
     /// Get all key-value pairs (snapshot, no metamethods).
@@ -373,6 +424,47 @@ impl LuaTableRef {
         self.seti((current_len + 1) as i64, value)
     }
 
+    /// Append a Rust value to the array part of the table.
+    pub fn push_typed<V: IntoLua>(&self, value: V) -> super::LuaResult<()> {
+        let vm = self.inner.vm_mut();
+        let value = collect_single_value(vm, value, "LuaTableRef::push_typed(value)")?;
+        let current_len = self.len()?;
+        self.seti((current_len + 1) as i64, value)
+    }
+
+    /// Convert all table pairs to typed Rust key-value pairs.
+    pub fn pairs_typed<K: FromLua, V: FromLua>(&self) -> super::LuaResult<Vec<(K, V)>> {
+        let pairs = self.pairs()?;
+        let vm = self.inner.vm_mut();
+        let mut converted = Vec::with_capacity(pairs.len());
+        for (key, value) in pairs {
+            let key = K::from_lua(key, vm.main_state()).map_err(|msg| vm.error(msg))?;
+            let value = V::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))?;
+            converted.push((key, value));
+        }
+        Ok(converted)
+    }
+
+    /// Read contiguous sequence values from `1..` until a nil is encountered.
+    pub fn sequence_values<V: FromLua>(&self) -> super::LuaResult<Vec<V>> {
+        let vm = self.inner.vm_mut();
+        let table = self.inner.to_value();
+        let mut values = Vec::new();
+        let mut index = 1_i64;
+        loop {
+            let Some(value) = vm.raw_geti(&table, index) else {
+                break;
+            };
+            if value.is_nil() {
+                break;
+            }
+            let value = V::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))?;
+            values.push(value);
+            index += 1;
+        }
+        Ok(values)
+    }
+
     // ==================== Conversion ====================
 
     /// Get the underlying LuaValue (retrieved from registry).
@@ -389,6 +481,14 @@ impl LuaTableRef {
 impl std::fmt::Debug for LuaTableRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "LuaTableRef(ref_id={})", self.inner.ref_id)
+    }
+}
+
+impl Clone for LuaTableRef {
+    fn clone(&self) -> Self {
+        LuaTableRef {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -469,6 +569,14 @@ impl LuaFunctionRef {
     /// Get the registry reference ID.
     pub fn ref_id(&self) -> RefId {
         self.inner.ref_id
+    }
+}
+
+impl Clone for LuaFunctionRef {
+    fn clone(&self) -> Self {
+        LuaFunctionRef {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -556,6 +664,14 @@ impl std::fmt::Debug for LuaStringRef {
 impl std::fmt::Display for LuaStringRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_string_lossy())
+    }
+}
+
+impl Clone for LuaStringRef {
+    fn clone(&self) -> Self {
+        LuaStringRef {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -694,6 +810,15 @@ impl<T: 'static> std::fmt::Debug for UserDataRef<T> {
     }
 }
 
+impl<T: 'static> Clone for UserDataRef<T> {
+    fn clone(&self) -> Self {
+        UserDataRef {
+            inner: self.inner.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 // ============================================================================
 // LuaAnyRef
 // ============================================================================
@@ -799,6 +924,14 @@ impl std::fmt::Debug for LuaAnyRef {
             self.inner.ref_id,
             self.kind()
         )
+    }
+}
+
+impl Clone for LuaAnyRef {
+    fn clone(&self) -> Self {
+        LuaAnyRef {
+            inner: self.inner.clone(),
+        }
     }
 }
 

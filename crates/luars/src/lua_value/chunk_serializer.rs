@@ -1,7 +1,7 @@
 // Chunk serializer/deserializer for string.dump/load
 // Custom binary format for lua-rs bytecode
 
-use super::{Chunk, LocVar, LuaValue, UpvalueDesc};
+use super::{LocVar, LuaProto, LuaValue, UpvalueDesc};
 use crate::Instruction;
 use crate::gc::{GcProto, ObjectAllocator};
 use crate::lua_vm::LuaVM;
@@ -9,7 +9,7 @@ use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
-fn detached_proto(chunk: Chunk) -> crate::ProtoPtr {
+fn detached_proto(chunk: LuaProto) -> crate::ProtoPtr {
     let size = std::mem::size_of::<GcProto>() as u32 + chunk.proto_data_size;
     let boxed = Box::new(GcProto::new(chunk, 0, size));
     crate::ProtoPtr::new(Box::leak(boxed) as *const GcProto)
@@ -21,7 +21,7 @@ const LUARS_VERSION: u8 = 1;
 
 /// Serialize a Chunk to binary format (requires ObjectPool for string access)
 pub fn serialize_chunk_with_pool(
-    chunk: &Chunk,
+    chunk: &LuaProto,
     strip: bool,
     pool: &ObjectAllocator,
 ) -> Result<Vec<u8>, String> {
@@ -42,7 +42,7 @@ pub fn serialize_chunk_with_pool(
 }
 
 /// Serialize a Chunk to binary format (with string deduplication but no VM strings)
-pub fn serialize_chunk(chunk: &Chunk, strip: bool) -> Result<Vec<u8>, String> {
+pub fn serialize_chunk(chunk: &LuaProto, strip: bool) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
 
     // Write header
@@ -60,7 +60,7 @@ pub fn serialize_chunk(chunk: &Chunk, strip: bool) -> Result<Vec<u8>, String> {
 }
 
 /// Deserialize binary data to a Chunk
-pub fn deserialize_chunk(data: &[u8]) -> Result<Chunk, String> {
+pub fn deserialize_chunk(data: &[u8]) -> Result<LuaProto, String> {
     let mut cursor = Cursor::new(data);
 
     // Verify magic number
@@ -95,7 +95,7 @@ pub fn deserialize_chunk(data: &[u8]) -> Result<Chunk, String> {
 }
 
 /// Deserialize binary data to a Chunk, directly creating strings with VM
-pub fn deserialize_chunk_with_strings_vm(data: &[u8], vm: &mut LuaVM) -> Result<Chunk, String> {
+pub fn deserialize_chunk_with_strings_vm(data: &[u8], vm: &mut LuaVM) -> Result<LuaProto, String> {
     let mut cursor = Cursor::new(data);
 
     // Verify magic number
@@ -133,7 +133,7 @@ pub fn deserialize_chunk_with_strings_vm(data: &[u8], vm: &mut LuaVM) -> Result<
 /// Deserialize binary data to a Chunk, returning string constants separately
 pub fn deserialize_chunk_with_strings(
     data: &[u8],
-) -> Result<(Chunk, Vec<(usize, String)>), String> {
+) -> Result<(LuaProto, Vec<(usize, String)>), String> {
     let mut cursor = Cursor::new(data);
 
     // Verify magic number
@@ -168,7 +168,7 @@ pub fn deserialize_chunk_with_strings(
 
 fn write_chunk_with_dedup(
     buf: &mut Vec<u8>,
-    chunk: &Chunk,
+    chunk: &LuaProto,
     strip: bool,
     pool: &ObjectAllocator,
     string_table: &mut HashMap<String, u32>,
@@ -244,7 +244,7 @@ fn write_chunk_with_dedup(
 
 fn write_chunk_no_pool_with_dedup(
     buf: &mut Vec<u8>,
-    chunk: &Chunk,
+    chunk: &LuaProto,
     strip: bool,
     string_table: &mut HashMap<String, u32>,
 ) -> Result<(), String> {
@@ -318,7 +318,7 @@ fn write_chunk_no_pool_with_dedup(
 }
 
 #[allow(dead_code)]
-fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<(), String> {
+fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &LuaProto, strip: bool) -> Result<(), String> {
     // Write code
     write_u32(buf, chunk.code.len() as u32);
     for &instr in &chunk.code {
@@ -387,7 +387,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &Chunk, strip: bool) -> Result<
 }
 
 #[allow(dead_code)]
-fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
+fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<LuaProto, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -454,7 +454,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
         line_info.push(read_u32(cursor)?);
     }
 
-    let mut chunk = Chunk {
+    let mut chunk = LuaProto {
         code,
         constants,
         locals,
@@ -479,7 +479,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<Chunk, String> {
 fn read_chunk_with_dedup(
     cursor: &mut Cursor<&[u8]>,
     string_table: &mut Vec<String>,
-) -> Result<Chunk, String> {
+) -> Result<LuaProto, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -546,7 +546,7 @@ fn read_chunk_with_dedup(
         line_info.push(read_u32(cursor)?);
     }
 
-    let mut chunk = Chunk {
+    let mut chunk = LuaProto {
         code,
         constants,
         locals,
@@ -736,7 +736,7 @@ fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<LuaValue, String> {
 }
 
 #[allow(dead_code)]
-fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chunk, String> {
+fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<LuaProto, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -804,7 +804,7 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<Chun
         line_info.push(read_u32(cursor)?);
     }
 
-    let mut chunk = Chunk {
+    let mut chunk = LuaProto {
         code,
         constants,
         child_protos,
@@ -848,7 +848,7 @@ fn read_chunk_with_vm_dedup(
     cursor: &mut Cursor<&[u8]>,
     vm: &mut LuaVM,
     string_table: &mut Vec<String>,
-) -> Result<Chunk, String> {
+) -> Result<LuaProto, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -916,7 +916,7 @@ fn read_chunk_with_vm_dedup(
         line_info.push(read_u32(cursor)?);
     }
 
-    let mut chunk = Chunk {
+    let mut chunk = LuaProto {
         code,
         constants,
         child_protos,
@@ -972,7 +972,7 @@ fn read_constant_with_vm_dedup(
 fn read_chunk_with_strings(
     cursor: &mut Cursor<&[u8]>,
     strings: &mut Vec<(usize, String)>,
-) -> Result<Chunk, String> {
+) -> Result<LuaProto, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -1039,7 +1039,7 @@ fn read_chunk_with_strings(
         line_info.push(read_u32(cursor)?);
     }
 
-    let mut chunk = Chunk {
+    let mut chunk = LuaProto {
         code,
         constants,
         locals,
@@ -1251,7 +1251,7 @@ mod tests {
 
     #[test]
     fn test_serialize_empty_chunk() {
-        let chunk = Chunk::new();
+        let chunk = LuaProto::new();
         let bytes = serialize_chunk(&chunk, false).unwrap();
         let restored = deserialize_chunk(&bytes).unwrap();
         assert_eq!(restored.code.len(), 0);
