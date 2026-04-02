@@ -80,8 +80,73 @@ impl Value {
             .unwrap_or_else(|| self.type_name().to_owned())
     }
 
+    /// Convert this value into a JSON value using the crate's existing `serde` bridge.
+    #[cfg(feature = "serde")]
+    pub fn to_json_value(&self) -> Result<serde_json::Value, String> {
+        crate::serde::lua_to_json(&self.to_value())
+    }
+
+    /// Convert this value into a JSON string using the crate's existing `serde` bridge.
+    #[cfg(feature = "serde")]
+    pub fn to_json_string(&self, pretty: bool) -> Result<String, String> {
+        crate::serde::lua_to_json_string(&self.to_value(), pretty)
+    }
+
+    /// Decode this Lua value into any serde-deserializable Rust value.
+    #[cfg(feature = "serde")]
+    pub fn to_serde<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
+        let json = self.to_json_value()?;
+        serde_json::from_value(json).map_err(|err| format!("Failed to deserialize value: {}", err))
+    }
+
+    /// Construct a safe Lua value from a JSON value inside the provided Lua runtime.
+    #[cfg(feature = "serde")]
+    pub fn from_json_value(lua: &mut crate::Lua, json: &serde_json::Value) -> LuaResult<Self> {
+        let vm = unsafe { lua.vm_mut() };
+        let value = vm
+            .deserialize_from_json(json)
+            .map_err(|msg| vm.error(msg))?;
+        Ok(Value::new(vm.to_ref(value)))
+    }
+
+    /// Construct a safe Lua value from a JSON string inside the provided Lua runtime.
+    #[cfg(feature = "serde")]
+    pub fn from_json_str(lua: &mut crate::Lua, json: &str) -> LuaResult<Self> {
+        let vm = unsafe { lua.vm_mut() };
+        let value = vm
+            .deserialize_from_json_string(json)
+            .map_err(|msg| vm.error(msg))?;
+        Ok(Value::new(vm.to_ref(value)))
+    }
+
+    /// Construct a safe Lua value from any serde-serializable Rust value.
+    #[cfg(feature = "serde")]
+    pub fn from_serde<T: serde::Serialize>(lua: &mut crate::Lua, value: &T) -> LuaResult<Self> {
+        let json = match serde_json::to_value(value) {
+            Ok(json) => json,
+            Err(err) => {
+                let vm = unsafe { lua.vm_mut() };
+                return Err(vm.error(err.to_string()));
+            }
+        };
+        Self::from_json_value(lua, &json)
+    }
+
     pub(crate) fn to_value(&self) -> luars::LuaValue {
         self.inner.to_value()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Value {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(
+            &self.to_json_value().map_err(serde::ser::Error::custom)?,
+            serializer,
+        )
     }
 }
 

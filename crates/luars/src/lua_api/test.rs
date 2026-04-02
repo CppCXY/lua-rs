@@ -4,11 +4,23 @@ mod tests {
 
     #[cfg(feature = "sandbox")]
     use crate::SandboxConfig;
+    #[cfg(feature = "serde")]
+    use crate::lua_api::Value;
     use crate::{
         LuaUserData, SafeOption, Stdlib,
         lua_api::{Function, Lua, Table},
         lua_methods,
     };
+    #[cfg(feature = "serde")]
+    use serde::{Deserialize, Serialize};
+
+    #[cfg(feature = "serde")]
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct ApiConfig {
+        host: String,
+        port: u16,
+        tags: Vec<String>,
+    }
 
     #[derive(LuaUserData)]
     struct ApiCounter {
@@ -419,5 +431,141 @@ mod tests {
         assert_eq!(table.get::<String>("host").unwrap(), "localhost");
         assert_eq!(table.get::<i64>("port").unwrap(), 8080);
         assert_eq!(function.call1::<_, i64>(21).unwrap(), 42);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn table_serde_json_round_trip_works() {
+        let mut lua = Lua::new(SafeOption::default());
+        let table = lua
+            .create_table_from([("host", "localhost"), ("port", "8080")])
+            .unwrap();
+        table
+            .set(
+                "nested",
+                lua.create_sequence_from([1_i64, 2_i64, 3_i64]).unwrap(),
+            )
+            .unwrap();
+
+        let json = table.to_json_value().unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "host": "localhost",
+                "port": "8080",
+                "nested": [1, 2, 3]
+            })
+        );
+
+        let encoded = serde_json::to_value(&table).unwrap();
+        assert_eq!(encoded, json);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn table_from_json_and_to_serde_work() {
+        let mut lua = Lua::new(SafeOption::default());
+        let table = Table::from_json_value(
+            &mut lua,
+            &serde_json::json!({
+                "host": "127.0.0.1",
+                "port": 8080,
+                "tags": ["dev", "edge"]
+            }),
+        )
+        .unwrap();
+
+        let config: ApiConfig = table.to_serde().unwrap();
+        assert_eq!(
+            config,
+            ApiConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+                tags: vec!["dev".to_string(), "edge".to_string()],
+            }
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn table_from_serde_works() {
+        let mut lua = Lua::new(SafeOption::default());
+        let input = ApiConfig {
+            host: "localhost".to_string(),
+            port: 3000,
+            tags: vec!["api".to_string(), "beta".to_string()],
+        };
+
+        let table = Table::from_serde(&mut lua, &input).unwrap();
+        assert_eq!(table.get::<String>("host").unwrap(), "localhost");
+        assert_eq!(table.get::<i64>("port").unwrap(), 3000);
+        assert_eq!(
+            table
+                .get::<Table>("tags")
+                .unwrap()
+                .sequence_values::<String>()
+                .unwrap(),
+            vec!["api".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn value_serde_scalar_round_trip_works() {
+        let mut lua = Lua::new(SafeOption::default());
+        let value = lua.pack(42_i64).unwrap();
+
+        assert_eq!(value.to_json_value().unwrap(), serde_json::json!(42));
+        assert_eq!(serde_json::to_value(&value).unwrap(), serde_json::json!(42));
+
+        let decoded: i64 = value.to_serde().unwrap();
+        assert_eq!(decoded, 42);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn value_from_json_and_from_serde_work() {
+        let mut lua = Lua::new(SafeOption::default());
+
+        let from_json = Value::from_json_value(
+            &mut lua,
+            &serde_json::json!({
+                "host": "127.0.0.1",
+                "port": 8081,
+                "tags": ["prod", "edge"]
+            }),
+        )
+        .unwrap();
+        let config: ApiConfig = from_json.to_serde().unwrap();
+        assert_eq!(
+            config,
+            ApiConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8081,
+                tags: vec!["prod".to_string(), "edge".to_string()],
+            }
+        );
+
+        let from_serde = Value::from_serde(
+            &mut lua,
+            &ApiConfig {
+                host: "localhost".to_string(),
+                port: 3001,
+                tags: vec!["api".to_string()],
+            },
+        )
+        .unwrap();
+
+        let table = from_serde.as_table().unwrap();
+        assert_eq!(table.get::<String>("host").unwrap(), "localhost");
+        assert_eq!(table.get::<i64>("port").unwrap(), 3001);
+        assert_eq!(
+            table
+                .get::<Table>("tags")
+                .unwrap()
+                .sequence_values::<String>()
+                .unwrap(),
+            vec!["api".to_string()]
+        );
     }
 }
