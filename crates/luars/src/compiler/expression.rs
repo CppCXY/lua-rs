@@ -129,6 +129,7 @@ pub struct VarVals {
     pub vidx: u16, // compiler index (in 'actvar.arr' or 'upvalues')
 }
 
+#[allow(unused)]
 impl ExpDesc {
     pub fn new_void() -> Self {
         ExpDesc {

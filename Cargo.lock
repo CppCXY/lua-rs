@@ -207,13 +207,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "luars_safe"
-version = "0.1.0"
-dependencies = [
- "luars",
-]
-
-[[package]]
 name = "luars_wasm"
 version = "0.1.0"
 dependencies = [

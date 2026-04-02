@@ -6,21 +6,19 @@ mod code; // Code generation (lcode.c)
 mod expr_parser; // Expression parser functions (lparser.c)
 mod expression; // Expression parsing and expdesc
 mod func_state; // FuncState and related structures (lparser.h)
-pub mod parse_literal; // Number parsing utilities
+mod parse_literal; // Number parsing utilities
 mod parser; // Lexer/token provider
 mod statement; // Statement parsing (lparser.c)
 
 // Re-exports
-pub use code::*;
-pub use expression::*;
-pub use func_state::*;
-pub use parse_literal::*;
-
 use crate::LuaVM;
 pub use crate::compiler::parser::LuaLanguageLevel;
 use crate::compiler::parser::{LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig};
 use crate::lua_value::{Chunk, UpvalueDesc};
 use crate::lua_vm::OpCode;
+pub use code::*;
+pub use expression::*;
+pub use func_state::*;
 
 // Structures are now in separate files (func_state.rs, expression.rs)
 

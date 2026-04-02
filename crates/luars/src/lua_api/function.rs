@@ -1,4 +1,4 @@
-use luars::{FromLua, FromLuaMulti, IntoLua, LuaFunctionRef, LuaResult, LuaValue};
+use crate::{FromLua, FromLuaMulti, IntoLua, LuaFunctionRef, LuaResult, LuaValue};
 
 /// Safe wrapper around a callable Lua function handle.
 pub struct Function {

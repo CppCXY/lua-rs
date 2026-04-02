@@ -1,10 +1,9 @@
-use crate::util::{from_value, into_single_value};
-use crate::{Function, Table, TableBuilder};
-use luars::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
-use luars::{
-    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaRegistrable, LuaResult, LuaVM, Stdlib
-};
 use luars::lua_vm::SafeOption;
+use luars::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
+use luars::{FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaRegistrable, LuaResult, LuaVM, Stdlib};
+
+use crate::lua_api::util::{from_value, into_single_value};
+use crate::lua_api::{Function, Table};
 
 /// Safe, embedding-oriented Lua runtime.
 ///
@@ -37,7 +36,10 @@ impl Lua {
     /// Execute source code and convert the first returned value.
     pub fn eval<R: FromLua>(&mut self, source: &str) -> LuaResult<R> {
         let values = self.vm.execute(source)?;
-        let value = values.into_iter().next().unwrap_or_else(luars::LuaValue::nil);
+        let value = values
+            .into_iter()
+            .next()
+            .unwrap_or_else(luars::LuaValue::nil);
         from_value(&mut self.vm, value, "eval")
     }
 
@@ -61,7 +63,11 @@ impl Lua {
 
     /// Call a global function and convert all results.
     #[inline]
-    pub fn call_global<A: IntoLua, R: FromLuaMulti>(&mut self, name: &str, args: A) -> LuaResult<R> {
+    pub fn call_global<A: IntoLua, R: FromLuaMulti>(
+        &mut self,
+        name: &str,
+        args: A,
+    ) -> LuaResult<R> {
         self.vm.call_global(name, args)
     }
 
@@ -115,11 +121,6 @@ impl Lua {
         self.vm.create_table_ref(narr, nrec).map(Table::new)
     }
 
-    /// Build a safe table using `TableBuilder`.
-    pub fn build_table(&mut self, builder: TableBuilder) -> LuaResult<Table> {
-        builder.build(self)
-    }
-
     /// Get a global function handle.
     pub fn get_function(&mut self, name: &str) -> LuaResult<Option<Function>> {
         self.vm
@@ -129,7 +130,9 @@ impl Lua {
 
     /// Get a global table handle.
     pub fn get_table(&mut self, name: &str) -> LuaResult<Option<Table>> {
-        self.vm.get_global_table(name).map(|opt| opt.map(Table::new))
+        self.vm
+            .get_global_table(name)
+            .map(|opt| opt.map(Table::new))
     }
 
     /// Bind a safe table handle into the global environment.
@@ -173,10 +176,7 @@ impl Lua {
     }
 
     /// Convert a table snapshot into typed key-value pairs.
-    pub fn table_pairs<K: FromLua, V: FromLua>(
-        &mut self,
-        table: &Table,
-    ) -> LuaResult<Vec<(K, V)>> {
+    pub fn table_pairs<K: FromLua, V: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<(K, V)>> {
         let pairs = table.pairs_raw()?;
         let mut converted = Vec::with_capacity(pairs.len());
         for (key, value) in pairs {
@@ -197,7 +197,8 @@ impl Lua {
         Ok(values)
     }
 
-    pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
+    /// Get a mutable reference to the underlying LuaVM for advanced use cases.
+    pub unsafe fn vm_mut(&mut self) -> &mut LuaVM {
         &mut self.vm
     }
 }
@@ -207,4 +208,3 @@ impl Default for Lua {
         Self::new(SafeOption::default())
     }
 }
-

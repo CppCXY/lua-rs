@@ -526,11 +526,6 @@ pub fn current_func_name_with_kind(l: &LuaState) -> Option<(&'static str, String
     getfuncname(l, ci_idx)
 }
 
-/// Get just the name of the current function.
-pub fn current_func_name(l: &LuaState) -> Option<String> {
-    current_func_name_with_kind(l).map(|(_, name)| name)
-}
-
 /// Search through loaded modules (package.loaded) to find the name of a function.
 /// Mirrors C Lua's pushglobalfuncname / findfield.
 /// Returns e.g. "table.sort", "string.sub", "math.sin", etc.

@@ -4,6 +4,7 @@ pub struct SourceRange {
     pub length: usize,
 }
 
+#[allow(unused)]
 impl SourceRange {
     pub fn new(start_offset: usize, length: usize) -> SourceRange {
         SourceRange {

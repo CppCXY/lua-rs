@@ -1,7 +1,7 @@
 use luars::LuaVM;
 use luars::LuaValue;
-use luars::lua_vm::SafeOption;
-use luars::stdlib;
+use luars::SafeOption;
+use luars::Stdlib;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -389,7 +389,7 @@ fn lua_main() -> i32 {
     };
 
     let mut vm = LuaVM::new(safe_option);
-    vm.open_stdlib(stdlib::Stdlib::All).unwrap();
+    vm.open_stdlib(Stdlib::All).unwrap();
 
     // Register the built-in debugger (require "emmy_core")
     luars_debugger::register_debugger(&mut vm).unwrap();

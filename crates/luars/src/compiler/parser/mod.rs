@@ -1,4 +1,3 @@
-mod lexer_config;
 mod lua_language_level;
 mod lua_operator_kind;
 mod lua_token_data;
@@ -9,9 +8,9 @@ mod text_range;
 mod tokenize_config;
 
 pub use crate::compiler::parser::{
-    lexer_config::ParserConfig, lua_language_level::LuaLanguageLevel, lua_operator_kind::*,
-    lua_token_data::LuaTokenData, lua_token_kind::LuaTokenKind, lua_tokenize::LuaTokenize,
-    reader::Reader, text_range::SourceRange, tokenize_config::TokensizeConfig,
+    lua_language_level::LuaLanguageLevel, lua_operator_kind::*, lua_token_data::LuaTokenData,
+    lua_token_kind::LuaTokenKind, lua_tokenize::LuaTokenize, reader::Reader,
+    text_range::SourceRange, tokenize_config::TokensizeConfig,
 };
 
 pub struct LuaLexer<'a> {
@@ -19,22 +18,22 @@ pub struct LuaLexer<'a> {
     tokens: Vec<LuaTokenData>,
     token_index: usize,
     current_token: LuaTokenKind,
-    pub parse_config: ParserConfig,
+    #[allow(unused)]
+    pub level: LuaLanguageLevel,
     pub line: usize,          // current line number (linenumber in Lua)
     pub lastline: usize,      // line of last token consumed (lastline in Lua)
     pub nesting_level: usize, // parser nesting depth (like C Lua's nCcalls during compilation)
 }
 
+#[allow(unused)]
 impl<'a> LuaLexer<'a> {
     pub fn new(text: &'a str, tokens: Vec<LuaTokenData>, level: LuaLanguageLevel) -> LuaLexer<'a> {
-        let config = ParserConfig::new(level);
-
         let mut parser = LuaLexer {
             text,
             tokens,
             token_index: 0,
             current_token: LuaTokenKind::None,
-            parse_config: config,
+            level,
             line: 1,
             lastline: 1, // Initialize lastline to 1 (llex.c:176)
             nesting_level: 0,

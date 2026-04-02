@@ -1,4 +1,4 @@
-use luars::{FromLua, IntoLua, LuaResult, LuaTableRef, LuaValue};
+use crate::{FromLua, IntoLua, LuaResult, LuaTableRef, LuaValue};
 
 /// Safe wrapper around a Lua table handle.
 pub struct Table {

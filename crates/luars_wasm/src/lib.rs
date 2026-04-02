@@ -1,4 +1,4 @@
-use luars::{lua_vm::SafeOption, stdlib, LuaVM, LuaValue};
+use luars::{SafeOption, Stdlib, LuaVM, LuaValue};
 use wasm_bindgen::prelude::*;
 
 mod conversion;
@@ -20,7 +20,7 @@ impl LuaWasm {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<LuaWasm, JsValue> {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_stdlib(stdlib::Stdlib::All)
+        vm.open_stdlib(Stdlib::All)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         Ok(LuaWasm { vm })
     }
@@ -409,7 +409,7 @@ impl LuaWasm {
     #[wasm_bindgen]
     pub fn reset(&mut self) -> Result<(), JsValue> {
         let mut vm = LuaVM::new(SafeOption::default());
-        vm.open_stdlib(stdlib::Stdlib::All)
+        vm.open_stdlib(Stdlib::All)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         self.vm = vm;
         Ok(())

@@ -2,6 +2,7 @@ use core::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum LuaLanguageLevel {
+    #[allow(unused)]
     LuaJIT,
     #[default]
     Lua55,

@@ -34,8 +34,8 @@ use crate::lua_vm::file_layout::inspect_file_chunk_layout;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
 pub use crate::lua_vm::lua_ref::{
-    LUA_NOREF, LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef,
-    RefId, UserDataRef,
+    LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef, RefId,
+    UserDataRef,
 };
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
@@ -297,7 +297,6 @@ impl LuaVM {
         vm.set_global("_G", globals_value).unwrap();
         vm.set_global("_ENV", globals_value).unwrap();
 
-
         vm.gc.clear_temporary_memory_limit();
         vm
     }
@@ -313,11 +312,7 @@ impl LuaVM {
     /// Register a CFunction in package.preload[name].
     /// When Lua code calls `require("name")`, the preload searcher will
     /// find this function and call it as the module loader.
-    pub fn register_preload(
-        &mut self,
-        name: &str,
-        loader: CFunction,
-    ) -> LuaResult<()> {
+    pub fn register_preload(&mut self, name: &str, loader: CFunction) -> LuaResult<()> {
         let preload_val = self.registry_get("_PRELOAD")?;
         if let Some(preload) = preload_val
             && preload.is_table()

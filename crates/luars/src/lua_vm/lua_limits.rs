@@ -95,11 +95,6 @@ pub const MAXCCALLS_PATTERN: usize = 200;
 /// Maximum string size (1 GB).
 pub const MAX_STRING_SIZE: i64 = 1 << 30;
 
-// ===== Concat =====
-
-/// Stack-allocated buffer size for small concatenations.
-pub const CONCAT_STACK_BUF_SIZE: usize = 256;
-
 // ===== GC Defaults =====
 
 /// Default GC pause (percentage). Controls how long GC waits before starting

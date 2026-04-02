@@ -1,4 +1,4 @@
-use luars::lua_vm::{Instruction, OpCode, SafeOption};
+use luars::{Instruction, OpCode, SafeOption};
 use luars::{Chunk, LuaVM};
 use std::env;
 use std::fs;

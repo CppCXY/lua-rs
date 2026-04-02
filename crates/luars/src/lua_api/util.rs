@@ -1,4 +1,4 @@
-use luars::{FromLua, IntoLua, LuaResult, LuaVM};
+use crate::{FromLua, IntoLua, LuaResult, LuaVM};
 
 pub(crate) fn into_single_value<T: IntoLua>(
     vm: &mut LuaVM,

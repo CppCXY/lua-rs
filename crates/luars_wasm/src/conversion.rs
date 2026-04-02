@@ -163,7 +163,7 @@ fn function_to_js_meta(value: &LuaValue) -> JsValue {
 //  JS → Lua
 // ════════════════════════════════════════════════════════════════════════
 
-pub fn js_to_lua(vm: &mut LuaVM, value: &JsValue) -> Result<LuaValue, luars::lua_vm::LuaError> {
+pub fn js_to_lua(vm: &mut LuaVM, value: &JsValue) -> Result<LuaValue, luars::LuaError> {
     let mut ctx = Ctx::new();
     js_to_lua_inner(vm, value, &mut ctx)
 }
@@ -172,7 +172,7 @@ fn js_to_lua_inner(
     vm: &mut LuaVM,
     value: &JsValue,
     ctx: &mut Ctx,
-) -> Result<LuaValue, luars::lua_vm::LuaError> {
+) -> Result<LuaValue, luars::LuaError> {
     if ctx.depth >= MAX_DEPTH {
         return Ok(LuaValue::nil());
     }
@@ -216,7 +216,7 @@ fn js_array_to_lua(
     vm: &mut LuaVM,
     value: &JsValue,
     ctx: &mut Ctx,
-) -> Result<LuaValue, luars::lua_vm::LuaError> {
+) -> Result<LuaValue, luars::LuaError> {
     let array = js_sys::Array::from(value);
     let len = array.length() as usize;
     let table = vm.create_table(len, 0)?;
@@ -234,7 +234,7 @@ fn js_object_to_lua(
     vm: &mut LuaVM,
     value: &JsValue,
     ctx: &mut Ctx,
-) -> Result<LuaValue, luars::lua_vm::LuaError> {
+) -> Result<LuaValue, luars::LuaError> {
     let obj = js_sys::Object::from(value.clone());
     let keys = js_sys::Object::keys(&obj);
     let len = keys.length() as usize;
@@ -275,7 +275,7 @@ pub fn lua_to_js_basic(value: &LuaValue) -> JsValue {
 }
 
 pub fn js_to_lua_basic(
-    state: &mut luars::lua_vm::LuaState,
+    state: &mut luars::LuaState,
     value: &JsValue,
 ) -> Result<LuaValue, String> {
     if value.is_null() || value.is_undefined() {
