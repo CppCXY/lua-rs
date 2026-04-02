@@ -1281,6 +1281,9 @@ impl GC {
         // markvalue(g, &g->l_registry);
         self.mark_value(l, &registry);
 
+        let global = l.vm_mut().global;
+        self.mark_value(l, &global);
+
         // Mark debug hook function (per-thread, on main thread)
         let hook = l.hook;
         if !hook.is_nil() {
@@ -2275,6 +2278,9 @@ impl GC {
         // Mark registry (global state)
         let registry = l.vm_mut().registry;
         self.mark_value(l, &registry);
+
+        let global = l.vm_mut().global;
+        self.mark_value(l, &global);
 
         // Mark debug hook function (per-thread, stored on LuaState)
         let hook = l.hook;
