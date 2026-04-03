@@ -9,7 +9,7 @@ use crate::lua_vm::execute::helper::{get_binop_metamethod, get_metamethod_from_m
 /// Based on Lua 5.5 ltm.c
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metamethod_event};
 use crate::stdlib::debug;
-use crate::{CallInfo, TablePtr};
+use crate::{CallInfo, gc::TablePtr};
 
 /// Try unary metamethod (for __unm, __bnot)
 /// Port of luaT_trybinTM for unary operations

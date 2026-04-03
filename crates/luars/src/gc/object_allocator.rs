@@ -15,8 +15,11 @@ use crate::lua_value::{
 };
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcTable, GcThread, GcUpvalue,
-    GcUserdata, LuaFunction, LuaResult, LuaTable, LuaValue, ProtoPtr, StringPtr, UpvaluePtr,
+    LuaFunction, LuaResult, LuaTable, LuaValue,
+    gc::{
+        GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcTable, GcThread,
+        GcUpvalue, GcUserdata, ProtoPtr, StringPtr, UpvaluePtr,
+    },
 };
 
 pub type CreateResult = LuaResult<LuaValue>;

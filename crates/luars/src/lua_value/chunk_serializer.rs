@@ -3,16 +3,16 @@
 
 use super::{LocVar, LuaProto, LuaValue, UpvalueDesc};
 use crate::Instruction;
-use crate::gc::{GcProto, ObjectAllocator};
+use crate::gc::{GcProto, ObjectAllocator, ProtoPtr};
 use crate::lua_vm::LuaVM;
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
-fn detached_proto(chunk: LuaProto) -> crate::ProtoPtr {
+fn detached_proto(chunk: LuaProto) -> ProtoPtr {
     let size = std::mem::size_of::<GcProto>() as u32 + chunk.proto_data_size;
     let boxed = Box::new(GcProto::new(chunk, 0, size));
-    crate::ProtoPtr::new(Box::leak(boxed) as *const GcProto)
+    ProtoPtr::new(Box::leak(boxed) as *const GcProto)
 }
 
 // Magic number for lua-rs bytecode (different from official Lua)

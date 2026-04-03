@@ -1,5 +1,6 @@
 use crate::{
-    LuaProto, UpvaluePtr,
+    LuaProto,
+    gc::UpvaluePtr,
     lua_value::{UpvalueDesc, UpvalueStore},
     lua_vm::{LuaError, LuaResult, LuaState},
 };

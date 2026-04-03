@@ -1,4 +1,8 @@
-use crate::{GC, LuaValue, ObjectAllocator, lua_vm::TmKind};
+use crate::{
+    LuaValue,
+    gc::{GC, ObjectAllocator},
+    lua_vm::TmKind,
+};
 
 /// Number of tag methods (must match TmKind::N)
 const TM_N: usize = 26;

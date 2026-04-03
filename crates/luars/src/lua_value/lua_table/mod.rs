@@ -2,7 +2,7 @@
 pub mod native_table;
 
 use super::lua_value::LuaValue;
-use crate::{LuaResult, TablePtr, lua_vm::LuaError};
+use crate::{LuaError, LuaResult, gc::TablePtr};
 use native_table::NativeTable;
 
 /// Mask covering all TM flags — any bit set to 1 represents a cacheable TM.

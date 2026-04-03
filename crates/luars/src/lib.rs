@@ -46,7 +46,6 @@ pub use lua_value::userdata_trait::{
     RefUserData, UdValue, UserDataTrait,
 };
 
-pub use gc::*;
 pub use lib_registry::LibraryRegistry;
 pub use lua_api::*;
 pub use lua_value::RustCallback;

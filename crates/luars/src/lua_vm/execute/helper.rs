@@ -1,5 +1,6 @@
 use crate::{
-    CallInfo, LuaProto, LuaResult, LuaValue, TablePtr,
+    CallInfo, LuaProto, LuaResult, LuaValue,
+    gc::TablePtr,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT, udvalue_to_lua_value},
     lua_vm::{
         LuaError, LuaState, TmKind,

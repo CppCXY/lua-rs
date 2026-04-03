@@ -21,7 +21,8 @@ mod string_arth;
 pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
-use crate::gc::GC;
+use crate::gc::{CreateResult, GcKind, ObjectAllocator, ThreadPtr, UpvaluePtr};
+use crate::gc::{GC, ProtoPtr};
 use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua, collect_into_lua_values};
 use crate::lua_value::{
     LuaProto, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
@@ -43,10 +44,7 @@ pub use crate::lua_vm::safe_option::SafeOption;
 pub use crate::lua_vm::sandbox::SandboxConfig;
 use crate::platform_time::{PlatformInstant, unix_nanos};
 use crate::stdlib::Stdlib;
-use crate::{
-    CreateResult, GcKind, LuaEnum, LuaRegistrable, ObjectAllocator, OpaqueUserData, RustCallback,
-    TableBuilder, ThreadPtr, UpvaluePtr, lib_registry,
-};
+use crate::{LuaEnum, LuaRegistrable, OpaqueUserData, RustCallback, TableBuilder, lib_registry};
 pub use execute::TmKind;
 pub use execute::{get_metamethod_event, get_metatable};
 pub use lua_rng::LuaRng;
@@ -462,7 +460,7 @@ impl LuaVM {
     }
 
     /// Execute a chunk in the main thread
-    pub fn execute_chunk(&mut self, chunk: crate::ProtoPtr) -> LuaResult<Vec<LuaValue>> {
+    pub fn execute_chunk(&mut self, chunk: ProtoPtr) -> LuaResult<Vec<LuaValue>> {
         // Main chunk needs _ENV upvalue pointing to global table
         // This matches Lua 5.5+ behavior where all chunks have _ENV as upvalue[0]
         let env_upval = self.create_upvalue_closed(self.global)?;
@@ -471,7 +469,7 @@ impl LuaVM {
     }
 
     #[inline]
-    pub(crate) fn prepare_loaded_chunk(&mut self, chunk: LuaProto) -> LuaResult<crate::ProtoPtr> {
+    pub(crate) fn prepare_loaded_chunk(&mut self, chunk: LuaProto) -> LuaResult<ProtoPtr> {
         #[cfg(feature = "shared-proto")]
         {
             let proto = self.create_proto(chunk)?;
@@ -502,7 +500,7 @@ impl LuaVM {
     #[cfg(feature = "sandbox")]
     fn execute_chunk_with_env(
         &mut self,
-        chunk: crate::ProtoPtr,
+        chunk: ProtoPtr,
         env: LuaValue,
     ) -> LuaResult<Vec<LuaValue>> {
         let env_upval = self.create_upvalue_closed(env)?;
@@ -1010,7 +1008,7 @@ impl LuaVM {
         Ok(chunk)
     }
 
-    pub(crate) fn load_proto_from_file(&mut self, path: &str) -> LuaResult<crate::ProtoPtr> {
+    pub(crate) fn load_proto_from_file(&mut self, path: &str) -> LuaResult<ProtoPtr> {
         use crate::lua_value::chunk_serializer;
 
         let resolved_path = std::fs::canonicalize(path)
@@ -1601,17 +1599,13 @@ impl LuaVM {
     }
 
     #[inline(always)]
-    pub fn create_proto(&mut self, chunk: LuaProto) -> LuaResult<crate::ProtoPtr> {
+    pub fn create_proto(&mut self, chunk: LuaProto) -> LuaResult<ProtoPtr> {
         self.object_allocator.create_proto(&mut self.gc, chunk)
     }
 
     /// Create a function in object pool
     #[inline(always)]
-    pub fn create_function(
-        &mut self,
-        chunk: crate::ProtoPtr,
-        upvalues: UpvalueStore,
-    ) -> CreateResult {
+    pub fn create_function(&mut self, chunk: ProtoPtr, upvalues: UpvalueStore) -> CreateResult {
         self.object_allocator
             .create_function(&mut self.gc, chunk, upvalues)
     }

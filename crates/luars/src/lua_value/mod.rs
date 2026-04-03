@@ -21,8 +21,9 @@ pub use lua_table::LuaTable;
 pub use lua_value::{LUA_VNUMFLT, LUA_VNUMINT};
 pub use lua_value::{LuaValue, LuaValueKind};
 
+use crate::gc::{ProtoPtr, TablePtr, UpvaluePtr};
 use crate::lua_vm::CFunction;
-use crate::{Instruction, ProtoPtr, RefUserData, TablePtr, UpvaluePtr};
+use crate::{Instruction, RefUserData};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LuaValuePtr {

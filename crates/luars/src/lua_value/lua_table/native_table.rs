@@ -6,7 +6,7 @@ use crate::lua_value::{
     lua_value::{LUA_TNIL, LUA_VEMPTY, LUA_VNIL, LUA_VNUMINT, LUA_VSHRSTR, Value, novariant},
     short_string_ptr_eq,
 };
-use crate::{StringPtr, gc::GcString};
+use crate::{gc::GcString, gc::StringPtr};
 
 use std::alloc::{self, Layout};
 use std::ptr;
@@ -2236,9 +2236,9 @@ mod tests {
     #[cfg(feature = "shared-proto")]
     use crate::gc::share_lua_value;
     #[cfg(feature = "shared-proto")]
-    use crate::lua_vm::SafeOption;
+    use crate::gc::{GC, StringInterner};
     #[cfg(feature = "shared-proto")]
-    use crate::{GC, StringInterner};
+    use crate::lua_vm::SafeOption;
 
     #[test]
     fn test_native_table_basic() {

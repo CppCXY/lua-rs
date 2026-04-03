@@ -5,12 +5,12 @@
 pub mod parse_number;
 mod require;
 
+use crate::gc::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use crate::gc::{code_param, decode_param};
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind, UpvalueStore};
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 use crate::stdlib::basic::parse_number::parse_lua_number;
-use crate::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use require::lua_require;
 
 pub fn create_basic_lib() -> LibraryModule {

@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, time::SystemTime};
 
-use crate::{ProtoPtr, compiler::LuaLanguageLevel};
+use crate::{compiler::LuaLanguageLevel, gc::ProtoPtr};
 
 #[derive(Clone)]
 pub struct SharedFileProtoEntry {

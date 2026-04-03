@@ -1,7 +1,7 @@
 #[cfg(feature = "shared-proto")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::{StringInterner, StringPtr};
+use crate::gc::{StringInterner, StringPtr};
 
 #[cfg(feature = "shared-proto")]
 static SHARED_SHORT_STRING_ID: AtomicUsize = AtomicUsize::new(1);

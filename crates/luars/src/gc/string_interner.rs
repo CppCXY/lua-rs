@@ -1,8 +1,9 @@
 use ahash::RandomState;
 
+use crate::LuaValue;
+use crate::gc::{CreateResult, GC, GcObjectOwner, GcString, StringPtr};
 use crate::lua_value::{InlineShortString, LuaStrRepr, LuaString};
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
-use crate::{CreateResult, GC, GcObjectOwner, GcString, LuaValue, StringPtr};
 
 const STRING_HASH_SEED_1: u64 = 0x243f_6a88_85a3_08d3;
 const STRING_HASH_SEED_2: u64 = 0x1319_8a2e_0370_7344;
@@ -64,6 +65,7 @@ impl Default for StringInterner {
     }
 }
 
+#[allow(unused)]
 impl StringInterner {
     pub const SHORT_STRING_LIMIT: usize = LUAI_MAXSHORTLEN;
     const INITIAL_SIZE: usize = 128;
@@ -335,8 +337,7 @@ mod tests {
     use super::StringInterner;
     #[cfg(feature = "shared-proto")]
     use super::share_lua_value;
-
-    use crate::GC;
+    use crate::gc::GC;
     use crate::lua_value::LuaStrRepr;
     use crate::lua_vm::SafeOption;
 

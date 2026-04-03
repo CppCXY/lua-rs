@@ -5,6 +5,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::gc::{CreateResult, GcObjectPtr, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr};
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_RECST, CIST_XPCALL, CIST_YPCALL};
@@ -17,10 +18,7 @@ use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, Sand
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 #[cfg(feature = "sandbox")]
 use crate::platform_time::unix_nanos;
-use crate::{
-    AsyncReturnValue, CreateResult, GcObjectPtr, LuaAnyRef, LuaFunctionRef, LuaRegistrable,
-    LuaTableRef, LuaVM, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
-};
+use crate::{AsyncReturnValue, LuaAnyRef, LuaFunctionRef, LuaRegistrable, LuaTableRef, LuaVM};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts

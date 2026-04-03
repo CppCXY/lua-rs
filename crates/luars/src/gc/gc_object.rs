@@ -1,5 +1,6 @@
 use crate::{
-    GcObjectKind, LuaFunction, LuaProto, LuaTable, LuaValue,
+    LuaFunction, LuaProto, LuaTable, LuaValue,
+    gc::GcObjectKind,
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
 };
@@ -26,7 +27,6 @@ pub const SHAREDBIT: u8 = 7; // Object is shared across VMs and never collected
 pub const WHITEBITS: u8 = (1 << WHITE0BIT) | (1 << WHITE1BIT);
 pub const AGEBITS: u8 = 0x07; // Mask for age bits (bits 0-2: 0b00000111)
 pub const MASKCOLORS: u8 = (1 << BLACKBIT) | WHITEBITS;
-pub const MASKGCBITS: u8 = MASKCOLORS | AGEBITS;
 
 /// GC object header - embedded in every GC-managed object
 /// Port of Lua 5.5's CommonHeader (lgc.h)
@@ -960,6 +960,7 @@ pub struct GcList {
     gc_list: Vec<GcObjectOwner>,
 }
 
+#[allow(unused)]
 impl GcList {
     #[inline]
     pub fn new() -> Self {
