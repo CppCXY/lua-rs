@@ -8,7 +8,7 @@ If you are embedding Lua into an application, start here. The examples below int
 
 ```toml
 [dependencies]
-luars = "0.17"
+luars = "0.18"
 ```
 
 The `#[derive(LuaUserData)]` and `#[lua_methods]` macros are re-exported by `luars`, so you usually do not need to depend on `luars-derive` directly.

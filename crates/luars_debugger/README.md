@@ -10,8 +10,8 @@ Add the crate to `Cargo.toml`:
 
 ```toml
 [dependencies]
-luars = "0.17"
-luars_debugger = "0.17"
+luars = "0.18"
+luars_debugger = "0.18"
 ```
 
 Then install the debugger into your runtime:

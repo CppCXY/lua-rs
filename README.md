@@ -3,6 +3,8 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![crate](https://img.shields.io/crates/v/luars.svg?style=flat-square)](https://crates.io/crates/luars)
 
+> **Note**: This is an **Lua 5.5** lib through AI-assisted programming.
+
 luars is a pure Rust Lua 5.5 runtime and embedding toolkit. This repository contains the core library, derive macros, the interpreter, debugger integration, a WASM target, and several host-facing examples.
 
 The repository-level documentation is intentionally focused on the high-level `Lua` API. Lower-level `LuaVM` APIs still exist, but the default examples and guides now use the high-level surface first.
@@ -11,7 +13,7 @@ The repository-level documentation is intentionally focused on the high-level `L
 
 ```toml
 [dependencies]
-luars = "0.17"
+luars = "0.18"
 ```
 
 ```rust

@@ -11,14 +11,14 @@ If you want the repository-level overview, including examples and companion crat
 
 ```toml
 [dependencies]
-luars = "0.17"
+luars = "0.18"
 ```
 
 Optional features:
 
 ```toml
 [dependencies]
-luars = { version = "0.17", features = ["serde", "sandbox"] }
+luars = { version = "0.18", features = ["serde", "sandbox"] }
 ```
 
 ## Quick Start
