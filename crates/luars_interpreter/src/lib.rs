@@ -391,8 +391,9 @@ fn lua_main() -> i32 {
     let mut vm = LuaVM::new(safe_option);
     vm.open_stdlib(Stdlib::All).unwrap();
 
-    // Register the built-in debugger (require "emmy_core")
-    luars_debugger::register_debugger(&mut vm).unwrap();
+    // Install the built-in debugger (require "emmy_core")
+    vm.install_library(luars_debugger::Library::default())
+        .unwrap();
 
     if cfg!(debug_assertions) {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));

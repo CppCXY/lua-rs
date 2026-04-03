@@ -1,11 +1,28 @@
 // Library registration system for Lua standard libraries
 // Provides a clean way to register Rust functions as Lua libraries
 
+use crate::lua_api;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::LuaState;
 use crate::lua_vm::{CFunction, LuaResult, LuaVM};
 use crate::stdlib::{self, Stdlib};
 // use crate::stdlib;
+
+/// Unified installation interface for libraries provided by luars or external crates.
+///
+/// A library can expose itself either as a plain [`LibraryModule`], a preload-only
+/// module such as [`PreloadModule`], or a custom builder type that performs extra
+/// setup before registering itself into the VM.
+pub trait LuaLibrary {
+    /// Install this library into a low-level [`LuaVM`].
+    fn install_vm(&self, vm: &mut LuaVM) -> LuaResult<()>;
+
+    /// Install this library into the high-level [`crate::Lua`] API.
+    fn install_lua(&self, lua: &mut lua_api::Lua) -> LuaResult<()> {
+        let vm = unsafe { lua.vm_mut() };
+        self.install_vm(vm)
+    }
+}
 
 /// Type for value initializers - functions that create values when the module loads
 pub type ValueInitializer = fn(&mut LuaVM) -> LuaResult<LuaValue>;
@@ -17,6 +34,28 @@ pub type ModuleInitializer = fn(&mut LuaState) -> LuaResult<()>;
 pub enum LibraryEntry {
     Function(CFunction),
     Value(ValueInitializer),
+}
+
+/// A simple `require()`-loadable preload module.
+pub struct PreloadModule {
+    pub name: String,
+    pub loader: CFunction,
+}
+
+impl PreloadModule {
+    /// Create a new preload module descriptor.
+    pub fn new(name: impl Into<String>, loader: CFunction) -> Self {
+        Self {
+            name: name.into(),
+            loader,
+        }
+    }
+}
+
+impl LuaLibrary for PreloadModule {
+    fn install_vm(&self, vm: &mut LuaVM) -> LuaResult<()> {
+        vm.register_preload(&self.name, self.loader)
+    }
 }
 
 /// A library module containing multiple functions and values
@@ -52,6 +91,12 @@ impl LibraryModule {
     pub fn with_initializer(mut self, init: ModuleInitializer) -> Self {
         self.initializer = Some(init);
         self
+    }
+}
+
+impl LuaLibrary for LibraryModule {
+    fn install_vm(&self, vm: &mut LuaVM) -> LuaResult<()> {
+        load_library_module(vm, self)
     }
 }
 
@@ -97,86 +142,90 @@ impl LibraryRegistry {
 
     /// Load a specific module into the VM
     pub fn load_module(&self, vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> {
-        // Create a table for the library
-        let lib_table = vm.create_table(0, 0)?;
-
-        // Register all entries in the table
-        for (name, entry) in &module.entries {
-            let value = match entry {
-                LibraryEntry::Function(func) => LuaValue::cfunction(*func),
-                LibraryEntry::Value(value_init) => value_init(vm)?,
-            };
-            let name_key = vm.create_string(name)?;
-            vm.raw_set(&lib_table, name_key, value);
-        }
-
-        // Set the library table as a global
-        if module.name == "_G" {
-            // For global functions, register them directly
-            for (name, entry) in &module.entries {
-                let value = match entry {
-                    LibraryEntry::Function(func) => LuaValue::cfunction(*func),
-                    LibraryEntry::Value(value_init) => value_init(vm)?,
-                };
-                vm.set_global(name, value)?;
-            }
-            // Also register _G (the globals table) in package.loaded["_G"]
-            // This matches C Lua's behavior where luaL_requiref stores the base library
-            // result in package.loaded["_G"], enabling pushglobalfuncname to find
-            // global C functions like pcall, print, etc.
-            let globals = vm.global;
-            if let Some(package_table) = vm.get_global("package")?
-                && package_table.is_table()
-            {
-                let loaded_key = vm.create_string("loaded")?;
-                if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
-                    && loaded_table.is_table()
-                {
-                    let mod_key = vm.create_string("_G")?;
-                    vm.raw_set(&loaded_table, mod_key, globals);
-                }
-            }
-        } else {
-            // For module libraries, set the table as global
-            vm.set_global(module.name, lib_table)?;
-
-            // Special handling for string library: set string metatable
-            if module.name == "string" {
-                // In Lua, all strings share a metatable where __index points to the string library
-                // This allows using string methods with : syntax (e.g., str:upper())
-                vm.set_string_metatable(lib_table)?;
-            }
-
-            // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)
-            // No need for Lua override anymore
-
-            // Also register in package.loaded and package.preload (if package exists)
-            // This allows require() to find standard libraries
-            if let Some(package_table) = vm.get_global("package")?
-                && package_table.is_table()
-            {
-                let loaded_key = vm.create_string("loaded")?;
-                if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
-                    && loaded_table.is_table()
-                {
-                    let mod_key = vm.create_string(module.name)?;
-                    vm.raw_set(&loaded_table, mod_key, lib_table);
-                }
-            }
-        }
-
-        // Call the module initializer if it exists
-        if let Some(init_fn) = module.initializer {
-            init_fn(vm.main_state())?;
-        }
-
-        Ok(())
+        load_library_module(vm, module)
     }
 
     /// Get a module by name
     pub fn get_module(&self, name: &str) -> Option<&LibraryModule> {
         self.modules.iter().find(|m| m.name == name)
     }
+}
+
+fn load_library_module(vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> {
+    // Create a table for the library
+    let lib_table = vm.create_table(0, 0)?;
+
+    // Register all entries in the table
+    for (name, entry) in &module.entries {
+        let value = match entry {
+            LibraryEntry::Function(func) => LuaValue::cfunction(*func),
+            LibraryEntry::Value(value_init) => value_init(vm)?,
+        };
+        let name_key = vm.create_string(name)?;
+        vm.raw_set(&lib_table, name_key, value);
+    }
+
+    // Set the library table as a global
+    if module.name == "_G" {
+        // For global functions, register them directly
+        for (name, entry) in &module.entries {
+            let value = match entry {
+                LibraryEntry::Function(func) => LuaValue::cfunction(*func),
+                LibraryEntry::Value(value_init) => value_init(vm)?,
+            };
+            vm.set_global(name, value)?;
+        }
+        // Also register _G (the globals table) in package.loaded["_G"]
+        // This matches C Lua's behavior where luaL_requiref stores the base library
+        // result in package.loaded["_G"], enabling pushglobalfuncname to find
+        // global C functions like pcall, print, etc.
+        let globals = vm.global;
+        if let Some(package_table) = vm.get_global("package")?
+            && package_table.is_table()
+        {
+            let loaded_key = vm.create_string("loaded")?;
+            if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
+                && loaded_table.is_table()
+            {
+                let mod_key = vm.create_string("_G")?;
+                vm.raw_set(&loaded_table, mod_key, globals);
+            }
+        }
+    } else {
+        // For module libraries, set the table as global
+        vm.set_global(module.name, lib_table)?;
+
+        // Special handling for string library: set string metatable
+        if module.name == "string" {
+            // In Lua, all strings share a metatable where __index points to the string library
+            // This allows using string methods with : syntax (e.g., str:upper())
+            vm.set_string_metatable(lib_table)?;
+        }
+
+        // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)
+        // No need for Lua override anymore
+
+        // Also register in package.loaded and package.preload (if package exists)
+        // This allows require() to find standard libraries
+        if let Some(package_table) = vm.get_global("package")?
+            && package_table.is_table()
+        {
+            let loaded_key = vm.create_string("loaded")?;
+            if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
+                && loaded_table.is_table()
+            {
+                let mod_key = vm.create_string(module.name)?;
+                vm.raw_set(&loaded_table, mod_key, lib_table);
+            }
+        }
+    }
+
+    // Call the module initializer if it exists
+    if let Some(init_fn) = module.initializer {
+        init_fn(vm.main_state())?;
+    }
+
+    Ok(())
 }
 
 impl Default for LibraryRegistry {

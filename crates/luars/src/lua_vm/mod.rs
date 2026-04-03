@@ -23,6 +23,7 @@ pub mod table_builder;
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::{CreateResult, GcKind, ObjectAllocator, ThreadPtr, UpvaluePtr};
 use crate::gc::{GC, ProtoPtr};
+use crate::lib_registry::LuaLibrary;
 use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua, collect_into_lua_values};
 use crate::lua_value::{
     LuaProto, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
@@ -319,6 +320,11 @@ impl LuaVM {
             self.raw_set(&preload, key, LuaValue::cfunction(loader));
         }
         Ok(())
+    }
+
+    /// Install a library provided by luars or an external crate.
+    pub fn install_library<L: LuaLibrary>(&mut self, library: L) -> LuaResult<()> {
+        library.install_vm(self)
     }
 
     /// Set a value in the registry by integer key

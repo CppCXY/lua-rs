@@ -433,6 +433,22 @@ mod tests {
         assert_eq!(function.call1::<_, i64>(21).unwrap(), 42);
     }
 
+    #[test]
+    fn high_level_lua_install_library_works() {
+        let mut lua = Lua::new(SafeOption::default());
+        lua.open_stdlib(Stdlib::All).unwrap();
+
+        let module = crate::LibraryModule::new("hostlib").with_function("answer", |l| {
+            l.push_value(crate::LuaValue::integer(42))?;
+            Ok(1)
+        });
+
+        lua.install_library(module).unwrap();
+
+        let answer: i64 = lua.load("return hostlib.answer()").eval().unwrap();
+        assert_eq!(answer, 42);
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn table_serde_json_round_trip_works() {

@@ -46,7 +46,7 @@ pub use lua_value::userdata_trait::{
     RefUserData, UdValue, UserDataTrait,
 };
 
-pub use lib_registry::LibraryRegistry;
+pub use lib_registry::{LibraryModule, LibraryRegistry, LuaLibrary, PreloadModule};
 pub use lua_api::*;
 pub use lua_value::RustCallback;
 pub use lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};

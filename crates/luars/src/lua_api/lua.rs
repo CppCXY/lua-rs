@@ -3,8 +3,8 @@ use luars::SandboxConfig;
 use luars::lua_vm::SafeOption;
 use luars::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
 use luars::{
-    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaRegistrable, LuaResult, LuaUserdata, LuaVM, Stdlib,
-    UserDataRef, UserDataTrait,
+    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaLibrary, LuaRegistrable, LuaResult, LuaUserdata,
+    LuaVM, Stdlib, UserDataRef, UserDataTrait,
 };
 
 use crate::lua_api::util::{collect_values, from_value, into_single_value};
@@ -30,6 +30,12 @@ impl Lua {
     #[inline]
     pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
         self.vm.open_stdlib(lib)
+    }
+
+    /// Install a library provided by luars or an external crate.
+    #[inline]
+    pub fn install_library<L: LuaLibrary>(&mut self, library: L) -> LuaResult<()> {
+        library.install_lua(self)
     }
 
     /// Open standard libraries.
