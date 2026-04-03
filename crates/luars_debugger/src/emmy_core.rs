@@ -12,7 +12,7 @@ use luars::{CFunction, LUA_MASKLINE, LuaResult, LuaState, LuaValue};
 use crate::debugger::Debugger;
 use crate::debugger::hook::should_break;
 
-/// Global debugger instance. Set once during `register_debugger()`.
+/// Global debugger instance. Set once during library installation.
 /// CFunction callbacks can't capture state, so we use a global.
 static DEBUGGER: OnceLock<Arc<Debugger>> = OnceLock::new();
 
@@ -21,7 +21,7 @@ fn get_debugger() -> &'static Arc<Debugger> {
     DEBUGGER.get().expect("debugger not initialized")
 }
 
-/// Set the global debugger instance. Called once from `register_debugger()`.
+/// Set the global debugger instance. Called once during library installation.
 pub(crate) fn set_debugger(dbg: Arc<Debugger>) {
     DEBUGGER.set(dbg).ok();
 }

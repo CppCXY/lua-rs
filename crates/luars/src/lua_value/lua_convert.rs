@@ -22,7 +22,7 @@
 //! Users can implement `FromLua` / `IntoLua` for their own types:
 //! ```ignore
 //! impl FromLua for MyVec3 {
-//!     fn from_lua(value: LuaValue, state: &LuaState) -> Result<Self, String> {
+//!     fn from_lua(value: LuaValue, state: &mut LuaState) -> Result<Self, String> {
 //!         // extract from userdata or table
 //!     }
 //! }
@@ -65,7 +65,7 @@ pub trait FromLua: Sized {
     /// Convert a `LuaValue` to `Self`.
     ///
     /// `state` is provided for operations that need GC access (e.g. string interning).
-    fn from_lua(value: LuaValue, state: &LuaState) -> Result<Self, String>;
+    fn from_lua(value: LuaValue, state: &mut LuaState) -> Result<Self, String>;
 }
 
 /// Convert a Lua multi-return list into a Rust type.
@@ -75,7 +75,7 @@ pub trait FromLua: Sized {
 /// `T: FromLua`, and tuples map positionally.
 pub trait FromLuaMulti: Sized {
     /// Convert a list of Lua values to `Self`.
-    fn from_lua_multi(values: Vec<LuaValue>, state: &LuaState) -> Result<Self, String>;
+    fn from_lua_multi(values: Vec<LuaValue>, state: &mut LuaState) -> Result<Self, String>;
 }
 
 /// Convert a Rust type into a `LuaValue` and push it.
@@ -93,7 +93,7 @@ pub trait IntoLua {
 
 impl FromLua for LuaValue {
     #[inline]
-    fn from_lua(value: LuaValue, _state: &LuaState) -> Result<Self, String> {
+    fn from_lua(value: LuaValue, _state: &mut LuaState) -> Result<Self, String> {
         Ok(value)
     }
 }
@@ -110,7 +110,7 @@ impl IntoLua for LuaValue {
 
 impl FromLua for () {
     #[inline]
-    fn from_lua(_value: LuaValue, _state: &LuaState) -> Result<Self, String> {
+    fn from_lua(_value: LuaValue, _state: &mut LuaState) -> Result<Self, String> {
         Ok(())
     }
 }
@@ -124,7 +124,7 @@ impl IntoLua for () {
 
 impl<T: FromLua> FromLuaMulti for T {
     #[inline]
-    fn from_lua_multi(values: Vec<LuaValue>, state: &LuaState) -> Result<Self, String> {
+    fn from_lua_multi(values: Vec<LuaValue>, state: &mut LuaState) -> Result<Self, String> {
         let value = values.into_iter().next().unwrap_or_default();
         T::from_lua(value, state)
     }
@@ -132,7 +132,7 @@ impl<T: FromLua> FromLuaMulti for T {
 
 impl FromLuaMulti for Vec<LuaValue> {
     #[inline]
-    fn from_lua_multi(values: Vec<LuaValue>, _state: &LuaState) -> Result<Self, String> {
+    fn from_lua_multi(values: Vec<LuaValue>, _state: &mut LuaState) -> Result<Self, String> {
         Ok(values)
     }
 }
@@ -141,7 +141,7 @@ impl FromLuaMulti for Vec<LuaValue> {
 
 impl FromLua for bool {
     #[inline]
-    fn from_lua(value: LuaValue, _state: &LuaState) -> Result<Self, String> {
+    fn from_lua(value: LuaValue, _state: &mut LuaState) -> Result<Self, String> {
         // Follow Lua truthiness: nil and false → false, everything else → true
         Ok(value.as_boolean().unwrap_or(!value.is_nil()))
     }
@@ -164,7 +164,7 @@ macro_rules! impl_from_lua_int {
         $(
             impl FromLua for $ty {
                 #[inline]
-                fn from_lua(value: LuaValue, _state: &LuaState) -> Result<Self, String> {
+                fn from_lua(value: LuaValue, _state: &mut LuaState) -> Result<Self, String> {
                     if let Some(i) = value.as_integer() {
                         Ok(i as $ty)
                     } else if let Some(f) = value.as_float() {
@@ -197,7 +197,7 @@ macro_rules! impl_from_lua_float {
         $(
             impl FromLua for $ty {
                 #[inline]
-                fn from_lua(value: LuaValue, _state: &LuaState) -> Result<Self, String> {
+                fn from_lua(value: LuaValue, _state: &mut LuaState) -> Result<Self, String> {
                     if let Some(n) = value.as_number() {
                         Ok(n as $ty)
                     } else if let Some(i) = value.as_integer() {
@@ -227,7 +227,7 @@ impl_from_lua_float!(f32, f64);
 
 impl FromLua for String {
     #[inline]
-    fn from_lua(value: LuaValue, _state: &LuaState) -> Result<Self, String> {
+    fn from_lua(value: LuaValue, _state: &mut LuaState) -> Result<Self, String> {
         if let Some(s) = value.as_str() {
             Ok(s.to_owned())
         } else if let Some(i) = value.as_integer() {
@@ -263,7 +263,7 @@ impl IntoLua for &str {
 
 impl<T: FromLua> FromLua for Option<T> {
     #[inline]
-    fn from_lua(value: LuaValue, state: &LuaState) -> Result<Self, String> {
+    fn from_lua(value: LuaValue, state: &mut LuaState) -> Result<Self, String> {
         if value.is_nil() {
             Ok(None)
         } else {
@@ -329,7 +329,7 @@ macro_rules! impl_lua_tuple_conversions {
 
             impl<$($ty: FromLua),+> FromLuaMulti for ($($ty,)+) {
                 #[inline]
-                fn from_lua_multi(values: Vec<LuaValue>, state: &LuaState) -> Result<Self, String> {
+                fn from_lua_multi(values: Vec<LuaValue>, state: &mut LuaState) -> Result<Self, String> {
                     let mut iter = values.into_iter();
                     Ok(($(
                         $ty::from_lua(iter.next().unwrap_or(LuaValue::nil()), state)?,

@@ -1,4 +1,4 @@
-// Lua 5.4 compatible value representation
+// Lua 5.5 compatible value representation
 // 16 bytes, no pointer caching, all GC objects accessed via ID
 pub mod chunk_serializer;
 pub mod lua_convert;
@@ -14,23 +14,16 @@ use std::fmt;
 
 pub use lua_string::*;
 pub use userdata_builder::UserDataBuilder;
-pub use userdata_trait::{
-    LuaEnum, LuaMethodProvider, LuaRegistrable, LuaStaticMethodProvider, OpaqueUserData, UdValue,
-    UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value,
-};
+pub use userdata_trait::{UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_value};
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
+pub use lua_value::{LUA_VNUMFLT, LUA_VNUMINT};
 pub use lua_value::{LuaValue, LuaValueKind};
 
-// Re-export type tag constants for VM execution
-pub use lua_value::{
-    LUA_TBOOLEAN, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT,
-    LUA_VNUMINT, LUA_VTABLE, LUA_VTRUE,
-};
-
+use crate::gc::{ProtoPtr, TablePtr, UpvaluePtr};
 use crate::lua_vm::CFunction;
-use crate::{Instruction, ProtoPtr, RefUserData, TablePtr, UpvaluePtr};
+use crate::{Instruction, RefUserData};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct LuaValuePtr {
@@ -376,7 +369,7 @@ pub struct LocVar {
 
 /// Compiled chunk (bytecode + metadata)
 #[derive(Debug, Clone)]
-pub struct Chunk {
+pub struct LuaProto {
     pub code: Vec<Instruction>,
     pub constants: Vec<LuaValue>,
     pub locals: Vec<LocVar>,
@@ -395,15 +388,15 @@ pub struct Chunk {
     pub proto_data_size: u32,            // Cached size for GC (code+constants+children+lines)
 }
 
-impl Default for Chunk {
+impl Default for LuaProto {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Chunk {
+impl LuaProto {
     pub fn new() -> Self {
-        Chunk {
+        LuaProto {
             code: Vec::new(),
             constants: Vec::new(),
             locals: Vec::new(),
@@ -523,7 +516,7 @@ impl LuaFunction {
 
     /// Get the chunk if this is a Lua function
     #[inline(always)]
-    pub fn chunk(&self) -> &Chunk {
+    pub fn chunk(&self) -> &LuaProto {
         &self.chunk.as_ref().data
     }
 

@@ -1,96 +1,124 @@
-# luars User Guide
+# luars High-Level Guide
 
-A comprehensive guide to embedding the luars Lua 5.5 runtime in your Rust application.
+This guide documents the high-level embedding API exposed through `luars::Lua`.
 
-## Getting Started
+If you are embedding Lua into an application, start here. The examples below intentionally avoid low-level `LuaVM`, raw stack manipulation, and direct `LuaValue` plumbing.
 
-| Document | Description |
-|----------|-------------|
-| [Getting Started](guide/01-GettingStarted.md) | Create a VM, load stdlib, run your first Lua script |
-| [Executing Code](guide/02-ExecutingCode.md) | `execute`, `load`, `dofile`, `call_global`, return values |
-| [Working with Values](guide/03-WorkingWithValues.md) | `LuaValue`, globals, tables, strings |
-| [Rust Functions in Lua](guide/04-RustFunctions.md) | `CFunction`, `RClosure`, `create_closure` |
-| [FromLua / IntoLua](guide/05-FromLuaIntoLua.md) | Automatic Rust ↔ Lua type conversion traits |
-| [Error Handling](guide/06-ErrorHandling.md) | `LuaError`, `LuaFullError`, `pcall`, `xpcall`, `Result` |
-| [API Reference](guide/07-APIReference.md) | Quick reference of all public methods |
+## Installation
 
-## UserData (Custom Rust Types in Lua)
-
-| Document | Description |
-|----------|-------------|
-| [Getting Started](userdata/GettingStarted.md) | 5-minute quickstart: define a Point, use it in Lua |
-| [#\[derive(LuaUserData)\]](userdata/DeriveUserData.md) | Field exposure and attributes (`skip` / `readonly` / `name`) |
-| [#\[lua_methods\]](userdata/LuaMethods.md) | Instance methods, constructors, `#[lua(skip)]` on methods |
-| [register_type](userdata/RegisterType.md) | Type registration: `register_type` and `register_type_of` |
-| [Type Conversions](userdata/TypeConversions.md) | Parameter types, return types, `Option` / `Result` handling |
-| [Complete Examples](userdata/Examples.md) | End-to-end examples: Vec2, AppConfig, Calculator, and more |
-
-## Async (Rust Async Functions in Lua)
-
-| Document | Description |
-|----------|-------------|
-| [Getting Started](async/01-getting-started.md) | 5-minute async quickstart |
-| [API Reference](async/02-api-reference.md) | All async types and methods |
-| [Examples](async/03-examples.md) | Code examples from simple to complex |
-| [Architecture](async/04-architecture.md) | Coroutine↔Future bridging internals |
-| [Multi-VM Patterns](async/05-multi-vm.md) | Concurrent multi-VM design patterns |
-| [HTTP Server Example](async/06-http-server.md) | Complete async HTTP server walkthrough |
-
-## Other
-
-| Document | Description |
-|----------|-------------|
-| [Differences from C Lua](Different.md) | All known behavioral differences between luars and C Lua 5.5 |
-
-## Quick Example
-
-```rust
-use luars::{LuaVM, SafeOption, Stdlib};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Create a VM
-    let mut vm = LuaVM::new(SafeOption::default());
-
-    // 2. Load the standard library
-    vm.open_stdlib(Stdlib::All)?;
-
-    // 3. Execute Lua code
-    let results = vm.execute(r#"
-        local sum = 0
-        for i = 1, 100 do
-            sum = sum + i
-        end
-        return sum
-    "#)?;
-
-    println!("Sum = {:?}", results[0].as_integer()); // Some(5050)
-    Ok(())
-}
+```toml
+[dependencies]
+luars = "0.17"
 ```
 
-## Typed-First Embedding Style
+The `#[derive(LuaUserData)]` and `#[lua_methods]` macros are re-exported by `luars`, so you usually do not need to depend on `luars-derive` directly.
 
-The public embedding API is now typed-first.
-
-Prefer these methods in application code:
-
-- `call` / `call1`
-- `call_global` / `call1_global`
-- `register_function_typed`
-- `register_async_typed`
-- `UserDataRef<T>` for typed userdata access inside Rust callbacks
-
-Use the raw fallbacks only when you intentionally want to manipulate `LuaValue` vectors yourself:
-
-- `call_raw`
-- `call_global_raw`
-- `register_function`
-- `register_async`
-
-Example:
+## 1. Create a runtime
 
 ```rust
-use luars::{LuaUserData, LuaVM, SafeOption, Stdlib, UserDataRef, lua_methods};
+use luars::{Lua, SafeOption, Stdlib};
+
+let mut lua = Lua::new(SafeOption::default());
+lua.load_stdlibs(Stdlib::All)?;
+```
+
+## 2. Execute chunks
+
+```rust
+lua.load(
+    r#"
+    local total = 0
+    for i = 1, 100 do
+        total = total + i
+    end
+    result = total
+    "#,
+)
+.exec()?;
+
+let result: i64 = lua.load("return result").eval()?;
+assert_eq!(result, 5050);
+```
+
+Use these entry points in normal host code:
+
+- `exec()` for chunks with side effects
+- `eval()` for one typed return value
+- `eval_multi()` for tuple-style results
+
+If the chunk may call async Rust functions, the same builder exposes:
+
+- `exec_async()`
+- `eval_async()`
+- `eval_multi_async()`
+
+## 3. Register Rust functions
+
+```rust
+lua.register_function("discount", |price_cents: i64, percent: i64| -> i64 {
+    price_cents - (price_cents * percent / 100)
+})?;
+
+let value: i64 = lua.load("return discount(2000, 15)").eval()?;
+assert_eq!(value, 1700);
+```
+
+Async callbacks use the same typed style:
+
+```rust
+lua.register_async_function("double_async", |value: i64| async move {
+    Ok(value * 2)
+})?;
+
+let result: i64 = lua.load("return double_async(21)").eval_async().await?;
+assert_eq!(result, 42);
+```
+
+## 4. Call Lua from Rust
+
+```rust
+lua.load(
+    r#"
+    function classify(score)
+        if score >= 90 then
+            return "excellent"
+        elseif score >= 60 then
+            return "pass"
+        else
+            return "retry"
+        end
+    end
+    "#,
+)
+.exec()?;
+
+let label: String = lua.call_global1("classify", 92_i64)?;
+assert_eq!(label, "excellent");
+```
+
+Async host code can use `call_async()`, `call_async1()`, `call_async_global()`, and `call_async_global1()`.
+
+## 5. Exchange tables and globals
+
+```rust
+let request = lua.create_table()?;
+request.set("path", "/orders")?;
+request.set("method", "GET")?;
+
+let headers = lua.create_table_from([("x-request-id", "req-42"), ("x-env", "dev")])?;
+request.set("headers", headers)?;
+lua.globals().set("request", request)?;
+
+let method: String = lua.load("return request.method").eval()?;
+assert_eq!(method, "GET");
+```
+
+The high-level table API is the default way to exchange structured data with Lua.
+
+## 6. Expose Rust types
+
+```rust
+use luars::{LuaUserData, lua_methods};
 
 #[derive(LuaUserData)]
 struct Counter {
@@ -102,38 +130,59 @@ impl Counter {
     pub fn new(count: i64) -> Self {
         Self { count }
     }
+
+    pub fn inc(&mut self, delta: i64) {
+        self.count += delta;
+    }
+
+    pub fn get(&self) -> i64 {
+        self.count
+    }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All)?;
-
-    vm.execute("function add(a, b) return a + b end")?;
-    let sum: i64 = vm.call1_global("add", (10, 20))?;
-    assert_eq!(sum, 30);
-
-    vm.register_function_typed("bump", |mut counter: UserDataRef<Counter>, delta: i64| {
-        let counter_ref = counter.get_mut().unwrap();
-        counter_ref.count += delta;
-        counter_ref.count
-    })?;
-
-    vm.register_async_typed("double_async", |n: i64| async move {
-        Ok(n * 2)
-    })?;
-
-    Ok(())
-}
+lua.register_type::<Counter>("Counter")?;
 ```
 
-## Dependencies
+More detail is available in [UserGuide.md](UserGuide.md).
 
-```toml
-[dependencies]
-luars = "0.12"
+## 7. Use scope for borrowed values
 
-# With JSON support:
-luars = { version = "0.12", features = ["serde"] }
+`scope(...)` lets you temporarily expose borrowed Rust data to Lua without forcing it into a `'static` lifetime.
+
+```rust
+let formatted: String = lua.scope(|scope| {
+    let prefix = String::from("order:");
+    let render = scope.create_function_with(&prefix, |prefix: &String, id: i64| {
+        format!("{prefix}{id}")
+    })?;
+
+    scope.globals().set("render", &render)?;
+    scope.load("return render(42)").eval()
+})?;
+
+assert_eq!(formatted, "order:42");
 ```
 
-The `#[derive(LuaUserData)]` and `#[lua_methods]` macros are re-exported by `luars` automatically — no need to add `luars-derive` separately.
+## 8. Use sandboxed chunks
+
+When the `sandbox` feature is enabled, the high-level API can execute chunks in an isolated `_ENV`:
+
+```rust
+use luars::SandboxConfig;
+
+let mut sandbox = SandboxConfig::default();
+lua.sandbox_insert_global(&mut sandbox, "answer", 42_i64)?;
+
+let answer: i64 = lua.eval_sandboxed("return answer", &sandbox)?;
+assert_eq!(answer, 42);
+assert!(lua.get_global::<i64>("answer")?.is_none());
+```
+
+`load_sandboxed()` returns a chunk builder, which is useful when you want a sandboxed script to return a function or table that you keep on the Rust side.
+
+## Examples
+
+- [../examples/luars-example/src/main.rs](../examples/luars-example/src/main.rs) for globals, userdata, and scope
+- [../examples/rules-engine-demo/src/main.rs](../examples/rules-engine-demo/src/main.rs) for host functions and table exchange
+- [../examples/http-server/src/main.rs](../examples/http-server/src/main.rs) for async request handling with sandboxed Lua handlers
+- [../examples/rust-bind-bench/src/main.rs](../examples/rust-bind-bench/src/main.rs) for repeated userdata calls

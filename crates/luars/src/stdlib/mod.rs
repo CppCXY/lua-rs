@@ -1,4 +1,4 @@
-// Lua 5.4 Standard Libraries Implementation
+// Lua 5.5 Standard Libraries Implementation
 
 pub mod basic;
 pub mod coroutine;

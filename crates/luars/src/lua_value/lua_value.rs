@@ -28,13 +28,13 @@
 // - Bits 0-3: 基础类型 (LUA_TNIL, LUA_TBOOLEAN, LUA_TNUMBER, etc.)
 // - Bits 4-5: variant bits (区分子类型,如integer/float, short/long string)
 // - Bit 6: BIT_ISCOLLECTABLE (标记是否是GC对象)
+use crate::gc::{
+    CClosurePtr, FunctionPtr, GcCClosure, GcFunction, GcObjectPtr, GcRClosure, GcString, GcTable,
+    GcThread, GcUserdata, RClosurePtr, StringPtr, TablePtr, ThreadPtr, UserdataPtr,
+};
 use crate::lua_value::{CClosureFunction, LuaUserdata, RClosureFunction, short_string_ptr_eq};
 use crate::lua_vm::{CFunction, LuaState};
-use crate::{
-    CClosurePtr, FunctionPtr, GcCClosure, GcFunction, GcObjectPtr, GcRClosure, GcString, GcTable,
-    GcThread, GcUserdata, LuaFunction, LuaTable, RClosurePtr, StringPtr, TablePtr, ThreadPtr,
-    UserdataPtr,
-};
+use crate::{LuaFunction, LuaTable};
 
 // ============ Basic type tags (bits 0-3) ============
 // From lua.h
@@ -144,7 +144,6 @@ impl Value {
 
 // ============ TValue ============
 /// Lua 5.5 TValue structure (16 bytes)
-/// Now with embedded GC ID for direct pointer access
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct LuaValue {
@@ -1422,8 +1421,8 @@ mod tests {
     #[test]
     fn test_shared_short_string_equals_local_short_string() {
         use crate::gc::share_lua_value;
+        use crate::gc::{GC, StringInterner};
         use crate::lua_vm::SafeOption;
-        use crate::{GC, StringInterner};
 
         let key = "0123456789abcdefghijklmnopqr";
         let mut left_interner = StringInterner::new();

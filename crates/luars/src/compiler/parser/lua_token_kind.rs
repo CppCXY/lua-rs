@@ -158,33 +158,3 @@ impl LuaTokenKind {
         }
     }
 }
-
-impl LuaTokenKind {
-    pub fn is_keyword(self) -> bool {
-        matches!(
-            self,
-            LuaTokenKind::TkAnd
-                | LuaTokenKind::TkBreak
-                | LuaTokenKind::TkDo
-                | LuaTokenKind::TkElse
-                | LuaTokenKind::TkElseIf
-                | LuaTokenKind::TkEnd
-                | LuaTokenKind::TkFalse
-                | LuaTokenKind::TkFor
-                | LuaTokenKind::TkFunction
-                | LuaTokenKind::TkGoto
-                | LuaTokenKind::TkIf
-                | LuaTokenKind::TkIn
-                | LuaTokenKind::TkLocal
-                | LuaTokenKind::TkNil
-                | LuaTokenKind::TkNot
-                | LuaTokenKind::TkOr
-                | LuaTokenKind::TkRepeat
-                | LuaTokenKind::TkReturn
-                | LuaTokenKind::TkThen
-                | LuaTokenKind::TkTrue
-                | LuaTokenKind::TkUntil
-                | LuaTokenKind::TkWhile
-        )
-    }
-}

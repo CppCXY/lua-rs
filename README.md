@@ -1,43 +1,13 @@
 # luars
 
-[![CI](https://github.com/CppCXY/lua-rs/workflows/CI/badge.svg)](https://github.com/CppCXY/lua-rs/actions)
-[![Lua Test Suite](https://github.com/CppCXY/lua-rs/workflows/Lua%20Test%20Suite/badge.svg)](https://github.com/CppCXY/lua-rs/actions/workflows/lua_testes.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![crate](https://img.shields.io/crates/v/luars.svg?style=flat-square)](https://crates.io/crates/luars)
 
-> **Note**: This is an **Lua 5.5** lib through AI-assisted programming.
+luars is a pure Rust Lua 5.5 runtime and embedding toolkit. This repository contains the core library, derive macros, the interpreter, debugger integration, a WASM target, and several host-facing examples.
 
-luars is a pure Rust Lua 5.5 runtime and embedding toolkit. This repository contains the core library, a command-line interpreter, derive macros, debugger integration, and a WASM target.
-
-The goal is not just to "run Lua", but to provide a practical embedding stack for Rust hosts: a typed-first API, derived UserData bindings, async bridging, multi-VM patterns, and browser-facing wasm-bindgen support.
-
-## Repository Layout
-
-| Path | Description |
-|------|-------------|
-| `crates/luars` | Core library crate: compiler, VM, GC, standard library, and embedding API |
-| `crates/luars_interpreter` | CLI interpreter and bytecode disassembler |
-| `crates/luars-derive` | Derive and attribute macros such as `LuaUserData` and `lua_methods` |
-| `crates/luars_debugger` | `require("emmy_core")` debugger integration |
-| `crates/luars_wasm` | Browser-targeted WASM wrapper and example pages |
-| `docs/` | Embedding, UserData, async, and behavioral-difference documentation |
-| `examples/` | Host integration examples closer to real applications |
-| `benchmarks/` | Benchmark scripts used against Lua 5.5 |
-| `lua_tests/testes` | Official Lua 5.5 test suite |
-
-## Highlights
-
-- Lua 5.5 compiler, bytecode VM, and GC implemented entirely in Rust
-- Typed-first embedding API: prefer Rust types over raw `LuaValue` plumbing
-- UserData derive macros for exposing fields, methods, operators, and constructors
-- Async Rust functions bridged into Lua coroutines
-- Lua strings keep byte-string semantics, with an optional UTF-8 view on the Rust side
-- Optional `serde`, `sandbox`, and `shared-proto` features
-- CLI, WASM, debugger integration, and multi-VM usage patterns
+The repository-level documentation is intentionally focused on the high-level `Lua` API. Lower-level `LuaVM` APIs still exist, but the default examples and guides now use the high-level surface first.
 
 ## Quick Start
-
-### Use as a Library
 
 ```toml
 [dependencies]
@@ -45,119 +15,67 @@ luars = "0.17"
 ```
 
 ```rust
-use luars::{LuaVM, Stdlib};
-use luars::lua_vm::SafeOption;
+use luars::{Lua, SafeOption, Stdlib};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All)?;
+    let mut lua = Lua::new(SafeOption::default());
+    lua.load_stdlibs(Stdlib::All)?;
 
-    vm.register_function_typed("add", |a: i64, b: i64| a + b)?;
+    lua.register_function("add", |a: i64, b: i64| a + b)?;
+    let sum: i64 = lua.load("return add(20, 22)").eval()?;
 
-    let sum = vm.execute("return add(20, 22)")?[0]
-        .as_integer()
-        .unwrap_or_default();
     assert_eq!(sum, 42);
     Ok(())
 }
 ```
 
-For the full embedding API, see [crates/luars/README.md](crates/luars/README.md) and [docs/Guide.md](docs/Guide.md).
+## What The High-Level API Covers
 
-### Use as an Interpreter
+- Execute chunks with `lua.load(...).exec()`, `eval()`, and `eval_multi()`
+- Execute async chunks with `exec_async()`, `eval_async()`, and `eval_multi_async()`
+- Call Lua globals with `call_global()` / `call_global1()` and their async variants
+- Register Rust functions with `register_function()` and `register_async_function()`
+- Expose Rust types with `register_type()` and `LuaUserData`
+- Work with globals and tables through `globals()`, `create_table()`, and `create_table_from()`
+- Create scoped borrowed callbacks and userdata through `scope(...)`
+- Run isolated chunks through `load_sandboxed()` and `execute_sandboxed()` when the `sandbox` feature is enabled
 
-```bash
-cargo build --release -p luars_interpreter
-```
+## Repository Layout
 
-This builds two executables:
-
-- `target/release/lua`
-- `target/release/bytecode_dump`
-
-Typical usage:
-
-```bash
-./target/release/lua script.lua
-./target/release/lua -i
-./target/release/lua -e "print('hello')"
-./target/release/bytecode_dump script.lua
-```
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [docs/Guide.md](docs/Guide.md) | Core embedding guide: execution, values, function registration, error handling, and API overview |
-| [docs/UserGuide.md](docs/UserGuide.md) | UserData, derive macros, type registration, and conversions |
-| [docs/Async.md](docs/Async.md) | Async API, coroutine bridging, and multi-VM patterns |
-| [docs/Different.md](docs/Different.md) | Known behavioral differences from the official C Lua 5.5 implementation |
-| [crates/luars_wasm/QUICKSTART.md](crates/luars_wasm/QUICKSTART.md) | WASM quick start |
+| Path | Description |
+|------|-------------|
+| `crates/luars` | Core library with the compiler, VM, GC, and high-level `Lua` API |
+| `crates/luars-derive` | `LuaUserData` and `lua_methods` macros |
+| `crates/luars_interpreter` | CLI interpreter and bytecode tools |
+| `crates/luars_debugger` | Debugger integration |
+| `crates/luars_wasm` | WASM bindings |
+| `docs/` | High-level embedding guides |
+| `examples/` | Host examples built around the high-level API |
 
 ## Examples
 
 | Example | Description |
 |---------|-------------|
-| [examples/rules-engine-demo/README.md](examples/rules-engine-demo/README.md) | A business-style rules-engine embedding example: Rust owns host capabilities, Lua owns checkout policy |
-| [examples/http-server](examples/http-server) | Async multi-VM HTTP server example |
-| [examples/luars-example](examples/luars-example) | Basic embedding, UserData, and host API examples |
-| [examples/rust-bind-bench](examples/rust-bind-bench) | Microbenchmarks for the Rust host binding path |
+| [examples/luars-example](examples/luars-example) | Minimal high-level API example: globals, userdata, and scope |
+| [examples/rules-engine-demo](examples/rules-engine-demo) | Business rules engine with Rust host functions and Lua policy |
+| [examples/http-server](examples/http-server) | Async HTTP example using high-level async calls and sandboxed Lua request handlers |
+| [examples/rust-bind-bench](examples/rust-bind-bench) | High-level userdata registration benchmark |
 
-## Build And Validate
+## Documentation
 
-### Run the Test Suite
+| Document | Description |
+|----------|-------------|
+| [docs/Guide.md](docs/Guide.md) | High-level `Lua` API overview |
+| [docs/UserGuide.md](docs/UserGuide.md) | High-level userdata guide |
+| [docs/Async.md](docs/Async.md) | High-level async and sandbox status |
+| [docs/Different.md](docs/Different.md) | Known differences from C Lua |
+| [crates/luars/README.md](crates/luars/README.md) | Crate-level documentation |
 
-```bash
-# Windows
-.\run_lua_tests.ps1
-
-# Linux / macOS
-cd lua_tests/testes && ../../target/release/lua all.lua
-```
-
-The project is continuously validated against the official Lua 5.5 test suite. Tests that depend on the C API, `testC`, native module loading, or some debugger hooks are skipped as documented in [docs/Different.md](docs/Different.md).
-
-### Run Benchmarks
+## Validate
 
 ```bash
-# Windows
-.\run_benchmarks.ps1
-
-# Linux / macOS
-./run_benchmarks.sh
+cargo test
 ```
-
-The benchmark scripts cover arithmetic, control flow, coroutines, functions, iterators, metatables, strings, tables, and more. The Windows snapshot linked below comes from `run_benchmarks.ps1` on Windows with a Ryzen 7 5800X, comparing luars against native Lua 5.5 on the same machine.
-
-On this project, Linux results are typically about 10% lower than the Windows snapshot, while macOS tends to perform better on most workloads.
-
-### Benchmark Snapshot
-
-The platform snapshots now live in dedicated documents:
-
-- [windows.md](docs/benchmarks/windows.md): the Windows snapshot with Ryzen 7 5800X
-- [macos.md](docs/benchmarks/macos.md): the macOS snapshot with an Apple M4 by @Bruce
-
-If you want the raw terminal output instead of the summarized charts, run `run_benchmarks.ps1` on Windows or `./run_benchmarks.sh` on macOS/Linux and inspect the per-subtest numbers directly.
-
-## Cargo Features
-
-| Feature | Description |
-|---------|-------------|
-| `serde` | Enable conversions between Lua values and serde / JSON data structures |
-| `sandbox` | Enable sandbox APIs for environment isolation, capability injection, and instruction/time/memory limits |
-| `shared-proto` | Enable shared function prototypes for multi-VM scenarios |
-
-## Compatibility And Boundaries
-
-luars aims for Lua 5.5 semantic compatibility, but it is not a drop-in ABI replacement for C Lua. The current boundaries are:
-
-- No C API, and no direct loading of native C Lua modules
-- `string.dump` / `load` use luars's own bytecode format
-- On the Rust host side, `as_str()` only returns a text view for valid UTF-8; use `as_bytes()` / `create_bytes()` when exact bytes matter
-- A few corners of `debug`, `io`, and `package` still differ from C Lua
-
-See [docs/Different.md](docs/Different.md) for the full list of known differences.
 
 ## License
 

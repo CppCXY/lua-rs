@@ -2,7 +2,7 @@
 ///
 /// Implements CALL and TAILCALL opcodes via `precall` / `pretailcall`.
 use crate::{
-    CallInfo, Chunk, LUA_MASKCALL, LUA_MASKRET, LuaValue,
+    CallInfo, LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
     lua_vm::{
         CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, TmKind, call_info::call_status,
         execute::hook::hook_on_return, get_metamethod_event, lua_limits::EXTRA_STACK,
@@ -222,9 +222,9 @@ pub fn pretailcall_lua(
     nargs: usize,
     numparams: usize,
     max_stack_size: usize,
-    chunk_ptr: *const Chunk,
+    chunk_ptr: *const LuaProto,
     upvalue_ptrs: *const crate::gc::UpvaluePtr,
-) -> LuaResult<*const Chunk> {
+) -> LuaResult<*const LuaProto> {
     let new_chunk_ptr = chunk_ptr;
 
     // Get current frame's func position (handles vararg func_offset)

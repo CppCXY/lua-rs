@@ -1,6 +1,6 @@
 use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
 use crate::lua_vm::lua_limits::{MAX_SRC_LEN, MAXCCALLS, MAXUPVAL, MAXVARS};
-use crate::{Chunk, LuaVM};
+use crate::{LuaProto, LuaVM};
 use crate::{LuaValue, compiler::parser::LuaLexer};
 
 // Upvalue descriptor
@@ -14,27 +14,28 @@ pub struct Upvaldesc {
 
 // Port of FuncState from lparser.h
 pub struct FuncState<'a> {
-    pub chunk: Chunk,
+    pub chunk: LuaProto,
     pub prev: Option<&'a mut FuncState<'a>>, // parent function state
     pub lexer: &'a mut LuaLexer<'a>,
     pub vm: &'a mut LuaVM,
     pub compiler_state: &'a mut CompilerState,
     pub block_cnt_id: Option<BlockCntId>,
-    pub pc: usize,                        // next position to code (equivalent to pc)
-    pub last_target: usize,               // label of last 'jump label'
-    pub pending_gotos: Vec<LabelDesc>,    // list of pending gotos
-    pub labels: Vec<LabelDesc>,           // list of active labels
-    pub actvar: Vec<VarDesc>,             // list of all variable descriptors (active and pending)
-    pub nactvar: u16, // number of active variables (actvar[0..nactvar] are active)
-    pub upvalues: Vec<Upvaldesc>, // upvalue descriptors
-    pub nups: u8,     // number of upvalues
-    pub freereg: u8,  // first free register
-    pub iwthabs: u8,  // instructions issued since last absolute line info
-    pub needclose: bool, // true if function needs to close upvalues when returning
-    pub is_vararg: bool, // true if function is vararg
-    pub numparams: u8, // number of fixed parameters (excluding vararg parameter)
-    pub first_local: usize, // index of first local variable in prev
-    pub source_name: String, // source file name for error messages
+    pub pc: usize,                     // next position to code (equivalent to pc)
+    pub last_target: usize,            // label of last 'jump label'
+    pub pending_gotos: Vec<LabelDesc>, // list of pending gotos
+    pub labels: Vec<LabelDesc>,        // list of active labels
+    pub actvar: Vec<VarDesc>,          // list of all variable descriptors (active and pending)
+    pub nactvar: u16,                  // number of active variables (actvar[0..nactvar] are active)
+    pub upvalues: Vec<Upvaldesc>,      // upvalue descriptors
+    pub nups: u8,                      // number of upvalues
+    pub freereg: u8,                   // first free register
+    #[allow(unused)]
+    pub iwthabs: u8, // instructions issued since last absolute line info
+    pub needclose: bool,               // true if function needs to close upvalues when returning
+    pub is_vararg: bool,               // true if function is vararg
+    pub numparams: u8,                 // number of fixed parameters (excluding vararg parameter)
+    pub first_local: usize,            // index of first local variable in prev
+    pub source_name: String,           // source file name for error messages
     pub kcache: LuaValue, // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
     pub checklimit_error: Option<String>, // deferred error from checkstack/checklimit
 }
@@ -130,15 +131,9 @@ pub struct LabelDesc {
     pub close: bool,
 }
 
-// Port of Dyndata from lparser.c
-pub struct Dyndata {
-    pub actvar: Vec<VarDesc>,  // list of active local variables
-    pub gt: Vec<LabelDesc>,    // pending gotos
-    pub label: Vec<LabelDesc>, // list of active labels
-}
-
 // Port of Vardesc from lparser.c
 // Variable kinds
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarKind {
     VDKREG = 0,     // regular local variable
@@ -166,6 +161,7 @@ impl VarKind {
 
     // Test for readonly variables (const, vararg parameter, or for-loop control variable)
     // In Lua 5.5: vkisreadonly(v) => v->kind >= RDKCONST
+    #[allow(unused)]
     pub fn is_readonly(self) -> bool {
         matches!(
             self,
@@ -176,10 +172,11 @@ impl VarKind {
 
 pub struct VarDesc {
     pub name: String,
-    pub kind: VarKind,                 // variable kind
-    pub ridx: i16,                     // register holding the variable
-    pub vidx: u16,                     // compiler index
-    pub pidx: usize,                   // index into chunk.locals (LocVar debug info)
+    pub kind: VarKind, // variable kind
+    pub ridx: i16,     // register holding the variable
+    #[allow(unused)]
+    pub vidx: u16, // compiler index
+    pub pidx: usize,   // index into chunk.locals (LocVar debug info)
     pub const_value: Option<LuaValue>, // constant value for compile-time constants
 }
 
@@ -194,7 +191,7 @@ impl<'a> FuncState<'a> {
         // Create kcache table for constant deduplication (like Lua 5.5's open_func)
         let kcache = vm.create_table(0, 0).unwrap();
         FuncState {
-            chunk: Chunk::new(),
+            chunk: LuaProto::new(),
             prev: None,
             lexer,
             vm,
@@ -301,6 +298,7 @@ impl<'a> FuncState<'a> {
         }
     }
 
+    #[allow(unused)]
     pub fn take_block_cnt(&mut self) -> Option<BlockCnt> {
         if let Some(bl_id) = self.block_cnt_id.take() {
             self.compiler_state.take_blockcnt(bl_id)
@@ -314,7 +312,7 @@ impl<'a> FuncState<'a> {
         // Create new kcache table for child function
         let kcache = parent.vm.create_table(0, 0).unwrap();
         FuncState {
-            chunk: Chunk::new(),
+            chunk: LuaProto::new(),
             prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
             lexer: parent.lexer,
             vm: parent.vm,

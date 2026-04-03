@@ -19,10 +19,6 @@
   maximum value for the corresponding unsigned argument.
 ----------------------------------------------------------------------*/
 
-// ============ Instruction Decoding Macros ============
-// These macros are guaranteed to be inlined and produce optimal code.
-// Use these instead of Instruction::get_* functions in hot paths.
-
 use crate::OpCode;
 
 /// Zero-cost abstraction for Lua 5.5 instruction encoding
@@ -470,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_position_constants() {
-        // Verify all position constants match Lua 5.4 spec
+        // Verify all position constants match Lua 5.5 spec
         assert_eq!(Instruction::POS_OP, 0);
         assert_eq!(Instruction::POS_A, 7);
         assert_eq!(Instruction::POS_K, 15);
@@ -481,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_size_constants() {
-        // Verify all size constants match Lua 5.4 spec
+        // Verify all size constants match Lua 5.5 spec
         assert_eq!(Instruction::SIZE_OP, 7);
         assert_eq!(Instruction::SIZE_A, 8);
         assert_eq!(Instruction::SIZE_K, 1);

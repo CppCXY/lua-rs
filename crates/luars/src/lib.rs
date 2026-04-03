@@ -1,5 +1,4 @@
 // Lua Runtime
-// A compact Lua VM implementation with bytecode compiler and GC
 
 // Crate-level clippy allows for design choices
 #![allow(clippy::too_many_arguments)]
@@ -23,13 +22,14 @@ extern crate self as luars;
 #[cfg(test)]
 mod test;
 
-pub mod compiler;
-pub mod gc;
-pub mod lib_registry;
-pub mod lua_value;
-pub mod lua_vm;
+mod compiler;
+mod gc;
+mod lib_registry;
+mod lua_api;
+mod lua_value;
+mod lua_vm;
 mod platform_time;
-pub mod stdlib;
+mod stdlib;
 
 #[cfg(feature = "serde")]
 pub mod serde;
@@ -46,19 +46,18 @@ pub use lua_value::userdata_trait::{
     RefUserData, UdValue, UserDataTrait,
 };
 
-#[cfg(test)]
-use crate::lua_vm::SafeOption;
-pub use gc::*;
-pub use lib_registry::LibraryRegistry;
+pub use lib_registry::{LibraryModule, LibraryRegistry, LuaLibrary, PreloadModule};
+pub use lua_api::*;
 pub use lua_value::RustCallback;
 pub use lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
-pub use lua_value::{Chunk, LuaFunction, LuaTable, LuaValue};
+pub use lua_value::{LuaFunction, LuaProto, LuaTable, LuaValue, LuaValueKind, chunk_serializer::*};
+pub use lua_vm::SafeOption;
 #[cfg(feature = "sandbox")]
 pub use lua_vm::SandboxConfig;
 pub use lua_vm::async_thread::{
     AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread, IntoAsyncLua,
 };
-pub use lua_vm::lua_error::LuaFullError;
+pub use lua_vm::lua_error::{LuaError, LuaFullError};
 pub use lua_vm::table_builder::TableBuilder;
 pub use lua_vm::{
     CFunction, CallInfo, DebugInfo, Instruction, LuaAnyRef, LuaFunctionRef, LuaResult, LuaState,

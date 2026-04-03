@@ -1,5 +1,6 @@
 use crate::{
-    CallInfo, Chunk, LuaResult, LuaValue, TablePtr,
+    CallInfo, LuaProto, LuaResult, LuaValue,
+    gc::TablePtr,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT, udvalue_to_lua_value},
     lua_vm::{
         LuaError, LuaState, TmKind,
@@ -20,7 +21,7 @@ use crate::{
 pub fn buildhiddenargs(
     lua_state: &mut LuaState,
     ci: &mut CallInfo,
-    chunk: &Chunk,
+    chunk: &LuaProto,
     totalargs: usize,
     nfixparams: usize,
     _nextra: usize,

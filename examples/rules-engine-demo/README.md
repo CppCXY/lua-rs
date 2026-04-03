@@ -1,46 +1,54 @@
 # rules-engine-demo
 
-一个更接近真实业务嵌入场景的 luars 示例：Rust 宿主负责库存、风险评分和物流 SLA，Lua 负责编排结算规则。
+This example shows how to build a business rules engine entirely on top of the high-level `Lua` API.
 
-这个例子想证明的不是“Lua 能跑”，而是：
+Rust owns the order data and host capabilities. Lua owns the decision logic. The example avoids low-level `LuaVM` usage, raw value arrays, and manual stack handling.
 
-- 业务规则可以放到 Lua 里动态演进
-- 核心数据和外部能力依然由 Rust 宿主管理
-- Rust 和 Lua 之间可以自然地交换表结构、调用函数、返回决策结果
+## What this example demonstrates
 
-## 场景
+- Exposing Rust capabilities with `Lua::register_function()`
+- Building input data with `Lua::create_table()` and `Table::set()`
+- Loading the rules script through `Lua::load(...).exec()`
+- Calling `evaluate_order(order)` through `Lua::call_global1()` and decoding a structured result
 
-模拟一个电商结算规则引擎：
+## Scenario
 
-- Rust 构建订单、客户、商品明细
-- Lua 函数 `evaluate_order(order)` 决定是否通过、是否打折、走哪种物流、是否人工审核
-- Lua 在决策过程中回调 Rust 提供的能力：
+The sample models a checkout rules engine:
+
+- Rust builds orders, customers, and line items
+- Lua decides approval, discounts, shipping tier, and manual review
+- Lua can call these Rust host functions during evaluation:
   - `risk_score(email, total_cents, country)`
   - `inventory_available(sku, quantity)`
   - `shipping_eta(country, tier)`
   - `audit(message)`
 
-## 运行
+## Run it
 
-使用内置脚本：
+Use the embedded rules script:
 
 ```powershell
 cargo run -p rules-engine-demo
 ```
 
-使用你自己的规则脚本：
+Use your own rules file:
 
 ```powershell
 cargo run -p rules-engine-demo -- --script examples/rules-engine-demo/scripts/checkout_rules.lua
 ```
 
-## 你可以改什么
+## Main files
 
-直接修改 [scripts/checkout_rules.lua](scripts/checkout_rules.lua)：
+- `src/main.rs`: registers host functions, builds tables, and calls Lua
+- `scripts/checkout_rules.lua`: the Lua rules script
 
-- 提高高风险阈值
-- 调整 VIP 折扣
-- 加入新的国家合规规则
-- 为特定品类切换物流策略
+## What you can change
 
-修改 Lua 后重新运行，不需要改 Rust 宿主代码。
+Edit [scripts/checkout_rules.lua](scripts/checkout_rules.lua) to:
+
+- raise or lower risk thresholds
+- tune VIP discounts
+- add country-specific compliance rules
+- change shipping behavior for product categories
+
+You can change the Lua policy and rerun the demo without touching the Rust host code.

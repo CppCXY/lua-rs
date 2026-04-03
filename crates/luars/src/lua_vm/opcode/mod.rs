@@ -3,6 +3,7 @@ mod instruction;
 pub use instruction::Instruction;
 
 /// Instruction format modes (Lua 5.5)
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpMode {
     IABC,  // iABC:  C(8) | B(8) | k(1) | A(8) | Op(7)

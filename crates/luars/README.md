@@ -3,27 +3,9 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/luars.svg)](https://crates.io/crates/luars)
 
-luars is an embeddable pure Rust Lua 5.5 runtime crate. It provides the compiler, bytecode VM, garbage collector, standard library, and a typed-first host API.
+luars is an embeddable pure Rust Lua 5.5 runtime crate. It includes the compiler, VM, GC, standard library, and a high-level host API built around `Lua`.
 
-If you want the repository-level view, including the CLI, WASM target, and example entry points, start with [README.md](../../README.md). This document focuses on the `luars` crate itself.
-
-## Good Fit For
-
-- Embedding Lua as a scripting layer inside a Rust application
-- Moving rules, orchestration, or plugin logic into Lua
-- Exposing Rust functions, tables, and custom types to Lua
-- Running async callbacks, multi-VM setups, or sandboxed execution
-
-## Features
-
-- Lua 5.5 compiler, register-based VM, and GC
-- Typed-first API: `call`, `call1`, `call_global`, `call1_global`
-- Raw fallback APIs when you need direct `LuaValue` control
-- `LuaUserData` and `lua_methods` macros for exposing Rust types
-- Typed registration APIs such as `register_function_typed` and `register_async_typed`
-- Byte-string Lua string semantics, plus an optional UTF-8 view on the Rust side
-- `TableBuilder`, typed getters, and `FromLua` / `IntoLua` conversions
-- Optional `serde`, `sandbox`, and `shared-proto` features
+If you want the repository-level overview, including examples and companion crates, start with [../../README.md](../../README.md). This README focuses on the crate surface that application code should use directly.
 
 ## Installation
 
@@ -39,162 +21,174 @@ Optional features:
 luars = { version = "0.17", features = ["serde", "sandbox"] }
 ```
 
-## Basic Example
+## Quick Start
 
 ```rust
-use luars::{LuaVM, Stdlib};
-use luars::lua_vm::SafeOption;
+use luars::{Lua, SafeOption, Stdlib};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All)?;
+    let mut lua = Lua::new(SafeOption::default());
+    lua.load_stdlibs(Stdlib::All)?;
 
-    vm.execute("function add(a, b) return a + b end")?;
-    let sum: i64 = vm.call1_global("add", (1, 2))?;
+    lua.register_function("add", |a: i64, b: i64| a + b)?;
+    let sum: i64 = lua.load("return add(1, 2)").eval()?;
 
     assert_eq!(sum, 3);
     Ok(())
 }
 ```
 
-## Host API Overview
+## High-Level Workflow
 
-### Execute And Call
+### Execute code
 
 ```rust
-let results = vm.execute("return 42")?;
-let chunk = vm.load("return 1 + 1")?;
-let value: i64 = vm.call1(chunk, ())?;
-let pair: (i64, i64) = vm.call_global("divmod", (9, 4))?;
-
-let raw = vm.call_global_raw("legacy_func", vec![])?;
+lua.load("x = 40 + 2").exec()?;
+let answer: i64 = lua.load("return x").eval()?;
+let pair: (i64, i64) = lua.load("return 20, 22").eval_multi()?;
 ```
 
-### Register Rust Functions
-
-Most host code should prefer the typed APIs:
+### Call Lua globals
 
 ```rust
-vm.register_function_typed("add", |a: i64, b: i64| a + b)?;
-vm.register_function_typed("greet", |name: String| format!("hello, {name}"))?;
+lua.load(
+    r#"
+    function greet(name)
+        return "hello, " .. name
+    end
+    "#,
+)
+.exec()?;
+
+let text: String = lua.call_global1("greet", "luars")?;
 ```
 
-Drop to the raw API only when you intentionally need direct stack and value access:
+### Register Rust functions
 
 ```rust
-vm.register_function("greet_raw", |state| {
-    let name = state
-        .get_arg(1)
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "world".to_string());
-
-    state.push_value(state.create_string(&format!("hello, {name}"))?)?;
-    Ok(1)
+lua.register_function("slugify", |value: String| {
+    value.trim().to_lowercase().replace(' ', "-")
 })?;
 ```
 
-### Lua Strings And Raw Bytes
-
-At the Lua level, strings still follow standard byte-string semantics. On the Rust side, you can choose a text view or exact raw bytes as needed:
+### Exchange tables and globals
 
 ```rust
-let text = vm.create_string("hello")?;
-assert_eq!(text.as_str(), Some("hello"));
+let config = lua.create_table_from([("host", "127.0.0.1"), ("mode", "dev")])?;
+lua.globals().set("config", config)?;
 
-let raw = vm.create_bytes(&[0xff, 0x00, b'A'])?;
-assert_eq!(raw.as_str(), None);
-assert_eq!(raw.as_bytes(), Some(&[0xff, 0x00, b'A'][..]));
+let globals = lua.globals();
+let host: String = globals.get("config")?.get("host")?;
+assert_eq!(host, "127.0.0.1");
 ```
 
-### Tables And Globals
-
-```rust
-use luars::{LuaValue, TableBuilder};
-
-let config = TableBuilder::new()
-    .set("host", vm.create_string("localhost")?)
-    .set("port", LuaValue::integer(8080))
-    .push(LuaValue::integer(1))
-    .build(&mut vm)?;
-
-vm.set_global("config", config)?;
-```
-
-### UserData
+### Expose Rust types as userdata
 
 ```rust
 use luars::{LuaUserData, lua_methods};
 
 #[derive(LuaUserData)]
-#[lua_impl(Display)]
-struct Point {
-    pub x: f64,
-    pub y: f64,
+struct Counter {
+    pub value: i64,
 }
 
 #[lua_methods]
-impl Point {
-    pub fn new(x: f64, y: f64) -> Self {
-        Self { x, y }
+impl Counter {
+    pub fn new(value: i64) -> Self {
+        Self { value }
     }
 
-    pub fn distance(&self) -> f64 {
-        (self.x * self.x + self.y * self.y).sqrt()
+    pub fn inc(&mut self, delta: i64) {
+        self.value += delta;
+    }
+
+    pub fn get(&self) -> i64 {
+        self.value
     }
 }
 
-vm.register_type_of::<Point>("Point")?;
+lua.register_type::<Counter>("Counter")?;
+let count: i64 = lua
+    .load(
+        r#"
+        local counter = Counter.new(1)
+        counter:inc(41)
+        return counter:get()
+        "#,
+    )
+    .eval()?;
+
+assert_eq!(count, 42);
 ```
 
-### Async
+### Use scoped borrowed values
 
 ```rust
-vm.register_async_typed("fetch_len", |url: String| async move {
-    let body = reqwest::get(&url).await?.text().await?;
-    Ok(body.len() as i64)
+let result: String = lua.scope(|scope| {
+    let prefix = String::from("user:");
+    let format_name = scope.create_function_with(&prefix, |prefix: &String, value: String| {
+        format!("{prefix}{value}")
+    })?;
+
+    scope.globals().set("format_name", &format_name)?;
+    scope.load("return format_name('alice')").eval()
 })?;
 
-let results = vm.execute_async("return fetch_len('https://example.com')").await?;
+assert_eq!(result, "user:alice");
 ```
 
-### Error Handling
+## Async And Sandbox
+
+The high-level API supports both typed async callbacks and async execution entry points:
 
 ```rust
-match vm.execute("error('boom')") {
-    Ok(_) => {}
-    Err(err) => {
-        let msg = vm.get_error_message(err);
-        let full = vm.into_full_error(err);
-        eprintln!("{msg}");
-        eprintln!("{full}");
-    }
-}
+lua.register_async_function("double_async", |value: i64| async move {
+    Ok(value * 2)
+})?;
+
+let result: i64 = lua.load("return double_async(21)").eval_async().await?;
+assert_eq!(result, 42);
 ```
+
+You can also drive existing Lua functions asynchronously with `call_async()`, `call_async1()`, `call_async_global()`, and `call_async_global1()`.
+
+When the `sandbox` feature is enabled, the same high-level surface exposes isolated execution helpers:
+
+```rust
+use luars::SandboxConfig;
+
+let mut sandbox = SandboxConfig::default();
+lua.sandbox_insert_global(&mut sandbox, "answer", 42_i64)?;
+
+let answer: i64 = lua.eval_sandboxed("return answer", &sandbox)?;
+assert_eq!(answer, 42);
+```
+
+For more detail, see [../../docs/Async.md](../../docs/Async.md).
 
 ## Feature Flags
 
 | Feature | Description |
 |---------|-------------|
-| `serde` | Enable conversions between `LuaValue` and serde / JSON data |
-| `sandbox` | Enable sandbox execution APIs for environment isolation, capability injection, and timeout/instruction/memory limits |
-| `shared-proto` | Enable shared function prototypes for multi-VM scenarios |
+| `serde` | Enable serde-based conversions |
+| `sandbox` | Enable sandbox execution helpers |
+| `shared-proto` | Enable shared prototypes for multi-VM scenarios |
 
 ## Known Boundaries
 
-- No C API, and no direct loading of native C Lua modules
+- No C API and no direct loading of native C Lua modules
 - `string.dump` produces luars-specific bytecode
-- On the Rust side, `as_str()` only returns `Some(&str)` when the underlying bytes are valid UTF-8
 - Some corners of `debug`, `io`, and `package` still differ from the official C Lua implementation
 
-See [../../docs/Different.md](../../docs/Different.md) for the full list of differences.
+See [../../docs/Different.md](../../docs/Different.md) for the detailed compatibility notes.
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [../../docs/Guide.md](../../docs/Guide.md) | Core embedding guide |
-| [../../docs/UserGuide.md](../../docs/UserGuide.md) | UserData and type exposure |
-| [../../docs/Async.md](../../docs/Async.md) | Async documentation and multi-VM patterns |
+| [../../docs/Guide.md](../../docs/Guide.md) | High-level embedding guide |
+| [../../docs/UserGuide.md](../../docs/UserGuide.md) | High-level userdata guide |
+| [../../docs/Async.md](../../docs/Async.md) | High-level async and sandbox guide |
 | [../../docs/Different.md](../../docs/Different.md) | Known differences from C Lua |
 
 ## License

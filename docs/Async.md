@@ -1,66 +1,60 @@
-# luars Async Documentation
+# luars High-Level Async And Sandbox Notes
 
-This directory contains the complete documentation for luars async features.
+This document describes the async and sandbox surface exposed through the high-level `Lua` API.
 
-## Documentation Index
+## Async support
 
-| Document | Contents |
-|----------|----------|
-| [Getting Started](async/01-getting-started.md) | 5-minute async quickstart, your first async function |
-| [API Reference](async/02-api-reference.md) | Detailed description of all async types and methods |
-| [Examples](async/03-examples.md) | Code examples from simple to complex |
-| [Internal Architecture](async/04-architecture.md) | Coroutine↔Future bridging implementation details |
-| [Multi-VM Patterns](async/05-multi-vm.md) | Design patterns for multi-LuaVM concurrent processing |
-| [HTTP Server Example](async/06-http-server.md) | Complete async HTTP server walkthrough |
-
-## Core Concept Overview
-
-## Typed-First API
-
-For most embedding code, prefer `register_async_typed` over the raw `register_async` API.
+The high-level API supports typed async registration and async execution.
 
 ```rust
-use luars::{LuaVM, SafeOption, Stdlib};
-
-let mut vm = LuaVM::new(SafeOption::default());
-vm.open_stdlib(Stdlib::All)?;
-
-vm.register_async_typed("fetch_len", |url: String| async move {
-      let body = reqwest::get(&url).await?.text().await?;
-      Ok(body.len() as i64)
+lua.register_async_function("fetch_len", |url: String| async move {
+    let body = reqwest::get(&url).await?.text().await?;
+    Ok(body.len() as i64)
 })?;
 
-let results = vm.execute_async("return fetch_len('https://example.com')").await?;
-assert!(results[0].as_integer().unwrap_or(0) > 0);
+let len: i64 = lua.load("return fetch_len('https://example.com')").eval_async().await?;
 ```
 
-Typed async callbacks use:
+Available async entry points:
 
-- `FromLua` to decode arguments
-- `IntoAsyncLua` to encode awaited return values
-- tuple returns for Lua multi-return values
-- `UserDataRef<T>` for typed userdata parameters
+- `lua.exec_async(source)`
+- `lua.eval_async(source)`
+- `lua.eval_multi_async(source)`
+- `lua.call_async(function, args)`
+- `lua.call_async1(function, args)`
+- `lua.call_async_global(name, args)`
+- `lua.call_async_global1(name, args)`
+- `lua.load(...).exec_async()` and related chunk-builder methods
 
-Example with multiple return values:
+These wrappers stay typed: arguments still use `IntoLua`, and results still use `FromLua` / `FromLuaMulti`.
+
+## Sandbox support
+
+When the `sandbox` feature is enabled, the high-level API exposes the existing isolated `_ENV` support:
 
 ```rust
-vm.register_async_typed("split_stats", |s: String| async move {
-      Ok((s.len() as i64, s.to_uppercase()))
-})?;
+use luars::SandboxConfig;
+
+let mut sandbox = SandboxConfig::default();
+lua.sandbox_insert_global(&mut sandbox, "answer", 42_i64)?;
+
+let answer: i64 = lua.eval_sandboxed("return answer", &sandbox)?;
+assert_eq!(answer, 42);
 ```
 
-Keep `register_async` for cases where you already want to manually work with `Vec<LuaValue>` and `Vec<AsyncReturnValue>`.
+Available sandbox entry points:
 
-```text
-Rust async runtime (tokio)
-  └── AsyncThread::poll()          ← Driver: implements Future trait
-        ├── has pending future? → poll it
-        │     ├── Pending → return Poll::Pending
-        │     └── Ready(result) → resume(result) → continue checking
-        └── no pending future → resume(args)
-              ├── coroutine finished → return Poll::Ready
-              ├── async yield (sentinel) → take future, poll it
-              └── normal yield → wake & return Pending
-```
+- `lua.execute_sandboxed(source, config)`
+- `lua.eval_sandboxed(source, config)`
+- `lua.eval_multi_sandboxed(source, config)`
+- `lua.load_sandboxed(source, config)`
+- `lua.sandbox_insert_global(config, name, value)`
+- `lua.sandbox_capture_global(config, name)`
 
-**Key point**: From Lua's perspective, async functions behave exactly like normal synchronous functions. The async yield/resume is completely transparent to Lua code.
+`load_sandboxed()` is the high-level API you want when a script should return a function or table that Rust keeps for later use.
+
+## Important boundary
+
+Runtime limits in `SandboxConfig` apply to `execute_sandboxed()` calls directly. When you use `load_sandboxed()` and keep the returned function for later calls, environment isolation remains, but runtime limits are not automatically re-applied on every later invocation.
+
+That mirrors the current lower-level runtime semantics.

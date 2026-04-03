@@ -829,7 +829,7 @@ impl Shape {
 fn test_enum_basic() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
-    vm.register_enum::<Color>("Color").unwrap();
+    vm.register_enum_of::<Color>("Color").unwrap();
 
     let results = vm
         .execute("return Color.Red, Color.Green, Color.Blue")
@@ -844,7 +844,7 @@ fn test_enum_basic() {
 fn test_enum_explicit_discriminants() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
-    vm.register_enum::<HttpStatus>("HttpStatus").unwrap();
+    vm.register_enum_of::<HttpStatus>("HttpStatus").unwrap();
 
     let results = vm
         .execute("return HttpStatus.Ok, HttpStatus.NotFound, HttpStatus.ServerError")
@@ -859,7 +859,7 @@ fn test_enum_explicit_discriminants() {
 fn test_enum_mixed_discriminants() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
-    vm.register_enum::<MixedDisc>("MD").unwrap();
+    vm.register_enum_of::<MixedDisc>("MD").unwrap();
 
     let results = vm.execute("return MD.A, MD.B, MD.C, MD.D, MD.E").unwrap();
     assert_eq!(results.len(), 5);
@@ -874,7 +874,7 @@ fn test_enum_mixed_discriminants() {
 fn test_enum_in_lua_comparison() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
-    vm.register_enum::<HttpStatus>("Status").unwrap();
+    vm.register_enum_of::<HttpStatus>("Status").unwrap();
 
     let results = vm
         .execute(
@@ -896,7 +896,7 @@ fn test_enum_in_lua_comparison() {
 fn test_enum_iteration_in_lua() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
-    vm.register_enum::<Color>("Color").unwrap();
+    vm.register_enum_of::<Color>("Color").unwrap();
 
     let results = vm
         .execute(

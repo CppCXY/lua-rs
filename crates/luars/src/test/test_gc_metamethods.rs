@@ -200,7 +200,7 @@ mod tests {
             collectgarbage("collect")
             collectgarbage("collect")
             
-            -- In Lua 5.4, resurrection is allowed but object won't be finalized again
+            -- In Lua 5.5, resurrection is allowed but object won't be finalized again
             return resurrected ~= nil
         "#;
 

@@ -1,6 +1,6 @@
 //! LuaValue → VariableProto serialization.
 
-use luars::{LuaValue, lua_value::LuaValueKind};
+use luars::{LuaValue, LuaValueKind};
 
 use crate::proto::{ValueType, Variable};
 

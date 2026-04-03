@@ -2,7 +2,7 @@
 // Equivalent to CallInfo structure in Lua C API (lstate.h)
 
 use crate::gc::UpvaluePtr;
-use crate::lua_value::Chunk;
+use crate::lua_value::LuaProto;
 
 /// Call status flags (equivalent to Lua's CIST_* flags)
 pub mod call_status {
@@ -117,7 +117,7 @@ pub struct CallInfo {
     /// Avoids Rc deref in the startfunc header (hot path).
     /// Null for C function frames.
     /// Safety: valid as long as the frame is active (func keeps the Rc alive).
-    pub chunk_ptr: *const Chunk,
+    pub chunk_ptr: *const LuaProto,
 
     /// Cached pointer to the upvalue array for Lua closures.
     /// Avoids the func → GcPtr → GcRClosure → LuaFunction → UpvalueStore enum match

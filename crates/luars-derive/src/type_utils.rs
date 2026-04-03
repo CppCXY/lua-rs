@@ -25,23 +25,23 @@ pub fn field_to_udvalue(
     match type_str.as_str() {
         // Integers → UdValue::Integer
         "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Integer(#accessor as i64) }
+            quote! { luars::UdValue::Integer(#accessor as i64) }
         }
         // Floats → UdValue::Number
         "f32" | "f64" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Number(#accessor as f64) }
+            quote! { luars::UdValue::Number(#accessor as f64) }
         }
         // Bool → UdValue::Boolean
         "bool" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Boolean(#accessor) }
+            quote! { luars::UdValue::Boolean(#accessor) }
         }
         // String → UdValue::Str (cloned)
         "String" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Str(#accessor.clone()) }
+            quote! { luars::UdValue::Str(#accessor.clone()) }
         }
         // Fallback: try Into<UdValue>
         _ => {
-            quote! { luars::lua_value::userdata_trait::UdValue::from(#accessor.clone()) }
+            quote! { luars::UdValue::from(#accessor.clone()) }
         }
     }
 }
@@ -124,23 +124,23 @@ pub fn ref_to_udvalue(
     match type_str.as_str() {
         // Integers → dereference then cast
         "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Integer(*#accessor as i64) }
+            quote! { luars::UdValue::Integer(*#accessor as i64) }
         }
         // Floats
         "f32" | "f64" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Number(*#accessor as f64) }
+            quote! { luars::UdValue::Number(*#accessor as f64) }
         }
         // Bool
         "bool" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Boolean(*#accessor) }
+            quote! { luars::UdValue::Boolean(*#accessor) }
         }
         // String → clone the reference
         "String" => {
-            quote! { luars::lua_value::userdata_trait::UdValue::Str(#accessor.clone()) }
+            quote! { luars::UdValue::Str(#accessor.clone()) }
         }
         // Fallback: clone and convert via From/Into
         _ => {
-            quote! { luars::lua_value::userdata_trait::UdValue::from(#accessor.clone()) }
+            quote! { luars::UdValue::from(#accessor.clone()) }
         }
     }
 }

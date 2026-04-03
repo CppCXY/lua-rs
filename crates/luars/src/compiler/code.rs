@@ -1,4 +1,4 @@
-// Code generation - Port from lcode.c (Lua 5.4.8)
+// Code generation - Port from lcode.c (Lua 5.5)
 // This file corresponds to lua-5.5.0/src/lcode.c
 use crate::LuaValue;
 use crate::compiler::expression::{ExpDesc, ExpKind};

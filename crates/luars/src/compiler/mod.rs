@@ -1,31 +1,29 @@
 // Lua bytecode compiler - Main module
-// Port of Lua 5.4 lparser.c and lcode.c
+// Port of Lua 5.5 lparser.c and lcode.c
 
 // Submodules
 mod code; // Code generation (lcode.c)
 mod expr_parser; // Expression parser functions (lparser.c)
 mod expression; // Expression parsing and expdesc
 mod func_state; // FuncState and related structures (lparser.h)
-pub mod parse_literal; // Number parsing utilities
+mod parse_literal; // Number parsing utilities
 mod parser; // Lexer/token provider
 mod statement; // Statement parsing (lparser.c)
 
 // Re-exports
-pub use code::*;
-pub use expression::*;
-pub use func_state::*;
-pub use parse_literal::*;
-
 use crate::LuaVM;
 pub use crate::compiler::parser::LuaLanguageLevel;
 use crate::compiler::parser::{LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig};
-use crate::lua_value::{Chunk, UpvalueDesc};
+use crate::lua_value::{LuaProto, UpvalueDesc};
 use crate::lua_vm::OpCode;
+pub use code::*;
+pub use expression::*;
+pub use func_state::*;
 
 // Structures are now in separate files (func_state.rs, expression.rs)
 
 // Port of luaY_parser from lparser.c
-pub fn compile_code(source: &str, vm: &mut LuaVM) -> Result<Chunk, String> {
+pub fn compile_code(source: &str, vm: &mut LuaVM) -> Result<LuaProto, String> {
     compile_code_with_name(source, vm, "@chunk")
 }
 
@@ -33,7 +31,7 @@ pub fn compile_code_with_name(
     source: &str,
     vm: &mut LuaVM,
     chunk_name: &str,
-) -> Result<Chunk, String> {
+) -> Result<LuaProto, String> {
     let level = vm.version;
     let tokenize_result = {
         let mut lexer = LuaTokenize::new(
@@ -80,7 +78,7 @@ pub fn compile_code_with_name(
         fs.lexer.line = saved_line;
     }
 
-    // Main function in Lua 5.4 has _ENV as first upvalue (lparser.c:1928-1931)
+    // Main function in Lua 5.5 has _ENV as first upvalue (lparser.c:1928-1931)
     // env = allocupvalue(fs);
     // env->instack = 1;
     // env->idx = 0;

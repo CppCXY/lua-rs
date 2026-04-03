@@ -5,6 +5,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::gc::{CreateResult, GcObjectPtr, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr};
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_RECST, CIST_XPCALL, CIST_YPCALL};
@@ -17,10 +18,7 @@ use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, Sand
 use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
 #[cfg(feature = "sandbox")]
 use crate::platform_time::unix_nanos;
-use crate::{
-    AsyncReturnValue, CreateResult, GcObjectPtr, LuaAnyRef, LuaFunctionRef, LuaRegistrable,
-    LuaTableRef, LuaVM, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
-};
+use crate::{AsyncReturnValue, LuaAnyRef, LuaFunctionRef, LuaRegistrable, LuaTableRef, LuaVM};
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
@@ -40,7 +38,7 @@ pub struct LuaState {
     pub(crate) stack_top: usize,
 
     /// Call stack - one CallInfo per active function call
-    /// Grows dynamically on demand (like Lua 5.4's linked list approach)
+    /// Grows dynamically on demand (like Lua 5.5's linked list approach)
     /// Similar to Lua's CallInfo *ci in lua_State
     #[allow(clippy::vec_box)]
     pub(crate) call_stack: Vec<Box<CallInfo>>,
@@ -272,7 +270,7 @@ impl LuaState {
                 } else {
                     0
                 };
-                let chunk_ptr: *const crate::lua_value::Chunk = chunk;
+                let chunk_ptr: *const crate::lua_value::LuaProto = chunk;
                 let upvalue_ptr = func_obj.upvalues().as_ptr();
                 (
                     call_status::with_nresults(call_status::CIST_LUA, nresults),
@@ -383,7 +381,7 @@ impl LuaState {
         base: usize,
         nresults: i32,
         max_stack_size: usize,
-        chunk_ptr: *const crate::lua_value::Chunk,
+        chunk_ptr: *const crate::lua_value::LuaProto,
         upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<bool> {
         if self.call_depth >= self.safe_state.max_call_depth {
@@ -424,7 +422,7 @@ impl LuaState {
         nresults: i32,
         param_count: usize,
         max_stack_size: usize,
-        chunk_ptr: *const crate::lua_value::Chunk,
+        chunk_ptr: *const crate::lua_value::LuaProto,
         upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<()> {
         // Check stack depth (cold — almost never triggers)
@@ -504,7 +502,7 @@ impl LuaState {
         param_count: usize,
         _max_stack_size: usize,
         frame_top: usize,
-        chunk_ptr: *const crate::lua_value::Chunk,
+        chunk_ptr: *const crate::lua_value::LuaProto,
         upvalue_ptrs: *const crate::gc::UpvaluePtr,
     ) -> LuaResult<()> {
         let nextraargs = if nparams > param_count {

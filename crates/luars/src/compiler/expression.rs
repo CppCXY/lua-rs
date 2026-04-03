@@ -1,5 +1,6 @@
 use crate::LuaValue;
 
+#[allow(clippy::upper_case_acronyms)]
 // Port of expdesc from lcode.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpKind {
@@ -129,6 +130,7 @@ pub struct VarVals {
     pub vidx: u16, // compiler index (in 'actvar.arr' or 'upvalues')
 }
 
+#[allow(unused)]
 impl ExpDesc {
     pub fn new_void() -> Self {
         ExpDesc {

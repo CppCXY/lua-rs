@@ -4,8 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use luars::lua_vm::{LuaVM, SafeOption};
-use luars::{LuaValue, Stdlib, TableBuilder};
+use luars::{Lua, SafeOption, Stdlib, Table};
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -69,23 +68,18 @@ fn run() -> AppResult<()> {
     let script_path = parse_script_path()?;
     let (script_name, script_source) = load_script(script_path.as_deref())?;
 
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(Stdlib::All)?;
-    register_host_functions(&mut vm)?;
-    vm.execute(&script_source)?;
+    let mut lua = Lua::new(SafeOption::default());
+    lua.load_stdlibs(Stdlib::All)?;
+    register_host_functions(&mut lua)?;
+    lua.load(&script_source).set_name(&script_name).exec()?;
 
     println!("=== luars rules engine demo ===");
     println!("rules source: {script_name}");
-    println!("scenario: checkout approval, discounting, shipping, and manual review");
     println!();
 
-    let evaluator = vm
-        .get_global_function("evaluate_order")?
-        .ok_or_else(|| io::Error::other("Lua global evaluate_order was not defined"))?;
-
     for order in sample_orders() {
-        let order_value = build_order_table(&mut vm, &order)?;
-        let decision = evaluate_order(&mut vm, &evaluator, order_value)?;
+        let order_value = build_order_table(&mut lua, &order)?;
+        let decision = evaluate_order(&mut lua, order_value)?;
         print_decision(&order, &decision);
     }
 
@@ -105,7 +99,7 @@ fn parse_script_path() -> AppResult<Option<PathBuf>> {
                 script = Some(PathBuf::from(value));
             }
             "--help" | "-h" => {
-                print_help();
+                println!("rules-engine-demo [--script PATH]");
                 std::process::exit(0);
             }
             other => {
@@ -119,10 +113,6 @@ fn parse_script_path() -> AppResult<Option<PathBuf>> {
     }
 
     Ok(script)
-}
-
-fn print_help() {
-    println!("rules-engine-demo [--script PATH]");
 }
 
 fn load_script(script_path: Option<&Path>) -> AppResult<(String, String)> {
@@ -143,8 +133,8 @@ fn load_script(script_path: Option<&Path>) -> AppResult<(String, String)> {
     }
 }
 
-fn register_host_functions(vm: &mut LuaVM) -> AppResult<()> {
-    vm.register_function_typed(
+fn register_host_functions(lua: &mut Lua) -> AppResult<()> {
+    lua.register_function(
         "risk_score",
         |email: String, total_cents: i64, country: String| -> i64 {
             let domain = email.split('@').nth(1).unwrap_or_default();
@@ -169,7 +159,7 @@ fn register_host_functions(vm: &mut LuaVM) -> AppResult<()> {
         },
     )?;
 
-    vm.register_function_typed(
+    lua.register_function(
         "inventory_available",
         |sku: String, quantity: i64| -> bool {
             let available_units = match sku.as_str() {
@@ -185,7 +175,7 @@ fn register_host_functions(vm: &mut LuaVM) -> AppResult<()> {
         },
     )?;
 
-    vm.register_function_typed("shipping_eta", |country: String, tier: String| -> i64 {
+    lua.register_function("shipping_eta", |country: String, tier: String| -> i64 {
         match (country.as_str(), tier.as_str()) {
             (_, "hold") => 0,
             ("CN", "express") => 1,
@@ -199,14 +189,8 @@ fn register_host_functions(vm: &mut LuaVM) -> AppResult<()> {
         }
     })?;
 
-    vm.register_function("audit", |state| {
-        let message = state
-            .get_arg(1)
-            .and_then(|value| value.as_str().map(str::to_owned));
-        if let Some(message) = message {
-            println!("  [lua audit] {message}");
-        }
-        Ok(0)
+    lua.register_function("audit", |message: String| {
+        println!("  [lua audit] {message}");
     })?;
 
     Ok(())
@@ -262,129 +246,67 @@ fn sample_orders() -> Vec<Order> {
                 },
             ],
         },
-        Order {
-            id: "ORD-1003",
-            coupon_code: Some("FLASH10"),
-            customer: Customer {
-                email: "ops@corp.example",
-                country: "US",
-                vip: false,
-                loyalty_points: 120,
-            },
-            items: vec![
-                LineItem {
-                    sku: "GLASS-MUG",
-                    category: "fragile",
-                    quantity: 4,
-                    unit_price_cents: 1_800,
-                },
-                LineItem {
-                    sku: "CLOUD-CREDIT",
-                    category: "digital",
-                    quantity: 1,
-                    unit_price_cents: 8_000,
-                },
-            ],
-        },
     ]
 }
 
-fn build_order_table(vm: &mut LuaVM, order: &Order) -> AppResult<LuaValue> {
-    let items = build_items_table(vm, &order.items)?;
-    let customer = TableBuilder::new()
-        .set("email", vm.create_string(order.customer.email)?)
-        .set("country", vm.create_string(order.customer.country)?)
-        .set("vip", LuaValue::boolean(order.customer.vip))
-        .set(
-            "loyalty_points",
-            LuaValue::integer(order.customer.loyalty_points),
-        )
-        .build(vm)?;
+fn build_order_table(lua: &mut Lua, order: &Order) -> AppResult<Table> {
+    let customer = lua.create_table()?;
+    customer.set("email", order.customer.email)?;
+    customer.set("country", order.customer.country)?;
+    customer.set("vip", order.customer.vip)?;
+    customer.set("loyalty_points", order.customer.loyalty_points)?;
 
-    let coupon_value = match order.coupon_code {
-        Some(code) => vm.create_string(code)?,
-        None => LuaValue::nil(),
-    };
-
-    Ok(TableBuilder::new()
-        .set("id", vm.create_string(order.id)?)
-        .set("coupon_code", coupon_value)
-        .set("total_cents", LuaValue::integer(order.total_cents()))
-        .set("item_count", LuaValue::integer(order.item_count()))
-        .set("customer", customer)
-        .set("items", items)
-        .build(vm)?)
-}
-
-fn build_items_table(vm: &mut LuaVM, items: &[LineItem]) -> AppResult<LuaValue> {
-    let mut builder = TableBuilder::new();
-
-    for item in items {
-        let item_table = TableBuilder::new()
-            .set("sku", vm.create_string(item.sku)?)
-            .set("category", vm.create_string(item.category)?)
-            .set("quantity", LuaValue::integer(item.quantity))
-            .set("unit_price_cents", LuaValue::integer(item.unit_price_cents))
-            .build(vm)?;
-        builder = builder.push(item_table);
+    let items = lua.create_table()?;
+    for item in &order.items {
+        items.push(build_line_item(lua, item)?)?;
     }
 
-    Ok(builder.build(vm)?)
+    let table = lua.create_table()?;
+    table.set("id", order.id)?;
+    table.set("coupon_code", order.coupon_code)?;
+    table.set("total_cents", order.total_cents())?;
+    table.set("item_count", order.item_count())?;
+    table.set("customer", customer)?;
+    table.set("items", items)?;
+    Ok(table)
 }
 
-fn evaluate_order(
-    vm: &mut LuaVM,
-    evaluator: &luars::LuaFunctionRef,
-    order_value: LuaValue,
-) -> AppResult<Decision> {
-    let decision_value = evaluator.call1_raw(vec![order_value])?;
-    let decision_table = vm
-        .to_table_ref(decision_value)
-        .ok_or_else(|| io::Error::other("evaluate_order must return a table"))?;
+fn build_line_item(lua: &mut Lua, item: &LineItem) -> AppResult<Table> {
+    let table = lua.create_table()?;
+    table.set("sku", item.sku)?;
+    table.set("category", item.category)?;
+    table.set("quantity", item.quantity)?;
+    table.set("unit_price_cents", item.unit_price_cents)?;
+    Ok(table)
+}
 
-    let tags_value = decision_table.get("tags")?;
-    let tags_table = vm
-        .to_table_ref(tags_value)
-        .ok_or_else(|| io::Error::other("decision.tags must be a table"))?;
-
-    let mut tags = Vec::new();
-    for index in 1..=tags_table.len()? {
-        let value = tags_table.geti(index as i64)?;
-        if let Some(tag) = value.as_str() {
-            tags.push(tag.to_string());
-        }
-    }
+fn evaluate_order(lua: &mut Lua, order: Table) -> AppResult<Decision> {
+    let decision: Table = lua.call_global1("evaluate_order", order)?;
+    let tags: Table = decision.get("tags")?;
 
     Ok(Decision {
-        approved: decision_table.get_as("approved")?,
-        action: decision_table.get_as("action")?,
-        discount_cents: decision_table.get_as("discount_cents")?,
-        shipping_tier: decision_table.get_as("shipping_tier")?,
-        eta_days: decision_table.get_as("eta_days")?,
-        reason: decision_table.get_as("reason")?,
-        tags,
+        approved: decision.get("approved")?,
+        action: decision.get("action")?,
+        discount_cents: decision.get("discount_cents")?,
+        shipping_tier: decision.get("shipping_tier")?,
+        eta_days: decision.get("eta_days")?,
+        reason: decision.get("reason")?,
+        tags: tags.sequence_values::<String>()?,
     })
 }
 
 fn print_decision(order: &Order, decision: &Decision) {
-    println!("order {}", order.id);
     println!(
-        "  customer: {} ({}) | total: {} | items: {}",
-        order.customer.email,
-        order.customer.country,
-        format_money(order.total_cents()),
-        order.item_count()
+        "order={} total={} approved={}",
+        order.id,
+        order.total_cents(),
+        decision.approved
     );
-    println!(
-        "  result: {} | approved: {} | shipping: {} | eta: {} day(s)",
-        decision.action, decision.approved, decision.shipping_tier, decision.eta_days
-    );
-    println!("  discount: {}", format_money(decision.discount_cents));
+    println!("  action: {}", decision.action);
+    println!("  discount_cents: {}", decision.discount_cents);
+    println!("  shipping_tier: {}", decision.shipping_tier);
+    println!("  eta_days: {}", decision.eta_days);
     println!("  reason: {}", decision.reason);
     println!("  tags: {}", decision.tags.join(", "));
     println!();
-}
-
-fn format_money(cents: i64) -> String {
-    format!("${:.2}", cents as f64 / 100.0)
 }

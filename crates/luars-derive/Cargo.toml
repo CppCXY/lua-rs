@@ -12,6 +12,7 @@ categories = ["development-tools"]
 
 [lib]
 proc-macro = true
+doctest = false
 
 [dependencies]
 syn = { version = "2", features = ["full", "extra-traits"] }

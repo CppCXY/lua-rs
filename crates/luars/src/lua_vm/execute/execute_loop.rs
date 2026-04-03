@@ -20,7 +20,8 @@
 
 use crate::{
     CallInfo, Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult,
-    LuaState, LuaValue, OpCode, TablePtr,
+    LuaState, LuaValue, OpCode,
+    gc::TablePtr,
     lua_value::LUA_VNUMINT,
     lua_vm::{
         LuaError, TmKind,

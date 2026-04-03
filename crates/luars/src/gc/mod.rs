@@ -173,35 +173,6 @@ pub enum GcKind {
     GenMajor = 2, // KGC_GENMAJOR - Generational major collections (temporary inc mode)
 }
 
-/// Object age for generational GC (from lgc.h)
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum GcAge {
-    New = 0,      // G_NEW - created in current cycle
-    Survival = 1, // G_SURVIVAL - created in previous cycle
-    Old0 = 2,     // G_OLD0 - marked old by forward barrier in this cycle
-    Old1 = 3,     // G_OLD1 - first full cycle as old
-    Old = 4,      // G_OLD - really old object (not to be visited)
-    Touched1 = 5, // G_TOUCHED1 - old object touched this cycle
-    Touched2 = 6, // G_TOUCHED2 - old object touched in previous cycle
-}
-
-impl GcAge {
-    pub fn is_old(self) -> bool {
-        self as u8 > GcAge::Survival as u8
-    }
-}
-
-/// GC color for tri-color marking (from lgc.h)
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcColor {
-    White0 = 0, // object is white (type 0)
-    White1 = 1, // object is white (type 1)
-    Gray = 2,   // object is gray (marked but not scanned)
-    Black = 3,  // object is black (fully marked)
-}
-
 /// GC state machine (from lgc.h)
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1281,6 +1252,9 @@ impl GC {
         // markvalue(g, &g->l_registry);
         self.mark_value(l, &registry);
 
+        let global = l.vm_mut().global;
+        self.mark_value(l, &global);
+
         // Mark debug hook function (per-thread, on main thread)
         let hook = l.hook;
         if !hook.is_nil() {
@@ -2275,6 +2249,9 @@ impl GC {
         // Mark registry (global state)
         let registry = l.vm_mut().registry;
         self.mark_value(l, &registry);
+
+        let global = l.vm_mut().global;
+        self.mark_value(l, &global);
 
         // Mark debug hook function (per-thread, stored on LuaState)
         let hook = l.hook;
