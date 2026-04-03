@@ -8,6 +8,7 @@
 //! - `String`, `&str` (via intermediate `String`)
 //! - `Option<T>` where `T: FromLua` / `T: IntoLua`
 //! - `LuaValue` (identity — zero-cost passthrough)
+//! - `T` where `T: UserDataTrait + Clone + 'static` (owned clone from Lua userdata)
 //!
 //! # Usage in derive macros
 //! The `#[lua_methods]` macro generates calls to `FromLua::from_lua` for each
@@ -28,6 +29,7 @@
 //! }
 //! ```
 
+use crate::UserDataTrait;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::LuaState;
 
@@ -134,6 +136,35 @@ impl FromLuaMulti for Vec<LuaValue> {
     #[inline]
     fn from_lua_multi(values: Vec<LuaValue>, _state: &mut LuaState) -> Result<Self, String> {
         Ok(values)
+    }
+}
+
+// ==================== Cloneable userdata ====================
+
+impl<T> FromLua for T
+where
+    T: UserDataTrait + Clone + 'static,
+{
+    #[inline]
+    fn from_lua(value: LuaValue, _state: &mut LuaState) -> Result<Self, String> {
+        let expected = std::any::type_name::<T>();
+        let Some(userdata) = value.as_userdata_mut() else {
+            return Err(format!(
+                "expected userdata {}, got {}",
+                expected,
+                value.type_name()
+            ));
+        };
+
+        let Some(inner) = userdata.downcast_ref::<T>() else {
+            return Err(format!(
+                "expected userdata {}, got {}",
+                expected,
+                userdata.type_name()
+            ));
+        };
+
+        Ok(inner.clone())
     }
 }
 

@@ -74,6 +74,29 @@ mod tests {
     }
 
     #[test]
+    fn high_level_collect_garbage_works() {
+        let mut lua = Lua::new(SafeOption::default());
+        lua.open_stdlib(Stdlib::All).unwrap();
+
+        lua.load(
+            r#"
+            local t = {}
+            for i = 1, 200 do
+                t[i] = { index = i, payload = string.rep("x", 32) }
+            end
+            t = nil
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+        lua.collect_garbage().unwrap();
+
+        let answer: i64 = lua.eval("return 40 + 2").unwrap();
+        assert_eq!(answer, 42);
+    }
+
+    #[test]
     fn safe_table_round_trip() {
         let mut lua = Lua::new(SafeOption::default());
         let table = lua.create_table_with_capacity(0, 2).unwrap();
@@ -583,5 +606,25 @@ mod tests {
                 .unwrap(),
             vec!["api".to_string()]
         );
+    }
+
+    #[test]
+    fn test_userdata() {
+        #[derive(Clone, Debug, LuaUserData)]
+        struct RustStruct {
+            a: i32,
+            b: i32,
+        }
+
+        #[lua_methods]
+        impl RustStruct {}
+
+        let mut l = Lua::new(SafeOption::default());
+        let t = l.create_table().unwrap();
+        t.set(1, RustStruct { a: 1, b: 2 }).unwrap();
+        let seq = t.sequence_values::<RustStruct>().unwrap();
+        assert_eq!(seq.len(), 1);
+        assert_eq!(seq[0].a, 1);
+        assert_eq!(seq[0].b, 2);
     }
 }

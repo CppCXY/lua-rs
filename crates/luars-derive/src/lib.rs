@@ -45,8 +45,8 @@ use syn::parse_macro_input;
 ///
 /// # Conversion behavior
 /// - `IntoLua` is auto-implemented, so derived userdata values can be passed directly into typed APIs
-/// - Owned `FromLua` is intentionally not auto-implemented, because userdata lives in Lua GC storage and
-///   implicit extraction by value would blur ownership semantics
+/// - Owned `FromLua` is available when the userdata type also implements `Clone`; the value is cloned
+///   out of Lua GC storage, while non-cloneable userdata should keep using `UserDataRef<T>`
 ///
 /// # Example
 /// ```ignore

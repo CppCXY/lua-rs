@@ -44,6 +44,12 @@ impl Lua {
         self.open_stdlib(lib)
     }
 
+    /// Run a full garbage-collection cycle immediately.
+    #[inline]
+    pub fn collect_garbage(&mut self) -> LuaResult<()> {
+        self.vm.main_state().collect_garbage()
+    }
+
     /// Execute source code and discard raw return values.
     #[inline]
     pub fn execute(&mut self, source: &str) -> LuaResult<()> {
