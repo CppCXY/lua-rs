@@ -18,6 +18,10 @@ fn print_usage() {
     eprintln!("  -v        show version information");
     eprintln!("  -E        ignore environment variables");
     eprintln!("  -W        turn warnings on");
+    #[cfg(feature = "jit")]
+    eprintln!("  --jit-stats  print JIT statistics after execution");
+    #[cfg(feature = "jit")]
+    eprintln!("  --jit-trace-report  print per-trace JIT slot details after execution");
     eprintln!("  --        stop handling options");
     eprintln!("  -         stop handling options and execute stdin");
 }
@@ -38,6 +42,10 @@ struct Options {
     read_stdin: bool,
     ignore_env: bool,
     warnings_on: bool,
+    #[cfg(feature = "jit")]
+    print_jit_stats: bool,
+    #[cfg(feature = "jit")]
+    print_jit_trace_report: bool,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -76,6 +84,14 @@ fn parse_args() -> Result<Options, String> {
                 }
                 "-W" => {
                     opts.warnings_on = true;
+                }
+                #[cfg(feature = "jit")]
+                "--jit-stats" => {
+                    opts.print_jit_stats = true;
+                }
+                #[cfg(feature = "jit")]
+                "--jit-trace-report" => {
+                    opts.print_jit_trace_report = true;
                 }
                 "--" => {
                     stop_options = true;
@@ -281,6 +297,26 @@ fn resolve_env_path(env_value: &str, default: &str) -> String {
         env_value.to_string()
     }
 }
+
+#[cfg(feature = "jit")]
+fn maybe_print_jit_stats(vm: &LuaVM, enabled: bool) {
+    if enabled || env::var_os("LUARS_JIT_STATS").is_some() {
+        println!("{}", vm.jit_stats());
+    }
+}
+
+#[cfg(feature = "jit")]
+fn maybe_print_jit_trace_report(vm: &LuaVM, enabled: bool) {
+    if enabled || env::var_os("LUARS_JIT_TRACE_REPORT").is_some() {
+        println!("{}", vm.jit_trace_report());
+    }
+}
+
+#[cfg(not(feature = "jit"))]
+fn maybe_print_jit_stats(_vm: &LuaVM, _enabled: bool) {}
+
+#[cfg(not(feature = "jit"))]
+fn maybe_print_jit_trace_report(_vm: &LuaVM, _enabled: bool) {}
 
 pub fn run_interpreter() {
     // Install crash handler on Windows to capture crash address
@@ -550,6 +586,18 @@ fn lua_main() -> i32 {
     {
         run_repl(&mut vm);
     }
+
+    #[cfg(feature = "jit")]
+    maybe_print_jit_stats(&vm, opts.print_jit_stats);
+
+    #[cfg(feature = "jit")]
+    maybe_print_jit_trace_report(&vm, opts.print_jit_trace_report);
+
+    #[cfg(not(feature = "jit"))]
+    maybe_print_jit_stats(&vm, false);
+
+    #[cfg(not(feature = "jit"))]
+    maybe_print_jit_trace_report(&vm, false);
 
     0
 }

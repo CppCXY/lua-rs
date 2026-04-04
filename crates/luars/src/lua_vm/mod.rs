@@ -6,6 +6,8 @@ mod const_string;
 pub mod debug_info;
 mod execute;
 mod file_layout;
+#[cfg(feature = "jit")]
+mod jit;
 pub mod lua_error;
 pub mod lua_limits;
 mod lua_ref;
@@ -41,6 +43,8 @@ pub use crate::lua_vm::lua_ref::{
 };
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
+#[cfg(feature = "jit")]
+pub use crate::lua_vm::jit::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 #[cfg(feature = "sandbox")]
 pub use crate::lua_vm::sandbox::SandboxConfig;
 use crate::platform_time::{PlatformInstant, unix_nanos};
@@ -240,6 +244,9 @@ pub struct LuaVM {
 
     pub const_strings: ConstString,
 
+    #[cfg(feature = "jit")]
+    pub(crate) jit: jit::JitState,
+
     /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
     pub(crate) io_default_output: Option<LuaValue>,
     pub(crate) io_default_input: Option<LuaValue>,
@@ -272,6 +279,8 @@ impl LuaVM {
             // Record start time for os.clock()
             start_time: PlatformInstant::now(),
             const_strings: cs,
+            #[cfg(feature = "jit")]
+            jit: jit::JitState::default(),
             io_default_output: None,
             io_default_input: None,
         });
@@ -1774,6 +1783,78 @@ impl LuaVM {
             stats.old_gen_size,
             stats.promoted_objects
         )
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_stats_snapshot(&self) -> JitStatsSnapshot {
+        self.jit.stats_snapshot()
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_stats(&self) -> String {
+        let snapshot = self.jit.stats_snapshot();
+        let counters = snapshot.counters;
+        let aborts = snapshot.aborts;
+        let top_unsupported_opcode = snapshot
+            .top_unsupported_opcode
+            .map(|(opcode, count)| format!("{:?}={}", opcode, count))
+            .unwrap_or_else(|| "none".to_string());
+        format!(
+            "JIT Stats:\n\
+            - Trace headers seen: {}\n\
+            - Record attempts: {}\n\
+            - Recorded traces: {}\n\
+            - Record aborts: {}\n\
+            - Abort EmptyLoopBody: {}\n\
+            - Abort PcOutOfBounds: {}\n\
+            - Abort UnsupportedOpcode: {}\n\
+            - Top UnsupportedOpcode: {}\n\
+            - Abort MissingBranchAfterGuard: {}\n\
+            - Abort ForwardJump: {}\n\
+            - Abort BackedgeMismatch: {}\n\
+            - Abort TraceTooLong: {}\n\
+            - Blacklist hits: {}\n\
+            - Trace enter checks: {}\n\
+            - Trace enter hits: {}\n\
+            - Helper plan dispatches: {}\n\
+            - Helper plan steps: {}\n\
+            - Helper plan guards: {}\n\
+            - Helper plan calls: {}\n\
+            - Helper plan metamethods: {}\n\
+            - Trace slots: {}\n\
+            - Recorded slots: {}\n\
+            - Compiled slots: {}\n\
+            - Blacklisted slots: {}",
+            counters.hot_headers,
+            counters.record_attempts,
+            counters.recorded_traces,
+            counters.record_aborts,
+            aborts.empty_loop_body,
+            aborts.pc_out_of_bounds,
+            aborts.unsupported_opcode,
+            top_unsupported_opcode,
+            aborts.missing_branch_after_guard,
+            aborts.forward_jump,
+            aborts.backedge_mismatch,
+            aborts.trace_too_long,
+            counters.blacklist_hits,
+            counters.trace_enter_checks,
+            counters.trace_enter_hits,
+            counters.helper_plan_dispatches,
+            counters.helper_plan_steps,
+            counters.helper_plan_guards,
+            counters.helper_plan_calls,
+            counters.helper_plan_metamethods,
+            snapshot.trace_count,
+            snapshot.recorded_count,
+            snapshot.compiled_count,
+            snapshot.blacklisted_count,
+        )
+    }
+
+    #[cfg(feature = "jit")]
+    pub fn jit_trace_report(&self) -> String {
+        self.jit.trace_report()
     }
 
     // ===== Error Handling =====

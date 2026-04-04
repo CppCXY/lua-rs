@@ -50,6 +50,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "jit")]
+use crate::lua_vm::jit;
+
 /// Execute until call depth reaches target_depth
 /// Used for protected calls (pcall) to execute only the called function
 /// without affecting caller frames
@@ -1759,7 +1762,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 OpCode::Jmp => {
                     let sj = instr.get_sj();
-                    pc = (pc as isize + sj as isize) as usize;
+                    let target_pc = (pc as isize + sj as isize) as usize;
+                    #[cfg(feature = "jit")]
+                    if sj < 0 {
+                        jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, target_pc);
+                        jit::record_loop_backedge(lua_state, ci.chunk_ptr, target_pc);
+                    }
+                    pc = target_pc;
                     updatetrap!();
                 }
                 OpCode::Eq => {
@@ -2264,12 +2273,22 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                                 // Jump back
                                 pc -= bx;
+                                #[cfg(feature = "jit")]
+                                {
+                                    jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, pc);
+                                    jit::record_loop_backedge(lua_state, ci.chunk_ptr, pc);
+                                }
                             }
                             // else: counter expired, exit loop
                         } else if float_for_loop(lua_state, base + a) {
                             // Float loop with non-integer step
                             // Jump back if loop continues
                             pc -= bx;
+                            #[cfg(feature = "jit")]
+                            {
+                                jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, pc);
+                                jit::record_loop_backedge(lua_state, ci.chunk_ptr, pc);
+                            }
                         }
                     }
 
@@ -2332,6 +2351,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if !stack_val!(instr.get_a() + 3).is_nil() {
                         // Continue loop: jump back
                         pc -= instr.get_bx() as usize;
+                        #[cfg(feature = "jit")]
+                        {
+                            jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, pc);
+                            jit::record_loop_backedge(lua_state, ci.chunk_ptr, pc);
+                        }
                     }
                     // else: exit loop (control variable is nil)
                 }

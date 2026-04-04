@@ -15,6 +15,7 @@ default = []
 serde = ["dep:serde", "dep:serde_json"]
 sandbox = []
 shared-proto = []
+jit = []
 
 [dependencies]
 # local

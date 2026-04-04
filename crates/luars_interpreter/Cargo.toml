@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 default = []
+jit = ["luars/jit"]
 serde = ["luars/serde"]
 
 [dependencies]
