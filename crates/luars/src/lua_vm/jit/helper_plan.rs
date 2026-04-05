@@ -66,6 +66,7 @@ pub(crate) struct HelperPlan {
     pub loop_tail_pc: u32,
     pub steps: Vec<HelperPlanStep>,
     pub guard_count: u16,
+    pub(crate) summary: HelperPlanDispatchSummary,
 }
 
 impl HelperPlan {
@@ -123,64 +124,21 @@ impl HelperPlan {
                     writes: inst.writes.clone(),
                 },
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        let summary = summarize_steps(&steps);
 
         Self {
             root_pc: ir.root_pc,
             loop_tail_pc: ir.loop_tail_pc,
             steps,
             guard_count: ir.guards.len() as u16,
+            summary,
         }
     }
 
     pub(crate) fn dispatch(&self) -> HelperPlanDispatchSummary {
-        let mut summary = HelperPlanDispatchSummary::default();
-
-        for step in &self.steps {
-            match step {
-                HelperPlanStep::LoadMove { reads, writes } => {
-                    execute_load_move_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::UpvalueAccess { reads, writes } => {
-                    execute_upvalue_access_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::UpvalueMutation { reads, writes } => {
-                    execute_upvalue_mutation_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::Cleanup { reads } => {
-                    execute_cleanup_helper(reads, &mut summary);
-                }
-                HelperPlanStep::TableAccess { reads, writes } => {
-                    execute_table_access_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::Arithmetic { reads, writes } => {
-                    execute_arithmetic_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::Call { reads, writes } => {
-                    execute_call_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::MetamethodFallback { reads } => {
-                    execute_metamethod_helper(reads, &mut summary);
-                }
-                HelperPlanStep::ClosureCreation { reads, writes } => {
-                    execute_closure_creation_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::LoopPrep { reads, writes } => {
-                    execute_loop_prep_helper(reads, writes, &mut summary);
-                }
-                HelperPlanStep::Guard { reads } => {
-                    execute_guard_helper(reads, &mut summary);
-                }
-                HelperPlanStep::Branch { reads } => {
-                    execute_branch_helper(reads, &mut summary);
-                }
-                HelperPlanStep::LoopBackedge { reads, writes } => {
-                    execute_loop_backedge_helper(reads, writes, &mut summary);
-                }
-            }
-        }
-
-        summary
+        self.summary
     }
 }
 
@@ -280,6 +238,56 @@ fn execute_loop_backedge_helper(
 
 fn record_helper_step(summary: &mut HelperPlanDispatchSummary) {
     summary.steps_executed = summary.steps_executed.saturating_add(1);
+}
+
+fn summarize_steps(steps: &[HelperPlanStep]) -> HelperPlanDispatchSummary {
+    let mut summary = HelperPlanDispatchSummary::default();
+
+    for step in steps {
+        match step {
+            HelperPlanStep::LoadMove { reads, writes } => {
+                execute_load_move_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::UpvalueAccess { reads, writes } => {
+                execute_upvalue_access_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::UpvalueMutation { reads, writes } => {
+                execute_upvalue_mutation_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::Cleanup { reads } => {
+                execute_cleanup_helper(reads, &mut summary);
+            }
+            HelperPlanStep::TableAccess { reads, writes } => {
+                execute_table_access_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::Arithmetic { reads, writes } => {
+                execute_arithmetic_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::Call { reads, writes } => {
+                execute_call_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::MetamethodFallback { reads } => {
+                execute_metamethod_helper(reads, &mut summary);
+            }
+            HelperPlanStep::ClosureCreation { reads, writes } => {
+                execute_closure_creation_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::LoopPrep { reads, writes } => {
+                execute_loop_prep_helper(reads, writes, &mut summary);
+            }
+            HelperPlanStep::Guard { reads } => {
+                execute_guard_helper(reads, &mut summary);
+            }
+            HelperPlanStep::Branch { reads } => {
+                execute_branch_helper(reads, &mut summary);
+            }
+            HelperPlanStep::LoopBackedge { reads, writes } => {
+                execute_loop_backedge_helper(reads, writes, &mut summary);
+            }
+        }
+    }
+
+    summary
 }
 
 #[cfg(test)]

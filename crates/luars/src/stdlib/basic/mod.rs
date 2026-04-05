@@ -504,7 +504,7 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
 /// Hot path: push_c_frame already guarantees EXTRA_STACK slots,
 /// so we use push_value_unchecked throughout.
 #[inline]
-fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
     let table_val = unsafe { l.get_arg_unchecked(1) };
     let index_val = unsafe { l.get_arg_unchecked(2) };
 
@@ -638,7 +638,7 @@ fn lua_userdata_next(l: &mut LuaState) -> LuaResult<usize> {
 
 /// next(table [, index]) - Return next key-value pair
 /// Port of Lua 5.5's luaB_next using luaH_next
-fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     // arg 1 is the table (required), arg 2 is the key (optional, defaults to nil)
     let table_val = unsafe { l.get_arg_unchecked(1) };
     let index_val = l.get_arg(2).unwrap_or_default();

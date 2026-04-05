@@ -2177,6 +2177,58 @@ impl NativeTable {
         Ok(None) // No more elements
     }
 
+    /// Zero-copy variant of next() that writes the next key/value pair directly
+    /// into the provided destinations. Returns Ok(true) when a pair was written,
+    /// Ok(false) when iteration finished, or Err(()) for an invalid key.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub unsafe fn next_into(
+        &self,
+        key: &LuaValue,
+        key_out: *mut LuaValue,
+        value_out: *mut LuaValue,
+    ) -> Result<bool, ()> {
+        let asize = self.asize;
+
+        let mut i = match self.findindex(key) {
+            Some(idx) => idx,
+            None => return Err(()),
+        };
+
+        while i < asize {
+            unsafe {
+                let tag = *self.get_arr_tag(i as usize);
+                if tag != LUA_VNIL && tag != LUA_VEMPTY {
+                    (*key_out).tt = LUA_VNUMINT;
+                    (*key_out).value = Value::integer((i + 1) as i64);
+                    (*value_out).tt = tag;
+                    (*value_out).value = *self.get_arr_val(i as usize);
+                    return Ok(true);
+                }
+            }
+            i += 1;
+        }
+
+        let hash_size = self.sizenode() as u32;
+        i -= asize;
+
+        while i < hash_size {
+            unsafe {
+                let node = self.node.add(i as usize);
+                if novariant((*node).key_tt) != LUA_TNIL && (*node).val_tt != LUA_VNIL {
+                    (*key_out).tt = (*node).key_tt;
+                    (*key_out).value = (*node).key_data;
+                    (*value_out).tt = (*node).val_tt;
+                    (*value_out).value = (*node).val_data;
+                    return Ok(true);
+                }
+            }
+            i += 1;
+        }
+
+        Ok(false)
+    }
+
     /// GC-safe iteration: call f for each entry
     pub fn for_each_entry<F>(&self, mut f: F)
     where

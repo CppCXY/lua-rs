@@ -4,7 +4,9 @@ use std::fmt::Write;
 use crate::lua_value::LuaProto;
 use crate::OpCode;
 
-use super::backend::{BackendCompileOutcome, CompiledTrace, NullTraceBackend, TraceBackend};
+use super::backend::{
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecutor, NullTraceBackend, TraceBackend,
+};
 use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use super::hotcount::tick_hotcount;
 use super::ir::TraceIr;
@@ -224,6 +226,34 @@ impl JitState {
         false
     }
 
+    pub(crate) fn compiled_trace_executor(
+        &self,
+        chunk_ptr: *const LuaProto,
+        pc: u32,
+    ) -> Option<(CompiledTraceExecutor, HelperPlanDispatchSummary)> {
+        let key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc,
+        };
+
+        self.traces.get(&key).and_then(|trace| {
+            trace.compiled_trace.as_ref().map(|compiled_trace| {
+                (compiled_trace.executor(), compiled_trace.summary())
+            })
+        })
+    }
+
+    pub(crate) fn record_batched_trace_execution(
+        &mut self,
+        checks: u32,
+        hits: u32,
+        summary: HelperPlanDispatchSummary,
+    ) {
+        self.counters.trace_enter_checks = self.counters.trace_enter_checks.saturating_add(checks);
+        self.counters.trace_enter_hits = self.counters.trace_enter_hits.saturating_add(hits);
+        self.apply_helper_plan_summary_n(summary, hits);
+    }
+
     pub(crate) fn record_loop_backedge(&mut self, chunk_ptr: *const LuaProto, pc: u32) {
         let key = TraceKey {
             chunk_addr: chunk_ptr as usize,
@@ -319,7 +349,7 @@ impl JitState {
                 };
                 let ir = TraceIr::lower(&artifact);
                 let helper_plan = HelperPlan::lower(&ir);
-                let backend_outcome = self.backend.compile(&ir, &helper_plan);
+                let backend_outcome = self.backend.compile(&artifact, &ir, &helper_plan);
                 self.counters.recorded_traces = self.counters.recorded_traces.saturating_add(1);
                 if storage_key != key {
                     if let Some(trace) = self.traces.get_mut(&key) {
@@ -386,28 +416,36 @@ impl JitState {
     }
 
     fn apply_helper_plan_summary(&mut self, summary: HelperPlanDispatchSummary) {
+        self.apply_helper_plan_summary_n(summary, 1);
+    }
+
+    fn apply_helper_plan_summary_n(&mut self, summary: HelperPlanDispatchSummary, count: u32) {
         if summary.steps_executed == 0 {
             return;
         }
 
+        if count == 0 {
+            return;
+        }
+
         self.counters.helper_plan_dispatches =
-            self.counters.helper_plan_dispatches.saturating_add(1);
+            self.counters.helper_plan_dispatches.saturating_add(count);
         self.counters.helper_plan_steps = self
             .counters
             .helper_plan_steps
-            .saturating_add(summary.steps_executed);
+            .saturating_add(summary.steps_executed.saturating_mul(count));
         self.counters.helper_plan_guards = self
             .counters
             .helper_plan_guards
-            .saturating_add(summary.guards_observed);
+            .saturating_add(summary.guards_observed.saturating_mul(count));
         self.counters.helper_plan_calls = self
             .counters
             .helper_plan_calls
-            .saturating_add(summary.call_steps);
+            .saturating_add(summary.call_steps.saturating_mul(count));
         self.counters.helper_plan_metamethods = self
             .counters
             .helper_plan_metamethods
-            .saturating_add(summary.metamethod_steps);
+            .saturating_add(summary.metamethod_steps.saturating_mul(count));
     }
 }
 
@@ -645,12 +683,7 @@ mod tests {
             jit.record_loop_backedge(chunk_ptr, 0);
         }
 
-        assert_eq!(
-            jit.trace_status_for(chunk_ptr as usize, 0),
-            Some(TraceStatus::Recorded {
-                instruction_count: 2,
-            })
-        );
+        assert_eq!(jit.trace_status_for(chunk_ptr as usize, 0), Some(TraceStatus::Compiled));
         let artifact = jit.artifact_for(chunk_ptr as usize, 0).unwrap();
         let ir = jit.ir_for(chunk_ptr as usize, 0).unwrap();
         let helper_plan = jit.helper_plan_for(chunk_ptr as usize, 0).unwrap();
@@ -821,8 +854,8 @@ mod tests {
 
         let snapshot = jit.stats_snapshot();
         assert_eq!(snapshot.trace_count, 3);
-        assert_eq!(snapshot.recorded_count, 1);
-        assert_eq!(snapshot.compiled_count, 0);
+        assert_eq!(snapshot.recorded_count, 0);
+        assert_eq!(snapshot.compiled_count, 1);
         assert_eq!(snapshot.blacklisted_count, 2);
         assert_eq!(snapshot.counters.recorded_traces, 1);
         assert_eq!(snapshot.counters.record_aborts, 2);
@@ -860,7 +893,7 @@ mod tests {
             jit.trace_status_for(chunk_ptr as usize, 0),
             Some(TraceStatus::Redirected { root_pc: 2 })
         );
-        assert!(matches!(jit.trace_status_for(chunk_ptr as usize, 2), Some(TraceStatus::Recorded { .. })));
+        assert_eq!(jit.trace_status_for(chunk_ptr as usize, 2), Some(TraceStatus::Compiled));
     }
 
     #[test]
