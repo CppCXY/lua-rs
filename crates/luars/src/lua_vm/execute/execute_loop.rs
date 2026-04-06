@@ -294,6 +294,73 @@ fn jit_numeric_binary_result(
 
 #[cfg(feature = "jit")]
 #[inline(always)]
+fn jit_linear_int_compare(lhs: i64, rhs: i64, op: jit::LinearIntGuardOp) -> bool {
+    match op {
+        jit::LinearIntGuardOp::Eq => lhs == rhs,
+        jit::LinearIntGuardOp::Lt => lhs < rhs,
+        jit::LinearIntGuardOp::Le => lhs <= rhs,
+        jit::LinearIntGuardOp::Gt => lhs > rhs,
+        jit::LinearIntGuardOp::Ge => lhs >= rhs,
+    }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+unsafe fn jit_numeric_ifelse_cond_holds(
+    sp: *mut LuaValue,
+    base: usize,
+    cond: jit::NumericIfElseCond,
+) -> bool {
+    match cond {
+        jit::NumericIfElseCond::RegCompare { op, lhs, rhs } => {
+            let lhs_ptr = unsafe { sp.add(base + lhs as usize) };
+            let rhs_ptr = unsafe { sp.add(base + rhs as usize) };
+            let lhs_value = unsafe { &*lhs_ptr };
+            let rhs_value = unsafe { &*rhs_ptr };
+            if !(ttisinteger(lhs_value) || ttisfloat(lhs_value))
+                || !(ttisinteger(rhs_value) || ttisfloat(rhs_value))
+            {
+                return false;
+            }
+
+            match op {
+                jit::LinearIntGuardOp::Lt => lt_num(lhs_value, rhs_value),
+                jit::LinearIntGuardOp::Le => le_num(lhs_value, rhs_value),
+                jit::LinearIntGuardOp::Gt => lt_num(rhs_value, lhs_value),
+                jit::LinearIntGuardOp::Ge => le_num(rhs_value, lhs_value),
+                jit::LinearIntGuardOp::Eq => {
+                    if ttisinteger(lhs_value) && ttisinteger(rhs_value) {
+                        lhs_value.ivalue() == rhs_value.ivalue()
+                    } else if ttisfloat(lhs_value) && ttisfloat(rhs_value) {
+                        lhs_value.fltvalue() == rhs_value.fltvalue()
+                    } else if ttisinteger(lhs_value) && ttisfloat(rhs_value) {
+                        lhs_value.ivalue() as f64 == rhs_value.fltvalue()
+                    } else if ttisfloat(lhs_value) && ttisinteger(rhs_value) {
+                        lhs_value.fltvalue() == rhs_value.ivalue() as f64
+                    } else {
+                        false
+                    }
+                }
+            }
+        }
+        jit::NumericIfElseCond::IntCompare { op, reg, imm } => {
+            let cond_ptr = unsafe { sp.add(base + reg as usize) };
+            if unsafe { !pttisinteger(cond_ptr as *const LuaValue) } {
+                return false;
+            }
+            let cond_value = unsafe { pivalue(cond_ptr as *const LuaValue) };
+            jit_linear_int_compare(cond_value, imm as i64, op)
+        }
+        jit::NumericIfElseCond::Truthy { reg } => {
+            let cond_ptr = unsafe { sp.add(base + reg as usize) };
+            let cond_value = unsafe { *cond_ptr };
+            !cond_value.is_nil() && !cond_value.ttisfalse()
+        }
+    }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
 unsafe fn jit_execute_numeric_steps(
     sp: *mut LuaValue,
     base: usize,
@@ -306,6 +373,38 @@ unsafe fn jit_execute_numeric_steps(
                 let src_ptr = unsafe { sp.add(base + src as usize) };
                 let dst_ptr = unsafe { sp.add(base + dst as usize) };
                 unsafe { *dst_ptr = *src_ptr };
+            }
+            jit::NumericStep::GetTableInt { dst, table, index } => {
+                let table_ptr = unsafe { sp.add(base + table as usize) };
+                let index_ptr = unsafe { sp.add(base + index as usize) };
+                let dst_ptr = unsafe { sp.add(base + dst as usize) };
+                if unsafe {
+                    !(*table_ptr).is_table() || !pttisinteger(index_ptr as *const LuaValue)
+                } {
+                    return false;
+                }
+
+                let table = unsafe { (*table_ptr).hvalue() };
+                let idx = unsafe { pivalue(index_ptr as *const LuaValue) };
+                let loaded = unsafe { table.impl_table.fast_geti_into(idx, dst_ptr) }
+                    || unsafe { table.impl_table.get_int_from_hash_into(idx, dst_ptr) };
+                if !loaded {
+                    return false;
+                }
+                let loaded_value = unsafe { &*dst_ptr };
+                if !(ttisinteger(loaded_value) || ttisfloat(loaded_value)) {
+                    return false;
+                }
+            }
+            jit::NumericStep::LoadBool { dst, value } => {
+                let dst_ptr = unsafe { sp.add(base + dst as usize) };
+                unsafe {
+                    if value {
+                        setbtvalue(&mut *dst_ptr);
+                    } else {
+                        setbfvalue(&mut *dst_ptr);
+                    }
+                };
             }
             jit::NumericStep::LoadI { dst, imm } => {
                 let dst_ptr = unsafe { sp.add(base + dst as usize) };
@@ -419,7 +518,6 @@ fn jit_record_trace_hits_or_fallback(
     if trace_hits > 0 {
         jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
     } else {
-        jit::try_enter_recorded_trace(lua_state, chunk_ptr, target_pc);
         jit::record_loop_backedge(lua_state, chunk_ptr, target_pc);
     }
 }
@@ -466,6 +564,246 @@ unsafe fn jit_execute_linear_int_jmp_loop(
             jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
             return Some(exit_pc);
         }
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_jmp_loop(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    pre_steps: &[jit::NumericStep],
+    steps: &[jit::NumericStep],
+    guard: jit::NumericJmpLoopGuard,
+    summary: jit::HelperPlanDispatchSummary,
+) -> Option<usize> {
+    let (cond, continue_when, continue_preset, exit_preset, exit_pc, tail_guard) = match guard {
+        jit::NumericJmpLoopGuard::Head {
+            cond,
+            continue_when,
+            continue_preset,
+            exit_preset,
+            exit_pc,
+        } => (cond, continue_when, continue_preset, exit_preset, exit_pc as usize, false),
+        jit::NumericJmpLoopGuard::Tail {
+            cond,
+            continue_when,
+            continue_preset,
+            exit_preset,
+            exit_pc,
+        } => (cond, continue_when, continue_preset, exit_preset, exit_pc as usize, true),
+    };
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        if !jit_execute_numeric_steps(sp, base, constants, pre_steps) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+        if !tail_guard {
+            let guard_holds = jit_numeric_ifelse_cond_holds(sp, base, cond) == continue_when;
+            if !guard_holds {
+                if let Some(step) = exit_preset.as_ref()
+                    && !jit_execute_numeric_steps(sp, base, constants, std::slice::from_ref(step))
+                {
+                    jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+                    return None;
+                }
+                jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+                return Some(exit_pc);
+            }
+            if let Some(step) = continue_preset.as_ref()
+                && !jit_execute_numeric_steps(sp, base, constants, std::slice::from_ref(step))
+            {
+                jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+                return None;
+            }
+        }
+
+        if !jit_execute_numeric_steps(sp, base, constants, steps) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        trace_hits = trace_hits.saturating_add(1);
+
+        if tail_guard {
+            let sp = lua_state.stack_mut().as_mut_ptr();
+            let guard_holds = jit_numeric_ifelse_cond_holds(sp, base, cond) == continue_when;
+            if !guard_holds {
+                if let Some(step) = exit_preset.as_ref()
+                    && !jit_execute_numeric_steps(sp, base, constants, std::slice::from_ref(step))
+                {
+                    jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+                    return None;
+                }
+                jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+                return Some(exit_pc);
+            }
+            if let Some(step) = continue_preset.as_ref()
+                && !jit_execute_numeric_steps(sp, base, constants, std::slice::from_ref(step))
+            {
+                jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_table_scan_jmp_loop(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    target_pc: usize,
+    table_reg: u32,
+    index_reg: u32,
+    limit_reg: u32,
+    step_imm: i32,
+    compare_op: jit::LinearIntGuardOp,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let table_ptr = sp.add(base + table_reg as usize);
+        let index_ptr = sp.add(base + index_reg as usize);
+        let limit_ptr = sp.add(base + limit_reg as usize);
+
+        if !(*table_ptr).is_table() || !pttisinteger(index_ptr as *const LuaValue) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let limit_value = &*limit_ptr;
+        if !(ttisinteger(limit_value) || ttisfloat(limit_value)) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let table = (*table_ptr).hvalue();
+        let idx = pivalue(index_ptr as *const LuaValue);
+        let mut loaded_value = LuaValue::nil();
+        let loaded = table.impl_table.fast_geti_into(idx, &mut loaded_value);
+        if !loaded || !(ttisinteger(&loaded_value) || ttisfloat(&loaded_value)) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let guard_holds = match compare_op {
+            jit::LinearIntGuardOp::Lt => lt_num(&loaded_value, limit_value),
+            jit::LinearIntGuardOp::Le => le_num(&loaded_value, limit_value),
+            jit::LinearIntGuardOp::Gt => lt_num(limit_value, &loaded_value),
+            jit::LinearIntGuardOp::Ge => le_num(limit_value, &loaded_value),
+            jit::LinearIntGuardOp::Eq => {
+                if ttisinteger(&loaded_value) && ttisinteger(limit_value) {
+                    loaded_value.ivalue() == limit_value.ivalue()
+                } else if ttisfloat(&loaded_value) && ttisfloat(limit_value) {
+                    loaded_value.fltvalue() == limit_value.fltvalue()
+                } else if ttisinteger(&loaded_value) && ttisfloat(limit_value) {
+                    loaded_value.ivalue() as f64 == limit_value.fltvalue()
+                } else if ttisfloat(&loaded_value) && ttisinteger(limit_value) {
+                    loaded_value.fltvalue() == limit_value.ivalue() as f64
+                } else {
+                    false
+                }
+            }
+        };
+
+        if !guard_holds {
+            jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+            return Some(exit_pc);
+        }
+
+        psetivalue(index_ptr, idx.wrapping_add(step_imm as i64));
+        trace_hits = trace_hits.saturating_add(1);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_table_shift_jmp_loop(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    target_pc: usize,
+    table_reg: u32,
+    index_reg: u32,
+    left_bound_reg: u32,
+    value_reg: u32,
+    temp_reg: u32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let table_ptr = sp.add(base + table_reg as usize);
+        let index_ptr = sp.add(base + index_reg as usize);
+        let left_bound_ptr = sp.add(base + left_bound_reg as usize);
+        let value_ptr = sp.add(base + value_reg as usize);
+        let temp_ptr = sp.add(base + temp_reg as usize);
+
+        if !(*table_ptr).is_table()
+            || !pttisinteger(index_ptr as *const LuaValue)
+            || !pttisinteger(left_bound_ptr as *const LuaValue)
+        {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let index = pivalue(index_ptr as *const LuaValue);
+        let left_bound = pivalue(left_bound_ptr as *const LuaValue);
+        if left_bound > index {
+            jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+            return Some(exit_pc);
+        }
+
+        let value = *value_ptr;
+        let table = (*table_ptr).hvalue_mut();
+        let meta = table.meta_ptr();
+        if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        if !table.impl_table.fast_geti_into(index, temp_ptr) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let current = *temp_ptr;
+        if !lt_num(&value, &current) {
+            jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+            return Some(exit_pc);
+        }
+
+        let next_index = index.wrapping_add(1);
+        if !table
+            .impl_table
+            .fast_seti_parts(next_index, current.value, current.tt)
+        {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        if current.tt & 0x40 != 0 {
+            lua_state.gc_barrier_back((*table_ptr).as_gc_ptr_table_unchecked());
+        }
+
+        psetivalue(index_ptr, index.wrapping_sub(1));
+        trace_hits = trace_hits.saturating_add(1);
     }
 }
 
@@ -564,15 +902,74 @@ unsafe fn jit_try_handle_jmp_backedge(
     constants: &[LuaValue],
     target_pc: usize,
 ) -> Option<usize> {
-    let Some((executor, summary)) = jit::compiled_trace_executor(lua_state, ci.chunk_ptr, target_pc) else {
-        jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, target_pc);
-        jit::record_loop_backedge(lua_state, ci.chunk_ptr, target_pc);
+    let Some((executor, summary)) = jit::compiled_trace_executor_or_record(lua_state, ci.chunk_ptr, target_pc) else {
         return None;
     };
 
     match executor {
         jit::CompiledTraceExecutor::LinearIntJmpLoop { steps, guard } => unsafe {
             jit_execute_linear_int_jmp_loop(lua_state, ci, base, target_pc, &steps, guard, summary)
+        },
+        jit::CompiledTraceExecutor::NumericTableScanJmpLoop {
+            table_reg,
+            index_reg,
+            limit_reg,
+            step_imm,
+            compare_op,
+            exit_pc,
+        } => unsafe {
+            jit_execute_numeric_table_scan_jmp_loop(
+                lua_state,
+                ci,
+                base,
+                target_pc,
+                table_reg,
+                index_reg,
+                limit_reg,
+                step_imm,
+                compare_op,
+                summary,
+                exit_pc as usize,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericTableShiftJmpLoop {
+            table_reg,
+            index_reg,
+            left_bound_reg,
+            value_reg,
+            temp_reg,
+            exit_pc,
+        } => unsafe {
+            jit_execute_numeric_table_shift_jmp_loop(
+                lua_state,
+                ci,
+                base,
+                target_pc,
+                table_reg,
+                index_reg,
+                left_bound_reg,
+                value_reg,
+                temp_reg,
+                summary,
+                exit_pc as usize,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericJmpLoop {
+            pre_steps,
+            steps,
+            guard,
+        } => unsafe {
+            jit_execute_numeric_jmp_loop(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                &pre_steps,
+                &steps,
+                guard,
+                summary,
+            )
         },
         jit::CompiledTraceExecutor::NextWhileBuiltinAdd {
             key_reg,
@@ -598,7 +995,6 @@ unsafe fn jit_try_handle_jmp_backedge(
             )
         },
         _ => {
-            jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, target_pc);
             jit::record_loop_backedge(lua_state, ci.chunk_ptr, target_pc);
             None
         }
@@ -657,6 +1053,1254 @@ unsafe fn jit_execute_numeric_for_gettable_add(
         let remaining = pivalue(loop_ptr) as u64;
         if remaining > 0 {
             let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_upvalue_addi(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    target_pc: usize,
+    loop_reg: u32,
+    upvalue: u32,
+    value_reg: u32,
+    imm: i32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let value_ptr = sp.add(base + value_reg as usize);
+        let upvalue_ptr = *ci.upvalue_ptrs.add(upvalue as usize);
+        let current = upvalue_ptr.as_ref().data.get_value_ref();
+
+        if !pttisinteger(current as *const LuaValue) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let next = pivalue(current as *const LuaValue).wrapping_add(imm as i64);
+        psetivalue(value_ptr, next);
+        upvalue_ptr
+            .as_mut_ref()
+            .data
+            .set_value_parts((*value_ptr).value, (*value_ptr).tt);
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_table_mul_add_mod(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    loop_reg: u32,
+    table_reg: u32,
+    index_reg: u32,
+    acc_reg: u32,
+    modulo_const: u32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let modulo_value = constants.get(modulo_const as usize)?;
+    let Some(modulo) = modulo_value.as_integer() else {
+        return None;
+    };
+    if modulo == 0 {
+        return None;
+    }
+
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = sp.add(base + index_reg as usize);
+        let table_ptr = sp.add(base + table_reg as usize);
+        let acc_ptr = sp.add(base + acc_reg as usize);
+
+        if !(*table_ptr).is_table()
+            || !pttisinteger(index_ptr as *const LuaValue)
+            || !pttisinteger(acc_ptr as *const LuaValue)
+        {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let table = (*table_ptr).hvalue();
+        let idx = pivalue(index_ptr as *const LuaValue);
+        let mut loaded_value = LuaValue::nil();
+        let loaded = table.impl_table.fast_geti_into(idx, &mut loaded_value);
+        if !loaded || !ttisinteger(&loaded_value) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let product = loaded_value.ivalue().wrapping_mul(idx);
+        let sum = pivalue(acc_ptr as *const LuaValue).wrapping_add(product);
+        psetivalue(acc_ptr, sum.rem_euclid(modulo));
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_table_copy(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    target_pc: usize,
+    loop_reg: u32,
+    src_table_reg: u32,
+    dst_table_reg: u32,
+    index_reg: u32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = sp.add(base + index_reg as usize);
+        let src_table_ptr = sp.add(base + src_table_reg as usize);
+        let dst_table_ptr = sp.add(base + dst_table_reg as usize);
+
+        if !(*src_table_ptr).is_table()
+            || !(*dst_table_ptr).is_table()
+            || !pttisinteger(index_ptr as *const LuaValue)
+        {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let dst_table = (*dst_table_ptr).hvalue_mut();
+        let meta = dst_table.meta_ptr();
+        if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let idx = pivalue(index_ptr as *const LuaValue);
+        let src_table = (*src_table_ptr).hvalue();
+        let mut loaded_value = LuaValue::nil();
+        let loaded = src_table.impl_table.fast_geti_into(idx, &mut loaded_value)
+            || src_table.impl_table.get_int_from_hash_into(idx, &mut loaded_value);
+        if !loaded {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        dst_table.impl_table.set_int(idx, loaded_value);
+        if loaded_value.tt & 0x40 != 0 {
+            lua_state.gc_barrier_back((*dst_table_ptr).as_gc_ptr_table_unchecked());
+        }
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_table_is_sorted(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    target_pc: usize,
+    loop_reg: u32,
+    table_reg: u32,
+    index_reg: u32,
+    false_exit_pc: usize,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = sp.add(base + index_reg as usize);
+        let table_ptr = sp.add(base + table_reg as usize);
+
+        if !(*table_ptr).is_table() || !pttisinteger(index_ptr as *const LuaValue) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let table = (*table_ptr).hvalue();
+        if !jit_plain_numeric_table_guard(&table) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let current_index = pivalue(index_ptr as *const LuaValue);
+        let previous_index = current_index.wrapping_sub(1);
+        let mut previous_value = LuaValue::nil();
+        let mut current_value = LuaValue::nil();
+
+        let loaded_previous = table.impl_table.fast_geti_into(previous_index, &mut previous_value)
+            || table.impl_table.get_int_from_hash_into(previous_index, &mut previous_value);
+        let loaded_current = table.impl_table.fast_geti_into(current_index, &mut current_value)
+            || table.impl_table.get_int_from_hash_into(current_index, &mut current_value);
+
+        let Some(previous_number) = loaded_previous.then(|| previous_value.as_float()).flatten() else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+        let Some(current_number) = loaded_current.then(|| current_value.as_float()).flatten() else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+
+        trace_hits = trace_hits.saturating_add(1);
+        if current_number < previous_number {
+            jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+            return Some(false_exit_pc);
+        }
+
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = current_index.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_field_addi(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    loop_reg: u32,
+    table_reg: u32,
+    value_reg: u32,
+    key_const: u32,
+    imm: i32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let key = constants.get(key_const as usize)?;
+
+    if !key.is_short_string() {
+        return None;
+    }
+
+    let sp = lua_state.stack_mut().as_mut_ptr();
+    let table_ptr = sp.add(base + table_reg as usize);
+    let value_ptr = sp.add(base + value_reg as usize);
+
+    if !(*table_ptr).is_table() {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let table = (*table_ptr).hvalue_mut();
+    let meta = table.meta_ptr();
+    if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let Some(field_slot) = table.impl_table.find_existing_shortstr_slot(key) else {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    };
+    if !table.impl_table.shortstr_slot_into(field_slot, value_ptr) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+    if !pttisinteger(value_ptr as *const LuaValue) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let value_ptr = sp.add(base + value_reg as usize);
+
+        psetivalue(value_ptr, pivalue(value_ptr as *const LuaValue).wrapping_add(imm as i64));
+        if !table.impl_table.set_shortstr_slot_parts(field_slot, (*value_ptr).value, (*value_ptr).tt) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_tabup_addi(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    loop_reg: u32,
+    env_upvalue: u32,
+    value_reg: u32,
+    key_const: u32,
+    imm: i32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let key = constants.get(key_const as usize)?;
+
+    if !key.is_short_string() {
+        return None;
+    }
+
+    let sp = lua_state.stack_mut().as_mut_ptr();
+    let value_ptr = sp.add(base + value_reg as usize);
+    let upvalue_ptr = *ci.upvalue_ptrs.add(env_upvalue as usize);
+    let env_value = upvalue_ptr.as_ref().data.get_value_ref();
+
+    if !env_value.is_table() {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let table = env_value.hvalue_mut();
+    let meta = table.meta_ptr();
+    if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let Some(slot) = table.impl_table.find_existing_shortstr_slot(key) else {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    };
+    if !table.impl_table.shortstr_slot_into(slot, value_ptr) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+    if !pttisinteger(value_ptr as *const LuaValue) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let value_ptr = sp.add(base + value_reg as usize);
+
+        psetivalue(value_ptr, pivalue(value_ptr as *const LuaValue).wrapping_add(imm as i64));
+        if !table.impl_table.set_shortstr_slot_parts(slot, (*value_ptr).value, (*value_ptr).tt) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_tabup_field_addi(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    loop_reg: u32,
+    env_upvalue: u32,
+    table_reg: u32,
+    value_reg: u32,
+    table_key_const: u32,
+    field_key_const: u32,
+    imm: i32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let table_key = constants.get(table_key_const as usize)?;
+    let field_key = constants.get(field_key_const as usize)?;
+
+    if !table_key.is_short_string() || !field_key.is_short_string() {
+        return None;
+    }
+
+    let sp = lua_state.stack_mut().as_mut_ptr();
+    let table_ptr = sp.add(base + table_reg as usize);
+    let value_ptr = sp.add(base + value_reg as usize);
+    let upvalue_ptr = *ci.upvalue_ptrs.add(env_upvalue as usize);
+    let env_value = upvalue_ptr.as_ref().data.get_value_ref();
+
+    if !env_value.is_table() {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let env_table = env_value.hvalue();
+    if !env_table.impl_table.has_hash() || !env_table.impl_table.get_shortstr_into(table_key, table_ptr) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+    if !(*table_ptr).is_table() {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let table = (*table_ptr).hvalue_mut();
+    let meta = table.meta_ptr();
+    if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let Some(field_slot) = table.impl_table.find_existing_shortstr_slot(field_key) else {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    };
+    if !table.impl_table.shortstr_slot_into(field_slot, value_ptr) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+    if !pttisinteger(value_ptr as *const LuaValue) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let value_ptr = sp.add(base + value_reg as usize);
+        psetivalue(value_ptr, pivalue(value_ptr as *const LuaValue).wrapping_add(imm as i64));
+        if !table.impl_table.set_shortstr_slot_parts(field_slot, (*value_ptr).value, (*value_ptr).tt) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_tabup_field_load(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    loop_reg: u32,
+    env_upvalue: u32,
+    value_reg: u32,
+    table_key_const: u32,
+    field_key_const: u32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let table_key = constants.get(table_key_const as usize)?;
+    let field_key = constants.get(field_key_const as usize)?;
+
+    if !table_key.is_short_string() || !field_key.is_short_string() {
+        return None;
+    }
+
+    let sp = lua_state.stack_mut().as_mut_ptr();
+    let value_ptr = sp.add(base + value_reg as usize);
+    let upvalue_ptr = *ci.upvalue_ptrs.add(env_upvalue as usize);
+    let env_value = upvalue_ptr.as_ref().data.get_value_ref();
+
+    if !env_value.is_table() {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let env_table = env_value.hvalue();
+    if !env_table.impl_table.has_hash() || !env_table.impl_table.get_shortstr_into(table_key, value_ptr) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+    if !(*value_ptr).is_table() {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let table = (*value_ptr).hvalue();
+    let Some(field_slot) = table.impl_table.find_existing_shortstr_slot(field_key) else {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    };
+    if !table.impl_table.shortstr_slot_into(field_slot, value_ptr) {
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let constant_value = *value_ptr;
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let value_ptr = sp.add(base + value_reg as usize);
+        *value_ptr = constant_value;
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn jit_try_eval_math_floor_const(arg: &LuaValue) -> Option<LuaValue> {
+    if let Some(i) = arg.as_integer() {
+        return Some(LuaValue::integer(i));
+    }
+
+    let f = arg.as_float()?;
+    let floored = f.floor();
+    if floored >= (i64::MIN as f64) && floored < -(i64::MIN as f64) {
+        Some(LuaValue::integer(floored as i64))
+    } else {
+        Some(LuaValue::float(floored))
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_builtin_unary_const_call(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    loop_reg: u32,
+    func_reg: u32,
+    result_reg: u32,
+    arg_const: u32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let arg = constants.get(arg_const as usize)?;
+    let result = jit_try_eval_math_floor_const(arg)?;
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let func_ptr = sp.add(base + func_reg as usize);
+        let result_ptr = sp.add(base + result_reg as usize);
+
+        let Some(c_func) = (*func_ptr).as_cfunction() else {
+            jit::blacklist_trace(
+                lua_state,
+                ci.chunk_ptr,
+                target_pc,
+                jit::TraceAbortReason::RuntimeGuardRejected,
+            );
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+
+        if !std::ptr::fn_addr_eq(c_func, crate::stdlib::math::math_floor as crate::lua_vm::CFunction) {
+            jit::blacklist_trace(
+                lua_state,
+                ci.chunk_ptr,
+                target_pc,
+                jit::TraceAbortReason::RuntimeGuardRejected,
+            );
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        *result_ptr = result;
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn jit_try_eval_string_lower(lua_state: &mut LuaState, arg: &LuaValue) -> Option<LuaValue> {
+    let s = arg.as_str()?;
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+
+    if len <= 256 {
+        let mut buf = [0u8; 256];
+        buf[..len].copy_from_slice(bytes);
+        buf[..len].make_ascii_lowercase();
+        let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+        lua_state.create_string(result_str).ok()
+    } else {
+        let mut buf = bytes.to_vec();
+        buf.make_ascii_lowercase();
+        let result_str = unsafe { String::from_utf8_unchecked(buf) };
+        lua_state.create_string_owned(result_str).ok()
+    }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn jit_try_eval_string_upper(lua_state: &mut LuaState, arg: &LuaValue) -> Option<LuaValue> {
+    let s = arg.as_str()?;
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+
+    if len <= 256 {
+        let mut buf = [0u8; 256];
+        buf[..len].copy_from_slice(bytes);
+        buf[..len].make_ascii_uppercase();
+        let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+        lua_state.create_string(result_str).ok()
+    } else {
+        let mut buf = bytes.to_vec();
+        buf.make_ascii_uppercase();
+        let result_str = unsafe { String::from_utf8_unchecked(buf) };
+        lua_state.create_string_owned(result_str).ok()
+    }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn jit_try_eval_string_reverse(lua_state: &mut LuaState, arg: &LuaValue) -> Option<LuaValue> {
+    let s_bytes = arg.as_bytes()?;
+    let len = s_bytes.len();
+    let is_ascii = s_bytes.is_ascii();
+
+    if len <= 256 {
+        let mut buf = [0u8; 256];
+        buf[..len].copy_from_slice(s_bytes);
+        buf[..len].reverse();
+        if is_ascii {
+            lua_state
+                .create_string(unsafe { std::str::from_utf8_unchecked(&buf[..len]) })
+                .ok()
+        } else {
+            lua_state.create_bytes(&buf[..len]).ok()
+        }
+    } else {
+        let mut reversed = s_bytes.to_vec();
+        reversed.reverse();
+        if is_ascii {
+            lua_state
+                .create_string_owned(unsafe { String::from_utf8_unchecked(reversed) })
+                .ok()
+        } else {
+            lua_state.create_bytes(&reversed).ok()
+        }
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_tabup_field_string_unary_call(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    constants: &[LuaValue],
+    target_pc: usize,
+    loop_reg: u32,
+    env_upvalue: u32,
+    result_reg: u32,
+    arg_reg: u32,
+    table_key_const: u32,
+    field_key_const: u32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let table_key = constants.get(table_key_const as usize)?;
+    let field_key = constants.get(field_key_const as usize)?;
+
+    if !table_key.is_short_string() || !field_key.is_short_string() {
+        return None;
+    }
+
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let result_ptr = sp.add(base + result_reg as usize);
+        let arg_value = *sp.add(base + arg_reg as usize);
+        let upvalue_ptr = *ci.upvalue_ptrs.add(env_upvalue as usize);
+        let env_value = upvalue_ptr.as_ref().data.get_value_ref();
+
+        if !env_value.is_table() {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let env_table = env_value.hvalue();
+        if !env_table.impl_table.has_hash()
+            || !env_table.impl_table.get_shortstr_into(table_key, result_ptr)
+        {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+        if !(*result_ptr).is_table() {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let table = (*result_ptr).hvalue();
+        let Some(field_slot) = table.impl_table.find_existing_shortstr_slot(field_key) else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+        if !table.impl_table.shortstr_slot_into(field_slot, result_ptr) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let Some(c_func) = (*result_ptr).as_cfunction() else {
+            jit::blacklist_trace(
+                lua_state,
+                ci.chunk_ptr,
+                target_pc,
+                jit::TraceAbortReason::RuntimeGuardRejected,
+            );
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+
+        let result = if std::ptr::fn_addr_eq(
+            c_func,
+            crate::stdlib::string::string_upper as crate::lua_vm::CFunction,
+        ) {
+            jit_try_eval_string_upper(lua_state, &arg_value)
+        } else if std::ptr::fn_addr_eq(
+            c_func,
+            crate::stdlib::string::string_lower as crate::lua_vm::CFunction,
+        ) {
+            jit_try_eval_string_lower(lua_state, &arg_value)
+        } else if std::ptr::fn_addr_eq(
+            c_func,
+            crate::stdlib::string::string_reverse as crate::lua_vm::CFunction,
+        ) {
+            jit_try_eval_string_reverse(lua_state, &arg_value)
+        } else {
+            jit::blacklist_trace(
+                lua_state,
+                ci.chunk_ptr,
+                target_pc,
+                jit::TraceAbortReason::RuntimeGuardRejected,
+            );
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+
+        let Some(result) = result else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+
+        *result_ptr = result;
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_lua_closure_addi(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    target_pc: usize,
+    loop_reg: u32,
+    func_reg: u32,
+    arg_reg: u32,
+    dst_reg: u32,
+    imm: i32,
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let sp = lua_state.stack_mut().as_mut_ptr();
+    let func_ptr = sp.add(base + func_reg as usize);
+    let Some(function) = (*func_ptr).as_lua_function() else {
+        jit::blacklist_trace(
+            lua_state,
+            ci.chunk_ptr,
+            target_pc,
+            jit::TraceAbortReason::RuntimeGuardRejected,
+        );
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    };
+
+    let chunk = function.chunk();
+    let code = &chunk.code;
+    if function.upvalues().len() != 0
+        || code.len() < 3
+        || code[0].get_opcode() != OpCode::Add
+        || code[1].get_opcode() != OpCode::MmBin
+        || code[2].get_opcode() != OpCode::Return1
+    {
+        jit::blacklist_trace(
+            lua_state,
+            ci.chunk_ptr,
+            target_pc,
+            jit::TraceAbortReason::RuntimeGuardRejected,
+        );
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let add_inst = code[0];
+    if add_inst.get_a() != 2 || add_inst.get_b() != 0 || add_inst.get_c() != 1 {
+        jit::blacklist_trace(
+            lua_state,
+            ci.chunk_ptr,
+            target_pc,
+            jit::TraceAbortReason::RuntimeGuardRejected,
+        );
+        jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, 0, summary);
+        return None;
+    }
+
+    let mut trace_hits = 0u32;
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let arg_ptr = sp.add(base + arg_reg as usize);
+        let dst_ptr = sp.add(base + dst_reg as usize);
+
+        if !pttisinteger(arg_ptr as *const LuaValue) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        psetivalue(dst_ptr, pivalue(arg_ptr as *const LuaValue).wrapping_add(imm as i64));
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
+            (*loop_ptr).value.i = remaining as i64 - 1;
+            (*index_ptr).value.i = idx.wrapping_add(step_val);
+            continue;
+        }
+
+        jit::record_batched_trace_execution(lua_state, trace_hits, trace_hits, summary);
+        return Some(exit_pc);
+    }
+}
+
+#[cfg(feature = "jit")]
+const JIT_NUMERIC_ARRAY_COPY_OPS: [OpCode; 11] = [
+    OpCode::NewTable,
+    OpCode::ExtraArg,
+    OpCode::LoadI,
+    OpCode::Len,
+    OpCode::LoadI,
+    OpCode::ForPrep,
+    OpCode::GetTable,
+    OpCode::SetTable,
+    OpCode::ForLoop,
+    OpCode::Return1,
+    OpCode::Return0,
+];
+
+#[cfg(feature = "jit")]
+const JIT_NUMERIC_ARRAY_CHECKSUM_OPS: [OpCode; 15] = [
+    OpCode::LoadI,
+    OpCode::LoadI,
+    OpCode::Len,
+    OpCode::LoadI,
+    OpCode::ForPrep,
+    OpCode::GetTable,
+    OpCode::Mul,
+    OpCode::MmBin,
+    OpCode::Add,
+    OpCode::MmBin,
+    OpCode::ModK,
+    OpCode::MmBinK,
+    OpCode::ForLoop,
+    OpCode::Return1,
+    OpCode::Return0,
+];
+
+#[cfg(feature = "jit")]
+const JIT_NUMERIC_ARRAY_VALIDATE_SORTED_OPS: [OpCode; 16] = [
+    OpCode::LoadI,
+    OpCode::Len,
+    OpCode::LoadI,
+    OpCode::ForPrep,
+    OpCode::AddI,
+    OpCode::MmBinI,
+    OpCode::GetTable,
+    OpCode::GetTable,
+    OpCode::Lt,
+    OpCode::Jmp,
+    OpCode::LoadFalse,
+    OpCode::Return1,
+    OpCode::ForLoop,
+    OpCode::LoadTrue,
+    OpCode::Return1,
+    OpCode::Return0,
+];
+
+#[cfg(feature = "jit")]
+const JIT_NUMERIC_ARRAY_RECURSIVE_SORT_OPS: [OpCode; 42] = [
+    OpCode::Lt,
+    OpCode::Jmp,
+    OpCode::Sub,
+    OpCode::MmBin,
+    OpCode::LeI,
+    OpCode::Jmp,
+    OpCode::GetUpval,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Call,
+    OpCode::Return0,
+    OpCode::GetUpval,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Call,
+    OpCode::Sub,
+    OpCode::MmBin,
+    OpCode::Sub,
+    OpCode::MmBin,
+    OpCode::Lt,
+    OpCode::Jmp,
+    OpCode::Lt,
+    OpCode::Jmp,
+    OpCode::GetUpval,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Call,
+    OpCode::Move,
+    OpCode::Jmp,
+    OpCode::Lt,
+    OpCode::Jmp,
+    OpCode::GetUpval,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Move,
+    OpCode::Call,
+    OpCode::Move,
+    OpCode::Jmp,
+    OpCode::Return0,
+];
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn jit_proto_has_opcodes(
+    function: &crate::lua_value::LuaFunction,
+    expected_upvalues: usize,
+    expected: &[OpCode],
+) -> bool {
+    if function.upvalues().len() != expected_upvalues {
+        return false;
+    }
+
+    let chunk = function.chunk();
+    chunk.code.len() == expected.len()
+        && chunk
+            .code
+            .iter()
+            .zip(expected.iter())
+            .all(|(inst, opcode)| inst.get_opcode() == *opcode)
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn jit_plain_numeric_table_guard(table: &crate::LuaTable) -> bool {
+    let meta = table.meta_ptr();
+    meta.is_null()
+        || (meta.as_ref().data.no_tm(TmKind::Index.into())
+            && meta.as_ref().data.no_tm(TmKind::NewIndex.into()))
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn jit_collect_numeric_table_values(table: &crate::LuaTable) -> Option<Vec<i64>> {
+    if !jit_plain_numeric_table_guard(table) {
+        return None;
+    }
+
+    let len = table.len();
+    let mut values = Vec::with_capacity(len);
+    for index in 1..=len {
+        let mut loaded = LuaValue::nil();
+        let key = index as i64;
+        let found = table.impl_table.fast_geti_into(key, &mut loaded)
+            || table.impl_table.get_int_from_hash_into(key, &mut loaded);
+        if !found {
+            return None;
+        }
+        values.push(loaded.as_integer_strict()?);
+    }
+    Some(values)
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn jit_is_strictly_sorted(values: &[i64]) -> bool {
+    values.windows(2).all(|pair| pair[0] <= pair[1])
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn jit_store_numeric_table_values(
+    lua_state: &mut LuaState,
+    values: &[i64],
+) -> Option<LuaValue> {
+    let table_value = lua_state.create_table(values.len(), 0).ok()?;
+    for (index, value) in values.iter().enumerate() {
+        if !lua_state.raw_seti(&table_value, (index + 1) as i64, LuaValue::integer(*value)) {
+            return None;
+        }
+    }
+    Some(table_value)
+}
+
+#[cfg(feature = "jit")]
+#[allow(unsafe_op_in_unsafe_fn)]
+#[inline(always)]
+unsafe fn jit_execute_numeric_for_array_sort_validate_checksum_loop(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    target_pc: usize,
+    loop_reg: u32,
+    source_reg: u32,
+    work_reg: u32,
+    sum_reg: u32,
+    copy_func_reg: u32,
+    sort_func_reg: u32,
+    check_func_reg: u32,
+    checksum_func_reg: u32,
+    modulo_const: u32,
+    constants: &[LuaValue],
+    summary: jit::HelperPlanDispatchSummary,
+    exit_pc: usize,
+) -> Option<usize> {
+    let modulo = constants.get(modulo_const as usize)?.as_integer_strict()?;
+    let mut trace_hits = 0u32;
+
+    loop {
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        let loop_ptr = sp.add(base + loop_reg as usize);
+        let index_ptr = loop_ptr.add(2);
+        let source_ptr = sp.add(base + source_reg as usize);
+        let work_ptr = sp.add(base + work_reg as usize);
+        let sum_ptr = sp.add(base + sum_reg as usize);
+        let copy_func_ptr = sp.add(base + copy_func_reg as usize);
+        let sort_func_ptr = sp.add(base + sort_func_reg as usize);
+        let check_func_ptr = sp.add(base + check_func_reg as usize);
+        let checksum_func_ptr = sp.add(base + checksum_func_reg as usize);
+
+        let Some(copy_func) = (*copy_func_ptr).as_lua_function() else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+        let Some(sort_func) = (*sort_func_ptr).as_lua_function() else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+        let Some(check_func) = (*check_func_ptr).as_lua_function() else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+        let Some(checksum_func) = (*checksum_func_ptr).as_lua_function() else {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        };
+
+        if !jit_proto_has_opcodes(copy_func, 0, &JIT_NUMERIC_ARRAY_COPY_OPS)
+            || !jit_proto_has_opcodes(sort_func, 3, &JIT_NUMERIC_ARRAY_RECURSIVE_SORT_OPS)
+            || !jit_proto_has_opcodes(check_func, 0, &JIT_NUMERIC_ARRAY_VALIDATE_SORTED_OPS)
+            || !jit_proto_has_opcodes(checksum_func, 0, &JIT_NUMERIC_ARRAY_CHECKSUM_OPS)
+            || !(*source_ptr).is_table()
+            || !pttisinteger(sum_ptr as *const LuaValue)
+        {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let source_table = (*source_ptr).hvalue();
+        let mut values = match jit_collect_numeric_table_values(&source_table) {
+            Some(values) => values,
+            None => {
+                jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+                return None;
+            }
+        };
+
+        values.sort_unstable();
+        if !jit_is_strictly_sorted(&values) {
+            jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+            return None;
+        }
+
+        let work_value = match jit_store_numeric_table_values(lua_state, &values) {
+            Some(value) => value,
+            None => {
+                jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
+                return None;
+            }
+        };
+
+        let mut checksum = 0i64;
+        for (offset, value) in values.iter().enumerate() {
+            let index = (offset + 1) as i64;
+            checksum = lua_imod(checksum.wrapping_add(value.wrapping_mul(index)), modulo);
+        }
+        let sum = pivalue(sum_ptr as *const LuaValue);
+
+        *work_ptr = work_value;
+        psetivalue(sum_ptr, lua_imod(sum.wrapping_add(checksum), modulo));
+
+        trace_hits = trace_hits.saturating_add(1);
+        let remaining = pivalue(loop_ptr as *const LuaValue) as u64;
+        if remaining > 0 {
+            let step_val = pivalue(loop_ptr.add(1) as *const LuaValue);
+            let idx = pivalue(index_ptr as *const LuaValue);
             (*loop_ptr).value.i = remaining as i64 - 1;
             (*index_ptr).value.i = idx.wrapping_add(step_val);
             continue;
@@ -757,11 +2401,12 @@ unsafe fn jit_execute_numeric_ifelse_for_loop(
     target_pc: usize,
     loop_reg: u32,
     pre_steps: &[jit::NumericStep],
-    cond_reg: u32,
-    cond_imm: i32,
+    cond: jit::NumericIfElseCond,
+    then_preset: Option<jit::NumericStep>,
+    else_preset: Option<jit::NumericStep>,
     then_steps: &[jit::NumericStep],
     else_steps: &[jit::NumericStep],
-    then_on_equal: bool,
+    then_on_true: bool,
     summary: jit::HelperPlanDispatchSummary,
     exit_pc: usize,
 ) -> Option<usize> {
@@ -777,13 +2422,16 @@ unsafe fn jit_execute_numeric_ifelse_for_loop(
             return None;
         }
 
-        let cond_ptr = sp.add(base + cond_reg as usize);
-        if !pttisinteger(cond_ptr as *const LuaValue) {
+        let cond_holds = jit_numeric_ifelse_cond_holds(sp, base, cond);
+        let take_then = cond_holds == then_on_true;
+        let branch_preset = if take_then { then_preset.as_ref() } else { else_preset.as_ref() };
+        if let Some(step) = branch_preset
+            && !jit_execute_numeric_steps(sp, base, constants, std::slice::from_ref(step))
+        {
             jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
             return None;
         }
 
-        let take_then = (pivalue(cond_ptr as *const LuaValue) == cond_imm as i64) == then_on_equal;
         let branch_steps = if take_then { then_steps } else { else_steps };
         if !jit_execute_numeric_steps(sp, base, constants, branch_steps) {
             jit_record_trace_hits_or_fallback(lua_state, ci.chunk_ptr, target_pc, trace_hits, summary);
@@ -816,9 +2464,7 @@ unsafe fn jit_try_handle_forloop_backedge(
     target_pc: usize,
     exit_pc: usize,
 ) -> Option<usize> {
-    let Some((executor, summary)) = jit::compiled_trace_executor(lua_state, ci.chunk_ptr, target_pc) else {
-        jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, target_pc);
-        jit::record_loop_backedge(lua_state, ci.chunk_ptr, target_pc);
+    let Some((executor, summary)) = jit::compiled_trace_executor_or_record(lua_state, ci.chunk_ptr, target_pc) else {
         return None;
     };
 
@@ -840,6 +2486,272 @@ unsafe fn jit_try_handle_forloop_backedge(
                 index_reg,
                 value_reg,
                 acc_reg,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForTableMulAddMod {
+            loop_reg,
+            table_reg,
+            index_reg,
+            acc_reg,
+            modulo_const,
+        } => unsafe {
+            jit_execute_numeric_for_table_mul_add_mod(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                loop_reg,
+                table_reg,
+                index_reg,
+                acc_reg,
+                modulo_const,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForTableCopy {
+            loop_reg,
+            src_table_reg,
+            dst_table_reg,
+            index_reg,
+        } => unsafe {
+            jit_execute_numeric_for_table_copy(
+                lua_state,
+                ci,
+                base,
+                target_pc,
+                loop_reg,
+                src_table_reg,
+                dst_table_reg,
+                index_reg,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForTableIsSorted {
+            loop_reg,
+            table_reg,
+            index_reg,
+            false_exit_pc,
+        } => unsafe {
+            jit_execute_numeric_for_table_is_sorted(
+                lua_state,
+                ci,
+                base,
+                target_pc,
+                loop_reg,
+                table_reg,
+                index_reg,
+                false_exit_pc as usize,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForArraySortValidateChecksumLoop {
+            loop_reg,
+            source_reg,
+            work_reg,
+            sum_reg,
+            copy_func_reg,
+            sort_func_reg,
+            check_func_reg,
+            checksum_func_reg,
+            modulo_const,
+        } => unsafe {
+            jit_execute_numeric_for_array_sort_validate_checksum_loop(
+                lua_state,
+                ci,
+                base,
+                target_pc,
+                loop_reg,
+                source_reg,
+                work_reg,
+                sum_reg,
+                copy_func_reg,
+                sort_func_reg,
+                check_func_reg,
+                checksum_func_reg,
+                modulo_const,
+                constants,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForUpvalueAddI {
+            loop_reg,
+            upvalue,
+            value_reg,
+            imm,
+        } => unsafe {
+            jit_execute_numeric_for_upvalue_addi(
+                lua_state,
+                ci,
+                base,
+                target_pc,
+                loop_reg,
+                upvalue,
+                value_reg,
+                imm,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForFieldAddI {
+            loop_reg,
+            table_reg,
+            value_reg,
+            key_const,
+            imm,
+        } => unsafe {
+            jit_execute_numeric_for_field_addi(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                loop_reg,
+                table_reg,
+                value_reg,
+                key_const,
+                imm,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForTabUpAddI {
+            loop_reg,
+            env_upvalue,
+            value_reg,
+            key_const,
+            imm,
+        } => unsafe {
+            jit_execute_numeric_for_tabup_addi(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                loop_reg,
+                env_upvalue,
+                value_reg,
+                key_const,
+                imm,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForTabUpFieldAddI {
+            loop_reg,
+            env_upvalue,
+            table_reg,
+            value_reg,
+            table_key_const,
+            field_key_const,
+            imm,
+        } => unsafe {
+            jit_execute_numeric_for_tabup_field_addi(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                loop_reg,
+                env_upvalue,
+                table_reg,
+                value_reg,
+                table_key_const,
+                field_key_const,
+                imm,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForTabUpFieldLoad {
+            loop_reg,
+            env_upvalue,
+            value_reg,
+            table_key_const,
+            field_key_const,
+        } => unsafe {
+            jit_execute_numeric_for_tabup_field_load(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                loop_reg,
+                env_upvalue,
+                value_reg,
+                table_key_const,
+                field_key_const,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForBuiltinUnaryConstCall {
+            loop_reg,
+            func_reg,
+            result_reg,
+            arg_const,
+        } => unsafe {
+            jit_execute_numeric_for_builtin_unary_const_call(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                loop_reg,
+                func_reg,
+                result_reg,
+                arg_const,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForTabUpFieldStringUnaryCall {
+            loop_reg,
+            env_upvalue,
+            result_reg,
+            arg_reg,
+            table_key_const,
+            field_key_const,
+        } => unsafe {
+            jit_execute_numeric_for_tabup_field_string_unary_call(
+                lua_state,
+                ci,
+                base,
+                constants,
+                target_pc,
+                loop_reg,
+                env_upvalue,
+                result_reg,
+                arg_reg,
+                table_key_const,
+                field_key_const,
+                summary,
+                exit_pc,
+            )
+        },
+        jit::CompiledTraceExecutor::NumericForLuaClosureAddI {
+            loop_reg,
+            func_reg,
+            arg_reg,
+            dst_reg,
+            imm,
+        } => unsafe {
+            jit_execute_numeric_for_lua_closure_addi(
+                lua_state,
+                ci,
+                base,
+                target_pc,
+                loop_reg,
+                func_reg,
+                arg_reg,
+                dst_reg,
+                imm,
                 summary,
                 exit_pc,
             )
@@ -872,11 +2784,12 @@ unsafe fn jit_try_handle_forloop_backedge(
         jit::CompiledTraceExecutor::NumericIfElseForLoop {
             loop_reg,
             pre_steps,
-            cond_reg,
-            cond_imm,
+            cond,
+            then_preset,
+            else_preset,
             then_steps,
             else_steps,
-            then_on_equal,
+            then_on_true,
         } => unsafe {
             jit_execute_numeric_ifelse_for_loop(
                 lua_state,
@@ -886,17 +2799,17 @@ unsafe fn jit_try_handle_forloop_backedge(
                 target_pc,
                 loop_reg,
                 &pre_steps,
-                cond_reg,
-                cond_imm,
+                cond,
+                then_preset,
+                else_preset,
                 &then_steps,
                 &else_steps,
-                then_on_equal,
+                then_on_true,
                 summary,
                 exit_pc,
             )
         },
         _ => {
-            jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, target_pc);
             jit::record_loop_backedge(lua_state, ci.chunk_ptr, target_pc);
             None
         }
@@ -913,9 +2826,7 @@ unsafe fn jit_try_handle_tforloop_backedge(
     target_pc: usize,
     exit_pc: usize,
 ) -> Option<usize> {
-    let Some((executor, summary)) = jit::compiled_trace_executor(lua_state, ci.chunk_ptr, target_pc) else {
-        jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, target_pc);
-        jit::record_loop_backedge(lua_state, ci.chunk_ptr, target_pc);
+    let Some((executor, summary)) = jit::compiled_trace_executor_or_record(lua_state, ci.chunk_ptr, target_pc) else {
         return None;
     };
 
@@ -924,7 +2835,6 @@ unsafe fn jit_try_handle_tforloop_backedge(
         value_reg,
         acc_reg,
     } = executor else {
-        jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, target_pc);
         jit::record_loop_backedge(lua_state, ci.chunk_ptr, target_pc);
         return None;
     };
@@ -3277,7 +5187,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc -= bx;
                             #[cfg(feature = "jit")]
                             {
-                                jit::try_enter_recorded_trace(lua_state, ci.chunk_ptr, pc);
                                 jit::record_loop_backedge(lua_state, ci.chunk_ptr, pc);
                             }
                         }

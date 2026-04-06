@@ -1,4 +1,5 @@
 use ahash::AHashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Write;
 
 use crate::lua_value::LuaProto;
@@ -52,6 +53,7 @@ struct TraceInfo {
     ir: Option<TraceIr>,
     helper_plan: Option<HelperPlan>,
     compiled_trace: Option<CompiledTrace>,
+    enterable: bool,
 }
 
 impl TraceInfo {
@@ -62,6 +64,7 @@ impl TraceInfo {
             ir: None,
             helper_plan: None,
             compiled_trace: None,
+            enterable: false,
         }
     }
 }
@@ -180,6 +183,11 @@ impl JitState {
                 .as_ref()
                 .map(|artifact| artifact.exits.len())
                 .unwrap_or(0);
+            let executor = trace
+                .compiled_trace
+                .as_ref()
+                .map(CompiledTrace::executor_family)
+                .unwrap_or("none");
             let step_counts = trace
                 .helper_plan
                 .as_ref()
@@ -192,13 +200,14 @@ impl JitState {
 
             let _ = writeln!(
                 report,
-                "- chunk=0x{chunk_addr:x} pc={pc} status={status} ops={op_count} exits={exit_count} details={details}",
+                "- chunk=0x{chunk_addr:x} pc={pc} status={status} executor={executor} ops={op_count} exits={exit_count} details={details}",
             );
         }
 
         report
     }
 
+    #[cfg(test)]
     pub(crate) fn try_enter_trace(&mut self, chunk_ptr: *const LuaProto, pc: u32) -> bool {
         let key = TraceKey {
             chunk_addr: chunk_ptr as usize,
@@ -211,23 +220,21 @@ impl JitState {
             return false;
         };
 
-        if matches!(trace.status, TraceStatus::Recorded { .. } | TraceStatus::Compiled) {
-            let dispatch_summary = trace
-                .compiled_trace
-                .as_ref()
-                .map(CompiledTrace::execute)
-                .or_else(|| trace.helper_plan.as_ref().map(HelperPlan::dispatch))
-                .unwrap_or_default();
-            self.counters.trace_enter_hits = self.counters.trace_enter_hits.saturating_add(1);
-            self.apply_helper_plan_summary(dispatch_summary);
-            return true;
+        if let Some(compiled_trace) = trace.compiled_trace.as_ref() {
+            let executor = compiled_trace.executor();
+            if !matches!(executor, CompiledTraceExecutor::SummaryOnly) {
+                let dispatch_summary = compiled_trace.execute();
+                self.counters.trace_enter_hits = self.counters.trace_enter_hits.saturating_add(1);
+                self.apply_helper_plan_summary(dispatch_summary);
+                return true;
+            }
         }
 
         false
     }
 
-    pub(crate) fn compiled_trace_executor(
-        &self,
+    pub(crate) fn compiled_trace_executor_or_record(
+        &mut self,
         chunk_ptr: *const LuaProto,
         pc: u32,
     ) -> Option<(CompiledTraceExecutor, HelperPlanDispatchSummary)> {
@@ -236,11 +243,43 @@ impl JitState {
             pc,
         };
 
-        self.traces.get(&key).and_then(|trace| {
-            trace.compiled_trace.as_ref().map(|compiled_trace| {
-                (compiled_trace.executor(), compiled_trace.summary())
-            })
-        })
+        let mut should_record = false;
+        match self.traces.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let trace = entry.get_mut();
+                if trace.enterable
+                    && let Some(compiled_trace) = trace.compiled_trace.as_ref()
+                {
+                    let executor = compiled_trace.executor();
+                    let summary = compiled_trace.summary();
+                    return Some((executor, summary));
+                }
+
+                match &mut trace.status {
+                    TraceStatus::Counting { hits } => should_record = tick_hotcount(&mut *hits),
+                    TraceStatus::Recording { .. }
+                    | TraceStatus::Recorded { .. }
+                    | TraceStatus::Compiled
+                    | TraceStatus::Redirected { .. } => {}
+                    TraceStatus::Blacklisted { .. } => {
+                        self.counters.blacklist_hits = self.counters.blacklist_hits.saturating_add(1);
+                    }
+                }
+            }
+            Entry::Vacant(entry) => {
+                let trace = entry.insert(TraceInfo::new());
+                if let TraceStatus::Counting { hits } = &mut trace.status {
+                    should_record = tick_hotcount(&mut *hits);
+                }
+            }
+        }
+
+        if should_record {
+            self.counters.hot_headers = self.counters.hot_headers.saturating_add(1);
+            self.begin_recording(key, chunk_ptr);
+        }
+
+        None
     }
 
     pub(crate) fn record_batched_trace_execution(
@@ -279,6 +318,32 @@ impl JitState {
             self.counters.hot_headers = self.counters.hot_headers.saturating_add(1);
             self.begin_recording(key, chunk_ptr);
         }
+    }
+
+    pub(crate) fn blacklist_trace(
+        &mut self,
+        chunk_ptr: *const LuaProto,
+        pc: u32,
+        reason: TraceAbortReason,
+    ) {
+        let key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc,
+        };
+
+        let attempts = self
+            .traces
+            .get(&key)
+            .map(|trace| match trace.status {
+                TraceStatus::Recording { attempts }
+                | TraceStatus::Blacklisted { attempts, .. } => attempts.saturating_add(1),
+                TraceStatus::Counting { .. }
+                | TraceStatus::Recorded { .. }
+                | TraceStatus::Compiled
+                | TraceStatus::Redirected { .. } => 1,
+            })
+            .unwrap_or(1);
+        self.abort_recording(key, attempts, reason);
     }
 
     #[cfg(test)]
@@ -336,6 +401,7 @@ impl JitState {
             trace.ir = None;
             trace.helper_plan = None;
             trace.compiled_trace = None;
+            trace.enterable = false;
             attempts
         } else {
             return;
@@ -360,6 +426,7 @@ impl JitState {
                         trace.ir = None;
                         trace.helper_plan = None;
                         trace.compiled_trace = None;
+                        trace.enterable = false;
                     }
                 }
                 if let Some(trace) = self.traces.get_mut(&storage_key) {
@@ -378,6 +445,12 @@ impl JitState {
                     trace.artifact = Some(artifact);
                     trace.ir = Some(ir);
                     trace.helper_plan = Some(helper_plan);
+                    trace.enterable = compiled_trace
+                        .as_ref()
+                        .map(|compiled_trace| {
+                            !matches!(compiled_trace.executor(), CompiledTraceExecutor::SummaryOnly)
+                        })
+                        .unwrap_or(false);
                     trace.compiled_trace = compiled_trace;
                 } else {
                     let mut trace = TraceInfo::new();
@@ -396,6 +469,12 @@ impl JitState {
                     trace.artifact = Some(artifact);
                     trace.ir = Some(ir);
                     trace.helper_plan = Some(helper_plan);
+                    trace.enterable = compiled_trace
+                        .as_ref()
+                        .map(|compiled_trace| {
+                            !matches!(compiled_trace.executor(), CompiledTraceExecutor::SummaryOnly)
+                        })
+                        .unwrap_or(false);
                     trace.compiled_trace = compiled_trace;
                     self.traces.insert(storage_key, trace);
                 }
@@ -412,9 +491,11 @@ impl JitState {
             trace.ir = None;
             trace.helper_plan = None;
             trace.compiled_trace = None;
+            trace.enterable = false;
         }
     }
 
+    #[cfg(test)]
     fn apply_helper_plan_summary(&mut self, summary: HelperPlanDispatchSummary) {
         self.apply_helper_plan_summary_n(summary, 1);
     }
@@ -478,6 +559,7 @@ fn apply_abort_reason(
         TraceAbortReason::TraceTooLong => {
             aborts.trace_too_long = aborts.trace_too_long.saturating_add(1);
         }
+        TraceAbortReason::RuntimeGuardRejected => {}
     }
 }
 
@@ -698,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_trace_is_recorded_with_exit_metadata() {
+    fn guarded_trace_is_compiled_with_exit_metadata() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
         chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
@@ -714,9 +796,7 @@ mod tests {
 
         assert_eq!(
             jit.trace_status_for(chunk_ptr as usize, 0),
-            Some(TraceStatus::Recorded {
-                instruction_count: 5,
-            })
+            Some(TraceStatus::Compiled)
         );
         let artifact = jit.artifact_for(chunk_ptr as usize, 0).unwrap();
         let ir = jit.ir_for(chunk_ptr as usize, 0).unwrap();
@@ -729,10 +809,10 @@ mod tests {
     }
 
     #[test]
-    fn recorded_trace_entry_is_counted() {
+    fn recorded_trace_entry_is_skipped() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk.code.push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
         chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -740,22 +820,22 @@ mod tests {
             jit.record_loop_backedge(chunk_ptr, 0);
         }
 
-        assert!(jit.try_enter_trace(chunk_ptr, 0));
+        assert!(!jit.try_enter_trace(chunk_ptr, 0));
         assert!(!jit.try_enter_trace(chunk_ptr, 1));
         assert_eq!(jit.counters().trace_enter_checks, 2);
-        assert_eq!(jit.counters().trace_enter_hits, 1);
-        assert_eq!(jit.counters().helper_plan_dispatches, 1);
-        assert_eq!(jit.counters().helper_plan_steps, 2);
+        assert_eq!(jit.counters().trace_enter_hits, 0);
+        assert_eq!(jit.counters().helper_plan_dispatches, 0);
+        assert_eq!(jit.counters().helper_plan_steps, 0);
         assert_eq!(jit.counters().helper_plan_guards, 0);
         assert_eq!(jit.counters().helper_plan_calls, 0);
         assert_eq!(jit.counters().helper_plan_metamethods, 0);
     }
 
     #[test]
-    fn guarded_trace_entry_dispatches_helper_plan_guards() {
+    fn guarded_trace_entry_is_skipped_without_specialized_executor() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk.code.push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
         chunk.code.push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
@@ -766,16 +846,16 @@ mod tests {
             jit.record_loop_backedge(chunk_ptr, 0);
         }
 
-        assert!(jit.try_enter_trace(chunk_ptr, 0));
-        assert_eq!(jit.counters().helper_plan_dispatches, 1);
-        assert_eq!(jit.counters().helper_plan_steps, 5);
-        assert_eq!(jit.counters().helper_plan_guards, 1);
+        assert!(!jit.try_enter_trace(chunk_ptr, 0));
+        assert_eq!(jit.counters().helper_plan_dispatches, 0);
+        assert_eq!(jit.counters().helper_plan_steps, 0);
+        assert_eq!(jit.counters().helper_plan_guards, 0);
         assert_eq!(jit.counters().helper_plan_calls, 0);
         assert_eq!(jit.counters().helper_plan_metamethods, 0);
     }
 
     #[test]
-    fn trace_entry_counts_call_and_metamethod_steps() {
+    fn summary_only_compiled_trace_entry_is_skipped() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
         chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
@@ -789,9 +869,11 @@ mod tests {
             jit.record_loop_backedge(chunk_ptr, 0);
         }
 
-        assert!(jit.try_enter_trace(chunk_ptr, 0));
-        assert_eq!(jit.counters().helper_plan_calls, 1);
-        assert_eq!(jit.counters().helper_plan_metamethods, 1);
+        assert!(!jit.try_enter_trace(chunk_ptr, 0));
+        assert_eq!(jit.counters().trace_enter_hits, 0);
+        assert_eq!(jit.counters().helper_plan_dispatches, 0);
+        assert_eq!(jit.counters().helper_plan_calls, 0);
+        assert_eq!(jit.counters().helper_plan_metamethods, 0);
     }
 
     #[test]
@@ -920,6 +1002,7 @@ mod tests {
 
         let report = jit.trace_report();
         assert!(report.contains("status=Compiled"));
+        assert!(report.contains("executor=SummaryOnly"));
         assert!(report.contains("details=load=1,arith=1,call=1,meta=1,backedge=1"));
         assert!(report.contains("status=Blacklisted(attempts=1, reason=UnsupportedOpcode(TailCall))"));
     }

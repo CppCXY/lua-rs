@@ -22,6 +22,7 @@ local benchmarks = {
     "bench_tables.lua",
     "bench_table_lib.lua",
     "bench_iterators.lua",
+    "bench_quicksort.lua",
     
     -- Strings
     "bench_strings.lua",

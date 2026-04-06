@@ -3,15 +3,12 @@ use crate::lua_value::LuaProto;
 
 const MAX_RECORDED_TRACE_LEN: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TraceAbortReason {
-    EmptyLoopBody,
-    PcOutOfBounds,
-    UnsupportedOpcode(OpCode),
-    MissingBranchAfterGuard,
-    ForwardJump,
-    BackedgeMismatch { target_pc: u32 },
-    TraceTooLong,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TraceArtifact {
+    pub seed: TraceSeed,
+    pub ops: Vec<TraceOp>,
+    pub exits: Vec<TraceExit>,
+    pub loop_tail_pc: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,11 +26,6 @@ pub(crate) struct TraceOp {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TraceExitKind {
-    GuardExit,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TraceExit {
     pub guard_pc: u32,
     pub branch_pc: u32,
@@ -42,12 +34,21 @@ pub(crate) struct TraceExit {
     pub kind: TraceExitKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TraceArtifact {
-    pub seed: TraceSeed,
-    pub ops: Vec<TraceOp>,
-    pub exits: Vec<TraceExit>,
-    pub loop_tail_pc: u32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TraceExitKind {
+    GuardExit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TraceAbortReason {
+    PcOutOfBounds,
+    EmptyLoopBody,
+    TraceTooLong,
+    UnsupportedOpcode(OpCode),
+    BackedgeMismatch { target_pc: u32 },
+    MissingBranchAfterGuard,
+    ForwardJump,
+    RuntimeGuardRejected,
 }
 
 pub(crate) struct TraceRecorder;
@@ -186,6 +187,19 @@ impl TraceRecorder {
                             continue;
                         }
 
+                        if let Some(next_pc) = guard_taken_continue(chunk, start_pc as u32, target_pc as u32)
+                        {
+                            exits.push(TraceExit {
+                                guard_pc: pc as u32,
+                                branch_pc: branch_pc as u32,
+                                exit_pc: (branch_pc + 1) as u32,
+                                taken_on_trace: true,
+                                kind: TraceExitKind::GuardExit,
+                            });
+                            pc = next_pc as usize;
+                            continue;
+                        }
+
                         exits.push(TraceExit {
                             guard_pc: pc as u32,
                             branch_pc: branch_pc as u32,
@@ -309,6 +323,22 @@ fn guard_fallthrough_exit(
     }
 
     Some((exit_pc as u32, target_pc as u32))
+}
+
+fn guard_taken_continue(chunk: &LuaProto, start_pc: u32, target_pc: u32) -> Option<u32> {
+    let target_pc = target_pc as usize;
+    let instruction = *chunk.code.get(target_pc)?;
+    match instruction.get_opcode() {
+        OpCode::ForLoop | OpCode::TForLoop => {
+            let loop_target = (target_pc + 1).checked_sub(instruction.get_bx() as usize)? as u32;
+            (loop_target == start_pc).then_some(target_pc as u32)
+        }
+        OpCode::Jmp => {
+            let loop_target = ((target_pc + 1) as i64 + instruction.get_sj() as i64) as u32;
+            (loop_target == start_pc).then_some(target_pc as u32)
+        }
+        _ => None,
+    }
 }
 
 fn rerecord_from_later_target(
@@ -451,7 +481,8 @@ fn is_supported_trace_opcode(opcode: OpCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-            use super::{TraceAbortReason, TraceExitKind, TraceRecorder};
+    use super::{TraceAbortReason, TraceExitKind, TraceRecorder};
+    use crate::{LuaVM, SafeOption};
     use crate::{Instruction, OpCode};
     use crate::lua_value::LuaProto;
 
@@ -520,6 +551,47 @@ mod tests {
         let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
         assert_eq!(artifact.ops.len(), 3);
         assert_eq!(artifact.loop_tail_pc, 2);
+    }
+
+    #[test]
+    fn recorder_inspects_quicksort_partition_outer_loop_trace() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_quicksort.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_quicksort.lua")
+            .unwrap();
+
+        let partition = chunk
+            .child_protos
+            .iter()
+            .find_map(|proto| {
+                let proto = &proto.as_ref().data;
+                (proto.linedefined == 50 && proto.lastlinedefined == 75).then_some(proto)
+            })
+            .unwrap();
+
+        let mut recorded = Vec::new();
+        for start_pc in 5..=12 {
+            match TraceRecorder::record_root(partition as *const LuaProto, start_pc) {
+                Ok(artifact) => recorded.push((
+                    start_pc,
+                    artifact.seed.start_pc,
+                    artifact
+                        .ops
+                        .iter()
+                        .map(|op| (op.pc, op.opcode))
+                        .collect::<Vec<_>>(),
+                    artifact.exits,
+                )),
+                Err(err) => println!("partition trace start_pc={start_pc} err={err:?}"),
+            }
+        }
+        println!("partition recorded traces={recorded:?}");
+        assert!(!recorded.is_empty());
     }
 
     #[test]

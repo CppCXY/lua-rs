@@ -137,6 +137,7 @@ impl HelperPlan {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn dispatch(&self) -> HelperPlanDispatchSummary {
         self.summary
     }

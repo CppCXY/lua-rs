@@ -15,6 +15,7 @@ $benchmarks = @(
     "bench_tables.lua",
     "bench_table_lib.lua",
     "bench_iterators.lua",
+    "bench_quicksort.lua",
     "bench_strings.lua",
     "bench_string_lib.lua",
     "bench_math.lua",
@@ -78,7 +79,8 @@ function Invoke-BenchmarkRuntime {
     }
 
     try {
-        $output = & $Executable $ScriptPath 2>&1
+        $rawOutput = & $Executable $ScriptPath 2>&1
+        $output = @($rawOutput | ForEach-Object { [string]$_ })
         $exitCode = $LASTEXITCODE
     } finally {
         foreach ($key in $ExtraEnv.Keys) {

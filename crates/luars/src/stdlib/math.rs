@@ -146,7 +146,7 @@ fn math_exp(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
     let value = unsafe { l.get_arg_unchecked(1) };
 
     // Fast path: integers are already floor'd

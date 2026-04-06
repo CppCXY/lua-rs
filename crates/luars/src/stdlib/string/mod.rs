@@ -249,7 +249,7 @@ fn string_len(l: &mut LuaState) -> LuaResult<usize> {
 
 /// string.lower(s) - Convert to lowercase
 /// OPTIMIZED: ASCII stack-buffer fast path, avoids heap allocation for short strings
-fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'string.lower' (string expected)".to_string())
     })?;
@@ -281,7 +281,7 @@ fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
 
 /// string.upper(s) - Convert to uppercase
 /// Simple byte-by-byte loop matching C Lua's str_upper.
-fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'string.upper' (string expected)".to_string())
     })?;
@@ -396,7 +396,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
 
 /// string.reverse(s) - Reverse string
 /// OPTIMIZED: Skip UTF-8 validation for ASCII strings (reversed ASCII is still valid UTF-8)
-fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
+pub(crate) fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l.get_arg(1).ok_or_else(|| {
         l.error("bad argument #1 to 'string.reverse' (string expected)".to_string())
     })?;
@@ -434,6 +434,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     l.push_value(result)?;
     Ok(1)
 }
+
 
 /// string.sub(s, i [, j]) - Extract substring
 /// ULTRA-OPTIMIZED: Uses create_substring to avoid allocations when possible
