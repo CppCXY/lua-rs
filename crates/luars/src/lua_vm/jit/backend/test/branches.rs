@@ -1035,7 +1035,7 @@ fn backend_compiles_tail_guard_linear_int_jmp_loop() {
                         op: LinearIntGuardOp::Le,
                         lhs: 0,
                         rhs: 4,
-                        continue_when: true,
+                        continue_when: false,
                         exit_pc: 84,
                     },
                 }
@@ -1271,7 +1271,7 @@ fn backend_compiles_tail_guard_linear_int_jmp_loop_with_immediate_guard() {
                         op: LinearIntGuardOp::Ge,
                         reg: 4,
                         imm: 10,
-                        continue_when: true,
+                        continue_when: false,
                         exit_pc: 83,
                     },
                 }

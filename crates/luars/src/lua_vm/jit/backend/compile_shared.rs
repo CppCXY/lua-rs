@@ -45,6 +45,51 @@ fn lowered_exit_for_guard<'a>(
     Some(exit)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoopGuardPosition {
+    Head,
+    Tail,
+}
+
+impl LoopGuardPosition {
+    fn continue_when(self, branch_k: bool) -> bool {
+        match self {
+            Self::Head => !branch_k,
+            Self::Tail => branch_k,
+        }
+    }
+
+    fn is_tail(self) -> bool {
+        matches!(self, Self::Tail)
+    }
+}
+
+fn wrap_numeric_jmp_guard(
+    position: LoopGuardPosition,
+    cond: NumericIfElseCond,
+    continue_when: bool,
+    continue_preset: Option<NumericStep>,
+    exit_preset: Option<NumericStep>,
+    exit_pc: u32,
+) -> NumericJmpLoopGuard {
+    match position {
+        LoopGuardPosition::Head => NumericJmpLoopGuard::Head {
+            cond,
+            continue_when,
+            continue_preset,
+            exit_preset,
+            exit_pc,
+        },
+        LoopGuardPosition::Tail => NumericJmpLoopGuard::Tail {
+            cond,
+            continue_when,
+            continue_preset,
+            exit_preset,
+            exit_pc,
+        },
+    }
+}
+
 
 fn compile_numeric_jmp_guard(
     inst: &TraceIrInst,
@@ -52,6 +97,11 @@ fn compile_numeric_jmp_guard(
     exit_pc: u32,
 ) -> Option<NumericJmpLoopGuard> {
     let raw = Instruction::from_u32(inst.raw_instruction);
+    let position = if tail {
+        LoopGuardPosition::Tail
+    } else {
+        LoopGuardPosition::Head
+    };
     let (cond, continue_when, continue_preset, exit_preset) = match inst.opcode {
         crate::OpCode::Lt | crate::OpCode::Le => {
             let op = match inst.opcode {
@@ -65,14 +115,14 @@ fn compile_numeric_jmp_guard(
                     lhs: raw.get_a(),
                     rhs: raw.get_b(),
                 },
-                !raw.get_k(),
+                position.continue_when(raw.get_k()),
                 None,
                 None,
             )
         }
         crate::OpCode::Test => (
             NumericIfElseCond::Truthy { reg: raw.get_a() },
-            if tail { raw.get_k() } else { !raw.get_k() },
+            position.continue_when(raw.get_k()),
             None,
             None,
         ),
@@ -83,31 +133,22 @@ fn compile_numeric_jmp_guard(
             };
             (
                 NumericIfElseCond::Truthy { reg: raw.get_b() },
-                if tail { raw.get_k() } else { !raw.get_k() },
-                if tail { Some(preset) } else { None },
-                if tail { None } else { Some(preset) },
+                position.continue_when(raw.get_k()),
+                if position.is_tail() { Some(preset) } else { None },
+                if position.is_tail() { None } else { Some(preset) },
             )
         }
         _ => return None,
     };
 
-    Some(if tail {
-        NumericJmpLoopGuard::Tail {
-            cond,
-            continue_when,
-            continue_preset,
-            exit_preset,
-            exit_pc,
-        }
-    } else {
-        NumericJmpLoopGuard::Head {
-            cond,
-            continue_when,
-            continue_preset,
-            exit_preset,
-            exit_pc,
-        }
-    })
+    Some(wrap_numeric_jmp_guard(
+        position,
+        cond,
+        continue_when,
+        continue_preset,
+        exit_preset,
+        exit_pc,
+    ))
 }
 
 
@@ -213,10 +254,23 @@ fn compile_numeric_steps(insts: &[TraceIrInst]) -> Option<Vec<NumericStep>> {
                 dst: raw.get_a(),
                 src: raw.get_b(),
             },
+            crate::OpCode::GetUpval => NumericStep::GetUpval {
+                dst: raw.get_a(),
+                upvalue: raw.get_b(),
+            },
+            crate::OpCode::SetUpval if !raw.get_k() => NumericStep::SetUpval {
+                src: raw.get_a(),
+                upvalue: raw.get_b(),
+            },
             crate::OpCode::GetTable if !raw.get_k() => NumericStep::GetTableInt {
                 dst: raw.get_a(),
                 table: raw.get_b(),
                 index: raw.get_c(),
+            },
+            crate::OpCode::SetTable if !raw.get_k() => NumericStep::SetTableInt {
+                table: raw.get_a(),
+                index: raw.get_b(),
+                value: raw.get_c(),
             },
             crate::OpCode::LoadI => NumericStep::LoadI {
                 dst: raw.get_a(),
@@ -742,7 +796,12 @@ fn compile_linear_int_guard(
     exit_pc: u32,
 ) -> Option<LinearIntLoopGuard> {
     let raw = Instruction::from_u32(inst.raw_instruction);
-    let continue_when = !raw.get_k();
+    let position = if tail {
+        LoopGuardPosition::Tail
+    } else {
+        LoopGuardPosition::Head
+    };
+    let continue_when = position.continue_when(raw.get_k());
 
     match inst.opcode {
         crate::OpCode::Lt | crate::OpCode::Le => {
@@ -751,7 +810,7 @@ fn compile_linear_int_guard(
                 crate::OpCode::Le => LinearIntGuardOp::Le,
                 _ => unreachable!(),
             };
-            if tail {
+            if position.is_tail() {
                 Some(LinearIntLoopGuard::TailRegReg {
                     op,
                     lhs: raw.get_a(),
@@ -787,7 +846,7 @@ fn compile_linear_int_guard(
                 _ => unreachable!(),
             };
 
-            if tail {
+            if position.is_tail() {
                 Some(LinearIntLoopGuard::TailRegImm {
                     op,
                     reg: raw.get_a(),

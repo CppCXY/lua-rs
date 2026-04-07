@@ -116,7 +116,7 @@ impl TraceRecorder {
                         return Err(TraceAbortReason::PcOutOfBounds);
                     };
                     if target_pc != start_pc {
-                        if let Some(artifact) = rerecord_from_later_target(
+                        if let Some(artifact) = rerecord_from_backedge_target(
                             chunk_ptr,
                             seed,
                             target_pc as u32,
@@ -227,6 +227,15 @@ impl TraceRecorder {
                         });
                     }
 
+                    if let Some(artifact) = rerecord_from_backedge_target(
+                        chunk_ptr,
+                        seed,
+                        target_pc as u32,
+                        branch_pc as u32,
+                    ) {
+                        return artifact;
+                    }
+
                     if let Some(artifact) = reroot_trace(seed, &ops, &exits, target_pc as u32, branch_pc as u32)
                     {
                         return Ok(artifact);
@@ -246,7 +255,7 @@ impl TraceRecorder {
                         return Err(TraceAbortReason::ForwardJump);
                     }
                     if target_pc != start_pc {
-                        if let Some(artifact) = rerecord_from_later_target(
+                        if let Some(artifact) = rerecord_from_backedge_target(
                             chunk_ptr,
                             seed,
                             target_pc as u32,
@@ -275,7 +284,7 @@ impl TraceRecorder {
                         return Err(TraceAbortReason::PcOutOfBounds);
                     };
                     if target_pc != start_pc {
-                        if let Some(artifact) = rerecord_from_later_target(
+                        if let Some(artifact) = rerecord_from_backedge_target(
                             chunk_ptr,
                             seed,
                             target_pc as u32,
@@ -291,6 +300,14 @@ impl TraceRecorder {
                             target_pc: target_pc as u32,
                         });
                     }
+                    return Ok(TraceArtifact {
+                        seed,
+                        ops,
+                        exits,
+                        loop_tail_pc: pc as u32,
+                    });
+                }
+                OpCode::Return | OpCode::Return0 | OpCode::Return1 => {
                     return Ok(TraceArtifact {
                         seed,
                         ops,
@@ -341,13 +358,13 @@ fn guard_taken_continue(chunk: &LuaProto, start_pc: u32, target_pc: u32) -> Opti
     }
 }
 
-fn rerecord_from_later_target(
+fn rerecord_from_backedge_target(
     chunk_ptr: *const LuaProto,
     seed: TraceSeed,
     target_pc: u32,
     loop_tail_pc: u32,
 ) -> Option<Result<TraceArtifact, TraceAbortReason>> {
-    if target_pc <= seed.start_pc || target_pc >= loop_tail_pc {
+    if target_pc == seed.start_pc || target_pc >= loop_tail_pc {
         return None;
     }
 
@@ -462,6 +479,9 @@ fn is_supported_trace_opcode(opcode: OpCode) -> bool {
             | OpCode::ForPrep
             | OpCode::TForPrep
             | OpCode::TForLoop
+            | OpCode::Return
+            | OpCode::Return0
+            | OpCode::Return1
             | OpCode::ExtraArg
                 | OpCode::Eq
                 | OpCode::Lt
@@ -595,6 +615,150 @@ mod tests {
     }
 
     #[test]
+    fn recorder_rerecords_quicksort_partition_inner_exit_to_outer_header() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_quicksort.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_quicksort.lua")
+            .unwrap();
+
+        let partition = chunk
+            .child_protos
+            .iter()
+            .find_map(|proto| {
+                let proto = &proto.as_ref().data;
+                (proto.linedefined == 50 && proto.lastlinedefined == 75).then_some(proto)
+            })
+            .unwrap();
+
+        let artifact = TraceRecorder::record_root(partition as *const LuaProto, 21).unwrap();
+        assert_eq!(artifact.seed.start_pc, 9);
+        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![9, 10, 11, 12, 13, 14]);
+        assert_eq!(artifact.exits.len(), 1);
+        assert_eq!(artifact.exits[0].exit_pc, 15);
+        assert!(!artifact.exits[0].taken_on_trace);
+        assert_eq!(artifact.loop_tail_pc, 14);
+    }
+
+    #[test]
+    fn recorder_inspects_quicksort_build_source_array_trace() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_quicksort.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_quicksort.lua")
+            .unwrap();
+
+        let proto = chunk
+            .child_protos
+            .iter()
+            .find_map(|proto| {
+                let proto = &proto.as_ref().data;
+                (proto.linedefined == 20 && proto.lastlinedefined == 26).then_some(proto)
+            })
+            .unwrap_or_else(|| {
+                let ranges = chunk
+                    .child_protos
+                    .iter()
+                    .map(|proto| {
+                        let proto = &proto.as_ref().data;
+                        (proto.linedefined, proto.lastlinedefined, proto.code.len())
+                    })
+                    .collect::<Vec<_>>();
+                panic!("build_source_array proto not found; child ranges={ranges:?}");
+            });
+
+        let mut recorded = Vec::new();
+        for start_pc in 0..proto.code.len() as u32 {
+            if let Ok(artifact) = TraceRecorder::record_root(proto as *const LuaProto, start_pc) {
+                recorded.push((
+                    start_pc,
+                    artifact.seed.start_pc,
+                    artifact
+                        .ops
+                        .iter()
+                        .map(|op| (op.pc, op.opcode))
+                        .collect::<Vec<_>>(),
+                ));
+            }
+        }
+        println!("build_source_array traces={recorded:?}");
+        assert!(!recorded.is_empty());
+    }
+
+    #[test]
+    fn recorder_inspects_quicksort_is_sorted_trace() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_quicksort.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_quicksort.lua")
+            .unwrap();
+
+        let proto = chunk
+            .child_protos
+            .iter()
+            .find_map(|proto| {
+                let proto = &proto.as_ref().data;
+                (proto.linedefined == 108 && proto.lastlinedefined == 115).then_some(proto)
+            })
+            .unwrap_or_else(|| {
+                let ranges = chunk
+                    .child_protos
+                    .iter()
+                    .map(|proto| {
+                        let proto = &proto.as_ref().data;
+                        (proto.linedefined, proto.lastlinedefined, proto.code.len())
+                    })
+                    .collect::<Vec<_>>();
+                panic!("is_sorted proto not found; child ranges={ranges:?}");
+            });
+
+        let mut recorded = Vec::new();
+        for start_pc in 0..proto.code.len() as u32 {
+            if let Ok(artifact) = TraceRecorder::record_root(proto as *const LuaProto, start_pc) {
+                recorded.push((
+                    start_pc,
+                    artifact.seed.start_pc,
+                    artifact
+                        .ops
+                        .iter()
+                        .map(|op| (op.pc, op.opcode))
+                        .collect::<Vec<_>>(),
+                    artifact.exits,
+                ));
+            }
+        }
+        println!("is_sorted traces={recorded:?}");
+        assert!(!recorded.is_empty());
+    }
+
+    #[test]
+    fn recorder_rerecords_backward_guard_branch_to_earlier_header() {
+        let mut chunk = LuaProto::new();
+        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
+        chunk.code.push(Instruction::create_abc(OpCode::Move, 2, 3, 0));
+        chunk.code.push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
+        chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
+
+        let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 3).unwrap();
+        assert_eq!(artifact.seed.start_pc, 0);
+        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+        assert_eq!(artifact.loop_tail_pc, 4);
+    }
+
+    #[test]
     fn recorder_accepts_getupval_and_forprep_inside_loop() {
         let mut chunk = LuaProto::new();
         chunk.code.push(Instruction::create_abc(OpCode::GetUpval, 0, 1, 0));
@@ -629,6 +793,44 @@ mod tests {
         let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
         assert_eq!(artifact.ops.len(), 2);
         assert_eq!(artifact.loop_tail_pc, 1);
+    }
+
+    #[test]
+    fn recorder_accepts_terminal_return0_trace() {
+        let mut chunk = LuaProto::new();
+        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+
+        let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
+        assert_eq!(artifact.ops.len(), 1);
+        assert_eq!(artifact.ops[0].opcode, OpCode::Return0);
+        assert!(artifact.exits.is_empty());
+        assert_eq!(artifact.loop_tail_pc, 0);
+    }
+
+    #[test]
+    fn recorder_accepts_terminal_return1_trace() {
+        let mut chunk = LuaProto::new();
+        chunk.code.push(Instruction::create_abc(OpCode::Return1, 3, 0, 0));
+
+        let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
+        assert_eq!(artifact.ops.len(), 1);
+        assert_eq!(artifact.ops[0].opcode, OpCode::Return1);
+        assert!(artifact.exits.is_empty());
+        assert_eq!(artifact.loop_tail_pc, 0);
+    }
+
+    #[test]
+    fn recorder_accepts_terminal_return_trace() {
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Return, 2, 3, 0, false));
+
+        let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
+        assert_eq!(artifact.ops.len(), 1);
+        assert_eq!(artifact.ops[0].opcode, OpCode::Return);
+        assert!(artifact.exits.is_empty());
+        assert_eq!(artifact.loop_tail_pc, 0);
     }
 
     #[test]
@@ -685,6 +887,19 @@ mod tests {
         assert_eq!(artifact.ops.len(), 2);
         assert_eq!(artifact.ops[0].pc, 2);
         assert_eq!(artifact.loop_tail_pc, 3);
+    }
+
+    #[test]
+    fn recorder_rerecords_to_earlier_backedge_header() {
+        let mut chunk = LuaProto::new();
+        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk.code.push(Instruction::create_sj(OpCode::Jmp, -3));
+
+        let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 1).unwrap();
+        assert_eq!(artifact.seed.start_pc, 0);
+        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(artifact.loop_tail_pc, 2);
     }
 
     #[test]

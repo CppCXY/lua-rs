@@ -82,7 +82,10 @@ pub(crate) enum NumericStep {
     LoadBool { dst: u32, value: bool },
     LoadI { dst: u32, imm: i32 },
     LoadF { dst: u32, imm: i32 },
+    GetUpval { dst: u32, upvalue: u32 },
+    SetUpval { src: u32, upvalue: u32 },
     GetTableInt { dst: u32, table: u32, index: u32 },
+    SetTableInt { table: u32, index: u32, value: u32 },
     Binary {
         dst: u32,
         lhs: NumericOperand,
@@ -169,6 +172,14 @@ pub(crate) enum LinearIntLoopGuard {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CompiledTraceExecutor {
+    Return {
+        start_reg: u32,
+        result_count: u8,
+    },
+    Return0,
+    Return1 {
+        src_reg: u32,
+    },
     LinearIntForLoop {
         loop_reg: u32,
         steps: Vec<LinearIntStep>,
@@ -176,6 +187,11 @@ pub(crate) enum CompiledTraceExecutor {
     NumericForLoop {
         loop_reg: u32,
         steps: Vec<NumericStep>,
+    },
+    GuardedNumericForLoop {
+        loop_reg: u32,
+        steps: Vec<NumericStep>,
+        guard: NumericJmpLoopGuard,
     },
     NumericIfElseForLoop {
         loop_reg: u32,
@@ -243,8 +259,12 @@ impl CompiledTraceExecution {
         match self {
             Self::LoweredOnly => "SummaryOnly",
             Self::Interpreter(executor) => match executor {
+                CompiledTraceExecutor::Return { .. } => "Return",
+                CompiledTraceExecutor::Return0 => "Return0",
+                CompiledTraceExecutor::Return1 { .. } => "Return1",
                 CompiledTraceExecutor::LinearIntForLoop { .. } => "LinearIntForLoop",
                 CompiledTraceExecutor::NumericForLoop { .. } => "NumericForLoop",
+                CompiledTraceExecutor::GuardedNumericForLoop { .. } => "GuardedNumericForLoop",
                 CompiledTraceExecutor::NumericIfElseForLoop { .. } => "NumericIfElseForLoop",
                 CompiledTraceExecutor::NumericJmpLoop { .. } => "NumericJmpLoop",
                 CompiledTraceExecutor::NumericTableScanJmpLoop { .. } => "NumericTableScanJmpLoop",
@@ -521,5 +541,36 @@ pub(super) fn synthetic_artifact_for_ir(ir: &TraceIr) -> TraceArtifact {
             })
             .collect(),
         loop_tail_pc: ir.loop_tail_pc,
+    }
+}
+
+impl NumericJmpLoopGuard {
+    pub(crate) fn is_tail(self) -> bool {
+        matches!(self, Self::Tail { .. })
+    }
+
+    pub(crate) fn exit_pc(self) -> u32 {
+        match self {
+            Self::Head { exit_pc, .. } | Self::Tail { exit_pc, .. } => exit_pc,
+        }
+    }
+}
+
+impl LinearIntLoopGuard {
+    pub(crate) fn is_head(self) -> bool {
+        matches!(self, Self::HeadRegReg { .. } | Self::HeadRegImm { .. })
+    }
+
+    pub(crate) fn is_tail(self) -> bool {
+        matches!(self, Self::TailRegReg { .. } | Self::TailRegImm { .. })
+    }
+
+    pub(crate) fn exit_pc(self) -> u32 {
+        match self {
+            Self::HeadRegReg { exit_pc, .. }
+            | Self::HeadRegImm { exit_pc, .. }
+            | Self::TailRegReg { exit_pc, .. }
+            | Self::TailRegImm { exit_pc, .. } => exit_pc,
+        }
     }
 }

@@ -1052,6 +1052,7 @@ mod tests {
         HOT_EXIT_THRESHOLD, JitAbortCounters, JitCounters, JitState, SideTraceKey,
         SideTraceStatus, TraceKey, TraceStatus,
     };
+    use crate::{LuaVM, SafeOption};
     use crate::LuaValue;
     use crate::lua_value::LuaProto;
     use crate::lua_vm::jit::hotcount::HOT_LOOP_THRESHOLD;
@@ -1213,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_trace_entry_is_skipped() {
+    fn executable_upvalue_trace_entry_is_enterable() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
         chunk.code.push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
@@ -1224,12 +1225,12 @@ mod tests {
             jit.record_loop_backedge(chunk_ptr, 0);
         }
 
-        assert!(!jit.try_enter_trace(chunk_ptr, 0));
+        assert!(jit.try_enter_trace(chunk_ptr, 0));
         assert!(!jit.try_enter_trace(chunk_ptr, 1));
         assert_eq!(jit.counters().trace_enter_checks, 2);
-        assert_eq!(jit.counters().trace_enter_hits, 0);
-        assert_eq!(jit.counters().helper_plan_dispatches, 0);
-        assert_eq!(jit.counters().helper_plan_steps, 0);
+        assert_eq!(jit.counters().trace_enter_hits, 1);
+        assert!(jit.counters().helper_plan_dispatches > 0);
+        assert!(jit.counters().helper_plan_steps > 0);
         assert_eq!(jit.counters().helper_plan_guards, 0);
         assert_eq!(jit.counters().helper_plan_calls, 0);
         assert_eq!(jit.counters().helper_plan_metamethods, 0);
@@ -1582,5 +1583,215 @@ mod tests {
         assert!(report.contains("executor=SummaryOnly"));
         assert!(report.contains("details=load=1,arith=1,call=1,meta=1,backedge=1"));
         assert!(report.contains("status=Blacklisted(attempts=1, reason=UnsupportedOpcode(TailCall))"));
+    }
+
+    #[test]
+    fn guarded_numeric_for_trace_is_enterable_and_reported() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let results = vm
+            .execute(
+                r#"
+                local function is_non_decreasing(a)
+                    for i = 2, #a do
+                        if a[i - 1] > a[i] then
+                            return false
+                        end
+                    end
+                    return true
+                end
+
+                local a = {}
+                for i = 1, 64 do
+                    a[i] = i
+                end
+
+                local checks = 0
+                for iter = 1, 200 do
+                    if is_non_decreasing(a) then
+                        checks = checks + 1
+                    end
+                end
+
+                return checks
+                "#,
+            )
+            .unwrap();
+        assert_eq!(results[0].as_integer(), Some(200));
+
+        let report = vm.jit.trace_report();
+        assert!(report.contains("executor=GuardedNumericForLoop"));
+        let compiled_trace = vm
+            .jit
+            .traces
+            .values()
+            .filter_map(|trace| trace.compiled_trace.as_ref())
+            .find(|trace| trace.executor_family() == "GuardedNumericForLoop")
+            .unwrap();
+        assert!(compiled_trace.is_enterable());
+        assert_eq!(compiled_trace.executor_family(), "GuardedNumericForLoop");
+        assert!(report.contains("status=Executable(instr=7) executor=GuardedNumericForLoop"));
+    }
+
+    #[test]
+    fn guarded_numeric_for_trace_exit_starts_side_trace_from_guard_exit_pc() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let results = vm
+            .execute(
+                r#"
+                local function is_non_decreasing(a)
+                    for i = 2, #a do
+                        if a[i - 1] > a[i] then
+                            return false
+                        end
+                    end
+                    return true
+                end
+
+                local a = {}
+                for i = 1, 64 do
+                    a[i] = i
+                end
+
+                local checks = 0
+                for iter = 1, 200 do
+                    if is_non_decreasing(a) then
+                        checks = checks + 1
+                    end
+                end
+
+                return checks
+                "#,
+            )
+            .unwrap();
+        assert_eq!(results[0].as_integer(), Some(200));
+
+        let (trace_key, guard_exit_pc) = vm
+            .jit
+            .traces
+            .iter()
+            .find_map(|(key, trace)| {
+                let compiled = trace.compiled_trace.as_ref()?;
+                if compiled.executor_family() != "GuardedNumericForLoop" {
+                    return None;
+                }
+                let exit_pc = trace.artifact.as_ref()?.exits.first()?.exit_pc;
+                Some((*key, exit_pc))
+            })
+            .unwrap();
+
+        let deopt = vm
+            .jit
+            .record_trace_exit(trace_key.chunk_addr as *const LuaProto, trace_key.pc, guard_exit_pc)
+            .unwrap();
+        assert_eq!(deopt.exit_index, 0);
+        assert_eq!(deopt.resume_pc, guard_exit_pc);
+
+        let snapshot = vm.jit.stats_snapshot();
+        assert_eq!(snapshot.side_trace_count, 1);
+
+        let side = vm
+            .jit
+            .side_traces
+            .values()
+            .find(|trace| trace.start_pc == guard_exit_pc)
+            .unwrap();
+        assert!(matches!(side.status, SideTraceStatus::Counting { hits: 1 }));
+
+        let report = vm.jit.trace_report();
+        assert!(report.contains(&format!("start_pc={} status=Counting(hits=1)", guard_exit_pc)));
+    }
+
+    #[test]
+    fn head_guard_linear_int_jmp_trace_is_enterable_and_reported() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let results = vm
+            .execute(
+                r#"
+                local total = 0
+                for outer = 1, 80 do
+                    local i = 0
+                    local acc = 0
+                    while i < 128 do
+                        acc = acc + i
+                        i = i + 1
+                    end
+                    total = total + acc
+                end
+                return total
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].as_integer(), Some(650240));
+
+        let report = vm.jit.trace_report();
+        assert!(report.contains("LinearIntJmpLoop"));
+        assert!(report.contains("status=Executable"));
+        assert!(vm.jit.stats_snapshot().counters.trace_enter_hits > 0);
+    }
+
+    #[test]
+    fn tail_guard_linear_int_jmp_trace_is_enterable_and_reported() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let results = vm
+            .execute(
+                r#"
+                local total = 0
+                for outer = 1, 80 do
+                    local i = 0
+                    local acc = 0
+                    repeat
+                        acc = acc + i
+                        i = i + 1
+                    until i >= 128
+                    total = total + acc
+                end
+                return total
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].as_integer(), Some(650240));
+
+        let report = vm.jit.trace_report();
+        assert!(report.contains("LinearIntJmpLoop"));
+        assert!(report.contains("status=Executable"));
+    }
+
+    #[test]
+    fn upvalue_numeric_for_trace_is_enterable_and_reported() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let results = vm
+            .execute(
+                r#"
+                local iterations = 200
+                local upvalue_var = 0
+
+                local function upvalue_test()
+                    for i = 1, iterations do
+                        upvalue_var = upvalue_var + 1
+                    end
+                end
+
+                upvalue_test()
+                return upvalue_var
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].as_integer(), Some(200));
+
+        let report = vm.jit.trace_report();
+        assert!(report.contains("executor=NumericForLoop"));
+        assert!(report.contains("details=upget=1,upset=1,arith=1,meta=1,backedge=1"));
+
+        let compiled_trace = vm
+            .jit
+            .traces
+            .values()
+            .filter_map(|trace| trace.compiled_trace.as_ref())
+            .find(|trace| trace.executor_family() == "NumericForLoop")
+            .unwrap();
+        assert!(compiled_trace.is_enterable());
     }
 }

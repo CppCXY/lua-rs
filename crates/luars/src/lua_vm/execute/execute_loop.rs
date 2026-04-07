@@ -61,45 +61,22 @@ unsafe fn jit_dispatch_root_trace_or_record(
     base: usize,
     target_pc: usize,
     loop_exit_pc_override: Option<usize>,
-) -> Option<usize> {
+) -> Option<jit::JitTraceAction> {
     unsafe { jit::dispatch_root_trace_or_record(lua_state, ci, base, target_pc, loop_exit_pc_override) }
 }
 
 #[cfg(feature = "jit")]
 #[inline(always)]
-unsafe fn jit_try_handle_jmp_backedge(
+unsafe fn jit_try_handle_backedge(
     lua_state: &mut LuaState,
     ci: &CallInfo,
     base: usize,
     target_pc: usize,
-) -> Option<usize> {
-    unsafe { jit_dispatch_root_trace_or_record(lua_state, ci, base, target_pc, None) }
-}
-
-#[cfg(feature = "jit")]
-#[allow(unsafe_op_in_unsafe_fn)]
-#[inline(always)]
-unsafe fn jit_try_handle_forloop_backedge(
-    lua_state: &mut LuaState,
-    ci: &CallInfo,
-    base: usize,
-    target_pc: usize,
-    exit_pc: usize,
-) -> Option<usize> {
-    unsafe { jit_dispatch_root_trace_or_record(lua_state, ci, base, target_pc, Some(exit_pc)) }
-}
-
-#[cfg(feature = "jit")]
-#[allow(unsafe_op_in_unsafe_fn)]
-#[inline(always)]
-unsafe fn jit_try_handle_tforloop_backedge(
-    lua_state: &mut LuaState,
-    ci: &CallInfo,
-    base: usize,
-    target_pc: usize,
-    exit_pc: usize,
-) -> Option<usize> {
-    unsafe { jit_dispatch_root_trace_or_record(lua_state, ci, base, target_pc, Some(exit_pc)) }
+    loop_exit_pc_override: Option<usize>,
+) -> Option<jit::JitTraceAction> {
+    unsafe {
+        jit_dispatch_root_trace_or_record(lua_state, ci, base, target_pc, loop_exit_pc_override)
+    }
 }
 
 /// Execute until call depth reaches target_depth
@@ -196,6 +173,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 #[cfg(feature = "sandbox")]
                 {
                     trap = lua_state.has_active_instruction_watch();
+                }
+            };
+        }
+
+        #[cfg(feature = "jit")]
+        macro_rules! apply_jit_trace_action {
+            ($action:expr) => {
+                match $action {
+                    jit::JitTraceAction::ContinueAt(exit_pc) => {
+                        pc = exit_pc;
+                    }
+                    jit::JitTraceAction::Returned => continue 'startfunc,
                 }
             };
         }
@@ -1814,10 +1803,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let target_pc = (pc as isize + sj as isize) as usize;
                     #[cfg(feature = "jit")]
                     if sj < 0 {
-                        if let Some(exit_pc) = unsafe {
-                            jit_try_handle_jmp_backedge(lua_state, ci, base, target_pc)
+                        if let Some(action) = unsafe {
+                            jit_try_handle_backedge(lua_state, ci, base, target_pc, None)
                         } {
-                            pc = exit_pc;
+                            apply_jit_trace_action!(action);
                             updatetrap!();
                             continue;
                         }
@@ -2329,15 +2318,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 pc -= bx;
                                 #[cfg(feature = "jit")]
                                 {
-                                    if let Some(exit_pc) = jit_try_handle_forloop_backedge(
-                                        lua_state,
-                                        ci,
-                                        base,
-                                        pc,
-                                        pc + bx,
+                                    if let Some(action) = jit_try_handle_backedge(
+                                        lua_state, ci, base, pc, Some(pc + bx),
                                     )
                                     {
-                                        pc = exit_pc;
+                                        apply_jit_trace_action!(action);
                                     }
                                 }
                             }
@@ -2414,16 +2399,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         pc -= instr.get_bx() as usize;
                         #[cfg(feature = "jit")]
                         {
-                            if let Some(exit_pc) = unsafe {
-                                jit_try_handle_tforloop_backedge(
+                            if let Some(action) = unsafe {
+                                jit_try_handle_backedge(
                                     lua_state,
                                     ci,
                                     base,
                                     pc,
-                                    pc + instr.get_bx() as usize,
+                                    Some(pc + instr.get_bx() as usize),
                                 )
                             } {
-                                pc = exit_pc;
+                                apply_jit_trace_action!(action);
                             }
                         }
                     }

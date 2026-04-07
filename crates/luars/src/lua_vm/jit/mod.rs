@@ -27,6 +27,12 @@ pub(crate) use trace_recorder::TraceAbortReason;
 pub(crate) use state::{ExecutableTraceDispatch, JitState, TraceExitDispatch};
 pub use state::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JitTraceAction {
+    ContinueAt(usize),
+    Returned,
+}
+
 #[inline(always)]
 fn should_track(lua_state: &LuaState) -> bool {
     if lua_state.hook_mask != 0 {

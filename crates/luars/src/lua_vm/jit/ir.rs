@@ -73,7 +73,9 @@ impl TraceIr {
                 pc: op.pc,
                 opcode: op.opcode,
                 raw_instruction: op.instruction.as_u32(),
-                kind: if op.pc == artifact.loop_tail_pc {
+                kind: if op.pc == artifact.loop_tail_pc
+                    && matches!(op.opcode, OpCode::Jmp | OpCode::ForLoop | OpCode::TForLoop)
+                {
                     TraceIrInstKind::LoopBackedge
                 } else {
                     classify_opcode(op.opcode)
@@ -306,6 +308,22 @@ fn collect_reads(pc: u32, instruction: Instruction, opcode: OpCode) -> Vec<Trace
             TraceIrOperand::UnsignedImmediate(2),
             TraceIrOperand::UnsignedImmediate(instruction.get_c()),
         ],
+        OpCode::Return => {
+            let result_count = instruction.get_b().saturating_sub(1);
+            let mut reads = vec![
+                TraceIrOperand::UnsignedImmediate(instruction.get_b()),
+                TraceIrOperand::Bool(instruction.get_k()),
+            ];
+            if result_count != 0 {
+                reads.push(TraceIrOperand::RegisterRange {
+                    start: instruction.get_a(),
+                    count: result_count,
+                });
+            }
+            reads
+        }
+        OpCode::Return0 => Vec::new(),
+        OpCode::Return1 => vec![TraceIrOperand::Register(instruction.get_a())],
         OpCode::Closure => vec![TraceIrOperand::UnsignedImmediate(instruction.get_bx())],
         OpCode::ForPrep => vec![TraceIrOperand::RegisterRange {
             start: instruction.get_a(),
@@ -451,7 +469,9 @@ fn classify_opcode(opcode: OpCode) -> TraceIrInstKind {
         | OpCode::ExtraArg => TraceIrInstKind::LoadMove,
         OpCode::GetUpval => TraceIrInstKind::UpvalueAccess,
         OpCode::SetUpval => TraceIrInstKind::UpvalueMutation,
-        OpCode::Close => TraceIrInstKind::Cleanup,
+        OpCode::Close | OpCode::Return | OpCode::Return0 | OpCode::Return1 => {
+            TraceIrInstKind::Cleanup
+        }
         OpCode::GetTabUp
         | OpCode::GetTable
         | OpCode::GetI
@@ -923,5 +943,58 @@ mod tests {
         );
         assert_eq!(ir.guards.len(), 1);
         assert_eq!(ir.guards[0].kind, TraceIrGuardKind::LoopBackedgeGuard);
+    }
+
+    #[test]
+    fn lowering_keeps_terminal_return_as_cleanup() {
+        let artifact = TraceArtifact {
+            seed: TraceSeed {
+                start_pc: 4,
+                root_chunk_addr: 0x30,
+                instruction_budget: 1,
+            },
+            ops: vec![TraceOp {
+                pc: 4,
+                instruction: Instruction::create_abc(OpCode::Return1, 2, 0, 0),
+                opcode: OpCode::Return1,
+            }],
+            exits: vec![],
+            loop_tail_pc: 4,
+        };
+
+        let ir = TraceIr::lower(&artifact);
+        assert_eq!(ir.insts.len(), 1);
+        assert_eq!(ir.insts[0].kind, TraceIrInstKind::Cleanup);
+        assert_eq!(ir.insts[0].reads, vec![TraceIrOperand::Register(2)]);
+    }
+
+    #[test]
+    fn lowering_keeps_fixed_arity_return_as_cleanup() {
+        let artifact = TraceArtifact {
+            seed: TraceSeed {
+                start_pc: 8,
+                root_chunk_addr: 0x31,
+                instruction_budget: 1,
+            },
+            ops: vec![TraceOp {
+                pc: 8,
+                instruction: Instruction::create_abck(OpCode::Return, 4, 3, 0, false),
+                opcode: OpCode::Return,
+            }],
+            exits: vec![],
+            loop_tail_pc: 8,
+        };
+
+        let ir = TraceIr::lower(&artifact);
+        assert_eq!(ir.insts.len(), 1);
+        assert_eq!(ir.insts[0].kind, TraceIrInstKind::Cleanup);
+        assert_eq!(
+            ir.insts[0].reads,
+            vec![
+                TraceIrOperand::UnsignedImmediate(3),
+                TraceIrOperand::Bool(false),
+                TraceIrOperand::RegisterRange { start: 4, count: 2 },
+            ]
+        );
     }
 }
