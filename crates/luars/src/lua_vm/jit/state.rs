@@ -7,7 +7,7 @@ use crate::lua_value::{LuaProto, LuaValue};
 use crate::OpCode;
 
 use super::backend::{
-    BackendCompileOutcome, CompiledTrace, CompiledTraceExecutor, NullTraceBackend, TraceBackend,
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, NullTraceBackend, TraceBackend,
 };
 use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use super::hotcount::tick_hotcount;
@@ -63,7 +63,6 @@ struct TraceInfo {
     lowered_trace: Option<LoweredTrace>,
     helper_plan: Option<HelperPlan>,
     compiled_trace: Option<CompiledTrace>,
-    enterable: bool,
 }
 
 impl TraceInfo {
@@ -75,7 +74,6 @@ impl TraceInfo {
             lowered_trace: None,
             helper_plan: None,
             compiled_trace: None,
-            enterable: false,
         }
     }
 }
@@ -119,7 +117,7 @@ impl SideTraceInfo {
 pub(crate) struct ExecutableTraceDispatch {
     pub start_pc: u32,
     pub loop_tail_pc: u32,
-    pub executor: CompiledTraceExecutor,
+    pub execution: CompiledTraceExecution,
     pub summary: HelperPlanDispatchSummary,
 }
 
@@ -351,8 +349,7 @@ impl JitState {
         };
 
         if let Some(compiled_trace) = trace.compiled_trace.as_ref() {
-            let executor = compiled_trace.executor();
-            if !matches!(executor, CompiledTraceExecutor::SummaryOnly) {
+            if compiled_trace.is_enterable() {
                 let dispatch_summary = compiled_trace.execute();
                 self.counters.trace_enter_hits = self.counters.trace_enter_hits.saturating_add(1);
                 self.apply_helper_plan_summary(dispatch_summary);
@@ -363,7 +360,7 @@ impl JitState {
         false
     }
 
-    pub(crate) fn compiled_trace_executor_or_record(
+    pub(crate) fn executable_trace_dispatch_or_record(
         &mut self,
         chunk_ptr: *const LuaProto,
         pc: u32,
@@ -377,13 +374,13 @@ impl JitState {
         match self.traces.entry(key) {
             Entry::Occupied(mut entry) => {
                 let trace = entry.get_mut();
-                if trace.enterable
-                    && let Some(compiled_trace) = trace.compiled_trace.as_ref()
+                if let Some(compiled_trace) = trace.compiled_trace.as_ref()
+                    && compiled_trace.is_enterable()
                 {
                     return Some(ExecutableTraceDispatch {
                         start_pc: compiled_trace.root_pc,
                         loop_tail_pc: compiled_trace.loop_tail_pc,
-                        executor: compiled_trace.executor(),
+                        execution: compiled_trace.execution(),
                         summary: compiled_trace.summary(),
                     });
                 }
@@ -647,7 +644,6 @@ impl JitState {
             trace.lowered_trace = None;
             trace.helper_plan = None;
             trace.compiled_trace = None;
-            trace.enterable = false;
             attempts
         } else {
             return;
@@ -674,7 +670,6 @@ impl JitState {
                         trace.lowered_trace = None;
                         trace.helper_plan = None;
                         trace.compiled_trace = None;
-                        trace.enterable = false;
                     }
                 }
                 if let Some(trace) = self.traces.get_mut(&storage_key) {
@@ -697,12 +692,6 @@ impl JitState {
                     trace.ir = Some(ir);
                     trace.lowered_trace = Some(lowered_trace);
                     trace.helper_plan = Some(helper_plan);
-                    trace.enterable = compiled_trace
-                        .as_ref()
-                        .map(|compiled_trace| {
-                            !matches!(compiled_trace.executor(), CompiledTraceExecutor::SummaryOnly)
-                        })
-                        .unwrap_or(false);
                     trace.compiled_trace = compiled_trace;
                 } else {
                     let mut trace = TraceInfo::new();
@@ -725,12 +714,6 @@ impl JitState {
                     trace.ir = Some(ir);
                     trace.lowered_trace = Some(lowered_trace);
                     trace.helper_plan = Some(helper_plan);
-                    trace.enterable = compiled_trace
-                        .as_ref()
-                        .map(|compiled_trace| {
-                            !matches!(compiled_trace.executor(), CompiledTraceExecutor::SummaryOnly)
-                        })
-                        .unwrap_or(false);
                     trace.compiled_trace = compiled_trace;
                     self.traces.insert(storage_key, trace);
                 }
@@ -748,7 +731,6 @@ impl JitState {
             trace.lowered_trace = None;
             trace.helper_plan = None;
             trace.compiled_trace = None;
-            trace.enterable = false;
         }
     }
 
@@ -841,14 +823,13 @@ impl JitState {
             return None;
         }
         let compiled_trace = trace.compiled_trace.as_ref()?;
-        let executor = compiled_trace.executor();
-        if matches!(executor, CompiledTraceExecutor::SummaryOnly) {
+        if !compiled_trace.is_enterable() {
             return None;
         }
         Some(ExecutableTraceDispatch {
             start_pc: trace.start_pc,
             loop_tail_pc: compiled_trace.loop_tail_pc,
-            executor,
+            execution: compiled_trace.execution(),
             summary: compiled_trace.summary(),
         })
     }
@@ -1020,10 +1001,7 @@ fn status_for_compiled_trace(
     instruction_count: u16,
     compiled_trace: &CompiledTrace,
 ) -> TraceStatus {
-    if matches!(
-        compiled_trace.executor(),
-        CompiledTraceExecutor::SummaryOnly
-    ) {
+    if !compiled_trace.is_enterable() {
         TraceStatus::Lowered { instruction_count }
     } else {
         TraceStatus::Executable { instruction_count }
@@ -1034,10 +1012,7 @@ fn side_status_for_compiled_trace(
     instruction_count: u16,
     compiled_trace: &CompiledTrace,
 ) -> SideTraceStatus {
-    if matches!(
-        compiled_trace.executor(),
-        CompiledTraceExecutor::SummaryOnly
-    ) {
+    if !compiled_trace.is_enterable() {
         SideTraceStatus::Lowered { instruction_count }
     } else {
         SideTraceStatus::Executable { instruction_count }
@@ -1189,7 +1164,7 @@ mod tests {
                 instruction_count: 2,
             })
         );
-        let dispatch = jit.compiled_trace_executor_or_record(chunk_ptr, 0).unwrap();
+        let dispatch = jit.executable_trace_dispatch_or_record(chunk_ptr, 0).unwrap();
         let artifact = jit.artifact_for(chunk_ptr as usize, 0).unwrap();
         let ir = jit.ir_for(chunk_ptr as usize, 0).unwrap();
         let helper_plan = jit.helper_plan_for(chunk_ptr as usize, 0).unwrap();

@@ -13,8 +13,9 @@ use crate::lua_value::LuaProto;
 use crate::lua_vm::{CallInfo, LuaState};
 
 pub(crate) use backend::{
-    CompiledTraceExecutor, LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NumericBinaryOp,
-    NumericIfElseCond, NumericJmpLoopGuard, NumericOperand, NumericStep,
+    CompiledTraceExecution, CompiledTraceExecutor, LinearIntGuardOp, LinearIntLoopGuard,
+    LinearIntStep, NumericBinaryOp, NumericIfElseCond, NumericJmpLoopGuard, NumericOperand,
+    NumericStep,
 };
 pub(crate) use helper_plan::HelperPlanDispatchSummary;
 #[cfg(feature = "jit")]
@@ -58,7 +59,7 @@ pub(crate) fn record_loop_backedge(
 }
 
 #[inline(always)]
-pub(crate) fn compiled_trace_executor_or_record(
+pub(crate) fn executable_trace_dispatch_or_record(
     lua_state: &mut LuaState,
     chunk_ptr: *const LuaProto,
     target_pc: usize,
@@ -74,7 +75,7 @@ pub(crate) fn compiled_trace_executor_or_record(
     lua_state
         .vm_mut()
         .jit
-        .compiled_trace_executor_or_record(chunk_ptr, pc)
+        .executable_trace_dispatch_or_record(chunk_ptr, pc)
 }
 
 #[inline(always)]

@@ -17,46 +17,46 @@ pub(super) fn compile_executor(
     artifact: &TraceArtifact,
     ir: &TraceIr,
     lowered_trace: &LoweredTrace,
-) -> CompiledTraceExecutor {
+) -> Option<CompiledTraceExecutor> {
     if let Some(executor) = compile_linear_int_forloop(ir) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_guarded_numeric_ifelse_forloop(artifact, ir, lowered_trace) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_numeric_ifelse_forloop(ir) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_numeric_forloop(ir) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_linear_int_jmp_loop(ir, lowered_trace) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_numeric_table_shift_jmp_loop(ir, lowered_trace) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_numeric_table_scan_jmp_loop(ir, lowered_trace) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_numeric_jmp_loop(ir, lowered_trace) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_generic_for_builtin_add(ir) {
-        return executor;
+        return Some(executor);
     }
 
     if let Some(executor) = compile_next_while_builtin_add(ir) {
-        return executor;
+        return Some(executor);
     }
 
-    CompiledTraceExecutor::SummaryOnly
+    None
 }

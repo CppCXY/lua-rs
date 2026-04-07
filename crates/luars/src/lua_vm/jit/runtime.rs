@@ -4,18 +4,17 @@ use crate::{CallInfo, LuaState, LuaValue};
 use crate::lua_value::LuaProto;
 #[cfg(feature = "jit")]
 use super::executors::{
-    jit_execute_generic_for_builtin_add,
-    jit_execute_linear_int_for_loop,
-    jit_execute_numeric_for_loop,
-    jit_execute_numeric_ifelse_for_loop,
+    jit_execute_generic_for_builtin_add, jit_execute_linear_int_for_loop,
     jit_execute_linear_int_jmp_loop, jit_execute_next_while_builtin_add,
+    jit_execute_numeric_for_loop, jit_execute_numeric_ifelse_for_loop,
     jit_execute_numeric_jmp_loop, jit_execute_numeric_table_scan_jmp_loop,
     jit_execute_numeric_table_shift_jmp_loop,
 };
 
 #[cfg(feature = "jit")]
 use super::{
-    CompiledTraceExecutor, ExecutableTraceDispatch, HelperPlanDispatchSummary, TraceExitDispatch,
+    CompiledTraceExecution, CompiledTraceExecutor, ExecutableTraceDispatch,
+    HelperPlanDispatchSummary, TraceExitDispatch,
 };
 
 #[cfg(feature = "jit")]
@@ -66,7 +65,7 @@ pub(crate) unsafe fn dispatch_root_trace_or_record(
     target_pc: usize,
     loop_exit_pc_override: Option<usize>,
 ) -> Option<usize> {
-    let Some(dispatch) = super::compiled_trace_executor_or_record(lua_state, ci.chunk_ptr, target_pc)
+    let Some(dispatch) = super::executable_trace_dispatch_or_record(lua_state, ci.chunk_ptr, target_pc)
     else {
         return None;
     };
@@ -124,12 +123,13 @@ unsafe fn dispatch_executable_trace(
     loop_exit_pc_override: Option<usize>,
 ) -> Option<usize> {
     let target_pc = dispatch.start_pc as usize;
-    let loop_tail_pc = loop_exit_pc_override.unwrap_or(dispatch.loop_tail_pc as usize);
-    let executor = dispatch.executor;
+    let exit_pc = loop_exit_pc_override.unwrap_or(dispatch.loop_tail_pc as usize);
+    let execution = dispatch.execution;
     let summary = dispatch.summary;
 
-    match executor {
-        CompiledTraceExecutor::LinearIntJmpLoop { steps, guard } => unsafe {
+    match execution {
+        CompiledTraceExecution::LoweredOnly => None,
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntJmpLoop { steps, guard }) => unsafe {
             jit_execute_linear_int_jmp_loop(
                 context.lua_state,
                 context.ci,
@@ -140,14 +140,14 @@ unsafe fn dispatch_executable_trace(
                 summary,
             )
         },
-        CompiledTraceExecutor::NumericTableScanJmpLoop {
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericTableScanJmpLoop {
             table_reg,
             index_reg,
             limit_reg,
             step_imm,
             compare_op,
             exit_pc,
-        } => unsafe {
+        }) => unsafe {
             jit_execute_numeric_table_scan_jmp_loop(
                 context.lua_state,
                 context.ci,
@@ -162,14 +162,14 @@ unsafe fn dispatch_executable_trace(
                 exit_pc as usize,
             )
         },
-        CompiledTraceExecutor::NumericTableShiftJmpLoop {
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericTableShiftJmpLoop {
             table_reg,
             index_reg,
             left_bound_reg,
             value_reg,
             temp_reg,
             exit_pc,
-        } => unsafe {
+        }) => unsafe {
             jit_execute_numeric_table_shift_jmp_loop(
                 context.lua_state,
                 context.ci,
@@ -184,11 +184,11 @@ unsafe fn dispatch_executable_trace(
                 exit_pc as usize,
             )
         },
-        CompiledTraceExecutor::NumericJmpLoop {
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericJmpLoop {
             pre_steps,
             steps,
             guard,
-        } => unsafe {
+        }) => unsafe {
             jit_execute_numeric_jmp_loop(
                 context.lua_state,
                 context.ci,
@@ -201,47 +201,7 @@ unsafe fn dispatch_executable_trace(
                 summary,
             )
         },
-        CompiledTraceExecutor::NextWhileBuiltinAdd {
-            key_reg,
-            value_reg,
-            acc_reg,
-            table_reg,
-            env_upvalue,
-            key_const,
-        } => unsafe {
-            jit_execute_next_while_builtin_add(
-                context.lua_state,
-                context.ci,
-                context.base,
-                context.constants,
-                target_pc,
-                key_reg,
-                value_reg,
-                acc_reg,
-                table_reg,
-                env_upvalue,
-                key_const,
-                summary,
-            )
-        },
-        _ => unsafe {
-            dispatch_direct_loop_side_trace(context, target_pc, loop_tail_pc, executor, summary)
-        },
-    }
-}
-
-#[cfg(feature = "jit")]
-#[inline(always)]
-#[allow(unsafe_op_in_unsafe_fn)]
-unsafe fn dispatch_direct_loop_side_trace(
-    context: &mut JitExecutionContext<'_>,
-    target_pc: usize,
-    loop_tail_pc: usize,
-    executor: CompiledTraceExecutor,
-    summary: HelperPlanDispatchSummary,
-) -> Option<usize> {
-    match executor {
-        CompiledTraceExecutor::LinearIntForLoop { loop_reg, steps } => unsafe {
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntForLoop { loop_reg, steps }) => unsafe {
             jit_execute_linear_int_for_loop(
                 context.lua_state,
                 context.ci,
@@ -250,10 +210,10 @@ unsafe fn dispatch_direct_loop_side_trace(
                 loop_reg,
                 &steps,
                 summary,
-                loop_tail_pc,
+                exit_pc,
             )
         },
-        CompiledTraceExecutor::NumericForLoop { loop_reg, steps } => unsafe {
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericForLoop { loop_reg, steps }) => unsafe {
             jit_execute_numeric_for_loop(
                 context.lua_state,
                 context.ci,
@@ -263,10 +223,10 @@ unsafe fn dispatch_direct_loop_side_trace(
                 loop_reg,
                 &steps,
                 summary,
-                loop_tail_pc,
+                exit_pc,
             )
         },
-        CompiledTraceExecutor::NumericIfElseForLoop {
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericIfElseForLoop {
             loop_reg,
             pre_steps,
             cond,
@@ -275,7 +235,7 @@ unsafe fn dispatch_direct_loop_side_trace(
             then_steps,
             else_steps,
             then_on_true,
-        } => unsafe {
+        }) => unsafe {
             jit_execute_numeric_ifelse_for_loop(
                 context.lua_state,
                 context.ci,
@@ -291,14 +251,37 @@ unsafe fn dispatch_direct_loop_side_trace(
                 &else_steps,
                 then_on_true,
                 summary,
-                loop_tail_pc,
+                exit_pc,
             )
         },
-        CompiledTraceExecutor::GenericForBuiltinAdd {
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NextWhileBuiltinAdd {
+            key_reg,
+            value_reg,
+            acc_reg,
+            table_reg,
+            env_upvalue,
+            key_const,
+        }) => unsafe {
+            jit_execute_next_while_builtin_add(
+                context.lua_state,
+                context.ci,
+                context.base,
+                context.constants,
+                target_pc,
+                key_reg,
+                value_reg,
+                acc_reg,
+                table_reg,
+                env_upvalue,
+                key_const,
+                summary,
+            )
+        },
+        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::GenericForBuiltinAdd {
             tfor_reg,
             value_reg,
             acc_reg,
-        } => unsafe {
+        }) => unsafe {
             jit_execute_generic_for_builtin_add(
                 context.lua_state,
                 context.ci,
@@ -308,10 +291,9 @@ unsafe fn dispatch_direct_loop_side_trace(
                 value_reg,
                 acc_reg,
                 summary,
-                loop_tail_pc,
+                exit_pc,
             )
         },
-        _ => None,
     }
 }
 

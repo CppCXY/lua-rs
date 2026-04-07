@@ -168,7 +168,6 @@ pub(crate) enum LinearIntLoopGuard {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CompiledTraceExecutor {
-    SummaryOnly,
     LinearIntForLoop {
         loop_reg: u32,
         steps: Vec<LinearIntStep>,
@@ -227,6 +226,44 @@ pub(crate) enum CompiledTraceExecutor {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompiledTraceExecution {
+    LoweredOnly,
+    Interpreter(CompiledTraceExecutor),
+}
+
+impl CompiledTraceExecution {
+    pub(crate) fn is_enterable(&self) -> bool {
+        !matches!(self, Self::LoweredOnly)
+    }
+
+    pub(crate) fn family(&self) -> &'static str {
+        match self {
+            Self::LoweredOnly => "SummaryOnly",
+            Self::Interpreter(executor) => match executor {
+                CompiledTraceExecutor::LinearIntForLoop { .. } => "LinearIntForLoop",
+                CompiledTraceExecutor::NumericForLoop { .. } => "NumericForLoop",
+                CompiledTraceExecutor::NumericIfElseForLoop { .. } => "NumericIfElseForLoop",
+                CompiledTraceExecutor::NumericJmpLoop { .. } => "NumericJmpLoop",
+                CompiledTraceExecutor::NumericTableScanJmpLoop { .. } => "NumericTableScanJmpLoop",
+                CompiledTraceExecutor::NumericTableShiftJmpLoop { .. } => "NumericTableShiftJmpLoop",
+                CompiledTraceExecutor::LinearIntJmpLoop { .. } => "LinearIntJmpLoop",
+                CompiledTraceExecutor::GenericForBuiltinAdd { .. } => "GenericForBuiltinAdd",
+                CompiledTraceExecutor::NextWhileBuiltinAdd { .. } => "NextWhileBuiltinAdd",
+            },
+        }
+    }
+}
+
+impl PartialEq<CompiledTraceExecutor> for CompiledTraceExecution {
+    fn eq(&self, other: &CompiledTraceExecutor) -> bool {
+        match self {
+            Self::Interpreter(executor) => executor == other,
+            Self::LoweredOnly => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CompiledTraceExit {
     pub exit_index: u16,
@@ -243,7 +280,7 @@ pub(crate) struct CompiledTrace {
     pub steps: Vec<CompiledTraceStepKind>,
     exits: Vec<CompiledTraceExit>,
     summary: HelperPlanDispatchSummary,
-    executor: CompiledTraceExecutor,
+    execution: CompiledTraceExecution,
 }
 
 impl CompiledTrace {
@@ -313,9 +350,13 @@ impl CompiledTrace {
 
         let executor = super::compile::compile_executor(artifact, ir, lowered_trace);
 
-        if !has_helper_call && matches!(executor, CompiledTraceExecutor::SummaryOnly) {
+        if !has_helper_call && executor.is_none() {
             return None;
         }
+
+        let execution = executor
+            .map(CompiledTraceExecution::Interpreter)
+            .unwrap_or(CompiledTraceExecution::LoweredOnly);
 
         let exits = lowered_trace
             .exits
@@ -335,7 +376,7 @@ impl CompiledTrace {
             steps,
             exits,
             summary,
-            executor,
+            execution,
         })
     }
 
@@ -352,23 +393,20 @@ impl CompiledTrace {
         &self.exits
     }
 
-    pub(crate) fn executor_family(&self) -> &'static str {
-        match self.executor {
-            CompiledTraceExecutor::SummaryOnly => "SummaryOnly",
-            CompiledTraceExecutor::LinearIntForLoop { .. } => "LinearIntForLoop",
-            CompiledTraceExecutor::NumericForLoop { .. } => "NumericForLoop",
-            CompiledTraceExecutor::NumericIfElseForLoop { .. } => "NumericIfElseForLoop",
-            CompiledTraceExecutor::NumericJmpLoop { .. } => "NumericJmpLoop",
-            CompiledTraceExecutor::NumericTableScanJmpLoop { .. } => "NumericTableScanJmpLoop",
-            CompiledTraceExecutor::NumericTableShiftJmpLoop { .. } => "NumericTableShiftJmpLoop",
-            CompiledTraceExecutor::LinearIntJmpLoop { .. } => "LinearIntJmpLoop",
-            CompiledTraceExecutor::GenericForBuiltinAdd { .. } => "GenericForBuiltinAdd",
-            CompiledTraceExecutor::NextWhileBuiltinAdd { .. } => "NextWhileBuiltinAdd",
-        }
+    pub(crate) fn is_enterable(&self) -> bool {
+        self.execution.is_enterable()
     }
 
-    pub(crate) fn executor(&self) -> CompiledTraceExecutor {
-        self.executor.clone()
+    pub(crate) fn executor_family(&self) -> &'static str {
+        self.execution.family()
+    }
+
+    pub(crate) fn execution(&self) -> CompiledTraceExecution {
+        self.execution.clone()
+    }
+
+    pub(crate) fn executor(&self) -> CompiledTraceExecution {
+        self.execution()
     }
 }
 
