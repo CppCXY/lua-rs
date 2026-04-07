@@ -1,5 +1,6 @@
 use super::*;
 
+#[test]
 fn null_backend_reports_not_yet_supported() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
@@ -22,6 +23,7 @@ fn null_backend_reports_not_yet_supported() {
     );
 }
 
+#[test]
 fn backend_compiles_helper_call_trace() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
@@ -65,6 +67,7 @@ fn backend_compiles_helper_call_trace() {
                     CompiledTraceStepKind::LoopBackedge,
                 ]
             );
+            assert!(compiled.exits().is_empty());
             let summary = compiled.execute();
             assert_eq!(summary.call_steps, 1);
             assert_eq!(summary.metamethod_steps, 1);
@@ -74,6 +77,8 @@ fn backend_compiles_helper_call_trace() {
         }
     }
 }
+
+#[test]
 fn compiled_trace_requires_helper_call_family() {
     let ir = TraceIr {
         root_pc: 0,

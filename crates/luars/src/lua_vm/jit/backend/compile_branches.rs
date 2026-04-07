@@ -72,6 +72,7 @@ fn compile_numeric_ifelse_forloop(ir: &TraceIr) -> Option<CompiledTraceExecutor>
 fn compile_guarded_numeric_ifelse_forloop(
     artifact: &TraceArtifact,
     ir: &TraceIr,
+    lowered_trace: &LoweredTrace,
 ) -> Option<CompiledTraceExecutor> {
     if ir.insts.len() < 5 || ir.guards.len() != 1 {
         return None;
@@ -81,6 +82,7 @@ fn compile_guarded_numeric_ifelse_forloop(
     if guard.kind != TraceIrGuardKind::SideExit || guard.taken_on_trace {
         return None;
     }
+    let lowered_exit = lowered_exit_for_guard(lowered_trace, 0, guard)?;
 
     let loop_backedge = ir.insts.last()?;
     if loop_backedge.opcode != crate::OpCode::ForLoop {
@@ -123,11 +125,11 @@ fn compile_guarded_numeric_ifelse_forloop(
     let chunk = unsafe { (artifact.seed.root_chunk_addr as *const LuaProto).as_ref() }?;
     let merge_inst = Instruction::from_u32(merge_jump.raw_instruction);
     let merge_target_pc = ((merge_jump.pc + 1) as i64 + merge_inst.get_sj() as i64) as u32;
-    if guard.exit_pc >= merge_target_pc {
+    if lowered_exit.resume_pc >= merge_target_pc {
         return None;
     }
 
-    let else_steps = compile_numeric_steps_from_chunk(chunk, guard.exit_pc, merge_target_pc)?;
+    let else_steps = compile_numeric_steps_from_chunk(chunk, lowered_exit.resume_pc, merge_target_pc)?;
     if else_steps.is_empty() {
         return None;
     }
@@ -147,7 +149,10 @@ fn compile_guarded_numeric_ifelse_forloop(
     })
 }
 
-fn compile_linear_int_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
+fn compile_linear_int_jmp_loop(
+    ir: &TraceIr,
+    lowered_trace: &LoweredTrace,
+) -> Option<CompiledTraceExecutor> {
     if ir.insts.len() < 3 || ir.guards.len() != 1 {
         return None;
     }
@@ -162,6 +167,7 @@ fn compile_linear_int_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
     }
 
     let guard = ir.guards[0];
+    let lowered_exit = lowered_exit_for_guard(lowered_trace, 0, guard)?;
 
     if !guard.taken_on_trace {
         if ir.insts.len() < 4 || ir.insts[1].opcode != crate::OpCode::Jmp {
@@ -169,7 +175,7 @@ fn compile_linear_int_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
         }
         let head = &ir.insts[0];
         let branch = &ir.insts[1];
-        let loop_guard = compile_linear_int_guard(head, false, guard.exit_pc)?;
+        let loop_guard = compile_linear_int_guard(head, false, lowered_exit.exit_pc)?;
         let branch_inst = Instruction::from_u32(branch.raw_instruction);
         if branch_inst.get_sj() <= 0 {
             return None;
@@ -184,7 +190,7 @@ fn compile_linear_int_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
     let head_len = ir.insts.len() - 2;
     let tail_guard_inst = &ir.insts[ir.insts.len() - 2];
     let steps = compile_linear_int_steps(&ir.insts[..head_len])?;
-    let loop_guard = compile_linear_int_guard(tail_guard_inst, true, guard.exit_pc)?;
+    let loop_guard = compile_linear_int_guard(tail_guard_inst, true, lowered_exit.exit_pc)?;
     Some(CompiledTraceExecutor::LinearIntJmpLoop {
         steps,
         guard: loop_guard,
@@ -192,7 +198,10 @@ fn compile_linear_int_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
 }
 
 
-fn compile_numeric_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
+fn compile_numeric_jmp_loop(
+    ir: &TraceIr,
+    lowered_trace: &LoweredTrace,
+) -> Option<CompiledTraceExecutor> {
     if ir.insts.len() < 3 || ir.guards.len() != 1 {
         return None;
     }
@@ -207,6 +216,7 @@ fn compile_numeric_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
     }
 
     let guard = ir.guards[0];
+    let lowered_exit = lowered_exit_for_guard(lowered_trace, 0, guard)?;
 
     if !guard.taken_on_trace {
         let guard_index = ir
@@ -227,7 +237,7 @@ fn compile_numeric_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
             return None;
         }
         let pre_steps = compile_numeric_steps(&ir.insts[..guard_index])?;
-        let loop_guard = compile_numeric_jmp_guard(&ir.insts[guard_index], false, guard)?;
+        let loop_guard = compile_numeric_jmp_guard(&ir.insts[guard_index], false, lowered_exit.exit_pc)?;
         let steps = compile_numeric_steps(&ir.insts[guard_index + 2..ir.insts.len() - 1])?;
         return Some(CompiledTraceExecutor::NumericJmpLoop {
             pre_steps,
@@ -236,7 +246,7 @@ fn compile_numeric_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
         });
     }
 
-    let loop_guard = compile_numeric_jmp_guard(&ir.insts[ir.insts.len() - 2], true, guard)?;
+    let loop_guard = compile_numeric_jmp_guard(&ir.insts[ir.insts.len() - 2], true, lowered_exit.exit_pc)?;
     let steps = compile_numeric_steps(&ir.insts[..ir.insts.len() - 2])?;
     Some(CompiledTraceExecutor::NumericJmpLoop {
         pre_steps: Vec::new(),
@@ -245,10 +255,14 @@ fn compile_numeric_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
     })
 }
 
-fn compile_numeric_table_shift_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
+fn compile_numeric_table_shift_jmp_loop(
+    ir: &TraceIr,
+    lowered_trace: &LoweredTrace,
+) -> Option<CompiledTraceExecutor> {
     if ir.insts.len() != 12 || ir.guards.len() != 2 {
         return None;
     }
+    let first_exit = lowered_exit_for_guard(lowered_trace, 0, ir.guards[0])?;
 
     let bound_guard = &ir.insts[0];
     let bound_jump = &ir.insts[1];
@@ -339,11 +353,14 @@ fn compile_numeric_table_shift_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExe
         left_bound_reg,
         value_reg,
         temp_reg,
-        exit_pc: ir.guards[0].exit_pc,
+        exit_pc: first_exit.exit_pc,
     })
 }
 
-fn compile_numeric_table_scan_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExecutor> {
+fn compile_numeric_table_scan_jmp_loop(
+    ir: &TraceIr,
+    lowered_trace: &LoweredTrace,
+) -> Option<CompiledTraceExecutor> {
     if ir.insts.len() != 6 || ir.guards.len() != 1 {
         return None;
     }
@@ -352,6 +369,7 @@ fn compile_numeric_table_scan_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExec
     if guard.taken_on_trace {
         return None;
     }
+    let lowered_exit = lowered_exit_for_guard(lowered_trace, 0, guard)?;
 
     let get_table = &ir.insts[0];
     let compare = &ir.insts[1];
@@ -420,7 +438,7 @@ fn compile_numeric_table_scan_jmp_loop(ir: &TraceIr) -> Option<CompiledTraceExec
         limit_reg,
         step_imm: addi_inst.get_sc(),
         compare_op,
-        exit_pc: guard.exit_pc,
+        exit_pc: lowered_exit.exit_pc,
     })
 }
 

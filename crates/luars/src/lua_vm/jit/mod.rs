@@ -1,21 +1,29 @@
 mod backend;
+mod executors;
 mod hotcount;
 mod helper_plan;
 mod ir;
+mod lowering;
+#[cfg(feature = "jit")]
+mod runtime;
 mod state;
 mod trace_recorder;
 
 use crate::lua_value::LuaProto;
-use crate::lua_vm::LuaState;
+use crate::lua_vm::{CallInfo, LuaState};
 
 pub(crate) use backend::{
     CompiledTraceExecutor, LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NumericBinaryOp,
     NumericIfElseCond, NumericJmpLoopGuard, NumericOperand, NumericStep,
 };
 pub(crate) use helper_plan::HelperPlanDispatchSummary;
+#[cfg(feature = "jit")]
+pub(crate) use runtime::{
+    dispatch_root_trace_or_record, finish_trace_exit, record_trace_hits_or_fallback,
+};
 pub(crate) use trace_recorder::TraceAbortReason;
 
-pub(crate) use state::JitState;
+pub(crate) use state::{ExecutableTraceDispatch, JitState, TraceExitDispatch};
 pub use state::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 
 #[inline(always)]
@@ -54,7 +62,7 @@ pub(crate) fn compiled_trace_executor_or_record(
     lua_state: &mut LuaState,
     chunk_ptr: *const LuaProto,
     target_pc: usize,
-) -> Option<(CompiledTraceExecutor, HelperPlanDispatchSummary)> {
+) -> Option<ExecutableTraceDispatch> {
     if chunk_ptr.is_null() || !should_track(lua_state) {
         return None;
     }
@@ -84,6 +92,41 @@ pub(crate) fn record_batched_trace_execution(
         .vm_mut()
         .jit
         .record_batched_trace_execution(checks, hits, summary);
+}
+
+#[inline(always)]
+pub(crate) unsafe fn resolve_trace_exit(
+    lua_state: &mut LuaState,
+    ci: &CallInfo,
+    base: usize,
+    parent_pc: usize,
+    exit_pc: usize,
+) -> Option<TraceExitDispatch> {
+    if ci.chunk_ptr.is_null() || !should_track(lua_state) {
+        return None;
+    }
+
+    let Ok(parent_pc) = u32::try_from(parent_pc) else {
+        return None;
+    };
+    let Ok(exit_pc) = u32::try_from(exit_pc) else {
+        return None;
+    };
+
+    let chunk = unsafe { &*ci.chunk_ptr };
+    let stack = lua_state.stack().as_ptr();
+
+    unsafe {
+        lua_state.vm_mut().jit.resolve_trace_exit(
+            ci.chunk_ptr,
+            parent_pc,
+            exit_pc,
+            stack,
+            base,
+            &chunk.constants,
+            ci.upvalue_ptrs,
+        )
+    }
 }
 
 #[inline(always)]

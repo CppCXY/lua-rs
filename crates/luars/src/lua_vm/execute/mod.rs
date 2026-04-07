@@ -1,11 +1,11 @@
 pub mod call;
 mod closure;
 mod concat;
-mod execute_loop;
+pub(crate) mod execute_loop;
 pub(crate) mod helper;
 mod hook;
 pub(crate) mod metamethod;
-mod number;
+pub(crate) mod number;
 mod vararg;
 
 pub use execute_loop::lua_execute;

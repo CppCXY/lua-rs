@@ -1,5 +1,6 @@
 use super::*;
 
+#[test]
 fn backend_marks_generic_for_builtin_add_as_executable() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {

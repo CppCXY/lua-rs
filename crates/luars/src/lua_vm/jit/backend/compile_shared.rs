@@ -33,11 +33,23 @@ fn compile_numeric_steps_from_chunk(
     compile_numeric_steps(&insts)
 }
 
+fn lowered_exit_for_guard<'a>(
+    lowered_trace: &'a LoweredTrace,
+    index: usize,
+    guard: TraceIrGuard,
+) -> Option<&'a LoweredExit> {
+    let exit = lowered_trace.exits.get(index)?;
+    if exit.guard_pc != guard.guard_pc || exit.branch_pc != guard.branch_pc || exit.exit_pc != guard.exit_pc {
+        return None;
+    }
+    Some(exit)
+}
+
 
 fn compile_numeric_jmp_guard(
     inst: &TraceIrInst,
     tail: bool,
-    guard: TraceIrGuard,
+    exit_pc: u32,
 ) -> Option<NumericJmpLoopGuard> {
     let raw = Instruction::from_u32(inst.raw_instruction);
     let (cond, continue_when, continue_preset, exit_preset) = match inst.opcode {
@@ -85,7 +97,7 @@ fn compile_numeric_jmp_guard(
             continue_when,
             continue_preset,
             exit_preset,
-            exit_pc: guard.exit_pc,
+            exit_pc,
         }
     } else {
         NumericJmpLoopGuard::Head {
@@ -93,7 +105,7 @@ fn compile_numeric_jmp_guard(
             continue_when,
             continue_preset,
             exit_preset,
-            exit_pc: guard.exit_pc,
+            exit_pc,
         }
     })
 }

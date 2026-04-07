@@ -1,6 +1,7 @@
 use super::*;
 use crate::lua_vm::jit::trace_recorder::{TraceArtifact, TraceExit, TraceExitKind, TraceOp, TraceSeed};
 
+#[test]
 fn backend_compiles_numeric_ifelse_forloop() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
@@ -167,6 +168,7 @@ fn backend_compiles_numeric_ifelse_forloop() {
     }
 }
 
+#[test]
 fn backend_compiles_guarded_numeric_ifelse_forloop_from_artifact() {
     let mut backend = NullTraceBackend;
     let mut chunk = crate::lua_value::LuaProto::new();
@@ -325,14 +327,18 @@ fn backend_compiles_guarded_numeric_ifelse_forloop_from_artifact() {
             metamethod_steps: 2,
         },
     };
+    let lowered_trace = crate::lua_vm::jit::lowering::LoweredTrace::lower(&artifact, &ir, &helper_plan);
 
     match <NullTraceBackend as TraceBackend>::compile(
         &mut backend,
         &artifact,
         &ir,
+        &lowered_trace,
         &helper_plan,
     ) {
         BackendCompileOutcome::Compiled(compiled) => {
+            assert_eq!(compiled.exits().len(), 1);
+            assert_eq!(compiled.exits()[0].resume_pc, 7);
             assert_eq!(
                 compiled.executor(),
                 CompiledTraceExecutor::NumericIfElseForLoop {
@@ -370,6 +376,7 @@ fn backend_compiles_guarded_numeric_ifelse_forloop_from_artifact() {
     }
 }
 
+#[test]
 fn backend_compiles_numeric_lti_ifelse_forloop() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
@@ -536,6 +543,7 @@ fn backend_compiles_numeric_lti_ifelse_forloop() {
     }
 }
 
+#[test]
 fn backend_compiles_numeric_test_ifelse_forloop() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {

@@ -3,6 +3,7 @@ use crate::Instruction;
 
 use crate::lua_vm::jit::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use crate::lua_vm::jit::ir::TraceIr;
+use crate::lua_vm::jit::lowering::{DeoptRestoreSummary, LoweredTrace};
 use crate::lua_vm::jit::trace_recorder::TraceArtifact;
 #[cfg(test)]
 use crate::lua_vm::jit::trace_recorder::{TraceExit, TraceExitKind, TraceOp, TraceSeed};
@@ -18,6 +19,7 @@ pub(crate) trait TraceBackend {
         &mut self,
         artifact: &TraceArtifact,
         ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> BackendCompileOutcome;
 }
@@ -75,6 +77,7 @@ pub(crate) enum NumericOperand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NumericStep {
     Move { dst: u32, src: u32 },
+    #[allow(dead_code)]
     LoadBool { dst: u32, value: bool },
     LoadI { dst: u32, imm: i32 },
     LoadF { dst: u32, imm: i32 },
@@ -209,100 +212,6 @@ pub(crate) enum CompiledTraceExecutor {
         steps: Vec<LinearIntStep>,
         guard: LinearIntLoopGuard,
     },
-    NumericForGetTableAdd {
-        loop_reg: u32,
-        table_reg: u32,
-        index_reg: u32,
-        value_reg: u32,
-        acc_reg: u32,
-    },
-    NumericForTableMulAddMod {
-        loop_reg: u32,
-        table_reg: u32,
-        index_reg: u32,
-        acc_reg: u32,
-        modulo_const: u32,
-    },
-    NumericForTableCopy {
-        loop_reg: u32,
-        src_table_reg: u32,
-        dst_table_reg: u32,
-        index_reg: u32,
-    },
-    NumericForTableIsSorted {
-        loop_reg: u32,
-        table_reg: u32,
-        index_reg: u32,
-        false_exit_pc: u32,
-    },
-    NumericForArraySortValidateChecksumLoop {
-        loop_reg: u32,
-        source_reg: u32,
-        work_reg: u32,
-        sum_reg: u32,
-        copy_func_reg: u32,
-        sort_func_reg: u32,
-        check_func_reg: u32,
-        checksum_func_reg: u32,
-        modulo_const: u32,
-    },
-    NumericForUpvalueAddI {
-        loop_reg: u32,
-        upvalue: u32,
-        value_reg: u32,
-        imm: i32,
-    },
-    NumericForFieldAddI {
-        loop_reg: u32,
-        table_reg: u32,
-        value_reg: u32,
-        key_const: u32,
-        imm: i32,
-    },
-    NumericForTabUpAddI {
-        loop_reg: u32,
-        env_upvalue: u32,
-        value_reg: u32,
-        key_const: u32,
-        imm: i32,
-    },
-    NumericForTabUpFieldAddI {
-        loop_reg: u32,
-        env_upvalue: u32,
-        table_reg: u32,
-        value_reg: u32,
-        table_key_const: u32,
-        field_key_const: u32,
-        imm: i32,
-    },
-    NumericForTabUpFieldLoad {
-        loop_reg: u32,
-        env_upvalue: u32,
-        value_reg: u32,
-        table_key_const: u32,
-        field_key_const: u32,
-    },
-    NumericForBuiltinUnaryConstCall {
-        loop_reg: u32,
-        func_reg: u32,
-        result_reg: u32,
-        arg_const: u32,
-    },
-    NumericForTabUpFieldStringUnaryCall {
-        loop_reg: u32,
-        env_upvalue: u32,
-        result_reg: u32,
-        arg_reg: u32,
-        table_key_const: u32,
-        field_key_const: u32,
-    },
-    NumericForLuaClosureAddI {
-        loop_reg: u32,
-        func_reg: u32,
-        arg_reg: u32,
-        dst_reg: u32,
-        imm: i32,
-    },
     GenericForBuiltinAdd {
         tfor_reg: u32,
         value_reg: u32,
@@ -318,11 +227,21 @@ pub(crate) enum CompiledTraceExecutor {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CompiledTraceExit {
+    pub exit_index: u16,
+    pub exit_pc: u32,
+    pub resume_pc: u32,
+    pub is_loop_backedge: bool,
+    pub restore_summary: DeoptRestoreSummary,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompiledTrace {
     pub root_pc: u32,
     pub loop_tail_pc: u32,
     pub steps: Vec<CompiledTraceStepKind>,
+    exits: Vec<CompiledTraceExit>,
     summary: HelperPlanDispatchSummary,
     executor: CompiledTraceExecutor,
 }
@@ -331,12 +250,14 @@ impl CompiledTrace {
     #[cfg(test)]
     pub(crate) fn from_helper_plan(ir: &TraceIr, helper_plan: &HelperPlan) -> Option<Self> {
         let artifact = synthetic_artifact_for_ir(ir);
-        Self::from_artifact_helper_plan(&artifact, ir, helper_plan)
+        let lowered_trace = LoweredTrace::lower(&artifact, ir, helper_plan);
+        Self::from_artifact_helper_plan(&artifact, ir, &lowered_trace, helper_plan)
     }
 
     fn from_artifact_helper_plan(
         artifact: &TraceArtifact,
         ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> Option<Self> {
         let mut steps = Vec::with_capacity(helper_plan.steps.len());
@@ -390,16 +311,29 @@ impl CompiledTrace {
             steps.push(kind);
         }
 
-        let executor = super::compile::compile_executor(artifact, ir);
+        let executor = super::compile::compile_executor(artifact, ir, lowered_trace);
 
         if !has_helper_call && matches!(executor, CompiledTraceExecutor::SummaryOnly) {
             return None;
         }
 
+        let exits = lowered_trace
+            .exits
+            .iter()
+            .map(|exit| CompiledTraceExit {
+                exit_index: exit.exit_index,
+                exit_pc: exit.exit_pc,
+                resume_pc: exit.resume_pc,
+                is_loop_backedge: exit.is_loop_backedge,
+                restore_summary: exit.restore_summary,
+            })
+            .collect();
+
         Some(Self {
             root_pc: helper_plan.root_pc,
             loop_tail_pc: helper_plan.loop_tail_pc,
             steps,
+            exits,
             summary,
             executor,
         })
@@ -414,6 +348,10 @@ impl CompiledTrace {
         self.summary
     }
 
+    pub(crate) fn exits(&self) -> &[CompiledTraceExit] {
+        &self.exits
+    }
+
     pub(crate) fn executor_family(&self) -> &'static str {
         match self.executor {
             CompiledTraceExecutor::SummaryOnly => "SummaryOnly",
@@ -424,25 +362,6 @@ impl CompiledTrace {
             CompiledTraceExecutor::NumericTableScanJmpLoop { .. } => "NumericTableScanJmpLoop",
             CompiledTraceExecutor::NumericTableShiftJmpLoop { .. } => "NumericTableShiftJmpLoop",
             CompiledTraceExecutor::LinearIntJmpLoop { .. } => "LinearIntJmpLoop",
-            CompiledTraceExecutor::NumericForGetTableAdd { .. } => "NumericForGetTableAdd",
-            CompiledTraceExecutor::NumericForTableMulAddMod { .. } => "NumericForTableMulAddMod",
-            CompiledTraceExecutor::NumericForTableCopy { .. } => "NumericForTableCopy",
-            CompiledTraceExecutor::NumericForTableIsSorted { .. } => "NumericForTableIsSorted",
-            CompiledTraceExecutor::NumericForArraySortValidateChecksumLoop { .. } => {
-                "NumericForArraySortValidateChecksumLoop"
-            }
-            CompiledTraceExecutor::NumericForUpvalueAddI { .. } => "NumericForUpvalueAddI",
-            CompiledTraceExecutor::NumericForFieldAddI { .. } => "NumericForFieldAddI",
-            CompiledTraceExecutor::NumericForTabUpAddI { .. } => "NumericForTabUpAddI",
-            CompiledTraceExecutor::NumericForTabUpFieldAddI { .. } => "NumericForTabUpFieldAddI",
-            CompiledTraceExecutor::NumericForTabUpFieldLoad { .. } => "NumericForTabUpFieldLoad",
-            CompiledTraceExecutor::NumericForBuiltinUnaryConstCall { .. } => {
-                "NumericForBuiltinUnaryConstCall"
-            }
-            CompiledTraceExecutor::NumericForTabUpFieldStringUnaryCall { .. } => {
-                "NumericForTabUpFieldStringUnaryCall"
-            }
-            CompiledTraceExecutor::NumericForLuaClosureAddI { .. } => "NumericForLuaClosureAddI",
             CompiledTraceExecutor::GenericForBuiltinAdd { .. } => "GenericForBuiltinAdd",
             CompiledTraceExecutor::NextWhileBuiltinAdd { .. } => "NextWhileBuiltinAdd",
         }
@@ -461,9 +380,10 @@ impl TraceBackend for NullTraceBackend {
         &mut self,
         artifact: &TraceArtifact,
         ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> BackendCompileOutcome {
-        match CompiledTrace::from_artifact_helper_plan(artifact, ir, helper_plan) {
+        match CompiledTrace::from_artifact_helper_plan(artifact, ir, lowered_trace, helper_plan) {
             Some(compiled_trace) => BackendCompileOutcome::Compiled(compiled_trace),
             None => BackendCompileOutcome::NotYetSupported,
         }
@@ -478,7 +398,8 @@ impl NullTraceBackend {
         helper_plan: &HelperPlan,
     ) -> BackendCompileOutcome {
         let artifact = synthetic_artifact_for_ir(ir);
-        <Self as TraceBackend>::compile(self, &artifact, ir, helper_plan)
+        let lowered_trace = LoweredTrace::lower(&artifact, ir, helper_plan);
+        <Self as TraceBackend>::compile(self, &artifact, ir, &lowered_trace, helper_plan)
     }
 }
 

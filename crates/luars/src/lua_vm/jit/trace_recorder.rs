@@ -768,12 +768,12 @@ mod tests {
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
 
         let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
-        assert_eq!(artifact.ops.len(), 5);
+        assert_eq!(artifact.ops.len(), 4);
         assert_eq!(artifact.exits.len(), 1);
         assert_eq!(artifact.exits[0].guard_pc, 1);
         assert_eq!(artifact.exits[0].branch_pc, 2);
-        assert_eq!(artifact.exits[0].exit_pc, 4);
-        assert!(!artifact.exits[0].taken_on_trace);
+        assert_eq!(artifact.exits[0].exit_pc, 3);
+        assert!(artifact.exits[0].taken_on_trace);
         assert_eq!(artifact.exits[0].kind, TraceExitKind::GuardExit);
         assert_eq!(artifact.loop_tail_pc, 4);
     }

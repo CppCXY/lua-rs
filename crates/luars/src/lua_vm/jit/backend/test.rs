@@ -12,4 +12,3 @@ mod branches;
 mod core;
 mod iterators;
 mod numeric_loops;
-mod specialized;

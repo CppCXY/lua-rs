@@ -1802,9 +1802,13 @@ impl LuaVM {
         format!(
             "JIT Stats:\n\
             - Trace headers seen: {}\n\
+            - Hot exits seen: {}\n\
             - Record attempts: {}\n\
+            - Side record attempts: {}\n\
             - Recorded traces: {}\n\
+            - Recorded side traces: {}\n\
             - Record aborts: {}\n\
+            - Side record aborts: {}\n\
             - Abort EmptyLoopBody: {}\n\
             - Abort PcOutOfBounds: {}\n\
             - Abort UnsupportedOpcode: {}\n\
@@ -1822,13 +1826,19 @@ impl LuaVM {
             - Helper plan calls: {}\n\
             - Helper plan metamethods: {}\n\
             - Trace slots: {}\n\
+            - Side trace slots: {}\n\
             - Recorded slots: {}\n\
-            - Compiled slots: {}\n\
+            - Lowered-only slots: {}\n\
+            - Executable slots: {}\n\
             - Blacklisted slots: {}",
             counters.hot_headers,
+            counters.hot_exits,
             counters.record_attempts,
+            counters.side_record_attempts,
             counters.recorded_traces,
+            counters.recorded_side_traces,
             counters.record_aborts,
+            counters.side_record_aborts,
             aborts.empty_loop_body,
             aborts.pc_out_of_bounds,
             aborts.unsupported_opcode,
@@ -1846,8 +1856,10 @@ impl LuaVM {
             counters.helper_plan_calls,
             counters.helper_plan_metamethods,
             snapshot.trace_count,
+            snapshot.side_trace_count,
             snapshot.recorded_count,
-            snapshot.compiled_count,
+            snapshot.lowered_count,
+            snapshot.executable_count,
             snapshot.blacklisted_count,
         )
     }

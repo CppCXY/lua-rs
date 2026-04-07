@@ -1,5 +1,6 @@
 use super::*;
 
+#[test]
 fn backend_compiles_pure_linear_int_forloop_without_helper_calls() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
@@ -81,6 +82,7 @@ fn backend_compiles_pure_linear_int_forloop_without_helper_calls() {
     }
 }
 
+#[test]
 fn backend_absorbs_mmbin_in_linear_int_forloop() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
@@ -158,6 +160,7 @@ fn backend_absorbs_mmbin_in_linear_int_forloop() {
     }
 }
 
+#[test]
 fn backend_compiles_numeric_float_forloop() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
@@ -263,6 +266,7 @@ fn backend_compiles_numeric_float_forloop() {
     }
 }
 
+#[test]
 fn backend_compiles_numeric_mixed_forloop() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {
