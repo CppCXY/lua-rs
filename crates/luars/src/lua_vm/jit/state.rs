@@ -7,7 +7,8 @@ use crate::lua_value::{LuaProto, LuaValue};
 use crate::OpCode;
 
 use super::backend::{
-    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, NullTraceBackend, TraceBackend,
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, NativeTraceBackend,
+    TraceBackend,
 };
 use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use super::hotcount::tick_hotcount;
@@ -185,7 +186,7 @@ pub(crate) struct JitState {
     traces: AHashMap<TraceKey, TraceInfo>,
     side_traces: AHashMap<SideTraceKey, SideTraceInfo>,
     counters: JitCounters,
-    backend: NullTraceBackend,
+    backend: NativeTraceBackend,
 }
 
 impl Default for JitState {
@@ -194,7 +195,7 @@ impl Default for JitState {
             traces: AHashMap::default(),
             side_traces: AHashMap::default(),
             counters: JitCounters::default(),
-            backend: NullTraceBackend,
+            backend: NativeTraceBackend::default(),
         }
     }
 }

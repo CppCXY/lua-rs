@@ -11,4 +11,6 @@ use crate::OpCode;
 mod branches;
 mod core;
 mod iterators;
+#[cfg(feature = "jit")]
+mod native;
 mod numeric_loops;

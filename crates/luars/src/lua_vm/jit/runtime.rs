@@ -16,6 +16,8 @@ use super::{
     CompiledTraceExecution, CompiledTraceExecutor, ExecutableTraceDispatch,
     HelperPlanDispatchSummary, TraceExitDispatch,
 };
+#[cfg(feature = "jit")]
+use super::backend::NativeCompiledTrace;
 
 #[cfg(feature = "jit")]
 pub(crate) struct JitExecutionContext<'a> {
@@ -129,6 +131,56 @@ unsafe fn dispatch_executable_trace(
 
     match execution {
         CompiledTraceExecution::LoweredOnly => None,
+        CompiledTraceExecution::Native(NativeCompiledTrace::LinearIntForLoop { entry }) => unsafe {
+            let encoded = entry(context.lua_state.stack_mut().as_mut_ptr(), context.base);
+            let trace_hits = (encoded >> 1) as u32;
+
+            if (encoded & 1) != 0 {
+                Some(finish_trace_exit(
+                    context.lua_state,
+                    context.ci,
+                    context.base,
+                    target_pc,
+                    trace_hits,
+                    summary,
+                    exit_pc,
+                ))
+            } else {
+                record_trace_hits_or_fallback(
+                    context.lua_state,
+                    context.ci.chunk_ptr,
+                    target_pc,
+                    trace_hits,
+                    summary,
+                );
+                None
+            }
+        },
+        CompiledTraceExecution::Native(NativeCompiledTrace::LinearIntJmpLoop { entry, exit_pc }) => unsafe {
+            let encoded = entry(context.lua_state.stack_mut().as_mut_ptr(), context.base);
+            let trace_hits = (encoded >> 1) as u32;
+
+            if (encoded & 1) != 0 {
+                Some(finish_trace_exit(
+                    context.lua_state,
+                    context.ci,
+                    context.base,
+                    target_pc,
+                    trace_hits,
+                    summary,
+                    exit_pc as usize,
+                ))
+            } else {
+                record_trace_hits_or_fallback(
+                    context.lua_state,
+                    context.ci.chunk_ptr,
+                    target_pc,
+                    trace_hits,
+                    summary,
+                );
+                None
+            }
+        },
         CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntJmpLoop { steps, guard }) => unsafe {
             jit_execute_linear_int_jmp_loop(
                 context.lua_state,

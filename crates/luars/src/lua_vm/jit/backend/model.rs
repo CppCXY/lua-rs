@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::Instruction;
+use crate::LuaValue;
 
 use crate::lua_vm::jit::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use crate::lua_vm::jit::ir::TraceIr;
@@ -230,6 +231,7 @@ pub(crate) enum CompiledTraceExecutor {
 pub(crate) enum CompiledTraceExecution {
     LoweredOnly,
     Interpreter(CompiledTraceExecutor),
+    Native(NativeCompiledTrace),
 }
 
 impl CompiledTraceExecution {
@@ -251,6 +253,10 @@ impl CompiledTraceExecution {
                 CompiledTraceExecutor::GenericForBuiltinAdd { .. } => "GenericForBuiltinAdd",
                 CompiledTraceExecutor::NextWhileBuiltinAdd { .. } => "NextWhileBuiltinAdd",
             },
+            Self::Native(native) => match native {
+                NativeCompiledTrace::LinearIntForLoop { .. } => "NativeLinearIntForLoop",
+                NativeCompiledTrace::LinearIntJmpLoop { .. } => "NativeLinearIntJmpLoop",
+            },
         }
     }
 }
@@ -259,10 +265,42 @@ impl PartialEq<CompiledTraceExecutor> for CompiledTraceExecution {
     fn eq(&self, other: &CompiledTraceExecutor) -> bool {
         match self {
             Self::Interpreter(executor) => executor == other,
-            Self::LoweredOnly => false,
+            Self::LoweredOnly | Self::Native(_) => false,
         }
     }
 }
+
+pub(crate) type NativeTraceEntry = unsafe extern "C" fn(*mut LuaValue, usize) -> u64;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NativeCompiledTrace {
+    LinearIntForLoop { entry: NativeTraceEntry },
+    LinearIntJmpLoop { entry: NativeTraceEntry, exit_pc: u32 },
+}
+
+impl PartialEq for NativeCompiledTrace {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::LinearIntForLoop { entry: lhs },
+                Self::LinearIntForLoop { entry: rhs },
+            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (
+                Self::LinearIntJmpLoop {
+                    entry: lhs,
+                    exit_pc: lhs_exit,
+                },
+                Self::LinearIntJmpLoop {
+                    entry: rhs,
+                    exit_pc: rhs_exit,
+                },
+            ) => *lhs_exit == *rhs_exit && std::ptr::fn_addr_eq(*lhs, *rhs),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for NativeCompiledTrace {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CompiledTraceExit {
@@ -296,6 +334,25 @@ impl CompiledTrace {
         ir: &TraceIr,
         lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
+    ) -> Option<Self> {
+        let execution = super::compile::compile_executor(artifact, ir, lowered_trace)
+            .map(CompiledTraceExecution::Interpreter)
+            .unwrap_or(CompiledTraceExecution::LoweredOnly);
+        Self::from_artifact_helper_plan_with_execution(
+            artifact,
+            ir,
+            lowered_trace,
+            helper_plan,
+            execution,
+        )
+    }
+
+    pub(super) fn from_artifact_helper_plan_with_execution(
+        _artifact: &TraceArtifact,
+        _ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+        helper_plan: &HelperPlan,
+        execution: CompiledTraceExecution,
     ) -> Option<Self> {
         let mut steps = Vec::with_capacity(helper_plan.steps.len());
         let mut has_helper_call = false;
@@ -348,15 +405,9 @@ impl CompiledTrace {
             steps.push(kind);
         }
 
-        let executor = super::compile::compile_executor(artifact, ir, lowered_trace);
-
-        if !has_helper_call && executor.is_none() {
+        if !has_helper_call && !execution.is_enterable() {
             return None;
         }
-
-        let execution = executor
-            .map(CompiledTraceExecution::Interpreter)
-            .unwrap_or(CompiledTraceExecution::LoweredOnly);
 
         let exits = lowered_trace
             .exits
@@ -442,7 +493,7 @@ impl NullTraceBackend {
 }
 
 #[cfg(test)]
-fn synthetic_artifact_for_ir(ir: &TraceIr) -> TraceArtifact {
+pub(super) fn synthetic_artifact_for_ir(ir: &TraceIr) -> TraceArtifact {
     TraceArtifact {
         seed: TraceSeed {
             start_pc: ir.root_pc,
