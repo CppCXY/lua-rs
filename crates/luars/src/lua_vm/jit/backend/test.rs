@@ -1,7 +1,8 @@
 use super::{
     BackendCompileOutcome, CompiledTrace, CompiledTraceExecutor, CompiledTraceStepKind,
     LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NullTraceBackend, NumericBinaryOp,
-    NumericIfElseCond, NumericJmpLoopGuard, NumericOperand, NumericStep, TraceBackend,
+    NumericIfElseCond, NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericOperand,
+    NumericStep, TraceBackend,
 };
 use crate::lua_vm::jit::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use crate::lua_vm::jit::ir::{TraceIr, TraceIrInst, TraceIrOperand};
@@ -11,6 +12,5 @@ use crate::OpCode;
 mod branches;
 mod core;
 mod iterators;
-#[cfg(feature = "jit")]
 mod native;
 mod numeric_loops;

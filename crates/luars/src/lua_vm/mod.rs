@@ -1820,6 +1820,39 @@ impl LuaVM {
             - Blacklist hits: {}\n\
             - Trace enter checks: {}\n\
             - Trace enter hits: {}\n\
+            - Root native dispatches: {}\n\
+            - Root native return dispatches: {}\n\
+            - Root native linear-int for dispatches: {}\n\
+            - Root native linear-int jmp dispatches: {}\n\
+            - Root native numeric for dispatches: {}\n\
+            - Root native guarded numeric for dispatches: {}\n\
+            - Root native numeric jmp dispatches: {}\n\
+            - Root interpreter dispatches: {}\n\
+            - Side native dispatches: {}\n\
+            - Side interpreter dispatches: {}\n\
+            - Native exit-index resolve attempts: {}\n\
+            - Native exit-index resolve hits: {}\n\
+            - Native redundant side-exit recoveries: {}\n\
+            - Native redundant side-exit fast dispatches: {}\n\
+            - Native profile guard steps: {}\n\
+            - Native profile linear guards: {}\n\
+            - Native profile numeric int-compare guards: {}\n\
+            - Native profile numeric reg-compare guards: {}\n\
+            - Native profile truthy guards: {}\n\
+            - Native profile arithmetic helpers: {}\n\
+            - Native profile table helpers: {}\n\
+            - Native profile upvalue helpers: {}\n\
+            - Native profile shift helpers: {}\n\
+            - Root interpreter numeric table-shift jmp dispatches: {}\n\
+            - Side interpreter numeric table-shift jmp dispatches: {}\n\
+            - Numeric table-shift iterations: {}\n\
+            - Numeric table-shift bound side exits: {}\n\
+            - Numeric table-shift compare side exits: {}\n\
+            - Numeric table-shift fallback type guards: {}\n\
+            - Numeric table-shift fallback meta guards: {}\n\
+            - Numeric table-shift fallback table gets: {}\n\
+            - Numeric table-shift fallback table sets: {}\n\
+            - Numeric table-shift GC barriers: {}\n\
             - Helper plan dispatches: {}\n\
             - Helper plan steps: {}\n\
             - Helper plan guards: {}\n\
@@ -1850,6 +1883,39 @@ impl LuaVM {
             counters.blacklist_hits,
             counters.trace_enter_checks,
             counters.trace_enter_hits,
+            counters.root_native_dispatches,
+            counters.root_native_return_dispatches,
+            counters.root_native_linear_int_for_dispatches,
+            counters.root_native_linear_int_jmp_dispatches,
+            counters.root_native_numeric_for_dispatches,
+            counters.root_native_guarded_numeric_for_dispatches,
+            counters.root_native_numeric_jmp_dispatches,
+            counters.root_interpreter_dispatches,
+            counters.side_native_dispatches,
+            counters.side_interpreter_dispatches,
+            counters.native_exit_index_resolve_attempts,
+            counters.native_exit_index_resolve_hits,
+            counters.native_redundant_side_exit_recoveries,
+            counters.native_redundant_side_exit_fast_dispatches,
+            counters.native_profile_guard_steps,
+            counters.native_profile_linear_guards,
+            counters.native_profile_numeric_int_compare_guards,
+            counters.native_profile_numeric_reg_compare_guards,
+            counters.native_profile_truthy_guards,
+            counters.native_profile_arithmetic_helpers,
+            counters.native_profile_table_helpers,
+            counters.native_profile_upvalue_helpers,
+            counters.native_profile_shift_helpers,
+            counters.root_interpreter_numeric_table_shift_jmp_dispatches,
+            counters.side_interpreter_numeric_table_shift_jmp_dispatches,
+            counters.numeric_table_shift_iterations,
+            counters.numeric_table_shift_bound_side_exits,
+            counters.numeric_table_shift_compare_side_exits,
+            counters.numeric_table_shift_fallback_type_guard,
+            counters.numeric_table_shift_fallback_meta_guard,
+            counters.numeric_table_shift_fallback_table_get,
+            counters.numeric_table_shift_fallback_table_set,
+            counters.numeric_table_shift_gc_barriers,
             counters.helper_plan_dispatches,
             counters.helper_plan_steps,
             counters.helper_plan_guards,

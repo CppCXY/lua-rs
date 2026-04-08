@@ -1,8 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-#[cfg(feature = "jit")]
 use crate::{CallInfo, LuaState, LuaValue};
-#[cfg(feature = "jit")]
 use crate::lua_vm::{
     TmKind,
     execute::{
@@ -11,18 +9,14 @@ use crate::lua_vm::{
             psetfltvalue, psetivalue, pttisinteger, setbfvalue, setbtvalue, setnilvalue,
             ttisfloat, ttisinteger,
         },
-        number::{le_num, lt_num},
+        number::{float_lt_int, int_lt_float, le_num, lt_num},
     },
 };
-#[cfg(feature = "jit")]
 use crate::stdlib::basic::{ipairs_next, lua_next};
 
-#[cfg(feature = "jit")]
 use crate::lua_vm::jit as jit;
-#[cfg(feature = "jit")]
 use super::{finish_trace_exit, record_trace_hits_or_fallback, JitTraceAction};
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 fn jit_finish_fixed_results(
     lua_state: &mut LuaState,
@@ -70,7 +64,6 @@ fn jit_finish_fixed_results(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 fn jit_finish_return_results(
     lua_state: &mut LuaState,
@@ -85,7 +78,6 @@ fn jit_finish_return_results(
     JitTraceAction::Returned
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn lua_next_into(
     table: &crate::LuaTable,
@@ -106,7 +98,6 @@ pub(crate) unsafe fn lua_next_into(
     unsafe { table.next_into(current_key, key_out, value_out) }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 fn jit_trace_fallback(
     lua_state: &mut LuaState,
@@ -119,7 +110,6 @@ fn jit_trace_fallback(
     None
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 fn jit_trace_complete_without_exit(
     lua_state: &mut LuaState,
@@ -130,7 +120,6 @@ fn jit_trace_complete_without_exit(
     None
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 unsafe fn jit_trace_exit(
     lua_state: &mut LuaState,
@@ -152,7 +141,6 @@ unsafe fn jit_trace_exit(
     ))
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 unsafe fn jit_execute_single_numeric_step(
     lua_state: &mut LuaState,
@@ -165,7 +153,6 @@ unsafe fn jit_execute_single_numeric_step(
     unsafe { execute_numeric_steps(lua_state, ci, sp, base, constants, std::slice::from_ref(step)) }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn execute_linear_int_steps(
     sp: *mut LuaValue,
@@ -259,7 +246,6 @@ pub(crate) unsafe fn execute_linear_int_steps(
     true
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 unsafe fn read_numeric_operand(
     sp: *mut LuaValue,
@@ -274,7 +260,6 @@ unsafe fn read_numeric_operand(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 fn numeric_binary_result(lhs: LuaValue, rhs: LuaValue, op: jit::NumericBinaryOp) -> Option<LuaValue> {
     if matches!(op, jit::NumericBinaryOp::Div | jit::NumericBinaryOp::Pow) {
@@ -361,7 +346,6 @@ fn numeric_binary_result(lhs: LuaValue, rhs: LuaValue, op: jit::NumericBinaryOp)
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 fn linear_int_compare(lhs: i64, rhs: i64, op: jit::LinearIntGuardOp) -> bool {
     match op {
@@ -373,7 +357,49 @@ fn linear_int_compare(lhs: i64, rhs: i64, op: jit::LinearIntGuardOp) -> bool {
     }
 }
 
-#[cfg(feature = "jit")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NumericTableShiftCompareValue {
+    Integer(i64),
+    Float(f64),
+    NonNumeric,
+}
+
+#[inline(always)]
+fn numeric_table_shift_compare_value(value: LuaValue) -> NumericTableShiftCompareValue {
+    if ttisinteger(&value) {
+        NumericTableShiftCompareValue::Integer(value.ivalue())
+    } else if ttisfloat(&value) {
+        NumericTableShiftCompareValue::Float(value.fltvalue())
+    } else {
+        NumericTableShiftCompareValue::NonNumeric
+    }
+}
+
+#[inline(always)]
+fn numeric_table_shift_lt_current(value: NumericTableShiftCompareValue, current: &LuaValue) -> bool {
+    match value {
+        NumericTableShiftCompareValue::Integer(lhs) => {
+            if ttisinteger(current) {
+                lhs < current.ivalue()
+            } else if ttisfloat(current) {
+                int_lt_float(lhs, current.fltvalue())
+            } else {
+                false
+            }
+        }
+        NumericTableShiftCompareValue::Float(lhs) => {
+            if ttisfloat(current) {
+                lhs < current.fltvalue()
+            } else if ttisinteger(current) {
+                float_lt_int(lhs, current.ivalue())
+            } else {
+                false
+            }
+        }
+        NumericTableShiftCompareValue::NonNumeric => false,
+    }
+}
+
 #[inline(always)]
 pub(crate) unsafe fn numeric_ifelse_cond_holds(
     sp: *mut LuaValue,
@@ -428,7 +454,6 @@ pub(crate) unsafe fn numeric_ifelse_cond_holds(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn execute_numeric_steps(
     lua_state: &mut LuaState,
@@ -550,7 +575,6 @@ pub(crate) unsafe fn execute_numeric_steps(
     true
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 fn linear_int_guard_holds(sp: *mut LuaValue, base: usize, guard: jit::LinearIntLoopGuard) -> bool {
     let (op, lhs_val, rhs_val, continue_when) = match guard {
@@ -593,7 +617,6 @@ fn linear_int_guard_holds(sp: *mut LuaValue, base: usize, guard: jit::LinearIntL
     }) == continue_when
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_linear_int_jmp_loop(
     lua_state: &mut LuaState,
@@ -627,7 +650,6 @@ pub(crate) unsafe fn jit_execute_linear_int_jmp_loop(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) fn jit_execute_return0(
     lua_state: &mut LuaState,
@@ -638,7 +660,6 @@ pub(crate) fn jit_execute_return0(
     jit_finish_return_results(lua_state, ci, ci.base, 0)
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) fn jit_execute_return1(
     lua_state: &mut LuaState,
@@ -651,7 +672,6 @@ pub(crate) fn jit_execute_return1(
     jit_finish_return_results(lua_state, ci, base + src_reg as usize, 1)
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) fn jit_execute_return(
     lua_state: &mut LuaState,
@@ -670,7 +690,6 @@ pub(crate) fn jit_execute_return(
     )
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_numeric_jmp_loop(
     lua_state: &mut LuaState,
@@ -678,31 +697,30 @@ pub(crate) unsafe fn jit_execute_numeric_jmp_loop(
     base: usize,
     constants: &[LuaValue],
     target_pc: usize,
-    pre_steps: &[jit::NumericStep],
+    head_blocks: &[jit::NumericJmpLoopGuardBlock],
     steps: &[jit::NumericStep],
-    guard: jit::NumericJmpLoopGuard,
+    tail_blocks: &[jit::NumericJmpLoopGuardBlock],
     summary: jit::HelperPlanDispatchSummary,
 ) -> Option<JitTraceAction> {
-    let exit_pc = guard.exit_pc() as usize;
-    let (cond, continue_when, continue_preset, exit_preset) = match guard {
-        jit::NumericJmpLoopGuard::Head { cond, continue_when, continue_preset, exit_preset, exit_pc } => {
-            let _ = exit_pc;
-            (cond, continue_when, continue_preset, exit_preset)
-        }
-        jit::NumericJmpLoopGuard::Tail { cond, continue_when, continue_preset, exit_preset, exit_pc } => {
-            let _ = exit_pc;
-            (cond, continue_when, continue_preset, exit_preset)
-        }
-    };
-    let tail_guard = guard.is_tail();
     let mut trace_hits = 0u32;
 
     loop {
         let sp = lua_state.stack_mut().as_mut_ptr();
-        if !execute_numeric_steps(lua_state, ci, sp, base, constants, pre_steps) {
-            return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-        }
-        if !tail_guard {
+        for block in head_blocks {
+            if !execute_numeric_steps(lua_state, ci, sp, base, constants, &block.pre_steps) {
+                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+            }
+
+            let (cond, continue_when, continue_preset, exit_preset, exit_pc) = match block.guard {
+                jit::NumericJmpLoopGuard::Head {
+                    cond,
+                    continue_when,
+                    continue_preset,
+                    exit_preset,
+                    exit_pc,
+                } => (cond, continue_when, continue_preset, exit_preset, exit_pc as usize),
+                jit::NumericJmpLoopGuard::Tail { .. } => return None,
+            };
             let guard_holds = numeric_ifelse_cond_holds(sp, base, cond) == continue_when;
             if !guard_holds {
                 if let Some(step) = exit_preset.as_ref()
@@ -725,8 +743,22 @@ pub(crate) unsafe fn jit_execute_numeric_jmp_loop(
 
         trace_hits = trace_hits.saturating_add(1);
 
-        if tail_guard {
-            let sp = lua_state.stack_mut().as_mut_ptr();
+        let sp = lua_state.stack_mut().as_mut_ptr();
+        for block in tail_blocks {
+            if !execute_numeric_steps(lua_state, ci, sp, base, constants, &block.pre_steps) {
+                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+            }
+
+            let (cond, continue_when, continue_preset, exit_preset, exit_pc) = match block.guard {
+                jit::NumericJmpLoopGuard::Tail {
+                    cond,
+                    continue_when,
+                    continue_preset,
+                    exit_preset,
+                    exit_pc,
+                } => (cond, continue_when, continue_preset, exit_preset, exit_pc as usize),
+                jit::NumericJmpLoopGuard::Head { .. } => return None,
+            };
             let guard_holds = numeric_ifelse_cond_holds(sp, base, cond) == continue_when;
             if !guard_holds {
                 if let Some(step) = exit_preset.as_ref()
@@ -745,7 +777,6 @@ pub(crate) unsafe fn jit_execute_numeric_jmp_loop(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_numeric_table_scan_jmp_loop(
     lua_state: &mut LuaState,
@@ -814,7 +845,6 @@ pub(crate) unsafe fn jit_execute_numeric_table_scan_jmp_loop(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_numeric_table_shift_jmp_loop(
     lua_state: &mut LuaState,
@@ -831,58 +861,126 @@ pub(crate) unsafe fn jit_execute_numeric_table_shift_jmp_loop(
 ) -> Option<JitTraceAction> {
     let mut trace_hits = 0u32;
 
+    let sp = lua_state.stack_mut().as_mut_ptr();
+    let table_ptr = sp.add(base + table_reg as usize);
+    let index_ptr = sp.add(base + index_reg as usize);
+    let left_bound_ptr = sp.add(base + left_bound_reg as usize);
+    let value_ptr = sp.add(base + value_reg as usize);
+    let temp_ptr = sp.add(base + temp_reg as usize);
+
+    if !(*table_ptr).is_table()
+        || !pttisinteger(index_ptr as *const LuaValue)
+        || !pttisinteger(left_bound_ptr as *const LuaValue)
+    {
+        jit::record_numeric_table_shift_fallback_type_guard(lua_state);
+        return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+    }
+
+    let left_bound = pivalue(left_bound_ptr as *const LuaValue);
+    let value = *value_ptr;
+    let compare_value = numeric_table_shift_compare_value(value);
+    let table_gc = (*table_ptr).as_gc_ptr_table_unchecked();
+    let table = (*table_ptr).hvalue_mut();
+    let meta = table.meta_ptr();
+    if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
+        jit::record_numeric_table_shift_fallback_meta_guard(lua_state);
+        return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+    }
+
     loop {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        let table_ptr = sp.add(base + table_reg as usize);
-        let index_ptr = sp.add(base + index_reg as usize);
-        let left_bound_ptr = sp.add(base + left_bound_reg as usize);
-        let value_ptr = sp.add(base + value_reg as usize);
-        let temp_ptr = sp.add(base + temp_reg as usize);
-
-        if !(*table_ptr).is_table()
-            || !pttisinteger(index_ptr as *const LuaValue)
-            || !pttisinteger(left_bound_ptr as *const LuaValue)
-        {
-            return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-        }
-
-        let index = pivalue(index_ptr as *const LuaValue);
-        let left_bound = pivalue(left_bound_ptr as *const LuaValue);
+        let index = (*index_ptr).value.i;
         if left_bound > index {
-            return jit_trace_exit(lua_state, ci, base, target_pc, trace_hits, summary, exit_pc);
-        }
-
-        let value = *value_ptr;
-        let table = (*table_ptr).hvalue_mut();
-        let meta = table.meta_ptr();
-        if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
-            return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-        }
-
-        if !table.impl_table.fast_geti_into(index, temp_ptr) {
-            return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-        }
-
-        let current = *temp_ptr;
-        if !lt_num(&value, &current) {
+            jit::record_numeric_table_shift_bound_side_exit(lua_state);
             return jit_trace_exit(lua_state, ci, base, target_pc, trace_hits, summary, exit_pc);
         }
 
         let next_index = index.wrapping_add(1);
-        if !table.impl_table.fast_seti_parts(next_index, current.value, current.tt) {
-            return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+        let array_index = (index as u64).wrapping_sub(1);
+        let array_size = table.impl_table.asize as u64;
+        if array_index < array_size && (next_index as u64).wrapping_sub(1) < array_size {
+            let current_tt = *table.impl_table.get_arr_tag(array_index as usize);
+            if (current_tt & 0x0F) == 0 {
+                jit::record_numeric_table_shift_fallback_table_get(lua_state);
+                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+            }
+
+            let current_value = *table.impl_table.get_arr_val(array_index as usize);
+            let current = LuaValue {
+                value: current_value,
+                tt: current_tt,
+            };
+            if !numeric_table_shift_lt_current(compare_value, &current) {
+                jit::record_numeric_table_shift_compare_side_exit(lua_state);
+                return jit_trace_exit(lua_state, ci, base, target_pc, trace_hits, summary, exit_pc);
+            }
+
+            *table.impl_table.get_arr_tag(index as usize) = current_tt;
+            *table.impl_table.get_arr_val(index as usize) = current_value;
+
+            if current_tt & 0x40 != 0 {
+                jit::record_numeric_table_shift_gc_barrier(lua_state);
+                lua_state.gc_barrier_back(table_gc);
+            }
+        } else {
+            if !table.impl_table.fast_geti_into(index, temp_ptr) {
+                jit::record_numeric_table_shift_fallback_table_get(lua_state);
+                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+            }
+
+            let current = &*temp_ptr;
+            if !numeric_table_shift_lt_current(compare_value, current) {
+                jit::record_numeric_table_shift_compare_side_exit(lua_state);
+                return jit_trace_exit(lua_state, ci, base, target_pc, trace_hits, summary, exit_pc);
+            }
+
+            if !table.impl_table.fast_seti_parts(next_index, current.value, current.tt) {
+                jit::record_numeric_table_shift_fallback_table_set(lua_state);
+                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
+            }
+
+            if current.tt & 0x40 != 0 {
+                jit::record_numeric_table_shift_gc_barrier(lua_state);
+                lua_state.gc_barrier_back(table_gc);
+            }
         }
 
-        if current.tt & 0x40 != 0 {
-            lua_state.gc_barrier_back((*table_ptr).as_gc_ptr_table_unchecked());
-        }
-
-        psetivalue(index_ptr, index.wrapping_sub(1));
+        (*index_ptr).value.i = index.wrapping_sub(1);
         trace_hits = trace_hits.saturating_add(1);
+        jit::record_numeric_table_shift_iteration(lua_state);
     }
 }
 
-#[cfg(feature = "jit")]
+#[cfg(test)]
+mod tests {
+    use super::{
+        NumericTableShiftCompareValue, numeric_table_shift_compare_value,
+        numeric_table_shift_lt_current,
+    };
+    use crate::LuaValue;
+
+    #[test]
+    fn numeric_table_shift_compare_fast_path_matches_lua_numeric_ordering() {
+        let int_value = numeric_table_shift_compare_value(LuaValue::integer(3));
+        assert_eq!(int_value, NumericTableShiftCompareValue::Integer(3));
+        assert!(numeric_table_shift_lt_current(int_value, &LuaValue::integer(4)));
+        assert!(numeric_table_shift_lt_current(int_value, &LuaValue::float(3.5)));
+        assert!(!numeric_table_shift_lt_current(int_value, &LuaValue::float(2.5)));
+
+        let float_value = numeric_table_shift_compare_value(LuaValue::float(3.25));
+        assert_eq!(float_value, NumericTableShiftCompareValue::Float(3.25));
+        assert!(numeric_table_shift_lt_current(float_value, &LuaValue::integer(4)));
+        assert!(!numeric_table_shift_lt_current(float_value, &LuaValue::integer(3)));
+        assert!(!numeric_table_shift_lt_current(float_value, &LuaValue::nil()));
+    }
+
+    #[test]
+    fn numeric_table_shift_compare_fast_path_keeps_non_numeric_false() {
+        let non_numeric = numeric_table_shift_compare_value(LuaValue::nil());
+        assert_eq!(non_numeric, NumericTableShiftCompareValue::NonNumeric);
+        assert!(!numeric_table_shift_lt_current(non_numeric, &LuaValue::integer(1)));
+    }
+}
+
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_next_while_builtin_add(
     lua_state: &mut LuaState,
@@ -959,7 +1057,6 @@ pub(crate) unsafe fn jit_execute_next_while_builtin_add(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_linear_int_for_loop(
     lua_state: &mut LuaState,
@@ -995,7 +1092,6 @@ pub(crate) unsafe fn jit_execute_linear_int_for_loop(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_numeric_for_loop(
     lua_state: &mut LuaState,
@@ -1033,7 +1129,6 @@ pub(crate) unsafe fn jit_execute_numeric_for_loop(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_guarded_numeric_for_loop(
     lua_state: &mut LuaState,
@@ -1098,7 +1193,6 @@ pub(crate) unsafe fn jit_execute_guarded_numeric_for_loop(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_numeric_ifelse_for_loop(
     lua_state: &mut LuaState,
@@ -1160,7 +1254,6 @@ pub(crate) unsafe fn jit_execute_numeric_ifelse_for_loop(
     }
 }
 
-#[cfg(feature = "jit")]
 #[inline(always)]
 pub(crate) unsafe fn jit_execute_generic_for_builtin_add(
     lua_state: &mut LuaState,

@@ -202,7 +202,7 @@ fn compile_numeric_jmp_loop(
     ir: &TraceIr,
     lowered_trace: &LoweredTrace,
 ) -> Option<CompiledTraceExecutor> {
-    if ir.insts.len() < 3 || ir.guards.len() != 1 {
+    if ir.insts.len() < 3 || ir.guards.is_empty() {
         return None;
     }
 
@@ -215,43 +215,70 @@ fn compile_numeric_jmp_loop(
         return None;
     }
 
-    let guard = ir.guards[0];
-    let lowered_exit = lowered_exit_for_guard(lowered_trace, 0, guard)?;
+    if ir.guards.iter().all(|guard| !guard.taken_on_trace) {
+        let mut head_blocks = Vec::with_capacity(ir.guards.len());
+        let mut guard_index = 0usize;
+        let mut segment_start = 0usize;
 
-    if !guard.taken_on_trace {
-        let guard_index = ir
-            .insts
-            .iter()
-            .position(|inst| {
-                matches!(
-                    inst.opcode,
-                    crate::OpCode::Test
-                        | crate::OpCode::TestSet
-                        | crate::OpCode::Lt
-                        | crate::OpCode::Le
-                )
-            })?;
-        if guard_index + 1 >= ir.insts.len()
-            || ir.insts[guard_index + 1].opcode != crate::OpCode::Jmp
-        {
+        while segment_start < ir.insts.len() - 1 {
+            let relative_guard_index = ir.insts[segment_start..ir.insts.len() - 1]
+                .iter()
+                .position(|inst| {
+                    matches!(
+                        inst.opcode,
+                        crate::OpCode::Test
+                            | crate::OpCode::TestSet
+                            | crate::OpCode::Lt
+                            | crate::OpCode::Le
+                    )
+                });
+            let Some(relative_guard_index) = relative_guard_index else {
+                break;
+            };
+            let inst_guard_index = segment_start + relative_guard_index;
+            if inst_guard_index + 1 >= ir.insts.len() - 1
+                || ir.insts[inst_guard_index + 1].opcode != crate::OpCode::Jmp
+            {
+                return None;
+            }
+
+            let guard = *ir.guards.get(guard_index)?;
+            let lowered_exit = lowered_exit_for_guard(lowered_trace, guard_index, guard)?;
+            let pre_steps = compile_numeric_steps(&ir.insts[segment_start..inst_guard_index])?;
+            let loop_guard =
+                compile_numeric_jmp_guard(&ir.insts[inst_guard_index], false, lowered_exit.exit_pc)?;
+            head_blocks.push(NumericJmpLoopGuardBlock { pre_steps, guard: loop_guard });
+            guard_index += 1;
+            segment_start = inst_guard_index + 2;
+        }
+
+        if guard_index != ir.guards.len() {
             return None;
         }
-        let pre_steps = compile_numeric_steps(&ir.insts[..guard_index])?;
-        let loop_guard = compile_numeric_jmp_guard(&ir.insts[guard_index], false, lowered_exit.exit_pc)?;
-        let steps = compile_numeric_steps(&ir.insts[guard_index + 2..ir.insts.len() - 1])?;
+
+        let steps = compile_numeric_steps(&ir.insts[segment_start..ir.insts.len() - 1])?;
         return Some(CompiledTraceExecutor::NumericJmpLoop {
-            pre_steps,
+            head_blocks,
             steps,
-            guard: loop_guard,
+            tail_blocks: Vec::new(),
         });
     }
 
+    if ir.guards.len() != 1 || !ir.guards[0].taken_on_trace {
+        return None;
+    }
+
+    let guard = ir.guards[0];
+    let lowered_exit = lowered_exit_for_guard(lowered_trace, 0, guard)?;
     let loop_guard = compile_numeric_jmp_guard(&ir.insts[ir.insts.len() - 2], true, lowered_exit.exit_pc)?;
     let steps = compile_numeric_steps(&ir.insts[..ir.insts.len() - 2])?;
     Some(CompiledTraceExecutor::NumericJmpLoop {
-        pre_steps: Vec::new(),
+        head_blocks: Vec::new(),
         steps,
-        guard: loop_guard,
+        tail_blocks: vec![NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: loop_guard,
+        }],
     })
 }
 

@@ -129,6 +129,12 @@ pub(crate) enum NumericJmpLoopGuard {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NumericJmpLoopGuardBlock {
+    pub pre_steps: Vec<NumericStep>,
+    pub guard: NumericJmpLoopGuard,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinearIntGuardOp {
     Eq,
@@ -204,9 +210,9 @@ pub(crate) enum CompiledTraceExecutor {
         then_on_true: bool,
     },
     NumericJmpLoop {
-        pre_steps: Vec<NumericStep>,
+        head_blocks: Vec<NumericJmpLoopGuardBlock>,
         steps: Vec<NumericStep>,
-        guard: NumericJmpLoopGuard,
+        tail_blocks: Vec<NumericJmpLoopGuardBlock>,
     },
     NumericTableScanJmpLoop {
         table_reg: u32,
@@ -274,8 +280,14 @@ impl CompiledTraceExecution {
                 CompiledTraceExecutor::NextWhileBuiltinAdd { .. } => "NextWhileBuiltinAdd",
             },
             Self::Native(native) => match native {
+                NativeCompiledTrace::Return { .. } => "NativeReturn",
+                NativeCompiledTrace::Return0 { .. } => "NativeReturn0",
+                NativeCompiledTrace::Return1 { .. } => "NativeReturn1",
                 NativeCompiledTrace::LinearIntForLoop { .. } => "NativeLinearIntForLoop",
                 NativeCompiledTrace::LinearIntJmpLoop { .. } => "NativeLinearIntJmpLoop",
+                NativeCompiledTrace::NumericForLoop { .. } => "NativeNumericForLoop",
+                NativeCompiledTrace::GuardedNumericForLoop { .. } => "NativeGuardedNumericForLoop",
+                NativeCompiledTrace::NumericJmpLoop { .. } => "NativeNumericJmpLoop",
             },
         }
     }
@@ -290,17 +302,79 @@ impl PartialEq<CompiledTraceExecutor> for CompiledTraceExecution {
     }
 }
 
-pub(crate) type NativeTraceEntry = unsafe extern "C" fn(*mut LuaValue, usize) -> u64;
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeTraceStatus {
+    Fallback = 0,
+    LoopExit = 1,
+    SideExit = 2,
+    Returned = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeTraceResult {
+    pub status: NativeTraceStatus,
+    pub hits: u32,
+    pub exit_pc: u32,
+    pub start_reg: u32,
+    pub result_count: u32,
+    pub exit_index: u32,
+}
+
+impl Default for NativeTraceResult {
+    fn default() -> Self {
+        Self::fallback(0)
+    }
+}
+
+impl NativeTraceResult {
+    pub(crate) const fn fallback(hits: u32) -> Self {
+        Self {
+            status: NativeTraceStatus::Fallback,
+            hits,
+            exit_pc: 0,
+            start_reg: 0,
+            result_count: 0,
+            exit_index: 0,
+        }
+    }
+}
+
+pub(crate) type NativeTraceEntry = unsafe extern "C" fn(
+    *mut LuaValue,
+    usize,
+    *const LuaValue,
+    usize,
+    *mut crate::LuaState,
+    *const crate::gc::UpvaluePtr,
+    *mut NativeTraceResult,
+);
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum NativeCompiledTrace {
+    Return { entry: NativeTraceEntry },
+    Return0 { entry: NativeTraceEntry },
+    Return1 { entry: NativeTraceEntry },
     LinearIntForLoop { entry: NativeTraceEntry },
-    LinearIntJmpLoop { entry: NativeTraceEntry, exit_pc: u32 },
+    LinearIntJmpLoop { entry: NativeTraceEntry },
+    NumericForLoop { entry: NativeTraceEntry },
+    GuardedNumericForLoop { entry: NativeTraceEntry },
+    NumericJmpLoop { entry: NativeTraceEntry },
 }
 
 impl PartialEq for NativeCompiledTrace {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::Return { entry: lhs }, Self::Return { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
+            (Self::Return0 { entry: lhs }, Self::Return0 { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
+            (Self::Return1 { entry: lhs }, Self::Return1 { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
             (
                 Self::LinearIntForLoop { entry: lhs },
                 Self::LinearIntForLoop { entry: rhs },
@@ -308,13 +382,21 @@ impl PartialEq for NativeCompiledTrace {
             (
                 Self::LinearIntJmpLoop {
                     entry: lhs,
-                    exit_pc: lhs_exit,
                 },
                 Self::LinearIntJmpLoop {
                     entry: rhs,
-                    exit_pc: rhs_exit,
                 },
-            ) => *lhs_exit == *rhs_exit && std::ptr::fn_addr_eq(*lhs, *rhs),
+            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (Self::NumericForLoop { entry: lhs }, Self::NumericForLoop { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
+            (
+                Self::GuardedNumericForLoop { entry: lhs },
+                Self::GuardedNumericForLoop { entry: rhs },
+            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (Self::NumericJmpLoop { entry: lhs }, Self::NumericJmpLoop { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
             _ => false,
         }
     }
@@ -331,6 +413,19 @@ pub(crate) struct CompiledTraceExit {
     pub restore_summary: DeoptRestoreSummary,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NativeLoweringProfile {
+    pub guard_steps: u32,
+    pub linear_guard_steps: u32,
+    pub numeric_int_compare_guard_steps: u32,
+    pub numeric_reg_compare_guard_steps: u32,
+    pub truthy_guard_steps: u32,
+    pub arithmetic_helper_steps: u32,
+    pub table_helper_steps: u32,
+    pub upvalue_helper_steps: u32,
+    pub shift_helper_steps: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompiledTrace {
     pub root_pc: u32,
@@ -339,6 +434,7 @@ pub(crate) struct CompiledTrace {
     exits: Vec<CompiledTraceExit>,
     summary: HelperPlanDispatchSummary,
     execution: CompiledTraceExecution,
+    native_profile: Option<NativeLoweringProfile>,
 }
 
 impl CompiledTrace {
@@ -364,6 +460,7 @@ impl CompiledTrace {
             lowered_trace,
             helper_plan,
             execution,
+            None,
         )
     }
 
@@ -373,6 +470,7 @@ impl CompiledTrace {
         lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
         execution: CompiledTraceExecution,
+        native_profile: Option<NativeLoweringProfile>,
     ) -> Option<Self> {
         let mut steps = Vec::with_capacity(helper_plan.steps.len());
         let mut has_helper_call = false;
@@ -448,6 +546,7 @@ impl CompiledTrace {
             exits,
             summary,
             execution,
+            native_profile,
         })
     }
 
@@ -474,6 +573,10 @@ impl CompiledTrace {
 
     pub(crate) fn execution(&self) -> CompiledTraceExecution {
         self.execution.clone()
+    }
+
+    pub(crate) fn native_profile(&self) -> Option<NativeLoweringProfile> {
+        self.native_profile
     }
 
     pub(crate) fn executor(&self) -> CompiledTraceExecution {
@@ -541,18 +644,6 @@ pub(super) fn synthetic_artifact_for_ir(ir: &TraceIr) -> TraceArtifact {
             })
             .collect(),
         loop_tail_pc: ir.loop_tail_pc,
-    }
-}
-
-impl NumericJmpLoopGuard {
-    pub(crate) fn is_tail(self) -> bool {
-        matches!(self, Self::Tail { .. })
-    }
-
-    pub(crate) fn exit_pc(self) -> u32 {
-        match self {
-            Self::Head { exit_pc, .. } | Self::Tail { exit_pc, .. } => exit_pc,
-        }
     }
 }
 

@@ -33,6 +33,223 @@ fn compile_numeric_steps_from_chunk(
     compile_numeric_steps(&insts)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct TableIntSlot {
+    table_reg: u32,
+    index_base_reg: u32,
+    index_offset: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RegisterAlias {
+    root_reg: u32,
+    offset: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TableIntSlotState {
+    available_value_reg: Option<u32>,
+    last_store_output: Option<usize>,
+    read_since_last_store: bool,
+}
+
+fn resolve_register_alias(
+    register_aliases: &std::collections::HashMap<u32, RegisterAlias>,
+    reg: u32,
+) -> RegisterAlias {
+    let mut current = RegisterAlias {
+        root_reg: reg,
+        offset: 0,
+    };
+    while let Some(&next) = register_aliases.get(&current.root_reg) {
+        if next.root_reg == current.root_reg {
+            break;
+        }
+        current = RegisterAlias {
+            root_reg: next.root_reg,
+            offset: current.offset.saturating_add(next.offset),
+        };
+    }
+    current
+}
+
+fn invalidate_register_aliases(
+    register_aliases: &mut std::collections::HashMap<u32, RegisterAlias>,
+    reg: u32,
+) {
+    register_aliases.remove(&reg);
+    let killed_aliases = register_aliases
+        .iter()
+        .filter_map(|(&alias, &root)| (alias == reg || root.root_reg == reg).then_some(alias))
+        .collect::<Vec<_>>();
+    for alias in killed_aliases {
+        register_aliases.remove(&alias);
+    }
+}
+
+fn find_table_int_alias_reg(
+    register_slots: &std::collections::HashMap<u32, TableIntSlot>,
+    slot: TableIntSlot,
+) -> Option<u32> {
+    register_slots
+        .iter()
+        .find_map(|(&reg, &mapped_slot)| (mapped_slot == slot).then_some(reg))
+}
+
+fn invalidate_table_int_register(
+    register_slots: &mut std::collections::HashMap<u32, TableIntSlot>,
+    slot_states: &mut std::collections::HashMap<TableIntSlot, TableIntSlotState>,
+    reg: u32,
+) {
+    register_slots.remove(&reg);
+
+    let killed_slots = slot_states
+        .keys()
+        .copied()
+        .filter(|slot| slot.table_reg == reg || slot.index_base_reg == reg)
+        .collect::<Vec<_>>();
+    for slot in killed_slots {
+        slot_states.remove(&slot);
+        register_slots.retain(|_, mapped_slot| *mapped_slot != slot);
+    }
+
+    for (&slot, state) in slot_states.iter_mut() {
+        if state.available_value_reg == Some(reg) {
+            state.available_value_reg = find_table_int_alias_reg(register_slots, slot);
+        }
+    }
+}
+
+fn set_table_int_slot_value_reg(
+    register_slots: &mut std::collections::HashMap<u32, TableIntSlot>,
+    slot_states: &mut std::collections::HashMap<TableIntSlot, TableIntSlotState>,
+    slot: TableIntSlot,
+    value_reg: u32,
+) {
+    register_slots.retain(|&reg, mapped_slot| *mapped_slot != slot || reg == value_reg);
+    register_slots.insert(value_reg, slot);
+    slot_states.entry(slot).or_default().available_value_reg = Some(value_reg);
+}
+
+fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+    let mut optimized = Vec::with_capacity(steps.len());
+    let mut register_slots = std::collections::HashMap::<u32, TableIntSlot>::new();
+    let mut slot_states = std::collections::HashMap::<TableIntSlot, TableIntSlotState>::new();
+    let mut register_aliases = std::collections::HashMap::<u32, RegisterAlias>::new();
+
+    for step in steps {
+        match step {
+            NumericStep::Move { dst, src } => {
+                invalidate_table_int_register(&mut register_slots, &mut slot_states, dst);
+                invalidate_register_aliases(&mut register_aliases, dst);
+                optimized.push(Some(NumericStep::Move { dst, src }));
+                register_aliases.insert(dst, resolve_register_alias(&register_aliases, src));
+                if let Some(slot) = register_slots.get(&src).copied() {
+                    register_slots.insert(dst, slot);
+                    slot_states.entry(slot).or_default().available_value_reg = Some(dst);
+                }
+            }
+            NumericStep::LoadBool { dst, value } => {
+                invalidate_table_int_register(&mut register_slots, &mut slot_states, dst);
+                invalidate_register_aliases(&mut register_aliases, dst);
+                optimized.push(Some(NumericStep::LoadBool { dst, value }));
+            }
+            NumericStep::LoadI { dst, imm } => {
+                invalidate_table_int_register(&mut register_slots, &mut slot_states, dst);
+                invalidate_register_aliases(&mut register_aliases, dst);
+                optimized.push(Some(NumericStep::LoadI { dst, imm }));
+            }
+            NumericStep::LoadF { dst, imm } => {
+                invalidate_table_int_register(&mut register_slots, &mut slot_states, dst);
+                invalidate_register_aliases(&mut register_aliases, dst);
+                optimized.push(Some(NumericStep::LoadF { dst, imm }));
+            }
+            NumericStep::GetUpval { dst, upvalue } => {
+                invalidate_table_int_register(&mut register_slots, &mut slot_states, dst);
+                invalidate_register_aliases(&mut register_aliases, dst);
+                optimized.push(Some(NumericStep::GetUpval { dst, upvalue }));
+            }
+            NumericStep::SetUpval { src, upvalue } => {
+                optimized.push(Some(NumericStep::SetUpval { src, upvalue }));
+            }
+            NumericStep::GetTableInt { dst, table, index } => {
+                invalidate_table_int_register(&mut register_slots, &mut slot_states, dst);
+                invalidate_register_aliases(&mut register_aliases, dst);
+
+                let slot = TableIntSlot {
+                    table_reg: resolve_register_alias(&register_aliases, table).root_reg,
+                    index_base_reg: resolve_register_alias(&register_aliases, index).root_reg,
+                    index_offset: resolve_register_alias(&register_aliases, index).offset,
+                };
+                if let Some(state) = slot_states.get_mut(&slot) {
+                    if state.last_store_output.is_some() {
+                        state.read_since_last_store = true;
+                    }
+                    if let Some(src) = state.available_value_reg {
+                        register_slots.insert(dst, slot);
+                        state.available_value_reg = Some(dst);
+                        if src != dst {
+                            optimized.push(Some(NumericStep::Move { dst, src }));
+                        }
+                        continue;
+                    }
+                }
+
+                optimized.push(Some(NumericStep::GetTableInt { dst, table, index }));
+                register_slots.insert(dst, slot);
+                let state = slot_states.entry(slot).or_default();
+                state.available_value_reg = Some(dst);
+                state.last_store_output = None;
+            }
+            NumericStep::SetTableInt { table, index, value } => {
+                let slot = TableIntSlot {
+                    table_reg: resolve_register_alias(&register_aliases, table).root_reg,
+                    index_base_reg: resolve_register_alias(&register_aliases, index).root_reg,
+                    index_offset: resolve_register_alias(&register_aliases, index).offset,
+                };
+                if let Some(state) = slot_states.get(&slot)
+                    && let Some(prev_output) = state.last_store_output
+                    && !state.read_since_last_store
+                {
+                    optimized[prev_output] = None;
+                }
+
+                let output_index = optimized.len();
+                optimized.push(Some(NumericStep::SetTableInt { table, index, value }));
+                set_table_int_slot_value_reg(&mut register_slots, &mut slot_states, slot, value);
+                let state = slot_states.entry(slot).or_default();
+                state.last_store_output = Some(output_index);
+                state.read_since_last_store = false;
+            }
+            NumericStep::Binary { dst, lhs, rhs, op } => {
+                invalidate_table_int_register(&mut register_slots, &mut slot_states, dst);
+                invalidate_register_aliases(&mut register_aliases, dst);
+                optimized.push(Some(NumericStep::Binary { dst, lhs, rhs, op }));
+                if op == NumericBinaryOp::Add {
+                    let alias = match (lhs, rhs) {
+                        (NumericOperand::Reg(src), NumericOperand::ImmI(imm))
+                        | (NumericOperand::ImmI(imm), NumericOperand::Reg(src)) => {
+                            let resolved = resolve_register_alias(&register_aliases, src);
+                            Some(RegisterAlias {
+                                root_reg: resolved.root_reg,
+                                offset: resolved.offset.saturating_add(imm),
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(alias) = alias
+                        && alias.root_reg != dst
+                    {
+                        register_aliases.insert(dst, alias);
+                    }
+                }
+            }
+        }
+    }
+
+    optimized.into_iter().flatten().collect()
+}
+
 fn lowered_exit_for_guard<'a>(
     lowered_trace: &'a LoweredTrace,
     index: usize,
@@ -712,7 +929,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst]) -> Option<Vec<NumericStep>> {
         index += 1;
     }
 
-    Some(steps)
+    Some(optimize_numeric_steps(steps))
 }
 
 fn compile_numeric_ifelse_condition(

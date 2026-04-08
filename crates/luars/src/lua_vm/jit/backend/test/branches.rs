@@ -1363,20 +1363,23 @@ fn backend_compiles_head_guard_numeric_test_jmp_loop() {
             assert_eq!(
                 compiled.executor(),
                 CompiledTraceExecutor::NumericJmpLoop {
-                    pre_steps: vec![],
+                    head_blocks: vec![NumericJmpLoopGuardBlock {
+                        pre_steps: vec![],
+                        guard: NumericJmpLoopGuard::Head {
+                            cond: NumericIfElseCond::Truthy { reg: 7 },
+                            continue_when: true,
+                            continue_preset: None,
+                            exit_preset: None,
+                            exit_pc: 5,
+                        },
+                    }],
                     steps: vec![NumericStep::Binary {
                         dst: 5,
                         lhs: NumericOperand::Reg(5),
                         rhs: NumericOperand::ImmI(1),
                         op: NumericBinaryOp::Add,
                     }],
-                    guard: NumericJmpLoopGuard::Head {
-                        cond: NumericIfElseCond::Truthy { reg: 7 },
-                        continue_when: true,
-                        continue_preset: None,
-                        exit_preset: None,
-                        exit_pc: 5,
-                    },
+                    tail_blocks: vec![],
                 }
             );
         }
@@ -1466,20 +1469,23 @@ fn backend_compiles_head_guard_numeric_testset_jmp_loop() {
             assert_eq!(
                 compiled.executor(),
                 CompiledTraceExecutor::NumericJmpLoop {
-                    pre_steps: vec![],
+                    head_blocks: vec![NumericJmpLoopGuardBlock {
+                        pre_steps: vec![],
+                        guard: NumericJmpLoopGuard::Head {
+                            cond: NumericIfElseCond::Truthy { reg: 7 },
+                            continue_when: true,
+                            continue_preset: None,
+                            exit_preset: Some(NumericStep::Move { dst: 8, src: 7 }),
+                            exit_pc: 5,
+                        },
+                    }],
                     steps: vec![NumericStep::Binary {
                         dst: 5,
                         lhs: NumericOperand::Reg(5),
                         rhs: NumericOperand::ImmI(1),
                         op: NumericBinaryOp::Add,
                     }],
-                    guard: NumericJmpLoopGuard::Head {
-                        cond: NumericIfElseCond::Truthy { reg: 7 },
-                        continue_when: true,
-                        continue_preset: None,
-                        exit_preset: Some(NumericStep::Move { dst: 8, src: 7 }),
-                        exit_pc: 5,
-                    },
+                    tail_blocks: vec![],
                 }
             );
         }
@@ -1569,13 +1575,32 @@ fn backend_compiles_head_guard_numeric_table_compare_jmp_loop() {
         BackendCompileOutcome::Compiled(compiled) => {
             assert_eq!(
                 compiled.executor(),
-                CompiledTraceExecutor::NumericTableScanJmpLoop {
-                    table_reg: 1,
-                    index_reg: 5,
-                    limit_reg: 4,
-                    step_imm: 1,
-                    compare_op: LinearIntGuardOp::Lt,
-                    exit_pc: 6,
+                CompiledTraceExecutor::NumericJmpLoop {
+                    head_blocks: vec![NumericJmpLoopGuardBlock {
+                        pre_steps: vec![NumericStep::GetTableInt {
+                            dst: 9,
+                            table: 1,
+                            index: 5,
+                        }],
+                        guard: NumericJmpLoopGuard::Head {
+                            cond: NumericIfElseCond::RegCompare {
+                                op: LinearIntGuardOp::Lt,
+                                lhs: 9,
+                                rhs: 4,
+                            },
+                            continue_when: true,
+                            continue_preset: None,
+                            exit_preset: None,
+                            exit_pc: 6,
+                        },
+                    }],
+                    steps: vec![NumericStep::Binary {
+                        dst: 5,
+                        lhs: NumericOperand::Reg(5),
+                        rhs: NumericOperand::ImmI(1),
+                        op: NumericBinaryOp::Add,
+                    }],
+                    tail_blocks: vec![],
                 }
             );
         }
@@ -1730,13 +1755,66 @@ fn backend_compiles_numeric_table_shift_jmp_loop() {
         BackendCompileOutcome::Compiled(compiled) => {
             assert_eq!(
                 compiled.executor(),
-                CompiledTraceExecutor::NumericTableShiftJmpLoop {
-                    table_reg: 0,
-                    index_reg: 7,
-                    left_bound_reg: 5,
-                    value_reg: 6,
-                    temp_reg: 8,
-                    exit_pc: 12,
+                CompiledTraceExecutor::NumericJmpLoop {
+                    head_blocks: vec![
+                        NumericJmpLoopGuardBlock {
+                            pre_steps: vec![],
+                            guard: NumericJmpLoopGuard::Head {
+                                cond: NumericIfElseCond::RegCompare {
+                                    op: LinearIntGuardOp::Le,
+                                    lhs: 5,
+                                    rhs: 7,
+                                },
+                                continue_when: true,
+                                continue_preset: None,
+                                exit_preset: None,
+                                exit_pc: 12,
+                            },
+                        },
+                        NumericJmpLoopGuardBlock {
+                            pre_steps: vec![NumericStep::GetTableInt {
+                                dst: 8,
+                                table: 0,
+                                index: 7,
+                            }],
+                            guard: NumericJmpLoopGuard::Head {
+                                cond: NumericIfElseCond::RegCompare {
+                                    op: LinearIntGuardOp::Lt,
+                                    lhs: 6,
+                                    rhs: 8,
+                                },
+                                continue_when: true,
+                                continue_preset: None,
+                                exit_preset: None,
+                                exit_pc: 12,
+                            },
+                        },
+                    ],
+                    steps: vec![
+                        NumericStep::Binary {
+                            dst: 8,
+                            lhs: NumericOperand::Reg(7),
+                            rhs: NumericOperand::ImmI(1),
+                            op: NumericBinaryOp::Add,
+                        },
+                        NumericStep::GetTableInt {
+                            dst: 9,
+                            table: 0,
+                            index: 7,
+                        },
+                        NumericStep::SetTableInt {
+                            table: 0,
+                            index: 8,
+                            value: 9,
+                        },
+                        NumericStep::Binary {
+                            dst: 7,
+                            lhs: NumericOperand::Reg(7),
+                            rhs: NumericOperand::ImmI(-1),
+                            op: NumericBinaryOp::Add,
+                        },
+                    ],
+                    tail_blocks: vec![],
                 }
             );
         }
@@ -1817,20 +1895,23 @@ fn backend_compiles_tail_guard_numeric_test_jmp_loop() {
             assert_eq!(
                 compiled.executor(),
                 CompiledTraceExecutor::NumericJmpLoop {
-                    pre_steps: vec![],
                     steps: vec![NumericStep::Binary {
                         dst: 5,
                         lhs: NumericOperand::Reg(5),
                         rhs: NumericOperand::ImmI(1),
                         op: NumericBinaryOp::Add,
                     }],
-                    guard: NumericJmpLoopGuard::Tail {
-                        cond: NumericIfElseCond::Truthy { reg: 7 },
-                        continue_when: true,
-                        continue_preset: None,
-                        exit_preset: None,
-                        exit_pc: 4,
-                    },
+                    head_blocks: vec![],
+                    tail_blocks: vec![NumericJmpLoopGuardBlock {
+                        pre_steps: vec![],
+                        guard: NumericJmpLoopGuard::Tail {
+                            cond: NumericIfElseCond::Truthy { reg: 7 },
+                            continue_when: true,
+                            continue_preset: None,
+                            exit_preset: None,
+                            exit_pc: 4,
+                        },
+                    }],
                 }
             );
         }
@@ -1912,20 +1993,23 @@ fn backend_compiles_tail_guard_numeric_testset_jmp_loop() {
             assert_eq!(
                 compiled.executor(),
                 CompiledTraceExecutor::NumericJmpLoop {
-                    pre_steps: vec![],
                     steps: vec![NumericStep::Binary {
                         dst: 5,
                         lhs: NumericOperand::Reg(8),
                         rhs: NumericOperand::ImmI(1),
                         op: NumericBinaryOp::Add,
                     }],
-                    guard: NumericJmpLoopGuard::Tail {
-                        cond: NumericIfElseCond::Truthy { reg: 7 },
-                        continue_when: true,
-                        continue_preset: Some(NumericStep::Move { dst: 8, src: 7 }),
-                        exit_preset: None,
-                        exit_pc: 4,
-                    },
+                    head_blocks: vec![],
+                    tail_blocks: vec![NumericJmpLoopGuardBlock {
+                        pre_steps: vec![],
+                        guard: NumericJmpLoopGuard::Tail {
+                            cond: NumericIfElseCond::Truthy { reg: 7 },
+                            continue_when: true,
+                            continue_preset: Some(NumericStep::Move { dst: 8, src: 7 }),
+                            exit_preset: None,
+                            exit_pc: 4,
+                        },
+                    }],
                 }
             );
         }

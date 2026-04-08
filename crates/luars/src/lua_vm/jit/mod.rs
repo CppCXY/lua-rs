@@ -4,7 +4,6 @@ mod hotcount;
 mod helper_plan;
 mod ir;
 mod lowering;
-#[cfg(feature = "jit")]
 mod runtime;
 mod state;
 mod trace_recorder;
@@ -14,17 +13,16 @@ use crate::lua_vm::{CallInfo, LuaState};
 
 pub(crate) use backend::{
     CompiledTraceExecution, CompiledTraceExecutor, LinearIntGuardOp, LinearIntLoopGuard,
-    LinearIntStep, NumericBinaryOp, NumericIfElseCond, NumericJmpLoopGuard, NumericOperand,
-    NumericStep,
+    LinearIntStep, NumericBinaryOp, NumericIfElseCond, NumericJmpLoopGuard,
+    NumericJmpLoopGuardBlock, NumericOperand, NumericStep,
 };
 pub(crate) use helper_plan::HelperPlanDispatchSummary;
-#[cfg(feature = "jit")]
 pub(crate) use runtime::{
     dispatch_root_trace_or_record, finish_trace_exit, record_trace_hits_or_fallback,
 };
-pub(crate) use trace_recorder::TraceAbortReason;
-
-pub(crate) use state::{ExecutableTraceDispatch, JitState, TraceExitDispatch};
+pub(crate) use state::{
+    ExecutableTraceDispatch, JitState, ReadySideTraceDispatch, TraceExitDispatch,
+};
 pub use state::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +100,154 @@ pub(crate) fn record_batched_trace_execution(
 }
 
 #[inline(always)]
+pub(crate) fn record_root_trace_dispatch(
+    lua_state: &mut LuaState,
+    dispatch: &ExecutableTraceDispatch,
+) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    let jit = &mut lua_state.vm_mut().jit;
+    jit.record_root_dispatch(&dispatch.execution);
+    if let Some(profile) = dispatch.native_profile {
+        jit.record_root_native_profile(profile);
+    }
+}
+
+#[inline(always)]
+pub(crate) fn record_ready_side_trace_dispatch(
+    lua_state: &mut LuaState,
+    dispatch: &ReadySideTraceDispatch,
+) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state.vm_mut().jit.record_ready_side_dispatch(dispatch);
+}
+
+#[inline(always)]
+pub(crate) fn record_redundant_side_exit_recovery(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_redundant_side_exit_recovery();
+}
+
+#[inline(always)]
+pub(crate) fn record_redundant_side_exit_fast_dispatch(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_redundant_side_exit_fast_dispatch();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_iteration(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_iteration();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_bound_side_exit(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_bound_side_exit();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_compare_side_exit(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_compare_side_exit();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_fallback_type_guard(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_fallback_type_guard();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_fallback_meta_guard(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_fallback_meta_guard();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_fallback_table_get(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_fallback_table_get();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_fallback_table_set(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_fallback_table_set();
+}
+
+#[inline(always)]
+pub(crate) fn record_numeric_table_shift_gc_barrier(lua_state: &mut LuaState) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_numeric_table_shift_gc_barrier();
+}
+
+#[inline(always)]
 pub(crate) unsafe fn resolve_trace_exit(
     lua_state: &mut LuaState,
     ci: &CallInfo,
@@ -137,19 +283,34 @@ pub(crate) unsafe fn resolve_trace_exit(
 }
 
 #[inline(always)]
-pub(crate) fn blacklist_trace(
+pub(crate) unsafe fn resolve_trace_exit_by_index(
     lua_state: &mut LuaState,
-    chunk_ptr: *const LuaProto,
-    target_pc: usize,
-    reason: TraceAbortReason,
-) {
-    if chunk_ptr.is_null() || !should_track(lua_state) {
-        return;
+    ci: &CallInfo,
+    base: usize,
+    parent_pc: usize,
+    exit_index: u16,
+) -> Option<TraceExitDispatch> {
+    if ci.chunk_ptr.is_null() || !should_track(lua_state) {
+        return None;
     }
 
-    let Ok(pc) = u32::try_from(target_pc) else {
-        return;
+    let Ok(parent_pc) = u32::try_from(parent_pc) else {
+        return None;
     };
 
-    lua_state.vm_mut().jit.blacklist_trace(chunk_ptr, pc, reason);
+    let chunk = unsafe { &*ci.chunk_ptr };
+    let stack = lua_state.stack().as_ptr();
+
+    unsafe {
+        lua_state.vm_mut().jit.resolve_trace_exit_by_index(
+            ci.chunk_ptr,
+            parent_pc,
+            exit_index,
+            stack,
+            base,
+            &chunk.constants,
+            ci.upvalue_ptrs,
+        )
+    }
 }
+

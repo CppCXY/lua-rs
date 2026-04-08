@@ -79,9 +79,34 @@ function Invoke-BenchmarkRuntime {
     }
 
     try {
-        $rawOutput = & $Executable $ScriptPath 2>&1
-        $output = @($rawOutput | ForEach-Object { [string]$_ })
-        $exitCode = $LASTEXITCODE
+        $stdoutPath = [System.IO.Path]::GetTempFileName()
+        $stderrPath = [System.IO.Path]::GetTempFileName()
+
+        try {
+            $process = Start-Process `
+                -FilePath $Executable `
+                -ArgumentList @($ScriptPath) `
+                -NoNewWindow `
+                -Wait `
+                -PassThru `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath
+
+            $stdoutLines = if (Test-Path $stdoutPath) {
+                @(Get-Content -Path $stdoutPath -ErrorAction SilentlyContinue)
+            } else {
+                @()
+            }
+            $stderrLines = if (Test-Path $stderrPath) {
+                @(Get-Content -Path $stderrPath -ErrorAction SilentlyContinue)
+            } else {
+                @()
+            }
+            $output = @($stdoutLines + $stderrLines | ForEach-Object { [string]$_ })
+            $exitCode = $process.ExitCode
+        } finally {
+            Remove-Item -Path $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
+        }
     } finally {
         foreach ($key in $ExtraEnv.Keys) {
             [Environment]::SetEnvironmentVariable($key, $previousEnv[$key])
@@ -219,7 +244,7 @@ function Write-JitStatsSummary {
     Write-ColorHost "JIT Summary (Lua-RS)" "Cyan"
     $Rows |
         Sort-Object -Property RecordAborts, BlacklistedSlots -Descending |
-        Select-Object Benchmark, RecordedTraces, RecordAborts, BlacklistedSlots, HelperPlanDispatches, HelperPlanCalls, HelperPlanMetamethods, TopAbortReason, TopUnsupportedOpcode |
+        Select-Object Benchmark, RecordedTraces, RootNativeDispatches, RootInterpreterDispatches, SideNativeDispatches, SideInterpreterDispatches, NativeExitIndexResolveAttempts, NativeExitIndexResolveHits, NativeProfileGuardSteps, NativeProfileArithmeticHelpers, NativeProfileTableHelpers, NativeProfileUpvalueHelpers, NativeProfileShiftHelpers, HelperPlanDispatches, HelperPlanCalls, HelperPlanMetamethods, TopAbortReason, TopUnsupportedOpcode |
         Format-Table -AutoSize |
         Out-String -Width 240 |
         Write-Output
@@ -281,6 +306,17 @@ foreach ($bench in $benchmarks) {
                 BlacklistHits = $parsedStats.BlacklistHits
                 TraceEnterChecks = $parsedStats.TraceEnterChecks
                 TraceEnterHits = $parsedStats.TraceEnterHits
+                RootNativeDispatches = $parsedStats.RootNativeDispatches
+                RootInterpreterDispatches = $parsedStats.RootInterpreterDispatches
+                SideNativeDispatches = $parsedStats.SideNativeDispatches
+                SideInterpreterDispatches = $parsedStats.SideInterpreterDispatches
+                NativeExitIndexResolveAttempts = $parsedStats.NativeExitIndexResolveAttempts
+                NativeExitIndexResolveHits = $parsedStats.NativeExitIndexResolveHits
+                NativeProfileGuardSteps = $parsedStats.NativeProfileGuardSteps
+                NativeProfileArithmeticHelpers = $parsedStats.NativeProfileArithmeticHelpers
+                NativeProfileTableHelpers = $parsedStats.NativeProfileTableHelpers
+                NativeProfileUpvalueHelpers = $parsedStats.NativeProfileUpvalueHelpers
+                NativeProfileShiftHelpers = $parsedStats.NativeProfileShiftHelpers
                 HelperPlanDispatches = $parsedStats.HelperPlanDispatches
                 HelperPlanSteps = $parsedStats.HelperPlanSteps
                 HelperPlanGuards = $parsedStats.HelperPlanGuards

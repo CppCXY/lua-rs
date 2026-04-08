@@ -7,13 +7,13 @@ use crate::lua_value::{LuaProto, LuaValue};
 use crate::OpCode;
 
 use super::backend::{
-    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, NativeTraceBackend,
-    TraceBackend,
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, CompiledTraceExecutor,
+    NativeCompiledTrace, NativeLoweringProfile, NativeTraceBackend, TraceBackend,
 };
 use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use super::hotcount::tick_hotcount;
 use super::ir::TraceIr;
-use super::lowering::{DeoptRecovery, DeoptTarget, LoweredTrace};
+use super::lowering::{DeoptRecovery, DeoptTarget, LoweredTrace, ValueHintSummary};
 use super::trace_recorder::{TraceAbortReason, TraceArtifact, TraceRecorder};
 
 const OPCODE_COUNT: usize = OpCode::ExtraArg as usize + 1;
@@ -64,6 +64,7 @@ struct TraceInfo {
     lowered_trace: Option<LoweredTrace>,
     helper_plan: Option<HelperPlan>,
     compiled_trace: Option<CompiledTrace>,
+    linked_ready_side_traces: AHashMap<u16, ReadySideTraceDispatch>,
 }
 
 impl TraceInfo {
@@ -75,6 +76,7 @@ impl TraceInfo {
             lowered_trace: None,
             helper_plan: None,
             compiled_trace: None,
+            linked_ready_side_traces: AHashMap::default(),
         }
     }
 }
@@ -120,12 +122,28 @@ pub(crate) struct ExecutableTraceDispatch {
     pub loop_tail_pc: u32,
     pub execution: CompiledTraceExecution,
     pub summary: HelperPlanDispatchSummary,
+    pub native_profile: Option<NativeLoweringProfile>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeExecutableTraceDispatch {
+    pub start_pc: u32,
+    pub loop_tail_pc: u32,
+    pub native: NativeCompiledTrace,
+    pub summary: HelperPlanDispatchSummary,
+    pub profile: NativeLoweringProfile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReadySideTraceDispatch {
+    Executable(ExecutableTraceDispatch),
+    Native(NativeExecutableTraceDispatch),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TraceExitDispatch {
     pub recovery: DeoptRecovery,
-    pub side_trace: Option<ExecutableTraceDispatch>,
+    pub ready_side_trace: Option<ReadySideTraceDispatch>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,6 +164,39 @@ pub struct JitCounters {
     pub helper_plan_guards: u32,
     pub helper_plan_calls: u32,
     pub helper_plan_metamethods: u32,
+    pub root_native_dispatches: u32,
+    pub root_native_return_dispatches: u32,
+    pub root_native_linear_int_for_dispatches: u32,
+    pub root_native_linear_int_jmp_dispatches: u32,
+    pub root_native_numeric_for_dispatches: u32,
+    pub root_native_guarded_numeric_for_dispatches: u32,
+    pub root_native_numeric_jmp_dispatches: u32,
+    pub root_interpreter_dispatches: u32,
+    pub side_native_dispatches: u32,
+    pub side_interpreter_dispatches: u32,
+    pub native_exit_index_resolve_attempts: u32,
+    pub native_exit_index_resolve_hits: u32,
+    pub native_redundant_side_exit_recoveries: u32,
+    pub native_redundant_side_exit_fast_dispatches: u32,
+    pub native_profile_guard_steps: u32,
+    pub native_profile_linear_guards: u32,
+    pub native_profile_numeric_int_compare_guards: u32,
+    pub native_profile_numeric_reg_compare_guards: u32,
+    pub native_profile_truthy_guards: u32,
+    pub native_profile_arithmetic_helpers: u32,
+    pub native_profile_table_helpers: u32,
+    pub native_profile_upvalue_helpers: u32,
+    pub native_profile_shift_helpers: u32,
+    pub root_interpreter_numeric_table_shift_jmp_dispatches: u32,
+    pub side_interpreter_numeric_table_shift_jmp_dispatches: u32,
+    pub numeric_table_shift_iterations: u32,
+    pub numeric_table_shift_bound_side_exits: u32,
+    pub numeric_table_shift_compare_side_exits: u32,
+    pub numeric_table_shift_fallback_type_guard: u32,
+    pub numeric_table_shift_fallback_meta_guard: u32,
+    pub numeric_table_shift_fallback_table_get: u32,
+    pub numeric_table_shift_fallback_table_set: u32,
+    pub numeric_table_shift_gc_barriers: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -301,10 +352,16 @@ impl JitState {
             if details.is_empty() {
                 details.push_str("none");
             }
+            let value_hints = trace
+                .lowered_trace
+                .as_ref()
+                .map(LoweredTrace::root_value_hint_summary)
+                .map(format_value_hint_summary)
+                .unwrap_or_else(|| String::from("none"));
 
             let _ = writeln!(
                 report,
-                "- chunk=0x{chunk_addr:x} pc={pc} status={status} executor={executor} ops={op_count} exits={exit_count} details={details}",
+                "- chunk=0x{chunk_addr:x} pc={pc} status={status} executor={executor} ops={op_count} exits={exit_count} details={details} value_hints={value_hints}",
             );
         }
 
@@ -383,6 +440,7 @@ impl JitState {
                         loop_tail_pc: compiled_trace.loop_tail_pc,
                         execution: compiled_trace.execution(),
                         summary: compiled_trace.summary(),
+                        native_profile: compiled_trace.native_profile(),
                     });
                 }
 
@@ -412,6 +470,173 @@ impl JitState {
         }
 
         None
+    }
+
+    pub(crate) fn record_root_dispatch(&mut self, execution: &CompiledTraceExecution) {
+        match execution {
+            CompiledTraceExecution::Native(native) => {
+                self.counters.root_native_dispatches =
+                    self.counters.root_native_dispatches.saturating_add(1);
+                match native {
+                    NativeCompiledTrace::Return { .. }
+                    | NativeCompiledTrace::Return0 { .. }
+                    | NativeCompiledTrace::Return1 { .. } => {
+                        self.counters.root_native_return_dispatches = self
+                            .counters
+                            .root_native_return_dispatches
+                            .saturating_add(1);
+                    }
+                    NativeCompiledTrace::LinearIntForLoop { .. } => {
+                        self.counters.root_native_linear_int_for_dispatches = self
+                            .counters
+                            .root_native_linear_int_for_dispatches
+                            .saturating_add(1);
+                    }
+                    NativeCompiledTrace::LinearIntJmpLoop { .. } => {
+                        self.counters.root_native_linear_int_jmp_dispatches = self
+                            .counters
+                            .root_native_linear_int_jmp_dispatches
+                            .saturating_add(1);
+                    }
+                    NativeCompiledTrace::NumericForLoop { .. } => {
+                        self.counters.root_native_numeric_for_dispatches = self
+                            .counters
+                            .root_native_numeric_for_dispatches
+                            .saturating_add(1);
+                    }
+                    NativeCompiledTrace::GuardedNumericForLoop { .. } => {
+                        self.counters.root_native_guarded_numeric_for_dispatches = self
+                            .counters
+                            .root_native_guarded_numeric_for_dispatches
+                            .saturating_add(1);
+                    }
+                    NativeCompiledTrace::NumericJmpLoop { .. } => {
+                        self.counters.root_native_numeric_jmp_dispatches = self
+                            .counters
+                            .root_native_numeric_jmp_dispatches
+                            .saturating_add(1);
+                    }
+                }
+            }
+            CompiledTraceExecution::Interpreter(_) => {
+                self.counters.root_interpreter_dispatches =
+                    self.counters.root_interpreter_dispatches.saturating_add(1);
+                if matches!(
+                    execution,
+                    CompiledTraceExecution::Interpreter(
+                        CompiledTraceExecutor::NumericTableShiftJmpLoop { .. }
+                    )
+                ) {
+                    self.counters.root_interpreter_numeric_table_shift_jmp_dispatches = self
+                        .counters
+                        .root_interpreter_numeric_table_shift_jmp_dispatches
+                        .saturating_add(1);
+                }
+            }
+            CompiledTraceExecution::LoweredOnly => {}
+        }
+    }
+
+    pub(crate) fn record_root_native_profile(&mut self, profile: NativeLoweringProfile) {
+        apply_native_lowering_profile(&mut self.counters, profile);
+    }
+
+    pub(crate) fn record_ready_side_dispatch(&mut self, dispatch: &ReadySideTraceDispatch) {
+        match dispatch {
+            ReadySideTraceDispatch::Native(native) => {
+                self.counters.side_native_dispatches =
+                    self.counters.side_native_dispatches.saturating_add(1);
+                apply_native_lowering_profile(&mut self.counters, native.profile);
+            }
+            ReadySideTraceDispatch::Executable(_) => {
+                self.counters.side_interpreter_dispatches =
+                    self.counters.side_interpreter_dispatches.saturating_add(1);
+                if matches!(
+                    dispatch,
+                    ReadySideTraceDispatch::Executable(ExecutableTraceDispatch {
+                        execution: CompiledTraceExecution::Interpreter(
+                            CompiledTraceExecutor::NumericTableShiftJmpLoop { .. }
+                        ),
+                        ..
+                    })
+                ) {
+                    self.counters.side_interpreter_numeric_table_shift_jmp_dispatches = self
+                        .counters
+                        .side_interpreter_numeric_table_shift_jmp_dispatches
+                        .saturating_add(1);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn record_numeric_table_shift_iteration(&mut self) {
+        self.counters.numeric_table_shift_iterations = self
+            .counters
+            .numeric_table_shift_iterations
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_numeric_table_shift_bound_side_exit(&mut self) {
+        self.counters.numeric_table_shift_bound_side_exits = self
+            .counters
+            .numeric_table_shift_bound_side_exits
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_numeric_table_shift_compare_side_exit(&mut self) {
+        self.counters.numeric_table_shift_compare_side_exits = self
+            .counters
+            .numeric_table_shift_compare_side_exits
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_numeric_table_shift_fallback_type_guard(&mut self) {
+        self.counters.numeric_table_shift_fallback_type_guard = self
+            .counters
+            .numeric_table_shift_fallback_type_guard
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_numeric_table_shift_fallback_meta_guard(&mut self) {
+        self.counters.numeric_table_shift_fallback_meta_guard = self
+            .counters
+            .numeric_table_shift_fallback_meta_guard
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_numeric_table_shift_fallback_table_get(&mut self) {
+        self.counters.numeric_table_shift_fallback_table_get = self
+            .counters
+            .numeric_table_shift_fallback_table_get
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_numeric_table_shift_fallback_table_set(&mut self) {
+        self.counters.numeric_table_shift_fallback_table_set = self
+            .counters
+            .numeric_table_shift_fallback_table_set
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_numeric_table_shift_gc_barrier(&mut self) {
+        self.counters.numeric_table_shift_gc_barriers = self
+            .counters
+            .numeric_table_shift_gc_barriers
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_redundant_side_exit_recovery(&mut self) {
+        self.counters.native_redundant_side_exit_recoveries = self
+            .counters
+            .native_redundant_side_exit_recoveries
+            .saturating_add(1);
+    }
+
+    pub(crate) fn record_redundant_side_exit_fast_dispatch(&mut self) {
+        self.counters.native_redundant_side_exit_fast_dispatches = self
+            .counters
+            .native_redundant_side_exit_fast_dispatches
+            .saturating_add(1);
     }
 
     pub(crate) fn record_batched_trace_execution(
@@ -546,6 +771,52 @@ impl JitState {
                 lowered_trace.recover_exit(exit_pc, stack, base, constants, upvalue_ptrs)
             })?;
 
+        self.finish_resolved_trace_exit(chunk_ptr, parent_pc, recovery)
+    }
+
+    pub(crate) unsafe fn resolve_trace_exit_by_index(
+        &mut self,
+        chunk_ptr: *const LuaProto,
+        parent_pc: u32,
+        exit_index: u16,
+        stack: *const LuaValue,
+        base: usize,
+        constants: &[LuaValue],
+        upvalue_ptrs: *const UpvaluePtr,
+    ) -> Option<TraceExitDispatch> {
+        let key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc: parent_pc,
+        };
+
+        self.counters.native_exit_index_resolve_attempts = self
+            .counters
+            .native_exit_index_resolve_attempts
+            .saturating_add(1);
+
+        let recovery = self
+            .traces
+            .get(&key)
+            .and_then(|trace| trace.lowered_trace.as_ref())
+            .and_then(|lowered_trace| unsafe {
+                lowered_trace.recover_exit_by_index(exit_index, stack, base, constants, upvalue_ptrs)
+            })?;
+
+        self.counters.native_exit_index_resolve_hits = self
+            .counters
+            .native_exit_index_resolve_hits
+            .saturating_add(1);
+
+        self.finish_resolved_trace_exit(chunk_ptr, parent_pc, recovery)
+    }
+
+    fn finish_resolved_trace_exit(
+        &mut self,
+        chunk_ptr: *const LuaProto,
+        parent_pc: u32,
+        recovery: DeoptRecovery,
+    ) -> Option<TraceExitDispatch> {
+
         self.record_hot_exit(
             chunk_ptr,
             parent_pc,
@@ -553,39 +824,16 @@ impl JitState {
             recovery.target.resume_pc,
         );
 
-        let side_trace = self.side_trace_dispatch_for(chunk_ptr, parent_pc, recovery.target.exit_index);
+        let ready_side_trace = self.ready_side_trace_dispatch_for(
+            chunk_ptr,
+            parent_pc,
+            recovery.target.exit_index,
+        );
 
         Some(TraceExitDispatch {
             recovery,
-            side_trace,
+            ready_side_trace,
         })
-    }
-
-    pub(crate) fn blacklist_trace(
-        &mut self,
-        chunk_ptr: *const LuaProto,
-        pc: u32,
-        reason: TraceAbortReason,
-    ) {
-        let key = TraceKey {
-            chunk_addr: chunk_ptr as usize,
-            pc,
-        };
-
-        let attempts = self
-            .traces
-            .get(&key)
-            .map(|trace| match trace.status {
-                TraceStatus::Recording { attempts }
-                | TraceStatus::Blacklisted { attempts, .. } => attempts.saturating_add(1),
-                TraceStatus::Counting { .. }
-                | TraceStatus::Recorded { .. }
-                | TraceStatus::Lowered { .. }
-                | TraceStatus::Executable { .. }
-                | TraceStatus::Redirected { .. } => 1,
-            })
-            .unwrap_or(1);
-        self.abort_recording(key, attempts, reason);
     }
 
     #[cfg(test)]
@@ -671,6 +919,7 @@ impl JitState {
                         trace.lowered_trace = None;
                         trace.helper_plan = None;
                         trace.compiled_trace = None;
+                        trace.linked_ready_side_traces.clear();
                     }
                 }
                 if let Some(trace) = self.traces.get_mut(&storage_key) {
@@ -694,6 +943,7 @@ impl JitState {
                     trace.lowered_trace = Some(lowered_trace);
                     trace.helper_plan = Some(helper_plan);
                     trace.compiled_trace = compiled_trace;
+                    trace.linked_ready_side_traces.clear();
                 } else {
                     let mut trace = TraceInfo::new();
                     let compiled_trace = match backend_outcome {
@@ -732,6 +982,7 @@ impl JitState {
             trace.lowered_trace = None;
             trace.helper_plan = None;
             trace.compiled_trace = None;
+            trace.linked_ready_side_traces.clear();
         }
     }
 
@@ -754,6 +1005,7 @@ impl JitState {
             trace.lowered_trace = None;
             trace.helper_plan = None;
             trace.compiled_trace = None;
+            self.clear_linked_ready_side_trace(key);
             attempts
         } else {
             return;
@@ -789,6 +1041,7 @@ impl JitState {
                     trace.helper_plan = Some(helper_plan);
                     trace.compiled_trace = compiled_trace;
                 }
+                self.refresh_linked_ready_side_trace(key);
             }
             Err(reason) => self.abort_side_recording(key, attempts, reason),
         }
@@ -804,6 +1057,7 @@ impl JitState {
             trace.helper_plan = None;
             trace.compiled_trace = None;
         }
+        self.clear_linked_ready_side_trace(key);
     }
 
     fn side_trace_dispatch_for(
@@ -832,7 +1086,118 @@ impl JitState {
             loop_tail_pc: compiled_trace.loop_tail_pc,
             execution: compiled_trace.execution(),
             summary: compiled_trace.summary(),
+            native_profile: compiled_trace.native_profile(),
         })
+    }
+
+    fn ready_side_trace_dispatch_for(
+        &self,
+        chunk_ptr: *const LuaProto,
+        parent_pc: u32,
+        exit_index: u16,
+    ) -> Option<ReadySideTraceDispatch> {
+        let parent_key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc: parent_pc,
+        };
+        if let Some(dispatch) = self
+            .traces
+            .get(&parent_key)
+            .and_then(|trace| trace.linked_ready_side_traces.get(&exit_index))
+        {
+            return Some(dispatch.clone());
+        }
+
+        let dispatch = self.side_trace_dispatch_for(chunk_ptr, parent_pc, exit_index)?;
+        match dispatch {
+            ExecutableTraceDispatch {
+                start_pc,
+                loop_tail_pc,
+                execution: CompiledTraceExecution::Native(native),
+                summary,
+                native_profile: Some(profile),
+            } => Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
+                start_pc,
+                loop_tail_pc,
+                native,
+                summary,
+                profile,
+            })),
+            dispatch => Some(ReadySideTraceDispatch::Executable(dispatch)),
+        }
+    }
+
+    fn native_side_trace_dispatch_for(
+        &self,
+        chunk_ptr: *const LuaProto,
+        parent_pc: u32,
+        exit_index: u16,
+    ) -> Option<NativeExecutableTraceDispatch> {
+        match self.ready_side_trace_dispatch_for(chunk_ptr, parent_pc, exit_index)? {
+            ReadySideTraceDispatch::Native(dispatch) => Some(dispatch),
+            ReadySideTraceDispatch::Executable(_) => None,
+        }
+    }
+
+    fn clear_linked_ready_side_trace(&mut self, key: SideTraceKey) {
+        if let Some(parent_trace) = self.traces.get_mut(&key.parent) {
+            parent_trace.linked_ready_side_traces.remove(&key.exit_index);
+        }
+    }
+
+    fn refresh_linked_ready_side_trace(&mut self, key: SideTraceKey) {
+        let dispatch = {
+            let side_trace = match self.side_traces.get(&key) {
+                Some(side_trace) => side_trace,
+                None => return,
+            };
+            if !matches!(side_trace.status, SideTraceStatus::Executable { .. }) {
+                None
+            } else {
+                let compiled_trace = match side_trace.compiled_trace.as_ref() {
+                    Some(compiled_trace) if compiled_trace.is_enterable() => compiled_trace,
+                    _ => return,
+                };
+                let dispatch = ExecutableTraceDispatch {
+                    start_pc: side_trace.start_pc,
+                    loop_tail_pc: compiled_trace.loop_tail_pc,
+                    execution: compiled_trace.execution(),
+                    summary: compiled_trace.summary(),
+                    native_profile: compiled_trace.native_profile(),
+                };
+                Some(match dispatch {
+                    ExecutableTraceDispatch {
+                        start_pc,
+                        loop_tail_pc,
+                        execution: CompiledTraceExecution::Native(native),
+                        summary,
+                        native_profile: Some(profile),
+                    } => ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
+                        start_pc,
+                        loop_tail_pc,
+                        native,
+                        summary,
+                        profile,
+                    }),
+                    dispatch => ReadySideTraceDispatch::Executable(dispatch),
+                })
+            }
+        };
+
+        let Some(parent_trace) = self.traces.get_mut(&key.parent) else {
+            return;
+        };
+
+        match dispatch {
+            Some(dispatch) => {
+                parent_trace
+                    .linked_ready_side_traces
+                    .insert(key.exit_index, dispatch);
+            }
+            None => {
+                parent_trace.linked_ready_side_traces.remove(&key.exit_index);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -899,7 +1264,6 @@ fn apply_abort_reason(
         TraceAbortReason::TraceTooLong => {
             aborts.trace_too_long = aborts.trace_too_long.saturating_add(1);
         }
-        TraceAbortReason::RuntimeGuardRejected => {}
     }
 }
 
@@ -1040,6 +1404,24 @@ fn format_step_counts(counts: TraceStepCounts) -> String {
     parts.join(",")
 }
 
+fn format_value_hint_summary(summary: ValueHintSummary) -> String {
+    let mut parts = Vec::new();
+
+    push_step_count(&mut parts, "int", summary.integer_count);
+    push_step_count(&mut parts, "float", summary.float_count);
+    push_step_count(&mut parts, "num", summary.numeric_count);
+    push_step_count(&mut parts, "bool", summary.boolean_count);
+    push_step_count(&mut parts, "table", summary.table_count);
+    push_step_count(&mut parts, "closure", summary.closure_count);
+    push_step_count(&mut parts, "unknown", summary.unknown_count);
+
+    if parts.is_empty() {
+        String::from("none")
+    } else {
+        parts.join(",")
+    }
+}
+
 fn push_step_count(parts: &mut Vec<String>, name: &str, count: u16) {
     if count != 0 {
         parts.push(format!("{name}={count}"));
@@ -1049,9 +1431,11 @@ fn push_step_count(parts: &mut Vec<String>, name: &str, count: u16) {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOT_EXIT_THRESHOLD, JitAbortCounters, JitCounters, JitState, SideTraceKey,
-        SideTraceStatus, TraceKey, TraceStatus,
+        HOT_EXIT_THRESHOLD, JitAbortCounters, JitCounters, JitState,
+        NativeExecutableTraceDispatch, ReadySideTraceDispatch, SideTraceKey, SideTraceStatus,
+        TraceKey, TraceStatus,
     };
+    use crate::lua_vm::jit::backend::NativeCompiledTrace;
     use crate::{LuaVM, SafeOption};
     use crate::LuaValue;
     use crate::lua_value::LuaProto;
@@ -1098,6 +1482,39 @@ mod tests {
                 helper_plan_guards: 0,
                 helper_plan_calls: 0,
                 helper_plan_metamethods: 0,
+                root_native_dispatches: 0,
+                root_native_return_dispatches: 0,
+                root_native_linear_int_for_dispatches: 0,
+                root_native_linear_int_jmp_dispatches: 0,
+                root_native_numeric_for_dispatches: 0,
+                root_native_guarded_numeric_for_dispatches: 0,
+                root_native_numeric_jmp_dispatches: 0,
+                root_interpreter_dispatches: 0,
+                side_native_dispatches: 0,
+                side_interpreter_dispatches: 0,
+                native_exit_index_resolve_attempts: 0,
+                native_exit_index_resolve_hits: 0,
+                native_redundant_side_exit_recoveries: 0,
+                native_redundant_side_exit_fast_dispatches: 0,
+                native_profile_guard_steps: 0,
+                native_profile_linear_guards: 0,
+                native_profile_numeric_int_compare_guards: 0,
+                native_profile_numeric_reg_compare_guards: 0,
+                native_profile_truthy_guards: 0,
+                native_profile_arithmetic_helpers: 0,
+                native_profile_table_helpers: 0,
+                native_profile_upvalue_helpers: 0,
+                native_profile_shift_helpers: 0,
+                root_interpreter_numeric_table_shift_jmp_dispatches: 0,
+                side_interpreter_numeric_table_shift_jmp_dispatches: 0,
+                numeric_table_shift_iterations: 0,
+                numeric_table_shift_bound_side_exits: 0,
+                numeric_table_shift_compare_side_exits: 0,
+                numeric_table_shift_fallback_type_guard: 0,
+                numeric_table_shift_fallback_meta_guard: 0,
+                numeric_table_shift_fallback_table_get: 0,
+                numeric_table_shift_fallback_table_set: 0,
+                numeric_table_shift_gc_barriers: 0,
             }
         );
     }
@@ -1465,6 +1882,67 @@ mod tests {
     }
 
     #[test]
+    fn native_executable_side_trace_produces_native_dispatch_plan() {
+        let mut jit = JitState::default();
+        let mut chunk = LuaProto::new();
+        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..HOT_EXIT_THRESHOLD {
+            jit.record_hot_exit(chunk_ptr, 0, 0, 0);
+        }
+
+        let dispatch = jit.native_side_trace_dispatch_for(chunk_ptr, 0, 0);
+        assert!(dispatch.is_some());
+        let dispatch = dispatch.unwrap();
+        assert_eq!(dispatch.start_pc, 0);
+        assert_eq!(dispatch.loop_tail_pc, 1);
+        assert!(matches!(dispatch.native, NativeCompiledTrace::LinearIntForLoop { .. }));
+
+        let ready_dispatch = jit.ready_side_trace_dispatch_for(chunk_ptr, 0, 0);
+        assert!(matches!(
+            ready_dispatch,
+            Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
+                start_pc: 0,
+                loop_tail_pc: 1,
+                native: NativeCompiledTrace::LinearIntForLoop { .. },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn ready_side_trace_dispatch_is_cached_on_parent_trace() {
+        let mut jit = JitState::default();
+        let mut chunk = LuaProto::new();
+        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..HOT_LOOP_THRESHOLD {
+            jit.record_loop_backedge(chunk_ptr, 0);
+        }
+        for _ in 0..HOT_EXIT_THRESHOLD {
+            jit.record_hot_exit(chunk_ptr, 0, 0, 0);
+        }
+
+        let parent = jit.traces.get(&TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc: 0,
+        });
+        assert!(matches!(
+            parent.and_then(|trace| trace.linked_ready_side_traces.get(&0)),
+            Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
+                start_pc: 0,
+                loop_tail_pc: 1,
+                native: NativeCompiledTrace::LinearIntForLoop { .. },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn snapshot_reports_trace_buckets() {
         let mut jit = JitState::default();
         let mut recorded_chunk = LuaProto::new();
@@ -1619,17 +2097,17 @@ mod tests {
         assert_eq!(results[0].as_integer(), Some(200));
 
         let report = vm.jit.trace_report();
-        assert!(report.contains("executor=GuardedNumericForLoop"));
+        assert!(report.contains("executor=NativeGuardedNumericForLoop"));
         let compiled_trace = vm
             .jit
             .traces
             .values()
             .filter_map(|trace| trace.compiled_trace.as_ref())
-            .find(|trace| trace.executor_family() == "GuardedNumericForLoop")
+            .find(|trace| trace.executor_family() == "NativeGuardedNumericForLoop")
             .unwrap();
         assert!(compiled_trace.is_enterable());
-        assert_eq!(compiled_trace.executor_family(), "GuardedNumericForLoop");
-        assert!(report.contains("status=Executable(instr=7) executor=GuardedNumericForLoop"));
+        assert_eq!(compiled_trace.executor_family(), "NativeGuardedNumericForLoop");
+        assert!(report.contains("status=Executable(instr=7) executor=NativeGuardedNumericForLoop"));
     }
 
     #[test]
@@ -1671,7 +2149,7 @@ mod tests {
             .iter()
             .find_map(|(key, trace)| {
                 let compiled = trace.compiled_trace.as_ref()?;
-                if compiled.executor_family() != "GuardedNumericForLoop" {
+                if compiled.executor_family() != "NativeGuardedNumericForLoop" {
                     return None;
                 }
                 let exit_pc = trace.artifact.as_ref()?.exits.first()?.exit_pc;
@@ -1782,7 +2260,7 @@ mod tests {
         assert_eq!(results[0].as_integer(), Some(200));
 
         let report = vm.jit.trace_report();
-        assert!(report.contains("executor=NumericForLoop"));
+        assert!(report.contains("executor=NativeNumericForLoop"));
         assert!(report.contains("details=upget=1,upset=1,arith=1,meta=1,backedge=1"));
 
         let compiled_trace = vm
@@ -1790,8 +2268,38 @@ mod tests {
             .traces
             .values()
             .filter_map(|trace| trace.compiled_trace.as_ref())
-            .find(|trace| trace.executor_family() == "NumericForLoop")
+            .find(|trace| trace.executor_family() == "NativeNumericForLoop")
             .unwrap();
         assert!(compiled_trace.is_enterable());
     }
+}
+
+fn apply_native_lowering_profile(counters: &mut JitCounters, profile: NativeLoweringProfile) {
+    counters.native_profile_guard_steps = counters
+        .native_profile_guard_steps
+        .saturating_add(profile.guard_steps);
+    counters.native_profile_linear_guards = counters
+        .native_profile_linear_guards
+        .saturating_add(profile.linear_guard_steps);
+    counters.native_profile_numeric_int_compare_guards = counters
+        .native_profile_numeric_int_compare_guards
+        .saturating_add(profile.numeric_int_compare_guard_steps);
+    counters.native_profile_numeric_reg_compare_guards = counters
+        .native_profile_numeric_reg_compare_guards
+        .saturating_add(profile.numeric_reg_compare_guard_steps);
+    counters.native_profile_truthy_guards = counters
+        .native_profile_truthy_guards
+        .saturating_add(profile.truthy_guard_steps);
+    counters.native_profile_arithmetic_helpers = counters
+        .native_profile_arithmetic_helpers
+        .saturating_add(profile.arithmetic_helper_steps);
+    counters.native_profile_table_helpers = counters
+        .native_profile_table_helpers
+        .saturating_add(profile.table_helper_steps);
+    counters.native_profile_upvalue_helpers = counters
+        .native_profile_upvalue_helpers
+        .saturating_add(profile.upvalue_helper_steps);
+    counters.native_profile_shift_helpers = counters
+        .native_profile_shift_helpers
+        .saturating_add(profile.shift_helper_steps);
 }

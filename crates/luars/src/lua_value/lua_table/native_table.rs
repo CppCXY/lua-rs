@@ -38,12 +38,6 @@ pub enum ShortStrSetResult {
     FinishNewKey,
 }
 
-#[cfg(feature = "jit")]
-#[derive(Clone, Copy)]
-pub(crate) struct ShortStrSlot {
-    node: *mut Node,
-}
-
 impl Node {
     /// Read value as LuaValue
     #[inline(always)]
@@ -302,68 +296,6 @@ impl NativeTable {
                 next = (*node).next;
             }
             false
-        }
-    }
-
-    #[cfg(feature = "jit")]
-    #[inline(always)]
-    pub(crate) fn find_existing_shortstr_slot(&self, key: &LuaValue) -> Option<ShortStrSlot> {
-        if self.node.is_null() {
-            return None;
-        }
-
-        let mut node = self.mainposition_string(key);
-        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
-
-        unsafe {
-            loop {
-                if (*node).key_tt == LUA_VSHRSTR
-                    && short_string_ptr_eq(
-                        StringPtr::new((*node).key_data.ptr as *mut GcString),
-                        key_ptr,
-                    )
-                {
-                    return ((*node).val_tt != LUA_VNIL).then_some(ShortStrSlot { node });
-                }
-
-                let next = (*node).next;
-                if next == 0 {
-                    return None;
-                }
-                node = node.offset(next as isize);
-            }
-        }
-    }
-
-    #[cfg(feature = "jit")]
-    #[inline(always)]
-    pub(crate) unsafe fn shortstr_slot_into(&self, slot: ShortStrSlot, dest: *mut LuaValue) -> bool {
-        let node = slot.node;
-        unsafe {
-            if (*node).val_tt == LUA_VNIL {
-                return false;
-            }
-            (*dest).tt = (*node).val_tt;
-            (*dest).value = (*node).val_data;
-            true
-        }
-    }
-
-    #[cfg(feature = "jit")]
-    #[inline(always)]
-    pub(crate) unsafe fn set_shortstr_slot_parts(
-        &mut self,
-        slot: ShortStrSlot,
-        value: Value,
-        tt: u8,
-    ) -> bool {
-        let node = slot.node;
-        unsafe {
-            if (*node).val_tt == LUA_VNIL {
-                return false;
-            }
-            (*node).set_value_parts(value, tt);
-            true
         }
     }
 

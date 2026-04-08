@@ -352,6 +352,466 @@ fn backend_compiles_numeric_forloop_with_upvalue_steps() {
 }
 
 #[test]
+fn backend_forwards_table_int_load_from_prior_store_in_numeric_forloop() {
+    let mut backend = NullTraceBackend;
+    let ir = TraceIr {
+        root_pc: 40,
+        loop_tail_pc: 43,
+        insts: vec![
+            TraceIrInst {
+                pc: 40,
+                opcode: OpCode::SetTable,
+                raw_instruction: Instruction::create_abck(OpCode::SetTable, 2, 7, 8, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(7),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 41,
+                opcode: OpCode::GetTable,
+                raw_instruction: Instruction::create_abck(OpCode::GetTable, 9, 2, 7, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(9)],
+            },
+            TraceIrInst {
+                pc: 42,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 10, 9, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(9)],
+                writes: vec![TraceIrOperand::Register(10)],
+            },
+            TraceIrInst {
+                pc: 43,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 4).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(40)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 40,
+        loop_tail_pc: 43,
+        steps: vec![
+            HelperPlanStep::TableAccess {
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(7),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: vec![],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(9)],
+            },
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(9)],
+                writes: vec![TraceIrOperand::Register(10)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(40)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 4,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 0,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert_eq!(
+                compiled.executor(),
+                CompiledTraceExecutor::NumericForLoop {
+                    loop_reg: 5,
+                    steps: vec![
+                        NumericStep::SetTableInt {
+                            table: 2,
+                            index: 7,
+                            value: 8,
+                        },
+                        NumericStep::Move { dst: 9, src: 8 },
+                        NumericStep::Move { dst: 10, src: 9 },
+                    ],
+                }
+            );
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
+fn backend_eliminates_dead_redundant_table_int_store_in_numeric_forloop() {
+    let mut backend = NullTraceBackend;
+    let ir = TraceIr {
+        root_pc: 60,
+        loop_tail_pc: 62,
+        insts: vec![
+            TraceIrInst {
+                pc: 60,
+                opcode: OpCode::SetTable,
+                raw_instruction: Instruction::create_abck(OpCode::SetTable, 2, 7, 8, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(7),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 61,
+                opcode: OpCode::SetTable,
+                raw_instruction: Instruction::create_abck(OpCode::SetTable, 2, 7, 9, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(7),
+                    TraceIrOperand::Register(9),
+                ],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 62,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 3).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(60)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 60,
+        loop_tail_pc: 62,
+        steps: vec![
+            HelperPlanStep::TableAccess {
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(7),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: vec![],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(7),
+                    TraceIrOperand::Register(9),
+                ],
+                writes: vec![],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(60)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 3,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 0,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert_eq!(
+                compiled.executor(),
+                CompiledTraceExecutor::NumericForLoop {
+                    loop_reg: 5,
+                    steps: vec![NumericStep::SetTableInt {
+                        table: 2,
+                        index: 7,
+                        value: 9,
+                    }],
+                }
+            );
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
+fn backend_forwards_table_int_load_across_moved_table_and_index_regs() {
+    let mut backend = NullTraceBackend;
+    let ir = TraceIr {
+        root_pc: 70,
+        loop_tail_pc: 74,
+        insts: vec![
+            TraceIrInst {
+                pc: 70,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 6, 2, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(2)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            TraceIrInst {
+                pc: 71,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 10, 7, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(10)],
+            },
+            TraceIrInst {
+                pc: 72,
+                opcode: OpCode::SetTable,
+                raw_instruction: Instruction::create_abck(OpCode::SetTable, 6, 10, 8, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(6),
+                    TraceIrOperand::Register(10),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 73,
+                opcode: OpCode::GetTable,
+                raw_instruction: Instruction::create_abck(OpCode::GetTable, 9, 2, 7, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(9)],
+            },
+            TraceIrInst {
+                pc: 74,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 5).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(70)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 70,
+        loop_tail_pc: 74,
+        steps: vec![
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(2)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(10)],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![
+                    TraceIrOperand::Register(6),
+                    TraceIrOperand::Register(10),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: vec![],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(9)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(70)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 5,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 0,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert_eq!(
+                compiled.executor(),
+                CompiledTraceExecutor::NumericForLoop {
+                    loop_reg: 5,
+                    steps: vec![
+                        NumericStep::Move { dst: 6, src: 2 },
+                        NumericStep::Move { dst: 10, src: 7 },
+                        NumericStep::SetTableInt {
+                            table: 6,
+                            index: 10,
+                            value: 8,
+                        },
+                        NumericStep::Move { dst: 9, src: 8 },
+                    ],
+                }
+            );
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
+fn backend_forwards_table_int_load_across_index_offset_aliases() {
+    let mut backend = NullTraceBackend;
+    let ir = TraceIr {
+        root_pc: 80,
+        loop_tail_pc: 84,
+        insts: vec![
+            TraceIrInst {
+                pc: 80,
+                opcode: OpCode::AddI,
+                raw_instruction: Instruction::create_abc(OpCode::AddI, 8, 7, 128).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(8)],
+            },
+            TraceIrInst {
+                pc: 81,
+                opcode: OpCode::MmBinI,
+                raw_instruction: Instruction::create_abck(OpCode::MmBinI, 7, 128, 0, false)
+                    .as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::MetamethodFallback,
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 82,
+                opcode: OpCode::SetTable,
+                raw_instruction: Instruction::create_abck(OpCode::SetTable, 2, 8, 9, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(8),
+                    TraceIrOperand::Register(9),
+                ],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 83,
+                opcode: OpCode::AddI,
+                raw_instruction: Instruction::create_abc(OpCode::AddI, 10, 7, 128).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(10)],
+            },
+            TraceIrInst {
+                pc: 84,
+                opcode: OpCode::MmBinI,
+                raw_instruction: Instruction::create_abck(OpCode::MmBinI, 7, 128, 0, false)
+                    .as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::MetamethodFallback,
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 85,
+                opcode: OpCode::GetTable,
+                raw_instruction: Instruction::create_abck(OpCode::GetTable, 11, 2, 10, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(10)],
+                writes: vec![TraceIrOperand::Register(11)],
+            },
+            TraceIrInst {
+                pc: 86,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 7).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(80)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 80,
+        loop_tail_pc: 86,
+        steps: vec![
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(8)],
+            },
+            HelperPlanStep::MetamethodFallback {
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![
+                    TraceIrOperand::Register(2),
+                    TraceIrOperand::Register(8),
+                    TraceIrOperand::Register(9),
+                ],
+                writes: vec![],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(10)],
+            },
+            HelperPlanStep::MetamethodFallback {
+                reads: vec![TraceIrOperand::Register(7), TraceIrOperand::SignedImmediate(1)],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(10)],
+                writes: vec![TraceIrOperand::Register(11)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(80)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 7,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 2,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert_eq!(
+                compiled.executor(),
+                CompiledTraceExecutor::NumericForLoop {
+                    loop_reg: 5,
+                    steps: vec![
+                        NumericStep::Binary {
+                            dst: 8,
+                            lhs: NumericOperand::Reg(7),
+                            rhs: NumericOperand::ImmI(1),
+                            op: NumericBinaryOp::Add,
+                        },
+                        NumericStep::SetTableInt {
+                            table: 2,
+                            index: 8,
+                            value: 9,
+                        },
+                        NumericStep::Binary {
+                            dst: 10,
+                            lhs: NumericOperand::Reg(7),
+                            rhs: NumericOperand::ImmI(1),
+                            op: NumericBinaryOp::Add,
+                        },
+                        NumericStep::Move { dst: 11, src: 9 },
+                    ],
+                }
+            );
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
 fn backend_compiles_guarded_numeric_forloop_with_tail_compare() {
     let mut backend = NullTraceBackend;
     let ir = TraceIr {

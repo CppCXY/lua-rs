@@ -48,7 +48,6 @@ pub(crate) enum TraceAbortReason {
     BackedgeMismatch { target_pc: u32 },
     MissingBranchAfterGuard,
     ForwardJump,
-    RuntimeGuardRejected,
 }
 
 pub(crate) struct TraceRecorder;
