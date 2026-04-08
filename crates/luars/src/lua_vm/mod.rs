@@ -1843,16 +1843,6 @@ impl LuaVM {
             - Native profile table helpers: {}\n\
             - Native profile upvalue helpers: {}\n\
             - Native profile shift helpers: {}\n\
-            - Root interpreter numeric table-shift jmp dispatches: {}\n\
-            - Side interpreter numeric table-shift jmp dispatches: {}\n\
-            - Numeric table-shift iterations: {}\n\
-            - Numeric table-shift bound side exits: {}\n\
-            - Numeric table-shift compare side exits: {}\n\
-            - Numeric table-shift fallback type guards: {}\n\
-            - Numeric table-shift fallback meta guards: {}\n\
-            - Numeric table-shift fallback table gets: {}\n\
-            - Numeric table-shift fallback table sets: {}\n\
-            - Numeric table-shift GC barriers: {}\n\
             - Helper plan dispatches: {}\n\
             - Helper plan steps: {}\n\
             - Helper plan guards: {}\n\
@@ -1906,16 +1896,6 @@ impl LuaVM {
             counters.native_profile_table_helpers,
             counters.native_profile_upvalue_helpers,
             counters.native_profile_shift_helpers,
-            counters.root_interpreter_numeric_table_shift_jmp_dispatches,
-            counters.side_interpreter_numeric_table_shift_jmp_dispatches,
-            counters.numeric_table_shift_iterations,
-            counters.numeric_table_shift_bound_side_exits,
-            counters.numeric_table_shift_compare_side_exits,
-            counters.numeric_table_shift_fallback_type_guard,
-            counters.numeric_table_shift_fallback_meta_guard,
-            counters.numeric_table_shift_fallback_table_get,
-            counters.numeric_table_shift_fallback_table_set,
-            counters.numeric_table_shift_gc_barriers,
             counters.helper_plan_dispatches,
             counters.helper_plan_steps,
             counters.helper_plan_guards,

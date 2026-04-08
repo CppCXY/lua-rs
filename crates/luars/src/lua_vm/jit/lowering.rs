@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use super::helper_plan::HelperPlan;
 use super::ir::{TraceIr, TraceIrGuardKind, TraceIrInst, TraceIrOperand};
@@ -82,6 +83,7 @@ pub(crate) struct LoweredTrace {
     pub exits: Vec<LoweredExit>,
     pub helper_plan_step_count: u16,
     pub root_register_hints: Vec<RegisterValueHint>,
+    pub entry_stable_register_hints: Vec<RegisterValueHint>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +219,7 @@ impl LoweredTrace {
             exits,
             helper_plan_step_count: helper_plan.steps.len().min(u16::MAX as usize) as u16,
             root_register_hints: collect_root_register_hints(ir),
+            entry_stable_register_hints: collect_entry_stable_register_hints(ir),
         }
     }
 
@@ -255,6 +258,13 @@ impl LoweredTrace {
             }
         }
         summary
+    }
+
+    pub(crate) fn entry_stable_register_value_kind(&self, reg: u32) -> Option<TraceValueKind> {
+        self.entry_stable_register_hints
+            .iter()
+            .find(|hint| hint.reg == reg)
+            .map(|hint| hint.kind)
     }
 
     pub(crate) fn deopt_target_for_exit_pc(&self, exit_pc: u32) -> Option<DeoptTarget> {
@@ -485,7 +495,61 @@ fn collect_restore_operands(ir: &TraceIr) -> Vec<SnapshotOperand> {
         }
     }
 
-    operands
+    compact_restore_operands(operands)
+}
+
+fn compact_restore_operands(operands: Vec<SnapshotOperand>) -> Vec<SnapshotOperand> {
+    let mut register_ranges = operands
+        .iter()
+        .filter_map(|operand| match operand {
+            SnapshotOperand::RegisterRange { start, count } => Some((*start, *count)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    register_ranges.sort_by_key(|(start, _)| *start);
+
+    let mut merged_ranges = Vec::<(u32, u32)>::new();
+    for (start, count) in register_ranges {
+        let end = start.saturating_add(count);
+        if let Some((existing_start, existing_count)) = merged_ranges.last_mut() {
+            let existing_end = existing_start.saturating_add(*existing_count);
+            if start <= existing_end {
+                *existing_count = end.max(existing_end).saturating_sub(*existing_start);
+                continue;
+            }
+        }
+        merged_ranges.push((start, count));
+    }
+
+    let mut compacted = Vec::new();
+    let mut emitted_ranges = BTreeSet::new();
+    for operand in operands {
+        match operand {
+            SnapshotOperand::Register(reg)
+                if merged_ranges
+                    .iter()
+                    .any(|(start, count)| reg >= *start && reg < start.saturating_add(*count)) =>
+            {
+                continue;
+            }
+            SnapshotOperand::RegisterRange { start, count } => {
+                if emitted_ranges.insert((start, count)) {
+                    compacted.push(SnapshotOperand::RegisterRange { start, count });
+                }
+            }
+            other if !compacted.contains(&other) => compacted.push(other),
+            _ => {}
+        }
+    }
+
+    if emitted_ranges.len() != merged_ranges.len() {
+        compacted.retain(|operand| !matches!(operand, SnapshotOperand::RegisterRange { .. }));
+        for (start, count) in merged_ranges {
+            compacted.push(SnapshotOperand::RegisterRange { start, count });
+        }
+    }
+
+    compacted
 }
 
 fn summarize_snapshot_operands(operands: &[SnapshotOperand]) -> DeoptRestoreSummary {
@@ -534,13 +598,15 @@ mod tests {
     use crate::OpCode;
     use crate::lua_value::LuaValue;
     use crate::lua_vm::jit::helper_plan::HelperPlan;
-    use crate::lua_vm::jit::ir::TraceIr;
+    use crate::lua_vm::jit::ir::{TraceIr, TraceIrOperand};
     use crate::lua_vm::jit::lowering::{
         DeoptRecovery, DeoptTarget, LoweredTrace, MaterializedSnapshot,
-        MaterializedSnapshotOperand, TraceValueKind,
+        MaterializedSnapshotOperand, SnapshotOperand, TraceValueKind,
     };
     use crate::lua_vm::jit::trace_recorder::TraceRecorder;
     use crate::lua_value::LuaProto;
+
+    use super::collect_restore_operands;
 
     #[test]
     fn lowering_creates_entry_and_exit_snapshots() {
@@ -690,6 +756,59 @@ mod tests {
         assert_eq!(lowered.register_value_kind(5), Some(TraceValueKind::Table));
         assert_eq!(lowered.register_value_kind(6), Some(TraceValueKind::Numeric));
     }
+
+    #[test]
+    fn lowering_tracks_entry_stable_register_hints_separately() {
+        let mut chunk = LuaProto::new();
+        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 0, 4));
+        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 0, 0));
+        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
+        let ir = TraceIr::lower(&artifact);
+        let helper_plan = HelperPlan::lower(&ir);
+        let lowered = LoweredTrace::lower(&artifact, &ir, &helper_plan);
+
+        assert_eq!(lowered.register_value_kind(0), Some(TraceValueKind::Numeric));
+        assert_eq!(lowered.register_value_kind(1), Some(TraceValueKind::Integer));
+        assert_eq!(lowered.entry_stable_register_value_kind(0), None);
+        assert_eq!(lowered.entry_stable_register_value_kind(1), None);
+    }
+
+    #[test]
+    fn lowering_compacts_restore_operands_by_register_range() {
+        let ir = TraceIr {
+            root_pc: 0,
+            loop_tail_pc: 1,
+            insts: vec![
+                crate::lua_vm::jit::ir::TraceIrInst {
+                    pc: 0,
+                    opcode: OpCode::Move,
+                    raw_instruction: Instruction::create_abc(OpCode::Move, 0, 1, 0).as_u32(),
+                    kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                    reads: vec![TraceIrOperand::Register(1)],
+                    writes: vec![TraceIrOperand::Register(0)],
+                },
+                crate::lua_vm::jit::ir::TraceIrInst {
+                    pc: 1,
+                    opcode: OpCode::LoadNil,
+                    raw_instruction: Instruction::create_abc(OpCode::LoadNil, 0, 2, 0).as_u32(),
+                    kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                    reads: vec![],
+                    writes: vec![TraceIrOperand::RegisterRange { start: 0, count: 3 }],
+                },
+            ],
+            guards: Vec::new(),
+        };
+
+        let restore_operands = collect_restore_operands(&ir);
+        assert_eq!(
+            restore_operands,
+            vec![SnapshotOperand::RegisterRange { start: 0, count: 3 }]
+        );
+    }
 }
 
 fn collect_root_register_hints(ir: &TraceIr) -> Vec<RegisterValueHint> {
@@ -703,6 +822,29 @@ fn collect_root_register_hints(ir: &TraceIr) -> Vec<RegisterValueHint> {
         .into_iter()
         .map(|(reg, kind)| RegisterValueHint { reg, kind })
         .collect()
+}
+
+fn collect_entry_stable_register_hints(ir: &TraceIr) -> Vec<RegisterValueHint> {
+    let written_registers = collect_written_registers(ir);
+    collect_root_register_hints(ir)
+        .into_iter()
+        .filter(|hint| !written_registers.contains(&hint.reg))
+        .collect()
+}
+
+fn collect_written_registers(ir: &TraceIr) -> BTreeSet<u32> {
+    let mut written = BTreeSet::new();
+    for inst in &ir.insts {
+        if let Some(reg) = single_written_register(inst) {
+            written.insert(reg);
+        }
+        if let Some((start, count)) = written_register_range(inst) {
+            for reg in start..start.saturating_add(count) {
+                written.insert(reg);
+            }
+        }
+    }
+    written
 }
 
 fn apply_written_register_hints(inst: &TraceIrInst, hints: &mut BTreeMap<u32, TraceValueKind>) {

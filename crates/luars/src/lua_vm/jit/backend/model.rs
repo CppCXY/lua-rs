@@ -222,14 +222,6 @@ pub(crate) enum CompiledTraceExecutor {
         compare_op: LinearIntGuardOp,
         exit_pc: u32,
     },
-    NumericTableShiftJmpLoop {
-        table_reg: u32,
-        index_reg: u32,
-        left_bound_reg: u32,
-        value_reg: u32,
-        temp_reg: u32,
-        exit_pc: u32,
-    },
     LinearIntJmpLoop {
         steps: Vec<LinearIntStep>,
         guard: LinearIntLoopGuard,
@@ -274,7 +266,6 @@ impl CompiledTraceExecution {
                 CompiledTraceExecutor::NumericIfElseForLoop { .. } => "NumericIfElseForLoop",
                 CompiledTraceExecutor::NumericJmpLoop { .. } => "NumericJmpLoop",
                 CompiledTraceExecutor::NumericTableScanJmpLoop { .. } => "NumericTableScanJmpLoop",
-                CompiledTraceExecutor::NumericTableShiftJmpLoop { .. } => "NumericTableShiftJmpLoop",
                 CompiledTraceExecutor::LinearIntJmpLoop { .. } => "LinearIntJmpLoop",
                 CompiledTraceExecutor::GenericForBuiltinAdd { .. } => "GenericForBuiltinAdd",
                 CompiledTraceExecutor::NextWhileBuiltinAdd { .. } => "NextWhileBuiltinAdd",

@@ -2,7 +2,6 @@
 
 use crate::{CallInfo, LuaState, LuaValue};
 use crate::lua_vm::{
-    TmKind,
     execute::{
         helper::{
             lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr, luai_numpow, pivalue,
@@ -842,111 +841,6 @@ pub(crate) unsafe fn jit_execute_numeric_table_scan_jmp_loop(
 
         psetivalue(index_ptr, idx.wrapping_add(step_imm as i64));
         trace_hits = trace_hits.saturating_add(1);
-    }
-}
-
-#[inline(always)]
-pub(crate) unsafe fn jit_execute_numeric_table_shift_jmp_loop(
-    lua_state: &mut LuaState,
-    ci: &CallInfo,
-    base: usize,
-    target_pc: usize,
-    table_reg: u32,
-    index_reg: u32,
-    left_bound_reg: u32,
-    value_reg: u32,
-    temp_reg: u32,
-    summary: jit::HelperPlanDispatchSummary,
-    exit_pc: usize,
-) -> Option<JitTraceAction> {
-    let mut trace_hits = 0u32;
-
-    let sp = lua_state.stack_mut().as_mut_ptr();
-    let table_ptr = sp.add(base + table_reg as usize);
-    let index_ptr = sp.add(base + index_reg as usize);
-    let left_bound_ptr = sp.add(base + left_bound_reg as usize);
-    let value_ptr = sp.add(base + value_reg as usize);
-    let temp_ptr = sp.add(base + temp_reg as usize);
-
-    if !(*table_ptr).is_table()
-        || !pttisinteger(index_ptr as *const LuaValue)
-        || !pttisinteger(left_bound_ptr as *const LuaValue)
-    {
-        jit::record_numeric_table_shift_fallback_type_guard(lua_state);
-        return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-    }
-
-    let left_bound = pivalue(left_bound_ptr as *const LuaValue);
-    let value = *value_ptr;
-    let compare_value = numeric_table_shift_compare_value(value);
-    let table_gc = (*table_ptr).as_gc_ptr_table_unchecked();
-    let table = (*table_ptr).hvalue_mut();
-    let meta = table.meta_ptr();
-    if !(meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into())) {
-        jit::record_numeric_table_shift_fallback_meta_guard(lua_state);
-        return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-    }
-
-    loop {
-        let index = (*index_ptr).value.i;
-        if left_bound > index {
-            jit::record_numeric_table_shift_bound_side_exit(lua_state);
-            return jit_trace_exit(lua_state, ci, base, target_pc, trace_hits, summary, exit_pc);
-        }
-
-        let next_index = index.wrapping_add(1);
-        let array_index = (index as u64).wrapping_sub(1);
-        let array_size = table.impl_table.asize as u64;
-        if array_index < array_size && (next_index as u64).wrapping_sub(1) < array_size {
-            let current_tt = *table.impl_table.get_arr_tag(array_index as usize);
-            if (current_tt & 0x0F) == 0 {
-                jit::record_numeric_table_shift_fallback_table_get(lua_state);
-                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-            }
-
-            let current_value = *table.impl_table.get_arr_val(array_index as usize);
-            let current = LuaValue {
-                value: current_value,
-                tt: current_tt,
-            };
-            if !numeric_table_shift_lt_current(compare_value, &current) {
-                jit::record_numeric_table_shift_compare_side_exit(lua_state);
-                return jit_trace_exit(lua_state, ci, base, target_pc, trace_hits, summary, exit_pc);
-            }
-
-            *table.impl_table.get_arr_tag(index as usize) = current_tt;
-            *table.impl_table.get_arr_val(index as usize) = current_value;
-
-            if current_tt & 0x40 != 0 {
-                jit::record_numeric_table_shift_gc_barrier(lua_state);
-                lua_state.gc_barrier_back(table_gc);
-            }
-        } else {
-            if !table.impl_table.fast_geti_into(index, temp_ptr) {
-                jit::record_numeric_table_shift_fallback_table_get(lua_state);
-                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-            }
-
-            let current = &*temp_ptr;
-            if !numeric_table_shift_lt_current(compare_value, current) {
-                jit::record_numeric_table_shift_compare_side_exit(lua_state);
-                return jit_trace_exit(lua_state, ci, base, target_pc, trace_hits, summary, exit_pc);
-            }
-
-            if !table.impl_table.fast_seti_parts(next_index, current.value, current.tt) {
-                jit::record_numeric_table_shift_fallback_table_set(lua_state);
-                return jit_trace_fallback(lua_state, ci, target_pc, trace_hits, summary);
-            }
-
-            if current.tt & 0x40 != 0 {
-                jit::record_numeric_table_shift_gc_barrier(lua_state);
-                lua_state.gc_barrier_back(table_gc);
-            }
-        }
-
-        (*index_ptr).value.i = index.wrapping_sub(1);
-        trace_hits = trace_hits.saturating_add(1);
-        jit::record_numeric_table_shift_iteration(lua_state);
     }
 }
 

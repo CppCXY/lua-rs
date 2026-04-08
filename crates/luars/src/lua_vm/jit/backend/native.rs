@@ -460,12 +460,10 @@ impl NativeTraceBackend {
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
         let mut known_integer_regs = lowered_trace
-            .root_register_hints
+            .entry_stable_register_hints
             .iter()
             .filter_map(|hint| {
-                (matches!(hint.kind, TraceValueKind::Integer)
-                    && !steps.iter().copied().any(|step| linear_int_step_writes_reg(step, hint.reg)))
-                    .then_some(hint.reg)
+                matches!(hint.kind, TraceValueKind::Integer).then_some(hint.reg)
             })
             .collect::<Vec<_>>();
         if loop_state_is_invariant {
@@ -803,12 +801,7 @@ impl NativeTraceBackend {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
-        let mut known_value_kinds = lowered_trace
-            .root_register_hints
-            .iter()
-            .copied()
-            .filter(|hint| !steps.iter().copied().any(|step| numeric_step_writes_reg(step, hint.reg)))
-            .collect::<Vec<_>>();
+        let mut known_value_kinds = lowered_trace.entry_stable_register_hints.clone();
 
         let loop_block = builder.create_block();
         let fallback_block = builder.create_block();
@@ -1054,6 +1047,10 @@ impl NativeTraceBackend {
             return None;
         }
 
+        if pre_steps.iter().chain(steps.iter()).any(numeric_step_touches_table) {
+            return None;
+        }
+
         let (cond, continue_when, continue_preset, exit_preset, exit_pc, tail_guard) = match guard {
             NumericJmpLoopGuard::Head {
                 cond,
@@ -1075,6 +1072,8 @@ impl NativeTraceBackend {
         if !native_supports_numeric_cond(cond)
             || continue_preset.as_ref().is_some_and(|step| !native_supports_numeric_step(step))
             || exit_preset.as_ref().is_some_and(|step| !native_supports_numeric_step(step))
+            || continue_preset.as_ref().is_some_and(numeric_step_touches_table)
+            || exit_preset.as_ref().is_some_and(numeric_step_touches_table)
         {
             return None;
         }
@@ -1098,18 +1097,7 @@ impl NativeTraceBackend {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
-        let mut known_value_kinds = lowered_trace
-            .root_register_hints
-            .iter()
-            .copied()
-            .filter(|hint| {
-                !pre_steps
-                    .iter()
-                    .chain(steps.iter())
-                    .copied()
-                    .any(|step| numeric_step_writes_reg(step, hint.reg))
-            })
-            .collect::<Vec<_>>();
+        let mut known_value_kinds = lowered_trace.entry_stable_register_hints.clone();
 
         let loop_block = builder.create_block();
         let fallback_block = builder.create_block();
@@ -2533,6 +2521,10 @@ fn native_supports_numeric_step(step: &NumericStep) -> bool {
                 )
         }
     }
+}
+
+fn numeric_step_touches_table(step: &NumericStep) -> bool {
+    matches!(step, NumericStep::GetTableInt { .. } | NumericStep::SetTableInt { .. })
 }
 
 fn native_supports_numeric_operand(operand: &NumericOperand) -> bool {

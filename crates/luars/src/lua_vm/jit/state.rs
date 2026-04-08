@@ -7,7 +7,7 @@ use crate::lua_value::{LuaProto, LuaValue};
 use crate::OpCode;
 
 use super::backend::{
-    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, CompiledTraceExecutor,
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution,
     NativeCompiledTrace, NativeLoweringProfile, NativeTraceBackend, TraceBackend,
 };
 use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
@@ -187,16 +187,6 @@ pub struct JitCounters {
     pub native_profile_table_helpers: u32,
     pub native_profile_upvalue_helpers: u32,
     pub native_profile_shift_helpers: u32,
-    pub root_interpreter_numeric_table_shift_jmp_dispatches: u32,
-    pub side_interpreter_numeric_table_shift_jmp_dispatches: u32,
-    pub numeric_table_shift_iterations: u32,
-    pub numeric_table_shift_bound_side_exits: u32,
-    pub numeric_table_shift_compare_side_exits: u32,
-    pub numeric_table_shift_fallback_type_guard: u32,
-    pub numeric_table_shift_fallback_meta_guard: u32,
-    pub numeric_table_shift_fallback_table_get: u32,
-    pub numeric_table_shift_fallback_table_set: u32,
-    pub numeric_table_shift_gc_barriers: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -521,17 +511,6 @@ impl JitState {
             CompiledTraceExecution::Interpreter(_) => {
                 self.counters.root_interpreter_dispatches =
                     self.counters.root_interpreter_dispatches.saturating_add(1);
-                if matches!(
-                    execution,
-                    CompiledTraceExecution::Interpreter(
-                        CompiledTraceExecutor::NumericTableShiftJmpLoop { .. }
-                    )
-                ) {
-                    self.counters.root_interpreter_numeric_table_shift_jmp_dispatches = self
-                        .counters
-                        .root_interpreter_numeric_table_shift_jmp_dispatches
-                        .saturating_add(1);
-                }
             }
             CompiledTraceExecution::LoweredOnly => {}
         }
@@ -551,78 +530,8 @@ impl JitState {
             ReadySideTraceDispatch::Executable(_) => {
                 self.counters.side_interpreter_dispatches =
                     self.counters.side_interpreter_dispatches.saturating_add(1);
-                if matches!(
-                    dispatch,
-                    ReadySideTraceDispatch::Executable(ExecutableTraceDispatch {
-                        execution: CompiledTraceExecution::Interpreter(
-                            CompiledTraceExecutor::NumericTableShiftJmpLoop { .. }
-                        ),
-                        ..
-                    })
-                ) {
-                    self.counters.side_interpreter_numeric_table_shift_jmp_dispatches = self
-                        .counters
-                        .side_interpreter_numeric_table_shift_jmp_dispatches
-                        .saturating_add(1);
-                }
             }
         }
-    }
-
-    pub(crate) fn record_numeric_table_shift_iteration(&mut self) {
-        self.counters.numeric_table_shift_iterations = self
-            .counters
-            .numeric_table_shift_iterations
-            .saturating_add(1);
-    }
-
-    pub(crate) fn record_numeric_table_shift_bound_side_exit(&mut self) {
-        self.counters.numeric_table_shift_bound_side_exits = self
-            .counters
-            .numeric_table_shift_bound_side_exits
-            .saturating_add(1);
-    }
-
-    pub(crate) fn record_numeric_table_shift_compare_side_exit(&mut self) {
-        self.counters.numeric_table_shift_compare_side_exits = self
-            .counters
-            .numeric_table_shift_compare_side_exits
-            .saturating_add(1);
-    }
-
-    pub(crate) fn record_numeric_table_shift_fallback_type_guard(&mut self) {
-        self.counters.numeric_table_shift_fallback_type_guard = self
-            .counters
-            .numeric_table_shift_fallback_type_guard
-            .saturating_add(1);
-    }
-
-    pub(crate) fn record_numeric_table_shift_fallback_meta_guard(&mut self) {
-        self.counters.numeric_table_shift_fallback_meta_guard = self
-            .counters
-            .numeric_table_shift_fallback_meta_guard
-            .saturating_add(1);
-    }
-
-    pub(crate) fn record_numeric_table_shift_fallback_table_get(&mut self) {
-        self.counters.numeric_table_shift_fallback_table_get = self
-            .counters
-            .numeric_table_shift_fallback_table_get
-            .saturating_add(1);
-    }
-
-    pub(crate) fn record_numeric_table_shift_fallback_table_set(&mut self) {
-        self.counters.numeric_table_shift_fallback_table_set = self
-            .counters
-            .numeric_table_shift_fallback_table_set
-            .saturating_add(1);
-    }
-
-    pub(crate) fn record_numeric_table_shift_gc_barrier(&mut self) {
-        self.counters.numeric_table_shift_gc_barriers = self
-            .counters
-            .numeric_table_shift_gc_barriers
-            .saturating_add(1);
     }
 
     pub(crate) fn record_redundant_side_exit_recovery(&mut self) {
@@ -1505,16 +1414,6 @@ mod tests {
                 native_profile_table_helpers: 0,
                 native_profile_upvalue_helpers: 0,
                 native_profile_shift_helpers: 0,
-                root_interpreter_numeric_table_shift_jmp_dispatches: 0,
-                side_interpreter_numeric_table_shift_jmp_dispatches: 0,
-                numeric_table_shift_iterations: 0,
-                numeric_table_shift_bound_side_exits: 0,
-                numeric_table_shift_compare_side_exits: 0,
-                numeric_table_shift_fallback_type_guard: 0,
-                numeric_table_shift_fallback_meta_guard: 0,
-                numeric_table_shift_fallback_table_get: 0,
-                numeric_table_shift_fallback_table_set: 0,
-                numeric_table_shift_gc_barriers: 0,
             }
         );
     }

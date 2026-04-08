@@ -51,10 +51,6 @@ pub(super) fn compile_executor(
         return Some(executor);
     }
 
-    if let Some(executor) = compile_numeric_table_shift_jmp_loop(ir, lowered_trace) {
-        return Some(executor);
-    }
-
     if let Some(executor) = compile_numeric_table_scan_jmp_loop(ir, lowered_trace) {
         return Some(executor);
     }

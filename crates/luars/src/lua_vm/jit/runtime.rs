@@ -5,8 +5,8 @@ use super::executors::{
     jit_execute_linear_int_jmp_loop, jit_execute_next_while_builtin_add,
     jit_execute_numeric_for_loop, jit_execute_numeric_ifelse_for_loop,
     jit_execute_numeric_jmp_loop, jit_execute_numeric_table_scan_jmp_loop,
-    jit_execute_numeric_table_shift_jmp_loop, jit_execute_return, jit_execute_return0,
-    jit_execute_return1, jit_execute_guarded_numeric_for_loop,
+    jit_execute_return, jit_execute_return0, jit_execute_return1,
+    jit_execute_guarded_numeric_for_loop,
 };
 
 use super::{
@@ -397,28 +397,6 @@ unsafe fn dispatch_executable_trace(
                 limit_reg,
                 step_imm,
                 compare_op,
-                summary,
-                exit_pc as usize,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericTableShiftJmpLoop {
-            table_reg,
-            index_reg,
-            left_bound_reg,
-            value_reg,
-            temp_reg,
-            exit_pc,
-        }) => unsafe {
-            jit_execute_numeric_table_shift_jmp_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                target_pc,
-                table_reg,
-                index_reg,
-                left_bound_reg,
-                value_reg,
-                temp_reg,
                 summary,
                 exit_pc as usize,
             )
