@@ -2,9 +2,13 @@ use super::*;
 use crate::gc::{Gc, GcUpvalue, UpvaluePtr};
 use crate::lua_value::LuaUpvalue;
 use crate::{LuaValue, LuaVM, SafeOption};
-use crate::lua_vm::jit::CompiledTraceExecution;
 use crate::lua_vm::jit::backend::{
-    NativeCompiledTrace, NativeTraceBackend, NativeTraceResult, NativeTraceStatus,
+    CompiledTraceExecution, LinearIntGuardOp, NativeCompiledTrace, NativeTraceBackend,
+    NativeTraceResult, NativeTraceStatus, NumericBinaryOp, NumericIfElseCond,
+    NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericOperand, NumericStep,
+};
+use crate::lua_vm::jit::lowering::{
+    DeoptRestoreSummary, LoweredExit, LoweredTrace, RegisterValueHint, TraceValueKind,
 };
 
 fn boxed_closed_upvalue(value: LuaValue) -> Box<GcUpvalue> {
@@ -15,6 +19,41 @@ fn boxed_closed_upvalue(value: LuaValue) -> Box<GcUpvalue> {
     ));
     upvalue.data.fix_closed_ptr();
     upvalue
+}
+
+fn lowered_trace_for_numeric_jmp_blocks(
+    root_pc: u32,
+    loop_tail_pc: u32,
+    exits: &[(u32, u32, u32)],
+    entry_hints: &[(u32, TraceValueKind)],
+) -> LoweredTrace {
+    let hints = entry_hints
+        .iter()
+        .map(|&(reg, kind)| RegisterValueHint { reg, kind })
+        .collect::<Vec<_>>();
+
+    LoweredTrace {
+        root_pc,
+        loop_tail_pc,
+        snapshots: Vec::new(),
+        exits: exits
+            .iter()
+            .enumerate()
+            .map(|(index, &(guard_pc, branch_pc, exit_pc))| LoweredExit {
+                exit_index: index as u16,
+                guard_pc,
+                branch_pc,
+                exit_pc,
+                resume_pc: exit_pc,
+                snapshot_id: (index + 1) as u16,
+                is_loop_backedge: false,
+                restore_summary: DeoptRestoreSummary::default(),
+            })
+            .collect(),
+        helper_plan_step_count: 0,
+        root_register_hints: hints.clone(),
+        entry_stable_register_hints: hints,
+    }
 }
 
 #[test]
@@ -2735,90 +2774,491 @@ fn native_numeric_for_loop_with_loadf_entry_executes_and_loop_exits() {
 }
 
 #[test]
-fn native_backend_keeps_table_touching_numeric_jmp_loop_out_of_native_execution() {
+fn native_backend_compiles_table_touching_numeric_jmp_loop_to_native_execution() {
     let mut backend = NativeTraceBackend::default();
     let ir = TraceIr {
-        root_pc: 0,
-        loop_tail_pc: 5,
+        root_pc: 310,
+        loop_tail_pc: 315,
         insts: vec![
             TraceIrInst {
-                pc: 0,
-                opcode: OpCode::GetTable,
-                raw_instruction: Instruction::create_abc(OpCode::GetTable, 9, 1, 5).as_u32(),
-                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
-                reads: vec![TraceIrOperand::Register(1), TraceIrOperand::Register(5)],
-                writes: vec![TraceIrOperand::Register(9)],
-            },
-            TraceIrInst {
-                pc: 1,
+                pc: 310,
                 opcode: OpCode::Lt,
-                raw_instruction: Instruction::create_abck(OpCode::Lt, 9, 4, 0, false).as_u32(),
+                raw_instruction: Instruction::create_abck(OpCode::Lt, 4, 5, 0, false).as_u32(),
                 kind: crate::lua_vm::jit::ir::TraceIrInstKind::Guard,
-                reads: vec![TraceIrOperand::Register(9), TraceIrOperand::Register(4)],
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(5)],
                 writes: Vec::new(),
             },
             TraceIrInst {
-                pc: 2,
+                pc: 311,
                 opcode: OpCode::Jmp,
-                raw_instruction: Instruction::create_sj(OpCode::Jmp, 3).as_u32(),
+                raw_instruction: Instruction::create_sj(OpCode::Jmp, 5).as_u32(),
                 kind: crate::lua_vm::jit::ir::TraceIrInstKind::Branch,
-                reads: vec![TraceIrOperand::JumpTarget(6)],
+                reads: vec![TraceIrOperand::JumpTarget(317)],
                 writes: Vec::new(),
             },
             TraceIrInst {
-                pc: 3,
-                opcode: OpCode::AddI,
-                raw_instruction: Instruction::create_abc(OpCode::AddI, 5, 5, 128).as_u32(),
-                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(5), TraceIrOperand::SignedImmediate(1)],
-                writes: vec![TraceIrOperand::Register(5)],
-            },
-            TraceIrInst {
-                pc: 4,
-                opcode: OpCode::MmBinI,
-                raw_instruction: Instruction::create_abck(OpCode::MmBinI, 5, 128, 6, false)
+                pc: 312,
+                opcode: OpCode::GetTable,
+                raw_instruction: Instruction::create_abck(OpCode::GetTable, 8, 2, 4, false)
                     .as_u32(),
-                kind: crate::lua_vm::jit::ir::TraceIrInstKind::MetamethodFallback,
-                reads: vec![TraceIrOperand::Register(5), TraceIrOperand::SignedImmediate(1)],
-                writes: Vec::new(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(8)],
             },
             TraceIrInst {
-                pc: 5,
+                pc: 313,
+                opcode: OpCode::SetTable,
+                raw_instruction: Instruction::create_abck(OpCode::SetTable, 3, 4, 8, false)
+                    .as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 314,
+                opcode: OpCode::AddI,
+                raw_instruction: Instruction::create_abc(OpCode::AddI, 4, 4, 128).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 315,
                 opcode: OpCode::Jmp,
                 raw_instruction: Instruction::create_sj(OpCode::Jmp, -6).as_u32(),
                 kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
-                reads: vec![TraceIrOperand::JumpTarget(0)],
+                reads: vec![TraceIrOperand::JumpTarget(310)],
                 writes: Vec::new(),
             },
         ],
         guards: vec![crate::lua_vm::jit::ir::TraceIrGuard {
-            guard_pc: 1,
-            branch_pc: 2,
-            exit_pc: 6,
+            guard_pc: 310,
+            branch_pc: 311,
+            exit_pc: 317,
             taken_on_trace: false,
             kind: crate::lua_vm::jit::ir::TraceIrGuardKind::SideExit,
         }],
     };
     let helper_plan = HelperPlan {
-        root_pc: 0,
-        loop_tail_pc: 5,
-        steps: vec![],
+        root_pc: 310,
+        loop_tail_pc: 315,
+        steps: vec![
+            HelperPlanStep::Guard {
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(5)],
+            },
+            HelperPlanStep::Branch {
+                reads: vec![TraceIrOperand::JumpTarget(317)],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(8)],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: vec![],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(310)],
+                writes: Vec::new(),
+            },
+        ],
         guard_count: 1,
         summary: HelperPlanDispatchSummary {
             steps_executed: 6,
             guards_observed: 1,
             call_steps: 0,
-            metamethod_steps: 1,
+            metamethod_steps: 0,
         },
     };
 
     match backend.compile_test(&ir, &helper_plan) {
-        BackendCompileOutcome::Compiled(compiled) => {
-            assert!(matches!(
-                compiled.execution(),
-                CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericJmpLoop { .. })
-            ));
-        }
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::NumericJmpLoop { .. }) => {}
+            other => panic!("expected native numeric jmp execution, got {other:?}"),
+        },
         BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
     }
 }
+
+#[test]
+fn native_backend_compiles_numeric_jmp_guard_block_sequences_to_native_execution() {
+    let mut backend = NativeTraceBackend::default();
+    let head_blocks = [NumericJmpLoopGuardBlock {
+        pre_steps: vec![NumericStep::GetTableInt {
+            dst: 8,
+            table: 2,
+            index: 4,
+        }],
+        guard: NumericJmpLoopGuard::Head {
+            cond: NumericIfElseCond::RegCompare {
+                op: LinearIntGuardOp::Lt,
+                lhs: 8,
+                rhs: 5,
+            },
+            continue_when: true,
+            continue_preset: None,
+            exit_preset: None,
+            exit_pc: 700,
+        },
+    }];
+    let steps = [
+        NumericStep::SetTableInt {
+            table: 3,
+            index: 4,
+            value: 8,
+        },
+        NumericStep::Binary {
+            dst: 4,
+            lhs: NumericOperand::Reg(4),
+            rhs: NumericOperand::ImmI(1),
+            op: NumericBinaryOp::Add,
+        },
+        NumericStep::Binary {
+            dst: 6,
+            lhs: NumericOperand::Reg(6),
+            rhs: NumericOperand::ImmI(-1),
+            op: NumericBinaryOp::Add,
+        },
+    ];
+    let tail_blocks = [
+        NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::Truthy { reg: 9 },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 701,
+            },
+        },
+        NumericJmpLoopGuardBlock {
+            pre_steps: vec![NumericStep::Move { dst: 10, src: 6 }],
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 4,
+                    rhs: 10,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 702,
+            },
+        },
+    ];
+    let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+        600,
+        603,
+        &[(610, 611, 700), (612, 613, 701), (614, 615, 702)],
+        &[
+            (2, TraceValueKind::Table),
+            (3, TraceValueKind::Table),
+            (4, TraceValueKind::Integer),
+            (5, TraceValueKind::Integer),
+            (6, TraceValueKind::Integer),
+            (9, TraceValueKind::Boolean),
+        ],
+    );
+
+    match backend.compile_test_numeric_jmp_blocks(&head_blocks, &steps, &tail_blocks, &lowered_trace) {
+        Some(NativeCompiledTrace::NumericJmpLoop { .. }) => {}
+        other => panic!("expected native numeric jmp execution, got {other:?}"),
+    }
+}
+
+#[test]
+fn native_numeric_jmp_guard_block_sequences_execute_and_side_exit() {
+    let mut backend = NativeTraceBackend::default();
+    let head_blocks = [NumericJmpLoopGuardBlock {
+        pre_steps: vec![NumericStep::GetTableInt {
+            dst: 8,
+            table: 2,
+            index: 4,
+        }],
+        guard: NumericJmpLoopGuard::Head {
+            cond: NumericIfElseCond::RegCompare {
+                op: LinearIntGuardOp::Lt,
+                lhs: 8,
+                rhs: 5,
+            },
+            continue_when: true,
+            continue_preset: None,
+            exit_preset: None,
+            exit_pc: 700,
+        },
+    }];
+    let steps = [
+        NumericStep::SetTableInt {
+            table: 3,
+            index: 4,
+            value: 8,
+        },
+        NumericStep::Binary {
+            dst: 4,
+            lhs: NumericOperand::Reg(4),
+            rhs: NumericOperand::ImmI(1),
+            op: NumericBinaryOp::Add,
+        },
+        NumericStep::Binary {
+            dst: 6,
+            lhs: NumericOperand::Reg(6),
+            rhs: NumericOperand::ImmI(-1),
+            op: NumericBinaryOp::Add,
+        },
+    ];
+    let tail_blocks = [
+        NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::Truthy { reg: 9 },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 701,
+            },
+        },
+        NumericJmpLoopGuardBlock {
+            pre_steps: vec![NumericStep::Move { dst: 10, src: 6 }],
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 4,
+                    rhs: 10,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 702,
+            },
+        },
+    ];
+    let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+        600,
+        603,
+        &[(610, 611, 700), (612, 613, 701), (614, 615, 702)],
+        &[
+            (2, TraceValueKind::Table),
+            (3, TraceValueKind::Table),
+            (4, TraceValueKind::Integer),
+            (5, TraceValueKind::Integer),
+            (6, TraceValueKind::Integer),
+            (9, TraceValueKind::Boolean),
+        ],
+    );
+
+    let entry = match backend.compile_test_numeric_jmp_blocks(&head_blocks, &steps, &tail_blocks, &lowered_trace) {
+        Some(NativeCompiledTrace::NumericJmpLoop { entry }) => entry,
+        other => panic!("expected native numeric jmp execution, got {other:?}"),
+    };
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    let src_table = vm.create_table(8, 0).unwrap();
+    let dst_table = vm.create_table(8, 0).unwrap();
+    src_table.as_table_mut().unwrap().raw_seti(1, LuaValue::integer(11));
+    src_table.as_table_mut().unwrap().raw_seti(2, LuaValue::integer(22));
+    src_table.as_table_mut().unwrap().raw_seti(3, LuaValue::integer(33));
+
+    let mut stack = [LuaValue::nil(); 12];
+    stack[2] = src_table;
+    stack[3] = dst_table;
+    stack[4] = LuaValue::integer(1);
+    stack[5] = LuaValue::integer(100);
+    stack[6] = LuaValue::integer(4);
+    stack[9] = LuaValue::boolean(true);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            vm.main_state(),
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::SideExit);
+    assert_eq!(result.hits, 2);
+    assert_eq!(result.exit_pc, 702);
+    assert_eq!(result.exit_index, 2);
+    assert_eq!(stack[4].as_integer(), Some(3));
+    assert_eq!(stack[6].as_integer(), Some(2));
+    assert_eq!(stack[8].as_integer(), Some(22));
+    assert_eq!(stack[10].as_integer(), Some(2));
+    assert_eq!(dst_table.as_table().unwrap().raw_geti(1), Some(LuaValue::integer(11)));
+    assert_eq!(dst_table.as_table().unwrap().raw_geti(2), Some(LuaValue::integer(22)));
+
+    let deopt = lowered_trace
+        .deopt_target_for_exit_index(result.exit_index.try_into().unwrap())
+        .unwrap();
+    assert_eq!(deopt.resume_pc, 702);
+}
+
+#[test]
+fn native_table_touching_numeric_jmp_loop_entry_executes_and_side_exits() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 310,
+        loop_tail_pc: 315,
+        insts: vec![
+            TraceIrInst {
+                pc: 310,
+                opcode: OpCode::Lt,
+                raw_instruction: Instruction::create_abck(OpCode::Lt, 4, 5, 0, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Guard,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(5)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 311,
+                opcode: OpCode::Jmp,
+                raw_instruction: Instruction::create_sj(OpCode::Jmp, 5).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Branch,
+                reads: vec![TraceIrOperand::JumpTarget(317)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 312,
+                opcode: OpCode::GetTable,
+                raw_instruction: Instruction::create_abck(OpCode::GetTable, 8, 2, 4, false)
+                    .as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(8)],
+            },
+            TraceIrInst {
+                pc: 313,
+                opcode: OpCode::SetTable,
+                raw_instruction: Instruction::create_abck(OpCode::SetTable, 3, 4, 8, false)
+                    .as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 314,
+                opcode: OpCode::AddI,
+                raw_instruction: Instruction::create_abc(OpCode::AddI, 4, 4, 128).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 315,
+                opcode: OpCode::Jmp,
+                raw_instruction: Instruction::create_sj(OpCode::Jmp, -6).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(310)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: vec![crate::lua_vm::jit::ir::TraceIrGuard {
+            guard_pc: 310,
+            branch_pc: 311,
+            exit_pc: 317,
+            taken_on_trace: false,
+            kind: crate::lua_vm::jit::ir::TraceIrGuardKind::SideExit,
+        }],
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 310,
+        loop_tail_pc: 315,
+        steps: vec![
+            HelperPlanStep::Guard {
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(5)],
+            },
+            HelperPlanStep::Branch {
+                reads: vec![TraceIrOperand::JumpTarget(317)],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(8)],
+            },
+            HelperPlanStep::TableAccess {
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::Register(8),
+                ],
+                writes: vec![],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::SignedImmediate(1)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(310)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 1,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 6,
+            guards_observed: 1,
+            call_steps: 0,
+            metamethod_steps: 0,
+        },
+    };
+
+    let entry = match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::NumericJmpLoop { entry }) => entry,
+            other => panic!("expected native numeric jmp execution, got {other:?}"),
+        },
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    };
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    let src_table = vm.create_table(8, 0).unwrap();
+    let dst_table = vm.create_table(8, 0).unwrap();
+    src_table.as_table_mut().unwrap().raw_seti(1, LuaValue::integer(11));
+    src_table.as_table_mut().unwrap().raw_seti(2, LuaValue::integer(22));
+    src_table.as_table_mut().unwrap().raw_seti(3, LuaValue::integer(33));
+
+    let mut stack = [LuaValue::nil(); 12];
+    stack[2] = src_table;
+    stack[3] = dst_table;
+    stack[4] = LuaValue::integer(1);
+    stack[5] = LuaValue::integer(4);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            vm.main_state(),
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::SideExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(result.exit_pc, 317);
+    assert_eq!(result.exit_index, 0);
+    assert_eq!(stack[4].as_integer(), Some(4));
+    assert_eq!(dst_table.as_table().unwrap().raw_geti(1), Some(LuaValue::integer(11)));
+    assert_eq!(dst_table.as_table().unwrap().raw_geti(2), Some(LuaValue::integer(22)));
+    assert_eq!(dst_table.as_table().unwrap().raw_geti(3), Some(LuaValue::integer(33)));
+}
+

@@ -10,17 +10,20 @@ use crate::lua_value::{LUA_VNUMFLT, LUA_VNUMINT};
 use crate::lua_vm::execute::helper::{
     lua_fmod, lua_idiv, lua_imod, luai_numpow, pivalue, pttisinteger, ttisfloat, ttisinteger,
 };
-use crate::{LuaState, LuaValue};
+use crate::{Instruction, LuaState, LuaValue};
 use crate::lua_vm::jit::helper_plan::HelperPlan;
 use crate::lua_vm::jit::ir::TraceIr;
 use crate::lua_vm::jit::lowering::{LoweredTrace, TraceValueKind};
 use crate::lua_vm::jit::trace_recorder::TraceArtifact;
 
-use super::compile::compile_executor;
+use super::compile::{
+    lower_linear_int_guard_for_native, lower_linear_int_steps_for_native,
+    lower_numeric_guard_for_native, lower_numeric_steps_for_native,
+};
 use super::{
-    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, CompiledTraceExecutor,
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution,
     LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NativeCompiledTrace,
-    NativeLoweringProfile, NativeTraceResult, NativeTraceStatus, NullTraceBackend, NumericBinaryOp, NumericIfElseCond,
+    NativeLoweringProfile, NativeTraceResult, NativeTraceStatus, NumericBinaryOp, NumericIfElseCond,
     NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericOperand, NumericStep, TraceBackend,
 };
 
@@ -56,7 +59,6 @@ const NATIVE_NUMERIC_BINARY_MOD: i32 = 5;
 const NATIVE_NUMERIC_BINARY_POW: i32 = 6;
 
 pub(crate) struct NativeTraceBackend {
-    fallback: NullTraceBackend,
     modules: Vec<JITModule>,
     next_function_index: u64,
 }
@@ -64,7 +66,6 @@ pub(crate) struct NativeTraceBackend {
 impl Default for NativeTraceBackend {
     fn default() -> Self {
         Self {
-            fallback: NullTraceBackend,
             modules: Vec::new(),
             next_function_index: 0,
         }
@@ -79,151 +80,273 @@ impl TraceBackend for NativeTraceBackend {
         lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> BackendCompileOutcome {
-        let (execution, native_profile) = match compile_executor(artifact, ir, lowered_trace) {
-            Some(CompiledTraceExecutor::Return {
-                start_reg,
-                result_count,
-            }) => self
-                .compile_native_return(start_reg, result_count)
-                .map(|native| (CompiledTraceExecution::Native(native), Some(NativeLoweringProfile::default())))
-                .unwrap_or_else(|| {
-                    (
-                        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return {
-                            start_reg,
-                            result_count,
-                        }),
-                        None,
-                    )
-                }),
-            Some(CompiledTraceExecutor::Return0) => self
-                .compile_native_return0()
-                .map(|native| (CompiledTraceExecution::Native(native), Some(NativeLoweringProfile::default())))
-                .unwrap_or((CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return0), None)),
-            Some(CompiledTraceExecutor::Return1 { src_reg }) => self
-                .compile_native_return1(src_reg)
-                .map(|native| (CompiledTraceExecution::Native(native), Some(NativeLoweringProfile::default())))
-                .unwrap_or_else(|| {
-                    (
-                        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return1 {
-                            src_reg,
-                        }),
-                        None,
-                    )
-                }),
-            Some(CompiledTraceExecutor::LinearIntForLoop { loop_reg, steps }) => self
-                .compile_native_linear_int_for_loop(loop_reg, &steps, lowered_trace)
-                .map(|native| {
-                    (
-                        CompiledTraceExecution::Native(native),
-                        Some(profile_for_linear_int_for_loop(&steps)),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntForLoop {
-                            loop_reg,
-                            steps,
-                        }),
-                        None,
-                    )
-                }),
-            Some(CompiledTraceExecutor::LinearIntJmpLoop { steps, guard }) => self
-                .compile_native_linear_int_jmp_loop(&steps, guard, lowered_trace)
-                .map(|native| {
-                    (
-                        CompiledTraceExecution::Native(native),
-                        Some(profile_for_linear_int_jmp_loop(&steps, guard)),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntJmpLoop {
-                            steps,
-                            guard,
-                        }),
-                        None,
-                    )
-                }),
-            Some(CompiledTraceExecutor::NumericForLoop { loop_reg, steps }) => self
-                .compile_native_numeric_for_loop(loop_reg, &steps, lowered_trace)
-                .map(|native| {
-                    (
-                        CompiledTraceExecution::Native(native),
-                        Some(profile_for_numeric_for_loop(&steps)),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericForLoop {
-                            loop_reg,
-                            steps,
-                        }),
-                        None,
-                    )
-                }),
-            Some(CompiledTraceExecutor::GuardedNumericForLoop {
-                loop_reg,
-                steps,
-                guard,
-            }) => self
-                .compile_native_guarded_numeric_for_loop(loop_reg, &steps, guard, lowered_trace)
-                .map(|native| {
-                    (
-                        CompiledTraceExecution::Native(native),
-                        Some(profile_for_guarded_numeric_for_loop(&steps, guard)),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::GuardedNumericForLoop {
-                            loop_reg,
-                            steps,
-                            guard,
-                        }),
-                        None,
-                    )
-                }),
-            Some(CompiledTraceExecutor::NumericJmpLoop {
-                head_blocks,
-                steps,
-                tail_blocks,
-            }) => self
-                .compile_native_numeric_jmp_loop(&head_blocks, &steps, &tail_blocks, lowered_trace)
-                .map(|native| {
-                    (
-                        CompiledTraceExecution::Native(native),
-                        Some(profile_for_numeric_jmp_loop(&head_blocks, &steps, &tail_blocks)),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericJmpLoop {
-                            head_blocks,
-                            steps,
-                            tail_blocks,
-                        }),
-                        None,
-                    )
-                }),
-            Some(executor) => (CompiledTraceExecution::Interpreter(executor), None),
-            None => (CompiledTraceExecution::LoweredOnly, None),
-        };
+        if let Some((execution, native_profile)) =
+            self.compile_native_generic_trace(ir, lowered_trace)
+        {
+            return match CompiledTrace::from_artifact_helper_plan_with_execution(
+                artifact,
+                ir,
+                lowered_trace,
+                helper_plan,
+                execution,
+                native_profile,
+            ) {
+                Some(compiled_trace) => BackendCompileOutcome::Compiled(compiled_trace),
+                None => BackendCompileOutcome::NotYetSupported,
+            };
+        }
 
         match CompiledTrace::from_artifact_helper_plan_with_execution(
             artifact,
             ir,
             lowered_trace,
             helper_plan,
-            execution,
-            native_profile,
+            CompiledTraceExecution::LoweredOnly,
+            Some(NativeLoweringProfile::default()),
         ) {
             Some(compiled_trace) => BackendCompileOutcome::Compiled(compiled_trace),
-            None => self.fallback.compile(artifact, ir, lowered_trace, helper_plan),
+            None => BackendCompileOutcome::NotYetSupported,
         }
     }
 }
 
 impl NativeTraceBackend {
+    fn compile_native_generic_trace(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        if let Some((execution, profile)) = self.compile_native_generic_return(ir) {
+            return Some((execution, profile));
+        }
+
+        if let Some((execution, profile)) =
+            self.compile_native_generic_linear_int_for(ir, lowered_trace)
+        {
+            return Some((execution, profile));
+        }
+
+        if let Some((execution, profile)) =
+            self.compile_native_generic_numeric_for(ir, lowered_trace)
+        {
+            return Some((execution, profile));
+        }
+
+        if let Some((execution, profile)) =
+            self.compile_native_generic_linear_int_jmp(ir, lowered_trace)
+        {
+            return Some((execution, profile));
+        }
+
+        if let Some((execution, profile)) =
+            self.compile_native_generic_numeric_jmp(ir, lowered_trace)
+        {
+            return Some((execution, profile));
+        }
+
+        None
+    }
+
+    fn compile_native_generic_return(
+        &mut self,
+        ir: &TraceIr,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        if !ir.guards.is_empty() {
+            return None;
+        }
+
+        let [inst] = ir.insts.as_slice() else {
+            return None;
+        };
+
+        let raw = Instruction::from_u32(inst.raw_instruction);
+        let native = match inst.opcode {
+            crate::OpCode::Return0 => self.compile_native_return0(),
+            crate::OpCode::Return1 => self.compile_native_return1(raw.get_a()),
+            crate::OpCode::Return if !raw.get_k() => match raw.get_b() {
+                1 => self.compile_native_return0(),
+                2 => self.compile_native_return1(raw.get_a()),
+                b if b > 2 => self.compile_native_return(raw.get_a(), b.saturating_sub(1) as u8),
+                _ => None,
+            },
+            _ => return None,
+        }?;
+
+        Some((
+            CompiledTraceExecution::Native(native),
+            Some(NativeLoweringProfile::default()),
+        ))
+    }
+
+    fn compile_native_generic_linear_int_for(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        let loop_backedge = ir.insts.last()?;
+        if loop_backedge.opcode != crate::OpCode::ForLoop || !ir.guards.is_empty() {
+            return None;
+        }
+
+        let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
+        let steps = lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 1])?;
+        let native = self.compile_native_linear_int_for_loop(loop_reg, &steps, lowered_trace)?;
+        Some((
+            CompiledTraceExecution::Native(native),
+            Some(profile_for_linear_int_for_loop(&steps)),
+        ))
+    }
+
+    fn compile_native_generic_numeric_for(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        let loop_backedge = ir.insts.last()?;
+        if loop_backedge.opcode != crate::OpCode::ForLoop {
+            return None;
+        }
+
+        let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
+
+        if ir.guards.is_empty() {
+            let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 1])?;
+            let native = self.compile_native_numeric_for_loop(loop_reg, &steps, lowered_trace)?;
+            return Some((
+                CompiledTraceExecution::Native(native),
+                Some(profile_for_numeric_for_loop(&steps)),
+            ));
+        }
+
+        if ir.guards.len() != 1 || ir.insts.len() < 4 {
+            return None;
+        }
+
+        let guard = ir.guards[0];
+        let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
+        let guard_index = ir
+            .insts
+            .iter()
+            .position(|inst| {
+                matches!(
+                    inst.opcode,
+                    crate::OpCode::Test | crate::OpCode::TestSet | crate::OpCode::Lt | crate::OpCode::Le
+                )
+            })?;
+        if guard_index + 2 != ir.insts.len() - 1 {
+            return None;
+        }
+        if ir.insts[guard_index + 1].opcode != crate::OpCode::Jmp {
+            return None;
+        }
+
+        let steps = lower_numeric_steps_for_native(&ir.insts[..guard_index])?;
+        let loop_guard = lower_numeric_guard_for_native(&ir.insts[guard_index], true, lowered_exit.resume_pc)?;
+        let native = self.compile_native_guarded_numeric_for_loop(loop_reg, &steps, loop_guard, lowered_trace)?;
+        let profile = profile_for_guarded_numeric_for_loop(&steps, loop_guard);
+        Some((CompiledTraceExecution::Native(native), Some(profile)))
+    }
+
+    fn compile_native_generic_linear_int_jmp(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        let backedge = ir.insts.last()?;
+        if backedge.opcode != crate::OpCode::Jmp {
+            return None;
+        }
+        if Instruction::from_u32(backedge.raw_instruction).get_sj() >= 0 {
+            return None;
+        }
+        if ir.guards.len() != 1 {
+            return None;
+        }
+
+        let guard = ir.guards[0];
+        let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
+
+        let (steps, loop_guard) = if guard.taken_on_trace {
+            if ir.insts.len() < 3 {
+                return None;
+            }
+
+            let guard_inst = &ir.insts[ir.insts.len() - 2];
+            let loop_guard =
+                lower_linear_int_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
+            let steps = lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 2])?;
+            (steps, loop_guard)
+        } else {
+            if ir.insts.len() < 4 || ir.insts[1].opcode != crate::OpCode::Jmp {
+                return None;
+            }
+
+            let loop_guard = lower_linear_int_guard_for_native(
+                &ir.insts[0],
+                false,
+                lowered_exit.resume_pc,
+            )?;
+            let steps = lower_linear_int_steps_for_native(&ir.insts[2..ir.insts.len() - 1])?;
+            (steps, loop_guard)
+        };
+
+        let native = self.compile_native_linear_int_jmp_loop(&steps, loop_guard, lowered_trace)?;
+        let profile = profile_for_linear_int_jmp_loop(&steps, loop_guard);
+        Some((CompiledTraceExecution::Native(native), Some(profile)))
+    }
+
+    fn compile_native_generic_numeric_jmp(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        let backedge = ir.insts.last()?;
+        if backedge.opcode != crate::OpCode::Jmp {
+            return None;
+        }
+        if Instruction::from_u32(backedge.raw_instruction).get_sj() >= 0 {
+            return None;
+        }
+        if ir.guards.len() != 1 {
+            return None;
+        }
+
+        let guard = ir.guards[0];
+        let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
+
+        if guard.taken_on_trace {
+            if ir.insts.len() < 3 {
+                return None;
+            }
+            let guard_inst = &ir.insts[ir.insts.len() - 2];
+            let loop_guard = lower_numeric_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
+            let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 2])?;
+            let native = self.compile_native_numeric_jmp_loop(&[], &steps, &[NumericJmpLoopGuardBlock {
+                pre_steps: Vec::new(),
+                guard: loop_guard,
+            }], lowered_trace)?;
+            let profile = profile_for_numeric_jmp_loop(&[], &steps, &[NumericJmpLoopGuardBlock {
+                pre_steps: Vec::new(),
+                guard: loop_guard,
+            }]);
+            return Some((CompiledTraceExecution::Native(native), Some(profile)));
+        }
+
+        if ir.insts.len() < 4 || ir.insts[1].opcode != crate::OpCode::Jmp {
+            return None;
+        }
+
+        let loop_guard = lower_numeric_guard_for_native(&ir.insts[0], false, lowered_exit.resume_pc)?;
+        let steps = lower_numeric_steps_for_native(&ir.insts[2..ir.insts.len() - 1])?;
+        let head_blocks = [NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: loop_guard,
+        }];
+        let native = self.compile_native_numeric_jmp_loop(&head_blocks, &steps, &[], lowered_trace)?;
+        let profile = profile_for_numeric_jmp_loop(&head_blocks, &steps, &[]);
+        Some((CompiledTraceExecution::Native(native), Some(profile)))
+    }
+
     fn compile_native_return0(&mut self) -> Option<NativeCompiledTrace> {
         self.compile_native_return_trace("jit_native_return0", 0, 0, NativeReturnKind::Return0)
     }
@@ -243,97 +366,6 @@ impl NativeTraceBackend {
             u32::from(result_count),
             NativeReturnKind::Return,
         )
-    }
-
-    fn compile_test_execution(
-        &mut self,
-        artifact: &TraceArtifact,
-        ir: &TraceIr,
-        lowered_trace: &LoweredTrace,
-    ) -> CompiledTraceExecution {
-        match compile_executor(artifact, ir, lowered_trace) {
-            Some(CompiledTraceExecutor::Return {
-                start_reg,
-                result_count,
-            }) => self
-                .compile_native_return(start_reg, result_count)
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or_else(|| {
-                    CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return {
-                        start_reg,
-                        result_count,
-                    })
-                }),
-            Some(CompiledTraceExecutor::Return0) => self
-                .compile_native_return0()
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or(CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return0)),
-            Some(CompiledTraceExecutor::Return1 { src_reg }) => self
-                .compile_native_return1(src_reg)
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or_else(|| {
-                    CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return1 {
-                        src_reg,
-                    })
-                }),
-            Some(CompiledTraceExecutor::LinearIntForLoop { loop_reg, steps }) => self
-                .compile_native_linear_int_for_loop(loop_reg, &steps, lowered_trace)
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or_else(|| {
-                    CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntForLoop {
-                        loop_reg,
-                        steps,
-                    })
-                }),
-            Some(CompiledTraceExecutor::LinearIntJmpLoop { steps, guard }) => self
-                .compile_native_linear_int_jmp_loop(&steps, guard, lowered_trace)
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or_else(|| {
-                    CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntJmpLoop {
-                        steps,
-                        guard,
-                    })
-                }),
-            Some(CompiledTraceExecutor::NumericForLoop { loop_reg, steps }) => self
-                .compile_native_numeric_for_loop(loop_reg, &steps, lowered_trace)
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or_else(|| {
-                    CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericForLoop {
-                        loop_reg,
-                        steps,
-                    })
-                }),
-            Some(CompiledTraceExecutor::GuardedNumericForLoop {
-                loop_reg,
-                steps,
-                guard,
-            }) => self
-                .compile_native_guarded_numeric_for_loop(loop_reg, &steps, guard, lowered_trace)
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or_else(|| {
-                    CompiledTraceExecution::Interpreter(CompiledTraceExecutor::GuardedNumericForLoop {
-                        loop_reg,
-                        steps,
-                        guard,
-                    })
-                }),
-            Some(CompiledTraceExecutor::NumericJmpLoop {
-                head_blocks,
-                steps,
-                tail_blocks,
-            }) => self
-                .compile_native_numeric_jmp_loop(&head_blocks, &steps, &tail_blocks, lowered_trace)
-                .map(CompiledTraceExecution::Native)
-                .unwrap_or_else(|| {
-                    CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericJmpLoop {
-                        head_blocks,
-                        steps,
-                        tail_blocks,
-                    })
-                }),
-            Some(executor) => CompiledTraceExecution::Interpreter(executor),
-            None => CompiledTraceExecution::LoweredOnly,
-        }
     }
 
     fn build_module() -> Result<JITModule, String> {
@@ -1035,47 +1067,23 @@ impl NativeTraceBackend {
         tail_blocks: &[NumericJmpLoopGuardBlock],
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
-        let (pre_steps, guard) = match (head_blocks, tail_blocks) {
-            ([block], []) => (block.pre_steps.as_slice(), block.guard),
-            ([], [block]) if block.pre_steps.is_empty() => (&[][..], block.guard),
-            _ => return None,
-        };
-
-        if !pre_steps.iter().all(native_supports_numeric_step)
-            || !steps.iter().all(native_supports_numeric_step)
-        {
+        if head_blocks.is_empty() && tail_blocks.is_empty() {
             return None;
         }
 
-        if pre_steps.iter().chain(steps.iter()).any(numeric_step_touches_table) {
+        if !steps.iter().all(native_supports_numeric_step) {
             return None;
         }
 
-        let (cond, continue_when, continue_preset, exit_preset, exit_pc, tail_guard) = match guard {
-            NumericJmpLoopGuard::Head {
-                cond,
-                continue_when,
-                continue_preset,
-                exit_preset,
-                exit_pc,
-            } => (cond, continue_when, continue_preset, exit_preset, exit_pc, false),
-            NumericJmpLoopGuard::Tail {
-                cond,
-                continue_when,
-                continue_preset,
-                exit_preset,
-                exit_pc,
-            } => (cond, continue_when, continue_preset, exit_preset, exit_pc, true),
-        };
-        let exit_index = lowered_trace.deopt_target_for_exit_pc(exit_pc)?.exit_index;
-
-        if !native_supports_numeric_cond(cond)
-            || continue_preset.as_ref().is_some_and(|step| !native_supports_numeric_step(step))
-            || exit_preset.as_ref().is_some_and(|step| !native_supports_numeric_step(step))
-            || continue_preset.as_ref().is_some_and(numeric_step_touches_table)
-            || exit_preset.as_ref().is_some_and(numeric_step_touches_table)
-        {
-            return None;
+        for block in head_blocks {
+            if !numeric_jmp_guard_block_is_supported(block, false, lowered_trace) {
+                return None;
+            }
+        }
+        for block in tail_blocks {
+            if !numeric_jmp_guard_block_is_supported(block, true, lowered_trace) {
+                return None;
+            }
         }
 
         let func_name = self.allocate_function_name("jit_native_numeric_jmp_loop");
@@ -1101,7 +1109,6 @@ impl NativeTraceBackend {
 
         let loop_block = builder.create_block();
         let fallback_block = builder.create_block();
-        let side_exit_block = builder.create_block();
 
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
@@ -1110,36 +1117,30 @@ impl NativeTraceBackend {
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
 
-        for step in pre_steps {
-            emit_numeric_step(
-                &mut builder,
-                &abi,
-                &native_helpers,
-                hits_var,
-                current_hits,
-                fallback_block,
-                *step,
-                &mut known_value_kinds,
-            )?;
-        }
+        let mut side_exit_sites = Vec::with_capacity(head_blocks.len() + tail_blocks.len());
 
-        if !tail_guard {
+        for block in head_blocks {
             let continue_block = builder.create_block();
-            emit_numeric_guard_flow(
+            let side_exit_block = builder.create_block();
+            emit_numeric_guard_block(
                 &mut builder,
                 &abi,
                 &native_helpers,
                 hits_var,
                 current_hits,
                 fallback_block,
-                cond,
-                continue_when,
-                continue_preset.as_ref(),
-                exit_preset.as_ref(),
+                block,
                 continue_block,
                 side_exit_block,
                 &mut known_value_kinds,
             )?;
+            side_exit_sites.push((
+                side_exit_block,
+                numeric_jmp_guard_exit_pc(block.guard),
+                lowered_trace
+                    .deopt_target_for_exit_pc(numeric_jmp_guard_exit_pc(block.guard))?
+                    .exit_index,
+            ));
             builder.switch_to_block(continue_block);
             builder.seal_block(continue_block);
         }
@@ -1160,38 +1161,45 @@ impl NativeTraceBackend {
         let next_hits = builder.ins().iadd_imm(current_hits, 1);
         builder.def_var(hits_var, next_hits);
 
-        if tail_guard {
+        for block in tail_blocks {
             let continue_block = builder.create_block();
-            emit_numeric_guard_flow(
+            let side_exit_block = builder.create_block();
+            emit_numeric_guard_block(
                 &mut builder,
                 &abi,
                 &native_helpers,
                 hits_var,
                 next_hits,
                 fallback_block,
-                cond,
-                continue_when,
-                continue_preset.as_ref(),
-                exit_preset.as_ref(),
+                block,
                 continue_block,
                 side_exit_block,
                 &mut known_value_kinds,
             )?;
+            side_exit_sites.push((
+                side_exit_block,
+                numeric_jmp_guard_exit_pc(block.guard),
+                lowered_trace
+                    .deopt_target_for_exit_pc(numeric_jmp_guard_exit_pc(block.guard))?
+                    .exit_index,
+            ));
             builder.switch_to_block(continue_block);
             builder.seal_block(continue_block);
         }
 
         builder.ins().jump(loop_block, &[]);
 
-        emit_native_terminal_result(
-            &mut builder,
-            side_exit_block,
-            abi.result_ptr,
-            hits_var,
-            NativeTraceStatus::SideExit,
-            Some(exit_pc),
-            Some(exit_index),
-        );
+        for (side_exit_block, exit_pc, exit_index) in side_exit_sites {
+            emit_native_terminal_result(
+                &mut builder,
+                side_exit_block,
+                abi.result_ptr,
+                hits_var,
+                NativeTraceStatus::SideExit,
+                Some(exit_pc),
+                Some(exit_index),
+            );
+        }
         emit_native_terminal_result(
             &mut builder,
             fallback_block,
@@ -1230,18 +1238,17 @@ impl NativeTraceBackend {
     ) -> BackendCompileOutcome {
         let artifact = super::synthetic_artifact_for_ir(ir);
         let lowered_trace = LoweredTrace::lower(&artifact, ir, helper_plan);
-        let execution = self.compile_test_execution(&artifact, ir, &lowered_trace);
-        match CompiledTrace::from_artifact_helper_plan_with_execution(
-            &artifact,
-            ir,
-            &lowered_trace,
-            helper_plan,
-            execution,
-            None,
-        ) {
-            Some(compiled_trace) => BackendCompileOutcome::Compiled(compiled_trace),
-            None => BackendCompileOutcome::NotYetSupported,
-        }
+        <Self as TraceBackend>::compile(self, &artifact, ir, &lowered_trace, helper_plan)
+    }
+
+    pub(crate) fn compile_test_numeric_jmp_blocks(
+        &mut self,
+        head_blocks: &[NumericJmpLoopGuardBlock],
+        steps: &[NumericStep],
+        tail_blocks: &[NumericJmpLoopGuardBlock],
+        lowered_trace: &LoweredTrace,
+    ) -> Option<NativeCompiledTrace> {
+        self.compile_native_numeric_jmp_loop(head_blocks, steps, tail_blocks, lowered_trace)
     }
 }
 
@@ -1369,11 +1376,6 @@ fn profile_for_numeric_guard(guard: NumericJmpLoopGuard) -> NativeLoweringProfil
         NumericJmpLoopGuard::Head { cond, .. } | NumericJmpLoopGuard::Tail { cond, .. } => cond,
     };
     match cond {
-        NumericIfElseCond::IntCompare { .. } => NativeLoweringProfile {
-            guard_steps: 1,
-            numeric_int_compare_guard_steps: 1,
-            ..NativeLoweringProfile::default()
-        },
         NumericIfElseCond::RegCompare { .. } => NativeLoweringProfile {
             guard_steps: 1,
             numeric_reg_compare_guard_steps: 1,
@@ -1399,6 +1401,104 @@ fn guard_exit_preset(guard: NumericJmpLoopGuard) -> Option<NumericStep> {
         NumericJmpLoopGuard::Head { exit_preset, .. }
         | NumericJmpLoopGuard::Tail { exit_preset, .. } => exit_preset,
     }
+}
+
+fn numeric_jmp_guard_exit_pc(guard: NumericJmpLoopGuard) -> u32 {
+    match guard {
+        NumericJmpLoopGuard::Head { exit_pc, .. } | NumericJmpLoopGuard::Tail { exit_pc, .. } => exit_pc,
+    }
+}
+
+fn numeric_jmp_guard_block_is_supported(
+    block: &NumericJmpLoopGuardBlock,
+    tail: bool,
+    lowered_trace: &LoweredTrace,
+) -> bool {
+    if !block.pre_steps.iter().all(native_supports_numeric_step) {
+        return false;
+    }
+
+    let guard = block.guard;
+    let matches_position = matches!((tail, guard), (false, NumericJmpLoopGuard::Head { .. }) | (true, NumericJmpLoopGuard::Tail { .. }));
+    if !matches_position {
+        return false;
+    }
+
+    let cond = match guard {
+        NumericJmpLoopGuard::Head { cond, .. } | NumericJmpLoopGuard::Tail { cond, .. } => cond,
+    };
+    if !native_supports_numeric_cond(cond) {
+        return false;
+    }
+    if guard_continue_preset(guard).is_some_and(|step| !native_supports_numeric_step(&step)) {
+        return false;
+    }
+    if guard_exit_preset(guard).is_some_and(|step| !native_supports_numeric_step(&step)) {
+        return false;
+    }
+
+    lowered_trace
+        .deopt_target_for_exit_pc(numeric_jmp_guard_exit_pc(guard))
+        .is_some()
+}
+
+fn emit_numeric_guard_block(
+    builder: &mut FunctionBuilder<'_>,
+    abi: &NativeAbi,
+    native_helpers: &NativeHelpers,
+    hits_var: Variable,
+    current_hits: Value,
+    fallback_block: Block,
+    block: &NumericJmpLoopGuardBlock,
+    continue_block: Block,
+    exit_block: Block,
+    known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+) -> Option<()> {
+    for step in &block.pre_steps {
+        emit_numeric_step(
+            builder,
+            abi,
+            native_helpers,
+            hits_var,
+            current_hits,
+            fallback_block,
+            *step,
+            known_value_kinds,
+        )?;
+    }
+
+    let (cond, continue_when, continue_preset, exit_preset) = match block.guard {
+        NumericJmpLoopGuard::Head {
+            cond,
+            continue_when,
+            continue_preset,
+            exit_preset,
+            ..
+        }
+        | NumericJmpLoopGuard::Tail {
+            cond,
+            continue_when,
+            continue_preset,
+            exit_preset,
+            ..
+        } => (cond, continue_when, continue_preset, exit_preset),
+    };
+
+    emit_numeric_guard_flow(
+        builder,
+        abi,
+        native_helpers,
+        hits_var,
+        current_hits,
+        fallback_block,
+        cond,
+        continue_when,
+        continue_preset.as_ref(),
+        exit_preset.as_ref(),
+        continue_block,
+        exit_block,
+        known_value_kinds,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -2523,21 +2623,12 @@ fn native_supports_numeric_step(step: &NumericStep) -> bool {
     }
 }
 
-fn numeric_step_touches_table(step: &NumericStep) -> bool {
-    matches!(step, NumericStep::GetTableInt { .. } | NumericStep::SetTableInt { .. })
-}
-
 fn native_supports_numeric_operand(operand: &NumericOperand) -> bool {
     matches!(operand, NumericOperand::Reg(_) | NumericOperand::ImmI(_) | NumericOperand::Const(_))
 }
 
 fn native_supports_numeric_cond(cond: NumericIfElseCond) -> bool {
-    matches!(
-        cond,
-        NumericIfElseCond::IntCompare { .. }
-            | NumericIfElseCond::RegCompare { .. }
-            | NumericIfElseCond::Truthy { .. }
-    )
+    matches!(cond, NumericIfElseCond::RegCompare { .. } | NumericIfElseCond::Truthy { .. })
 }
 
 fn emit_numeric_step(
@@ -3258,15 +3349,6 @@ fn emit_numeric_condition_value(
 ) -> Option<Value> {
     let mem = MemFlags::new();
     match cond {
-        NumericIfElseCond::IntCompare { op, reg, imm } => {
-            let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
-            if !matches!(numeric_reg_value_kind(known_value_kinds, reg), TraceValueKind::Integer) {
-                emit_integer_guard(builder, reg_ptr, hits_var, current_hits, fallback_block);
-            }
-            let lhs = builder.ins().load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET);
-            let rhs = builder.ins().iconst(types::I64, i64::from(imm));
-            Some(emit_linear_compare(builder, lhs, rhs, op))
-        }
         NumericIfElseCond::RegCompare { op, lhs, rhs } => {
             let lhs_ptr = slot_addr(builder, abi.base_ptr, lhs);
             let rhs_ptr = slot_addr(builder, abi.base_ptr, rhs);

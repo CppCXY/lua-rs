@@ -1,5 +1,4 @@
 mod backend;
-mod executors;
 mod hotcount;
 mod helper_plan;
 mod ir;
@@ -11,15 +10,9 @@ mod trace_recorder;
 use crate::lua_value::LuaProto;
 use crate::lua_vm::{CallInfo, LuaState};
 
-pub(crate) use backend::{
-    CompiledTraceExecution, CompiledTraceExecutor, LinearIntGuardOp, LinearIntLoopGuard,
-    LinearIntStep, NumericBinaryOp, NumericIfElseCond, NumericJmpLoopGuard,
-    NumericJmpLoopGuardBlock, NumericOperand, NumericStep,
-};
-pub(crate) use helper_plan::HelperPlanDispatchSummary;
-pub(crate) use runtime::{
-    dispatch_root_trace_or_record, finish_trace_exit, record_trace_hits_or_fallback,
-};
+use backend::CompiledTraceExecution;
+use helper_plan::HelperPlanDispatchSummary;
+pub(crate) use runtime::dispatch_root_trace_or_record;
 pub(crate) use state::{
     ExecutableTraceDispatch, JitState, ReadySideTraceDispatch, TraceExitDispatch,
 };

@@ -1827,9 +1827,7 @@ impl LuaVM {
             - Root native numeric for dispatches: {}\n\
             - Root native guarded numeric for dispatches: {}\n\
             - Root native numeric jmp dispatches: {}\n\
-            - Root interpreter dispatches: {}\n\
             - Side native dispatches: {}\n\
-            - Side interpreter dispatches: {}\n\
             - Native exit-index resolve attempts: {}\n\
             - Native exit-index resolve hits: {}\n\
             - Native redundant side-exit recoveries: {}\n\
@@ -1880,9 +1878,7 @@ impl LuaVM {
             counters.root_native_numeric_for_dispatches,
             counters.root_native_guarded_numeric_for_dispatches,
             counters.root_native_numeric_jmp_dispatches,
-            counters.root_interpreter_dispatches,
             counters.side_native_dispatches,
-            counters.side_interpreter_dispatches,
             counters.native_exit_index_resolve_attempts,
             counters.native_exit_index_resolve_hits,
             counters.native_redundant_side_exit_recoveries,

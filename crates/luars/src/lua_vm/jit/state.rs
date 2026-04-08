@@ -171,9 +171,7 @@ pub struct JitCounters {
     pub root_native_numeric_for_dispatches: u32,
     pub root_native_guarded_numeric_for_dispatches: u32,
     pub root_native_numeric_jmp_dispatches: u32,
-    pub root_interpreter_dispatches: u32,
     pub side_native_dispatches: u32,
-    pub side_interpreter_dispatches: u32,
     pub native_exit_index_resolve_attempts: u32,
     pub native_exit_index_resolve_hits: u32,
     pub native_redundant_side_exit_recoveries: u32,
@@ -508,10 +506,6 @@ impl JitState {
                     }
                 }
             }
-            CompiledTraceExecution::Interpreter(_) => {
-                self.counters.root_interpreter_dispatches =
-                    self.counters.root_interpreter_dispatches.saturating_add(1);
-            }
             CompiledTraceExecution::LoweredOnly => {}
         }
     }
@@ -527,10 +521,7 @@ impl JitState {
                     self.counters.side_native_dispatches.saturating_add(1);
                 apply_native_lowering_profile(&mut self.counters, native.profile);
             }
-            ReadySideTraceDispatch::Executable(_) => {
-                self.counters.side_interpreter_dispatches =
-                    self.counters.side_interpreter_dispatches.saturating_add(1);
-            }
+            ReadySideTraceDispatch::Executable(_) => {}
         }
     }
 
@@ -1398,9 +1389,7 @@ mod tests {
                 root_native_numeric_for_dispatches: 0,
                 root_native_guarded_numeric_for_dispatches: 0,
                 root_native_numeric_jmp_dispatches: 0,
-                root_interpreter_dispatches: 0,
                 side_native_dispatches: 0,
-                side_interpreter_dispatches: 0,
                 native_exit_index_resolve_attempts: 0,
                 native_exit_index_resolve_hits: 0,
                 native_redundant_side_exit_recoveries: 0,
@@ -1515,7 +1504,7 @@ mod tests {
 
         assert_eq!(
             jit.trace_status_for(chunk_ptr as usize, 0),
-            Some(TraceStatus::Recorded {
+            Some(TraceStatus::Lowered {
                 instruction_count: 4,
             })
         );
@@ -1797,7 +1786,11 @@ mod tests {
         let dispatch = dispatch.unwrap();
         assert_eq!(dispatch.start_pc, 0);
         assert_eq!(dispatch.loop_tail_pc, 1);
-        assert!(matches!(dispatch.native, NativeCompiledTrace::LinearIntForLoop { .. }));
+        assert!(matches!(
+            dispatch.native,
+            NativeCompiledTrace::LinearIntForLoop { .. }
+                | NativeCompiledTrace::NumericForLoop { .. }
+        ));
 
         let ready_dispatch = jit.ready_side_trace_dispatch_for(chunk_ptr, 0, 0);
         assert!(matches!(
@@ -1805,7 +1798,8 @@ mod tests {
             Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
                 start_pc: 0,
                 loop_tail_pc: 1,
-                native: NativeCompiledTrace::LinearIntForLoop { .. },
+                native: NativeCompiledTrace::LinearIntForLoop { .. }
+                    | NativeCompiledTrace::NumericForLoop { .. },
                 ..
             }))
         ));
@@ -1835,7 +1829,8 @@ mod tests {
             Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
                 start_pc: 0,
                 loop_tail_pc: 1,
-                native: NativeCompiledTrace::LinearIntForLoop { .. },
+                native: NativeCompiledTrace::LinearIntForLoop { .. }
+                    | NativeCompiledTrace::NumericForLoop { .. },
                 ..
             }))
         ));

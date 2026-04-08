@@ -1,17 +1,9 @@
 use crate::{CallInfo, LuaState, LuaValue};
 use crate::lua_value::LuaProto;
-use super::executors::{
-    jit_execute_generic_for_builtin_add, jit_execute_linear_int_for_loop,
-    jit_execute_linear_int_jmp_loop, jit_execute_next_while_builtin_add,
-    jit_execute_numeric_for_loop, jit_execute_numeric_ifelse_for_loop,
-    jit_execute_numeric_jmp_loop, jit_execute_numeric_table_scan_jmp_loop,
-    jit_execute_return, jit_execute_return0, jit_execute_return1,
-    jit_execute_guarded_numeric_for_loop,
-};
 
 use super::{
-    CompiledTraceExecution, CompiledTraceExecutor, ExecutableTraceDispatch,
-    HelperPlanDispatchSummary, JitTraceAction, ReadySideTraceDispatch, TraceExitDispatch,
+    CompiledTraceExecution, ExecutableTraceDispatch, HelperPlanDispatchSummary,
+    JitTraceAction, ReadySideTraceDispatch, TraceExitDispatch,
 };
 use super::backend::{NativeCompiledTrace, NativeTraceResult, NativeTraceStatus};
 use super::state::NativeExecutableTraceDispatch;
@@ -75,21 +67,6 @@ pub(crate) unsafe fn dispatch_root_trace_or_record(
 
     let mut context = unsafe { JitExecutionContext::new(lua_state, ci, base) };
     unsafe { dispatch_executable_trace(&mut context, dispatch, loop_exit_pc_override) }
-}
-
-#[inline(always)]
-#[allow(unsafe_op_in_unsafe_fn)]
-pub(crate) unsafe fn finish_trace_exit(
-    lua_state: &mut LuaState,
-    ci: &CallInfo,
-    base: usize,
-    target_pc: usize,
-    trace_hits: u32,
-    summary: HelperPlanDispatchSummary,
-    exit_pc: usize,
-) -> JitTraceAction {
-    let mut context = unsafe { JitExecutionContext::new(lua_state, ci, base) };
-    unsafe { finish_trace_exit_in_context(&mut context, target_pc, trace_hits, summary, exit_pc) }
 }
 
 #[inline(always)]
@@ -235,24 +212,10 @@ unsafe fn dispatch_native_trace_result(
                 result.exit_pc as usize,
             )
         }),
-        NativeTraceStatus::Returned => match result.result_count {
-            0 => Some(jit_execute_return0(context.lua_state, context.ci, summary)),
-            1 => Some(jit_execute_return1(
-                context.lua_state,
-                context.ci,
-                context.base,
-                result.start_reg,
-                summary,
-            )),
-            count => Some(jit_execute_return(
-                context.lua_state,
-                context.ci,
-                context.base,
-                result.start_reg,
-                count as u8,
-                summary,
-            )),
-        },
+        NativeTraceStatus::Returned => {
+            super::record_batched_trace_execution(context.lua_state, result.hits, result.hits, summary);
+            Some(JitTraceAction::Returned)
+        }
     }
 }
 
@@ -344,186 +307,6 @@ unsafe fn dispatch_executable_trace(
         CompiledTraceExecution::LoweredOnly => None,
         CompiledTraceExecution::Native(native) => unsafe {
             dispatch_native_compiled_trace(context, target_pc, summary, exit_pc, native)
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return {
-            start_reg,
-            result_count,
-        }) => Some(jit_execute_return(
-            context.lua_state,
-            context.ci,
-            context.base,
-            start_reg,
-            result_count,
-            summary,
-        )),
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return0) => {
-            Some(jit_execute_return0(context.lua_state, context.ci, summary))
-        }
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::Return1 { src_reg }) => {
-            Some(jit_execute_return1(
-                context.lua_state,
-                context.ci,
-                context.base,
-                src_reg,
-                summary,
-            ))
-        }
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntJmpLoop { steps, guard }) => unsafe {
-            jit_execute_linear_int_jmp_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                target_pc,
-                &steps,
-                guard,
-                summary,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericTableScanJmpLoop {
-            table_reg,
-            index_reg,
-            limit_reg,
-            step_imm,
-            compare_op,
-            exit_pc,
-        }) => unsafe {
-            jit_execute_numeric_table_scan_jmp_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                target_pc,
-                table_reg,
-                index_reg,
-                limit_reg,
-                step_imm,
-                compare_op,
-                summary,
-                exit_pc as usize,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericJmpLoop {
-            head_blocks,
-            steps,
-            tail_blocks,
-        }) => unsafe {
-            jit_execute_numeric_jmp_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                context.constants,
-                target_pc,
-                &head_blocks,
-                &steps,
-                &tail_blocks,
-                summary,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::LinearIntForLoop { loop_reg, steps }) => unsafe {
-            jit_execute_linear_int_for_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                target_pc,
-                loop_reg,
-                &steps,
-                summary,
-                exit_pc,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericForLoop { loop_reg, steps }) => unsafe {
-            jit_execute_numeric_for_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                context.constants,
-                target_pc,
-                loop_reg,
-                &steps,
-                summary,
-                exit_pc,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::GuardedNumericForLoop { loop_reg, steps, guard }) => unsafe {
-            jit_execute_guarded_numeric_for_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                context.constants,
-                target_pc,
-                loop_reg,
-                &steps,
-                guard,
-                summary,
-                exit_pc,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NumericIfElseForLoop {
-            loop_reg,
-            pre_steps,
-            cond,
-            then_preset,
-            else_preset,
-            then_steps,
-            else_steps,
-            then_on_true,
-        }) => unsafe {
-            jit_execute_numeric_ifelse_for_loop(
-                context.lua_state,
-                context.ci,
-                context.base,
-                context.constants,
-                target_pc,
-                loop_reg,
-                &pre_steps,
-                cond,
-                then_preset,
-                else_preset,
-                &then_steps,
-                &else_steps,
-                then_on_true,
-                summary,
-                exit_pc,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::NextWhileBuiltinAdd {
-            key_reg,
-            value_reg,
-            acc_reg,
-            table_reg,
-            env_upvalue,
-            key_const,
-        }) => unsafe {
-            jit_execute_next_while_builtin_add(
-                context.lua_state,
-                context.ci,
-                context.base,
-                context.constants,
-                target_pc,
-                key_reg,
-                value_reg,
-                acc_reg,
-                table_reg,
-                env_upvalue,
-                key_const,
-                summary,
-            )
-        },
-        CompiledTraceExecution::Interpreter(CompiledTraceExecutor::GenericForBuiltinAdd {
-            tfor_reg,
-            value_reg,
-            acc_reg,
-        }) => unsafe {
-            jit_execute_generic_for_builtin_add(
-                context.lua_state,
-                context.ci,
-                context.base,
-                target_pc,
-                tfor_reg,
-                value_reg,
-                acc_reg,
-                summary,
-                exit_pc,
-            )
         },
     }
 }

@@ -96,11 +96,6 @@ pub(crate) enum NumericStep {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NumericIfElseCond {
-    IntCompare {
-        op: LinearIntGuardOp,
-        reg: u32,
-        imm: i32,
-    },
     RegCompare {
         op: LinearIntGuardOp,
         lhs: u32,
@@ -177,74 +172,8 @@ pub(crate) enum LinearIntLoopGuard {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CompiledTraceExecutor {
-    Return {
-        start_reg: u32,
-        result_count: u8,
-    },
-    Return0,
-    Return1 {
-        src_reg: u32,
-    },
-    LinearIntForLoop {
-        loop_reg: u32,
-        steps: Vec<LinearIntStep>,
-    },
-    NumericForLoop {
-        loop_reg: u32,
-        steps: Vec<NumericStep>,
-    },
-    GuardedNumericForLoop {
-        loop_reg: u32,
-        steps: Vec<NumericStep>,
-        guard: NumericJmpLoopGuard,
-    },
-    NumericIfElseForLoop {
-        loop_reg: u32,
-        pre_steps: Vec<NumericStep>,
-        cond: NumericIfElseCond,
-        then_preset: Option<NumericStep>,
-        else_preset: Option<NumericStep>,
-        then_steps: Vec<NumericStep>,
-        else_steps: Vec<NumericStep>,
-        then_on_true: bool,
-    },
-    NumericJmpLoop {
-        head_blocks: Vec<NumericJmpLoopGuardBlock>,
-        steps: Vec<NumericStep>,
-        tail_blocks: Vec<NumericJmpLoopGuardBlock>,
-    },
-    NumericTableScanJmpLoop {
-        table_reg: u32,
-        index_reg: u32,
-        limit_reg: u32,
-        step_imm: i32,
-        compare_op: LinearIntGuardOp,
-        exit_pc: u32,
-    },
-    LinearIntJmpLoop {
-        steps: Vec<LinearIntStep>,
-        guard: LinearIntLoopGuard,
-    },
-    GenericForBuiltinAdd {
-        tfor_reg: u32,
-        value_reg: u32,
-        acc_reg: u32,
-    },
-    NextWhileBuiltinAdd {
-        key_reg: u32,
-        value_reg: u32,
-        acc_reg: u32,
-        table_reg: u32,
-        env_upvalue: u32,
-        key_const: u32,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CompiledTraceExecution {
     LoweredOnly,
-    Interpreter(CompiledTraceExecutor),
     Native(NativeCompiledTrace),
 }
 
@@ -256,20 +185,6 @@ impl CompiledTraceExecution {
     pub(crate) fn family(&self) -> &'static str {
         match self {
             Self::LoweredOnly => "SummaryOnly",
-            Self::Interpreter(executor) => match executor {
-                CompiledTraceExecutor::Return { .. } => "Return",
-                CompiledTraceExecutor::Return0 => "Return0",
-                CompiledTraceExecutor::Return1 { .. } => "Return1",
-                CompiledTraceExecutor::LinearIntForLoop { .. } => "LinearIntForLoop",
-                CompiledTraceExecutor::NumericForLoop { .. } => "NumericForLoop",
-                CompiledTraceExecutor::GuardedNumericForLoop { .. } => "GuardedNumericForLoop",
-                CompiledTraceExecutor::NumericIfElseForLoop { .. } => "NumericIfElseForLoop",
-                CompiledTraceExecutor::NumericJmpLoop { .. } => "NumericJmpLoop",
-                CompiledTraceExecutor::NumericTableScanJmpLoop { .. } => "NumericTableScanJmpLoop",
-                CompiledTraceExecutor::LinearIntJmpLoop { .. } => "LinearIntJmpLoop",
-                CompiledTraceExecutor::GenericForBuiltinAdd { .. } => "GenericForBuiltinAdd",
-                CompiledTraceExecutor::NextWhileBuiltinAdd { .. } => "NextWhileBuiltinAdd",
-            },
             Self::Native(native) => match native {
                 NativeCompiledTrace::Return { .. } => "NativeReturn",
                 NativeCompiledTrace::Return0 { .. } => "NativeReturn0",
@@ -280,15 +195,6 @@ impl CompiledTraceExecution {
                 NativeCompiledTrace::GuardedNumericForLoop { .. } => "NativeGuardedNumericForLoop",
                 NativeCompiledTrace::NumericJmpLoop { .. } => "NativeNumericJmpLoop",
             },
-        }
-    }
-}
-
-impl PartialEq<CompiledTraceExecutor> for CompiledTraceExecution {
-    fn eq(&self, other: &CompiledTraceExecutor) -> bool {
-        match self {
-            Self::Interpreter(executor) => executor == other,
-            Self::LoweredOnly | Self::Native(_) => false,
         }
     }
 }
@@ -442,9 +348,7 @@ impl CompiledTrace {
         lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> Option<Self> {
-        let execution = super::compile::compile_executor(artifact, ir, lowered_trace)
-            .map(CompiledTraceExecution::Interpreter)
-            .unwrap_or(CompiledTraceExecution::LoweredOnly);
+        let execution = CompiledTraceExecution::LoweredOnly;
         Self::from_artifact_helper_plan_with_execution(
             artifact,
             ir,
@@ -514,7 +418,9 @@ impl CompiledTrace {
             steps.push(kind);
         }
 
-        if !has_helper_call && !execution.is_enterable() {
+        let recognized_lowered = matches!(execution, CompiledTraceExecution::LoweredOnly)
+            && native_profile.is_some();
+        if !has_helper_call && !execution.is_enterable() && !recognized_lowered {
             return None;
         }
 
@@ -570,9 +476,6 @@ impl CompiledTrace {
         self.native_profile
     }
 
-    pub(crate) fn executor(&self) -> CompiledTraceExecution {
-        self.execution()
-    }
 }
 
 #[derive(Default)]

@@ -1,38 +1,3 @@
-fn compile_numeric_steps_from_chunk(
-    chunk: &LuaProto,
-    start_pc: u32,
-    end_pc: u32,
-) -> Option<Vec<NumericStep>> {
-    if start_pc >= end_pc {
-        return Some(Vec::new());
-    }
-
-    let insts = (start_pc..end_pc)
-        .map(|pc| {
-            let raw_instruction = chunk.code.get(pc as usize)?.as_u32();
-            let opcode = Instruction::from_u32(raw_instruction).get_opcode();
-            let kind = match opcode {
-                crate::OpCode::MmBin | crate::OpCode::MmBinI | crate::OpCode::MmBinK => {
-                    TraceIrInstKind::MetamethodFallback
-                }
-                crate::OpCode::Jmp => TraceIrInstKind::Branch,
-                crate::OpCode::ForLoop | crate::OpCode::TForLoop => TraceIrInstKind::LoopBackedge,
-                _ => TraceIrInstKind::Arithmetic,
-            };
-            Some(TraceIrInst {
-                pc,
-                opcode,
-                raw_instruction,
-                kind,
-                reads: Vec::new(),
-                writes: Vec::new(),
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    compile_numeric_steps(&insts)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TableIntRegion {
     table_value: u32,
@@ -348,18 +313,6 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
     optimized.into_iter().flatten().collect()
 }
 
-fn lowered_exit_for_guard<'a>(
-    lowered_trace: &'a LoweredTrace,
-    index: usize,
-    guard: TraceIrGuard,
-) -> Option<&'a LoweredExit> {
-    let exit = lowered_trace.exits.get(index)?;
-    if exit.guard_pc != guard.guard_pc || exit.branch_pc != guard.branch_pc || exit.exit_pc != guard.exit_pc {
-        return None;
-    }
-    Some(exit)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LoopGuardPosition {
     Head,
@@ -404,7 +357,6 @@ fn wrap_numeric_jmp_guard(
         },
     }
 }
-
 
 fn compile_numeric_jmp_guard(
     inst: &TraceIrInst,
@@ -1028,81 +980,6 @@ fn compile_numeric_steps(insts: &[TraceIrInst]) -> Option<Vec<NumericStep>> {
     }
 
     Some(optimize_numeric_steps(steps))
-}
-
-fn compile_numeric_ifelse_condition(
-    inst: &TraceIrInst,
-) -> Option<(NumericIfElseCond, bool, Option<NumericStep>, Option<NumericStep>)> {
-    let raw = Instruction::from_u32(inst.raw_instruction);
-    match inst.opcode {
-        crate::OpCode::Lt | crate::OpCode::Le => {
-            let op = match inst.opcode {
-                crate::OpCode::Lt => LinearIntGuardOp::Lt,
-                crate::OpCode::Le => LinearIntGuardOp::Le,
-                _ => unreachable!(),
-            };
-
-            Some((
-                NumericIfElseCond::RegCompare {
-                    op,
-                    lhs: raw.get_a(),
-                    rhs: raw.get_b(),
-                },
-                !raw.get_k(),
-                None,
-                None,
-            ))
-        }
-        crate::OpCode::EqI
-        | crate::OpCode::LtI
-        | crate::OpCode::LeI
-        | crate::OpCode::GtI
-        | crate::OpCode::GeI => {
-            if raw.get_c() != 0 {
-                return None;
-            }
-
-            let op = match inst.opcode {
-                crate::OpCode::EqI => LinearIntGuardOp::Eq,
-                crate::OpCode::LtI => LinearIntGuardOp::Lt,
-                crate::OpCode::LeI => LinearIntGuardOp::Le,
-                crate::OpCode::GtI => LinearIntGuardOp::Gt,
-                crate::OpCode::GeI => LinearIntGuardOp::Ge,
-                _ => unreachable!(),
-            };
-
-            Some((
-                NumericIfElseCond::IntCompare {
-                    op,
-                    reg: raw.get_a(),
-                    imm: raw.get_sb(),
-                },
-                !raw.get_k(),
-                None,
-                None,
-            ))
-        }
-        crate::OpCode::Test => Some((
-            NumericIfElseCond::Truthy { reg: raw.get_a() },
-            !raw.get_k(),
-            None,
-            None,
-        )),
-        crate::OpCode::TestSet => {
-            let preset = NumericStep::Move {
-                dst: raw.get_a(),
-                src: raw.get_b(),
-            };
-            let then_on_true = !raw.get_k();
-            Some((
-                NumericIfElseCond::Truthy { reg: raw.get_b() },
-                then_on_true,
-                if then_on_true { None } else { Some(preset) },
-                if then_on_true { Some(preset) } else { None },
-            ))
-        }
-        _ => None,
-    }
 }
 
 fn compile_linear_int_guard(
