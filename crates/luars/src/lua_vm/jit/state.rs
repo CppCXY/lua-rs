@@ -2291,7 +2291,7 @@ mod tests {
         assert_eq!(results[0].as_integer(), Some(407));
 
         let report = vm.jit.trace_report();
-        assert!(report.contains("executor=NativeNumericForLoop"));
+        assert!(report.contains("executor=NativeLinearIntForLoop"));
         assert!(report.contains("details=arith=3,backedge=1"));
     }
 }

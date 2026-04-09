@@ -283,6 +283,7 @@ pub(crate) struct LoweredTrace {
     pub snapshots: Vec<DeoptSnapshot>,
     pub exits: Vec<LoweredExit>,
     pub helper_plan_step_count: u16,
+    pub constants: Vec<LuaValue>,
     pub root_register_hints: Vec<RegisterValueHint>,
     pub entry_stable_register_hints: Vec<RegisterValueHint>,
     pub ssa_trace: LoweredSsaTrace,
@@ -425,10 +426,21 @@ impl LoweredTrace {
             snapshots,
             exits,
             helper_plan_step_count: helper_plan.steps.len().min(u16::MAX as usize) as u16,
+            constants: chunk.map(|chunk| chunk.constants.clone()).unwrap_or_default(),
             root_register_hints: collect_root_register_hints(ir),
             entry_stable_register_hints: collect_entry_stable_register_hints(ir),
             ssa_trace,
         }
+    }
+
+    pub(crate) fn integer_constant(&self, index: u32) -> Option<i32> {
+        let value = self.constants.get(index as usize)?;
+        let integer = value.as_integer_strict()?;
+        i32::try_from(integer).ok()
+    }
+
+    pub(crate) fn float_constant(&self, index: u32) -> Option<f64> {
+        self.constants.get(index as usize)?.as_float()
     }
 
     #[cfg(test)]
@@ -469,7 +481,6 @@ impl LoweredTrace {
         summary
     }
 
-    #[cfg(test)]
     pub(crate) fn entry_stable_register_value_kind(&self, reg: u32) -> Option<TraceValueKind> {
         self.entry_stable_register_hints
             .iter()

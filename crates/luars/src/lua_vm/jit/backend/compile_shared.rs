@@ -150,6 +150,270 @@ fn normalized_table_int_key(
     }
 }
 
+fn numeric_step_reads(step: NumericStep) -> impl Iterator<Item = u32> {
+    let regs = match step {
+        NumericStep::Move { src, .. } => vec![src],
+        NumericStep::LoadBool { .. } | NumericStep::LoadI { .. } | NumericStep::LoadF { .. } => {
+            Vec::new()
+        }
+        NumericStep::GetUpval { .. } => Vec::new(),
+        NumericStep::SetUpval { src, .. } => vec![src],
+        NumericStep::GetTableInt { table, index, .. } => vec![table, index],
+        NumericStep::SetTableInt {
+            table,
+            index,
+            value,
+        } => vec![table, index, value],
+        NumericStep::Binary { lhs, rhs, .. } => {
+            let mut regs = Vec::new();
+            if let NumericOperand::Reg(reg) = lhs {
+                regs.push(reg);
+            }
+            if let NumericOperand::Reg(reg) = rhs {
+                regs.push(reg);
+            }
+            regs
+        }
+    };
+    regs.into_iter()
+}
+
+fn numeric_step_writes(step: NumericStep) -> impl Iterator<Item = u32> {
+    let regs = match step {
+        NumericStep::Move { dst, .. }
+        | NumericStep::LoadBool { dst, .. }
+        | NumericStep::LoadI { dst, .. }
+        | NumericStep::LoadF { dst, .. }
+        | NumericStep::GetUpval { dst, .. }
+        | NumericStep::GetTableInt { dst, .. }
+        | NumericStep::Binary { dst, .. } => vec![dst],
+        NumericStep::SetUpval { .. } | NumericStep::SetTableInt { .. } => Vec::new(),
+    };
+    regs.into_iter()
+}
+
+fn numeric_step_touches_reg(step: NumericStep, reg: u32) -> bool {
+    numeric_step_reads(step).any(|candidate| candidate == reg)
+        || numeric_step_writes(step).any(|candidate| candidate == reg)
+}
+
+fn resolve_numeric_move_alias(
+    move_aliases: &std::collections::HashMap<u32, u32>,
+    reg: u32,
+) -> u32 {
+    let mut current = reg;
+    let mut seen = std::collections::HashSet::new();
+    while let Some(next) = move_aliases.get(&current).copied() {
+        if !seen.insert(current) || next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+fn normalize_numeric_operand_alias(
+    move_aliases: &std::collections::HashMap<u32, u32>,
+    operand: NumericOperand,
+) -> NumericOperand {
+    match operand {
+        NumericOperand::Reg(reg) => NumericOperand::Reg(resolve_numeric_move_alias(move_aliases, reg)),
+        NumericOperand::ImmI(_) | NumericOperand::Const(_) => operand,
+    }
+}
+
+fn prune_dead_pure_numeric_defs(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+    let mut live = std::collections::HashSet::<u32>::new();
+    let mut killed_by_later_write = std::collections::HashSet::<u32>::new();
+    let mut kept = Vec::with_capacity(steps.len());
+
+    for step in steps.into_iter().rev() {
+        let reads: Vec<_> = numeric_step_reads(step).collect();
+        let writes: Vec<_> = numeric_step_writes(step).collect();
+        let keep = match step {
+            NumericStep::Move { dst, src } => dst == src || live.contains(&dst),
+            NumericStep::LoadI { dst, .. } => live.contains(&dst),
+            NumericStep::LoadBool { dst, .. }
+            | NumericStep::LoadF { dst, .. } => {
+                live.contains(&dst) || !killed_by_later_write.contains(&dst)
+            }
+            NumericStep::Binary { dst, op, .. } => {
+                live.contains(&dst)
+                    || !numeric_binary_is_safe_to_drop_when_dead(op)
+                    || !killed_by_later_write.contains(&dst)
+            }
+            NumericStep::GetUpval { .. }
+            | NumericStep::SetUpval { .. }
+            | NumericStep::GetTableInt { .. }
+            | NumericStep::SetTableInt { .. } => true,
+        };
+
+        for reg in &reads {
+            killed_by_later_write.remove(reg);
+        }
+        for reg in &writes {
+            killed_by_later_write.insert(*reg);
+        }
+
+        if keep {
+            for reg in &writes {
+                live.remove(reg);
+            }
+            for reg in reads {
+                live.insert(reg);
+            }
+            kept.push(step);
+        }
+    }
+
+    kept.into_iter().rev().collect()
+}
+
+fn can_forward_numeric_binary_across_step(step: NumericStep) -> bool {
+    matches!(
+        step,
+        NumericStep::Move { .. }
+            | NumericStep::LoadBool { .. }
+            | NumericStep::LoadI { .. }
+            | NumericStep::LoadF { .. }
+    )
+}
+
+fn numeric_binary_is_safe_to_drop_when_dead(op: NumericBinaryOp) -> bool {
+    matches!(
+        op,
+        NumericBinaryOp::Add
+            | NumericBinaryOp::Sub
+            | NumericBinaryOp::Mul
+            | NumericBinaryOp::BAnd
+            | NumericBinaryOp::BOr
+            | NumericBinaryOp::BXor
+            | NumericBinaryOp::Shl
+            | NumericBinaryOp::Shr
+    )
+}
+
+fn numeric_binary_is_single_use_operand(step: NumericStep, current: u32) -> bool {
+    match step {
+        NumericStep::Binary { lhs, rhs, .. } => {
+            matches!(lhs, NumericOperand::Reg(reg) if reg == current)
+                || matches!(rhs, NumericOperand::Reg(reg) if reg == current)
+        }
+        _ => false,
+    }
+}
+
+fn is_numeric_binary_forward_terminal_consumer(
+    step: NumericStep,
+    current: u32,
+    read_counts: &std::collections::HashMap<u32, usize>,
+) -> bool {
+    if read_counts.get(&current).copied().unwrap_or(0) != 1 {
+        return false;
+    }
+
+    match step {
+        NumericStep::SetUpval { src, .. } => src == current,
+        NumericStep::SetTableInt { value, .. } => value == current,
+        NumericStep::Binary { .. } => numeric_binary_is_single_use_operand(step, current),
+        _ => false,
+    }
+}
+
+fn forward_local_numeric_binary_moves(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+    let mut read_counts = std::collections::HashMap::<u32, usize>::new();
+    for step in &steps {
+        for reg in numeric_step_reads(*step) {
+            *read_counts.entry(reg).or_insert(0) += 1;
+        }
+    }
+
+    let mut forwarded = Vec::with_capacity(steps.len());
+    let mut index = 0usize;
+    'outer: while index < steps.len() {
+        if let Some(NumericStep::Binary {
+            dst: temp,
+            lhs,
+            rhs,
+            op,
+        }) = steps.get(index).copied()
+            && read_counts.get(&temp).copied().unwrap_or(0) == 1
+        {
+            let mut scan = index.saturating_add(1);
+            let mut current = temp;
+            let mut final_dst = None;
+            let mut final_end = None;
+            let mut skipped_move_indices = std::collections::HashSet::<usize>::new();
+            while let Some(step) = steps.get(scan).copied() {
+                match step {
+                    NumericStep::Move { dst, src }
+                        if src == current
+                            && dst != current
+                            && read_counts.get(&current).copied().unwrap_or(0) == 1 =>
+                    {
+                        final_dst = Some(dst);
+                        current = dst;
+                        skipped_move_indices.insert(scan);
+                        scan = scan.saturating_add(1);
+                    }
+                    _ if current != temp
+                        && is_numeric_binary_forward_terminal_consumer(step, current, &read_counts) =>
+                    {
+                        final_dst = Some(current);
+                        final_end = Some(scan.saturating_add(1));
+                        break;
+                    }
+                    _ if can_forward_numeric_binary_across_step(step)
+                        && !numeric_step_touches_reg(step, current) =>
+                    {
+                        scan = scan.saturating_add(1);
+                    }
+                    _ => break,
+                }
+            }
+
+            if let Some(dst) = final_dst {
+                let end = final_end.unwrap_or(scan);
+                forwarded.push(NumericStep::Binary { dst, lhs, rhs, op });
+                for (offset, step) in steps[index.saturating_add(1)..end].iter().copied().enumerate() {
+                    let step_index = index.saturating_add(1).saturating_add(offset);
+                    if !skipped_move_indices.contains(&step_index) {
+                        forwarded.push(step);
+                    }
+                }
+                index = end;
+                continue 'outer;
+            }
+        }
+
+        forwarded.push(steps[index]);
+        index = index.saturating_add(1);
+    }
+
+    forwarded
+}
+
+fn run_numeric_forwarding_pass(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+    forward_local_numeric_binary_moves(steps)
+}
+
+fn run_numeric_normalize_and_prune_pass(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+    optimize_numeric_steps(steps)
+}
+
+pub(super) fn run_numeric_midend_passes(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+    let mut current = steps;
+    for _ in 0..4 {
+        let next = run_numeric_normalize_and_prune_pass(run_numeric_forwarding_pass(current.clone()));
+        if next == current {
+            return next;
+        }
+        current = next;
+    }
+
+    current
+}
+
 fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
     let mut optimized = Vec::with_capacity(steps.len());
     let mut register_values = std::collections::HashMap::<u32, u32>::new();
@@ -157,13 +421,22 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
     let mut region_states = std::collections::HashMap::<TableIntRegion, TableIntRegionState>::new();
     let mut key_states = std::collections::HashMap::<TableIntKey, TableIntKeyState>::new();
     let mut register_aliases = std::collections::HashMap::<u32, RegisterAlias>::new();
+    let mut move_aliases = std::collections::HashMap::<u32, u32>::new();
     let mut next_value_id = u32::MAX;
+    let mut read_counts = std::collections::HashMap::<u32, usize>::new();
+
+    for step in &steps {
+        for reg in numeric_step_reads(*step) {
+            *read_counts.entry(reg).or_insert(0) += 1;
+        }
+    }
 
     for step in steps {
         match step {
             NumericStep::Move { dst, src } => {
+                let src = resolve_numeric_move_alias(&move_aliases, src);
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
-                optimized.push(Some(NumericStep::Move { dst, src }));
+                move_aliases.remove(&dst);
                 let resolved = resolve_register_alias(&register_values, &register_aliases, src);
                 set_register_value(
                     &mut register_values,
@@ -171,14 +444,20 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                     dst,
                     resolved,
                 );
+                move_aliases.insert(dst, src);
                 if let Some(key) = register_slots.get(&src).copied() {
                     register_slots.insert(dst, key);
                     current_table_int_key_state(&mut region_states, &mut key_states, key)
                         .available_value_reg = Some(dst);
                 }
+
+                if dst != src && read_counts.get(&dst).copied().unwrap_or(0) > 0 {
+                    optimized.push(Some(NumericStep::Move { dst, src }));
+                }
             }
             NumericStep::LoadBool { dst, value } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
                     &mut register_aliases,
@@ -189,6 +468,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::LoadI { dst, imm } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
                     &mut register_aliases,
@@ -199,6 +479,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::LoadF { dst, imm } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
                     &mut register_aliases,
@@ -209,6 +490,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::GetUpval { dst, upvalue } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
                     &mut register_aliases,
@@ -218,10 +500,14 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                 optimized.push(Some(NumericStep::GetUpval { dst, upvalue }));
             }
             NumericStep::SetUpval { src, upvalue } => {
+                let src = resolve_numeric_move_alias(&move_aliases, src);
                 optimized.push(Some(NumericStep::SetUpval { src, upvalue }));
             }
             NumericStep::GetTableInt { dst, table, index } => {
+                let table = resolve_numeric_move_alias(&move_aliases, table);
+                let index = resolve_numeric_move_alias(&move_aliases, index);
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
                     &mut register_aliases,
@@ -252,6 +538,9 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                 state.last_store_output = None;
             }
             NumericStep::SetTableInt { table, index, value } => {
+                let table = resolve_numeric_move_alias(&move_aliases, table);
+                let index = resolve_numeric_move_alias(&move_aliases, index);
+                let value = resolve_numeric_move_alias(&move_aliases, value);
                 let key = normalized_table_int_key(&register_values, &register_aliases, table, index);
                 let existing_state = current_table_int_key_state(&mut region_states, &mut key_states, key);
                 if let Some(prev_output) = existing_state.last_store_output
@@ -274,6 +563,8 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                 state.read_since_last_store = false;
             }
             NumericStep::Binary { dst, lhs, rhs, op } => {
+                let lhs = normalize_numeric_operand_alias(&move_aliases, lhs);
+                let rhs = normalize_numeric_operand_alias(&move_aliases, rhs);
                 let affine_alias = if op == NumericBinaryOp::Add {
                     match (lhs, rhs) {
                         (NumericOperand::Reg(src), NumericOperand::ImmI(imm))
@@ -295,6 +586,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                 };
 
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
                     &mut register_aliases,
@@ -310,7 +602,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
         }
     }
 
-    optimized.into_iter().flatten().collect()
+    prune_dead_pure_numeric_defs(optimized.into_iter().flatten().collect())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,7 +711,7 @@ fn compile_numeric_jmp_guard(
 }
 
 
-fn compile_linear_int_steps(insts: &[TraceIrInst]) -> Option<Vec<LinearIntStep>> {
+fn compile_linear_int_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) -> Option<Vec<LinearIntStep>> {
     let mut steps = Vec::with_capacity(insts.len());
     let mut index = 0usize;
 
@@ -434,6 +726,10 @@ fn compile_linear_int_steps(insts: &[TraceIrInst]) -> Option<Vec<LinearIntStep>>
             crate::OpCode::LoadI => LinearIntStep::LoadI {
                 dst: raw.get_a(),
                 imm: raw.get_sbx(),
+            },
+            crate::OpCode::BNot => LinearIntStep::BNot {
+                dst: raw.get_a(),
+                src: raw.get_b(),
             },
             crate::OpCode::Add if !raw.get_k() => {
                 consume_fused_arithmetic_companion(insts, &mut index);
@@ -451,6 +747,14 @@ fn compile_linear_int_steps(insts: &[TraceIrInst]) -> Option<Vec<LinearIntStep>>
                     imm: raw.get_sc(),
                 }
             }
+            crate::OpCode::AddK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::AddI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
             crate::OpCode::Sub if !raw.get_k() => {
                 consume_fused_arithmetic_companion(insts, &mut index);
                 LinearIntStep::Sub {
@@ -459,12 +763,140 @@ fn compile_linear_int_steps(insts: &[TraceIrInst]) -> Option<Vec<LinearIntStep>>
                     rhs: raw.get_c(),
                 }
             }
+            crate::OpCode::SubK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::SubI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
             crate::OpCode::Mul if !raw.get_k() => {
                 consume_fused_arithmetic_companion(insts, &mut index);
                 LinearIntStep::Mul {
                     dst: raw.get_a(),
                     lhs: raw.get_b(),
                     rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::MulK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::MulI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
+            crate::OpCode::IDiv if !raw.get_k() => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::IDiv {
+                    dst: raw.get_a(),
+                    lhs: raw.get_b(),
+                    rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::IDivK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::IDivI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
+            crate::OpCode::Mod if !raw.get_k() => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::Mod {
+                    dst: raw.get_a(),
+                    lhs: raw.get_b(),
+                    rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::ModK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::ModI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
+            crate::OpCode::BAnd if !raw.get_k() => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::BAnd {
+                    dst: raw.get_a(),
+                    lhs: raw.get_b(),
+                    rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::BAndK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::BAndI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
+            crate::OpCode::BOr if !raw.get_k() => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::BOr {
+                    dst: raw.get_a(),
+                    lhs: raw.get_b(),
+                    rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::BOrK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::BOrI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
+            crate::OpCode::BXor if !raw.get_k() => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::BXor {
+                    dst: raw.get_a(),
+                    lhs: raw.get_b(),
+                    rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::BXorK => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::BXorI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: lowered_trace.integer_constant(raw.get_c())?,
+                }
+            }
+            crate::OpCode::Shl if !raw.get_k() => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::Shl {
+                    dst: raw.get_a(),
+                    lhs: raw.get_b(),
+                    rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::ShlI => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::ShlI {
+                    dst: raw.get_a(),
+                    imm: raw.get_sc(),
+                    src: raw.get_b(),
+                }
+            }
+            crate::OpCode::Shr if !raw.get_k() => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::Shr {
+                    dst: raw.get_a(),
+                    lhs: raw.get_b(),
+                    rhs: raw.get_c(),
+                }
+            }
+            crate::OpCode::ShrI => {
+                consume_fused_arithmetic_companion(insts, &mut index);
+                LinearIntStep::ShrI {
+                    dst: raw.get_a(),
+                    src: raw.get_b(),
+                    imm: raw.get_sc(),
                 }
             }
             crate::OpCode::MmBin | crate::OpCode::MmBinI => return None,
@@ -572,7 +1004,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::Add,
                 }
             }
@@ -590,7 +1022,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::Sub,
                 }
             }
@@ -608,7 +1040,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::Mul,
                 }
             }
@@ -626,7 +1058,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::Div,
                 }
             }
@@ -644,7 +1076,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::IDiv,
                 }
             }
@@ -662,7 +1094,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::Mod,
                 }
             }
@@ -680,7 +1112,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::Pow,
                 }
             }
@@ -698,7 +1130,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::BAnd,
                 }
             }
@@ -716,7 +1148,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::BOr,
                 }
             }
@@ -734,7 +1166,7 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                 NumericStep::Binary {
                     dst: raw.get_a(),
                     lhs: NumericOperand::Reg(raw.get_b()),
-                    rhs: NumericOperand::Const(raw.get_c()),
+                    rhs: numeric_operand_for_constant(lowered_trace, raw.get_c()),
                     op: NumericBinaryOp::BXor,
                 }
             }
@@ -781,7 +1213,14 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
         index += 1;
     }
 
-    Some(optimize_numeric_steps(steps))
+    Some(run_numeric_midend_passes(steps))
+}
+
+fn numeric_operand_for_constant(lowered_trace: &LoweredTrace, index: u32) -> NumericOperand {
+    lowered_trace
+        .integer_constant(index)
+        .map(NumericOperand::ImmI)
+        .unwrap_or(NumericOperand::Const(index))
 }
 
 fn compile_linear_int_guard(

@@ -46,10 +46,27 @@ pub(crate) enum CompiledTraceStepKind {
 pub(crate) enum LinearIntStep {
     Move { dst: u32, src: u32 },
     LoadI { dst: u32, imm: i32 },
+    BNot { dst: u32, src: u32 },
     Add { dst: u32, lhs: u32, rhs: u32 },
     AddI { dst: u32, src: u32, imm: i32 },
     Sub { dst: u32, lhs: u32, rhs: u32 },
+    SubI { dst: u32, src: u32, imm: i32 },
     Mul { dst: u32, lhs: u32, rhs: u32 },
+    MulI { dst: u32, src: u32, imm: i32 },
+    IDiv { dst: u32, lhs: u32, rhs: u32 },
+    IDivI { dst: u32, src: u32, imm: i32 },
+    Mod { dst: u32, lhs: u32, rhs: u32 },
+    ModI { dst: u32, src: u32, imm: i32 },
+    BAnd { dst: u32, lhs: u32, rhs: u32 },
+    BAndI { dst: u32, src: u32, imm: i32 },
+    BOr { dst: u32, lhs: u32, rhs: u32 },
+    BOrI { dst: u32, src: u32, imm: i32 },
+    BXor { dst: u32, lhs: u32, rhs: u32 },
+    BXorI { dst: u32, src: u32, imm: i32 },
+    Shl { dst: u32, lhs: u32, rhs: u32 },
+    ShlI { dst: u32, imm: i32, src: u32 },
+    Shr { dst: u32, lhs: u32, rhs: u32 },
+    ShrI { dst: u32, src: u32, imm: i32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

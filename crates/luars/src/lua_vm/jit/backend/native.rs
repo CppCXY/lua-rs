@@ -189,7 +189,7 @@ impl NativeTraceBackend {
         }
 
         let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
-        let steps = lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 1])?;
+        let steps = lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
         let native = self.compile_native_linear_int_for_loop(loop_reg, &steps, lowered_trace)?;
         Some((
             CompiledTraceExecution::Native(native),
@@ -272,9 +272,9 @@ impl NativeTraceBackend {
             }
 
             let guard_inst = &ir.insts[ir.insts.len() - 2];
-            let loop_guard =
-                lower_linear_int_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
-            let steps = lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 2])?;
+            let loop_guard = lower_linear_int_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
+            let steps =
+                lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 2], lowered_trace)?;
             (steps, loop_guard)
         } else {
             if ir.insts.len() < 4 || ir.insts[1].opcode != crate::OpCode::Jmp {
@@ -286,7 +286,7 @@ impl NativeTraceBackend {
                 false,
                 lowered_exit.resume_pc,
             )?;
-            let steps = lower_linear_int_steps_for_native(&ir.insts[2..ir.insts.len() - 1])?;
+            let steps = lower_linear_int_steps_for_native(&ir.insts[2..ir.insts.len() - 1], lowered_trace)?;
             (steps, loop_guard)
         };
 
@@ -460,6 +460,13 @@ impl NativeTraceBackend {
         let target_config = module.target_config();
         let pointer_ty = target_config.pointer_type();
         let mut context = make_native_context(target_config);
+        let native_helpers = declare_native_helpers(
+            &mut module,
+            &mut context.func,
+            pointer_ty,
+            target_config.default_call_conv,
+        )
+        .ok()?;
         let func_id = module
             .declare_function(&func_name, Linkage::Local, &context.func.signature)
             .ok()?;
@@ -584,6 +591,7 @@ impl NativeTraceBackend {
         for step in steps {
             emit_linear_int_step(
                 &mut builder,
+                &native_helpers,
                 abi.base_ptr,
                 hits_var,
                 current_hits,
@@ -695,6 +703,13 @@ impl NativeTraceBackend {
         let target_config = module.target_config();
         let pointer_ty = target_config.pointer_type();
         let mut context = make_native_context(target_config);
+        let native_helpers = declare_native_helpers(
+            &mut module,
+            &mut context.func,
+            pointer_ty,
+            target_config.default_call_conv,
+        )
+        .ok()?;
         let func_id = module
             .declare_function(&func_name, Linkage::Local, &context.func.signature)
             .ok()?;
@@ -739,6 +754,7 @@ impl NativeTraceBackend {
         for step in steps {
             emit_linear_int_step(
                 &mut builder,
+                &native_helpers,
                 abi.base_ptr,
                 hits_var,
                 current_hits,
@@ -830,51 +846,229 @@ impl NativeTraceBackend {
         let mut builder_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
+        let carried_remaining_var = builder.declare_var(types::I64);
+        let carried_index_var = builder.declare_var(types::I64);
+        let carried_float_raw_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
         let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
+        let loop_state_is_invariant = numeric_loop_state_is_invariant(loop_reg, steps);
+        let carried_float_step = if loop_state_is_invariant {
+            exact_float_self_update_step(steps, lowered_trace)
+        } else {
+            None
+        };
 
         let loop_block = builder.create_block();
-        let fallback_block = builder.create_block();
-        let loop_exit_block = builder.create_block();
+        if loop_state_is_invariant {
+            builder.append_block_param(loop_block, types::I64);
+            builder.append_block_param(loop_block, types::I64);
+        }
+        if carried_float_step.is_some() {
+            builder.append_block_param(loop_block, types::I64);
+        }
+        let fallback_terminal_block = builder.create_block();
+        let loop_exit_terminal_block = builder.create_block();
+        let fallback_block = if loop_state_is_invariant {
+            builder.create_block()
+        } else {
+            fallback_terminal_block
+        };
+        let loop_exit_block = if loop_state_is_invariant {
+            builder.create_block()
+        } else {
+            loop_exit_terminal_block
+        };
 
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
-        builder.ins().jump(loop_block, &[]);
+        let hoisted_step_value = if loop_state_is_invariant {
+            let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
+            let step_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(1));
+            let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
+            emit_integer_guard(&mut builder, loop_ptr, hits_var, zero_hits, fallback_block);
+            emit_integer_guard(&mut builder, step_ptr, hits_var, zero_hits, fallback_block);
+            emit_integer_guard(&mut builder, index_ptr, hits_var, zero_hits, fallback_block);
+            set_numeric_reg_value_kind(&mut known_value_kinds, loop_reg, TraceValueKind::Integer);
+            set_numeric_reg_value_kind(
+                &mut known_value_kinds,
+                loop_reg.saturating_add(1),
+                TraceValueKind::Integer,
+            );
+            set_numeric_reg_value_kind(
+                &mut known_value_kinds,
+                loop_reg.saturating_add(2),
+                TraceValueKind::Integer,
+            );
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), step_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
+        let initial_remaining = if loop_state_is_invariant {
+            let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
+            builder
+                .ins()
+                .load(types::I64, MemFlags::new(), loop_ptr, LUA_VALUE_VALUE_OFFSET)
+        } else {
+            builder.ins().iconst(types::I64, 0)
+        };
+        let initial_index = if loop_state_is_invariant {
+            let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
+            builder
+                .ins()
+                .load(types::I64, MemFlags::new(), index_ptr, LUA_VALUE_VALUE_OFFSET)
+        } else {
+            builder.ins().iconst(types::I64, 0)
+        };
+        let initial_float_raw = if let Some(step) = carried_float_step {
+            let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
+            emit_exact_tag_guard(
+                &mut builder,
+                slot_ptr,
+                LUA_VNUMFLT,
+                hits_var,
+                zero_hits,
+                fallback_block,
+            );
+            set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Float);
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
+        let carried_float_rhs = carried_float_step.map(|step| {
+            resolve_carried_float_rhs(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                zero_hits,
+                fallback_block,
+                step,
+            )
+        });
+
+        let mut initial_args = Vec::new();
+        if loop_state_is_invariant {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_remaining));
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_index));
+        }
+        if let Some(raw) = initial_float_raw {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(raw));
+        }
+        builder.ins().jump(loop_block, &initial_args);
 
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
+        if loop_state_is_invariant {
+            let carried_remaining = builder.block_params(loop_block)[0];
+            let carried_index = builder.block_params(loop_block)[1];
+            builder.def_var(carried_remaining_var, carried_remaining);
+            builder.def_var(carried_index_var, carried_index);
+        }
+        if carried_float_step.is_some() {
+            let float_param_index = if loop_state_is_invariant { 2 } else { 0 };
+            let carried_float_raw = builder.block_params(loop_block)[float_param_index];
+            builder.def_var(carried_float_raw_var, carried_float_raw);
+        }
 
-        for step in steps {
-            emit_numeric_step(
+        if let Some(step) = carried_float_step {
+            emit_carried_float_loop_step(
                 &mut builder,
-                &abi,
-                &native_helpers,
-                hits_var,
-                current_hits,
-                fallback_block,
-                *step,
+                carried_float_raw_var,
+                step,
+                carried_float_rhs.expect("plain numeric carried-float path requires resolved rhs"),
                 &mut known_value_kinds,
-            )?;
+            );
+        } else {
+            for step in steps {
+                emit_numeric_step(
+                    &mut builder,
+                    &abi,
+                    &native_helpers,
+                    hits_var,
+                    current_hits,
+                    fallback_block,
+                    *step,
+                    &mut known_value_kinds,
+                    None,
+                    None,
+                )?;
+            }
         }
 
         let next_hits = builder.ins().iadd_imm(current_hits, 1);
-        emit_counted_loop_backedge(
-            &mut builder,
-            abi.base_ptr,
-            hits_var,
-            current_hits,
-            next_hits,
-            loop_reg,
-            None,
-            false,
-            loop_block,
-            loop_exit_block,
-            fallback_block,
-        );
+        if loop_state_is_invariant {
+            let carried_remaining = builder.use_var(carried_remaining_var);
+            let carried_index = builder.use_var(carried_index_var);
+            if carried_float_step.is_some() {
+                let carried_float_raw = builder.use_var(carried_float_raw_var);
+                emit_numeric_counted_loop_backedge_with_carried_float(
+                    &mut builder,
+                    hits_var,
+                    next_hits,
+                    carried_remaining,
+                    carried_index,
+                    hoisted_step_value,
+                    carried_float_raw,
+                    loop_block,
+                    loop_exit_block,
+                );
+            } else {
+                emit_linear_int_counted_loop_backedge(
+                    &mut builder,
+                    hits_var,
+                    next_hits,
+                    carried_remaining,
+                    carried_index,
+                    hoisted_step_value,
+                    loop_block,
+                    loop_exit_block,
+                );
+            }
+        } else {
+            emit_counted_loop_backedge(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                current_hits,
+                next_hits,
+                loop_reg,
+                None,
+                false,
+                loop_block,
+                loop_exit_terminal_block,
+                fallback_terminal_block,
+            );
+        }
+
+        if loop_state_is_invariant || carried_float_step.is_some() {
+            emit_materialize_numeric_loop_state(
+                &mut builder,
+                abi.base_ptr,
+                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
+                fallback_block,
+                fallback_terminal_block,
+            );
+            emit_materialize_numeric_loop_state(
+                &mut builder,
+                abi.base_ptr,
+                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
+                loop_exit_block,
+                loop_exit_terminal_block,
+            );
+        }
 
         emit_native_terminal_result(
             &mut builder,
-            loop_exit_block,
+            loop_exit_terminal_block,
             abi.result_ptr,
             hits_var,
             NativeTraceStatus::LoopExit,
@@ -883,7 +1077,7 @@ impl NativeTraceBackend {
         );
         emit_native_terminal_result(
             &mut builder,
-            fallback_block,
+            fallback_terminal_block,
             abi.result_ptr,
             hits_var,
             NativeTraceStatus::Fallback,
@@ -951,32 +1145,178 @@ impl NativeTraceBackend {
         let mut builder_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
+        let carried_remaining_var = builder.declare_var(types::I64);
+        let carried_index_var = builder.declare_var(types::I64);
+        let carried_float_raw_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
         let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
+        let loop_state_is_invariant = numeric_loop_state_is_invariant(loop_reg, steps)
+            && !numeric_guard_touches_reg(guard, loop_reg)
+            && !numeric_guard_touches_reg(guard, loop_reg.saturating_add(1))
+            && !numeric_guard_touches_reg(guard, loop_reg.saturating_add(2));
+        let carried_float_step = if loop_state_is_invariant {
+            exact_float_self_update_step(steps, lowered_trace)
+                .filter(|step| {
+                    !numeric_guard_writes_reg_outside_condition(guard, step.reg)
+                        && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
+                            !numeric_guard_writes_reg_outside_condition(guard, reg)
+                        })
+                })
+        } else {
+            None
+        };
 
         let loop_block = builder.create_block();
-        let fallback_block = builder.create_block();
-        let loop_exit_block = builder.create_block();
-        let side_exit_block = builder.create_block();
+        if loop_state_is_invariant {
+            builder.append_block_param(loop_block, types::I64);
+            builder.append_block_param(loop_block, types::I64);
+        }
+        if carried_float_step.is_some() {
+            builder.append_block_param(loop_block, types::I64);
+        }
+        let fallback_terminal_block = builder.create_block();
+        let loop_exit_terminal_block = builder.create_block();
+        let side_exit_terminal_block = builder.create_block();
+        let fallback_block = if loop_state_is_invariant || carried_float_step.is_some() {
+            builder.create_block()
+        } else {
+            fallback_terminal_block
+        };
+        let loop_exit_block = if loop_state_is_invariant || carried_float_step.is_some() {
+            builder.create_block()
+        } else {
+            loop_exit_terminal_block
+        };
+        let side_exit_block = if loop_state_is_invariant || carried_float_step.is_some() {
+            builder.create_block()
+        } else {
+            side_exit_terminal_block
+        };
 
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
-        builder.ins().jump(loop_block, &[]);
+        let hoisted_step_value = if loop_state_is_invariant {
+            let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
+            let step_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(1));
+            let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
+            emit_integer_guard(&mut builder, loop_ptr, hits_var, zero_hits, fallback_block);
+            emit_integer_guard(&mut builder, step_ptr, hits_var, zero_hits, fallback_block);
+            emit_integer_guard(&mut builder, index_ptr, hits_var, zero_hits, fallback_block);
+            set_numeric_reg_value_kind(&mut known_value_kinds, loop_reg, TraceValueKind::Integer);
+            set_numeric_reg_value_kind(
+                &mut known_value_kinds,
+                loop_reg.saturating_add(1),
+                TraceValueKind::Integer,
+            );
+            set_numeric_reg_value_kind(
+                &mut known_value_kinds,
+                loop_reg.saturating_add(2),
+                TraceValueKind::Integer,
+            );
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), step_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
+        let initial_remaining = if loop_state_is_invariant {
+            let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
+            builder
+                .ins()
+                .load(types::I64, MemFlags::new(), loop_ptr, LUA_VALUE_VALUE_OFFSET)
+        } else {
+            builder.ins().iconst(types::I64, 0)
+        };
+        let initial_index = if loop_state_is_invariant {
+            let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
+            builder
+                .ins()
+                .load(types::I64, MemFlags::new(), index_ptr, LUA_VALUE_VALUE_OFFSET)
+        } else {
+            builder.ins().iconst(types::I64, 0)
+        };
+        let initial_float_raw = if let Some(step) = carried_float_step {
+            let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
+            emit_exact_tag_guard(
+                &mut builder,
+                slot_ptr,
+                LUA_VNUMFLT,
+                hits_var,
+                zero_hits,
+                fallback_block,
+            );
+            set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Float);
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
+        let carried_float_rhs = carried_float_step.map(|step| {
+            resolve_carried_float_rhs(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                zero_hits,
+                fallback_block,
+                step,
+            )
+        });
+        let hoisted_guard_rhs = carried_float_step
+            .zip(carried_float_rhs)
+            .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_rhs(step, rhs));
+
+        let mut initial_args = Vec::new();
+        if loop_state_is_invariant {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_remaining));
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_index));
+        }
+        if let Some(raw) = initial_float_raw {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(raw));
+        }
+        builder.ins().jump(loop_block, &initial_args);
 
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
+        if loop_state_is_invariant {
+            let carried_remaining = builder.block_params(loop_block)[0];
+            let carried_index = builder.block_params(loop_block)[1];
+            builder.def_var(carried_remaining_var, carried_remaining);
+            builder.def_var(carried_index_var, carried_index);
+        }
+        if carried_float_step.is_some() {
+            let float_param_index = if loop_state_is_invariant { 2 } else { 0 };
+            let carried_float_raw = builder.block_params(loop_block)[float_param_index];
+            builder.def_var(carried_float_raw_var, carried_float_raw);
+        }
 
-        for step in steps {
-            emit_numeric_step(
+        if let Some(step) = carried_float_step {
+            emit_carried_float_loop_step(
                 &mut builder,
-                &abi,
-                &native_helpers,
-                hits_var,
-                current_hits,
-                fallback_block,
-                *step,
+                carried_float_raw_var,
+                step,
+                carried_float_rhs.expect("guarded numeric carried-float path requires resolved rhs"),
                 &mut known_value_kinds,
-            )?;
+            );
+        } else {
+            for step in steps {
+                emit_numeric_step(
+                    &mut builder,
+                    &abi,
+                    &native_helpers,
+                    hits_var,
+                    current_hits,
+                    fallback_block,
+                    *step,
+                    &mut known_value_kinds,
+                    None,
+                    None,
+                )?;
+            }
         }
 
         let continue_block = builder.create_block();
@@ -994,28 +1334,90 @@ impl NativeTraceBackend {
             continue_block,
             side_exit_block,
             &mut known_value_kinds,
+            carried_float_step.map(|step| CarriedFloatGuardValue {
+                reg: step.reg,
+                raw_var: carried_float_raw_var,
+            }),
+            hoisted_guard_rhs,
         )?;
 
         builder.switch_to_block(continue_block);
         builder.seal_block(continue_block);
         let next_hits = builder.ins().iadd_imm(current_hits, 1);
-        emit_counted_loop_backedge(
-            &mut builder,
-            abi.base_ptr,
-            hits_var,
-            current_hits,
-            next_hits,
-            loop_reg,
-            None,
-            false,
-            loop_block,
-            loop_exit_block,
-            fallback_block,
-        );
+        if loop_state_is_invariant {
+            let carried_remaining = builder.use_var(carried_remaining_var);
+            let carried_index = builder.use_var(carried_index_var);
+            if carried_float_step.is_some() {
+                let carried_float_raw = builder.use_var(carried_float_raw_var);
+                emit_numeric_counted_loop_backedge_with_carried_float(
+                    &mut builder,
+                    hits_var,
+                    next_hits,
+                    carried_remaining,
+                    carried_index,
+                    hoisted_step_value,
+                    carried_float_raw,
+                    loop_block,
+                    loop_exit_block,
+                );
+            } else {
+                emit_linear_int_counted_loop_backedge(
+                    &mut builder,
+                    hits_var,
+                    next_hits,
+                    carried_remaining,
+                    carried_index,
+                    hoisted_step_value,
+                    loop_block,
+                    loop_exit_block,
+                );
+            }
+        } else {
+            emit_counted_loop_backedge(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                current_hits,
+                next_hits,
+                loop_reg,
+                None,
+                false,
+                loop_block,
+                loop_exit_terminal_block,
+                fallback_block,
+            );
+        }
+
+        if loop_state_is_invariant || carried_float_step.is_some() {
+            emit_materialize_numeric_loop_state(
+                &mut builder,
+                abi.base_ptr,
+                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
+                fallback_block,
+                fallback_terminal_block,
+            );
+            emit_materialize_numeric_loop_state(
+                &mut builder,
+                abi.base_ptr,
+                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
+                loop_exit_block,
+                loop_exit_terminal_block,
+            );
+            emit_materialize_numeric_loop_state(
+                &mut builder,
+                abi.base_ptr,
+                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
+                side_exit_block,
+                side_exit_terminal_block,
+            );
+        }
 
         emit_native_terminal_result(
             &mut builder,
-            side_exit_block,
+            side_exit_terminal_block,
             abi.result_ptr,
             hits_var,
             NativeTraceStatus::SideExit,
@@ -1024,7 +1426,7 @@ impl NativeTraceBackend {
         );
         emit_native_terminal_result(
             &mut builder,
-            loop_exit_block,
+            loop_exit_terminal_block,
             abi.result_ptr,
             hits_var,
             NativeTraceStatus::LoopExit,
@@ -1033,7 +1435,7 @@ impl NativeTraceBackend {
         );
         emit_native_terminal_result(
             &mut builder,
-            fallback_block,
+            fallback_terminal_block,
             abi.result_ptr,
             hits_var,
             NativeTraceStatus::Fallback,
@@ -1097,24 +1499,93 @@ impl NativeTraceBackend {
         let mut builder_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
+        let carried_float_raw_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
         let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
+        let carried_float_step = exact_float_self_update_step(steps, lowered_trace).filter(|step| {
+            !head_blocks
+                .iter()
+                .chain(tail_blocks.iter())
+                .any(|block| numeric_guard_block_writes_reg_outside_condition(block, step.reg))
+                && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
+                    !head_blocks
+                        .iter()
+                        .chain(tail_blocks.iter())
+                        .any(|block| numeric_guard_block_writes_reg_outside_condition(block, reg))
+                })
+        });
 
         let loop_block = builder.create_block();
-        let fallback_block = builder.create_block();
+        if carried_float_step.is_some() {
+            builder.append_block_param(loop_block, types::I64);
+        }
+        let fallback_terminal_block = builder.create_block();
+        let fallback_block = if carried_float_step.is_some() {
+            builder.create_block()
+        } else {
+            fallback_terminal_block
+        };
 
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
-        builder.ins().jump(loop_block, &[]);
+        let initial_float_raw = if let Some(step) = carried_float_step {
+            let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
+            emit_exact_tag_guard(
+                &mut builder,
+                slot_ptr,
+                LUA_VNUMFLT,
+                hits_var,
+                zero_hits,
+                fallback_block,
+            );
+            set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Float);
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
+        let carried_float_rhs = carried_float_step.map(|step| {
+            resolve_carried_float_rhs(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                zero_hits,
+                fallback_block,
+                step,
+            )
+        });
+        let hoisted_guard_rhs = carried_float_step
+            .zip(carried_float_rhs)
+            .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_rhs(step, rhs));
+        if let Some(raw) = initial_float_raw {
+            builder.ins().jump(
+                loop_block,
+                &[cranelift::codegen::ir::BlockArg::Value(raw)],
+            );
+        } else {
+            builder.ins().jump(loop_block, &[]);
+        }
 
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
+        if carried_float_step.is_some() {
+            let carried_float_raw = builder.block_params(loop_block)[0];
+            builder.def_var(carried_float_raw_var, carried_float_raw);
+        }
 
         let mut side_exit_sites = Vec::with_capacity(head_blocks.len() + tail_blocks.len());
 
         for block in head_blocks {
             let continue_block = builder.create_block();
-            let side_exit_block = builder.create_block();
+            let side_exit_terminal_block = builder.create_block();
+            let side_exit_block = if carried_float_step.is_some() {
+                builder.create_block()
+            } else {
+                side_exit_terminal_block
+            };
             emit_numeric_guard_block(
                 &mut builder,
                 &abi,
@@ -1126,9 +1597,15 @@ impl NativeTraceBackend {
                 continue_block,
                 side_exit_block,
                 &mut known_value_kinds,
+                carried_float_step.map(|step| CarriedFloatGuardValue {
+                    reg: step.reg,
+                    raw_var: carried_float_raw_var,
+                }),
+                hoisted_guard_rhs,
             )?;
             side_exit_sites.push((
                 side_exit_block,
+                side_exit_terminal_block,
                 numeric_jmp_guard_exit_pc(block.guard),
                 lowered_trace
                     .deopt_target_for_exit_pc(numeric_jmp_guard_exit_pc(block.guard))?
@@ -1138,17 +1615,29 @@ impl NativeTraceBackend {
             builder.seal_block(continue_block);
         }
 
-        for step in steps {
-            emit_numeric_step(
+        if let Some(step) = carried_float_step {
+            emit_carried_float_loop_step(
                 &mut builder,
-                &abi,
-                &native_helpers,
-                hits_var,
-                current_hits,
-                fallback_block,
-                *step,
+                carried_float_raw_var,
+                step,
+                carried_float_rhs.expect("numeric jmp carried-float path requires resolved rhs"),
                 &mut known_value_kinds,
-            )?;
+            );
+        } else {
+            for step in steps {
+                emit_numeric_step(
+                    &mut builder,
+                    &abi,
+                    &native_helpers,
+                    hits_var,
+                    current_hits,
+                    fallback_block,
+                    *step,
+                    &mut known_value_kinds,
+                    None,
+                    None,
+                )?;
+            }
         }
 
         let next_hits = builder.ins().iadd_imm(current_hits, 1);
@@ -1156,7 +1645,12 @@ impl NativeTraceBackend {
 
         for block in tail_blocks {
             let continue_block = builder.create_block();
-            let side_exit_block = builder.create_block();
+            let side_exit_terminal_block = builder.create_block();
+            let side_exit_block = if carried_float_step.is_some() {
+                builder.create_block()
+            } else {
+                side_exit_terminal_block
+            };
             emit_numeric_guard_block(
                 &mut builder,
                 &abi,
@@ -1168,9 +1662,15 @@ impl NativeTraceBackend {
                 continue_block,
                 side_exit_block,
                 &mut known_value_kinds,
+                carried_float_step.map(|step| CarriedFloatGuardValue {
+                    reg: step.reg,
+                    raw_var: carried_float_raw_var,
+                }),
+                hoisted_guard_rhs,
             )?;
             side_exit_sites.push((
                 side_exit_block,
+                side_exit_terminal_block,
                 numeric_jmp_guard_exit_pc(block.guard),
                 lowered_trace
                     .deopt_target_for_exit_pc(numeric_jmp_guard_exit_pc(block.guard))?
@@ -1180,12 +1680,41 @@ impl NativeTraceBackend {
             builder.seal_block(continue_block);
         }
 
-        builder.ins().jump(loop_block, &[]);
+        if carried_float_step.is_some() {
+            let carried_float_raw = builder.use_var(carried_float_raw_var);
+            builder.ins().jump(
+                loop_block,
+                &[cranelift::codegen::ir::BlockArg::Value(carried_float_raw)],
+            );
+        } else {
+            builder.ins().jump(loop_block, &[]);
+        }
 
-        for (side_exit_block, exit_pc, exit_index) in side_exit_sites {
+        if carried_float_step.is_some() {
+            emit_materialize_numeric_loop_state(
+                &mut builder,
+                abi.base_ptr,
+                None,
+                carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
+                fallback_block,
+                fallback_terminal_block,
+            );
+        }
+
+        for (side_exit_block, side_exit_terminal_block, exit_pc, exit_index) in side_exit_sites {
+            if carried_float_step.is_some() {
+                emit_materialize_numeric_loop_state(
+                    &mut builder,
+                    abi.base_ptr,
+                    None,
+                    carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
+                    side_exit_block,
+                    side_exit_terminal_block,
+                );
+            }
             emit_native_terminal_result(
                 &mut builder,
-                side_exit_block,
+                side_exit_terminal_block,
                 abi.result_ptr,
                 hits_var,
                 NativeTraceStatus::SideExit,
@@ -1195,7 +1724,7 @@ impl NativeTraceBackend {
         }
         emit_native_terminal_result(
             &mut builder,
-            fallback_block,
+            fallback_terminal_block,
             abi.result_ptr,
             hits_var,
             NativeTraceStatus::Fallback,
@@ -1222,6 +1751,44 @@ impl NativeTraceBackend {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CarriedFloatLoopStep {
+    reg: u32,
+    op: NumericBinaryOp,
+    rhs: CarriedFloatRhs,
+}
+
+#[derive(Clone, Copy)]
+struct CarriedFloatGuardValue {
+    reg: u32,
+    raw_var: Variable,
+}
+
+#[derive(Clone, Copy)]
+struct HoistedNumericGuardValue {
+    reg: u32,
+    source: HoistedNumericGuardSource,
+}
+
+#[derive(Clone, Copy)]
+enum HoistedNumericGuardSource {
+    FloatRaw(Value),
+    Integer(Value),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CarriedFloatRhs {
+    Imm(f64),
+    StableReg { reg: u32, kind: TraceValueKind },
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedCarriedFloatRhs {
+    Imm(f64),
+    FloatRaw(Value),
+    Integer(Value),
+}
+
 #[cfg(test)]
 impl NativeTraceBackend {
     pub(crate) fn compile_test(
@@ -1231,6 +1798,18 @@ impl NativeTraceBackend {
     ) -> BackendCompileOutcome {
         let artifact = super::synthetic_artifact_for_ir(ir);
         let lowered_trace = LoweredTrace::lower(&artifact, ir, helper_plan);
+        <Self as TraceBackend>::compile(self, &artifact, ir, &lowered_trace, helper_plan)
+    }
+
+    pub(crate) fn compile_test_with_constants(
+        &mut self,
+        ir: &TraceIr,
+        helper_plan: &HelperPlan,
+        constants: Vec<LuaValue>,
+    ) -> BackendCompileOutcome {
+        let artifact = super::synthetic_artifact_for_ir(ir);
+        let mut lowered_trace = LoweredTrace::lower(&artifact, ir, helper_plan);
+        lowered_trace.constants = constants;
         <Self as TraceBackend>::compile(self, &artifact, ir, &lowered_trace, helper_plan)
     }
 
@@ -1245,12 +1824,27 @@ impl NativeTraceBackend {
     }
 }
 
-fn profile_for_linear_int_for_loop(_steps: &[LinearIntStep]) -> NativeLoweringProfile {
-    NativeLoweringProfile::default()
+fn profile_for_linear_int_for_loop(steps: &[LinearIntStep]) -> NativeLoweringProfile {
+    steps.iter().copied().fold(NativeLoweringProfile::default(), |acc, step| {
+        merge_native_profiles(acc, profile_for_linear_int_step(step))
+    })
 }
 
-fn profile_for_linear_int_jmp_loop(_steps: &[LinearIntStep], _guard: LinearIntLoopGuard) -> NativeLoweringProfile {
-    profile_for_linear_guard()
+fn profile_for_linear_int_jmp_loop(steps: &[LinearIntStep], _guard: LinearIntLoopGuard) -> NativeLoweringProfile {
+    merge_native_profiles(profile_for_linear_int_for_loop(steps), profile_for_linear_guard())
+}
+
+fn profile_for_linear_int_step(step: LinearIntStep) -> NativeLoweringProfile {
+    match step {
+        LinearIntStep::Shl { .. }
+        | LinearIntStep::ShlI { .. }
+        | LinearIntStep::Shr { .. }
+        | LinearIntStep::ShrI { .. } => NativeLoweringProfile {
+            shift_helper_steps: 1,
+            ..NativeLoweringProfile::default()
+        },
+        _ => NativeLoweringProfile::default(),
+    }
 }
 
 fn profile_for_numeric_for_loop(steps: &[NumericStep]) -> NativeLoweringProfile {
@@ -1446,6 +2040,8 @@ fn emit_numeric_guard_block(
     continue_block: Block,
     exit_block: Block,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<()> {
     for step in &block.pre_steps {
         emit_numeric_step(
@@ -1457,6 +2053,8 @@ fn emit_numeric_guard_block(
             fallback_block,
             *step,
             known_value_kinds,
+            carried_float,
+            hoisted_numeric,
         )?;
     }
 
@@ -1491,6 +2089,8 @@ fn emit_numeric_guard_block(
         continue_block,
         exit_block,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )
 }
 
@@ -1978,38 +2578,52 @@ fn emit_copy_luavalue(builder: &mut FunctionBuilder<'_>, dst_ptr: Value, src_ptr
     builder.ins().store(mem, raw_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
 }
 
-fn emit_store_integer(builder: &mut FunctionBuilder<'_>, dst_ptr: Value, value: Value) {
+fn emit_store_boolean_with_known_tag(
+    builder: &mut FunctionBuilder<'_>,
+    dst_ptr: Value,
+    value: bool,
+    dst_known_boolean: bool,
+) {
     let mem = MemFlags::new();
-    let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
-    builder.ins().store(mem, value, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-    builder.ins().store(mem, int_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
-}
-
-fn emit_store_float(builder: &mut FunctionBuilder<'_>, dst_ptr: Value, value: f64) {
-    let mem = MemFlags::new();
-    let raw = builder.ins().iconst(types::I64, value.to_bits() as i64);
-    let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-    builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
-}
-
-fn emit_store_float_value(builder: &mut FunctionBuilder<'_>, dst_ptr: Value, value: Value) {
-    let mem = MemFlags::new();
-    let raw = builder.ins().bitcast(types::I64, mem, value);
-    let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-    builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
-}
-
-fn emit_store_boolean(builder: &mut FunctionBuilder<'_>, dst_ptr: Value, value: bool) {
-    let mem = MemFlags::new();
-    let bool_tag = builder.ins().iconst(
-        types::I8,
-        if value { LUA_VTRUE_TAG as i64 } else { LUA_VFALSE_TAG as i64 },
-    );
     let zero = builder.ins().iconst(types::I64, 0);
     builder.ins().store(mem, zero, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-    builder.ins().store(mem, bool_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+    if !dst_known_boolean {
+        let bool_tag = builder.ins().iconst(
+            types::I8,
+            if value { LUA_VTRUE_TAG as i64 } else { LUA_VFALSE_TAG as i64 },
+        );
+        builder.ins().store(mem, bool_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+    }
+}
+
+fn emit_store_float_with_known_tag(
+    builder: &mut FunctionBuilder<'_>,
+    dst_ptr: Value,
+    value: f64,
+    dst_known_float: bool,
+) {
+    let mem = MemFlags::new();
+    let raw = builder.ins().iconst(types::I64, value.to_bits() as i64);
+    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    if !dst_known_float {
+        let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
+        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+    }
+}
+
+fn emit_store_float_value_with_known_tag(
+    builder: &mut FunctionBuilder<'_>,
+    dst_ptr: Value,
+    value: Value,
+    dst_known_float: bool,
+) {
+    let mem = MemFlags::new();
+    let raw = builder.ins().bitcast(types::I64, mem, value);
+    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    if !dst_known_float {
+        let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
+        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+    }
 }
 
 fn emit_numeric_tagged_value_to_float(
@@ -2068,12 +2682,23 @@ fn emit_integer_guard(
     current_hits: Value,
     bail_block: Block,
 ) {
+    emit_exact_tag_guard(builder, slot_ptr, LUA_VNUMINT, hits_var, current_hits, bail_block);
+}
+
+fn emit_exact_tag_guard(
+    builder: &mut FunctionBuilder<'_>,
+    slot_ptr: Value,
+    expected_tag: u8,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+) {
     let mem = MemFlags::new();
     let tt = builder.ins().load(types::I8, mem, slot_ptr, LUA_VALUE_TT_OFFSET);
-    let is_integer = builder.ins().icmp_imm(IntCC::Equal, tt, LUA_VNUMINT as i64);
+    let tag_matches = builder.ins().icmp_imm(IntCC::Equal, tt, i64::from(expected_tag));
     let next_block = builder.create_block();
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(is_integer, next_block, &[], bail_block, &[]);
+    builder.ins().brif(tag_matches, next_block, &[], bail_block, &[]);
     builder.switch_to_block(next_block);
     builder.seal_block(next_block);
 }
@@ -2211,6 +2836,39 @@ fn emit_linear_int_counted_loop_backedge(
     builder.seal_block(continue_block);
 }
 
+    fn emit_numeric_counted_loop_backedge_with_carried_float(
+        builder: &mut FunctionBuilder<'_>,
+        hits_var: Variable,
+        next_hits: Value,
+        carried_remaining: Value,
+        carried_index: Value,
+        hoisted_step_value: Option<Value>,
+        carried_float_raw: Value,
+        loop_block: Block,
+        loop_exit_block: Block,
+    ) {
+        let has_more = builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThan, carried_remaining, 0);
+        let continue_block = builder.create_block();
+        builder.def_var(hits_var, next_hits);
+        builder.ins().brif(has_more, continue_block, &[], loop_exit_block, &[]);
+
+        builder.switch_to_block(continue_block);
+        let step_val = hoisted_step_value.expect("numeric invariant path requires hoisted step");
+        let updated_remaining = builder.ins().iadd_imm(carried_remaining, -1);
+        let updated_index = builder.ins().iadd(carried_index, step_val);
+        builder.ins().jump(
+            loop_block,
+            &[
+                cranelift::codegen::ir::BlockArg::Value(updated_remaining),
+                cranelift::codegen::ir::BlockArg::Value(updated_index),
+                cranelift::codegen::ir::BlockArg::Value(carried_float_raw),
+            ],
+        );
+        builder.seal_block(continue_block);
+    }
+
 fn emit_linear_int_materialize_loop_state(
     builder: &mut FunctionBuilder<'_>,
     base_ptr: Value,
@@ -2227,6 +2885,46 @@ fn emit_linear_int_materialize_loop_state(
     let carried_index = builder.use_var(carried_index_var);
     emit_store_integer_with_known_tag(builder, loop_ptr, carried_remaining, true);
     emit_store_integer_with_known_tag(builder, index_ptr, carried_index, true);
+    builder.ins().jump(target_block, &[]);
+    builder.seal_block(source_block);
+}
+
+fn emit_store_float_raw_with_known_tag(
+    builder: &mut FunctionBuilder<'_>,
+    dst_ptr: Value,
+    raw: Value,
+    dst_known_float: bool,
+) {
+    let mem = MemFlags::new();
+    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    if !dst_known_float {
+        let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
+        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+    }
+}
+
+fn emit_materialize_numeric_loop_state(
+    builder: &mut FunctionBuilder<'_>,
+    base_ptr: Value,
+    loop_state: Option<(u32, Variable, Variable)>,
+    carried_float: Option<(u32, Variable)>,
+    source_block: Block,
+    target_block: Block,
+) {
+    builder.switch_to_block(source_block);
+    if let Some((loop_reg, carried_remaining_var, carried_index_var)) = loop_state {
+        let loop_ptr = slot_addr(builder, base_ptr, loop_reg);
+        let index_ptr = slot_addr(builder, base_ptr, loop_reg.saturating_add(2));
+        let carried_remaining = builder.use_var(carried_remaining_var);
+        let carried_index = builder.use_var(carried_index_var);
+        emit_store_integer_with_known_tag(builder, loop_ptr, carried_remaining, true);
+        emit_store_integer_with_known_tag(builder, index_ptr, carried_index, true);
+    }
+    if let Some((reg, carried_float_raw_var)) = carried_float {
+        let ptr = slot_addr(builder, base_ptr, reg);
+        let raw = builder.use_var(carried_float_raw_var);
+        emit_store_float_raw_with_known_tag(builder, ptr, raw, true);
+    }
     builder.ins().jump(target_block, &[]);
     builder.seal_block(source_block);
 }
@@ -2287,10 +2985,27 @@ fn linear_int_step_writes_reg(step: LinearIntStep, reg: u32) -> bool {
     match step {
         LinearIntStep::Move { dst, .. }
         | LinearIntStep::LoadI { dst, .. }
+        | LinearIntStep::BNot { dst, .. }
         | LinearIntStep::Add { dst, .. }
         | LinearIntStep::AddI { dst, .. }
         | LinearIntStep::Sub { dst, .. }
-        | LinearIntStep::Mul { dst, .. } => dst == reg,
+        | LinearIntStep::SubI { dst, .. }
+        | LinearIntStep::Mul { dst, .. }
+        | LinearIntStep::MulI { dst, .. }
+        | LinearIntStep::IDiv { dst, .. }
+        | LinearIntStep::IDivI { dst, .. }
+        | LinearIntStep::Mod { dst, .. }
+        | LinearIntStep::ModI { dst, .. }
+        | LinearIntStep::BAnd { dst, .. }
+        | LinearIntStep::BAndI { dst, .. }
+        | LinearIntStep::BOr { dst, .. }
+        | LinearIntStep::BOrI { dst, .. }
+        | LinearIntStep::BXor { dst, .. }
+        | LinearIntStep::BXorI { dst, .. }
+        | LinearIntStep::Shl { dst, .. }
+        | LinearIntStep::ShlI { dst, .. }
+        | LinearIntStep::Shr { dst, .. }
+        | LinearIntStep::ShrI { dst, .. } => dst == reg,
     }
 }
 
@@ -2303,6 +3018,115 @@ fn linear_int_loop_state_is_invariant(loop_reg: u32, steps: &[LinearIntStep]) ->
             || linear_int_step_writes_reg(step, index_reg)
     })
 }
+
+fn numeric_step_writes_reg(step: NumericStep, reg: u32) -> bool {
+    match step {
+        NumericStep::Move { dst, .. }
+        | NumericStep::LoadBool { dst, .. }
+        | NumericStep::LoadI { dst, .. }
+        | NumericStep::LoadF { dst, .. }
+        | NumericStep::GetUpval { dst, .. }
+        | NumericStep::GetTableInt { dst, .. }
+        | NumericStep::Binary { dst, .. } => dst == reg,
+        NumericStep::SetUpval { .. } | NumericStep::SetTableInt { .. } => false,
+    }
+}
+
+fn numeric_operand_reads_reg(operand: NumericOperand, reg: u32) -> bool {
+    matches!(operand, NumericOperand::Reg(operand_reg) if operand_reg == reg)
+}
+
+fn numeric_step_reads_reg(step: NumericStep, reg: u32) -> bool {
+    match step {
+        NumericStep::Move { src, .. } => src == reg,
+        NumericStep::LoadBool { .. } | NumericStep::LoadI { .. } | NumericStep::LoadF { .. } => {
+            false
+        }
+        NumericStep::GetUpval { .. } => false,
+        NumericStep::SetUpval { src, .. } => src == reg,
+        NumericStep::GetTableInt { table, index, .. } => table == reg || index == reg,
+        NumericStep::SetTableInt { table, index, value } => {
+            table == reg || index == reg || value == reg
+        }
+        NumericStep::Binary { lhs, rhs, .. } => {
+            numeric_operand_reads_reg(lhs, reg) || numeric_operand_reads_reg(rhs, reg)
+        }
+    }
+}
+
+fn numeric_loop_state_is_invariant(loop_reg: u32, steps: &[NumericStep]) -> bool {
+    let step_reg = loop_reg.saturating_add(1);
+    let index_reg = loop_reg.saturating_add(2);
+    !steps.iter().copied().any(|step| {
+        numeric_step_reads_reg(step, loop_reg)
+            || numeric_step_reads_reg(step, step_reg)
+            || numeric_step_reads_reg(step, index_reg)
+            || numeric_step_writes_reg(step, loop_reg)
+            || numeric_step_writes_reg(step, step_reg)
+            || numeric_step_writes_reg(step, index_reg)
+    })
+}
+
+fn numeric_cond_reads_reg(cond: NumericIfElseCond, reg: u32) -> bool {
+    match cond {
+        NumericIfElseCond::RegCompare { lhs, rhs, .. } => lhs == reg || rhs == reg,
+        NumericIfElseCond::Truthy { reg: cond_reg } => cond_reg == reg,
+    }
+}
+
+fn numeric_guard_touches_reg(guard: NumericJmpLoopGuard, reg: u32) -> bool {
+    let (cond, continue_preset, exit_preset) = match guard {
+        NumericJmpLoopGuard::Head {
+            cond,
+            continue_preset,
+            exit_preset,
+            ..
+        }
+        | NumericJmpLoopGuard::Tail {
+            cond,
+            continue_preset,
+            exit_preset,
+            ..
+        } => (cond, continue_preset, exit_preset),
+    };
+
+    numeric_cond_reads_reg(cond, reg)
+        || continue_preset.is_some_and(|step| {
+            numeric_step_reads_reg(step, reg) || numeric_step_writes_reg(step, reg)
+        })
+        || exit_preset.is_some_and(|step| {
+            numeric_step_reads_reg(step, reg) || numeric_step_writes_reg(step, reg)
+        })
+}
+
+    fn numeric_guard_writes_reg_outside_condition(guard: NumericJmpLoopGuard, reg: u32) -> bool {
+        let (_, continue_preset, exit_preset) = match guard {
+            NumericJmpLoopGuard::Head {
+                cond: _,
+                continue_preset,
+                exit_preset,
+                ..
+            }
+            | NumericJmpLoopGuard::Tail {
+                cond: _,
+                continue_preset,
+                exit_preset,
+                ..
+            } => ((), continue_preset, exit_preset),
+        };
+
+        continue_preset.is_some_and(|step| numeric_step_writes_reg(step, reg))
+            || exit_preset.is_some_and(|step| numeric_step_writes_reg(step, reg))
+    }
+
+    fn numeric_guard_block_writes_reg_outside_condition(block: &NumericJmpLoopGuardBlock, reg: u32) -> bool {
+        block
+            .pre_steps
+            .iter()
+            .copied()
+            .any(|step| numeric_step_writes_reg(step, reg))
+            || numeric_guard_writes_reg_outside_condition(block.guard, reg)
+    }
 
 fn linear_int_reg_is_known_integer(known_integer_regs: &[u32], reg: u32) -> bool {
     known_integer_regs.contains(&reg)
@@ -2416,6 +3240,7 @@ fn emit_linear_int_guard_condition(
 
 fn emit_linear_int_step(
     builder: &mut FunctionBuilder<'_>,
+    native_helpers: &NativeHelpers,
     base_ptr: Value,
     hits_var: Variable,
     current_hits: Value,
@@ -2446,6 +3271,23 @@ fn emit_linear_int_step(
             let dst_val = builder.ins().iconst(types::I64, i64::from(imm));
             let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
             emit_store_integer_with_known_tag(builder, dst_ptr, dst_val, dst_known_integer);
+            mark_linear_int_reg_known_integer(known_integer_regs, dst);
+        }
+        LinearIntStep::BNot { dst, src } => {
+            let dst_ptr = slot_addr(builder, base_ptr, dst);
+            let src_val = emit_known_linear_int_reg_value(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                src,
+            );
+            let result = builder.ins().bnot(src_val);
+            let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+            emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             mark_linear_int_reg_known_integer(known_integer_regs, dst);
         }
         LinearIntStep::Add { dst, lhs, rhs } => {
@@ -2496,6 +3338,24 @@ fn emit_linear_int_step(
                 |b, l, r| b.ins().isub(l, r),
             );
         }
+        LinearIntStep::SubI { dst, src, imm } => {
+            let dst_ptr = slot_addr(builder, base_ptr, dst);
+            let src_val = emit_known_linear_int_reg_value(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                src,
+            );
+            let imm_val = builder.ins().iconst(types::I64, i64::from(imm));
+            let result = builder.ins().isub(src_val, imm_val);
+            let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+            emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
+            mark_linear_int_reg_known_integer(known_integer_regs, dst);
+        }
         LinearIntStep::Mul { dst, lhs, rhs } => {
             emit_binary_int_op(
                 builder,
@@ -2511,7 +3371,493 @@ fn emit_linear_int_step(
                 |b, l, r| b.ins().imul(l, r),
             );
         }
+        LinearIntStep::MulI { dst, src, imm } => {
+            let dst_ptr = slot_addr(builder, base_ptr, dst);
+            let src_val = emit_known_linear_int_reg_value(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                src,
+            );
+            let imm_val = builder.ins().iconst(types::I64, i64::from(imm));
+            let result = builder.ins().imul(src_val, imm_val);
+            let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+            emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
+            mark_linear_int_reg_known_integer(known_integer_regs, dst);
+        }
+        LinearIntStep::IDiv { dst, lhs, rhs } => {
+            emit_linear_int_div_mod_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                lhs,
+                rhs,
+                false,
+            );
+        }
+        LinearIntStep::IDivI { dst, src, imm } => {
+            emit_linear_int_div_mod_imm(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                src,
+                imm,
+                false,
+            );
+        }
+        LinearIntStep::Mod { dst, lhs, rhs } => {
+            emit_linear_int_div_mod_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                lhs,
+                rhs,
+                true,
+            );
+        }
+        LinearIntStep::ModI { dst, src, imm } => {
+            emit_linear_int_div_mod_imm(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                src,
+                imm,
+                true,
+            );
+        }
+        LinearIntStep::BAnd { dst, lhs, rhs } => {
+            emit_binary_int_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                lhs,
+                rhs,
+                |b, l, r| b.ins().band(l, r),
+            );
+        }
+        LinearIntStep::BAndI { dst, src, imm } => {
+            emit_linear_int_imm_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                src,
+                imm,
+                |b, value, rhs| b.ins().band(value, rhs),
+            );
+        }
+        LinearIntStep::BOr { dst, lhs, rhs } => {
+            emit_binary_int_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                lhs,
+                rhs,
+                |b, l, r| b.ins().bor(l, r),
+            );
+        }
+        LinearIntStep::BOrI { dst, src, imm } => {
+            emit_linear_int_imm_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                src,
+                imm,
+                |b, value, rhs| b.ins().bor(value, rhs),
+            );
+        }
+        LinearIntStep::BXor { dst, lhs, rhs } => {
+            emit_binary_int_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                lhs,
+                rhs,
+                |b, l, r| b.ins().bxor(l, r),
+            );
+        }
+        LinearIntStep::BXorI { dst, src, imm } => {
+            emit_linear_int_imm_op(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                src,
+                imm,
+                |b, value, rhs| b.ins().bxor(value, rhs),
+            );
+        }
+        LinearIntStep::Shl { dst, lhs, rhs } => {
+            emit_linear_int_shift_op(
+                builder,
+                native_helpers,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                lhs,
+                rhs,
+                true,
+            );
+        }
+        LinearIntStep::ShlI { dst, imm, src } => {
+            emit_linear_int_shift_imm_lhs(
+                builder,
+                native_helpers,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                imm,
+                src,
+            );
+        }
+        LinearIntStep::Shr { dst, lhs, rhs } => {
+            emit_linear_int_shift_op(
+                builder,
+                native_helpers,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                lhs,
+                rhs,
+                false,
+            );
+        }
+        LinearIntStep::ShrI { dst, src, imm } => {
+            emit_linear_int_imm_shift_rhs(
+                builder,
+                native_helpers,
+                base_ptr,
+                hits_var,
+                current_hits,
+                bail_block,
+                known_integer_regs,
+                loop_carried_values,
+                dst,
+                src,
+                imm,
+            );
+        }
     }
+}
+
+fn emit_linear_int_imm_op<F>(
+    builder: &mut FunctionBuilder<'_>,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    known_integer_regs: &mut Vec<u32>,
+    loop_carried_values: &[(u32, Value)],
+    dst: u32,
+    src: u32,
+    imm: i32,
+    op: F,
+) where
+    F: Fn(&mut FunctionBuilder<'_>, Value, Value) -> Value,
+{
+    let dst_ptr = slot_addr(builder, base_ptr, dst);
+    let src_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        src,
+    );
+    let imm_val = builder.ins().iconst(types::I64, i64::from(imm));
+    let result = op(builder, src_val, imm_val);
+    let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+    emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
+    mark_linear_int_reg_known_integer(known_integer_regs, dst);
+}
+
+fn emit_linear_int_div_mod_op(
+    builder: &mut FunctionBuilder<'_>,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    known_integer_regs: &mut Vec<u32>,
+    loop_carried_values: &[(u32, Value)],
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    modulo: bool,
+) {
+    let lhs_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        lhs,
+    );
+    let rhs_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        rhs,
+    );
+    let dst_ptr = slot_addr(builder, base_ptr, dst);
+    let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+    if modulo {
+        emit_integer_mod(
+            builder,
+            hits_var,
+            current_hits,
+            bail_block,
+            dst_ptr,
+            lhs_val,
+            rhs_val,
+            dst_known_integer,
+        );
+    } else {
+        emit_integer_idiv(
+            builder,
+            hits_var,
+            current_hits,
+            bail_block,
+            dst_ptr,
+            lhs_val,
+            rhs_val,
+            dst_known_integer,
+        );
+    }
+    mark_linear_int_reg_known_integer(known_integer_regs, dst);
+}
+
+fn emit_linear_int_div_mod_imm(
+    builder: &mut FunctionBuilder<'_>,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    known_integer_regs: &mut Vec<u32>,
+    loop_carried_values: &[(u32, Value)],
+    dst: u32,
+    src: u32,
+    imm: i32,
+    modulo: bool,
+) {
+    let lhs_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        src,
+    );
+    let rhs_val = builder.ins().iconst(types::I64, i64::from(imm));
+    let dst_ptr = slot_addr(builder, base_ptr, dst);
+    let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+    if modulo {
+        emit_integer_mod(
+            builder,
+            hits_var,
+            current_hits,
+            bail_block,
+            dst_ptr,
+            lhs_val,
+            rhs_val,
+            dst_known_integer,
+        );
+    } else {
+        emit_integer_idiv(
+            builder,
+            hits_var,
+            current_hits,
+            bail_block,
+            dst_ptr,
+            lhs_val,
+            rhs_val,
+            dst_known_integer,
+        );
+    }
+    mark_linear_int_reg_known_integer(known_integer_regs, dst);
+}
+
+fn emit_linear_int_shift_op(
+    builder: &mut FunctionBuilder<'_>,
+    native_helpers: &NativeHelpers,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    known_integer_regs: &mut Vec<u32>,
+    loop_carried_values: &[(u32, Value)],
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    shift_left: bool,
+) {
+    let lhs_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        lhs,
+    );
+    let rhs_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        rhs,
+    );
+    let call = if shift_left {
+        builder.ins().call(native_helpers.shift_left, &[lhs_val, rhs_val])
+    } else {
+        builder.ins().call(native_helpers.shift_right, &[lhs_val, rhs_val])
+    };
+    let result = builder.inst_results(call)[0];
+    let dst_ptr = slot_addr(builder, base_ptr, dst);
+    let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+    emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
+    mark_linear_int_reg_known_integer(known_integer_regs, dst);
+}
+
+fn emit_linear_int_shift_imm_lhs(
+    builder: &mut FunctionBuilder<'_>,
+    native_helpers: &NativeHelpers,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    known_integer_regs: &mut Vec<u32>,
+    loop_carried_values: &[(u32, Value)],
+    dst: u32,
+    imm: i32,
+    src: u32,
+) {
+    let lhs_val = builder.ins().iconst(types::I64, i64::from(imm));
+    let rhs_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        src,
+    );
+    let call = builder.ins().call(native_helpers.shift_left, &[lhs_val, rhs_val]);
+    let result = builder.inst_results(call)[0];
+    let dst_ptr = slot_addr(builder, base_ptr, dst);
+    let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+    emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
+    mark_linear_int_reg_known_integer(known_integer_regs, dst);
+}
+
+fn emit_linear_int_imm_shift_rhs(
+    builder: &mut FunctionBuilder<'_>,
+    native_helpers: &NativeHelpers,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    known_integer_regs: &mut Vec<u32>,
+    loop_carried_values: &[(u32, Value)],
+    dst: u32,
+    src: u32,
+    imm: i32,
+) {
+    let lhs_val = emit_known_linear_int_reg_value(
+        builder,
+        base_ptr,
+        hits_var,
+        current_hits,
+        bail_block,
+        known_integer_regs,
+        loop_carried_values,
+        src,
+    );
+    let rhs_val = builder.ins().iconst(types::I64, i64::from(imm));
+    let call = builder.ins().call(native_helpers.shift_right, &[lhs_val, rhs_val]);
+    let result = builder.inst_results(call)[0];
+    let dst_ptr = slot_addr(builder, base_ptr, dst);
+    let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
+    emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
+    mark_linear_int_reg_known_integer(known_integer_regs, dst);
 }
 
 fn emit_binary_int_op<F>(
@@ -2571,6 +3917,257 @@ fn emit_helper_success_guard(
     builder.seal_block(continue_block);
 }
 
+fn exact_float_self_update_step(
+    steps: &[NumericStep],
+    lowered_trace: &LoweredTrace,
+) -> Option<CarriedFloatLoopStep> {
+    let (dst, lhs, rhs, op) = match steps {
+        [NumericStep::Binary { dst, lhs, rhs, op }] => (*dst, *lhs, *rhs, *op),
+        [
+            NumericStep::Move { dst: alias_dst, src: alias_src },
+            NumericStep::Binary { dst, lhs, rhs, op },
+        ] if matches!(rhs, NumericOperand::Reg(reg) if *reg == *alias_dst)
+            && *alias_dst != *dst
+            && *alias_src != *dst => {
+                (*dst, *lhs, NumericOperand::Reg(*alias_src), *op)
+            }
+        _ => return None,
+    };
+    let NumericOperand::Reg(lhs_reg) = lhs else {
+        return None;
+    };
+    if dst != lhs_reg
+        || !matches!(op, NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul | NumericBinaryOp::Div)
+    {
+        return None;
+    }
+    let rhs = match rhs {
+        NumericOperand::ImmI(imm) => CarriedFloatRhs::Imm(f64::from(imm)),
+        NumericOperand::Const(index) => CarriedFloatRhs::Imm(
+            lowered_trace
+                .float_constant(index)
+                .or_else(|| lowered_trace.integer_constant(index).map(f64::from))?,
+        ),
+        NumericOperand::Reg(rhs_reg) => {
+            if rhs_reg == dst {
+                return None;
+            }
+            match lowered_trace.entry_stable_register_value_kind(rhs_reg) {
+                Some(TraceValueKind::Float) => CarriedFloatRhs::StableReg {
+                    reg: rhs_reg,
+                    kind: TraceValueKind::Float,
+                },
+                Some(TraceValueKind::Integer) => CarriedFloatRhs::StableReg {
+                    reg: rhs_reg,
+                    kind: TraceValueKind::Integer,
+                },
+                _ => return None,
+            }
+        }
+    };
+    Some(CarriedFloatLoopStep {
+        reg: dst,
+        op,
+        rhs,
+    })
+}
+
+fn carried_float_rhs_stable_reg(step: CarriedFloatLoopStep) -> Option<u32> {
+    match step.rhs {
+        CarriedFloatRhs::StableReg { reg, .. } => Some(reg),
+        CarriedFloatRhs::Imm(_) => None,
+    }
+}
+
+fn resolve_carried_float_rhs(
+    builder: &mut FunctionBuilder<'_>,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    step: CarriedFloatLoopStep,
+) -> ResolvedCarriedFloatRhs {
+    match step.rhs {
+        CarriedFloatRhs::Imm(value) => ResolvedCarriedFloatRhs::Imm(value),
+        CarriedFloatRhs::StableReg { reg, kind } => {
+            let ptr = slot_addr(builder, base_ptr, reg);
+            match kind {
+                TraceValueKind::Float => {
+                    emit_exact_tag_guard(
+                        builder,
+                        ptr,
+                        LUA_VNUMFLT,
+                        hits_var,
+                        current_hits,
+                        bail_block,
+                    );
+                    ResolvedCarriedFloatRhs::FloatRaw(
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlags::new(), ptr, LUA_VALUE_VALUE_OFFSET),
+                    )
+                }
+                TraceValueKind::Integer => {
+                    emit_exact_tag_guard(
+                        builder,
+                        ptr,
+                        LUA_VNUMINT,
+                        hits_var,
+                        current_hits,
+                        bail_block,
+                    );
+                    ResolvedCarriedFloatRhs::Integer(
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlags::new(), ptr, LUA_VALUE_VALUE_OFFSET),
+                    )
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+fn hoisted_numeric_guard_value_from_carried_rhs(
+    step: CarriedFloatLoopStep,
+    rhs: ResolvedCarriedFloatRhs,
+) -> Option<HoistedNumericGuardValue> {
+    match (step.rhs, rhs) {
+        (
+            CarriedFloatRhs::StableReg {
+                reg,
+                kind: TraceValueKind::Float,
+            },
+            ResolvedCarriedFloatRhs::FloatRaw(raw),
+        ) => Some(HoistedNumericGuardValue {
+            reg,
+            source: HoistedNumericGuardSource::FloatRaw(raw),
+        }),
+        (
+            CarriedFloatRhs::StableReg {
+                reg,
+                kind: TraceValueKind::Integer,
+            },
+            ResolvedCarriedFloatRhs::Integer(value),
+        ) => Some(HoistedNumericGuardValue {
+            reg,
+            source: HoistedNumericGuardSource::Integer(value),
+        }),
+        _ => None,
+    }
+}
+
+fn emit_materialize_guard_numeric_override(
+    builder: &mut FunctionBuilder<'_>,
+    abi: &NativeAbi,
+    reg: u32,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
+) -> bool {
+    let dst_ptr = slot_addr(builder, abi.base_ptr, reg);
+    let mem = MemFlags::new();
+
+    if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
+        let raw = builder.use_var(carried.raw_var);
+        let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
+        builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        return true;
+    }
+
+    if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == reg) {
+        match hoisted.source {
+            HoistedNumericGuardSource::FloatRaw(raw) => {
+                let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
+                builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+                builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+            }
+            HoistedNumericGuardSource::Integer(value) => {
+                emit_store_integer_with_known_tag(builder, dst_ptr, value, false);
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
+fn emit_guard_numeric_override_tag_and_value(
+    builder: &mut FunctionBuilder<'_>,
+    reg: u32,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
+) -> Option<(Value, Value)> {
+    if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
+        return Some((
+            builder.ins().iconst(types::I8, LUA_VNUMFLT as i64),
+            builder.use_var(carried.raw_var),
+        ));
+    }
+
+    if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == reg) {
+        return Some(match hoisted.source {
+            HoistedNumericGuardSource::FloatRaw(raw) => (
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64),
+                raw,
+            ),
+            HoistedNumericGuardSource::Integer(value) => (
+                builder.ins().iconst(types::I8, LUA_VNUMINT as i64),
+                value,
+            ),
+        });
+    }
+
+    None
+}
+
+fn emit_guard_numeric_override_integer_value(
+    builder: &mut FunctionBuilder<'_>,
+    reg: u32,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
+) -> Option<Value> {
+    hoisted_numeric
+        .filter(|hoisted| hoisted.reg == reg)
+        .and_then(|hoisted| match hoisted.source {
+            HoistedNumericGuardSource::Integer(value) => Some(value),
+            HoistedNumericGuardSource::FloatRaw(_) => {
+                let _ = builder;
+                None
+            }
+        })
+}
+
+fn emit_carried_float_loop_step(
+    builder: &mut FunctionBuilder<'_>,
+    carried_float_raw_var: Variable,
+    step: CarriedFloatLoopStep,
+    rhs: ResolvedCarriedFloatRhs,
+    known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+) {
+    let carried_raw = builder.use_var(carried_float_raw_var);
+    let lhs = builder.ins().bitcast(types::F64, MemFlags::new(), carried_raw);
+    let rhs = match rhs {
+        ResolvedCarriedFloatRhs::Imm(value) => {
+            let rhs_raw = builder.ins().iconst(types::I64, value.to_bits() as i64);
+            builder.ins().bitcast(types::F64, MemFlags::new(), rhs_raw)
+        }
+        ResolvedCarriedFloatRhs::FloatRaw(raw) => {
+            builder.ins().bitcast(types::F64, MemFlags::new(), raw)
+        }
+        ResolvedCarriedFloatRhs::Integer(value) => builder.ins().fcvt_from_sint(types::F64, value),
+    };
+    let result = match step.op {
+        NumericBinaryOp::Add => builder.ins().fadd(lhs, rhs),
+        NumericBinaryOp::Sub => builder.ins().fsub(lhs, rhs),
+        NumericBinaryOp::Mul => builder.ins().fmul(lhs, rhs),
+        NumericBinaryOp::Div => builder.ins().fdiv(lhs, rhs),
+        _ => unreachable!(),
+    };
+    let raw = builder.ins().bitcast(types::I64, MemFlags::new(), result);
+    builder.def_var(carried_float_raw_var, raw);
+    set_numeric_reg_value_kind(known_value_kinds, step.reg, TraceValueKind::Float);
+}
+
 fn native_supports_numeric_step(step: &NumericStep) -> bool {
     match step {
         NumericStep::Move { .. }
@@ -2620,32 +4217,64 @@ fn emit_numeric_step(
     fallback_block: Block,
     step: NumericStep,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<()> {
     match step {
         NumericStep::Move { dst, src } => {
-            let src_ptr = slot_addr(builder, abi.base_ptr, src);
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
-            emit_copy_luavalue(builder, dst_ptr, src_ptr);
-            let src_kind = numeric_reg_value_kind(known_value_kinds, src);
+            let src_kind = if let Some((src_tag, src_val)) =
+                emit_guard_numeric_override_tag_and_value(builder, src, carried_float, hoisted_numeric)
+            {
+                let mem = MemFlags::new();
+                builder.ins().store(mem, src_val, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+                builder.ins().store(mem, src_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+                match src_tag {
+                    _ if carried_float.is_some_and(|carried| carried.reg == src) => TraceValueKind::Float,
+                    _ => hoisted_numeric
+                        .filter(|hoisted| hoisted.reg == src)
+                        .map(|hoisted| match hoisted.source {
+                            HoistedNumericGuardSource::FloatRaw(_) => TraceValueKind::Float,
+                            HoistedNumericGuardSource::Integer(_) => TraceValueKind::Integer,
+                        })
+                        .unwrap_or(TraceValueKind::Unknown),
+                }
+            } else {
+                let src_ptr = slot_addr(builder, abi.base_ptr, src);
+                emit_copy_luavalue(builder, dst_ptr, src_ptr);
+                numeric_reg_value_kind(known_value_kinds, src)
+            };
             set_numeric_reg_value_kind(known_value_kinds, dst, src_kind);
             Some(())
         }
         NumericStep::LoadBool { dst, value } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
-            emit_store_boolean(builder, dst_ptr, value);
+            let dst_known_boolean = matches!(
+                numeric_reg_value_kind(known_value_kinds, dst),
+                TraceValueKind::Boolean
+            );
+            emit_store_boolean_with_known_tag(builder, dst_ptr, value, dst_known_boolean);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Boolean);
             Some(())
         }
         NumericStep::LoadI { dst, imm } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
             let value = builder.ins().iconst(types::I64, i64::from(imm));
-            emit_store_integer(builder, dst_ptr, value);
+            let dst_known_integer = matches!(
+                numeric_reg_value_kind(known_value_kinds, dst),
+                TraceValueKind::Integer
+            );
+            emit_store_integer_with_known_tag(builder, dst_ptr, value, dst_known_integer);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Integer);
             Some(())
         }
         NumericStep::LoadF { dst, imm } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
-            emit_store_float(builder, dst_ptr, imm as f64);
+            let dst_known_float = matches!(
+                numeric_reg_value_kind(known_value_kinds, dst),
+                TraceValueKind::Float
+            );
+            emit_store_float_with_known_tag(builder, dst_ptr, imm as f64, dst_known_float);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Float);
             Some(())
         }
@@ -2696,6 +4325,7 @@ fn emit_numeric_step(
             Some(())
         }
         NumericStep::Binary { dst, lhs, rhs, op } => {
+            let dst_known_kind = numeric_reg_value_kind(known_value_kinds, dst);
             if matches!(op, NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul) {
                 emit_integer_add_sub_mul_with_helper_fallback(
                     builder,
@@ -2709,6 +4339,10 @@ fn emit_numeric_step(
                     rhs,
                     op,
                     known_value_kinds,
+                    matches!(dst_known_kind, TraceValueKind::Integer),
+                    matches!(dst_known_kind, TraceValueKind::Float),
+                    carried_float,
+                    hoisted_numeric,
                 )?;
                 set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
                 return Some(());
@@ -2726,6 +4360,9 @@ fn emit_numeric_step(
                     lhs,
                     rhs,
                     known_value_kinds,
+                    matches!(dst_known_kind, TraceValueKind::Float),
+                    carried_float,
+                    hoisted_numeric,
                 )?;
                 set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
                 return Some(());
@@ -2743,6 +4380,9 @@ fn emit_numeric_step(
                     lhs,
                     rhs,
                     known_value_kinds,
+                    matches!(dst_known_kind, TraceValueKind::Float),
+                    carried_float,
+                    hoisted_numeric,
                 )?;
                 set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
                 return Some(());
@@ -2757,6 +4397,8 @@ fn emit_numeric_step(
                     fallback_block,
                     lhs,
                     known_value_kinds,
+                    carried_float,
+                    hoisted_numeric,
                 )?;
                 let rhs_val = emit_numeric_integer_operand(
                     builder,
@@ -2766,14 +4408,34 @@ fn emit_numeric_step(
                     fallback_block,
                     rhs,
                     known_value_kinds,
+                    carried_float,
+                    hoisted_numeric,
                 )?;
                 let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
                 if matches!(op, NumericBinaryOp::Mod) {
-                    emit_integer_mod(builder, hits_var, current_hits, fallback_block, dst_ptr, lhs_val, rhs_val);
+                    emit_integer_mod(
+                        builder,
+                        hits_var,
+                        current_hits,
+                        fallback_block,
+                        dst_ptr,
+                        lhs_val,
+                        rhs_val,
+                        matches!(dst_known_kind, TraceValueKind::Integer),
+                    );
                 } else {
-                    emit_integer_idiv(builder, hits_var, current_hits, fallback_block, dst_ptr, lhs_val, rhs_val);
+                    emit_integer_idiv(
+                        builder,
+                        hits_var,
+                        current_hits,
+                        fallback_block,
+                        dst_ptr,
+                        lhs_val,
+                        rhs_val,
+                        matches!(dst_known_kind, TraceValueKind::Integer),
+                    );
                 }
-                set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
+                set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Integer);
                 return Some(());
             }
 
@@ -2818,6 +4480,8 @@ fn emit_numeric_step(
                 fallback_block,
                 lhs,
                 known_value_kinds,
+                carried_float,
+                hoisted_numeric,
             )?;
             let rhs_val = emit_numeric_integer_operand(
                 builder,
@@ -2827,6 +4491,8 @@ fn emit_numeric_step(
                 fallback_block,
                 rhs,
                 known_value_kinds,
+                carried_float,
+                hoisted_numeric,
             )?;
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
             let result = match op {
@@ -2849,7 +4515,12 @@ fn emit_numeric_step(
                 | NumericBinaryOp::Mod
                 | NumericBinaryOp::Pow => unreachable!(),
             };
-            emit_store_integer(builder, dst_ptr, result);
+            emit_store_integer_with_known_tag(
+                builder,
+                dst_ptr,
+                result,
+                matches!(dst_known_kind, TraceValueKind::Integer),
+            );
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Integer);
             Some(())
         }
@@ -2864,12 +4535,24 @@ fn emit_numeric_integer_operand(
     fallback_block: Block,
     operand: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<Value> {
     let mem = MemFlags::new();
     match operand {
         NumericOperand::ImmI(imm) => Some(builder.ins().iconst(types::I64, i64::from(imm))),
         NumericOperand::Reg(reg) => {
+            if let Some(value) = emit_guard_numeric_override_integer_value(builder, reg, hoisted_numeric) {
+                return Some(value);
+            }
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
+            let _ = emit_materialize_guard_numeric_override(
+                builder,
+                abi,
+                reg,
+                carried_float,
+                hoisted_numeric,
+            );
             if !matches!(numeric_reg_value_kind(known_value_kinds, reg), TraceValueKind::Integer) {
                 emit_integer_guard(builder, reg_ptr, hits_var, current_hits, fallback_block);
             }
@@ -2891,6 +4574,8 @@ fn emit_numeric_operand_tag_and_value(
     fallback_block: Block,
     operand: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<(Value, Value)> {
     let mem = MemFlags::new();
     match operand {
@@ -2899,6 +4584,11 @@ fn emit_numeric_operand_tag_and_value(
             builder.ins().iconst(types::I64, i64::from(imm)),
         )),
         NumericOperand::Reg(reg) => {
+            if let Some(result) =
+                emit_guard_numeric_override_tag_and_value(builder, reg, carried_float, hoisted_numeric)
+            {
+                return Some(result);
+            }
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
             let tag = if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, reg)) {
                 builder.ins().iconst(types::I8, i64::from(tag))
@@ -2928,7 +4618,15 @@ fn emit_numeric_binary_helper_call(
     lhs: NumericOperand,
     rhs: NumericOperand,
     op: NumericBinaryOp,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<()> {
+    if let NumericOperand::Reg(reg) = lhs {
+        let _ = emit_materialize_guard_numeric_override(builder, abi, reg, carried_float, hoisted_numeric);
+    }
+    if let NumericOperand::Reg(reg) = rhs {
+        let _ = emit_materialize_guard_numeric_override(builder, abi, reg, carried_float, hoisted_numeric);
+    }
     let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
     let (lhs_kind, lhs_payload) = emit_numeric_operand_kind_and_payload(builder, lhs);
     let (rhs_kind, rhs_payload) = emit_numeric_operand_kind_and_payload(builder, rhs);
@@ -2964,6 +4662,10 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
     rhs: NumericOperand,
     op: NumericBinaryOp,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    dst_known_integer: bool,
+    dst_known_float: bool,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<()> {
     let (lhs_tag, lhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -2973,6 +4675,8 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         fallback_block,
         lhs,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )?;
     let (rhs_tag, rhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -2982,6 +4686,8 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         fallback_block,
         rhs,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )?;
     let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
     let int_fast_block = builder.create_block();
@@ -3014,7 +4720,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             builder.ins().brif(overflow, helper_block, &[], int_store_block, &[]);
 
             builder.switch_to_block(int_store_block);
-            emit_store_integer(builder, dst_ptr, result);
+            emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             builder.ins().jump(done_block, &[]);
             builder.seal_block(int_store_block);
         }
@@ -3028,7 +4734,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             builder.ins().brif(overflow, helper_block, &[], int_store_block, &[]);
 
             builder.switch_to_block(int_store_block);
-            emit_store_integer(builder, dst_ptr, result);
+            emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             builder.ins().jump(done_block, &[]);
             builder.seal_block(int_store_block);
         }
@@ -3044,7 +4750,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             builder.ins().brif(either_zero, zero_block, &[], nonzero_block, &[]);
 
             builder.switch_to_block(zero_block);
-            emit_store_integer(builder, dst_ptr, zero);
+            emit_store_integer_with_known_tag(builder, dst_ptr, zero, dst_known_integer);
             builder.ins().jump(done_block, &[]);
             builder.seal_block(zero_block);
 
@@ -3067,7 +4773,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             builder.seal_block(mul_compute_block);
 
             builder.switch_to_block(mul_store_block);
-            emit_store_integer(builder, dst_ptr, result);
+            emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             builder.ins().jump(done_block, &[]);
             builder.seal_block(mul_store_block);
             builder.seal_block(nonzero_block);
@@ -3089,7 +4795,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         NumericBinaryOp::Mul => builder.ins().fmul(lhs_num, rhs_num),
         _ => unreachable!(),
     };
-    emit_store_float_value(builder, dst_ptr, result);
+    emit_store_float_value_with_known_tag(builder, dst_ptr, result, dst_known_float);
     builder.ins().jump(done_block, &[]);
     builder.seal_block(float_store_block);
 
@@ -3105,6 +4811,8 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         lhs,
         rhs,
         op,
+        carried_float,
+        hoisted_numeric,
     )?;
     builder.ins().jump(done_block, &[]);
     builder.seal_block(helper_block);
@@ -3125,6 +4833,9 @@ fn emit_numeric_div_with_helper_fallback(
     lhs: NumericOperand,
     rhs: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    dst_known_float: bool,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<()> {
     let (lhs_tag, lhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -3134,6 +4845,8 @@ fn emit_numeric_div_with_helper_fallback(
         fallback_block,
         lhs,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )?;
     let (rhs_tag, rhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -3143,6 +4856,8 @@ fn emit_numeric_div_with_helper_fallback(
         fallback_block,
         rhs,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )?;
     let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
     let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
@@ -3168,7 +4883,7 @@ fn emit_numeric_div_with_helper_fallback(
     let rhs_as_float_raw = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
     let rhs_as_float = builder.ins().select(rhs_is_int, rhs_as_float_int, rhs_as_float_raw);
     let result = builder.ins().fdiv(lhs_as_float, rhs_as_float);
-    emit_store_float_value(builder, dst_ptr, result);
+    emit_store_float_value_with_known_tag(builder, dst_ptr, result, dst_known_float);
     builder.ins().jump(done_block, &[]);
     builder.seal_block(fast_block);
 
@@ -3184,6 +4899,8 @@ fn emit_numeric_div_with_helper_fallback(
         lhs,
         rhs,
         NumericBinaryOp::Div,
+        carried_float,
+        hoisted_numeric,
     )?;
     builder.ins().jump(done_block, &[]);
     builder.seal_block(helper_block);
@@ -3204,6 +4921,9 @@ fn emit_numeric_pow_with_helper_fallback(
     lhs: NumericOperand,
     rhs: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    dst_known_float: bool,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<()> {
     let (lhs_tag, lhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -3213,6 +4933,8 @@ fn emit_numeric_pow_with_helper_fallback(
         fallback_block,
         lhs,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )?;
     let (rhs_tag, rhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -3222,6 +4944,8 @@ fn emit_numeric_pow_with_helper_fallback(
         fallback_block,
         rhs,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )?;
     let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
     let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
@@ -3244,7 +4968,7 @@ fn emit_numeric_pow_with_helper_fallback(
     let rhs_num = emit_numeric_tagged_value_to_float(builder, rhs_tag, rhs_val);
     let call = builder.ins().call(native_helpers.numeric_pow, &[lhs_num, rhs_num]);
     let result = builder.inst_results(call)[0];
-    emit_store_float_value(builder, dst_ptr, result);
+    emit_store_float_value_with_known_tag(builder, dst_ptr, result, dst_known_float);
     builder.ins().jump(done_block, &[]);
     builder.seal_block(fast_block);
 
@@ -3260,6 +4984,8 @@ fn emit_numeric_pow_with_helper_fallback(
         lhs,
         rhs,
         NumericBinaryOp::Pow,
+        carried_float,
+        hoisted_numeric,
     )?;
     builder.ins().jump(done_block, &[]);
     builder.seal_block(helper_block);
@@ -3277,6 +5003,7 @@ fn emit_integer_mod(
     dst_ptr: Value,
     lhs_val: Value,
     rhs_val: Value,
+    dst_known_integer: bool,
 ) {
     let zero = builder.ins().iconst(types::I64, 0);
     let rhs_is_zero = builder.ins().icmp(IntCC::Equal, rhs_val, zero);
@@ -3293,7 +5020,7 @@ fn emit_integer_mod(
     let adjusted = builder.ins().iadd(remainder, rhs_val);
     let maybe_adjusted = builder.ins().select(sign_diff, adjusted, remainder);
     let result = builder.ins().select(rem_is_zero, remainder, maybe_adjusted);
-    emit_store_integer(builder, dst_ptr, result);
+    emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
 }
 
 fn emit_integer_idiv(
@@ -3304,6 +5031,7 @@ fn emit_integer_idiv(
     dst_ptr: Value,
     lhs_val: Value,
     rhs_val: Value,
+    dst_known_integer: bool,
 ) {
     let zero = builder.ins().iconst(types::I64, 0);
     let neg_one = builder.ins().iconst(types::I64, -1);
@@ -3324,7 +5052,7 @@ fn emit_integer_idiv(
     builder.switch_to_block(neg_one_block);
     builder.seal_block(neg_one_block);
     let negated = builder.ins().ineg(lhs_val);
-    emit_store_integer(builder, dst_ptr, negated);
+    emit_store_integer_with_known_tag(builder, dst_ptr, negated, dst_known_integer);
     builder.ins().jump(done_block, &[]);
 
     builder.switch_to_block(normal_block);
@@ -3337,7 +5065,7 @@ fn emit_integer_idiv(
     let floor_adjust = builder.ins().iadd_imm(quotient, -1);
     let adjusted = builder.ins().select(sign_diff, floor_adjust, quotient);
     let result = builder.ins().select(rem_is_zero, quotient, adjusted);
-    emit_store_integer(builder, dst_ptr, result);
+    emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
     builder.ins().jump(done_block, &[]);
 
     builder.switch_to_block(done_block);
@@ -3352,18 +5080,42 @@ fn emit_numeric_condition_value(
     fallback_block: Block,
     cond: NumericIfElseCond,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<Value> {
     let mem = MemFlags::new();
     match cond {
         NumericIfElseCond::RegCompare { op, lhs, rhs } => {
             let lhs_ptr = slot_addr(builder, abi.base_ptr, lhs);
             let rhs_ptr = slot_addr(builder, abi.base_ptr, rhs);
-            let lhs_tag = if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, lhs)) {
+            let lhs_tag = if carried_float.is_some_and(|carried| carried.reg == lhs) {
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == lhs) {
+                match hoisted.source {
+                    HoistedNumericGuardSource::FloatRaw(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+                    }
+                    HoistedNumericGuardSource::Integer(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMINT as i64)
+                    }
+                }
+            } else if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, lhs)) {
                 builder.ins().iconst(types::I8, i64::from(tag))
             } else {
                 builder.ins().load(types::I8, mem, lhs_ptr, LUA_VALUE_TT_OFFSET)
             };
-            let rhs_tag = if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, rhs)) {
+            let rhs_tag = if carried_float.is_some_and(|carried| carried.reg == rhs) {
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == rhs) {
+                match hoisted.source {
+                    HoistedNumericGuardSource::FloatRaw(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+                    }
+                    HoistedNumericGuardSource::Integer(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMINT as i64)
+                    }
+                }
+            } else if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, rhs)) {
                 builder.ins().iconst(types::I8, i64::from(tag))
             } else {
                 builder.ins().load(types::I8, mem, rhs_ptr, LUA_VALUE_TT_OFFSET)
@@ -3383,15 +5135,46 @@ fn emit_numeric_condition_value(
             builder.switch_to_block(compare_block);
             builder.seal_block(compare_block);
 
-            let lhs_val = builder.ins().load(types::I64, mem, lhs_ptr, LUA_VALUE_VALUE_OFFSET);
-            let rhs_val = builder.ins().load(types::I64, mem, rhs_ptr, LUA_VALUE_VALUE_OFFSET);
+            let lhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == lhs) {
+                builder.use_var(carried.raw_var)
+            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == lhs) {
+                match hoisted.source {
+                    HoistedNumericGuardSource::FloatRaw(raw) => raw,
+                    HoistedNumericGuardSource::Integer(value) => value,
+                }
+            } else {
+                builder.ins().load(types::I64, mem, lhs_ptr, LUA_VALUE_VALUE_OFFSET)
+            };
+            let rhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == rhs) {
+                builder.use_var(carried.raw_var)
+            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == rhs) {
+                match hoisted.source {
+                    HoistedNumericGuardSource::FloatRaw(raw) => raw,
+                    HoistedNumericGuardSource::Integer(value) => value,
+                }
+            } else {
+                builder.ins().load(types::I64, mem, rhs_ptr, LUA_VALUE_VALUE_OFFSET)
+            };
             let lhs_num = emit_numeric_tagged_value_to_float(builder, lhs_tag, lhs_val);
             let rhs_num = emit_numeric_tagged_value_to_float(builder, rhs_tag, rhs_val);
             Some(emit_numeric_compare(builder, lhs_num, rhs_num, op))
         }
         NumericIfElseCond::Truthy { reg } => {
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
-            let tag = builder.ins().load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET);
+            let tag = if carried_float.is_some_and(|carried| carried.reg == reg) {
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == reg) {
+                match hoisted.source {
+                    HoistedNumericGuardSource::FloatRaw(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+                    }
+                    HoistedNumericGuardSource::Integer(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMINT as i64)
+                    }
+                }
+            } else {
+                builder.ins().load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET)
+            };
             let is_nil = builder.ins().icmp_imm(IntCC::Equal, tag, LUA_VNIL_TAG as i64);
             let is_false = builder.ins().icmp_imm(IntCC::Equal, tag, LUA_VFALSE_TAG as i64);
             let is_falsey = builder.ins().bor(is_nil, is_false);
@@ -3444,6 +5227,8 @@ fn emit_numeric_guard_flow(
     continue_block: Block,
     exit_block: Block,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    carried_float: Option<CarriedFloatGuardValue>,
+    hoisted_numeric: Option<HoistedNumericGuardValue>,
 ) -> Option<()> {
     let cond_value = emit_numeric_condition_value(
         builder,
@@ -3453,6 +5238,8 @@ fn emit_numeric_guard_flow(
         fallback_block,
         cond,
         known_value_kinds,
+        carried_float,
+        hoisted_numeric,
     )?;
 
     let hold_block = builder.create_block();
@@ -3475,6 +5262,8 @@ fn emit_numeric_guard_flow(
             fallback_block,
             *step,
             known_value_kinds,
+            carried_float,
+            hoisted_numeric,
         )?;
     }
     builder.def_var(hits_var, current_hits);
@@ -3492,6 +5281,8 @@ fn emit_numeric_guard_flow(
             fallback_block,
             *step,
             known_value_kinds,
+            carried_float,
+            hoisted_numeric,
         )?;
     }
     builder.def_var(hits_var, current_hits);
