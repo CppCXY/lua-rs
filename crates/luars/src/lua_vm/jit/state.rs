@@ -12,8 +12,11 @@ use super::backend::{
 };
 use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use super::hotcount::tick_hotcount;
-use super::ir::TraceIr;
-use super::lowering::{DeoptRecovery, DeoptTarget, LoweredTrace, ValueHintSummary};
+use super::ir::{TraceIr, is_fused_arithmetic_metamethod_fallback};
+use super::lowering::{
+    DeoptRecovery, DeoptTarget, LoweredTrace, SsaMemoryEffectSummary,
+    SsaTableIntOptimizationSummary, SsaValueSummary, ValueHintSummary,
+};
 use super::trace_recorder::{TraceAbortReason, TraceArtifact, TraceRecorder};
 
 const OPCODE_COUNT: usize = OpCode::ExtraArg as usize + 1;
@@ -317,9 +320,10 @@ impl JitState {
         for (chunk_addr, pc, trace) in slots {
             let status = format_trace_status(trace.status);
             let op_count = trace
-                .artifact
+                .ir
                 .as_ref()
-                .map(|artifact| artifact.ops.len())
+                .map(semantic_trace_instruction_count)
+                .or_else(|| trace.artifact.as_ref().map(|artifact| artifact.ops.len()))
                 .unwrap_or(0);
             let exit_count = trace
                 .artifact
@@ -346,10 +350,28 @@ impl JitState {
                 .map(LoweredTrace::root_value_hint_summary)
                 .map(format_value_hint_summary)
                 .unwrap_or_else(|| String::from("none"));
+            let ssa = trace
+                .lowered_trace
+                .as_ref()
+                .map(LoweredTrace::ssa_value_summary)
+                .map(format_ssa_value_summary)
+                .unwrap_or_else(|| String::from("none"));
+            let ssa_mem = trace
+                .lowered_trace
+                .as_ref()
+                .map(LoweredTrace::ssa_memory_effect_summary)
+                .map(format_ssa_memory_effect_summary)
+                .unwrap_or_else(|| String::from("none"));
+            let ssa_ti_opt = trace
+                .lowered_trace
+                .as_ref()
+                .map(LoweredTrace::ssa_table_int_optimization_summary)
+                .map(format_ssa_table_int_optimization_summary)
+                .unwrap_or_else(|| String::from("none"));
 
             let _ = writeln!(
                 report,
-                "- chunk=0x{chunk_addr:x} pc={pc} status={status} executor={executor} ops={op_count} exits={exit_count} details={details} value_hints={value_hints}",
+                "- chunk=0x{chunk_addr:x} pc={pc} status={status} executor={executor} ops={op_count} exits={exit_count} details={details} value_hints={value_hints} ssa={ssa} ssa_mem={ssa_mem} ssa_ti_opt={ssa_ti_opt}",
             );
         }
 
@@ -823,17 +845,15 @@ impl JitState {
                     }
                 }
                 if let Some(trace) = self.traces.get_mut(&storage_key) {
+                    let instruction_count = semantic_instruction_count(&ir);
                     let compiled_trace = match backend_outcome {
                         BackendCompileOutcome::Compiled(compiled_trace) => {
-                            trace.status = status_for_compiled_trace(
-                                artifact.ops.len() as u16,
-                                &compiled_trace,
-                            );
+                            trace.status = status_for_compiled_trace(instruction_count, &compiled_trace);
                             Some(compiled_trace)
                         }
                         BackendCompileOutcome::NotYetSupported => {
                             trace.status = TraceStatus::Recorded {
-                                instruction_count: artifact.ops.len() as u16,
+                                instruction_count,
                             };
                             None
                         }
@@ -846,17 +866,15 @@ impl JitState {
                     trace.linked_ready_side_traces.clear();
                 } else {
                     let mut trace = TraceInfo::new();
+                    let instruction_count = semantic_instruction_count(&ir);
                     let compiled_trace = match backend_outcome {
                         BackendCompileOutcome::Compiled(compiled_trace) => {
-                            trace.status = status_for_compiled_trace(
-                                artifact.ops.len() as u16,
-                                &compiled_trace,
-                            );
+                            trace.status = status_for_compiled_trace(instruction_count, &compiled_trace);
                             Some(compiled_trace)
                         }
                         BackendCompileOutcome::NotYetSupported => {
                             trace.status = TraceStatus::Recorded {
-                                instruction_count: artifact.ops.len() as u16,
+                                instruction_count,
                             };
                             None
                         }
@@ -917,20 +935,18 @@ impl JitState {
                 let helper_plan = HelperPlan::lower(&ir);
                 let lowered_trace = LoweredTrace::lower(&artifact, &ir, &helper_plan);
                 let backend_outcome = self.backend.compile(&artifact, &ir, &lowered_trace, &helper_plan);
+                let instruction_count = semantic_instruction_count(&ir);
                 self.counters.recorded_side_traces =
                     self.counters.recorded_side_traces.saturating_add(1);
                 if let Some(trace) = self.side_traces.get_mut(&key) {
                     let compiled_trace = match backend_outcome {
                         BackendCompileOutcome::Compiled(compiled_trace) => {
-                            trace.status = side_status_for_compiled_trace(
-                                artifact.ops.len() as u16,
-                                &compiled_trace,
-                            );
+                            trace.status = side_status_for_compiled_trace(instruction_count, &compiled_trace);
                             Some(compiled_trace)
                         }
                         BackendCompileOutcome::NotYetSupported => {
                             trace.status = SideTraceStatus::Recorded {
-                                instruction_count: artifact.ops.len() as u16,
+                                instruction_count,
                             };
                             None
                         }
@@ -1322,10 +1338,74 @@ fn format_value_hint_summary(summary: ValueHintSummary) -> String {
     }
 }
 
+fn format_ssa_value_summary(summary: SsaValueSummary) -> String {
+    let mut parts = Vec::new();
+
+    push_step_count(&mut parts, "entry", summary.entry_count);
+    push_step_count(&mut parts, "derived", summary.derived_count);
+    push_step_count(&mut parts, "int", summary.integer_count);
+    push_step_count(&mut parts, "float", summary.float_count);
+    push_step_count(&mut parts, "num", summary.numeric_count);
+    push_step_count(&mut parts, "bool", summary.boolean_count);
+    push_step_count(&mut parts, "table", summary.table_count);
+    push_step_count(&mut parts, "closure", summary.closure_count);
+    push_step_count(&mut parts, "unknown", summary.unknown_count);
+
+    if parts.is_empty() {
+        String::from("none")
+    } else {
+        parts.join(",")
+    }
+}
+
+fn format_ssa_memory_effect_summary(summary: SsaMemoryEffectSummary) -> String {
+    let mut parts = Vec::new();
+
+    push_step_count(&mut parts, "tread", summary.table_read_count);
+    push_step_count(&mut parts, "twrite", summary.table_write_count);
+    push_step_count(&mut parts, "tiread", summary.table_int_read_count);
+    push_step_count(&mut parts, "tiwrite", summary.table_int_write_count);
+    push_step_count(&mut parts, "upread", summary.upvalue_read_count);
+    push_step_count(&mut parts, "upwrite", summary.upvalue_write_count);
+    push_step_count(&mut parts, "call", summary.call_count);
+    push_step_count(&mut parts, "meta", summary.metamethod_count);
+
+    if parts.is_empty() {
+        String::from("none")
+    } else {
+        parts.join(",")
+    }
+}
+
+fn format_ssa_table_int_optimization_summary(summary: SsaTableIntOptimizationSummary) -> String {
+    let mut parts = Vec::new();
+
+    push_step_count(&mut parts, "forward", summary.forwardable_read_count);
+    push_step_count(&mut parts, "dead", summary.dead_store_count);
+
+    if parts.is_empty() {
+        String::from("none")
+    } else {
+        parts.join(",")
+    }
+}
+
 fn push_step_count(parts: &mut Vec<String>, name: &str, count: u16) {
     if count != 0 {
         parts.push(format!("{name}={count}"));
     }
+}
+
+fn semantic_trace_instruction_count(ir: &TraceIr) -> usize {
+    ir.insts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !is_fused_arithmetic_metamethod_fallback(&ir.insts, *index))
+        .count()
+}
+
+fn semantic_instruction_count(ir: &TraceIr) -> u16 {
+    semantic_trace_instruction_count(ir).min(u16::MAX as usize) as u16
 }
 
 #[cfg(test)]
@@ -1542,6 +1622,28 @@ mod tests {
     }
 
     #[test]
+    fn executable_numeric_trace_does_not_replay_consumed_metamethod_fallbacks() {
+        let mut jit = JitState::default();
+        let mut chunk = LuaProto::new();
+        chunk.constants.push(LuaValue::integer(1));
+        chunk.code.push(Instruction::create_abc(OpCode::AddK, 0, 0, 0));
+        chunk.code.push(Instruction::create_abc(OpCode::MmBinK, 0, 0, 6));
+        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 3));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..HOT_LOOP_THRESHOLD {
+            jit.record_loop_backedge(chunk_ptr, 0);
+        }
+
+        assert!(jit.try_enter_trace(chunk_ptr, 0));
+        assert_eq!(jit.counters().trace_enter_hits, 1);
+        assert_eq!(jit.counters().helper_plan_dispatches, 0);
+        assert_eq!(jit.counters().helper_plan_steps, 0);
+        assert_eq!(jit.counters().helper_plan_calls, 0);
+        assert_eq!(jit.counters().helper_plan_metamethods, 0);
+    }
+
+    #[test]
     fn guarded_trace_entry_is_skipped_without_specialized_executor() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
@@ -1604,7 +1706,7 @@ mod tests {
         assert_eq!(
             jit.trace_status_for(chunk_ptr as usize, 0),
             Some(TraceStatus::Lowered {
-                instruction_count: 5,
+                instruction_count: 4,
             })
         );
         let compiled_trace = jit.compiled_trace_for(chunk_ptr as usize, 0).unwrap();
@@ -1740,7 +1842,7 @@ mod tests {
             .recovery
             .register_restores
             .iter()
-            .any(|(reg, value)| *reg == 0 && *value == LuaValue::integer(11)));
+            .any(|(reg, value)| *reg == 0 && *value == LuaValue::integer(22)));
         assert!(jit
             .side_traces
             .contains_key(&SideTraceKey {
@@ -1951,9 +2053,10 @@ mod tests {
         }
 
         let report = jit.trace_report();
-        assert!(report.contains("status=Lowered(instr=5)"));
+        assert!(report.contains("status=Lowered(instr=4)"));
         assert!(report.contains("executor=SummaryOnly"));
-        assert!(report.contains("details=load=1,arith=1,call=1,meta=1,backedge=1"));
+        assert!(report.contains("details=load=1,arith=1,call=1,backedge=1"));
+        assert!(report.contains("ssa_ti_opt=none"));
         assert!(report.contains("status=Blacklisted(attempts=1, reason=UnsupportedOpcode(TailCall))"));
     }
 
@@ -2001,7 +2104,7 @@ mod tests {
             .unwrap();
         assert!(compiled_trace.is_enterable());
         assert_eq!(compiled_trace.executor_family(), "NativeGuardedNumericForLoop");
-        assert!(report.contains("status=Executable(instr=7) executor=NativeGuardedNumericForLoop"));
+        assert!(report.contains("status=Executable(instr=6) executor=NativeGuardedNumericForLoop"));
     }
 
     #[test]
@@ -2155,7 +2258,7 @@ mod tests {
 
         let report = vm.jit.trace_report();
         assert!(report.contains("executor=NativeNumericForLoop"));
-        assert!(report.contains("details=upget=1,upset=1,arith=1,meta=1,backedge=1"));
+        assert!(report.contains("details=upget=1,upset=1,arith=1,backedge=1"));
 
         let compiled_trace = vm
             .jit
@@ -2165,6 +2268,31 @@ mod tests {
             .find(|trace| trace.executor_family() == "NativeNumericForLoop")
             .unwrap();
         assert!(compiled_trace.is_enterable());
+    }
+
+    #[test]
+    fn benchmark_mixed_arithmetic_trace_is_native_and_correct() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let results = vm
+            .execute(
+                r#"
+                local iterations = 200
+                local x, y, z = 0, 0, 0
+                for i = 1, iterations do
+                    x = i + 5
+                    y = x * 2
+                    z = y - 3
+                end
+                return z
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].as_integer(), Some(407));
+
+        let report = vm.jit.trace_report();
+        assert!(report.contains("executor=NativeNumericForLoop"));
+        assert!(report.contains("details=arith=3,backedge=1"));
     }
 }
 

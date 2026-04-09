@@ -111,6 +111,98 @@ impl TraceIr {
     }
 }
 
+pub(crate) fn is_fused_arithmetic_metamethod_fallback(
+    insts: &[TraceIrInst],
+    index: usize,
+) -> bool {
+    let Some(inst) = insts.get(index) else {
+        return false;
+    };
+
+    if !matches!(inst.opcode, OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK) {
+        return false;
+    }
+
+    let Some(previous) = index.checked_sub(1).and_then(|prev| insts.get(prev)) else {
+        return false;
+    };
+
+    arithmetic_metamethod_pair_matches(previous, inst)
+}
+
+pub(crate) fn is_fused_arithmetic_metamethod_pair(
+    arithmetic_opcode: OpCode,
+    arithmetic_instruction: Instruction,
+    metamethod_opcode: OpCode,
+    metamethod_instruction: Instruction,
+) -> bool {
+    match arithmetic_opcode {
+        OpCode::Add
+        | OpCode::Sub
+        | OpCode::Mul
+        | OpCode::Div
+        | OpCode::IDiv
+        | OpCode::Mod
+        | OpCode::Pow
+        | OpCode::BAnd
+        | OpCode::BOr
+        | OpCode::BXor
+        | OpCode::Shl
+        | OpCode::Shr
+            if !arithmetic_instruction.get_k() =>
+        {
+            metamethod_opcode == OpCode::MmBin
+                && metamethod_instruction.get_a() == arithmetic_instruction.get_b()
+                && metamethod_instruction.get_b() == arithmetic_instruction.get_c()
+        }
+        OpCode::AddI | OpCode::ShlI | OpCode::ShrI => {
+            metamethod_opcode == OpCode::MmBinI
+                && metamethod_instruction.get_a() == arithmetic_instruction.get_b()
+                && metamethod_instruction.get_sb()
+                    == arithmetic_instruction.get_sc().unsigned_abs() as i32
+        }
+        OpCode::AddK
+        | OpCode::SubK
+        | OpCode::MulK
+        | OpCode::DivK
+        | OpCode::IDivK
+        | OpCode::ModK
+        | OpCode::PowK
+        | OpCode::BAndK
+        | OpCode::BOrK
+        | OpCode::BXorK => {
+            metamethod_opcode == OpCode::MmBinK
+                && metamethod_instruction.get_a() == arithmetic_instruction.get_b()
+                && metamethod_instruction.get_b() == arithmetic_instruction.get_c()
+        }
+        _ => false,
+    }
+}
+
+fn arithmetic_metamethod_pair_matches(
+    arithmetic: &TraceIrInst,
+    metamethod: &TraceIrInst,
+) -> bool {
+    is_fused_arithmetic_metamethod_pair(
+        arithmetic.opcode,
+        Instruction::from_u32(arithmetic.raw_instruction),
+        metamethod.opcode,
+        Instruction::from_u32(metamethod.raw_instruction),
+    )
+}
+
+pub(crate) fn instruction_reads(
+    pc: u32,
+    instruction: Instruction,
+    opcode: OpCode,
+) -> Vec<TraceIrOperand> {
+    collect_reads(pc, instruction, opcode)
+}
+
+pub(crate) fn instruction_writes(instruction: Instruction, opcode: OpCode) -> Vec<TraceIrOperand> {
+    collect_writes(instruction, opcode)
+}
+
 fn rk_operand(slot: u32, is_const: bool) -> TraceIrOperand {
     if is_const {
         TraceIrOperand::ConstantIndex(slot)
@@ -538,7 +630,10 @@ fn classify_opcode(opcode: OpCode) -> TraceIrInstKind {
 mod tests {
     use crate::{Instruction, OpCode};
 
-    use super::{TraceIr, TraceIrGuardKind, TraceIrInstKind, TraceIrOperand};
+    use super::{
+        TraceIr, TraceIrGuardKind, TraceIrInst, TraceIrInstKind, TraceIrOperand,
+        is_fused_arithmetic_metamethod_fallback,
+    };
     use crate::lua_vm::jit::trace_recorder::{
         TraceArtifact, TraceExit, TraceExitKind, TraceOp, TraceSeed,
     };
@@ -689,6 +784,31 @@ mod tests {
         );
         assert_eq!(ir.insts[1].writes, vec![TraceIrOperand::Register(0)]);
         assert_eq!(ir.insts[2].kind, TraceIrInstKind::LoopBackedge);
+    }
+
+    #[test]
+    fn detects_fused_arithmetic_metamethod_companions() {
+        let insts = vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: OpCode::AddK,
+                raw_instruction: Instruction::create_abck(OpCode::AddK, 4, 4, 0, false).as_u32(),
+                kind: TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: OpCode::MmBinK,
+                raw_instruction: Instruction::create_abck(OpCode::MmBinK, 4, 0, 6, false).as_u32(),
+                kind: TraceIrInstKind::MetamethodFallback,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![],
+            },
+        ];
+
+        assert!(is_fused_arithmetic_metamethod_fallback(&insts, 1));
+        assert!(!is_fused_arithmetic_metamethod_fallback(&insts, 0));
     }
 
     #[test]

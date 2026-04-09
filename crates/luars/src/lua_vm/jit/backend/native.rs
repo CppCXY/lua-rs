@@ -210,7 +210,7 @@ impl NativeTraceBackend {
         let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
 
         if ir.guards.is_empty() {
-            let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 1])?;
+            let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
             let native = self.compile_native_numeric_for_loop(loop_reg, &steps, lowered_trace)?;
             return Some((
                 CompiledTraceExecution::Native(native),
@@ -240,7 +240,7 @@ impl NativeTraceBackend {
             return None;
         }
 
-        let steps = lower_numeric_steps_for_native(&ir.insts[..guard_index])?;
+        let steps = lower_numeric_steps_for_native(&ir.insts[..guard_index], lowered_trace)?;
         let loop_guard = lower_numeric_guard_for_native(&ir.insts[guard_index], true, lowered_exit.resume_pc)?;
         let native = self.compile_native_guarded_numeric_for_loop(loop_reg, &steps, loop_guard, lowered_trace)?;
         let profile = profile_for_guarded_numeric_for_loop(&steps, loop_guard);
@@ -320,7 +320,7 @@ impl NativeTraceBackend {
             }
             let guard_inst = &ir.insts[ir.insts.len() - 2];
             let loop_guard = lower_numeric_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
-            let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 2])?;
+            let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 2], lowered_trace)?;
             let native = self.compile_native_numeric_jmp_loop(&[], &steps, &[NumericJmpLoopGuardBlock {
                 pre_steps: Vec::new(),
                 guard: loop_guard,
@@ -337,7 +337,7 @@ impl NativeTraceBackend {
         }
 
         let loop_guard = lower_numeric_guard_for_native(&ir.insts[0], false, lowered_exit.resume_pc)?;
-        let steps = lower_numeric_steps_for_native(&ir.insts[2..ir.insts.len() - 1])?;
+        let steps = lower_numeric_steps_for_native(&ir.insts[2..ir.insts.len() - 1], lowered_trace)?;
         let head_blocks = [NumericJmpLoopGuardBlock {
             pre_steps: Vec::new(),
             guard: loop_guard,
@@ -492,11 +492,9 @@ impl NativeTraceBackend {
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
         let mut known_integer_regs = lowered_trace
-            .entry_stable_register_hints
-            .iter()
-            .filter_map(|hint| {
-                matches!(hint.kind, TraceValueKind::Integer).then_some(hint.reg)
-            })
+            .entry_ssa_register_hints()
+            .into_iter()
+            .filter_map(|hint| matches!(hint.kind, TraceValueKind::Integer).then_some(hint.reg))
             .collect::<Vec<_>>();
         if loop_state_is_invariant {
             known_integer_regs.push(loop_reg);
@@ -833,7 +831,7 @@ impl NativeTraceBackend {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
-        let mut known_value_kinds = lowered_trace.entry_stable_register_hints.clone();
+        let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
 
         let loop_block = builder.create_block();
         let fallback_block = builder.create_block();
@@ -954,12 +952,7 @@ impl NativeTraceBackend {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
-        let mut known_value_kinds = lowered_trace
-            .root_register_hints
-            .iter()
-            .copied()
-            .filter(|hint| !steps.iter().copied().any(|step| numeric_step_writes_reg(step, hint.reg)))
-            .collect::<Vec<_>>();
+        let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
 
         let loop_block = builder.create_block();
         let fallback_block = builder.create_block();
@@ -1105,7 +1098,7 @@ impl NativeTraceBackend {
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
-        let mut known_value_kinds = lowered_trace.entry_stable_register_hints.clone();
+        let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
 
         let loop_block = builder.create_block();
         let fallback_block = builder.create_block();
@@ -2301,19 +2294,6 @@ fn linear_int_step_writes_reg(step: LinearIntStep, reg: u32) -> bool {
     }
 }
 
-fn numeric_step_writes_reg(step: NumericStep, reg: u32) -> bool {
-    match step {
-        NumericStep::Move { dst, .. }
-        | NumericStep::LoadBool { dst, .. }
-        | NumericStep::LoadI { dst, .. }
-        | NumericStep::LoadF { dst, .. }
-        | NumericStep::GetUpval { dst, .. }
-        | NumericStep::GetTableInt { dst, .. }
-        | NumericStep::Binary { dst, .. } => dst == reg,
-        NumericStep::SetUpval { .. } | NumericStep::SetTableInt { .. } => false,
-    }
-}
-
 fn linear_int_loop_state_is_invariant(loop_reg: u32, steps: &[LinearIntStep]) -> bool {
     let step_reg = loop_reg.saturating_add(1);
     let index_reg = loop_reg.saturating_add(2);
@@ -2357,7 +2337,7 @@ fn set_numeric_reg_value_kind(
 fn trace_value_kind_tag(kind: TraceValueKind) -> Option<u8> {
     match kind {
         TraceValueKind::Integer => Some(LUA_VNUMINT),
-        TraceValueKind::Float | TraceValueKind::Numeric => Some(LUA_VNUMFLT),
+        TraceValueKind::Float => Some(LUA_VNUMFLT),
         TraceValueKind::Boolean => Some(LUA_VTRUE_TAG),
         _ => None,
     }
@@ -3004,44 +2984,53 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         known_value_kinds,
     )?;
     let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
-    let fast_block = builder.create_block();
+    let int_fast_block = builder.create_block();
+    let numeric_fast_block = builder.create_block();
     let helper_block = builder.create_block();
     let done_block = builder.create_block();
-    let store_block = builder.create_block();
+    let float_store_block = builder.create_block();
     let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
+    let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
     let lhs_is_int = builder.ins().icmp(IntCC::Equal, lhs_tag, int_tag);
     let rhs_is_int = builder.ins().icmp(IntCC::Equal, rhs_tag, int_tag);
     let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
+    let lhs_is_float = builder.ins().icmp(IntCC::Equal, lhs_tag, float_tag);
+    let rhs_is_float = builder.ins().icmp(IntCC::Equal, rhs_tag, float_tag);
+    let lhs_is_numeric = builder.ins().bor(lhs_is_int, lhs_is_float);
+    let rhs_is_numeric = builder.ins().bor(rhs_is_int, rhs_is_float);
+    let both_numeric = builder.ins().band(lhs_is_numeric, rhs_is_numeric);
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(both_int, fast_block, &[], helper_block, &[]);
+    builder.ins().brif(both_int, int_fast_block, &[], numeric_fast_block, &[]);
 
-    builder.switch_to_block(fast_block);
+    builder.switch_to_block(int_fast_block);
     match op {
         NumericBinaryOp::Add => {
+            let int_store_block = builder.create_block();
             let result = builder.ins().iadd(lhs_val, rhs_val);
             let lhs_xor_result = builder.ins().bxor(lhs_val, result);
             let rhs_xor_result = builder.ins().bxor(rhs_val, result);
             let overflow_bits = builder.ins().band(lhs_xor_result, rhs_xor_result);
             let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
-            builder.ins().brif(overflow, helper_block, &[], store_block, &[]);
+            builder.ins().brif(overflow, helper_block, &[], int_store_block, &[]);
 
-            builder.switch_to_block(store_block);
+            builder.switch_to_block(int_store_block);
             emit_store_integer(builder, dst_ptr, result);
             builder.ins().jump(done_block, &[]);
-            builder.seal_block(store_block);
+            builder.seal_block(int_store_block);
         }
         NumericBinaryOp::Sub => {
+            let int_store_block = builder.create_block();
             let result = builder.ins().isub(lhs_val, rhs_val);
             let lhs_xor_rhs = builder.ins().bxor(lhs_val, rhs_val);
             let lhs_xor_result = builder.ins().bxor(lhs_val, result);
             let overflow_bits = builder.ins().band(lhs_xor_rhs, lhs_xor_result);
             let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
-            builder.ins().brif(overflow, helper_block, &[], store_block, &[]);
+            builder.ins().brif(overflow, helper_block, &[], int_store_block, &[]);
 
-            builder.switch_to_block(store_block);
+            builder.switch_to_block(int_store_block);
             emit_store_integer(builder, dst_ptr, result);
             builder.ins().jump(done_block, &[]);
-            builder.seal_block(store_block);
+            builder.seal_block(int_store_block);
         }
         NumericBinaryOp::Mul => {
             let zero = builder.ins().iconst(types::I64, 0);
@@ -3085,7 +3074,24 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         }
         _ => unreachable!(),
     }
-    builder.seal_block(fast_block);
+    builder.seal_block(int_fast_block);
+
+    builder.switch_to_block(numeric_fast_block);
+    builder.ins().brif(both_numeric, float_store_block, &[], helper_block, &[]);
+    builder.seal_block(numeric_fast_block);
+
+    builder.switch_to_block(float_store_block);
+    let lhs_num = emit_numeric_tagged_value_to_float(builder, lhs_tag, lhs_val);
+    let rhs_num = emit_numeric_tagged_value_to_float(builder, rhs_tag, rhs_val);
+    let result = match op {
+        NumericBinaryOp::Add => builder.ins().fadd(lhs_num, rhs_num),
+        NumericBinaryOp::Sub => builder.ins().fsub(lhs_num, rhs_num),
+        NumericBinaryOp::Mul => builder.ins().fmul(lhs_num, rhs_num),
+        _ => unreachable!(),
+    };
+    emit_store_float_value(builder, dst_ptr, result);
+    builder.ins().jump(done_block, &[]);
+    builder.seal_block(float_store_block);
 
     builder.switch_to_block(helper_block);
     emit_numeric_binary_helper_call(

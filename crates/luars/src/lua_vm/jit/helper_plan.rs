@@ -1,4 +1,6 @@
-use super::ir::{TraceIr, TraceIrInstKind, TraceIrOperand};
+use super::ir::{
+    TraceIr, TraceIrInstKind, TraceIrOperand, is_fused_arithmetic_metamethod_fallback,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HelperPlanDispatchSummary {
@@ -74,7 +76,9 @@ impl HelperPlan {
         let steps = ir
             .insts
             .iter()
-            .map(|inst| match inst.kind {
+            .enumerate()
+            .filter(|(index, _)| !is_fused_arithmetic_metamethod_fallback(&ir.insts, *index))
+            .map(|(_, inst)| match inst.kind {
                 TraceIrInstKind::LoadMove => HelperPlanStep::LoadMove {
                     reads: inst.reads.clone(),
                     writes: inst.writes.clone(),
@@ -293,6 +297,7 @@ fn summarize_steps(steps: &[HelperPlanStep]) -> HelperPlanDispatchSummary {
 
 #[cfg(test)]
 mod tests {
+    use crate::Instruction;
     use crate::lua_vm::jit::helper_plan::{
         HelperPlan, HelperPlanDispatchSummary, HelperPlanStep,
     };
@@ -409,6 +414,48 @@ mod tests {
                 metamethod_steps: 1,
             }
         );
+    }
+
+    #[test]
+    fn lower_skips_fused_arithmetic_metamethod_companion_steps() {
+        let ir = TraceIr {
+            root_pc: 0,
+            loop_tail_pc: 2,
+            insts: vec![
+                TraceIrInst {
+                    pc: 0,
+                    opcode: OpCode::AddK,
+                    raw_instruction: Instruction::create_abck(OpCode::AddK, 4, 4, 0, false).as_u32(),
+                    kind: TraceIrInstKind::Arithmetic,
+                    reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                    writes: vec![TraceIrOperand::Register(4)],
+                },
+                TraceIrInst {
+                    pc: 1,
+                    opcode: OpCode::MmBinK,
+                    raw_instruction: Instruction::create_abck(OpCode::MmBinK, 4, 0, 6, false).as_u32(),
+                    kind: TraceIrInstKind::MetamethodFallback,
+                    reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                    writes: vec![],
+                },
+                TraceIrInst {
+                    pc: 2,
+                    opcode: OpCode::ForLoop,
+                    raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 3).as_u32(),
+                    kind: TraceIrInstKind::LoopBackedge,
+                    reads: vec![TraceIrOperand::JumpTarget(0)],
+                    writes: vec![],
+                },
+            ],
+            guards: Vec::new(),
+        };
+
+        let plan = HelperPlan::lower(&ir);
+
+        assert_eq!(plan.steps.len(), 2);
+        assert!(matches!(plan.steps[0], HelperPlanStep::Arithmetic { .. }));
+        assert!(matches!(plan.steps[1], HelperPlanStep::LoopBackedge { .. }));
+        assert_eq!(plan.summary.metamethod_steps, 0);
     }
 
     #[test]

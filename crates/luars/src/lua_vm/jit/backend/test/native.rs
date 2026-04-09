@@ -8,7 +8,8 @@ use crate::lua_vm::jit::backend::{
     NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericOperand, NumericStep,
 };
 use crate::lua_vm::jit::lowering::{
-    DeoptRestoreSummary, LoweredExit, LoweredTrace, RegisterValueHint, TraceValueKind,
+    DeoptRestoreSummary, LoweredExit, LoweredSsaTrace, LoweredTrace, RegisterValueHint,
+    TraceValueKind,
 };
 
 fn boxed_closed_upvalue(value: LuaValue) -> Box<GcUpvalue> {
@@ -53,6 +54,7 @@ fn lowered_trace_for_numeric_jmp_blocks(
         helper_plan_step_count: 0,
         root_register_hints: hints.clone(),
         entry_stable_register_hints: hints,
+        ssa_trace: LoweredSsaTrace::default(),
     }
 }
 
@@ -2089,6 +2091,98 @@ fn native_numeric_for_loop_with_mixed_arithmetic_entry_executes_and_loop_exits()
     assert_eq!(result.status, NativeTraceStatus::LoopExit);
     assert_eq!(result.hits, 1);
     assert_eq!(stack[4].as_float(), Some(2.5));
+}
+
+#[test]
+fn native_numeric_for_loop_with_float_mul_entry_executes_and_loop_exits() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 140,
+        loop_tail_pc: 142,
+        insts: vec![
+            TraceIrInst {
+                pc: 140,
+                opcode: OpCode::MulK,
+                raw_instruction: Instruction::create_abc(OpCode::MulK, 4, 4, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 141,
+                opcode: OpCode::MmBinK,
+                raw_instruction: Instruction::create_abck(OpCode::MmBinK, 4, 0, 8, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::MetamethodFallback,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 142,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 3).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(140)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 140,
+        loop_tail_pc: 142,
+        steps: vec![
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::MetamethodFallback {
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(140)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 3,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 1,
+        },
+    };
+
+    let entry = match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::NumericForLoop { entry }) => entry,
+            other => panic!("expected native numeric forloop execution, got {other:?}"),
+        },
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    };
+
+    let mut stack = [LuaValue::nil(); 8];
+    let constants = [LuaValue::float(2.0)];
+    stack[4] = LuaValue::float(1.5);
+    stack[5] = LuaValue::integer(0);
+    stack[6] = LuaValue::integer(1);
+    stack[7] = LuaValue::integer(0);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            constants.as_ptr(),
+            constants.len(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 1);
+    assert_eq!(stack[4].as_float(), Some(3.0));
 }
 
 #[test]

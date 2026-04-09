@@ -1,5 +1,6 @@
 use crate::{Instruction, OpCode};
 use crate::lua_value::LuaProto;
+use super::ir::is_fused_arithmetic_metamethod_pair;
 
 const MAX_RECORDED_TRACE_LEN: usize = 64;
 
@@ -94,6 +95,11 @@ impl TraceRecorder {
             let opcode = instruction.get_opcode();
             if !is_supported_trace_opcode(opcode) {
                 return Err(TraceAbortReason::UnsupportedOpcode(opcode));
+            }
+
+            if should_skip_fused_arithmetic_metamethod_companion(&ops, opcode, instruction) {
+                pc += 1;
+                continue;
             }
 
             ops.push(TraceOp {
@@ -320,6 +326,24 @@ impl TraceRecorder {
             }
         }
     }
+}
+
+fn should_skip_fused_arithmetic_metamethod_companion(
+    ops: &[TraceOp],
+    opcode: OpCode,
+    instruction: Instruction,
+) -> bool {
+    let Some(previous) = ops.last() else {
+        return false;
+    };
+
+    matches!(opcode, OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK)
+        && is_fused_arithmetic_metamethod_pair(
+            previous.opcode,
+            previous.instruction,
+            opcode,
+            instruction,
+        )
 }
 
 fn guard_fallthrough_exit(
@@ -561,14 +585,15 @@ mod tests {
     }
 
     #[test]
-    fn recorder_accepts_mmbin_inside_loop() {
+    fn recorder_skips_fused_mmbin_inside_loop() {
         let mut chunk = LuaProto::new();
         chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 1, 2, false));
         chunk.code.push(Instruction::create_abc(OpCode::MmBin, 1, 2, 0));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -3));
 
         let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
-        assert_eq!(artifact.ops.len(), 3);
+        assert_eq!(artifact.ops.len(), 2);
+        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![0, 2]);
         assert_eq!(artifact.loop_tail_pc, 2);
     }
 
@@ -636,7 +661,7 @@ mod tests {
 
         let artifact = TraceRecorder::record_root(partition as *const LuaProto, 21).unwrap();
         assert_eq!(artifact.seed.start_pc, 9);
-        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![9, 10, 11, 12, 13, 14]);
+        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![9, 10, 11, 12, 14]);
         assert_eq!(artifact.exits.len(), 1);
         assert_eq!(artifact.exits[0].exit_pc, 15);
         assert!(!artifact.exits[0].taken_on_trace);
@@ -916,7 +941,7 @@ mod tests {
 
         let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
         assert_eq!(artifact.seed.start_pc, 3);
-        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![3, 5, 6]);
         assert_eq!(artifact.exits.len(), 1);
         assert_eq!(artifact.exits[0].guard_pc, 6);
         assert_eq!(artifact.exits[0].exit_pc, 7);
@@ -953,7 +978,7 @@ mod tests {
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -8));
 
         let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 0).unwrap();
-        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 7]);
+        assert_eq!(artifact.ops.iter().map(|op| op.pc).collect::<Vec<_>>(), vec![0, 1, 2, 4, 7]);
         assert_eq!(artifact.exits.len(), 1);
         assert_eq!(artifact.exits[0].exit_pc, 5);
         assert!(!artifact.exits[0].taken_on_trace);

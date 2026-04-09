@@ -369,7 +369,7 @@ impl CompiledTrace {
     ) -> Option<Self> {
         let mut steps = Vec::with_capacity(helper_plan.steps.len());
         let mut has_helper_call = false;
-        let mut summary = HelperPlanDispatchSummary::default();
+        let mut helper_plan_summary = HelperPlanDispatchSummary::default();
 
         for step in &helper_plan.steps {
             let kind = match step {
@@ -393,16 +393,20 @@ impl CompiledTrace {
                 HelperPlanStep::Branch { .. } => CompiledTraceStepKind::Branch,
                 HelperPlanStep::LoopBackedge { .. } => CompiledTraceStepKind::LoopBackedge,
             };
-            summary.steps_executed = summary.steps_executed.saturating_add(1);
+            helper_plan_summary.steps_executed = helper_plan_summary.steps_executed.saturating_add(1);
             match kind {
                 CompiledTraceStepKind::Call => {
-                    summary.call_steps = summary.call_steps.saturating_add(1);
+                    helper_plan_summary.call_steps = helper_plan_summary.call_steps.saturating_add(1);
                 }
                 CompiledTraceStepKind::MetamethodFallback => {
-                    summary.metamethod_steps = summary.metamethod_steps.saturating_add(1);
+                    helper_plan_summary.metamethod_steps = helper_plan_summary
+                        .metamethod_steps
+                        .saturating_add(1);
                 }
                 CompiledTraceStepKind::Guard => {
-                    summary.guards_observed = summary.guards_observed.saturating_add(1);
+                    helper_plan_summary.guards_observed = helper_plan_summary
+                        .guards_observed
+                        .saturating_add(1);
                 }
                 CompiledTraceStepKind::LoadMove
                 | CompiledTraceStepKind::UpvalueAccess
@@ -423,6 +427,8 @@ impl CompiledTrace {
         if !has_helper_call && !execution.is_enterable() && !recognized_lowered {
             return None;
         }
+
+        let summary = execution_summary_for_dispatch(execution.clone(), native_profile, helper_plan_summary);
 
         let exits = lowered_trace
             .exits
@@ -557,5 +563,37 @@ impl LinearIntLoopGuard {
             | Self::TailRegReg { exit_pc, .. }
             | Self::TailRegImm { exit_pc, .. } => exit_pc,
         }
+    }
+}
+
+fn execution_summary_for_dispatch(
+    execution: CompiledTraceExecution,
+    native_profile: Option<NativeLoweringProfile>,
+    helper_plan_summary: HelperPlanDispatchSummary,
+) -> HelperPlanDispatchSummary {
+    match execution {
+        CompiledTraceExecution::LoweredOnly => helper_plan_summary,
+        CompiledTraceExecution::Native(_) => native_dispatch_summary(native_profile),
+    }
+}
+
+fn native_dispatch_summary(
+    native_profile: Option<NativeLoweringProfile>,
+) -> HelperPlanDispatchSummary {
+    let Some(profile) = native_profile else {
+        return HelperPlanDispatchSummary::default();
+    };
+
+    let steps_executed = profile
+        .arithmetic_helper_steps
+        .saturating_add(profile.table_helper_steps)
+        .saturating_add(profile.upvalue_helper_steps)
+        .saturating_add(profile.shift_helper_steps);
+
+    HelperPlanDispatchSummary {
+        steps_executed,
+        guards_observed: 0,
+        call_steps: 0,
+        metamethod_steps: 0,
     }
 }
