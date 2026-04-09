@@ -520,6 +520,12 @@ impl JitState {
                             .root_native_guarded_numeric_for_dispatches
                             .saturating_add(1);
                     }
+                    NativeCompiledTrace::TForLoop { .. } => {
+                        self.counters.root_native_numeric_for_dispatches = self
+                            .counters
+                            .root_native_numeric_for_dispatches
+                            .saturating_add(1);
+                    }
                     NativeCompiledTrace::NumericJmpLoop { .. } => {
                         self.counters.root_native_numeric_jmp_dispatches = self
                             .counters
@@ -1584,7 +1590,7 @@ mod tests {
 
         assert_eq!(
             jit.trace_status_for(chunk_ptr as usize, 0),
-            Some(TraceStatus::Lowered {
+            Some(TraceStatus::Executable {
                 instruction_count: 4,
             })
         );
@@ -1644,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_trace_entry_is_skipped_without_specialized_executor() {
+    fn guarded_trace_entry_is_enterable_after_generic_guard_native_recognition() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
         chunk.code.push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
@@ -1658,9 +1664,10 @@ mod tests {
             jit.record_loop_backedge(chunk_ptr, 0);
         }
 
-        assert!(!jit.try_enter_trace(chunk_ptr, 0));
-        assert_eq!(jit.counters().helper_plan_dispatches, 0);
-        assert_eq!(jit.counters().helper_plan_steps, 0);
+        assert!(jit.try_enter_trace(chunk_ptr, 0));
+        assert_eq!(jit.counters().trace_enter_hits, 1);
+        assert!(jit.counters().helper_plan_dispatches > 0);
+        assert!(jit.counters().helper_plan_steps > 0);
         assert_eq!(jit.counters().helper_plan_guards, 0);
         assert_eq!(jit.counters().helper_plan_calls, 0);
         assert_eq!(jit.counters().helper_plan_metamethods, 0);

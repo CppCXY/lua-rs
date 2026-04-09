@@ -488,6 +488,13 @@ impl LoweredTrace {
             .map(|hint| hint.kind)
     }
 
+    pub(crate) fn entry_register_value_kind(&self, reg: u32) -> Option<TraceValueKind> {
+        self.ssa_trace.values.iter().find_map(|value| match value.origin {
+            SsaValueOrigin::EntryRegister(entry_reg) if entry_reg == reg => Some(value.kind),
+            _ => None,
+        })
+    }
+
     pub(crate) fn entry_ssa_register_hints(&self) -> Vec<RegisterValueHint> {
         self.ssa_trace
             .values

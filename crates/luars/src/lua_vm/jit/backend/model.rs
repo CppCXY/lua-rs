@@ -210,6 +210,7 @@ impl CompiledTraceExecution {
                 NativeCompiledTrace::LinearIntJmpLoop { .. } => "NativeLinearIntJmpLoop",
                 NativeCompiledTrace::NumericForLoop { .. } => "NativeNumericForLoop",
                 NativeCompiledTrace::GuardedNumericForLoop { .. } => "NativeGuardedNumericForLoop",
+                NativeCompiledTrace::TForLoop { .. } => "NativeTForLoop",
                 NativeCompiledTrace::NumericJmpLoop { .. } => "NativeNumericJmpLoop",
             },
         }
@@ -274,6 +275,7 @@ pub(crate) enum NativeCompiledTrace {
     LinearIntJmpLoop { entry: NativeTraceEntry },
     NumericForLoop { entry: NativeTraceEntry },
     GuardedNumericForLoop { entry: NativeTraceEntry },
+    TForLoop { entry: NativeTraceEntry },
     NumericJmpLoop { entry: NativeTraceEntry },
 }
 
@@ -308,6 +310,9 @@ impl PartialEq for NativeCompiledTrace {
                 Self::GuardedNumericForLoop { entry: lhs },
                 Self::GuardedNumericForLoop { entry: rhs },
             ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (Self::TForLoop { entry: lhs }, Self::TForLoop { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
             (Self::NumericJmpLoop { entry: lhs }, Self::NumericJmpLoop { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
             }

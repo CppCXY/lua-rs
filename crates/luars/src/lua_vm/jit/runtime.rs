@@ -275,6 +275,7 @@ unsafe fn dispatch_native_compiled_trace(
         | NativeCompiledTrace::LinearIntJmpLoop { entry }
         | NativeCompiledTrace::NumericForLoop { entry }
         | NativeCompiledTrace::GuardedNumericForLoop { entry }
+        | NativeCompiledTrace::TForLoop { entry }
         | NativeCompiledTrace::NumericJmpLoop { entry } => entry,
     };
 
