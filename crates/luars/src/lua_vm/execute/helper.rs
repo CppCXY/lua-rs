@@ -7,7 +7,10 @@ use crate::{
         call_info::call_status::{
             CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
         },
-        execute::{call::poscall, call_tm_res, concat::concat, metamethod::call_tm_res_into},
+        execute::{
+            call::poscall, call_tm_res, call_tm_res1, concat::concat,
+            metamethod::call_tm_res_into,
+        },
         lua_limits::{EXTRA_STACK, MAXTAGLOOP},
     },
 };
@@ -524,6 +527,14 @@ pub fn finishget(
     key: &LuaValue,
 ) -> LuaResult<Option<LuaValue>> {
     finishget_inner(lua_state, obj, key, false)
+}
+
+pub fn finishget_known_miss(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+) -> LuaResult<Option<LuaValue>> {
+    finishget_inner(lua_state, obj, key, true)
 }
 
 /// Get a metamethod from a metatable value — implements Lua 5.5's fasttm/luaT_gettm pattern.
@@ -1092,24 +1103,25 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaRes
 }
 
 pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult<()> {
+    let result = objlen_value(l, value)?;
+    setobj2s(l, result_reg, &result);
+    Ok(())
+}
+
+pub fn objlen_value(l: &mut LuaState, value: LuaValue) -> LuaResult<LuaValue> {
     if let Some(bytes) = value.as_bytes() {
         let len = bytes.len();
-        setivalue(
-            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-            len as i64,
-        );
-        return Ok(());
+        return Ok(LuaValue::integer(len as i64));
     } else if value.ttistable() {
-        if let Some(tm) = get_metamethod_event(l, &value, TmKind::Len) {
-            return call_tm_res_into(l, tm, value, value, result_reg);
+        if let Some(tm) = value
+            .as_table()
+            .and_then(|table| get_metamethod_from_meta_ptr(l, table.meta_ptr(), TmKind::Len))
+        {
+            return call_tm_res1(l, tm, value);
         }
 
         let len = value.as_table().unwrap().len();
-        setivalue(
-            unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-            len as i64,
-        );
-        return Ok(());
+        return Ok(LuaValue::integer(len as i64));
     } else {
         // Try trait-based __len for userdata first
         if value.ttisfulluserdata()
@@ -1117,21 +1129,16 @@ pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult
             && let Some(udv) = ud.get_trait().lua_len()
         {
             let result = udvalue_to_lua_value(l, udv)?;
-            setivalue(
-                unsafe { l.stack_mut().get_unchecked_mut(result_reg) },
-                result.as_integer().unwrap_or(0),
-            );
-            return Ok(());
+            return Ok(LuaValue::integer(result.as_integer().unwrap_or(0)));
         }
     }
 
     let tm = get_metamethod_event(l, &value, TmKind::Len);
     if let Some(tm) = tm {
-        call_tm_res_into(l, tm, value, value, result_reg)?;
+        call_tm_res1(l, tm, value)
     } else {
-        return Err(crate::stdlib::debug::typeerror(l, &value, "get length of"));
+        Err(crate::stdlib::debug::typeerror(l, &value, "get length of"))
     }
-    Ok(())
 }
 
 /// Equality comparison - direct port of Lua 5.5's luaV_equalobj
@@ -1524,6 +1531,69 @@ pub fn self_shortstr_index_chain_fast(
     false
 }
 
+#[inline(never)]
+fn table_index_chain_fast_known_miss(
+    lua_state: &mut LuaState,
+    obj: &LuaValue,
+    key: &LuaValue,
+    dest_reg: usize,
+) -> bool {
+    const TM_INDEX_BIT: u8 = TmKind::Index as u8;
+
+    let integer_key = key.ttisinteger().then(|| key.ivalue());
+    if integer_key.is_none() && !key.is_short_string() {
+        return false;
+    }
+
+    let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+    let mut current = *obj;
+    let mut skip_lookup = true;
+
+    for _ in 0..MAXTAGLOOP {
+        let Some(table) = current.as_table_mut() else {
+            return false;
+        };
+
+        if !skip_lookup {
+            let value = if let Some(index) = integer_key {
+                table.impl_table.fast_geti(index)
+            } else {
+                table.impl_table.get_shortstr_fast(key)
+            };
+
+            if let Some(value) = value {
+                setobj2s(lua_state, dest_reg, &value);
+                return true;
+            }
+        } else {
+            skip_lookup = false;
+        }
+
+        let meta = table.meta_ptr();
+        if meta.is_null() {
+            return false;
+        }
+
+        let mt = unsafe { &mut (*meta.as_mut_ptr()).data };
+        if mt.no_tm(TM_INDEX_BIT) {
+            return false;
+        }
+
+        let Some(tm) = mt.impl_table.get_shortstr_fast(&event_key) else {
+            mt.set_tm_absent(TM_INDEX_BIT);
+            return false;
+        };
+
+        if tm.is_function() || !tm.is_table() {
+            return false;
+        }
+
+        current = tm;
+    }
+
+    false
+}
+
 fn finishget_to_reg_inner(
     lua_state: &mut LuaState,
     obj: &LuaValue,
@@ -1616,6 +1686,10 @@ fn finishget_to_reg_known_miss(
     key: &LuaValue,
     dest_reg: usize,
 ) -> LuaResult<()> {
+    if table_index_chain_fast_known_miss(lua_state, obj, key, dest_reg) {
+        return Ok(());
+    }
+
     finishget_to_reg_inner(lua_state, obj, key, dest_reg, true)
 }
 

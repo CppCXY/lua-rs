@@ -31,6 +31,89 @@ fn test_native_tfor_iterator(state: &mut crate::lua_vm::LuaState) -> crate::lua_
     Ok(2)
 }
 
+fn test_native_call_increment(state: &mut crate::lua_vm::LuaState) -> crate::lua_vm::LuaResult<usize> {
+    let arg = state
+        .get_arg(1)
+        .and_then(|value| value.as_integer())
+        .unwrap_or(0);
+    state.push_value(LuaValue::integer(arg + 5))?;
+    Ok(1)
+}
+
+fn call_for_loop_test_ir() -> TraceIr {
+    TraceIr {
+        root_pc: 0,
+        loop_tail_pc: 3,
+        insts: vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 0, 4, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 1, 10, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(10)],
+                writes: vec![TraceIrOperand::Register(1)],
+            },
+            TraceIrInst {
+                pc: 2,
+                opcode: OpCode::Call,
+                raw_instruction: Instruction::create_abc(OpCode::Call, 0, 2, 2).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Call,
+                reads: vec![TraceIrOperand::Register(0), TraceIrOperand::Register(1)],
+                writes: vec![TraceIrOperand::RegisterRange { start: 0, count: 1 }],
+            },
+            TraceIrInst {
+                pc: 3,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 8, 4).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    }
+}
+
+fn call_for_loop_test_helper_plan() -> HelperPlan {
+    HelperPlan {
+        root_pc: 0,
+        loop_tail_pc: 3,
+        steps: vec![
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(10)],
+                writes: vec![TraceIrOperand::Register(1)],
+            },
+            HelperPlanStep::Call {
+                reads: vec![TraceIrOperand::Register(0), TraceIrOperand::Register(1)],
+                writes: vec![TraceIrOperand::RegisterRange { start: 0, count: 1 }],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 4,
+            guards_observed: 0,
+            call_steps: 1,
+            metamethod_steps: 0,
+        },
+    }
+}
+
 fn tfor_loop_test_ir() -> TraceIr {
     TraceIr {
         root_pc: 0,
@@ -3036,6 +3119,392 @@ fn native_tfor_loop_with_lua_iterator_returns_to_interpreter() {
     assert!(state.current_frame().is_some_and(|ci| ci.is_lua()));
     assert_eq!(state.get_arg(1).and_then(|value| value.as_integer()), Some(3));
     assert_eq!(state.get_arg(2).and_then(|value| value.as_integer()), Some(1));
+}
+
+#[test]
+fn native_backend_compiles_call_for_loop_to_native_execution() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = call_for_loop_test_ir();
+    let helper_plan = call_for_loop_test_helper_plan();
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert!(matches!(
+                compiled.execution(),
+                CompiledTraceExecution::Native(NativeCompiledTrace::CallForLoop { .. })
+            ));
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
+fn native_call_for_loop_with_c_callable_executes_and_loop_exits() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = call_for_loop_test_ir();
+    let helper_plan = call_for_loop_test_helper_plan();
+
+    let entry = match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::CallForLoop { entry }) => entry,
+            other => panic!("expected native call-for execution, got {other:?}"),
+        },
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    };
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    let state = vm.main_state();
+    state.push_c_frame(0, 16, -1).unwrap();
+    {
+        let stack = state.stack_mut();
+        stack[4] = LuaValue::cfunction(test_native_call_increment);
+        stack[8] = LuaValue::integer(2);
+        stack[9] = LuaValue::integer(1);
+        stack[10] = LuaValue::integer(1);
+    }
+
+    let lua_state_ptr: *mut crate::lua_vm::LuaState = state;
+    let stack_ptr = state.stack_mut().as_mut_ptr();
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack_ptr,
+            0,
+            std::ptr::null(),
+            0,
+            lua_state_ptr,
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    eprintln!(
+        "c-call result={:?} hits={} r0={:?} r4={:?} r8={:?} r9={:?} r10={:?}",
+        result.status,
+        result.hits,
+        state.stack_get(0),
+        state.stack_get(4),
+        state.stack_get(8),
+        state.stack_get(9),
+        state.stack_get(10)
+    );
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(state.stack_get(0).and_then(|value| value.as_integer()), Some(8));
+}
+
+#[test]
+fn native_call_for_loop_with_table_call_metamethod_executes_and_loop_exits() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = call_for_loop_test_ir();
+    let helper_plan = call_for_loop_test_helper_plan();
+
+    let entry = match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::CallForLoop { entry }) => entry,
+            other => panic!("expected native call-for execution, got {other:?}"),
+        },
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    };
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    vm.execute(
+        r#"
+        native_call_target = setmetatable({}, {
+            __call = function(self, x)
+                return x + 5
+            end
+        })
+        "#,
+    )
+    .unwrap();
+    let callable = vm.get_global("native_call_target").unwrap().unwrap();
+    let state = vm.main_state();
+    state.push_c_frame(0, 16, -1).unwrap();
+    {
+        let stack = state.stack_mut();
+        stack[4] = callable;
+        stack[8] = LuaValue::integer(2);
+        stack[9] = LuaValue::integer(1);
+        stack[10] = LuaValue::integer(1);
+    }
+
+    let lua_state_ptr: *mut crate::lua_vm::LuaState = state;
+    let stack_ptr = state.stack_mut().as_mut_ptr();
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack_ptr,
+            0,
+            std::ptr::null(),
+            0,
+            lua_state_ptr,
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    eprintln!(
+        "tm-call result={:?} hits={} r0={:?} r4={:?} r8={:?} r9={:?} r10={:?}",
+        result.status,
+        result.hits,
+        state.stack_get(0),
+        state.stack_get(4),
+        state.stack_get(8),
+        state.stack_get(9),
+        state.stack_get(10)
+    );
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(state.stack_get(0).and_then(|value| value.as_integer()), Some(8));
+}
+
+#[test]
+fn native_numeric_for_loop_with_integer_gettable_function_index_executes_and_loop_exits() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 0,
+        loop_tail_pc: 3,
+        insts: vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: OpCode::GetTable,
+                raw_instruction: Instruction::create_abck(OpCode::GetTable, 4, 3, 8, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::Register(8)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: OpCode::Add,
+                raw_instruction: Instruction::create_abck(OpCode::Add, 2, 2, 4, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(2)],
+            },
+            TraceIrInst {
+                pc: 2,
+                opcode: OpCode::MmBin,
+                raw_instruction: Instruction::create_abck(OpCode::MmBin, 2, 4, 6, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::MetamethodFallback,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 3,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 9, 4).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 0,
+        loop_tail_pc: 3,
+        steps: vec![
+            HelperPlanStep::TableAccess {
+                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::Register(8)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(2)],
+            },
+            HelperPlanStep::MetamethodFallback {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 4,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 1,
+        },
+    };
+
+    let entry = match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::NumericForLoop { entry }) => entry,
+            other => panic!("expected native numeric forloop execution, got {other:?}"),
+        },
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    };
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    vm.execute(
+        r#"
+        native_index_target = setmetatable({}, {
+            __index = function(_, k)
+                return k * 2
+            end
+        })
+        "#,
+    )
+    .unwrap();
+    let table = vm.get_global("native_index_target").unwrap().unwrap();
+    let state = vm.main_state();
+    state.push_c_frame(0, 16, -1).unwrap();
+    {
+        let stack = state.stack_mut();
+        stack[2] = LuaValue::integer(0);
+        stack[3] = table;
+        stack[8] = LuaValue::integer(3);
+        stack[9] = LuaValue::integer(0);
+        stack[10] = LuaValue::integer(1);
+        stack[11] = LuaValue::integer(0);
+    }
+
+    let lua_state_ptr: *mut crate::lua_vm::LuaState = state;
+    let stack_ptr = state.stack_mut().as_mut_ptr();
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack_ptr,
+            0,
+            std::ptr::null(),
+            0,
+            lua_state_ptr,
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 1);
+    assert_eq!(state.stack_get(2).and_then(|value| value.as_integer()), Some(6));
+}
+
+#[test]
+fn native_numeric_for_loop_with_len_metamethod_executes_and_loop_exits() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 0,
+        loop_tail_pc: 3,
+        insts: vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: OpCode::Len,
+                raw_instruction: Instruction::create_abc(OpCode::Len, 4, 3, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(3)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: OpCode::Add,
+                raw_instruction: Instruction::create_abck(OpCode::Add, 2, 2, 4, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(2)],
+            },
+            TraceIrInst {
+                pc: 2,
+                opcode: OpCode::MmBin,
+                raw_instruction: Instruction::create_abck(OpCode::MmBin, 2, 4, 6, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::MetamethodFallback,
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![],
+            },
+            TraceIrInst {
+                pc: 3,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 9, 4).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 0,
+        loop_tail_pc: 3,
+        steps: vec![
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(3)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(2)],
+            },
+            HelperPlanStep::MetamethodFallback {
+                reads: vec![TraceIrOperand::Register(2), TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 4,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 1,
+        },
+    };
+
+    let entry = match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::NumericForLoop { entry }) => entry,
+            other => panic!("expected native numeric forloop execution, got {other:?}"),
+        },
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    };
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    vm.execute(
+        r#"
+        native_len_target = setmetatable({}, {
+            __len = function(_)
+                return 7
+            end
+        })
+        "#,
+    )
+    .unwrap();
+    let table = vm.get_global("native_len_target").unwrap().unwrap();
+    let state = vm.main_state();
+    state.push_c_frame(0, 16, -1).unwrap();
+    {
+        let stack = state.stack_mut();
+        stack[2] = LuaValue::integer(0);
+        stack[3] = table;
+        stack[9] = LuaValue::integer(0);
+        stack[10] = LuaValue::integer(1);
+        stack[11] = LuaValue::integer(0);
+    }
+
+    let lua_state_ptr: *mut crate::lua_vm::LuaState = state;
+    let stack_ptr = state.stack_mut().as_mut_ptr();
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack_ptr,
+            0,
+            std::ptr::null(),
+            0,
+            lua_state_ptr,
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 1);
+    assert_eq!(state.stack_get(2).and_then(|value| value.as_integer()), Some(7));
 }
 
 #[test]

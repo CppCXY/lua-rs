@@ -34,8 +34,8 @@ pub fn try_unary_tm(
     // Try to get metamethod from operand
     let metamethod = get_metamethod_event(lua_state, &operand, tm_kind);
     if let Some(mm) = metamethod {
-        // Call metamethod: mm(operand, operand) -> result
-        let result = call_tm_res(lua_state, mm, operand, operand)?;
+        // Unary metamethods receive exactly one argument.
+        let result = call_tm_res1(lua_state, mm, operand)?;
 
         // Store result
         let stack = lua_state.stack_mut();
@@ -258,7 +258,7 @@ pub fn call_tm_res(
         let r = lua_execute(lua_state, caller_depth);
         lua_state.dec_n_ccalls();
         r?;
-    } else if metamethod.is_cfunction() {
+    } else if metamethod.is_c_callable() {
         call_c_function(lua_state, func_pos, 2, 1)?;
     } else {
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
@@ -322,7 +322,7 @@ pub fn call_tm_res1(
         let r = lua_execute(lua_state, caller_depth);
         lua_state.dec_n_ccalls();
         r?;
-    } else if metamethod.is_cfunction() {
+    } else if metamethod.is_c_callable() {
         call_c_function(lua_state, func_pos, 1, 1)?;
     } else {
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
@@ -389,7 +389,7 @@ pub fn call_tm_res_into(
         let r = lua_execute(lua_state, caller_depth);
         lua_state.dec_n_ccalls();
         r?;
-    } else if metamethod.is_cfunction() {
+    } else if metamethod.is_c_callable() {
         call_c_function(lua_state, func_pos, 2, 1)?;
     } else {
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
@@ -438,7 +438,6 @@ pub fn call_tm(
         ci_top
     };
 
-    // Direct stack write using raw pointers
     unsafe {
         let sp = lua_state.stack_mut().as_mut_ptr();
         *sp.add(func_pos) = metamethod;
@@ -448,7 +447,6 @@ pub fn call_tm(
     }
     lua_state.set_top_raw(func_pos + 4);
 
-    // Call with 0 results (nresults=0)
     if metamethod.is_lua_function() {
         let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
         let chunk = lua_func.chunk();
@@ -480,11 +478,13 @@ pub fn call_tm(
         let r = lua_execute(lua_state, caller_depth);
         lua_state.dec_n_ccalls();
         r?;
-    } else if metamethod.is_cfunction() {
+    } else if metamethod.is_c_callable() {
         call::call_c_function(lua_state, func_pos, 3, 0)?;
     } else {
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
+
+    lua_state.set_top_raw(func_pos);
 
     Ok(())
 }

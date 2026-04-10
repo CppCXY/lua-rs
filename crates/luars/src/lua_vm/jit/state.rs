@@ -173,6 +173,7 @@ pub struct JitCounters {
     pub root_native_linear_int_jmp_dispatches: u32,
     pub root_native_numeric_for_dispatches: u32,
     pub root_native_guarded_numeric_for_dispatches: u32,
+    pub root_native_call_for_dispatches: u32,
     pub root_native_numeric_jmp_dispatches: u32,
     pub side_native_dispatches: u32,
     pub native_exit_index_resolve_attempts: u32,
@@ -186,6 +187,9 @@ pub struct JitCounters {
     pub native_profile_truthy_guards: u32,
     pub native_profile_arithmetic_helpers: u32,
     pub native_profile_table_helpers: u32,
+    pub native_profile_table_get_helpers: u32,
+    pub native_profile_table_set_helpers: u32,
+    pub native_profile_len_helpers: u32,
     pub native_profile_upvalue_helpers: u32,
     pub native_profile_shift_helpers: u32,
 }
@@ -518,6 +522,12 @@ impl JitState {
                         self.counters.root_native_guarded_numeric_for_dispatches = self
                             .counters
                             .root_native_guarded_numeric_for_dispatches
+                            .saturating_add(1);
+                    }
+                    NativeCompiledTrace::CallForLoop { .. } => {
+                        self.counters.root_native_call_for_dispatches = self
+                            .counters
+                            .root_native_call_for_dispatches
                             .saturating_add(1);
                     }
                     NativeCompiledTrace::TForLoop { .. } => {
@@ -1474,6 +1484,7 @@ mod tests {
                 root_native_linear_int_jmp_dispatches: 0,
                 root_native_numeric_for_dispatches: 0,
                 root_native_guarded_numeric_for_dispatches: 0,
+                root_native_call_for_dispatches: 0,
                 root_native_numeric_jmp_dispatches: 0,
                 side_native_dispatches: 0,
                 native_exit_index_resolve_attempts: 0,
@@ -1487,6 +1498,9 @@ mod tests {
                 native_profile_truthy_guards: 0,
                 native_profile_arithmetic_helpers: 0,
                 native_profile_table_helpers: 0,
+                native_profile_table_get_helpers: 0,
+                native_profile_table_set_helpers: 0,
+                native_profile_len_helpers: 0,
                 native_profile_upvalue_helpers: 0,
                 native_profile_shift_helpers: 0,
             }
@@ -2325,6 +2339,15 @@ fn apply_native_lowering_profile(counters: &mut JitCounters, profile: NativeLowe
     counters.native_profile_table_helpers = counters
         .native_profile_table_helpers
         .saturating_add(profile.table_helper_steps);
+    counters.native_profile_table_get_helpers = counters
+        .native_profile_table_get_helpers
+        .saturating_add(profile.table_get_helper_steps);
+    counters.native_profile_table_set_helpers = counters
+        .native_profile_table_set_helpers
+        .saturating_add(profile.table_set_helper_steps);
+    counters.native_profile_len_helpers = counters
+        .native_profile_len_helpers
+        .saturating_add(profile.len_helper_steps);
     counters.native_profile_upvalue_helpers = counters
         .native_profile_upvalue_helpers
         .saturating_add(profile.upvalue_helper_steps);

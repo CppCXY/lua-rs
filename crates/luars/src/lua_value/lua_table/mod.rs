@@ -133,17 +133,6 @@ impl LuaTable {
         self.impl_table.next(input_key)
     }
 
-    #[cfg(feature = "jit")]
-    #[inline]
-    pub(crate) unsafe fn next_into(
-        &self,
-        input_key: &LuaValue,
-        key_out: *mut LuaValue,
-        value_out: *mut LuaValue,
-    ) -> Result<bool, ()> {
-        unsafe { self.impl_table.next_into(input_key, key_out, value_out) }
-    }
-
     pub fn remove_array_at(&mut self, i: i64) -> LuaResult<LuaValue> {
         self.impl_table
             .remove_at(i)

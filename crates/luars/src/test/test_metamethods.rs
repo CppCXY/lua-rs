@@ -392,6 +392,84 @@ fn test_len_metamethod() {
 }
 
 #[test]
+fn test_len_metamethod_receives_single_argument() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.execute(
+        r#"
+        local seen_n = nil
+        local seen_extra = nil
+        local t = {}
+        setmetatable(t, {
+            __len = function(tbl, ...)
+                seen_n = select('#', ...)
+                seen_extra = select(1, ...)
+                return 7
+            end
+        })
+        assert(#t == 7)
+        assert(seen_n == 0)
+        assert(seen_extra == nil)
+    "#,
+    );
+    if let Err(e) = &result {
+        eprintln!("test_len_metamethod_receives_single_argument error: {:?}", e);
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_len_metamethod_rclosure() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    vm.register_function("rust_len", |state| {
+        assert!(state.get_arg(1).map(|v| v.is_table()).unwrap_or(false));
+        assert!(state.get_arg(2).is_none());
+        state.push_value(LuaValue::integer(9))?;
+        Ok(1)
+    })
+    .unwrap();
+
+    let result = vm.execute(
+        r#"
+        local t = {}
+        setmetatable(t, { __len = rust_len })
+        assert(#t == 9)
+    "#,
+    );
+    if let Err(e) = &result {
+        eprintln!("test_len_metamethod_rclosure error: {:?}", e);
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_call_metamethod_rclosure() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    vm.register_function("rust_call", |state| {
+        assert!(state.get_arg(1).map(|v| v.is_table()).unwrap_or(false));
+        let a = state.get_arg(2).and_then(|v| v.as_integer()).unwrap_or_default();
+        let b = state.get_arg(3).and_then(|v| v.as_integer()).unwrap_or_default();
+        state.push_value(LuaValue::integer(a + b))?;
+        Ok(1)
+    })
+    .unwrap();
+
+    let result = vm.execute(
+        r#"
+        local t = {}
+        setmetatable(t, { __call = rust_call })
+        assert(t(4, 6) == 10)
+    "#,
+    );
+    if let Err(e) = &result {
+        eprintln!("test_call_metamethod_rclosure error: {:?}", e);
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_eq_metamethod() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();

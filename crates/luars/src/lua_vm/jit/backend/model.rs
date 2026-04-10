@@ -4,7 +4,7 @@ use crate::LuaValue;
 
 use crate::lua_vm::jit::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use crate::lua_vm::jit::ir::TraceIr;
-use crate::lua_vm::jit::lowering::{DeoptRestoreSummary, LoweredTrace};
+use crate::lua_vm::jit::lowering::{DeoptRestoreSummary, LoweredTrace, TraceValueKind};
 use crate::lua_vm::jit::trace_recorder::TraceArtifact;
 #[cfg(test)]
 use crate::lua_vm::jit::trace_recorder::{TraceExit, TraceExitKind, TraceOp, TraceSeed};
@@ -99,16 +99,53 @@ pub(crate) enum NumericStep {
     LoadBool { dst: u32, value: bool },
     LoadI { dst: u32, imm: i32 },
     LoadF { dst: u32, imm: i32 },
+    Len { dst: u32, src: u32 },
     GetUpval { dst: u32, upvalue: u32 },
     SetUpval { src: u32, upvalue: u32 },
+    GetTabUpField { dst: u32, upvalue: u32, key: u32 },
+    SetTabUpField { upvalue: u32, key: u32, value: u32 },
     GetTableInt { dst: u32, table: u32, index: u32 },
     SetTableInt { table: u32, index: u32, value: u32 },
+    GetTableField { dst: u32, table: u32, key: u32 },
+    SetTableField { table: u32, key: u32, value: u32 },
     Binary {
         dst: u32,
         lhs: NumericOperand,
         rhs: NumericOperand,
         op: NumericBinaryOp,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NumericValueFlowRhs {
+    ImmI(i32),
+    Const(u32),
+    StableReg { reg: u32, kind: TraceValueKind },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NumericSelfUpdateValueKind {
+    Integer,
+    Float,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NumericSelfUpdateValueFlow {
+    pub reg: u32,
+    pub op: NumericBinaryOp,
+    pub kind: NumericSelfUpdateValueKind,
+    pub rhs: NumericValueFlowRhs,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NumericValueState {
+    pub self_update: Option<NumericSelfUpdateValueFlow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NumericLowering {
+    pub steps: Vec<NumericStep>,
+    pub value_state: NumericValueState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +247,7 @@ impl CompiledTraceExecution {
                 NativeCompiledTrace::LinearIntJmpLoop { .. } => "NativeLinearIntJmpLoop",
                 NativeCompiledTrace::NumericForLoop { .. } => "NativeNumericForLoop",
                 NativeCompiledTrace::GuardedNumericForLoop { .. } => "NativeGuardedNumericForLoop",
+                NativeCompiledTrace::CallForLoop { .. } => "NativeCallForLoop",
                 NativeCompiledTrace::TForLoop { .. } => "NativeTForLoop",
                 NativeCompiledTrace::NumericJmpLoop { .. } => "NativeNumericJmpLoop",
             },
@@ -275,6 +313,7 @@ pub(crate) enum NativeCompiledTrace {
     LinearIntJmpLoop { entry: NativeTraceEntry },
     NumericForLoop { entry: NativeTraceEntry },
     GuardedNumericForLoop { entry: NativeTraceEntry },
+    CallForLoop { entry: NativeTraceEntry },
     TForLoop { entry: NativeTraceEntry },
     NumericJmpLoop { entry: NativeTraceEntry },
 }
@@ -310,6 +349,9 @@ impl PartialEq for NativeCompiledTrace {
                 Self::GuardedNumericForLoop { entry: lhs },
                 Self::GuardedNumericForLoop { entry: rhs },
             ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (Self::CallForLoop { entry: lhs }, Self::CallForLoop { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
             (Self::TForLoop { entry: lhs }, Self::TForLoop { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
             }
@@ -341,6 +383,9 @@ pub(crate) struct NativeLoweringProfile {
     pub truthy_guard_steps: u32,
     pub arithmetic_helper_steps: u32,
     pub table_helper_steps: u32,
+    pub table_get_helper_steps: u32,
+    pub table_set_helper_steps: u32,
+    pub len_helper_steps: u32,
     pub upvalue_helper_steps: u32,
     pub shift_helper_steps: u32,
 }

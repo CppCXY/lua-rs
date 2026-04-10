@@ -7,9 +7,10 @@ use cranelift_module::{default_libcall_names, Linkage, Module};
 
 use crate::gc::UpvaluePtr;
 use crate::lua_value::{LUA_VNUMFLT, LUA_VNUMINT};
-use crate::lua_vm::execute::call::precall;
+use crate::lua_vm::execute::{call::precall, execute_loop::lua_execute};
 use crate::lua_vm::execute::helper::{
-    lua_fmod, lua_idiv, lua_imod, luai_numpow, pivalue, pttisinteger, ttisfloat, ttisinteger,
+    finishget_known_miss, lua_fmod, lua_idiv, lua_imod, luai_numpow, objlen_value, pivalue,
+    pttisinteger, ttisfloat, ttisinteger,
 };
 use crate::{Instruction, LuaState, LuaValue};
 use crate::lua_vm::jit::helper_plan::HelperPlan;
@@ -19,14 +20,18 @@ use crate::lua_vm::jit::trace_recorder::TraceArtifact;
 
 use super::compile::{
     lower_linear_int_guard_for_native, lower_linear_int_steps_for_native,
-    lower_numeric_guard_for_native, lower_numeric_steps_for_native,
+    lower_numeric_guard_for_native, lower_numeric_lowering_for_native, lower_numeric_steps_for_native,
 };
 use super::{
     BackendCompileOutcome, CompiledTrace, CompiledTraceExecution,
     LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NativeCompiledTrace,
     NativeLoweringProfile, NativeTraceResult, NativeTraceStatus, NumericBinaryOp, NumericIfElseCond,
-    NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericOperand, NumericStep, TraceBackend,
+    NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericLowering, NumericOperand,
+    NumericSelfUpdateValueFlow, NumericSelfUpdateValueKind, NumericStep, NumericValueFlowRhs,
+    TraceBackend,
 };
+#[cfg(test)]
+use super::NumericValueState;
 
 const LUA_VALUE_SIZE: i64 = std::mem::size_of::<LuaValue>() as i64;
 const LUA_VALUE_TT_OFFSET: i32 = std::mem::offset_of!(LuaValue, tt) as i32;
@@ -36,12 +41,18 @@ const LUA_VFALSE_TAG: u8 = 1;
 const LUA_VTRUE_TAG: u8 = 17;
 const NATIVE_HELPER_NUMERIC_GET_UPVAL_SYMBOL: &str = "jit_native_helper_numeric_get_upval";
 const NATIVE_HELPER_NUMERIC_SET_UPVAL_SYMBOL: &str = "jit_native_helper_numeric_set_upval";
+const NATIVE_HELPER_NUMERIC_GET_TABUP_FIELD_SYMBOL: &str = "jit_native_helper_numeric_get_tabup_field";
+const NATIVE_HELPER_NUMERIC_SET_TABUP_FIELD_SYMBOL: &str = "jit_native_helper_numeric_set_tabup_field";
 const NATIVE_HELPER_NUMERIC_GET_TABLE_INT_SYMBOL: &str = "jit_native_helper_numeric_get_table_int";
 const NATIVE_HELPER_NUMERIC_SET_TABLE_INT_SYMBOL: &str = "jit_native_helper_numeric_set_table_int";
+const NATIVE_HELPER_NUMERIC_GET_TABLE_FIELD_SYMBOL: &str = "jit_native_helper_numeric_get_table_field";
+const NATIVE_HELPER_NUMERIC_SET_TABLE_FIELD_SYMBOL: &str = "jit_native_helper_numeric_set_table_field";
+const NATIVE_HELPER_NUMERIC_LEN_SYMBOL: &str = "jit_native_helper_numeric_len";
 const NATIVE_HELPER_NUMERIC_BINARY_SYMBOL: &str = "jit_native_helper_numeric_binary";
 const NATIVE_HELPER_NUMERIC_POW_SYMBOL: &str = "jit_native_helper_numeric_pow";
 const NATIVE_HELPER_SHIFT_LEFT_SYMBOL: &str = "jit_native_helper_shift_left";
 const NATIVE_HELPER_SHIFT_RIGHT_SYMBOL: &str = "jit_native_helper_shift_right";
+const NATIVE_HELPER_CALL_SYMBOL: &str = "jit_native_helper_call";
 const NATIVE_HELPER_TFOR_CALL_SYMBOL: &str = "jit_native_helper_tfor_call";
 const NATIVE_TRACE_RESULT_STATUS_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, status) as i32;
 const NATIVE_TRACE_RESULT_HITS_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, hits) as i32;
@@ -59,6 +70,8 @@ const NATIVE_NUMERIC_BINARY_DIV: i32 = 3;
 const NATIVE_NUMERIC_BINARY_IDIV: i32 = 4;
 const NATIVE_NUMERIC_BINARY_MOD: i32 = 5;
 const NATIVE_NUMERIC_BINARY_POW: i32 = 6;
+const NATIVE_CALL_FALLBACK: i32 = 0;
+const NATIVE_CALL_CONTINUE: i32 = 1;
 const NATIVE_TFOR_CALL_FALLBACK: i32 = 0;
 const NATIVE_TFOR_CALL_C_CONTINUE: i32 = 1;
 const NATIVE_TFOR_CALL_LUA_RETURNED: i32 = 2;
@@ -133,6 +146,12 @@ impl NativeTraceBackend {
 
         if let Some((execution, profile)) =
             self.compile_native_generic_numeric_for(ir, lowered_trace)
+        {
+            return Some((execution, profile));
+        }
+
+        if let Some((execution, profile)) =
+            self.compile_native_generic_call_for(ir, lowered_trace)
         {
             return Some((execution, profile));
         }
@@ -219,11 +238,11 @@ impl NativeTraceBackend {
         let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
 
         if ir.guards.is_empty() {
-            let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
-            let native = self.compile_native_numeric_for_loop(loop_reg, &steps, lowered_trace)?;
+            let lowering = lower_numeric_lowering_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
+            let native = self.compile_native_numeric_for_loop(loop_reg, &lowering, lowered_trace)?;
             return Some((
                 CompiledTraceExecution::Native(native),
-                Some(profile_for_numeric_for_loop(&steps)),
+                Some(profile_for_numeric_for_loop(&lowering.steps)),
             ));
         }
 
@@ -249,10 +268,11 @@ impl NativeTraceBackend {
             return None;
         }
 
-        let steps = lower_numeric_steps_for_native(&ir.insts[..guard_index], lowered_trace)?;
+        let lowering = lower_numeric_lowering_for_native(&ir.insts[..guard_index], lowered_trace)?;
         let loop_guard = lower_numeric_guard_for_native(&ir.insts[guard_index], true, lowered_exit.resume_pc)?;
-        let native = self.compile_native_guarded_numeric_for_loop(loop_reg, &steps, loop_guard, lowered_trace)?;
-        let profile = profile_for_guarded_numeric_for_loop(&steps, loop_guard);
+        let native =
+            self.compile_native_guarded_numeric_for_loop(loop_reg, &lowering, loop_guard, lowered_trace)?;
+        let profile = profile_for_guarded_numeric_for_loop(&lowering.steps, loop_guard);
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
 
@@ -343,6 +363,50 @@ impl NativeTraceBackend {
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
 
+    fn compile_native_generic_call_for(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        let loop_backedge = ir.insts.last()?;
+        if loop_backedge.opcode != crate::OpCode::ForLoop || !ir.guards.is_empty() {
+            return None;
+        }
+        if ir.insts.len() < 2 {
+            return None;
+        }
+
+        let call_inst = &ir.insts[ir.insts.len() - 2];
+        if call_inst.opcode != crate::OpCode::Call {
+            return None;
+        }
+
+        let call_raw = Instruction::from_u32(call_inst.raw_instruction);
+        if call_raw.get_b() == 0 || call_raw.get_c() == 0 {
+            return None;
+        }
+
+        let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
+        let prep_moves = lower_native_call_prep_moves(&ir.insts[..ir.insts.len() - 2])?;
+        let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 2], lowered_trace)?;
+        if !steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+
+        let native = self.compile_native_call_for_loop(
+            loop_reg,
+            &prep_moves,
+            &steps,
+            call_raw.get_a(),
+            call_raw.get_b(),
+            call_raw.get_c(),
+            call_inst.pc,
+            lowered_trace,
+        )?;
+        let profile = profile_for_numeric_steps(&steps);
+        Some((CompiledTraceExecution::Native(native), Some(profile)))
+    }
+
     fn compile_native_generic_numeric_jmp(
         &mut self,
         ir: &TraceIr,
@@ -359,10 +423,11 @@ impl NativeTraceBackend {
             return None;
         }
 
-        let (head_blocks, steps, tail_blocks) =
+        let (head_blocks, lowering, tail_blocks) =
             recognize_numeric_jmp_guard_blocks(ir, lowered_trace)?;
-        let native = self.compile_native_numeric_jmp_loop(&head_blocks, &steps, &tail_blocks, lowered_trace)?;
-        let profile = profile_for_numeric_jmp_loop(&head_blocks, &steps, &tail_blocks);
+        let native =
+            self.compile_native_numeric_jmp_loop(&head_blocks, &lowering, &tail_blocks, lowered_trace)?;
+        let profile = profile_for_numeric_jmp_loop(&head_blocks, &lowering.steps, &tail_blocks);
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
 
@@ -404,12 +469,32 @@ impl NativeTraceBackend {
             jit_native_helper_numeric_set_upval as *const u8,
         );
         builder.symbol(
+            NATIVE_HELPER_NUMERIC_GET_TABUP_FIELD_SYMBOL,
+            jit_native_helper_numeric_get_tabup_field as *const u8,
+        );
+        builder.symbol(
+            NATIVE_HELPER_NUMERIC_SET_TABUP_FIELD_SYMBOL,
+            jit_native_helper_numeric_set_tabup_field as *const u8,
+        );
+        builder.symbol(
             NATIVE_HELPER_NUMERIC_GET_TABLE_INT_SYMBOL,
             jit_native_helper_numeric_get_table_int as *const u8,
         );
         builder.symbol(
             NATIVE_HELPER_NUMERIC_SET_TABLE_INT_SYMBOL,
             jit_native_helper_numeric_set_table_int as *const u8,
+        );
+        builder.symbol(
+            NATIVE_HELPER_NUMERIC_GET_TABLE_FIELD_SYMBOL,
+            jit_native_helper_numeric_get_table_field as *const u8,
+        );
+        builder.symbol(
+            NATIVE_HELPER_NUMERIC_SET_TABLE_FIELD_SYMBOL,
+            jit_native_helper_numeric_set_table_field as *const u8,
+        );
+        builder.symbol(
+            NATIVE_HELPER_NUMERIC_LEN_SYMBOL,
+            jit_native_helper_numeric_len as *const u8,
         );
         builder.symbol(
             NATIVE_HELPER_NUMERIC_BINARY_SYMBOL,
@@ -427,6 +512,7 @@ impl NativeTraceBackend {
             NATIVE_HELPER_SHIFT_RIGHT_SYMBOL,
             jit_native_helper_shift_right as *const u8,
         );
+        builder.symbol(NATIVE_HELPER_CALL_SYMBOL, jit_native_helper_call as *const u8);
         builder.symbol(
             NATIVE_HELPER_TFOR_CALL_SYMBOL,
             jit_native_helper_tfor_call as *const u8,
@@ -901,7 +987,7 @@ impl NativeTraceBackend {
                 *step,
                 &mut known_value_kinds,
                 None,
-                None,
+                HoistedNumericGuardValues::default(),
             )?;
         }
 
@@ -997,9 +1083,10 @@ impl NativeTraceBackend {
     fn compile_native_numeric_for_loop(
         &mut self,
         loop_reg: u32,
-        steps: &[NumericStep],
+        lowering: &NumericLowering,
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
+        let steps = &lowering.steps;
         if !steps.iter().all(native_supports_numeric_step) {
             return None;
         }
@@ -1024,19 +1111,48 @@ impl NativeTraceBackend {
         let hits_var = builder.declare_var(types::I64);
         let carried_remaining_var = builder.declare_var(types::I64);
         let carried_index_var = builder.declare_var(types::I64);
+        let carried_integer_var = builder.declare_var(types::I64);
         let carried_float_raw_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
         let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
         let loop_state_is_invariant = numeric_loop_state_is_invariant(loop_reg, steps);
-        let carried_float_step = if loop_state_is_invariant {
-            exact_float_self_update_step(steps, lowered_trace)
+        let carried_integer_flow = if loop_state_is_invariant {
+            lowering
+                .value_state
+                .self_update
+                .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Integer))
         } else {
             None
         };
+        let carried_integer_step = carried_integer_flow
+            .and_then(carried_integer_loop_step_from_value_flow)
+            .filter(|step| {
+                carried_integer_rhs_stable_reg(*step)
+                    .is_none_or(|reg| numeric_steps_preserve_reg(steps, reg))
+            });
+        let carried_integer_span = carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
+        let carried_float_flow = if loop_state_is_invariant && carried_integer_step.is_none() {
+            lowering
+                .value_state
+                .self_update
+                .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Float))
+        } else {
+            None
+        };
+        let carried_float_step = carried_float_flow
+            .and_then(|flow| carried_float_loop_step_from_value_flow(flow, lowered_trace))
+            .filter(|step| {
+                carried_float_rhs_stable_reg(*step)
+                    .is_none_or(|reg| numeric_steps_preserve_reg(steps, reg))
+            });
+        let carried_float_span = carried_float_flow.and_then(|flow| float_self_update_step_span(steps, flow));
 
         let loop_block = builder.create_block();
         if loop_state_is_invariant {
             builder.append_block_param(loop_block, types::I64);
+            builder.append_block_param(loop_block, types::I64);
+        }
+        if carried_integer_step.is_some() {
             builder.append_block_param(loop_block, types::I64);
         }
         if carried_float_step.is_some() {
@@ -1099,6 +1215,25 @@ impl NativeTraceBackend {
         } else {
             builder.ins().iconst(types::I64, 0)
         };
+        let initial_integer_value = if let Some(step) = carried_integer_step {
+            let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
+            emit_exact_tag_guard(
+                &mut builder,
+                slot_ptr,
+                LUA_VNUMINT,
+                hits_var,
+                zero_hits,
+                fallback_block,
+            );
+            set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Integer);
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
         let initial_float_raw = if let Some(step) = carried_float_step {
             let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
             emit_exact_tag_guard(
@@ -1128,11 +1263,24 @@ impl NativeTraceBackend {
                 step,
             )
         });
+        let carried_integer_rhs = carried_integer_step.map(|step| {
+            resolve_carried_integer_rhs(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                zero_hits,
+                fallback_block,
+                step,
+            )
+        });
 
         let mut initial_args = Vec::new();
         if loop_state_is_invariant {
             initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_remaining));
             initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_index));
+        }
+        if let Some(value) = initial_integer_value {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(value));
         }
         if let Some(raw) = initial_float_raw {
             initial_args.push(cranelift::codegen::ir::BlockArg::Value(raw));
@@ -1147,20 +1295,67 @@ impl NativeTraceBackend {
             builder.def_var(carried_remaining_var, carried_remaining);
             builder.def_var(carried_index_var, carried_index);
         }
+        if carried_integer_step.is_some() {
+            let integer_param_index = if loop_state_is_invariant { 2 } else { 0 };
+            let carried_integer = builder.block_params(loop_block)[integer_param_index];
+            builder.def_var(carried_integer_var, carried_integer);
+        }
         if carried_float_step.is_some() {
-            let float_param_index = if loop_state_is_invariant { 2 } else { 0 };
+            let float_param_index = if loop_state_is_invariant {
+                2 + usize::from(carried_integer_step.is_some())
+            } else {
+                usize::from(carried_integer_step.is_some())
+            };
             let carried_float_raw = builder.block_params(loop_block)[float_param_index];
             builder.def_var(carried_float_raw_var, carried_float_raw);
         }
 
-        if let Some(step) = carried_float_step {
-            emit_carried_float_loop_step(
+        if let Some(step) = carried_integer_step {
+            let (span_start, span_len) = carried_integer_span
+                .expect("plain numeric carried-integer path requires a matching self-update span");
+            emit_numeric_steps_with_carried_integer(
                 &mut builder,
-                carried_float_raw_var,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_block,
+                steps,
+                carried_integer_var,
                 step,
-                carried_float_rhs.expect("plain numeric carried-float path requires resolved rhs"),
+                carried_integer_rhs.expect("plain numeric carried-integer path requires resolved rhs"),
+                span_start,
+                span_len,
+                None,
                 &mut known_value_kinds,
-            );
+            )?;
+        } else if let Some(step) = carried_float_step {
+            if let Some((span_start, span_len)) = carried_float_span {
+                emit_numeric_steps_with_carried_float(
+                    &mut builder,
+                    &abi,
+                    &native_helpers,
+                    hits_var,
+                    current_hits,
+                    fallback_block,
+                    steps,
+                    carried_float_raw_var,
+                    step,
+                    carried_float_rhs.expect("plain numeric carried-float path requires resolved rhs"),
+                    span_start,
+                    span_len,
+                    None,
+                    &mut known_value_kinds,
+                )?;
+            } else {
+                emit_carried_float_loop_step(
+                    &mut builder,
+                    carried_float_raw_var,
+                    step,
+                    carried_float_rhs.expect("plain numeric carried-float path requires resolved rhs"),
+                    &mut known_value_kinds,
+                );
+            }
         } else {
             for step in steps {
                 emit_numeric_step(
@@ -1173,7 +1368,7 @@ impl NativeTraceBackend {
                     *step,
                     &mut known_value_kinds,
                     None,
-                    None,
+                    HoistedNumericGuardValues::default(),
                 )?;
             }
         }
@@ -1182,7 +1377,20 @@ impl NativeTraceBackend {
         if loop_state_is_invariant {
             let carried_remaining = builder.use_var(carried_remaining_var);
             let carried_index = builder.use_var(carried_index_var);
-            if carried_float_step.is_some() {
+            if carried_integer_step.is_some() {
+                let carried_integer = builder.use_var(carried_integer_var);
+                emit_numeric_counted_loop_backedge_with_carried_integer(
+                    &mut builder,
+                    hits_var,
+                    next_hits,
+                    carried_remaining,
+                    carried_index,
+                    hoisted_step_value,
+                    carried_integer,
+                    loop_block,
+                    loop_exit_block,
+                );
+            } else if carried_float_step.is_some() {
                 let carried_float_raw = builder.use_var(carried_float_raw_var);
                 emit_numeric_counted_loop_backedge_with_carried_float(
                     &mut builder,
@@ -1228,6 +1436,7 @@ impl NativeTraceBackend {
                 &mut builder,
                 abi.base_ptr,
                 loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 fallback_block,
                 fallback_terminal_block,
@@ -1236,6 +1445,7 @@ impl NativeTraceBackend {
                 &mut builder,
                 abi.base_ptr,
                 loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 loop_exit_block,
                 loop_exit_terminal_block,
@@ -1263,9 +1473,13 @@ impl NativeTraceBackend {
 
         builder.seal_block(loop_block);
         builder.finalize();
-        module.define_function(func_id, &mut context).ok()?;
+        if module.define_function(func_id, &mut context).is_err() {
+            return None;
+        }
         module.clear_context(&mut context);
-        module.finalize_definitions().ok()?;
+        if module.finalize_definitions().is_err() {
+            return None;
+        }
         let entry = module.get_finalized_function(func_id);
         self.modules.push(module);
         Some(NativeCompiledTrace::NumericForLoop {
@@ -1273,13 +1487,165 @@ impl NativeTraceBackend {
         })
     }
 
+    fn compile_native_call_for_loop(
+        &mut self,
+        loop_reg: u32,
+        prep_moves: &[(u32, u32)],
+        steps: &[NumericStep],
+        call_a: u32,
+        call_b: u32,
+        call_c: u32,
+        call_pc: u32,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<NativeCompiledTrace> {
+        if !steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+
+        let func_name = self.allocate_function_name("jit_native_call_for_loop");
+        let mut module = Self::build_module().ok()?;
+        let target_config = module.target_config();
+        let pointer_ty = target_config.pointer_type();
+        let mut context = make_native_context(target_config);
+        let native_helpers = declare_native_helpers(
+            &mut module,
+            &mut context.func,
+            pointer_ty,
+            target_config.default_call_conv,
+        )
+        .ok()?;
+        let func_id = module
+            .declare_function(&func_name, Linkage::Local, &context.func.signature)
+            .ok()?;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
+        let hits_var = builder.declare_var(types::I64);
+        let abi = init_native_entry(&mut builder, pointer_ty);
+        let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
+
+        let loop_block = builder.create_block();
+        let call_continue_block = builder.create_block();
+        let fallback_terminal_block = builder.create_block();
+        let loop_exit_terminal_block = builder.create_block();
+
+        let zero_hits = builder.ins().iconst(types::I64, 0);
+        builder.def_var(hits_var, zero_hits);
+        builder.ins().jump(loop_block, &[]);
+
+        builder.switch_to_block(loop_block);
+        let current_hits = builder.use_var(hits_var);
+        for &(dst, src) in prep_moves {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_terminal_block,
+                NumericStep::Move { dst, src },
+                &mut known_value_kinds,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
+        for step in steps {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_terminal_block,
+                *step,
+                &mut known_value_kinds,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
+
+        let call_a_value = builder.ins().iconst(types::I32, i64::from(call_a));
+        let call_b_value = builder.ins().iconst(types::I32, i64::from(call_b));
+        let call_c_value = builder.ins().iconst(types::I32, i64::from(call_c));
+        let call_pc_value = builder.ins().iconst(types::I32, i64::from(call_pc));
+        let helper_call = builder.ins().call(
+            native_helpers.call,
+            &[
+                abi.lua_state_ptr,
+                abi.base_slots,
+                call_a_value,
+                call_b_value,
+                call_c_value,
+                call_pc_value,
+            ],
+        );
+        let helper_status = builder.inst_results(helper_call)[0];
+        let helper_continue = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder.ins().brif(
+            helper_continue,
+            call_continue_block,
+            &[],
+            fallback_terminal_block,
+            &[],
+        );
+
+        builder.switch_to_block(call_continue_block);
+        builder.seal_block(call_continue_block);
+        let next_hits = builder.ins().iadd_imm(current_hits, 1);
+        emit_counted_loop_backedge(
+            &mut builder,
+            abi.base_ptr,
+            hits_var,
+            current_hits,
+            next_hits,
+            loop_reg,
+            None,
+            false,
+            loop_block,
+            loop_exit_terminal_block,
+            fallback_terminal_block,
+        );
+
+        emit_native_terminal_result(
+            &mut builder,
+            loop_exit_terminal_block,
+            abi.result_ptr,
+            hits_var,
+            NativeTraceStatus::LoopExit,
+            None,
+            None,
+        );
+        emit_native_terminal_result(
+            &mut builder,
+            fallback_terminal_block,
+            abi.result_ptr,
+            hits_var,
+            NativeTraceStatus::Fallback,
+            None,
+            None,
+        );
+
+        builder.seal_block(loop_block);
+        builder.finalize();
+        module.define_function(func_id, &mut context).ok()?;
+        module.clear_context(&mut context);
+        module.finalize_definitions().ok()?;
+        let entry = module.get_finalized_function(func_id);
+        self.modules.push(module);
+        Some(NativeCompiledTrace::CallForLoop {
+            entry: unsafe { std::mem::transmute(entry) },
+        })
+    }
+
     fn compile_native_guarded_numeric_for_loop(
         &mut self,
         loop_reg: u32,
-        steps: &[NumericStep],
+        lowering: &NumericLowering,
         guard: NumericJmpLoopGuard,
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
+        let steps = &lowering.steps;
         if !steps.iter().all(native_supports_numeric_step) {
             return None;
         }
@@ -1323,6 +1689,7 @@ impl NativeTraceBackend {
         let hits_var = builder.declare_var(types::I64);
         let carried_remaining_var = builder.declare_var(types::I64);
         let carried_index_var = builder.declare_var(types::I64);
+        let carried_integer_var = builder.declare_var(types::I64);
         let carried_float_raw_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
         let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
@@ -1330,21 +1697,51 @@ impl NativeTraceBackend {
             && !numeric_guard_touches_reg(guard, loop_reg)
             && !numeric_guard_touches_reg(guard, loop_reg.saturating_add(1))
             && !numeric_guard_touches_reg(guard, loop_reg.saturating_add(2));
-        let carried_float_step = if loop_state_is_invariant {
-            exact_float_self_update_step(steps, lowered_trace)
-                .filter(|step| {
-                    !numeric_guard_writes_reg_outside_condition(guard, step.reg)
-                        && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
-                            !numeric_guard_writes_reg_outside_condition(guard, reg)
-                        })
-                })
+        let carried_integer_flow = if loop_state_is_invariant {
+            lowering
+                .value_state
+                .self_update
+                .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Integer))
         } else {
             None
         };
+        let carried_integer_step = carried_integer_flow
+            .and_then(carried_integer_loop_step_from_value_flow)
+            .filter(|step| {
+                !numeric_guard_writes_reg_outside_condition(guard, step.reg)
+                    && carried_integer_rhs_stable_reg(*step)
+                        .is_none_or(|reg| {
+                            numeric_steps_preserve_reg(steps, reg)
+                                && !numeric_guard_writes_reg_outside_condition(guard, reg)
+                        })
+            });
+        let carried_integer_span = carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
+        let carried_float_flow = if loop_state_is_invariant && carried_integer_step.is_none() {
+            lowering
+                .value_state
+                .self_update
+                .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Float))
+        } else {
+            None
+        };
+        let carried_float_step = carried_float_flow
+            .and_then(|flow| carried_float_loop_step_from_value_flow(flow, lowered_trace))
+            .or_else(|| exact_float_self_update_step(steps, lowered_trace))
+            .filter(|step| {
+                !numeric_guard_writes_reg_outside_condition(guard, step.reg)
+                    && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
+                        numeric_steps_preserve_reg(steps, reg)
+                            && !numeric_guard_writes_reg_outside_condition(guard, reg)
+                    })
+            });
+        let carried_float_span = carried_float_flow.and_then(|flow| float_self_update_step_span(steps, flow));
 
         let loop_block = builder.create_block();
         if loop_state_is_invariant {
             builder.append_block_param(loop_block, types::I64);
+            builder.append_block_param(loop_block, types::I64);
+        }
+        if carried_integer_step.is_some() {
             builder.append_block_param(loop_block, types::I64);
         }
         if carried_float_step.is_some() {
@@ -1353,17 +1750,17 @@ impl NativeTraceBackend {
         let fallback_terminal_block = builder.create_block();
         let loop_exit_terminal_block = builder.create_block();
         let side_exit_terminal_block = builder.create_block();
-        let fallback_block = if loop_state_is_invariant || carried_float_step.is_some() {
+        let fallback_block = if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
             builder.create_block()
         } else {
             fallback_terminal_block
         };
-        let loop_exit_block = if loop_state_is_invariant || carried_float_step.is_some() {
+        let loop_exit_block = if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
             builder.create_block()
         } else {
             loop_exit_terminal_block
         };
-        let side_exit_block = if loop_state_is_invariant || carried_float_step.is_some() {
+        let side_exit_block = if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
             builder.create_block()
         } else {
             side_exit_terminal_block
@@ -1413,6 +1810,25 @@ impl NativeTraceBackend {
         } else {
             builder.ins().iconst(types::I64, 0)
         };
+        let initial_integer_value = if let Some(step) = carried_integer_step {
+            let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
+            emit_exact_tag_guard(
+                &mut builder,
+                slot_ptr,
+                LUA_VNUMINT,
+                hits_var,
+                zero_hits,
+                fallback_block,
+            );
+            set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Integer);
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
         let initial_float_raw = if let Some(step) = carried_float_step {
             let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
             emit_exact_tag_guard(
@@ -1432,6 +1848,16 @@ impl NativeTraceBackend {
         } else {
             None
         };
+        let carried_integer_rhs = carried_integer_step.map(|step| {
+            resolve_carried_integer_rhs(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                zero_hits,
+                fallback_block,
+                step,
+            )
+        });
         let carried_float_rhs = carried_float_step.map(|step| {
             resolve_carried_float_rhs(
                 &mut builder,
@@ -1445,11 +1871,17 @@ impl NativeTraceBackend {
         let hoisted_guard_rhs = carried_float_step
             .zip(carried_float_rhs)
             .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_rhs(step, rhs));
+        let hoisted_integer_rhs = carried_integer_step
+            .zip(carried_integer_rhs)
+            .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_integer_rhs(step, rhs));
 
         let mut initial_args = Vec::new();
         if loop_state_is_invariant {
             initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_remaining));
             initial_args.push(cranelift::codegen::ir::BlockArg::Value(initial_index));
+        }
+        if let Some(value) = initial_integer_value {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(value));
         }
         if let Some(raw) = initial_float_raw {
             initial_args.push(cranelift::codegen::ir::BlockArg::Value(raw));
@@ -1464,20 +1896,67 @@ impl NativeTraceBackend {
             builder.def_var(carried_remaining_var, carried_remaining);
             builder.def_var(carried_index_var, carried_index);
         }
+        if carried_integer_step.is_some() {
+            let integer_param_index = if loop_state_is_invariant { 2 } else { 0 };
+            let carried_integer = builder.block_params(loop_block)[integer_param_index];
+            builder.def_var(carried_integer_var, carried_integer);
+        }
         if carried_float_step.is_some() {
-            let float_param_index = if loop_state_is_invariant { 2 } else { 0 };
+            let float_param_index = if loop_state_is_invariant {
+                2 + usize::from(carried_integer_step.is_some())
+            } else {
+                usize::from(carried_integer_step.is_some())
+            };
             let carried_float_raw = builder.block_params(loop_block)[float_param_index];
             builder.def_var(carried_float_raw_var, carried_float_raw);
         }
 
-        if let Some(step) = carried_float_step {
-            emit_carried_float_loop_step(
+        if let Some(step) = carried_integer_step {
+            let (span_start, span_len) = carried_integer_span
+                .expect("guarded numeric carried-integer path requires a matching self-update span");
+            emit_numeric_steps_with_carried_integer(
                 &mut builder,
-                carried_float_raw_var,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_block,
+                steps,
+                carried_integer_var,
                 step,
-                carried_float_rhs.expect("guarded numeric carried-float path requires resolved rhs"),
+                carried_integer_rhs.expect("guarded numeric carried-integer path requires resolved rhs"),
+                span_start,
+                span_len,
+                hoisted_integer_rhs,
                 &mut known_value_kinds,
-            );
+            )?;
+        } else if let Some(step) = carried_float_step {
+            if let Some((span_start, span_len)) = carried_float_span {
+                emit_numeric_steps_with_carried_float(
+                    &mut builder,
+                    &abi,
+                    &native_helpers,
+                    hits_var,
+                    current_hits,
+                    fallback_block,
+                    steps,
+                    carried_float_raw_var,
+                    step,
+                    carried_float_rhs.expect("guarded numeric carried-float path requires resolved rhs"),
+                    span_start,
+                    span_len,
+                    hoisted_guard_rhs,
+                    &mut known_value_kinds,
+                )?;
+            } else {
+                emit_carried_float_loop_step(
+                    &mut builder,
+                    carried_float_raw_var,
+                    step,
+                    carried_float_rhs.expect("guarded numeric carried-float path requires resolved rhs"),
+                    &mut known_value_kinds,
+                );
+            }
         } else {
             for step in steps {
                 emit_numeric_step(
@@ -1490,12 +1969,20 @@ impl NativeTraceBackend {
                     *step,
                     &mut known_value_kinds,
                     None,
-                    None,
+                    HoistedNumericGuardValues::default(),
                 )?;
             }
         }
 
         let continue_block = builder.create_block();
+        let carried_integer_guard_value = carried_integer_step.map(|step| HoistedNumericGuardValue {
+            reg: step.reg,
+            source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
+        });
+        let hoisted_numeric = HoistedNumericGuardValues {
+            first: carried_integer_guard_value.or(hoisted_guard_rhs),
+            second: hoisted_integer_rhs,
+        };
         emit_numeric_guard_flow(
             &mut builder,
             &abi,
@@ -1514,7 +2001,7 @@ impl NativeTraceBackend {
                 reg: step.reg,
                 raw_var: carried_float_raw_var,
             }),
-            hoisted_guard_rhs,
+            hoisted_numeric,
         )?;
 
         builder.switch_to_block(continue_block);
@@ -1523,7 +2010,20 @@ impl NativeTraceBackend {
         if loop_state_is_invariant {
             let carried_remaining = builder.use_var(carried_remaining_var);
             let carried_index = builder.use_var(carried_index_var);
-            if carried_float_step.is_some() {
+            if carried_integer_step.is_some() {
+                let carried_integer = builder.use_var(carried_integer_var);
+                emit_numeric_counted_loop_backedge_with_carried_integer(
+                    &mut builder,
+                    hits_var,
+                    next_hits,
+                    carried_remaining,
+                    carried_index,
+                    hoisted_step_value,
+                    carried_integer,
+                    loop_block,
+                    loop_exit_block,
+                );
+            } else if carried_float_step.is_some() {
                 let carried_float_raw = builder.use_var(carried_float_raw_var);
                 emit_numeric_counted_loop_backedge_with_carried_float(
                     &mut builder,
@@ -1564,11 +2064,12 @@ impl NativeTraceBackend {
             );
         }
 
-        if loop_state_is_invariant || carried_float_step.is_some() {
+        if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
             emit_materialize_numeric_loop_state(
                 &mut builder,
                 abi.base_ptr,
                 loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 fallback_block,
                 fallback_terminal_block,
@@ -1577,6 +2078,7 @@ impl NativeTraceBackend {
                 &mut builder,
                 abi.base_ptr,
                 loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 loop_exit_block,
                 loop_exit_terminal_block,
@@ -1585,6 +2087,7 @@ impl NativeTraceBackend {
                 &mut builder,
                 abi.base_ptr,
                 loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 side_exit_block,
                 side_exit_terminal_block,
@@ -1634,10 +2137,11 @@ impl NativeTraceBackend {
     fn compile_native_numeric_jmp_loop(
         &mut self,
         head_blocks: &[NumericJmpLoopGuardBlock],
-        steps: &[NumericStep],
+        lowering: &NumericLowering,
         tail_blocks: &[NumericJmpLoopGuardBlock],
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
+        let steps = &lowering.steps;
         if head_blocks.is_empty() && tail_blocks.is_empty() {
             return None;
         }
@@ -1675,33 +2179,78 @@ impl NativeTraceBackend {
         let mut builder_ctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
         let hits_var = builder.declare_var(types::I64);
+        let carried_integer_var = builder.declare_var(types::I64);
         let carried_float_raw_var = builder.declare_var(types::I64);
         let abi = init_native_entry(&mut builder, pointer_ty);
         let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
-        let carried_float_step = exact_float_self_update_step(steps, lowered_trace).filter(|step| {
-            !head_blocks
-                .iter()
-                .chain(tail_blocks.iter())
-                .any(|block| numeric_guard_block_writes_reg_outside_condition(block, step.reg))
-                && (!head_blocks
+        let carried_integer_flow = lowering
+            .value_state
+            .self_update
+            .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Integer));
+        let carried_integer_step = carried_integer_flow
+            .and_then(carried_integer_loop_step_from_value_flow)
+            .filter(|step| {
+                !head_blocks
                     .iter()
                     .chain(tail_blocks.iter())
                     .any(|block| numeric_guard_block_touches_reg(block, step.reg))
-                    || entry_reg_has_explicit_float_hint(lowered_trace, step.reg))
-                && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
-                    !head_blocks
+                    && carried_integer_rhs_stable_reg(*step).is_none_or(|reg| {
+                        numeric_steps_preserve_reg(steps, reg)
+                            && !head_blocks
+                                .iter()
+                                .chain(tail_blocks.iter())
+                                .any(|block| {
+                                    numeric_guard_block_writes_reg_outside_condition(block, reg)
+                                })
+                    })
+            });
+        let carried_integer_span = carried_integer_flow
+            .and_then(|flow| integer_self_update_step_span(steps, flow));
+        let carried_float_flow = carried_integer_step
+            .is_none()
+            .then_some(())
+            .and_then(|_| {
+                lowering
+                    .value_state
+                    .self_update
+                    .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Float))
+            })
+            ;
+        let carried_float_step = carried_float_flow
+            .and_then(|flow| carried_float_loop_step_from_value_flow(flow, lowered_trace))
+            .or_else(|| exact_float_self_update_step(steps, lowered_trace))
+            .filter(|step| {
+                !head_blocks
+                    .iter()
+                    .chain(tail_blocks.iter())
+                    .any(|block| numeric_guard_block_writes_reg_outside_condition(block, step.reg))
+                    && (!head_blocks
                         .iter()
                         .chain(tail_blocks.iter())
-                        .any(|block| numeric_guard_block_writes_reg_outside_condition(block, reg))
-                })
-        });
+                        .any(|block| numeric_guard_block_touches_reg(block, step.reg))
+                        || entry_reg_has_explicit_float_hint(lowered_trace, step.reg))
+                    && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
+                        numeric_steps_preserve_reg(steps, reg)
+                            && !head_blocks
+                                .iter()
+                                .chain(tail_blocks.iter())
+                                .any(|block| {
+                                    numeric_guard_block_writes_reg_outside_condition(block, reg)
+                                })
+                    })
+            });
+                    let carried_float_span = carried_float_flow
+                        .and_then(|flow| float_self_update_step_span(steps, flow));
 
         let loop_block = builder.create_block();
+        if carried_integer_step.is_some() {
+            builder.append_block_param(loop_block, types::I64);
+        }
         if carried_float_step.is_some() {
             builder.append_block_param(loop_block, types::I64);
         }
         let fallback_terminal_block = builder.create_block();
-        let fallback_block = if carried_float_step.is_some() {
+        let fallback_block = if carried_integer_step.is_some() || carried_float_step.is_some() {
             builder.create_block()
         } else {
             fallback_terminal_block
@@ -1709,6 +2258,25 @@ impl NativeTraceBackend {
 
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
+        let initial_integer_value = if let Some(step) = carried_integer_step {
+            let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
+            emit_exact_tag_guard(
+                &mut builder,
+                slot_ptr,
+                LUA_VNUMINT,
+                hits_var,
+                zero_hits,
+                fallback_block,
+            );
+            set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Integer);
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        } else {
+            None
+        };
         let initial_float_raw = if let Some(step) = carried_float_step {
             let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
             emit_exact_tag_guard(
@@ -1728,6 +2296,16 @@ impl NativeTraceBackend {
         } else {
             None
         };
+        let carried_integer_rhs = carried_integer_step.map(|step| {
+            resolve_carried_integer_rhs(
+                &mut builder,
+                abi.base_ptr,
+                hits_var,
+                zero_hits,
+                fallback_block,
+                step,
+            )
+        });
         let carried_float_rhs = carried_float_step.map(|step| {
             resolve_carried_float_rhs(
                 &mut builder,
@@ -1741,28 +2319,45 @@ impl NativeTraceBackend {
         let hoisted_guard_rhs = carried_float_step
             .zip(carried_float_rhs)
             .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_rhs(step, rhs));
-        if let Some(raw) = initial_float_raw {
-            builder.ins().jump(
-                loop_block,
-                &[cranelift::codegen::ir::BlockArg::Value(raw)],
-            );
-        } else {
-            builder.ins().jump(loop_block, &[]);
+        let hoisted_integer_rhs = carried_integer_step
+            .zip(carried_integer_rhs)
+            .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_integer_rhs(step, rhs));
+        let mut initial_args = Vec::new();
+        if let Some(value) = initial_integer_value {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(value));
         }
+        if let Some(raw) = initial_float_raw {
+            initial_args.push(cranelift::codegen::ir::BlockArg::Value(raw));
+        }
+        builder.ins().jump(loop_block, &initial_args);
 
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
+        if carried_integer_step.is_some() {
+            let carried_integer = builder.block_params(loop_block)[0];
+            builder.def_var(carried_integer_var, carried_integer);
+        }
         if carried_float_step.is_some() {
-            let carried_float_raw = builder.block_params(loop_block)[0];
+            let float_param_index = usize::from(carried_integer_step.is_some());
+            let carried_float_raw = builder.block_params(loop_block)[float_param_index];
             builder.def_var(carried_float_raw_var, carried_float_raw);
         }
+
+        let carried_integer_guard_value = carried_integer_step.map(|step| HoistedNumericGuardValue {
+            reg: step.reg,
+            source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
+        });
+        let hoisted_numeric = HoistedNumericGuardValues {
+            first: carried_integer_guard_value.or(hoisted_guard_rhs),
+            second: hoisted_integer_rhs,
+        };
 
         let mut side_exit_sites = Vec::with_capacity(head_blocks.len() + tail_blocks.len());
 
         for block in head_blocks {
             let continue_block = builder.create_block();
             let side_exit_terminal_block = builder.create_block();
-            let side_exit_block = if carried_float_step.is_some() {
+            let side_exit_block = if carried_integer_step.is_some() || carried_float_step.is_some() {
                 builder.create_block()
             } else {
                 side_exit_terminal_block
@@ -1782,7 +2377,7 @@ impl NativeTraceBackend {
                     reg: step.reg,
                     raw_var: carried_float_raw_var,
                 }),
-                hoisted_guard_rhs,
+                hoisted_numeric,
             )?;
             side_exit_sites.push((
                 side_exit_block,
@@ -1796,14 +2391,52 @@ impl NativeTraceBackend {
             builder.seal_block(continue_block);
         }
 
-        if let Some(step) = carried_float_step {
-            emit_carried_float_loop_step(
+        if let Some(step) = carried_integer_step {
+            let (span_start, span_len) = carried_integer_span
+                .expect("numeric jmp carried-integer path requires a matching self-update span");
+            emit_numeric_steps_with_carried_integer(
                 &mut builder,
-                carried_float_raw_var,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_block,
+                steps,
+                carried_integer_var,
                 step,
-                carried_float_rhs.expect("numeric jmp carried-float path requires resolved rhs"),
+                carried_integer_rhs.expect("numeric jmp carried-integer path requires resolved rhs"),
+                span_start,
+                span_len,
+                hoisted_integer_rhs,
                 &mut known_value_kinds,
-            );
+            )?;
+        } else if let Some(step) = carried_float_step {
+            if let Some((span_start, span_len)) = carried_float_span {
+                emit_numeric_steps_with_carried_float(
+                    &mut builder,
+                    &abi,
+                    &native_helpers,
+                    hits_var,
+                    current_hits,
+                    fallback_block,
+                    steps,
+                    carried_float_raw_var,
+                    step,
+                    carried_float_rhs.expect("numeric jmp carried-float path requires resolved rhs"),
+                    span_start,
+                    span_len,
+                    hoisted_guard_rhs,
+                    &mut known_value_kinds,
+                )?;
+            } else {
+                emit_carried_float_loop_step(
+                    &mut builder,
+                    carried_float_raw_var,
+                    step,
+                    carried_float_rhs.expect("numeric jmp carried-float path requires resolved rhs"),
+                    &mut known_value_kinds,
+                );
+            }
         } else {
             for step in steps {
                 emit_numeric_step(
@@ -1816,7 +2449,7 @@ impl NativeTraceBackend {
                     *step,
                     &mut known_value_kinds,
                     None,
-                    None,
+                    HoistedNumericGuardValues::default(),
                 )?;
             }
         }
@@ -1827,7 +2460,7 @@ impl NativeTraceBackend {
         for block in tail_blocks {
             let continue_block = builder.create_block();
             let side_exit_terminal_block = builder.create_block();
-            let side_exit_block = if carried_float_step.is_some() {
+            let side_exit_block = if carried_integer_step.is_some() || carried_float_step.is_some() {
                 builder.create_block()
             } else {
                 side_exit_terminal_block
@@ -1847,7 +2480,7 @@ impl NativeTraceBackend {
                     reg: step.reg,
                     raw_var: carried_float_raw_var,
                 }),
-                hoisted_guard_rhs,
+                hoisted_numeric,
             )?;
             side_exit_sites.push((
                 side_exit_block,
@@ -1861,7 +2494,24 @@ impl NativeTraceBackend {
             builder.seal_block(continue_block);
         }
 
-        if carried_float_step.is_some() {
+        if carried_integer_step.is_some() {
+            let carried_integer = builder.use_var(carried_integer_var);
+            if carried_float_step.is_some() {
+                let carried_float_raw = builder.use_var(carried_float_raw_var);
+                builder.ins().jump(
+                    loop_block,
+                    &[
+                        cranelift::codegen::ir::BlockArg::Value(carried_integer),
+                        cranelift::codegen::ir::BlockArg::Value(carried_float_raw),
+                    ],
+                );
+            } else {
+                builder.ins().jump(
+                    loop_block,
+                    &[cranelift::codegen::ir::BlockArg::Value(carried_integer)],
+                );
+            }
+        } else if carried_float_step.is_some() {
             let carried_float_raw = builder.use_var(carried_float_raw_var);
             builder.ins().jump(
                 loop_block,
@@ -1871,11 +2521,12 @@ impl NativeTraceBackend {
             builder.ins().jump(loop_block, &[]);
         }
 
-        if carried_float_step.is_some() {
+        if carried_integer_step.is_some() || carried_float_step.is_some() {
             emit_materialize_numeric_loop_state(
                 &mut builder,
                 abi.base_ptr,
                 None,
+                carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 fallback_block,
                 fallback_terminal_block,
@@ -1883,11 +2534,12 @@ impl NativeTraceBackend {
         }
 
         for (side_exit_block, side_exit_terminal_block, exit_pc, exit_index) in side_exit_sites {
-            if carried_float_step.is_some() {
+            if carried_integer_step.is_some() || carried_float_step.is_some() {
                 emit_materialize_numeric_loop_state(
                     &mut builder,
                     abi.base_ptr,
                     None,
+                    carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                     carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                     side_exit_block,
                     side_exit_terminal_block,
@@ -1939,6 +2591,13 @@ struct CarriedFloatLoopStep {
     rhs: CarriedFloatRhs,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CarriedIntegerLoopStep {
+    reg: u32,
+    op: NumericBinaryOp,
+    rhs: CarriedIntegerRhs,
+}
+
 #[derive(Clone, Copy)]
 struct CarriedFloatGuardValue {
     reg: u32,
@@ -1949,6 +2608,12 @@ struct CarriedFloatGuardValue {
 struct HoistedNumericGuardValue {
     reg: u32,
     source: HoistedNumericGuardSource,
+}
+
+#[derive(Clone, Copy, Default)]
+struct HoistedNumericGuardValues {
+    first: Option<HoistedNumericGuardValue>,
+    second: Option<HoistedNumericGuardValue>,
 }
 
 #[derive(Clone, Copy)]
@@ -1963,10 +2628,22 @@ enum CarriedFloatRhs {
     StableReg { reg: u32, kind: TraceValueKind },
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CarriedIntegerRhs {
+    Imm(i64),
+    StableReg { reg: u32 },
+}
+
 #[derive(Clone, Copy)]
 enum ResolvedCarriedFloatRhs {
     Imm(f64),
     FloatRaw(Value),
+    Integer(Value),
+}
+
+#[derive(Clone, Copy)]
+enum ResolvedCarriedIntegerRhs {
+    Imm(Value),
     Integer(Value),
 }
 
@@ -2001,7 +2678,1627 @@ impl NativeTraceBackend {
         tail_blocks: &[NumericJmpLoopGuardBlock],
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
-        self.compile_native_numeric_jmp_loop(head_blocks, steps, tail_blocks, lowered_trace)
+        self.compile_native_numeric_jmp_loop(
+            head_blocks,
+            &NumericLowering {
+                steps: steps.to_vec(),
+                value_state: NumericValueState::default(),
+            },
+            tail_blocks,
+            lowered_trace,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lua_vm::{LuaVM, SafeOption};
+    use crate::lua_vm::jit::lowering::{DeoptRestoreSummary, LoweredExit, LoweredSsaTrace};
+
+    fn lowered_trace_with_entry_hints(hints: &[(u32, TraceValueKind)]) -> LoweredTrace {
+        let hints = hints
+            .iter()
+            .map(|&(reg, kind)| crate::lua_vm::jit::lowering::RegisterValueHint { reg, kind })
+            .collect::<Vec<_>>();
+
+        LoweredTrace {
+            root_pc: 0,
+            loop_tail_pc: 0,
+            snapshots: Vec::new(),
+            exits: Vec::new(),
+            helper_plan_step_count: 0,
+            constants: Vec::new(),
+            root_register_hints: hints.clone(),
+            entry_stable_register_hints: hints,
+            ssa_trace: LoweredSsaTrace::default(),
+        }
+    }
+
+    fn lowered_trace_with_entry_hints_and_constants(
+        hints: &[(u32, TraceValueKind)],
+        constants: Vec<LuaValue>,
+    ) -> LoweredTrace {
+        let mut lowered = lowered_trace_with_entry_hints(hints);
+        lowered.constants = constants;
+        lowered
+    }
+
+    fn lowered_trace_for_numeric_jmp_blocks(
+        root_pc: u32,
+        loop_tail_pc: u32,
+        exits: &[(u32, u32, u32)],
+        entry_hints: &[(u32, TraceValueKind)],
+    ) -> LoweredTrace {
+        let hints = entry_hints
+            .iter()
+            .map(|&(reg, kind)| crate::lua_vm::jit::lowering::RegisterValueHint { reg, kind })
+            .collect::<Vec<_>>();
+
+        LoweredTrace {
+            root_pc,
+            loop_tail_pc,
+            snapshots: Vec::new(),
+            exits: exits
+                .iter()
+                .enumerate()
+                .map(|(index, &(guard_pc, branch_pc, exit_pc))| LoweredExit {
+                    exit_index: index as u16,
+                    guard_pc,
+                    branch_pc,
+                    exit_pc,
+                    resume_pc: exit_pc,
+                    snapshot_id: (index + 1) as u16,
+                    is_loop_backedge: false,
+                    restore_summary: DeoptRestoreSummary::default(),
+                })
+                .collect(),
+            helper_plan_step_count: 0,
+            constants: Vec::new(),
+            root_register_hints: hints.clone(),
+            entry_stable_register_hints: hints,
+            ssa_trace: LoweredSsaTrace::default(),
+        }
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_uses_integer_self_update_value_flow() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(2),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(2),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_with_entry_hints(&[(4, TraceValueKind::Integer)]);
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 8];
+        stack[4] = LuaValue::integer(1);
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::LoopExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(stack[4].as_integer(), Some(7));
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_materializes_carried_integer_only_on_fallback_boundary() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_with_entry_hints(&[(4, TraceValueKind::Integer)]);
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 8];
+        stack[4] = LuaValue::integer(i64::MAX - 1);
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::Fallback);
+        assert_eq!(result.hits, 1);
+        assert_eq!(stack[4].as_integer(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_uses_integer_self_update_value_flow() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            400,
+            402,
+            &[(401, 402, 405)],
+            &[
+                (4, TraceValueKind::Integer),
+                (8, TraceValueKind::Integer),
+                (9, TraceValueKind::Integer),
+                (10, TraceValueKind::Integer),
+            ],
+        );
+        let tail_blocks = vec![NumericJmpLoopGuardBlock {
+            pre_steps: vec![NumericStep::Binary {
+                dst: 8,
+                lhs: NumericOperand::Reg(8),
+                rhs: NumericOperand::Reg(10),
+                op: NumericBinaryOp::Add,
+            }],
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 8,
+                    rhs: 9,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 405,
+            },
+        }];
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[8] = LuaValue::integer(0);
+        stack[9] = LuaValue::integer(1);
+        stack[10] = LuaValue::integer(1);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 1);
+        assert_eq!(result.exit_pc, 405);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(2));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_materializes_carried_integer_only_on_fallback_boundary() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(410, 411, &[(410, 411, 415)], &[(4, TraceValueKind::Integer)]);
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(
+                &[],
+                &lowering,
+                &[NumericJmpLoopGuardBlock {
+                    pre_steps: Vec::new(),
+                    guard: NumericJmpLoopGuard::Tail {
+                        cond: NumericIfElseCond::RegCompare {
+                            op: LinearIntGuardOp::Lt,
+                            lhs: 12,
+                            rhs: 13,
+                        },
+                        continue_when: true,
+                        continue_preset: None,
+                        exit_preset: None,
+                        exit_pc: 415,
+                    },
+                }],
+                &lowered_trace,
+            )
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(i64::MAX);
+        stack[12] = LuaValue::integer(0);
+        stack[13] = LuaValue::integer(1);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::Fallback);
+        assert_eq!(result.hits, 0);
+        assert_eq!(stack[4].as_integer(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_does_not_hoist_overwritten_stable_rhs() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::Reg(10),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::LoadI { dst: 10, imm: 1 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::StableReg {
+                        reg: 10,
+                        kind: TraceValueKind::Integer,
+                    },
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_with_entry_hints(&[
+            (4, TraceValueKind::Integer),
+            (10, TraceValueKind::Integer),
+        ]);
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+        stack[10] = LuaValue::integer(2);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::LoopExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(stack[4].as_integer(), Some(5));
+        assert_eq!(stack[10].as_integer(), Some(1));
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_with_short_string_field_steps() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let key = vm.create_string("value").unwrap();
+        let table = vm.create_table(0, 1).unwrap();
+        assert!(vm.raw_set(&table, key, LuaValue::integer(1)));
+
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::GetTableField {
+                    dst: 4,
+                    table: 3,
+                    key: 0,
+                },
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::ImmI(1),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::SetTableField {
+                    table: 3,
+                    key: 0,
+                    value: 4,
+                },
+            ],
+            value_state: NumericValueState::default(),
+        };
+        let lowered_trace = lowered_trace_with_entry_hints_and_constants(
+            &[(3, TraceValueKind::Table)],
+            vec![key],
+        );
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 8];
+        stack[3] = table;
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                lowered_trace.constants.as_ptr(),
+                lowered_trace.constants.len(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::LoopExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(stack[4].as_integer(), Some(4));
+        assert_eq!(vm.raw_get(&stack[3], &key).and_then(|value| value.as_integer()), Some(4));
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_with_short_string_tabup_field_steps() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let key = vm.create_string("value").unwrap();
+        let table = vm.create_table(0, 1).unwrap();
+        assert!(vm.raw_set(&table, key, LuaValue::integer(1)));
+        let upvalue = vm.create_upvalue_closed(table).unwrap();
+
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::GetTabUpField {
+                    dst: 4,
+                    upvalue: 0,
+                    key: 0,
+                },
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::ImmI(1),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::SetTabUpField {
+                    upvalue: 0,
+                    key: 0,
+                    value: 4,
+                },
+            ],
+            value_state: NumericValueState::default(),
+        };
+        let lowered_trace = lowered_trace_with_entry_hints_and_constants(&[], vec![key]);
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 8];
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                lowered_trace.constants.as_ptr(),
+                lowered_trace.constants.len(),
+                std::ptr::null_mut(),
+                std::slice::from_ref(&upvalue).as_ptr(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::LoopExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(stack[4].as_integer(), Some(4));
+        assert_eq!(vm.raw_get(&table, &key).and_then(|value| value.as_integer()), Some(4));
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_with_tabup_field_function_index_steps() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+        vm.execute(
+            r#"
+            native_tabup_index_target = setmetatable({}, {
+                __index = function(_, k)
+                    if k == "value" then
+                        return 2
+                    end
+                    return 0
+                end
+            })
+            "#,
+        )
+        .unwrap();
+        let key = vm.create_string("value").unwrap();
+        let table = vm.get_global("native_tabup_index_target").unwrap().unwrap();
+        let upvalue = vm.create_upvalue_closed(table).unwrap();
+
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::GetTabUpField {
+                    dst: 4,
+                    upvalue: 0,
+                    key: 0,
+                },
+                NumericStep::Binary {
+                    dst: 2,
+                    lhs: NumericOperand::Reg(2),
+                    rhs: NumericOperand::Reg(4),
+                    op: NumericBinaryOp::Add,
+                },
+            ],
+            value_state: NumericValueState::default(),
+        };
+        let lowered_trace = lowered_trace_with_entry_hints_and_constants(&[], vec![key]);
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let state = vm.main_state();
+        state.push_c_frame(0, 12, -1).unwrap();
+        {
+            let stack = state.stack_mut();
+            stack[2] = LuaValue::integer(0);
+            stack[5] = LuaValue::integer(2);
+            stack[6] = LuaValue::integer(1);
+            stack[7] = LuaValue::integer(0);
+        }
+
+        let lua_state_ptr: *mut crate::lua_vm::LuaState = state;
+        let stack_ptr = state.stack_mut().as_mut_ptr();
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack_ptr,
+                0,
+                lowered_trace.constants.as_ptr(),
+                lowered_trace.constants.len(),
+                lua_state_ptr,
+                std::slice::from_ref(&upvalue).as_ptr(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::LoopExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(state.stack_get(2).and_then(|value| value.as_integer()), Some(6));
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_keeps_integer_self_update_with_residual_move() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::ImmI(2),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::Move { dst: 11, src: 4 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(2),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_with_entry_hints(&[(4, TraceValueKind::Integer)]);
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::LoopExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(stack[4].as_integer(), Some(7));
+        assert_eq!(stack[11].as_integer(), Some(7));
+    }
+
+    #[test]
+    fn compile_native_numeric_for_loop_keeps_float_self_update_with_residual_move() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::Reg(8),
+                    op: NumericBinaryOp::Mul,
+                },
+                NumericStep::Move { dst: 11, src: 4 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Mul,
+                    kind: NumericSelfUpdateValueKind::Float,
+                    rhs: NumericValueFlowRhs::StableReg {
+                        reg: 8,
+                        kind: TraceValueKind::Integer,
+                    },
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_with_entry_hints(&[
+            (4, TraceValueKind::Float),
+            (8, TraceValueKind::Integer),
+        ]);
+
+        let entry = match backend
+            .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+            .expect("expected native numeric forloop")
+        {
+            NativeCompiledTrace::NumericForLoop { entry } => entry,
+            other => panic!("expected native numeric forloop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::float(1.5);
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+        stack[8] = LuaValue::integer(2);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::LoopExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(stack[4].as_float(), Some(12.0));
+        assert_eq!(stack[11].as_float(), Some(12.0));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_tail_guard_reads_carried_integer_reg() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            416,
+            418,
+            &[(417, 418, 419)],
+            &[(4, TraceValueKind::Integer), (9, TraceValueKind::Integer)],
+        );
+        let tail_blocks = vec![NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 4,
+                    rhs: 9,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 419,
+            },
+        }];
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[9] = LuaValue::integer(3);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 2);
+        assert_eq!(result.exit_pc, 419);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_guard_prestep_reads_carried_integer_reg() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            420,
+            422,
+            &[(421, 422, 423)],
+            &[(4, TraceValueKind::Integer), (9, TraceValueKind::Integer)],
+        );
+        let tail_blocks = vec![NumericJmpLoopGuardBlock {
+            pre_steps: vec![NumericStep::Move { dst: 10, src: 4 }],
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 10,
+                    rhs: 9,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 423,
+            },
+        }];
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[9] = LuaValue::integer(3);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 2);
+        assert_eq!(result.exit_pc, 423);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(3));
+        assert_eq!(stack[10].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_continue_preset_reads_carried_integer_and_stable_rhs() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::Reg(6),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::StableReg {
+                        reg: 6,
+                        kind: TraceValueKind::Integer,
+                    },
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            424,
+            426,
+            &[(425, 426, 427)],
+            &[(4, TraceValueKind::Integer), (6, TraceValueKind::Integer), (9, TraceValueKind::Integer)],
+        );
+        let tail_blocks = vec![NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 4,
+                    rhs: 9,
+                },
+                continue_when: true,
+                continue_preset: Some(NumericStep::Binary {
+                    dst: 10,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::Reg(6),
+                    op: NumericBinaryOp::Add,
+                }),
+                exit_preset: Some(NumericStep::Move { dst: 11, src: 4 }),
+                exit_pc: 427,
+            },
+        }];
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[6] = LuaValue::integer(2);
+        stack[9] = LuaValue::integer(5);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 2);
+        assert_eq!(result.exit_pc, 427);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(5));
+        assert_eq!(stack[10].as_integer(), Some(5));
+        assert_eq!(stack[11].as_integer(), Some(5));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_does_not_hoist_overwritten_stable_rhs() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::Reg(10),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::LoadI { dst: 10, imm: 1 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::StableReg {
+                        reg: 10,
+                        kind: TraceValueKind::Integer,
+                    },
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            428,
+            430,
+            &[(429, 430, 431)],
+            &[
+                (4, TraceValueKind::Integer),
+                (9, TraceValueKind::Integer),
+                (10, TraceValueKind::Integer),
+            ],
+        );
+        let tail_blocks = vec![NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 4,
+                    rhs: 9,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 431,
+            },
+        }];
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[9] = LuaValue::integer(5);
+        stack[10] = LuaValue::integer(2);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(result.exit_pc, 431);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(5));
+        assert_eq!(stack[10].as_integer(), Some(1));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_keeps_integer_self_update_with_residual_move() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::ImmI(1),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::Move { dst: 11, src: 4 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            432,
+            434,
+            &[(433, 434, 435)],
+            &[(4, TraceValueKind::Integer), (9, TraceValueKind::Integer)],
+        );
+        let tail_blocks = vec![NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 11,
+                    rhs: 9,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 435,
+            },
+        }];
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[9] = LuaValue::integer(3);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 2);
+        assert_eq!(result.exit_pc, 435);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(3));
+        assert_eq!(stack[11].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn compile_native_numeric_jmp_loop_keeps_float_self_update_with_residual_move() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::Reg(8),
+                    op: NumericBinaryOp::Mul,
+                },
+                NumericStep::Move { dst: 11, src: 4 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Mul,
+                    kind: NumericSelfUpdateValueKind::Float,
+                    rhs: NumericValueFlowRhs::StableReg {
+                        reg: 8,
+                        kind: TraceValueKind::Integer,
+                    },
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            444,
+            446,
+            &[(445, 446, 447)],
+            &[
+                (4, TraceValueKind::Float),
+                (8, TraceValueKind::Integer),
+                (9, TraceValueKind::Integer),
+            ],
+        );
+        let tail_blocks = vec![NumericJmpLoopGuardBlock {
+            pre_steps: Vec::new(),
+            guard: NumericJmpLoopGuard::Tail {
+                cond: NumericIfElseCond::RegCompare {
+                    op: LinearIntGuardOp::Lt,
+                    lhs: 11,
+                    rhs: 9,
+                },
+                continue_when: true,
+                continue_preset: None,
+                exit_preset: None,
+                exit_pc: 447,
+            },
+        }];
+
+        let entry = match backend
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .expect("expected native numeric jmp loop")
+        {
+            NativeCompiledTrace::NumericJmpLoop { entry } => entry,
+            other => panic!("expected native numeric jmp loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::float(1.0);
+        stack[8] = LuaValue::integer(2);
+        stack[9] = LuaValue::integer(5);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 3);
+        assert_eq!(result.exit_pc, 447);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_float(), Some(8.0));
+        assert_eq!(stack[11].as_float(), Some(8.0));
+    }
+
+    #[test]
+    fn compile_native_guarded_numeric_for_loop_uses_integer_self_update_value_flow() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            420,
+            422,
+            &[(421, 422, 425)],
+            &[
+                (4, TraceValueKind::Integer),
+                (5, TraceValueKind::Integer),
+                (6, TraceValueKind::Integer),
+                (8, TraceValueKind::Integer),
+            ],
+        );
+
+        let entry = match backend
+            .compile_native_guarded_numeric_for_loop(
+                5,
+                &lowering,
+                NumericJmpLoopGuard::Tail {
+                    cond: NumericIfElseCond::RegCompare {
+                        op: LinearIntGuardOp::Lt,
+                        lhs: 4,
+                        rhs: 8,
+                    },
+                    continue_when: true,
+                    continue_preset: None,
+                    exit_preset: None,
+                    exit_pc: 425,
+                },
+                &lowered_trace,
+            )
+            .expect("expected native guarded numeric for loop")
+        {
+            NativeCompiledTrace::GuardedNumericForLoop { entry } => entry,
+            other => panic!("expected native guarded numeric for loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+        stack[8] = LuaValue::integer(3);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 1);
+        assert_eq!(result.exit_pc, 425);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn compile_native_guarded_numeric_for_loop_materializes_carried_integer_only_on_fallback_boundary() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            }],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(430, 431, &[(430, 431, 435)], &[(4, TraceValueKind::Integer)]);
+
+        let entry = match backend
+            .compile_native_guarded_numeric_for_loop(
+                5,
+                &lowering,
+                NumericJmpLoopGuard::Tail {
+                    cond: NumericIfElseCond::RegCompare {
+                        op: LinearIntGuardOp::Lt,
+                        lhs: 12,
+                        rhs: 13,
+                    },
+                    continue_when: true,
+                    continue_preset: None,
+                    exit_preset: None,
+                    exit_pc: 435,
+                },
+                &lowered_trace,
+            )
+            .expect("expected native guarded numeric for loop")
+        {
+            NativeCompiledTrace::GuardedNumericForLoop { entry } => entry,
+            other => panic!("expected native guarded numeric for loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(i64::MAX);
+        stack[5] = LuaValue::integer(2);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+        stack[12] = LuaValue::integer(0);
+        stack[13] = LuaValue::integer(1);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::Fallback);
+        assert_eq!(result.hits, 0);
+        assert_eq!(stack[4].as_integer(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn compile_native_guarded_numeric_for_loop_does_not_hoist_overwritten_stable_rhs() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::Reg(10),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::LoadI { dst: 10, imm: 1 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::StableReg {
+                        reg: 10,
+                        kind: TraceValueKind::Integer,
+                    },
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            435,
+            437,
+            &[(436, 437, 439)],
+            &[
+                (4, TraceValueKind::Integer),
+                (5, TraceValueKind::Integer),
+                (6, TraceValueKind::Integer),
+                (8, TraceValueKind::Integer),
+                (10, TraceValueKind::Integer),
+            ],
+        );
+
+        let entry = match backend
+            .compile_native_guarded_numeric_for_loop(
+                5,
+                &lowering,
+                NumericJmpLoopGuard::Tail {
+                    cond: NumericIfElseCond::RegCompare {
+                        op: LinearIntGuardOp::Lt,
+                        lhs: 4,
+                        rhs: 8,
+                    },
+                    continue_when: true,
+                    continue_preset: None,
+                    exit_preset: None,
+                    exit_pc: 439,
+                },
+                &lowered_trace,
+            )
+            .expect("expected native guarded numeric for loop")
+        {
+            NativeCompiledTrace::GuardedNumericForLoop { entry } => entry,
+            other => panic!("expected native guarded numeric for loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[5] = LuaValue::integer(10);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+        stack[8] = LuaValue::integer(5);
+        stack[10] = LuaValue::integer(2);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 2);
+        assert_eq!(result.exit_pc, 439);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(5));
+        assert_eq!(stack[10].as_integer(), Some(1));
+    }
+
+    #[test]
+    fn compile_native_guarded_numeric_for_loop_keeps_integer_self_update_with_residual_move() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::ImmI(1),
+                    op: NumericBinaryOp::Add,
+                },
+                NumericStep::Move { dst: 11, src: 4 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Add,
+                    kind: NumericSelfUpdateValueKind::Integer,
+                    rhs: NumericValueFlowRhs::ImmI(1),
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            440,
+            442,
+            &[(441, 442, 443)],
+            &[
+                (4, TraceValueKind::Integer),
+                (5, TraceValueKind::Integer),
+                (6, TraceValueKind::Integer),
+                (8, TraceValueKind::Integer),
+            ],
+        );
+
+        let entry = match backend
+            .compile_native_guarded_numeric_for_loop(
+                5,
+                &lowering,
+                NumericJmpLoopGuard::Tail {
+                    cond: NumericIfElseCond::RegCompare {
+                        op: LinearIntGuardOp::Lt,
+                        lhs: 11,
+                        rhs: 8,
+                    },
+                    continue_when: true,
+                    continue_preset: None,
+                    exit_preset: None,
+                    exit_pc: 443,
+                },
+                &lowered_trace,
+            )
+            .expect("expected native guarded numeric for loop")
+        {
+            NativeCompiledTrace::GuardedNumericForLoop { entry } => entry,
+            other => panic!("expected native guarded numeric for loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::integer(1);
+        stack[5] = LuaValue::integer(10);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+        stack[8] = LuaValue::integer(3);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 1);
+        assert_eq!(result.exit_pc, 443);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_integer(), Some(3));
+        assert_eq!(stack[11].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn compile_native_guarded_numeric_for_loop_keeps_float_self_update_with_residual_move() {
+        let mut backend = NativeTraceBackend::default();
+        let lowering = NumericLowering {
+            steps: vec![
+                NumericStep::Binary {
+                    dst: 4,
+                    lhs: NumericOperand::Reg(4),
+                    rhs: NumericOperand::Reg(8),
+                    op: NumericBinaryOp::Mul,
+                },
+                NumericStep::Move { dst: 11, src: 4 },
+            ],
+            value_state: NumericValueState {
+                self_update: Some(NumericSelfUpdateValueFlow {
+                    reg: 4,
+                    op: NumericBinaryOp::Mul,
+                    kind: NumericSelfUpdateValueKind::Float,
+                    rhs: NumericValueFlowRhs::StableReg {
+                        reg: 8,
+                        kind: TraceValueKind::Integer,
+                    },
+                }),
+            },
+        };
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            448,
+            450,
+            &[(449, 450, 451)],
+            &[
+                (4, TraceValueKind::Float),
+                (5, TraceValueKind::Integer),
+                (6, TraceValueKind::Integer),
+                (8, TraceValueKind::Integer),
+            ],
+        );
+
+        let entry = match backend
+            .compile_native_guarded_numeric_for_loop(
+                5,
+                &lowering,
+                NumericJmpLoopGuard::Tail {
+                    cond: NumericIfElseCond::RegCompare {
+                        op: LinearIntGuardOp::Lt,
+                        lhs: 11,
+                        rhs: 8,
+                    },
+                    continue_when: true,
+                    continue_preset: None,
+                    exit_preset: None,
+                    exit_pc: 451,
+                },
+                &lowered_trace,
+            )
+            .expect("expected native guarded numeric for loop")
+        {
+            NativeCompiledTrace::GuardedNumericForLoop { entry } => entry,
+            other => panic!("expected native guarded numeric for loop, got {other:?}"),
+        };
+
+        let mut stack = [LuaValue::nil(); 16];
+        stack[4] = LuaValue::float(1.0);
+        stack[5] = LuaValue::integer(10);
+        stack[6] = LuaValue::integer(1);
+        stack[7] = LuaValue::integer(0);
+        stack[8] = LuaValue::integer(3);
+
+        let mut result = NativeTraceResult::default();
+        unsafe {
+            entry(
+                stack.as_mut_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut result,
+            );
+        }
+
+        assert_eq!(result.status, NativeTraceStatus::SideExit);
+        assert_eq!(result.hits, 0);
+        assert_eq!(result.exit_pc, 451);
+        assert_eq!(result.exit_index, 0);
+        assert_eq!(stack[4].as_float(), Some(3.0));
+        assert_eq!(stack[11].as_float(), Some(3.0));
     }
 }
 
@@ -2078,9 +4375,40 @@ fn profile_for_numeric_step(step: NumericStep) -> NativeLoweringProfile {
             upvalue_helper_steps: 1,
             ..NativeLoweringProfile::default()
         },
-        NumericStep::GetTableInt { .. } | NumericStep::SetTableInt { .. } => {
+        NumericStep::GetTabUpField { .. } => {
+            NativeLoweringProfile {
+                upvalue_helper_steps: 1,
+                table_helper_steps: 1,
+                table_get_helper_steps: 1,
+                ..NativeLoweringProfile::default()
+            }
+        }
+        NumericStep::SetTabUpField { .. } => {
+            NativeLoweringProfile {
+                upvalue_helper_steps: 1,
+                table_helper_steps: 1,
+                table_set_helper_steps: 1,
+                ..NativeLoweringProfile::default()
+            }
+        }
+        NumericStep::GetTableInt { .. } | NumericStep::GetTableField { .. } => {
             NativeLoweringProfile {
                 table_helper_steps: 1,
+                table_get_helper_steps: 1,
+                ..NativeLoweringProfile::default()
+            }
+        }
+        NumericStep::SetTableInt { .. } | NumericStep::SetTableField { .. } => {
+            NativeLoweringProfile {
+                table_helper_steps: 1,
+                table_set_helper_steps: 1,
+                ..NativeLoweringProfile::default()
+            }
+        }
+        NumericStep::Len { .. } => {
+            NativeLoweringProfile {
+                table_helper_steps: 1,
+                len_helper_steps: 1,
                 ..NativeLoweringProfile::default()
             }
         }
@@ -2126,6 +4454,13 @@ fn merge_native_profiles(
             .arithmetic_helper_steps
             .saturating_add(rhs.arithmetic_helper_steps),
         table_helper_steps: lhs.table_helper_steps.saturating_add(rhs.table_helper_steps),
+        table_get_helper_steps: lhs
+            .table_get_helper_steps
+            .saturating_add(rhs.table_get_helper_steps),
+        table_set_helper_steps: lhs
+            .table_set_helper_steps
+            .saturating_add(rhs.table_set_helper_steps),
+        len_helper_steps: lhs.len_helper_steps.saturating_add(rhs.len_helper_steps),
         upvalue_helper_steps: lhs.upvalue_helper_steps.saturating_add(rhs.upvalue_helper_steps),
         shift_helper_steps: lhs.shift_helper_steps.saturating_add(rhs.shift_helper_steps),
     }
@@ -2213,7 +4548,7 @@ fn numeric_jmp_guard_block_is_supported(
 fn recognize_numeric_jmp_guard_blocks(
     ir: &TraceIr,
     lowered_trace: &LoweredTrace,
-) -> Option<(Vec<NumericJmpLoopGuardBlock>, Vec<NumericStep>, Vec<NumericJmpLoopGuardBlock>)> {
+) -> Option<(Vec<NumericJmpLoopGuardBlock>, NumericLowering, Vec<NumericJmpLoopGuardBlock>)> {
     if ir.insts.len() < 3 {
         return None;
     }
@@ -2305,9 +4640,9 @@ fn recognize_numeric_jmp_guard_blocks(
         return None;
     }
 
-    let steps = lower_numeric_steps_for_native(&ir.insts[body_start..body_end], lowered_trace)?;
+    let lowering = lower_numeric_lowering_for_native(&ir.insts[body_start..body_end], lowered_trace)?;
     let tail_blocks = tail_blocks_rev.into_iter().rev().collect::<Vec<_>>();
-    Some((head_blocks, steps, tail_blocks))
+    Some((head_blocks, lowering, tail_blocks))
 }
 
 fn recognize_initial_numeric_head_guard_block(
@@ -2352,7 +4687,7 @@ fn emit_numeric_guard_block(
     exit_block: Block,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     for step in &block.pre_steps {
         emit_numeric_step(
@@ -2421,12 +4756,18 @@ struct NativeAbi {
 struct NativeHelpers {
     get_upval: FuncRef,
     set_upval: FuncRef,
+    get_tabup_field: FuncRef,
+    set_tabup_field: FuncRef,
     get_table_int: FuncRef,
     set_table_int: FuncRef,
+    get_table_field: FuncRef,
+    set_table_field: FuncRef,
+    len: FuncRef,
     numeric_binary: FuncRef,
     numeric_pow: FuncRef,
     shift_left: FuncRef,
     shift_right: FuncRef,
+    call: FuncRef,
     tfor_call: FuncRef,
 }
 
@@ -2526,11 +4867,27 @@ fn declare_native_helpers(
             &[types::I32],
             call_conv,
         )?,
+        get_tabup_field: import_helper(
+            module,
+            func,
+            NATIVE_HELPER_NUMERIC_GET_TABUP_FIELD_SYMBOL,
+            &[pointer_ty, pointer_ty, pointer_ty, pointer_ty, pointer_ty],
+            &[types::I32],
+            call_conv,
+        )?,
+        set_tabup_field: import_helper(
+            module,
+            func,
+            NATIVE_HELPER_NUMERIC_SET_TABUP_FIELD_SYMBOL,
+            &[pointer_ty, pointer_ty, pointer_ty, pointer_ty, pointer_ty],
+            &[types::I32],
+            call_conv,
+        )?,
         get_table_int: import_helper(
             module,
             func,
             NATIVE_HELPER_NUMERIC_GET_TABLE_INT_SYMBOL,
-            &[pointer_ty, pointer_ty, pointer_ty],
+            &[pointer_ty, pointer_ty, pointer_ty, pointer_ty],
             &[types::I32],
             call_conv,
         )?,
@@ -2539,6 +4896,30 @@ fn declare_native_helpers(
             func,
             NATIVE_HELPER_NUMERIC_SET_TABLE_INT_SYMBOL,
             &[pointer_ty, pointer_ty, pointer_ty, pointer_ty],
+            &[types::I32],
+            call_conv,
+        )?,
+        get_table_field: import_helper(
+            module,
+            func,
+            NATIVE_HELPER_NUMERIC_GET_TABLE_FIELD_SYMBOL,
+            &[pointer_ty, pointer_ty, pointer_ty, pointer_ty],
+            &[types::I32],
+            call_conv,
+        )?,
+        set_table_field: import_helper(
+            module,
+            func,
+            NATIVE_HELPER_NUMERIC_SET_TABLE_FIELD_SYMBOL,
+            &[pointer_ty, pointer_ty, pointer_ty, pointer_ty],
+            &[types::I32],
+            call_conv,
+        )?,
+        len: import_helper(
+            module,
+            func,
+            NATIVE_HELPER_NUMERIC_LEN_SYMBOL,
+            &[pointer_ty, pointer_ty, pointer_ty],
             &[types::I32],
             call_conv,
         )?,
@@ -2582,6 +4963,14 @@ fn declare_native_helpers(
             NATIVE_HELPER_SHIFT_RIGHT_SYMBOL,
             &[types::I64, types::I64],
             &[types::I64],
+            call_conv,
+        )?,
+        call: import_helper(
+            module,
+            func,
+            NATIVE_HELPER_CALL_SYMBOL,
+            &[pointer_ty, pointer_ty, types::I32, types::I32, types::I32, types::I32],
+            &[types::I32],
             call_conv,
         )?,
         tfor_call: import_helper(
@@ -2643,7 +5032,86 @@ unsafe extern "C" fn jit_native_helper_numeric_set_upval(
     1
 }
 
+unsafe extern "C" fn jit_native_helper_numeric_get_tabup_field(
+    lua_state: *mut LuaState,
+    dst_ptr: *mut LuaValue,
+    upvalue_ptrs: *const UpvaluePtr,
+    upvalue_index: usize,
+    key_ptr: *const LuaValue,
+) -> i32 {
+    if upvalue_ptrs.is_null() {
+        return 0;
+    }
+    debug_assert!(unsafe { (*key_ptr).is_short_string() });
+
+    let upvalue_ptr = unsafe { *upvalue_ptrs.add(upvalue_index) };
+    let table_value = upvalue_ptr.as_ref().data.get_value_ref();
+    if !table_value.is_table() {
+        return 0;
+    }
+
+    let table = table_value.hvalue();
+    if table.impl_table.has_hash() {
+        let loaded_tt = unsafe { table.impl_table.get_shortstr_tagged_into(&*key_ptr, dst_ptr) };
+        if loaded_tt != 0 {
+            return i32::from(loaded_tt == LUA_VNUMINT || loaded_tt == LUA_VNUMFLT);
+        }
+    }
+
+    if lua_state.is_null() {
+        return 0;
+    }
+
+    let lua_state = unsafe { &mut *lua_state };
+    let key_value = unsafe { &*key_ptr };
+    match finishget_known_miss(lua_state, table_value, key_value) {
+        Ok(Some(value)) if value.is_integer() || value.is_float() => {
+            unsafe { *dst_ptr = value };
+            1
+        }
+        _ => 0,
+    }
+}
+
+unsafe extern "C" fn jit_native_helper_numeric_set_tabup_field(
+    lua_state: *mut LuaState,
+    upvalue_ptrs: *const UpvaluePtr,
+    upvalue_index: usize,
+    key_ptr: *const LuaValue,
+    value_ptr: *const LuaValue,
+) -> i32 {
+    if upvalue_ptrs.is_null() {
+        return 0;
+    }
+    debug_assert!(unsafe { (*key_ptr).is_short_string() });
+
+    let upvalue_ptr = unsafe { *upvalue_ptrs.add(upvalue_index) };
+    let table_value = upvalue_ptr.as_ref().data.get_value_ref();
+    if !table_value.is_table() {
+        return 0;
+    }
+
+    let table = table_value.hvalue_mut();
+    let value = unsafe { *value_ptr };
+    if !table
+        .impl_table
+        .set_existing_shortstr_parts(unsafe { &*key_ptr }, value.value, value.tt)
+    {
+        return 0;
+    }
+
+    if value.tt & 0x40 != 0 {
+        if lua_state.is_null() {
+            return 0;
+        }
+        unsafe { (*lua_state).gc_barrier_back(table_value.as_gc_ptr_table_unchecked()) };
+    }
+
+    1
+}
+
 unsafe extern "C" fn jit_native_helper_numeric_get_table_int(
+    lua_state: *mut LuaState,
     dst_ptr: *mut LuaValue,
     table_ptr: *const LuaValue,
     index_ptr: *const LuaValue,
@@ -2656,12 +5124,25 @@ unsafe extern "C" fn jit_native_helper_numeric_get_table_int(
     let index = unsafe { pivalue(index_ptr) };
     let loaded = unsafe { table.impl_table.fast_geti_into(index, dst_ptr) }
         || unsafe { table.impl_table.get_int_from_hash_into(index, dst_ptr) };
-    if !loaded {
+    if loaded {
+        let loaded_value = unsafe { &*dst_ptr };
+        return i32::from(ttisinteger(loaded_value) || ttisfloat(loaded_value));
+    }
+
+    if lua_state.is_null() {
         return 0;
     }
 
-    let loaded_value = unsafe { &*dst_ptr };
-    i32::from(ttisinteger(loaded_value) || ttisfloat(loaded_value))
+    let lua_state = unsafe { &mut *lua_state };
+    let table_value = unsafe { &*table_ptr };
+    let index_value = unsafe { &*index_ptr };
+    match finishget_known_miss(lua_state, table_value, index_value) {
+        Ok(Some(value)) if value.is_integer() || value.is_float() => {
+            unsafe { *dst_ptr = value };
+            1
+        }
+        _ => 0,
+    }
 }
 
 unsafe extern "C" fn jit_native_helper_numeric_set_table_int(
@@ -2689,6 +5170,100 @@ unsafe extern "C" fn jit_native_helper_numeric_set_table_int(
     }
 
     1
+}
+
+unsafe extern "C" fn jit_native_helper_numeric_get_table_field(
+    lua_state: *mut LuaState,
+    dst_ptr: *mut LuaValue,
+    table_ptr: *const LuaValue,
+    key_ptr: *const LuaValue,
+) -> i32 {
+    if unsafe { !(*table_ptr).is_table() } {
+        return 0;
+    }
+    debug_assert!(unsafe { (*key_ptr).is_short_string() });
+
+    let table = unsafe { (*table_ptr).hvalue() };
+    if table.impl_table.has_hash() {
+        let loaded_tt = unsafe { table.impl_table.get_shortstr_tagged_into(&*key_ptr, dst_ptr) };
+        if loaded_tt != 0 {
+            return i32::from(loaded_tt == LUA_VNUMINT || loaded_tt == LUA_VNUMFLT);
+        }
+    }
+
+    if lua_state.is_null() {
+        return 0;
+    }
+
+    let lua_state = unsafe { &mut *lua_state };
+    let table_value = unsafe { &*table_ptr };
+    let key_value = unsafe { &*key_ptr };
+    match finishget_known_miss(lua_state, table_value, key_value) {
+        Ok(Some(value)) if value.is_integer() || value.is_float() => {
+            unsafe { *dst_ptr = value };
+            1
+        }
+        _ => 0,
+    }
+}
+
+unsafe extern "C" fn jit_native_helper_numeric_set_table_field(
+    lua_state: *mut LuaState,
+    table_ptr: *const LuaValue,
+    key_ptr: *const LuaValue,
+    value_ptr: *const LuaValue,
+) -> i32 {
+    if unsafe { !(*table_ptr).is_table() } {
+        return 0;
+    }
+    debug_assert!(unsafe { (*key_ptr).is_short_string() });
+
+    let table = unsafe { (*table_ptr).hvalue_mut() };
+    let value = unsafe { *value_ptr };
+    if !table
+        .impl_table
+        .set_existing_shortstr_parts(unsafe { &*key_ptr }, value.value, value.tt)
+    {
+        return 0;
+    }
+
+    if value.tt & 0x40 != 0 {
+        if lua_state.is_null() {
+            return 0;
+        }
+        unsafe { (*lua_state).gc_barrier_back((*table_ptr).as_gc_ptr_table_unchecked()) };
+    }
+
+    1
+}
+
+unsafe extern "C" fn jit_native_helper_numeric_len(
+    lua_state: *mut LuaState,
+    dst_ptr: *mut LuaValue,
+    value_ptr: *const LuaValue,
+) -> i32 {
+    if value_ptr.is_null() {
+        return 0;
+    }
+
+    let value = unsafe { *value_ptr };
+    if let Some(bytes) = value.as_bytes() {
+        unsafe { *dst_ptr = LuaValue::integer(bytes.len() as i64) };
+        return 1;
+    }
+
+    if lua_state.is_null() {
+        return 0;
+    }
+
+    let lua_state = unsafe { &mut *lua_state };
+    match objlen_value(lua_state, value) {
+        Ok(result) if result.is_integer() || result.is_float() => {
+            unsafe { *dst_ptr = result };
+            1
+        }
+        _ => 0,
+    }
 }
 
 extern "C" fn jit_native_helper_shift_left(lhs: i64, rhs: i64) -> i64 {
@@ -2746,6 +5321,70 @@ unsafe extern "C" fn jit_native_helper_tfor_call(
         Ok(true) => NATIVE_TFOR_CALL_LUA_RETURNED,
         Ok(false) => NATIVE_TFOR_CALL_C_CONTINUE,
         Err(_) => NATIVE_TFOR_CALL_FALLBACK,
+    }
+}
+
+unsafe extern "C" fn jit_native_helper_call(
+    lua_state: *mut LuaState,
+    base: usize,
+    a: u32,
+    b: u32,
+    c: u32,
+    pc: u32,
+) -> i32 {
+    if lua_state.is_null() {
+        return NATIVE_CALL_FALLBACK;
+    }
+
+    let lua_state = unsafe { &mut *lua_state };
+    if lua_state.hook_mask != 0 {
+        return NATIVE_CALL_FALLBACK;
+    }
+
+    if lua_state.current_frame().is_none() {
+        return NATIVE_CALL_FALLBACK;
+    }
+
+    let func_idx = base + a as usize;
+    if func_idx >= lua_state.stack_len() {
+        return NATIVE_CALL_FALLBACK;
+    }
+
+    let nargs = if b != 0 {
+        let top = func_idx + b as usize;
+        if top > lua_state.stack_len() {
+            return NATIVE_CALL_FALLBACK;
+        }
+        lua_state.set_top_raw(top);
+        b as usize - 1
+    } else {
+        let top = lua_state.get_top();
+        if top <= func_idx {
+            return NATIVE_CALL_FALLBACK;
+        }
+        top - func_idx - 1
+    };
+
+    let caller_depth = lua_state.call_depth();
+    let Some(ci) = lua_state.current_frame_mut() else {
+        return NATIVE_CALL_FALLBACK;
+    };
+    ci.save_pc(pc as usize);
+
+    match precall(lua_state, func_idx, nargs, c as i32 - 1) {
+        Ok(true) => {
+            if lua_state.inc_n_ccalls().is_err() {
+                return NATIVE_CALL_FALLBACK;
+            }
+            let result = lua_execute(lua_state, caller_depth);
+            lua_state.dec_n_ccalls();
+            match result {
+                Ok(()) => NATIVE_CALL_CONTINUE,
+                Err(_) => NATIVE_CALL_FALLBACK,
+            }
+        }
+        Ok(false) => NATIVE_CALL_CONTINUE,
+        Err(_) => NATIVE_CALL_FALLBACK,
     }
 }
 
@@ -2914,6 +5553,18 @@ fn slot_addr(builder: &mut FunctionBuilder<'_>, base_ptr: Value, reg: u32) -> Va
     builder
         .ins()
         .iadd_imm(base_ptr, i64::from(reg).saturating_mul(LUA_VALUE_SIZE))
+}
+
+fn lower_native_call_prep_moves(insts: &[TraceIrInst]) -> Option<Vec<(u32, u32)>> {
+    let mut moves = Vec::with_capacity(insts.len());
+    for inst in insts {
+        let raw = Instruction::from_u32(inst.raw_instruction);
+        match inst.opcode {
+            crate::OpCode::Move => moves.push((raw.get_a(), raw.get_b())),
+            _ => return None,
+        }
+    }
+    Some(moves)
 }
 
 fn const_addr(
@@ -3204,6 +5855,39 @@ fn emit_linear_int_counted_loop_backedge(
     builder.seal_block(continue_block);
 }
 
+fn emit_numeric_counted_loop_backedge_with_carried_integer(
+    builder: &mut FunctionBuilder<'_>,
+    hits_var: Variable,
+    next_hits: Value,
+    carried_remaining: Value,
+    carried_index: Value,
+    hoisted_step_value: Option<Value>,
+    carried_integer: Value,
+    loop_block: Block,
+    loop_exit_block: Block,
+) {
+    let has_more = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, carried_remaining, 0);
+    let continue_block = builder.create_block();
+    builder.def_var(hits_var, next_hits);
+    builder.ins().brif(has_more, continue_block, &[], loop_exit_block, &[]);
+
+    builder.switch_to_block(continue_block);
+    let step_val = hoisted_step_value.expect("numeric invariant path requires hoisted step");
+    let updated_remaining = builder.ins().iadd_imm(carried_remaining, -1);
+    let updated_index = builder.ins().iadd(carried_index, step_val);
+    builder.ins().jump(
+        loop_block,
+        &[
+            cranelift::codegen::ir::BlockArg::Value(updated_remaining),
+            cranelift::codegen::ir::BlockArg::Value(updated_index),
+            cranelift::codegen::ir::BlockArg::Value(carried_integer),
+        ],
+    );
+    builder.seal_block(continue_block);
+}
+
     fn emit_numeric_counted_loop_backedge_with_carried_float(
         builder: &mut FunctionBuilder<'_>,
         hits_var: Variable,
@@ -3275,6 +5959,7 @@ fn emit_materialize_numeric_loop_state(
     builder: &mut FunctionBuilder<'_>,
     base_ptr: Value,
     loop_state: Option<(u32, Variable, Variable)>,
+    carried_integer: Option<(u32, Variable)>,
     carried_float: Option<(u32, Variable)>,
     source_block: Block,
     target_block: Block,
@@ -3287,6 +5972,11 @@ fn emit_materialize_numeric_loop_state(
         let carried_index = builder.use_var(carried_index_var);
         emit_store_integer_with_known_tag(builder, loop_ptr, carried_remaining, true);
         emit_store_integer_with_known_tag(builder, index_ptr, carried_index, true);
+    }
+    if let Some((reg, carried_integer_var)) = carried_integer {
+        let ptr = slot_addr(builder, base_ptr, reg);
+        let value = builder.use_var(carried_integer_var);
+        emit_store_integer_with_known_tag(builder, ptr, value, true);
     }
     if let Some((reg, carried_float_raw_var)) = carried_float {
         let ptr = slot_addr(builder, base_ptr, reg);
@@ -3393,10 +6083,16 @@ fn numeric_step_writes_reg(step: NumericStep, reg: u32) -> bool {
         | NumericStep::LoadBool { dst, .. }
         | NumericStep::LoadI { dst, .. }
         | NumericStep::LoadF { dst, .. }
+        | NumericStep::Len { dst, .. }
         | NumericStep::GetUpval { dst, .. }
+        | NumericStep::GetTabUpField { dst, .. }
         | NumericStep::GetTableInt { dst, .. }
+        | NumericStep::GetTableField { dst, .. }
         | NumericStep::Binary { dst, .. } => dst == reg,
-        NumericStep::SetUpval { .. } | NumericStep::SetTableInt { .. } => false,
+        NumericStep::SetUpval { .. }
+        | NumericStep::SetTabUpField { .. }
+        | NumericStep::SetTableInt { .. }
+        | NumericStep::SetTableField { .. } => false,
     }
 }
 
@@ -3410,12 +6106,16 @@ fn numeric_step_reads_reg(step: NumericStep, reg: u32) -> bool {
         NumericStep::LoadBool { .. } | NumericStep::LoadI { .. } | NumericStep::LoadF { .. } => {
             false
         }
-        NumericStep::GetUpval { .. } => false,
+        NumericStep::Len { src, .. } => src == reg,
+        NumericStep::GetUpval { .. } | NumericStep::GetTabUpField { .. } => false,
         NumericStep::SetUpval { src, .. } => src == reg,
+        NumericStep::SetTabUpField { value, .. } => value == reg,
         NumericStep::GetTableInt { table, index, .. } => table == reg || index == reg,
+        NumericStep::GetTableField { table, .. } => table == reg,
         NumericStep::SetTableInt { table, index, value } => {
             table == reg || index == reg || value == reg
         }
+        NumericStep::SetTableField { table, value, .. } => table == reg || value == reg,
         NumericStep::Binary { lhs, rhs, .. } => {
             numeric_operand_reads_reg(lhs, reg) || numeric_operand_reads_reg(rhs, reg)
         }
@@ -3433,6 +6133,10 @@ fn numeric_loop_state_is_invariant(loop_reg: u32, steps: &[NumericStep]) -> bool
             || numeric_step_writes_reg(step, step_reg)
             || numeric_step_writes_reg(step, index_reg)
     })
+}
+
+fn numeric_steps_preserve_reg(steps: &[NumericStep], reg: u32) -> bool {
+    !steps.iter().copied().any(|step| numeric_step_writes_reg(step, reg))
 }
 
 fn numeric_cond_reads_reg(cond: NumericIfElseCond, reg: u32) -> bool {
@@ -4375,10 +7079,345 @@ fn exact_float_self_update_step(
     })
 }
 
+fn carried_float_loop_step_from_value_flow(
+    value_flow: NumericSelfUpdateValueFlow,
+    lowered_trace: &LoweredTrace,
+) -> Option<CarriedFloatLoopStep> {
+    if !matches!(value_flow.kind, NumericSelfUpdateValueKind::Float) {
+        return None;
+    }
+
+    let rhs = match value_flow.rhs {
+        NumericValueFlowRhs::ImmI(imm) => CarriedFloatRhs::Imm(f64::from(imm)),
+        NumericValueFlowRhs::Const(index) => CarriedFloatRhs::Imm(
+            lowered_trace
+                .float_constant(index)
+                .or_else(|| lowered_trace.integer_constant(index).map(f64::from))?,
+        ),
+        NumericValueFlowRhs::StableReg { reg, kind } => match kind {
+            TraceValueKind::Integer | TraceValueKind::Float => CarriedFloatRhs::StableReg { reg, kind },
+            TraceValueKind::Unknown
+            | TraceValueKind::Numeric
+            | TraceValueKind::Boolean
+            | TraceValueKind::Table
+            | TraceValueKind::Closure => return None,
+        },
+    };
+
+    Some(CarriedFloatLoopStep {
+        reg: value_flow.reg,
+        op: value_flow.op,
+        rhs,
+    })
+}
+
+fn carried_integer_loop_step_from_value_flow(value_flow: NumericSelfUpdateValueFlow) -> Option<CarriedIntegerLoopStep> {
+    if !matches!(value_flow.kind, NumericSelfUpdateValueKind::Integer) {
+        return None;
+    }
+
+    let rhs = match value_flow.rhs {
+        NumericValueFlowRhs::ImmI(imm) => CarriedIntegerRhs::Imm(i64::from(imm)),
+        NumericValueFlowRhs::StableReg {
+            reg,
+            kind: TraceValueKind::Integer,
+        } => CarriedIntegerRhs::StableReg { reg },
+        NumericValueFlowRhs::Const(_) | NumericValueFlowRhs::StableReg { .. } => return None,
+    };
+
+    Some(CarriedIntegerLoopStep {
+        reg: value_flow.reg,
+        op: value_flow.op,
+        rhs,
+    })
+}
+
 fn carried_float_rhs_stable_reg(step: CarriedFloatLoopStep) -> Option<u32> {
     match step.rhs {
         CarriedFloatRhs::StableReg { reg, .. } => Some(reg),
         CarriedFloatRhs::Imm(_) => None,
+    }
+}
+
+fn carried_integer_rhs_stable_reg(step: CarriedIntegerLoopStep) -> Option<u32> {
+    match step.rhs {
+        CarriedIntegerRhs::StableReg { reg } => Some(reg),
+        CarriedIntegerRhs::Imm(_) => None,
+    }
+}
+
+fn numeric_value_flow_rhs_matches_operand(rhs: NumericValueFlowRhs, operand: NumericOperand) -> bool {
+    match (rhs, operand) {
+        (NumericValueFlowRhs::ImmI(expected), NumericOperand::ImmI(actual)) => expected == actual,
+        (NumericValueFlowRhs::Const(expected), NumericOperand::Const(actual)) => expected == actual,
+        (NumericValueFlowRhs::StableReg { reg, .. }, NumericOperand::Reg(actual)) => reg == actual,
+        _ => false,
+    }
+}
+
+fn integer_self_update_step_span(
+    steps: &[NumericStep],
+    value_flow: NumericSelfUpdateValueFlow,
+) -> Option<(usize, usize)> {
+    if !matches!(value_flow.kind, NumericSelfUpdateValueKind::Integer) {
+        return None;
+    }
+
+    for index in 0..steps.len() {
+        match steps[index] {
+            NumericStep::Binary { dst, lhs, rhs, op }
+                if dst == value_flow.reg
+                    && matches!(lhs, NumericOperand::Reg(reg) if reg == value_flow.reg)
+                    && op == value_flow.op
+                    && numeric_value_flow_rhs_matches_operand(value_flow.rhs, rhs) =>
+            {
+                return Some((index, 1));
+            }
+            NumericStep::Move {
+                dst: alias_dst,
+                src: alias_src,
+            } if index + 1 < steps.len() => {
+                if let NumericStep::Binary { dst, lhs, rhs, op } = steps[index + 1] {
+                    if dst == value_flow.reg
+                        && matches!(lhs, NumericOperand::Reg(reg) if reg == value_flow.reg)
+                        && matches!(rhs, NumericOperand::Reg(reg) if reg == alias_dst)
+                        && op == value_flow.op
+                        && matches!(
+                            value_flow.rhs,
+                            NumericValueFlowRhs::StableReg { reg, .. } if reg == alias_src
+                        )
+                    {
+                        return Some((index, 2));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn float_self_update_step_span(
+    steps: &[NumericStep],
+    value_flow: NumericSelfUpdateValueFlow,
+) -> Option<(usize, usize)> {
+    if !matches!(value_flow.kind, NumericSelfUpdateValueKind::Float) {
+        return None;
+    }
+
+    for index in 0..steps.len() {
+        match steps[index] {
+            NumericStep::Binary { dst, lhs, rhs, op }
+                if dst == value_flow.reg
+                    && matches!(lhs, NumericOperand::Reg(reg) if reg == value_flow.reg)
+                    && op == value_flow.op
+                    && numeric_value_flow_rhs_matches_operand(value_flow.rhs, rhs) =>
+            {
+                return Some((index, 1));
+            }
+            NumericStep::Move {
+                dst: alias_dst,
+                src: alias_src,
+            } if index + 1 < steps.len() => {
+                if let NumericStep::Binary { dst, lhs, rhs, op } = steps[index + 1] {
+                    if dst == value_flow.reg
+                        && matches!(lhs, NumericOperand::Reg(reg) if reg == value_flow.reg)
+                        && matches!(rhs, NumericOperand::Reg(reg) if reg == alias_dst)
+                        && op == value_flow.op
+                        && matches!(
+                            value_flow.rhs,
+                            NumericValueFlowRhs::StableReg { reg, .. } if reg == alias_src
+                        )
+                    {
+                        return Some((index, 2));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn emit_numeric_steps_with_carried_integer(
+    builder: &mut FunctionBuilder<'_>,
+    abi: &NativeAbi,
+    native_helpers: &NativeHelpers,
+    hits_var: Variable,
+    current_hits: Value,
+    fallback_block: Block,
+    steps: &[NumericStep],
+    carried_integer_var: Variable,
+    carried_step: CarriedIntegerLoopStep,
+    carried_rhs: ResolvedCarriedIntegerRhs,
+    span_start: usize,
+    span_len: usize,
+    stable_rhs: Option<HoistedNumericGuardValue>,
+    known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+) -> Option<()> {
+    let pre_override = HoistedNumericGuardValues {
+        first: Some(HoistedNumericGuardValue {
+            reg: carried_step.reg,
+            source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
+        }),
+        second: stable_rhs,
+    };
+
+    for step in &steps[..span_start] {
+        emit_numeric_step(
+            builder,
+            abi,
+            native_helpers,
+            hits_var,
+            current_hits,
+            fallback_block,
+            *step,
+            known_value_kinds,
+            None,
+            pre_override,
+        )?;
+    }
+
+    emit_carried_integer_loop_step(
+        builder,
+        carried_integer_var,
+        carried_step,
+        carried_rhs,
+        fallback_block,
+        known_value_kinds,
+    );
+
+    let post_override = HoistedNumericGuardValues {
+        first: Some(HoistedNumericGuardValue {
+            reg: carried_step.reg,
+            source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
+        }),
+        second: stable_rhs,
+    };
+
+    for step in &steps[span_start.saturating_add(span_len)..] {
+        emit_numeric_step(
+            builder,
+            abi,
+            native_helpers,
+            hits_var,
+            current_hits,
+            fallback_block,
+            *step,
+            known_value_kinds,
+            None,
+            post_override,
+        )?;
+    }
+
+    Some(())
+}
+
+fn emit_numeric_steps_with_carried_float(
+    builder: &mut FunctionBuilder<'_>,
+    abi: &NativeAbi,
+    native_helpers: &NativeHelpers,
+    hits_var: Variable,
+    current_hits: Value,
+    fallback_block: Block,
+    steps: &[NumericStep],
+    carried_float_raw_var: Variable,
+    carried_step: CarriedFloatLoopStep,
+    carried_rhs: ResolvedCarriedFloatRhs,
+    span_start: usize,
+    span_len: usize,
+    stable_rhs: Option<HoistedNumericGuardValue>,
+    known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+) -> Option<()> {
+    let pre_carried = Some(CarriedFloatGuardValue {
+        reg: carried_step.reg,
+        raw_var: carried_float_raw_var,
+    });
+    let pre_override = HoistedNumericGuardValues {
+        first: stable_rhs,
+        second: None,
+    };
+
+    for step in &steps[..span_start] {
+        emit_numeric_step(
+            builder,
+            abi,
+            native_helpers,
+            hits_var,
+            current_hits,
+            fallback_block,
+            *step,
+            known_value_kinds,
+            pre_carried,
+            pre_override,
+        )?;
+    }
+
+    emit_carried_float_loop_step(
+        builder,
+        carried_float_raw_var,
+        carried_step,
+        carried_rhs,
+        known_value_kinds,
+    );
+
+    let post_carried = Some(CarriedFloatGuardValue {
+        reg: carried_step.reg,
+        raw_var: carried_float_raw_var,
+    });
+    let post_override = HoistedNumericGuardValues {
+        first: stable_rhs,
+        second: None,
+    };
+
+    for step in &steps[span_start.saturating_add(span_len)..] {
+        emit_numeric_step(
+            builder,
+            abi,
+            native_helpers,
+            hits_var,
+            current_hits,
+            fallback_block,
+            *step,
+            known_value_kinds,
+            post_carried,
+            post_override,
+        )?;
+    }
+
+    Some(())
+}
+
+fn resolve_carried_integer_rhs(
+    builder: &mut FunctionBuilder<'_>,
+    base_ptr: Value,
+    hits_var: Variable,
+    current_hits: Value,
+    bail_block: Block,
+    step: CarriedIntegerLoopStep,
+) -> ResolvedCarriedIntegerRhs {
+    match step.rhs {
+        CarriedIntegerRhs::Imm(value) => {
+            ResolvedCarriedIntegerRhs::Imm(builder.ins().iconst(types::I64, value))
+        }
+        CarriedIntegerRhs::StableReg { reg } => {
+            let ptr = slot_addr(builder, base_ptr, reg);
+            emit_exact_tag_guard(
+                builder,
+                ptr,
+                LUA_VNUMINT,
+                hits_var,
+                current_hits,
+                bail_block,
+            );
+            ResolvedCarriedIntegerRhs::Integer(
+                builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), ptr, LUA_VALUE_VALUE_OFFSET),
+            )
+        }
     }
 }
 
@@ -4460,12 +7499,43 @@ fn hoisted_numeric_guard_value_from_carried_rhs(
     }
 }
 
+fn hoisted_numeric_guard_value_from_carried_integer_rhs(
+    step: CarriedIntegerLoopStep,
+    rhs: ResolvedCarriedIntegerRhs,
+) -> Option<HoistedNumericGuardValue> {
+    match (step.rhs, rhs) {
+        (CarriedIntegerRhs::StableReg { reg }, ResolvedCarriedIntegerRhs::Integer(value)) => {
+            Some(HoistedNumericGuardValue {
+                reg,
+                source: HoistedNumericGuardSource::Integer(value),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn lookup_hoisted_numeric_guard_value(
+    hoisted_numeric: HoistedNumericGuardValues,
+    reg: u32,
+) -> Option<HoistedNumericGuardSource> {
+    hoisted_numeric
+        .first
+        .filter(|hoisted| hoisted.reg == reg)
+        .map(|hoisted| hoisted.source)
+        .or_else(|| {
+            hoisted_numeric
+                .second
+                .filter(|hoisted| hoisted.reg == reg)
+                .map(|hoisted| hoisted.source)
+        })
+}
+
 fn emit_materialize_guard_numeric_override(
     builder: &mut FunctionBuilder<'_>,
     abi: &NativeAbi,
     reg: u32,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> bool {
     let dst_ptr = slot_addr(builder, abi.base_ptr, reg);
     let mem = MemFlags::new();
@@ -4478,8 +7548,8 @@ fn emit_materialize_guard_numeric_override(
         return true;
     }
 
-    if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == reg) {
-        match hoisted.source {
+    if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, reg) {
+        match hoisted {
             HoistedNumericGuardSource::FloatRaw(raw) => {
                 let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
                 builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
@@ -4499,7 +7569,7 @@ fn emit_guard_numeric_override_tag_and_value(
     builder: &mut FunctionBuilder<'_>,
     reg: u32,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<(Value, Value)> {
     if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
         return Some((
@@ -4508,8 +7578,8 @@ fn emit_guard_numeric_override_tag_and_value(
         ));
     }
 
-    if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == reg) {
-        return Some(match hoisted.source {
+    if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, reg) {
+        return Some(match hoisted {
             HoistedNumericGuardSource::FloatRaw(raw) => (
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64),
                 raw,
@@ -4527,17 +7597,15 @@ fn emit_guard_numeric_override_tag_and_value(
 fn emit_guard_numeric_override_integer_value(
     builder: &mut FunctionBuilder<'_>,
     reg: u32,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<Value> {
-    hoisted_numeric
-        .filter(|hoisted| hoisted.reg == reg)
-        .and_then(|hoisted| match hoisted.source {
-            HoistedNumericGuardSource::Integer(value) => Some(value),
-            HoistedNumericGuardSource::FloatRaw(_) => {
-                let _ = builder;
-                None
-            }
-        })
+    lookup_hoisted_numeric_guard_value(hoisted_numeric, reg).and_then(|hoisted| match hoisted {
+        HoistedNumericGuardSource::Integer(value) => Some(value),
+        HoistedNumericGuardSource::FloatRaw(_) => {
+            let _ = builder;
+            None
+        }
+    })
 }
 
 fn emit_carried_float_loop_step(
@@ -4571,6 +7639,97 @@ fn emit_carried_float_loop_step(
     set_numeric_reg_value_kind(known_value_kinds, step.reg, TraceValueKind::Float);
 }
 
+fn emit_carried_integer_loop_step(
+    builder: &mut FunctionBuilder<'_>,
+    carried_integer_var: Variable,
+    step: CarriedIntegerLoopStep,
+    rhs: ResolvedCarriedIntegerRhs,
+    fallback_block: Block,
+    known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+) {
+    let lhs = builder.use_var(carried_integer_var);
+    let rhs = match rhs {
+        ResolvedCarriedIntegerRhs::Imm(value) | ResolvedCarriedIntegerRhs::Integer(value) => value,
+    };
+
+    let next_value = match step.op {
+        NumericBinaryOp::Add => {
+            let result = builder.ins().iadd(lhs, rhs);
+            let lhs_xor_result = builder.ins().bxor(lhs, result);
+            let rhs_xor_result = builder.ins().bxor(rhs, result);
+            let overflow_bits = builder.ins().band(lhs_xor_result, rhs_xor_result);
+            let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
+            let ok_block = builder.create_block();
+            builder.ins().brif(overflow, fallback_block, &[], ok_block, &[]);
+            builder.switch_to_block(ok_block);
+            builder.seal_block(ok_block);
+            result
+        }
+        NumericBinaryOp::Sub => {
+            let result = builder.ins().isub(lhs, rhs);
+            let lhs_xor_rhs = builder.ins().bxor(lhs, rhs);
+            let lhs_xor_result = builder.ins().bxor(lhs, result);
+            let overflow_bits = builder.ins().band(lhs_xor_rhs, lhs_xor_result);
+            let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
+            let ok_block = builder.create_block();
+            builder.ins().brif(overflow, fallback_block, &[], ok_block, &[]);
+            builder.switch_to_block(ok_block);
+            builder.seal_block(ok_block);
+            result
+        }
+        NumericBinaryOp::Mul => {
+            let zero = builder.ins().iconst(types::I64, 0);
+            let neg_one = builder.ins().iconst(types::I64, -1);
+            let lhs_is_zero = builder.ins().icmp(IntCC::Equal, lhs, zero);
+            let rhs_is_zero = builder.ins().icmp(IntCC::Equal, rhs, zero);
+            let either_zero = builder.ins().bor(lhs_is_zero, rhs_is_zero);
+            let zero_block = builder.create_block();
+            let nonzero_block = builder.create_block();
+            let done_block = builder.create_block();
+            let result_var = builder.declare_var(types::I64);
+            builder.ins().brif(either_zero, zero_block, &[], nonzero_block, &[]);
+
+            builder.switch_to_block(zero_block);
+            builder.def_var(result_var, zero);
+            builder.ins().jump(done_block, &[]);
+            builder.seal_block(zero_block);
+
+            builder.switch_to_block(nonzero_block);
+            let lhs_is_min = builder.ins().icmp_imm(IntCC::Equal, lhs, i64::MIN);
+            let rhs_is_min = builder.ins().icmp_imm(IntCC::Equal, rhs, i64::MIN);
+            let lhs_is_neg_one = builder.ins().icmp(IntCC::Equal, lhs, neg_one);
+            let rhs_is_neg_one = builder.ins().icmp(IntCC::Equal, rhs, neg_one);
+            let lhs_min_rhs_neg_one = builder.ins().band(lhs_is_min, rhs_is_neg_one);
+            let rhs_min_lhs_neg_one = builder.ins().band(rhs_is_min, lhs_is_neg_one);
+            let special_overflow = builder.ins().bor(lhs_min_rhs_neg_one, rhs_min_lhs_neg_one);
+            let mul_compute_block = builder.create_block();
+            let mul_store_block = builder.create_block();
+            builder.ins().brif(special_overflow, fallback_block, &[], mul_compute_block, &[]);
+
+            builder.switch_to_block(mul_compute_block);
+            let result = builder.ins().imul(lhs, rhs);
+            let quotient = builder.ins().sdiv(result, rhs);
+            let overflow = builder.ins().icmp(IntCC::NotEqual, quotient, lhs);
+            builder.ins().brif(overflow, fallback_block, &[], mul_store_block, &[]);
+            builder.seal_block(mul_compute_block);
+
+            builder.switch_to_block(mul_store_block);
+            builder.def_var(result_var, result);
+            builder.ins().jump(done_block, &[]);
+            builder.seal_block(mul_store_block);
+            builder.seal_block(nonzero_block);
+
+            builder.switch_to_block(done_block);
+            builder.seal_block(done_block);
+            builder.use_var(result_var)
+        }
+        _ => unreachable!(),
+    };
+
+    builder.def_var(carried_integer_var, next_value);
+    set_numeric_reg_value_kind(known_value_kinds, step.reg, TraceValueKind::Integer);
+}
+
 fn native_supports_numeric_step(step: &NumericStep) -> bool {
     match step {
         NumericStep::Move { .. }
@@ -4579,8 +7738,13 @@ fn native_supports_numeric_step(step: &NumericStep) -> bool {
         | NumericStep::LoadF { .. }
         | NumericStep::GetUpval { .. }
         | NumericStep::SetUpval { .. }
+        | NumericStep::GetTabUpField { .. }
+        | NumericStep::SetTabUpField { .. }
         | NumericStep::GetTableInt { .. }
-        | NumericStep::SetTableInt { .. } => true,
+        | NumericStep::SetTableInt { .. }
+        | NumericStep::GetTableField { .. }
+        | NumericStep::SetTableField { .. }
+        | NumericStep::Len { .. } => true,
         NumericStep::Binary { lhs, rhs, op, .. } => {
             native_supports_numeric_operand(lhs)
                 && native_supports_numeric_operand(rhs)
@@ -4621,7 +7785,7 @@ fn emit_numeric_step(
     step: NumericStep,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     match step {
         NumericStep::Move { dst, src } => {
@@ -4634,9 +7798,8 @@ fn emit_numeric_step(
                 builder.ins().store(mem, src_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
                 match src_tag {
                     _ if carried_float.is_some_and(|carried| carried.reg == src) => TraceValueKind::Float,
-                    _ => hoisted_numeric
-                        .filter(|hoisted| hoisted.reg == src)
-                        .map(|hoisted| match hoisted.source {
+                    _ => lookup_hoisted_numeric_guard_value(hoisted_numeric, src)
+                        .map(|hoisted| match hoisted {
                             HoistedNumericGuardSource::FloatRaw(_) => TraceValueKind::Float,
                             HoistedNumericGuardSource::Integer(_) => TraceValueKind::Integer,
                         })
@@ -4703,13 +7866,73 @@ fn emit_numeric_step(
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
             Some(())
         }
+        NumericStep::GetTabUpField { dst, upvalue, key } => {
+            let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
+            let upvalue_index = builder.ins().iconst(abi.pointer_ty, i64::from(upvalue));
+            let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
+            let call = builder.ins().call(
+                native_helpers.get_tabup_field,
+                &[
+                    abi.lua_state_ptr,
+                    dst_ptr,
+                    abi.upvalue_ptrs,
+                    upvalue_index,
+                    key_ptr,
+                ],
+            );
+            let success = builder.inst_results(call)[0];
+            emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
+            Some(())
+        }
+        NumericStep::SetTabUpField { upvalue, key, value } => {
+            let upvalue_index = builder.ins().iconst(abi.pointer_ty, i64::from(upvalue));
+            let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
+            let value_ptr = slot_addr(builder, abi.base_ptr, value);
+            let call = builder.ins().call(
+                native_helpers.set_tabup_field,
+                &[
+                    abi.lua_state_ptr,
+                    abi.upvalue_ptrs,
+                    upvalue_index,
+                    key_ptr,
+                    value_ptr,
+                ],
+            );
+            let success = builder.inst_results(call)[0];
+            emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            Some(())
+        }
         NumericStep::GetTableInt { dst, table, index } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
             let table_ptr = slot_addr(builder, abi.base_ptr, table);
             let index_ptr = slot_addr(builder, abi.base_ptr, index);
             let call = builder
                 .ins()
-                .call(native_helpers.get_table_int, &[dst_ptr, table_ptr, index_ptr]);
+                .call(native_helpers.get_table_int, &[abi.lua_state_ptr, dst_ptr, table_ptr, index_ptr]);
+            let success = builder.inst_results(call)[0];
+            emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
+            Some(())
+        }
+        NumericStep::GetTableField { dst, table, key } => {
+            let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
+            let table_ptr = slot_addr(builder, abi.base_ptr, table);
+            let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
+            let call = builder
+                .ins()
+                .call(native_helpers.get_table_field, &[abi.lua_state_ptr, dst_ptr, table_ptr, key_ptr]);
+            let success = builder.inst_results(call)[0];
+            emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
+            Some(())
+        }
+        NumericStep::Len { dst, src } => {
+            let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
+            let value_ptr = slot_addr(builder, abi.base_ptr, src);
+            let call = builder
+                .ins()
+                .call(native_helpers.len, &[abi.lua_state_ptr, dst_ptr, value_ptr]);
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
@@ -4722,6 +7945,18 @@ fn emit_numeric_step(
             let call = builder.ins().call(
                 native_helpers.set_table_int,
                 &[abi.lua_state_ptr, table_ptr, index_ptr, value_ptr],
+            );
+            let success = builder.inst_results(call)[0];
+            emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            Some(())
+        }
+        NumericStep::SetTableField { table, key, value } => {
+            let table_ptr = slot_addr(builder, abi.base_ptr, table);
+            let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
+            let value_ptr = slot_addr(builder, abi.base_ptr, value);
+            let call = builder.ins().call(
+                native_helpers.set_table_field,
+                &[abi.lua_state_ptr, table_ptr, key_ptr, value_ptr],
             );
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
@@ -4939,7 +8174,7 @@ fn emit_numeric_integer_operand(
     operand: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<Value> {
     let mem = MemFlags::new();
     match operand {
@@ -4978,7 +8213,7 @@ fn emit_numeric_operand_tag_and_value(
     operand: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<(Value, Value)> {
     let mem = MemFlags::new();
     match operand {
@@ -5022,7 +8257,7 @@ fn emit_numeric_binary_helper_call(
     rhs: NumericOperand,
     op: NumericBinaryOp,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     if let NumericOperand::Reg(reg) = lhs {
         let _ = emit_materialize_guard_numeric_override(builder, abi, reg, carried_float, hoisted_numeric);
@@ -5068,7 +8303,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
     dst_known_integer: bool,
     dst_known_float: bool,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     let (lhs_tag, lhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -5238,7 +8473,7 @@ fn emit_numeric_div_with_helper_fallback(
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     dst_known_float: bool,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     let (lhs_tag, lhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -5326,7 +8561,7 @@ fn emit_numeric_pow_with_helper_fallback(
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     dst_known_float: bool,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     let (lhs_tag, lhs_val) = emit_numeric_operand_tag_and_value(
         builder,
@@ -5484,7 +8719,7 @@ fn emit_numeric_condition_value(
     cond: NumericIfElseCond,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<Value> {
     let mem = MemFlags::new();
     match cond {
@@ -5493,8 +8728,8 @@ fn emit_numeric_condition_value(
             let rhs_ptr = slot_addr(builder, abi.base_ptr, rhs);
             let lhs_tag = if carried_float.is_some_and(|carried| carried.reg == lhs) {
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == lhs) {
-                match hoisted.source {
+            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, lhs) {
+                match hoisted {
                     HoistedNumericGuardSource::FloatRaw(_) => {
                         builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
                     }
@@ -5509,8 +8744,8 @@ fn emit_numeric_condition_value(
             };
             let rhs_tag = if carried_float.is_some_and(|carried| carried.reg == rhs) {
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == rhs) {
-                match hoisted.source {
+            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, rhs) {
+                match hoisted {
                     HoistedNumericGuardSource::FloatRaw(_) => {
                         builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
                     }
@@ -5540,8 +8775,8 @@ fn emit_numeric_condition_value(
 
             let lhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == lhs) {
                 builder.use_var(carried.raw_var)
-            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == lhs) {
-                match hoisted.source {
+            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, lhs) {
+                match hoisted {
                     HoistedNumericGuardSource::FloatRaw(raw) => raw,
                     HoistedNumericGuardSource::Integer(value) => value,
                 }
@@ -5550,8 +8785,8 @@ fn emit_numeric_condition_value(
             };
             let rhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == rhs) {
                 builder.use_var(carried.raw_var)
-            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == rhs) {
-                match hoisted.source {
+            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, rhs) {
+                match hoisted {
                     HoistedNumericGuardSource::FloatRaw(raw) => raw,
                     HoistedNumericGuardSource::Integer(value) => value,
                 }
@@ -5566,8 +8801,8 @@ fn emit_numeric_condition_value(
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
             let tag = if carried_float.is_some_and(|carried| carried.reg == reg) {
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(hoisted) = hoisted_numeric.filter(|hoisted| hoisted.reg == reg) {
-                match hoisted.source {
+            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, reg) {
+                match hoisted {
                     HoistedNumericGuardSource::FloatRaw(_) => {
                         builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
                     }
@@ -5631,7 +8866,7 @@ fn emit_numeric_guard_flow(
     exit_block: Block,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
     carried_float: Option<CarriedFloatGuardValue>,
-    hoisted_numeric: Option<HoistedNumericGuardValue>,
+    hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     let cond_value = emit_numeric_condition_value(
         builder,

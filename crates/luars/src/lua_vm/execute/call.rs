@@ -5,7 +5,8 @@ use crate::{
     CallInfo, LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
     lua_vm::{
         CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, TmKind, call_info::call_status,
-        execute::hook::hook_on_return, get_metamethod_event, lua_limits::EXTRA_STACK,
+        execute::{helper::get_metamethod_from_meta_ptr, hook::hook_on_return},
+        get_metamethod_event, lua_limits::EXTRA_STACK,
     },
 };
 
@@ -75,7 +76,13 @@ pub fn resolve_call_chain(
         }
 
         // Try to get __call metamethod
-        if let Some(mm) = get_metamethod_event(lua_state, &func, TmKind::Call) {
+        let metamethod = if let Some(table) = func.as_table() {
+            get_metamethod_from_meta_ptr(lua_state, table.meta_ptr(), TmKind::Call)
+        } else {
+            get_metamethod_event(lua_state, &func, TmKind::Call)
+        };
+
+        if let Some(mm) = metamethod {
             // Check chain depth (Lua 5.5 allows up to 15 __call layers)
             // We check BEFORE incrementing, so if we're already at 15, error
             if ccmt_depth == 15 {
@@ -436,8 +443,8 @@ fn precall_meta(
                 upvalue_ptrs,
             )?
         {
+            let fi = lua_state.call_depth() - 1;
             if ccmt_depth > 0 {
-                let fi = lua_state.call_depth() - 1;
                 let status = call_status::set_ccmt_count(0, ccmt_depth);
                 lua_state.get_call_info_mut(fi).call_status |= status;
             }

@@ -156,14 +156,18 @@ fn numeric_step_reads(step: NumericStep) -> impl Iterator<Item = u32> {
         NumericStep::LoadBool { .. } | NumericStep::LoadI { .. } | NumericStep::LoadF { .. } => {
             Vec::new()
         }
-        NumericStep::GetUpval { .. } => Vec::new(),
+        NumericStep::Len { src, .. } => vec![src],
+        NumericStep::GetUpval { .. } | NumericStep::GetTabUpField { .. } => Vec::new(),
         NumericStep::SetUpval { src, .. } => vec![src],
+        NumericStep::SetTabUpField { value, .. } => vec![value],
         NumericStep::GetTableInt { table, index, .. } => vec![table, index],
         NumericStep::SetTableInt {
             table,
             index,
             value,
         } => vec![table, index, value],
+        NumericStep::GetTableField { table, .. } => vec![table],
+        NumericStep::SetTableField { table, value, .. } => vec![table, value],
         NumericStep::Binary { lhs, rhs, .. } => {
             let mut regs = Vec::new();
             if let NumericOperand::Reg(reg) = lhs {
@@ -184,10 +188,16 @@ fn numeric_step_writes(step: NumericStep) -> impl Iterator<Item = u32> {
         | NumericStep::LoadBool { dst, .. }
         | NumericStep::LoadI { dst, .. }
         | NumericStep::LoadF { dst, .. }
+        | NumericStep::Len { dst, .. }
         | NumericStep::GetUpval { dst, .. }
+        | NumericStep::GetTabUpField { dst, .. }
         | NumericStep::GetTableInt { dst, .. }
+        | NumericStep::GetTableField { dst, .. }
         | NumericStep::Binary { dst, .. } => vec![dst],
-        NumericStep::SetUpval { .. } | NumericStep::SetTableInt { .. } => Vec::new(),
+        NumericStep::SetUpval { .. }
+        | NumericStep::SetTabUpField { .. }
+        | NumericStep::SetTableInt { .. }
+        | NumericStep::SetTableField { .. } => Vec::new(),
     };
     regs.into_iter()
 }
@@ -234,7 +244,8 @@ fn prune_dead_pure_numeric_defs(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             NumericStep::Move { dst, src } => dst == src || live.contains(&dst),
             NumericStep::LoadI { dst, .. } => live.contains(&dst),
             NumericStep::LoadBool { dst, .. }
-            | NumericStep::LoadF { dst, .. } => {
+            | NumericStep::LoadF { dst, .. }
+            | NumericStep::Len { dst, .. } => {
                 live.contains(&dst) || !killed_by_later_write.contains(&dst)
             }
             NumericStep::Binary { dst, op, .. } => {
@@ -244,8 +255,12 @@ fn prune_dead_pure_numeric_defs(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::GetUpval { .. }
             | NumericStep::SetUpval { .. }
+            | NumericStep::GetTabUpField { .. }
+            | NumericStep::SetTabUpField { .. }
             | NumericStep::GetTableInt { .. }
-            | NumericStep::SetTableInt { .. } => true,
+            | NumericStep::SetTableInt { .. }
+            | NumericStep::GetTableField { .. }
+            | NumericStep::SetTableField { .. } => true,
         };
 
         for reg in &reads {
@@ -276,6 +291,7 @@ fn can_forward_numeric_binary_across_step(step: NumericStep) -> bool {
             | NumericStep::LoadBool { .. }
             | NumericStep::LoadI { .. }
             | NumericStep::LoadF { .. }
+            | NumericStep::Len { .. }
     )
 }
 
@@ -314,7 +330,9 @@ fn is_numeric_binary_forward_terminal_consumer(
 
     match step {
         NumericStep::SetUpval { src, .. } => src == current,
+        NumericStep::SetTabUpField { value, .. } => value == current,
         NumericStep::SetTableInt { value, .. } => value == current,
+        NumericStep::SetTableField { value, .. } => value == current,
         NumericStep::Binary { .. } => numeric_binary_is_single_use_operand(step, current),
         _ => false,
     }
@@ -488,6 +506,18 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                 );
                 optimized.push(Some(NumericStep::LoadF { dst, imm }));
             }
+            NumericStep::Len { dst, src } => {
+                let src = resolve_numeric_move_alias(&move_aliases, src);
+                clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
+                reset_register_value(
+                    &mut register_values,
+                    &mut register_aliases,
+                    &mut next_value_id,
+                    dst,
+                );
+                optimized.push(Some(NumericStep::Len { dst, src }));
+            }
             NumericStep::GetUpval { dst, upvalue } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
                 move_aliases.remove(&dst);
@@ -502,6 +532,21 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             NumericStep::SetUpval { src, upvalue } => {
                 let src = resolve_numeric_move_alias(&move_aliases, src);
                 optimized.push(Some(NumericStep::SetUpval { src, upvalue }));
+            }
+            NumericStep::GetTabUpField { dst, upvalue, key } => {
+                clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
+                reset_register_value(
+                    &mut register_values,
+                    &mut register_aliases,
+                    &mut next_value_id,
+                    dst,
+                );
+                optimized.push(Some(NumericStep::GetTabUpField { dst, upvalue, key }));
+            }
+            NumericStep::SetTabUpField { upvalue, key, value } => {
+                let value = resolve_numeric_move_alias(&move_aliases, value);
+                optimized.push(Some(NumericStep::SetTabUpField { upvalue, key, value }));
             }
             NumericStep::GetTableInt { dst, table, index } => {
                 let table = resolve_numeric_move_alias(&move_aliases, table);
@@ -561,6 +606,23 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                 let state = current_table_int_key_state(&mut region_states, &mut key_states, key);
                 state.last_store_output = Some(output_index);
                 state.read_since_last_store = false;
+            }
+            NumericStep::GetTableField { dst, table, key } => {
+                let table = resolve_numeric_move_alias(&move_aliases, table);
+                clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                move_aliases.remove(&dst);
+                reset_register_value(
+                    &mut register_values,
+                    &mut register_aliases,
+                    &mut next_value_id,
+                    dst,
+                );
+                optimized.push(Some(NumericStep::GetTableField { dst, table, key }));
+            }
+            NumericStep::SetTableField { table, key, value } => {
+                let table = resolve_numeric_move_alias(&move_aliases, table);
+                let value = resolve_numeric_move_alias(&move_aliases, value);
+                optimized.push(Some(NumericStep::SetTableField { table, key, value }));
             }
             NumericStep::Binary { dst, lhs, rhs, op } => {
                 let lhs = normalize_numeric_operand_alias(&move_aliases, lhs);
@@ -930,7 +992,413 @@ fn ssa_table_int_rewrite_for_pc(
         .and_then(|instruction| instruction.table_int_rewrite)
 }
 
-fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) -> Option<Vec<NumericStep>> {
+fn numeric_steps_write_reg_outside_span(
+    steps: &[NumericStep],
+    reg: u32,
+    span_start: usize,
+    span_len: usize,
+) -> bool {
+    steps.iter().enumerate().any(|(index, step)| {
+        (index < span_start || index >= span_start.saturating_add(span_len))
+            && numeric_step_writes(*step).any(|written| written == reg)
+    })
+}
+
+fn numeric_steps_touch_reg_outside_span(
+    steps: &[NumericStep],
+    reg: u32,
+    span_start: usize,
+    span_len: usize,
+) -> bool {
+    steps.iter().enumerate().any(|(index, step)| {
+        (index < span_start || index >= span_start.saturating_add(span_len))
+            && numeric_step_touches_reg(*step, reg)
+    })
+}
+
+fn detect_integer_self_update_value_flow(
+    steps: &[NumericStep],
+    lowered_trace: &LoweredTrace,
+) -> Option<NumericSelfUpdateValueFlow> {
+    let mut detected = None;
+
+    for index in 0..steps.len() {
+        let mut candidate = None;
+        let mut span_len = 1usize;
+        let mut alias_reg = None;
+
+        match steps[index] {
+            NumericStep::Binary { dst, lhs, rhs, op } => {
+                candidate = Some((dst, lhs, rhs, op));
+            }
+            NumericStep::Move {
+                dst: alias_dst,
+                src: alias_src,
+            } if index + 1 < steps.len() => {
+                if let NumericStep::Binary { dst, lhs, rhs, op } = steps[index + 1] {
+                    if matches!(rhs, NumericOperand::Reg(reg) if reg == alias_dst)
+                        && alias_dst != dst
+                        && alias_src != dst
+                    {
+                        candidate = Some((dst, lhs, NumericOperand::Reg(alias_src), op));
+                        span_len = 2;
+                        alias_reg = Some(alias_dst);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let Some((dst, lhs, rhs, op)) = candidate else {
+            continue;
+        };
+
+        let NumericOperand::Reg(lhs_reg) = lhs else {
+            continue;
+        };
+        if dst != lhs_reg {
+            continue;
+        }
+
+        let dst_entry_kind = lowered_trace.entry_register_value_kind(dst);
+        let dst_stable_kind = lowered_trace.entry_stable_register_value_kind(dst);
+        if !matches!(dst_entry_kind, Some(TraceValueKind::Integer))
+            && !matches!(dst_stable_kind, Some(TraceValueKind::Integer))
+        {
+            continue;
+        }
+
+        let rhs = match rhs {
+            NumericOperand::ImmI(imm) => NumericValueFlowRhs::ImmI(imm),
+            NumericOperand::Reg(rhs_reg) => {
+                if rhs_reg == dst {
+                    continue;
+                }
+                let Some(kind) = lowered_trace.entry_stable_register_value_kind(rhs_reg) else {
+                    continue;
+                };
+                if !matches!(kind, TraceValueKind::Integer) {
+                    continue;
+                }
+                NumericValueFlowRhs::StableReg { reg: rhs_reg, kind }
+            }
+            NumericOperand::Const(_) => continue,
+        };
+
+        if !matches!(op, NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul) {
+            continue;
+        }
+
+        if numeric_steps_write_reg_outside_span(steps, dst, index, span_len) {
+            continue;
+        }
+
+        if let NumericValueFlowRhs::StableReg { reg, .. } = rhs {
+            if numeric_steps_write_reg_outside_span(steps, reg, index, span_len) {
+                continue;
+            }
+        }
+
+        if let Some(alias_reg) = alias_reg {
+            if numeric_steps_touch_reg_outside_span(steps, alias_reg, index, span_len) {
+                continue;
+            }
+        }
+
+        let flow = NumericSelfUpdateValueFlow {
+            reg: dst,
+            op,
+            kind: NumericSelfUpdateValueKind::Integer,
+            rhs,
+        };
+
+        if detected.replace(flow).is_some() {
+            return None;
+        }
+    }
+
+    detected
+}
+
+fn detect_float_self_update_value_flow(
+    steps: &[NumericStep],
+    lowered_trace: &LoweredTrace,
+) -> Option<NumericSelfUpdateValueFlow> {
+    let mut detected = None;
+
+    for index in 0..steps.len() {
+        let mut candidate = None;
+        let mut span_len = 1usize;
+        let mut alias_reg = None;
+
+        match steps[index] {
+            NumericStep::Binary { dst, lhs, rhs, op } => {
+                candidate = Some((dst, lhs, rhs, op));
+            }
+            NumericStep::Move {
+                dst: alias_dst,
+                src: alias_src,
+            } if index + 1 < steps.len() => {
+                if let NumericStep::Binary { dst, lhs, rhs, op } = steps[index + 1] {
+                    if matches!(rhs, NumericOperand::Reg(reg) if reg == alias_dst)
+                        && alias_dst != dst
+                        && alias_src != dst
+                    {
+                        candidate = Some((dst, lhs, NumericOperand::Reg(alias_src), op));
+                        span_len = 2;
+                        alias_reg = Some(alias_dst);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let Some((dst, lhs, rhs, op)) = candidate else {
+            continue;
+        };
+
+        let NumericOperand::Reg(lhs_reg) = lhs else {
+            continue;
+        };
+        if dst != lhs_reg {
+            continue;
+        }
+
+        let dst_entry_kind = lowered_trace.entry_register_value_kind(dst);
+        let dst_stable_kind = lowered_trace.entry_stable_register_value_kind(dst);
+        if matches!(
+            dst_entry_kind,
+            Some(
+                TraceValueKind::Integer
+                    | TraceValueKind::Table
+                    | TraceValueKind::Boolean
+                    | TraceValueKind::Closure
+            )
+        ) || matches!(
+            dst_stable_kind,
+            Some(
+                TraceValueKind::Integer
+                    | TraceValueKind::Table
+                    | TraceValueKind::Boolean
+                    | TraceValueKind::Closure
+            )
+        ) {
+            continue;
+        }
+
+        let rhs = match rhs {
+            NumericOperand::ImmI(imm) => NumericValueFlowRhs::ImmI(imm),
+            NumericOperand::Const(index) => NumericValueFlowRhs::Const(index),
+            NumericOperand::Reg(rhs_reg) => {
+                if rhs_reg == dst {
+                    continue;
+                }
+                let Some(kind) = lowered_trace.entry_stable_register_value_kind(rhs_reg) else {
+                    continue;
+                };
+                match kind {
+                    TraceValueKind::Integer | TraceValueKind::Float => {
+                        NumericValueFlowRhs::StableReg { reg: rhs_reg, kind }
+                    }
+                    TraceValueKind::Unknown
+                    | TraceValueKind::Numeric
+                    | TraceValueKind::Boolean
+                    | TraceValueKind::Table
+                    | TraceValueKind::Closure => continue,
+                }
+            }
+        };
+
+        if !matches!(
+            op,
+            NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul | NumericBinaryOp::Div
+        ) {
+            continue;
+        }
+
+        if numeric_steps_write_reg_outside_span(steps, dst, index, span_len) {
+            continue;
+        }
+
+        if let NumericValueFlowRhs::StableReg { reg, .. } = rhs {
+            if numeric_steps_write_reg_outside_span(steps, reg, index, span_len) {
+                continue;
+            }
+        }
+
+        if let Some(alias_reg) = alias_reg {
+            if numeric_steps_touch_reg_outside_span(steps, alias_reg, index, span_len) {
+                continue;
+            }
+        }
+
+        let flow = NumericSelfUpdateValueFlow {
+            reg: dst,
+            op,
+            kind: NumericSelfUpdateValueKind::Float,
+            rhs,
+        };
+
+        if detected.replace(flow).is_some() {
+            return None;
+        }
+    }
+
+    detected
+}
+
+fn detect_numeric_self_update_value_flow(
+    steps: &[NumericStep],
+    lowered_trace: &LoweredTrace,
+) -> Option<NumericSelfUpdateValueFlow> {
+    if let Some(flow) = detect_integer_self_update_value_flow(steps, lowered_trace) {
+        return Some(flow);
+    }
+
+    if let Some(flow) = detect_float_self_update_value_flow(steps, lowered_trace) {
+        return Some(flow);
+    }
+
+    let (dst, lhs, rhs, op) = match steps {
+        [NumericStep::Binary { dst, lhs, rhs, op }] => (*dst, *lhs, *rhs, *op),
+        [
+            NumericStep::Move {
+                dst: alias_dst,
+                src: alias_src,
+            },
+            NumericStep::Binary { dst, lhs, rhs, op },
+        ] if matches!(rhs, NumericOperand::Reg(reg) if *reg == *alias_dst)
+            && *alias_dst != *dst
+            && *alias_src != *dst => {
+                (*dst, *lhs, NumericOperand::Reg(*alias_src), *op)
+            }
+        _ => return None,
+    };
+
+    let NumericOperand::Reg(lhs_reg) = lhs else {
+        return None;
+    };
+    if dst != lhs_reg {
+        return None;
+    }
+
+    let dst_entry_kind = lowered_trace.entry_register_value_kind(dst);
+    let dst_stable_kind = lowered_trace.entry_stable_register_value_kind(dst);
+    if matches!(
+        dst_entry_kind,
+        Some(
+            TraceValueKind::Table
+                | TraceValueKind::Boolean
+                | TraceValueKind::Closure
+        )
+    ) || matches!(
+        dst_stable_kind,
+        Some(
+            TraceValueKind::Table
+                | TraceValueKind::Boolean
+                | TraceValueKind::Closure
+        )
+    ) {
+        return None;
+    }
+
+    let exact_integer_dst = matches!(dst_entry_kind, Some(TraceValueKind::Integer))
+        || matches!(dst_stable_kind, Some(TraceValueKind::Integer));
+
+    let rhs = match rhs {
+        NumericOperand::ImmI(imm) => NumericValueFlowRhs::ImmI(imm),
+        NumericOperand::Const(index) => NumericValueFlowRhs::Const(index),
+        NumericOperand::Reg(rhs_reg) => {
+            if rhs_reg == dst {
+                return None;
+            }
+            let kind = lowered_trace.entry_stable_register_value_kind(rhs_reg)?;
+            match kind {
+                TraceValueKind::Integer | TraceValueKind::Float => {
+                    NumericValueFlowRhs::StableReg { reg: rhs_reg, kind }
+                }
+                TraceValueKind::Unknown
+                | TraceValueKind::Numeric
+                | TraceValueKind::Boolean
+                | TraceValueKind::Table
+                | TraceValueKind::Closure => return None,
+            }
+        }
+    };
+
+    let integer_rhs = matches!(rhs, NumericValueFlowRhs::ImmI(_))
+        || matches!(
+            rhs,
+            NumericValueFlowRhs::StableReg {
+                kind: TraceValueKind::Integer,
+                ..
+            }
+        );
+
+    if exact_integer_dst
+        && integer_rhs
+        && matches!(
+            op,
+            NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul
+        )
+    {
+        return Some(NumericSelfUpdateValueFlow {
+            reg: dst,
+            op,
+            kind: NumericSelfUpdateValueKind::Integer,
+            rhs,
+        });
+    }
+
+    if !matches!(
+        dst_entry_kind,
+        Some(TraceValueKind::Integer)
+            | Some(TraceValueKind::Table)
+            | Some(TraceValueKind::Boolean)
+            | Some(TraceValueKind::Closure)
+    ) && !matches!(
+        dst_stable_kind,
+        Some(TraceValueKind::Integer)
+            | Some(TraceValueKind::Table)
+            | Some(TraceValueKind::Boolean)
+            | Some(TraceValueKind::Closure)
+    ) && matches!(
+        op,
+        NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul | NumericBinaryOp::Div
+    ) && matches!(
+        rhs,
+        NumericValueFlowRhs::ImmI(_)
+            | NumericValueFlowRhs::Const(_)
+            | NumericValueFlowRhs::StableReg {
+                kind: TraceValueKind::Integer,
+                ..
+            }
+            | NumericValueFlowRhs::StableReg {
+                kind: TraceValueKind::Float,
+                ..
+            }
+    ) {
+        return Some(NumericSelfUpdateValueFlow {
+            reg: dst,
+            op,
+            kind: NumericSelfUpdateValueKind::Float,
+            rhs,
+        });
+    }
+
+    None
+}
+
+fn build_numeric_value_state(steps: &[NumericStep], lowered_trace: &LoweredTrace) -> NumericValueState {
+    NumericValueState {
+        self_update: detect_numeric_self_update_value_flow(steps, lowered_trace),
+    }
+}
+
+fn compile_numeric_lowering(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+) -> Option<NumericLowering> {
     let mut steps = Vec::with_capacity(insts.len());
     let mut index = 0usize;
 
@@ -973,6 +1441,26 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
                     value: raw.get_c(),
                 }
             }
+            crate::OpCode::GetField => NumericStep::GetTableField {
+                dst: raw.get_a(),
+                table: raw.get_b(),
+                key: raw.get_c(),
+            },
+            crate::OpCode::GetTabUp => NumericStep::GetTabUpField {
+                dst: raw.get_a(),
+                upvalue: raw.get_b(),
+                key: raw.get_c(),
+            },
+            crate::OpCode::SetField if !raw.get_k() => NumericStep::SetTableField {
+                table: raw.get_a(),
+                key: raw.get_b(),
+                value: raw.get_c(),
+            },
+            crate::OpCode::SetTabUp if !raw.get_k() => NumericStep::SetTabUpField {
+                upvalue: raw.get_a(),
+                key: raw.get_b(),
+                value: raw.get_c(),
+            },
             crate::OpCode::LoadI => NumericStep::LoadI {
                 dst: raw.get_a(),
                 imm: raw.get_sbx(),
@@ -980,6 +1468,10 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
             crate::OpCode::LoadF => NumericStep::LoadF {
                 dst: raw.get_a(),
                 imm: raw.get_sbx(),
+            },
+            crate::OpCode::Len => NumericStep::Len {
+                dst: raw.get_a(),
+                src: raw.get_b(),
             },
             crate::OpCode::Add if !raw.get_k() => {
                 consume_fused_arithmetic_companion(insts, &mut index);
@@ -1213,7 +1705,9 @@ fn compile_numeric_steps(insts: &[TraceIrInst], lowered_trace: &LoweredTrace) ->
         index += 1;
     }
 
-    Some(run_numeric_midend_passes(steps))
+    let steps = run_numeric_midend_passes(steps);
+    let value_state = build_numeric_value_state(&steps, lowered_trace);
+    Some(NumericLowering { steps, value_state })
 }
 
 fn numeric_operand_for_constant(lowered_trace: &LoweredTrace, index: u32) -> NumericOperand {

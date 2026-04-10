@@ -1,10 +1,11 @@
 use crate::Instruction;
 
 use crate::lua_vm::jit::ir::TraceIrInst;
-use crate::lua_vm::jit::lowering::{LoweredTrace, SsaTableIntRewrite};
+use crate::lua_vm::jit::lowering::{LoweredTrace, SsaTableIntRewrite, TraceValueKind};
 use super::model::{
     LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NumericBinaryOp, NumericIfElseCond,
-    NumericJmpLoopGuard, NumericOperand, NumericStep,
+    NumericJmpLoopGuard, NumericLowering, NumericOperand, NumericSelfUpdateValueFlow,
+    NumericSelfUpdateValueKind, NumericStep, NumericValueFlowRhs, NumericValueState,
 };
 
 include!("compile_shared.rs");
@@ -28,7 +29,14 @@ pub(super) fn lower_numeric_steps_for_native(
     insts: &[TraceIrInst],
     lowered_trace: &LoweredTrace,
 ) -> Option<Vec<NumericStep>> {
-    compile_numeric_steps(insts, lowered_trace)
+    compile_numeric_lowering(insts, lowered_trace).map(|lowering| lowering.steps)
+}
+
+pub(super) fn lower_numeric_lowering_for_native(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+) -> Option<NumericLowering> {
+    compile_numeric_lowering(insts, lowered_trace)
 }
 
 pub(super) fn lower_numeric_guard_for_native(
@@ -42,6 +50,7 @@ pub(super) fn lower_numeric_guard_for_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lua_vm::{LuaVM, SafeOption};
     use crate::lua_vm::jit::helper_plan::HelperPlan;
     use crate::lua_vm::jit::ir::{TraceIr, TraceIrInst, TraceIrInstKind, TraceIrOperand};
     use crate::lua_vm::jit::lowering::{LoweredSsaTrace, LoweredTrace};
@@ -1178,5 +1187,285 @@ mod tests {
         let steps = lower_linear_int_steps_for_native(&insts, &lowered_trace).unwrap();
 
         assert_eq!(steps, vec![LinearIntStep::BNot { dst: 4, src: 3 }]);
+    }
+
+    #[test]
+    fn lower_numeric_steps_reports_integer_self_update_value_flow() {
+        let insts = vec![TraceIrInst {
+            pc: 60,
+            opcode: crate::OpCode::AddI,
+            raw_instruction: Instruction::create_abc(crate::OpCode::AddI, 4, 4, 130).as_u32(),
+            kind: TraceIrInstKind::Arithmetic,
+            reads: vec![TraceIrOperand::Register(4)],
+            writes: vec![TraceIrOperand::Register(4)],
+        }];
+
+        let mut lowered_trace = lowered_trace_with_constants(Vec::new());
+        lowered_trace.root_register_hints = vec![crate::lua_vm::jit::lowering::RegisterValueHint {
+            reg: 4,
+            kind: TraceValueKind::Integer,
+        }];
+        lowered_trace.entry_stable_register_hints = lowered_trace.root_register_hints.clone();
+
+        let lowering = lower_numeric_lowering_for_native(&insts, &lowered_trace).unwrap();
+
+        assert_eq!(
+            lowering.value_state.self_update,
+            Some(NumericSelfUpdateValueFlow {
+                reg: 4,
+                op: NumericBinaryOp::Add,
+                kind: NumericSelfUpdateValueKind::Integer,
+                rhs: NumericValueFlowRhs::ImmI(3),
+            })
+        );
+    }
+
+    #[test]
+    fn lower_numeric_steps_reports_float_self_update_value_flow_after_alias_normalization() {
+        let insts = vec![
+            TraceIrInst {
+                pc: 70,
+                opcode: crate::OpCode::Move,
+                raw_instruction: Instruction::create_abc(crate::OpCode::Move, 6, 8, 0).as_u32(),
+                kind: TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(8)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            TraceIrInst {
+                pc: 71,
+                opcode: crate::OpCode::Mul,
+                raw_instruction: Instruction::create_abck(crate::OpCode::Mul, 4, 4, 6, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(6)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+        ];
+
+        let mut lowered_trace = lowered_trace_with_constants(Vec::new());
+        lowered_trace.root_register_hints = vec![
+            crate::lua_vm::jit::lowering::RegisterValueHint {
+                reg: 4,
+                kind: TraceValueKind::Float,
+            },
+            crate::lua_vm::jit::lowering::RegisterValueHint {
+                reg: 8,
+                kind: TraceValueKind::Integer,
+            },
+        ];
+        lowered_trace.entry_stable_register_hints = lowered_trace.root_register_hints.clone();
+
+        let lowering = lower_numeric_lowering_for_native(&insts, &lowered_trace).unwrap();
+
+        assert_eq!(
+            lowering.value_state.self_update,
+            Some(NumericSelfUpdateValueFlow {
+                reg: 4,
+                op: NumericBinaryOp::Mul,
+                kind: NumericSelfUpdateValueKind::Float,
+                rhs: NumericValueFlowRhs::StableReg {
+                    reg: 8,
+                    kind: TraceValueKind::Integer,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn lower_numeric_steps_reports_integer_self_update_value_flow_with_residual_step() {
+        let insts = vec![
+            TraceIrInst {
+                pc: 80,
+                opcode: crate::OpCode::AddI,
+                raw_instruction: Instruction::create_abc(crate::OpCode::AddI, 4, 4, 130).as_u32(),
+                kind: TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 81,
+                opcode: crate::OpCode::Move,
+                raw_instruction: Instruction::create_abc(crate::OpCode::Move, 11, 9, 0).as_u32(),
+                kind: TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(9)],
+                writes: vec![TraceIrOperand::Register(11)],
+            },
+        ];
+
+        let mut lowered_trace = lowered_trace_with_constants(Vec::new());
+        lowered_trace.root_register_hints = vec![
+            crate::lua_vm::jit::lowering::RegisterValueHint {
+                reg: 4,
+                kind: TraceValueKind::Integer,
+            },
+            crate::lua_vm::jit::lowering::RegisterValueHint {
+                reg: 9,
+                kind: TraceValueKind::Integer,
+            },
+        ];
+        lowered_trace.entry_stable_register_hints = lowered_trace.root_register_hints.clone();
+
+        let lowering = lower_numeric_lowering_for_native(&insts, &lowered_trace).unwrap();
+
+        assert_eq!(
+            lowering.value_state.self_update,
+            Some(NumericSelfUpdateValueFlow {
+                reg: 4,
+                op: NumericBinaryOp::Add,
+                kind: NumericSelfUpdateValueKind::Integer,
+                rhs: NumericValueFlowRhs::ImmI(3),
+            })
+        );
+    }
+
+    #[test]
+    fn lower_numeric_steps_reports_float_self_update_value_flow_with_residual_step() {
+        let insts = vec![
+            TraceIrInst {
+                pc: 90,
+                opcode: crate::OpCode::Mul,
+                raw_instruction: Instruction::create_abck(crate::OpCode::Mul, 4, 4, 8, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(8)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 91,
+                opcode: crate::OpCode::Move,
+                raw_instruction: Instruction::create_abc(crate::OpCode::Move, 11, 4, 0).as_u32(),
+                kind: TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(11)],
+            },
+        ];
+
+        let mut lowered_trace = lowered_trace_with_constants(Vec::new());
+        lowered_trace.root_register_hints = vec![
+            crate::lua_vm::jit::lowering::RegisterValueHint {
+                reg: 4,
+                kind: TraceValueKind::Float,
+            },
+            crate::lua_vm::jit::lowering::RegisterValueHint {
+                reg: 8,
+                kind: TraceValueKind::Integer,
+            },
+        ];
+        lowered_trace.entry_stable_register_hints = lowered_trace.root_register_hints.clone();
+
+        let lowering = lower_numeric_lowering_for_native(&insts, &lowered_trace).unwrap();
+
+        assert_eq!(
+            lowering.value_state.self_update,
+            Some(NumericSelfUpdateValueFlow {
+                reg: 4,
+                op: NumericBinaryOp::Mul,
+                kind: NumericSelfUpdateValueKind::Float,
+                rhs: NumericValueFlowRhs::StableReg {
+                    reg: 8,
+                    kind: TraceValueKind::Integer,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn lower_numeric_steps_lowers_short_string_field_access() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let key = vm.create_string("value").unwrap();
+        let lowered_trace = lowered_trace_with_constants(vec![key]);
+
+        let insts = vec![
+            TraceIrInst {
+                pc: 100,
+                opcode: crate::OpCode::GetField,
+                raw_instruction: Instruction::create_abck(crate::OpCode::GetField, 4, 3, 0, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 101,
+                opcode: crate::OpCode::SetField,
+                raw_instruction: Instruction::create_abck(crate::OpCode::SetField, 3, 0, 4, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::ConstantIndex(0),
+                    TraceIrOperand::Register(4),
+                ],
+                writes: Vec::new(),
+            },
+        ];
+
+        let steps = lower_numeric_steps_for_native(&insts, &lowered_trace).unwrap();
+
+        assert_eq!(
+            steps,
+            vec![
+                NumericStep::GetTableField {
+                    dst: 4,
+                    table: 3,
+                    key: 0,
+                },
+                NumericStep::SetTableField {
+                    table: 3,
+                    key: 0,
+                    value: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lower_numeric_steps_lowers_short_string_tabup_field_access() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let key = vm.create_string("value").unwrap();
+        let lowered_trace = lowered_trace_with_constants(vec![key]);
+
+        let insts = vec![
+            TraceIrInst {
+                pc: 100,
+                opcode: crate::OpCode::GetTabUp,
+                raw_instruction: Instruction::create_abck(crate::OpCode::GetTabUp, 4, 0, 0, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Upvalue(0), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![TraceIrOperand::Register(4)],
+            },
+            TraceIrInst {
+                pc: 101,
+                opcode: crate::OpCode::SetTabUp,
+                raw_instruction: Instruction::create_abck(crate::OpCode::SetTabUp, 0, 0, 4, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Upvalue(0),
+                    TraceIrOperand::ConstantIndex(0),
+                    TraceIrOperand::Register(4),
+                ],
+                writes: Vec::new(),
+            },
+        ];
+
+        let steps = lower_numeric_steps_for_native(&insts, &lowered_trace).unwrap();
+
+        assert_eq!(
+            steps,
+            vec![
+                NumericStep::GetTabUpField {
+                    dst: 4,
+                    upvalue: 0,
+                    key: 0,
+                },
+                NumericStep::SetTabUpField {
+                    upvalue: 0,
+                    key: 0,
+                    value: 4,
+                },
+            ]
+        );
     }
 }

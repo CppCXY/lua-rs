@@ -1826,6 +1826,7 @@ impl LuaVM {
             - Root native linear-int jmp dispatches: {}\n\
             - Root native numeric for dispatches: {}\n\
             - Root native guarded numeric for dispatches: {}\n\
+            - Root native call-for dispatches: {}\n\
             - Root native numeric jmp dispatches: {}\n\
             - Side native dispatches: {}\n\
             - Native exit-index resolve attempts: {}\n\
@@ -1839,6 +1840,9 @@ impl LuaVM {
             - Native profile truthy guards: {}\n\
             - Native profile arithmetic helpers: {}\n\
             - Native profile table helpers: {}\n\
+            - Native profile table get helpers: {}\n\
+            - Native profile table set helpers: {}\n\
+            - Native profile len helpers: {}\n\
             - Native profile upvalue helpers: {}\n\
             - Native profile shift helpers: {}\n\
             - Helper plan dispatches: {}\n\
@@ -1877,6 +1881,7 @@ impl LuaVM {
             counters.root_native_linear_int_jmp_dispatches,
             counters.root_native_numeric_for_dispatches,
             counters.root_native_guarded_numeric_for_dispatches,
+            counters.root_native_call_for_dispatches,
             counters.root_native_numeric_jmp_dispatches,
             counters.side_native_dispatches,
             counters.native_exit_index_resolve_attempts,
@@ -1890,6 +1895,9 @@ impl LuaVM {
             counters.native_profile_truthy_guards,
             counters.native_profile_arithmetic_helpers,
             counters.native_profile_table_helpers,
+            counters.native_profile_table_get_helpers,
+            counters.native_profile_table_set_helpers,
+            counters.native_profile_len_helpers,
             counters.native_profile_upvalue_helpers,
             counters.native_profile_shift_helpers,
             counters.helper_plan_dispatches,

@@ -2361,8 +2361,10 @@ impl LuaState {
             return Ok(bytes.len() as i64);
         }
         if obj.ttistable() {
-            if let Some(mm) = execute::get_metamethod_event(self, obj, execute::TmKind::Len) {
-                let result = execute::call_tm_res(self, mm, *obj, *obj)?;
+            if let Some(mm) = obj.as_table().and_then(|table| {
+                execute::helper::get_metamethod_from_meta_ptr(self, table.meta_ptr(), execute::TmKind::Len)
+            }) {
+                let result = execute::call_tm_res1(self, mm, *obj)?;
                 return result
                     .as_integer()
                     .ok_or_else(|| self.error("object length is not an integer".to_string()));
@@ -2371,7 +2373,7 @@ impl LuaState {
             return Ok(obj.as_table().unwrap().len() as i64);
         }
         if let Some(mm) = execute::get_metamethod_event(self, obj, execute::TmKind::Len) {
-            let result = execute::call_tm_res(self, mm, *obj, *obj)?;
+            let result = execute::call_tm_res1(self, mm, *obj)?;
             return result
                 .as_integer()
                 .ok_or_else(|| self.error("object length is not an integer".to_string()));
