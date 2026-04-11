@@ -696,6 +696,7 @@ impl NativeTraceBackend {
         } else {
             Vec::new()
         };
+        let mut current_integer_values = Vec::new();
 
         for step in steps {
             emit_linear_int_step(
@@ -707,6 +708,7 @@ impl NativeTraceBackend {
                 fallback_block,
                 *step,
                 &mut known_integer_regs,
+                &mut current_integer_values,
                 &loop_carried_values,
             );
         }
@@ -832,12 +834,15 @@ impl NativeTraceBackend {
         let fallback_block = builder.create_block();
         let side_exit_block = builder.create_block();
 
+        let mut known_integer_regs = Vec::new();
         let zero_hits = builder.ins().iconst(types::I64, 0);
         builder.def_var(hits_var, zero_hits);
         builder.ins().jump(guard_block, &[]);
 
         builder.switch_to_block(guard_block);
         let current_hits = builder.use_var(hits_var);
+        let empty_current_integer_values = Vec::new();
+        let loop_carried_values = Vec::new();
         if guard.is_head() {
             let cond = emit_linear_int_guard_condition(
                 &mut builder,
@@ -845,6 +850,9 @@ impl NativeTraceBackend {
                 hits_var,
                 current_hits,
                 fallback_block,
+                &known_integer_regs,
+                &empty_current_integer_values,
+                &loop_carried_values,
                 guard,
             );
             builder.def_var(hits_var, current_hits);
@@ -857,9 +865,8 @@ impl NativeTraceBackend {
             builder.ins().jump(body_block, &[]);
         }
 
-        builder.switch_to_block(body_block);
-        let mut known_integer_regs = Vec::new();
-        let loop_carried_values = Vec::new();
+    builder.switch_to_block(body_block);
+        let mut current_integer_values = Vec::new();
         for step in steps {
             emit_linear_int_step(
                 &mut builder,
@@ -870,6 +877,7 @@ impl NativeTraceBackend {
                 fallback_block,
                 *step,
                 &mut known_integer_regs,
+                &mut current_integer_values,
                 &loop_carried_values,
             );
         }
@@ -882,6 +890,9 @@ impl NativeTraceBackend {
                 hits_var,
                 next_hits,
                 fallback_block,
+                &known_integer_regs,
+                &current_integer_values,
+                &loop_carried_values,
                 guard,
             );
             builder.def_var(hits_var, next_hits);
@@ -976,6 +987,7 @@ impl NativeTraceBackend {
 
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
+        let mut current_numeric_values = Vec::new();
         for step in steps {
             emit_numeric_step(
                 &mut builder,
@@ -986,6 +998,7 @@ impl NativeTraceBackend {
                 fallback_block,
                 *step,
                 &mut known_value_kinds,
+                &mut current_numeric_values,
                 None,
                 HoistedNumericGuardValues::default(),
             )?;
@@ -1313,6 +1326,7 @@ impl NativeTraceBackend {
         if let Some(step) = carried_integer_step {
             let (span_start, span_len) = carried_integer_span
                 .expect("plain numeric carried-integer path requires a matching self-update span");
+            let mut current_numeric_values = Vec::new();
             emit_numeric_steps_with_carried_integer(
                 &mut builder,
                 &abi,
@@ -1328,9 +1342,11 @@ impl NativeTraceBackend {
                 span_len,
                 None,
                 &mut known_value_kinds,
+                &mut current_numeric_values,
             )?;
         } else if let Some(step) = carried_float_step {
             if let Some((span_start, span_len)) = carried_float_span {
+                let mut current_numeric_values = Vec::new();
                 emit_numeric_steps_with_carried_float(
                     &mut builder,
                     &abi,
@@ -1346,6 +1362,7 @@ impl NativeTraceBackend {
                     span_len,
                     None,
                     &mut known_value_kinds,
+                    &mut current_numeric_values,
                 )?;
             } else {
                 emit_carried_float_loop_step(
@@ -1357,6 +1374,7 @@ impl NativeTraceBackend {
                 );
             }
         } else {
+            let mut current_numeric_values = Vec::new();
             for step in steps {
                 emit_numeric_step(
                     &mut builder,
@@ -1367,6 +1385,7 @@ impl NativeTraceBackend {
                     fallback_block,
                     *step,
                     &mut known_value_kinds,
+                    &mut current_numeric_values,
                     None,
                     HoistedNumericGuardValues::default(),
                 )?;
@@ -1534,6 +1553,7 @@ impl NativeTraceBackend {
 
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
+        let mut current_numeric_values = Vec::new();
         for &(dst, src) in prep_moves {
             emit_numeric_step(
                 &mut builder,
@@ -1544,6 +1564,7 @@ impl NativeTraceBackend {
                 fallback_terminal_block,
                 NumericStep::Move { dst, src },
                 &mut known_value_kinds,
+                &mut current_numeric_values,
                 None,
                 HoistedNumericGuardValues::default(),
             )?;
@@ -1558,6 +1579,7 @@ impl NativeTraceBackend {
                 fallback_terminal_block,
                 *step,
                 &mut known_value_kinds,
+                &mut current_numeric_values,
                 None,
                 HoistedNumericGuardValues::default(),
             )?;
@@ -1911,6 +1933,8 @@ impl NativeTraceBackend {
             builder.def_var(carried_float_raw_var, carried_float_raw);
         }
 
+        let mut current_numeric_values = Vec::new();
+
         if let Some(step) = carried_integer_step {
             let (span_start, span_len) = carried_integer_span
                 .expect("guarded numeric carried-integer path requires a matching self-update span");
@@ -1929,6 +1953,7 @@ impl NativeTraceBackend {
                 span_len,
                 hoisted_integer_rhs,
                 &mut known_value_kinds,
+                &mut current_numeric_values,
             )?;
         } else if let Some(step) = carried_float_step {
             if let Some((span_start, span_len)) = carried_float_span {
@@ -1947,6 +1972,7 @@ impl NativeTraceBackend {
                     span_len,
                     hoisted_guard_rhs,
                     &mut known_value_kinds,
+                    &mut current_numeric_values,
                 )?;
             } else {
                 emit_carried_float_loop_step(
@@ -1968,6 +1994,7 @@ impl NativeTraceBackend {
                     fallback_block,
                     *step,
                     &mut known_value_kinds,
+                    &mut current_numeric_values,
                     None,
                     HoistedNumericGuardValues::default(),
                 )?;
@@ -1997,6 +2024,7 @@ impl NativeTraceBackend {
             continue_block,
             side_exit_block,
             &mut known_value_kinds,
+            &mut current_numeric_values,
             carried_float_step.map(|step| CarriedFloatGuardValue {
                 reg: step.reg,
                 raw_var: carried_float_raw_var,
@@ -2353,6 +2381,7 @@ impl NativeTraceBackend {
         };
 
         let mut side_exit_sites = Vec::with_capacity(head_blocks.len() + tail_blocks.len());
+        let mut current_numeric_values = Vec::new();
 
         for block in head_blocks {
             let continue_block = builder.create_block();
@@ -2373,6 +2402,7 @@ impl NativeTraceBackend {
                 continue_block,
                 side_exit_block,
                 &mut known_value_kinds,
+                &mut current_numeric_values,
                 carried_float_step.map(|step| CarriedFloatGuardValue {
                     reg: step.reg,
                     raw_var: carried_float_raw_var,
@@ -2409,6 +2439,7 @@ impl NativeTraceBackend {
                 span_len,
                 hoisted_integer_rhs,
                 &mut known_value_kinds,
+                &mut current_numeric_values,
             )?;
         } else if let Some(step) = carried_float_step {
             if let Some((span_start, span_len)) = carried_float_span {
@@ -2427,6 +2458,7 @@ impl NativeTraceBackend {
                     span_len,
                     hoisted_guard_rhs,
                     &mut known_value_kinds,
+                    &mut current_numeric_values,
                 )?;
             } else {
                 emit_carried_float_loop_step(
@@ -2448,6 +2480,7 @@ impl NativeTraceBackend {
                     fallback_block,
                     *step,
                     &mut known_value_kinds,
+                    &mut current_numeric_values,
                     None,
                     HoistedNumericGuardValues::default(),
                 )?;
@@ -2476,6 +2509,7 @@ impl NativeTraceBackend {
                 continue_block,
                 side_exit_block,
                 &mut known_value_kinds,
+                &mut current_numeric_values,
                 carried_float_step.map(|step| CarriedFloatGuardValue {
                     reg: step.reg,
                     raw_var: carried_float_raw_var,
@@ -2615,6 +2649,8 @@ struct HoistedNumericGuardValues {
     first: Option<HoistedNumericGuardValue>,
     second: Option<HoistedNumericGuardValue>,
 }
+
+type CurrentNumericGuardValues = Vec<(u32, HoistedNumericGuardSource)>;
 
 #[derive(Clone, Copy)]
 enum HoistedNumericGuardSource {
@@ -4686,6 +4722,7 @@ fn emit_numeric_guard_block(
     continue_block: Block,
     exit_block: Block,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    current_numeric_values: &mut CurrentNumericGuardValues,
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
@@ -4699,6 +4736,7 @@ fn emit_numeric_guard_block(
             exit_block,
             *step,
             known_value_kinds,
+            current_numeric_values,
             carried_float,
             hoisted_numeric,
         )?;
@@ -4735,6 +4773,7 @@ fn emit_numeric_guard_block(
         continue_block,
         exit_block,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )
@@ -6274,9 +6313,17 @@ fn emit_known_linear_int_reg_value(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &[u32],
+    current_integer_values: &[(u32, Value)],
     loop_carried_values: &[(u32, Value)],
     reg: u32,
 ) -> Value {
+    if let Some(value) = current_integer_values
+        .iter()
+        .rev()
+        .find_map(|(current_reg, value)| (*current_reg == reg).then_some(*value))
+    {
+        return value;
+    }
     if let Some(value) = loop_carried_values
         .iter()
         .find_map(|(carried_reg, value)| (*carried_reg == reg).then_some(*value))
@@ -6291,31 +6338,73 @@ fn emit_known_linear_int_reg_value(
     builder.ins().load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET)
 }
 
+fn set_current_linear_int_reg_value(
+    current_integer_values: &mut Vec<(u32, Value)>,
+    reg: u32,
+    value: Value,
+) {
+    if let Some((_, current_value)) = current_integer_values
+        .iter_mut()
+        .rev()
+        .find(|(current_reg, _)| *current_reg == reg)
+    {
+        *current_value = value;
+    } else {
+        current_integer_values.push((reg, value));
+    }
+}
+
 fn emit_linear_int_guard_condition(
     builder: &mut FunctionBuilder<'_>,
     base_ptr: Value,
     hits_var: Variable,
     current_hits: Value,
     fallback_block: Block,
+    known_integer_regs: &[u32],
+    current_integer_values: &[(u32, Value)],
+    loop_carried_values: &[(u32, Value)],
     guard: LinearIntLoopGuard,
 ) -> Value {
-    let mem = MemFlags::new();
     let (op, lhs_val, rhs_val) = match guard {
         LinearIntLoopGuard::HeadRegReg { op, lhs, rhs, .. }
         | LinearIntLoopGuard::TailRegReg { op, lhs, rhs, .. } => {
-            let lhs_ptr = slot_addr(builder, base_ptr, lhs);
-            let rhs_ptr = slot_addr(builder, base_ptr, rhs);
-            emit_integer_guard(builder, lhs_ptr, hits_var, current_hits, fallback_block);
-            emit_integer_guard(builder, rhs_ptr, hits_var, current_hits, fallback_block);
-            let lhs_val = builder.ins().load(types::I64, mem, lhs_ptr, LUA_VALUE_VALUE_OFFSET);
-            let rhs_val = builder.ins().load(types::I64, mem, rhs_ptr, LUA_VALUE_VALUE_OFFSET);
+            let lhs_val = emit_known_linear_int_reg_value(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                fallback_block,
+                known_integer_regs,
+                current_integer_values,
+                loop_carried_values,
+                lhs,
+            );
+            let rhs_val = emit_known_linear_int_reg_value(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                fallback_block,
+                known_integer_regs,
+                current_integer_values,
+                loop_carried_values,
+                rhs,
+            );
             (op, lhs_val, rhs_val)
         }
         LinearIntLoopGuard::HeadRegImm { op, reg, imm, .. }
         | LinearIntLoopGuard::TailRegImm { op, reg, imm, .. } => {
-            let reg_ptr = slot_addr(builder, base_ptr, reg);
-            emit_integer_guard(builder, reg_ptr, hits_var, current_hits, fallback_block);
-            let lhs_val = builder.ins().load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET);
+            let lhs_val = emit_known_linear_int_reg_value(
+                builder,
+                base_ptr,
+                hits_var,
+                current_hits,
+                fallback_block,
+                known_integer_regs,
+                current_integer_values,
+                loop_carried_values,
+                reg,
+            );
             let rhs_val = builder.ins().iconst(types::I64, i64::from(imm));
             (op, lhs_val, rhs_val)
         }
@@ -6333,6 +6422,7 @@ fn emit_linear_int_step(
     bail_block: Block,
     step: LinearIntStep,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
 ) {
     match step {
@@ -6345,12 +6435,14 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 src,
             );
             let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
             emit_store_integer_with_known_tag(builder, dst_ptr, src_val, dst_known_integer);
             mark_linear_int_reg_known_integer(known_integer_regs, dst);
+            set_current_linear_int_reg_value(current_integer_values, dst, src_val);
         }
         LinearIntStep::LoadI { dst, imm } => {
             let dst_ptr = slot_addr(builder, base_ptr, dst);
@@ -6358,6 +6450,7 @@ fn emit_linear_int_step(
             let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
             emit_store_integer_with_known_tag(builder, dst_ptr, dst_val, dst_known_integer);
             mark_linear_int_reg_known_integer(known_integer_regs, dst);
+            set_current_linear_int_reg_value(current_integer_values, dst, dst_val);
         }
         LinearIntStep::BNot { dst, src } => {
             let dst_ptr = slot_addr(builder, base_ptr, dst);
@@ -6368,6 +6461,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 src,
             );
@@ -6375,6 +6469,7 @@ fn emit_linear_int_step(
             let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
             emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             mark_linear_int_reg_known_integer(known_integer_regs, dst);
+            set_current_linear_int_reg_value(current_integer_values, dst, result);
         }
         LinearIntStep::Add { dst, lhs, rhs } => {
             emit_binary_int_op(
@@ -6384,6 +6479,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6400,6 +6496,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 src,
             );
@@ -6408,6 +6505,7 @@ fn emit_linear_int_step(
             let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
             emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             mark_linear_int_reg_known_integer(known_integer_regs, dst);
+            set_current_linear_int_reg_value(current_integer_values, dst, result);
         }
         LinearIntStep::Sub { dst, lhs, rhs } => {
             emit_binary_int_op(
@@ -6417,6 +6515,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6433,6 +6532,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 src,
             );
@@ -6441,6 +6541,7 @@ fn emit_linear_int_step(
             let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
             emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             mark_linear_int_reg_known_integer(known_integer_regs, dst);
+            set_current_linear_int_reg_value(current_integer_values, dst, result);
         }
         LinearIntStep::Mul { dst, lhs, rhs } => {
             emit_binary_int_op(
@@ -6450,6 +6551,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6466,6 +6568,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 src,
             );
@@ -6474,6 +6577,7 @@ fn emit_linear_int_step(
             let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
             emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
             mark_linear_int_reg_known_integer(known_integer_regs, dst);
+            set_current_linear_int_reg_value(current_integer_values, dst, result);
         }
         LinearIntStep::IDiv { dst, lhs, rhs } => {
             emit_linear_int_div_mod_op(
@@ -6483,6 +6587,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6498,6 +6603,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 src,
@@ -6513,6 +6619,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6528,6 +6635,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 src,
@@ -6543,6 +6651,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6558,6 +6667,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 src,
@@ -6573,6 +6683,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6588,6 +6699,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 src,
@@ -6603,6 +6715,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6618,6 +6731,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 src,
@@ -6634,6 +6748,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6650,6 +6765,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 imm,
@@ -6665,6 +6781,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 lhs,
@@ -6681,6 +6798,7 @@ fn emit_linear_int_step(
                 current_hits,
                 bail_block,
                 known_integer_regs,
+                current_integer_values,
                 loop_carried_values,
                 dst,
                 src,
@@ -6697,6 +6815,7 @@ fn emit_linear_int_imm_op<F>(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
     dst: u32,
     src: u32,
@@ -6713,6 +6832,7 @@ fn emit_linear_int_imm_op<F>(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         src,
     );
@@ -6721,6 +6841,7 @@ fn emit_linear_int_imm_op<F>(
     let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
     emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
     mark_linear_int_reg_known_integer(known_integer_regs, dst);
+    set_current_linear_int_reg_value(current_integer_values, dst, result);
 }
 
 fn emit_linear_int_div_mod_op(
@@ -6730,6 +6851,7 @@ fn emit_linear_int_div_mod_op(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
     dst: u32,
     lhs: u32,
@@ -6743,6 +6865,7 @@ fn emit_linear_int_div_mod_op(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         lhs,
     );
@@ -6753,6 +6876,7 @@ fn emit_linear_int_div_mod_op(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         rhs,
     );
@@ -6782,6 +6906,7 @@ fn emit_linear_int_div_mod_op(
         );
     }
     mark_linear_int_reg_known_integer(known_integer_regs, dst);
+    current_integer_values.retain(|(reg, _)| *reg != dst);
 }
 
 fn emit_linear_int_div_mod_imm(
@@ -6791,6 +6916,7 @@ fn emit_linear_int_div_mod_imm(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
     dst: u32,
     src: u32,
@@ -6804,6 +6930,7 @@ fn emit_linear_int_div_mod_imm(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         src,
     );
@@ -6834,6 +6961,7 @@ fn emit_linear_int_div_mod_imm(
         );
     }
     mark_linear_int_reg_known_integer(known_integer_regs, dst);
+    current_integer_values.retain(|(reg, _)| *reg != dst);
 }
 
 fn emit_linear_int_shift_op(
@@ -6844,6 +6972,7 @@ fn emit_linear_int_shift_op(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
     dst: u32,
     lhs: u32,
@@ -6857,6 +6986,7 @@ fn emit_linear_int_shift_op(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         lhs,
     );
@@ -6867,6 +6997,7 @@ fn emit_linear_int_shift_op(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         rhs,
     );
@@ -6880,6 +7011,7 @@ fn emit_linear_int_shift_op(
     let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
     emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
     mark_linear_int_reg_known_integer(known_integer_regs, dst);
+    set_current_linear_int_reg_value(current_integer_values, dst, result);
 }
 
 fn emit_linear_int_shift_imm_lhs(
@@ -6890,6 +7022,7 @@ fn emit_linear_int_shift_imm_lhs(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
     dst: u32,
     imm: i32,
@@ -6903,6 +7036,7 @@ fn emit_linear_int_shift_imm_lhs(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         src,
     );
@@ -6912,6 +7046,7 @@ fn emit_linear_int_shift_imm_lhs(
     let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
     emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
     mark_linear_int_reg_known_integer(known_integer_regs, dst);
+    set_current_linear_int_reg_value(current_integer_values, dst, result);
 }
 
 fn emit_linear_int_imm_shift_rhs(
@@ -6922,6 +7057,7 @@ fn emit_linear_int_imm_shift_rhs(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
     dst: u32,
     src: u32,
@@ -6934,6 +7070,7 @@ fn emit_linear_int_imm_shift_rhs(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         src,
     );
@@ -6944,6 +7081,7 @@ fn emit_linear_int_imm_shift_rhs(
     let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
     emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
     mark_linear_int_reg_known_integer(known_integer_regs, dst);
+    set_current_linear_int_reg_value(current_integer_values, dst, result);
 }
 
 fn emit_binary_int_op<F>(
@@ -6953,6 +7091,7 @@ fn emit_binary_int_op<F>(
     current_hits: Value,
     bail_block: Block,
     known_integer_regs: &mut Vec<u32>,
+    current_integer_values: &mut Vec<(u32, Value)>,
     loop_carried_values: &[(u32, Value)],
     dst: u32,
     lhs: u32,
@@ -6969,6 +7108,7 @@ fn emit_binary_int_op<F>(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         lhs,
     );
@@ -6979,6 +7119,7 @@ fn emit_binary_int_op<F>(
         current_hits,
         bail_block,
         known_integer_regs,
+        current_integer_values,
         loop_carried_values,
         rhs,
     );
@@ -6986,6 +7127,7 @@ fn emit_binary_int_op<F>(
     let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
     emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
     mark_linear_int_reg_known_integer(known_integer_regs, dst);
+    set_current_linear_int_reg_value(current_integer_values, dst, result);
 }
 
 fn emit_helper_success_guard(
@@ -7256,6 +7398,7 @@ fn emit_numeric_steps_with_carried_integer(
     span_len: usize,
     stable_rhs: Option<HoistedNumericGuardValue>,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    current_numeric_values: &mut CurrentNumericGuardValues,
 ) -> Option<()> {
     let pre_override = HoistedNumericGuardValues {
         first: Some(HoistedNumericGuardValue {
@@ -7275,6 +7418,7 @@ fn emit_numeric_steps_with_carried_integer(
             fallback_block,
             *step,
             known_value_kinds,
+            current_numeric_values,
             None,
             pre_override,
         )?;
@@ -7307,6 +7451,7 @@ fn emit_numeric_steps_with_carried_integer(
             fallback_block,
             *step,
             known_value_kinds,
+            current_numeric_values,
             None,
             post_override,
         )?;
@@ -7330,6 +7475,7 @@ fn emit_numeric_steps_with_carried_float(
     span_len: usize,
     stable_rhs: Option<HoistedNumericGuardValue>,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    current_numeric_values: &mut CurrentNumericGuardValues,
 ) -> Option<()> {
     let pre_carried = Some(CarriedFloatGuardValue {
         reg: carried_step.reg,
@@ -7350,6 +7496,7 @@ fn emit_numeric_steps_with_carried_float(
             fallback_block,
             *step,
             known_value_kinds,
+            current_numeric_values,
             pre_carried,
             pre_override,
         )?;
@@ -7382,6 +7529,7 @@ fn emit_numeric_steps_with_carried_float(
             fallback_block,
             *step,
             known_value_kinds,
+            current_numeric_values,
             post_carried,
             post_override,
         )?;
@@ -7530,26 +7678,54 @@ fn lookup_hoisted_numeric_guard_value(
         })
 }
 
+fn lookup_numeric_guard_value(
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
+    hoisted_numeric: HoistedNumericGuardValues,
+    reg: u32,
+) -> Option<HoistedNumericGuardSource> {
+    current_numeric_values
+        .iter()
+        .rev()
+        .find_map(|(current_reg, source)| (*current_reg == reg).then_some(*source))
+        .or_else(|| lookup_hoisted_numeric_guard_value(hoisted_numeric, reg))
+}
+
+fn set_current_numeric_guard_value(
+    current_numeric_values: &mut CurrentNumericGuardValues,
+    reg: u32,
+    source: HoistedNumericGuardSource,
+) {
+    if let Some((_, current_source)) = current_numeric_values
+        .iter_mut()
+        .find(|(current_reg, _)| *current_reg == reg)
+    {
+        *current_source = source;
+    } else {
+        current_numeric_values.push((reg, source));
+    }
+}
+
+fn clear_current_numeric_guard_value(
+    current_numeric_values: &mut CurrentNumericGuardValues,
+    reg: u32,
+) {
+    current_numeric_values.retain(|(current_reg, _)| *current_reg != reg);
+}
+
 fn emit_materialize_guard_numeric_override(
     builder: &mut FunctionBuilder<'_>,
     abi: &NativeAbi,
     reg: u32,
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> bool {
     let dst_ptr = slot_addr(builder, abi.base_ptr, reg);
     let mem = MemFlags::new();
 
-    if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
-        let raw = builder.use_var(carried.raw_var);
-        let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-        builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
-        return true;
-    }
-
-    if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, reg) {
-        match hoisted {
+    if let Some(override_value) = lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
+    {
+        match override_value {
             HoistedNumericGuardSource::FloatRaw(raw) => {
                 let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
                 builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
@@ -7562,24 +7738,27 @@ fn emit_materialize_guard_numeric_override(
         return true;
     }
 
+    if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
+        let raw = builder.use_var(carried.raw_var);
+        let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
+        builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        return true;
+    }
+
     false
 }
 
 fn emit_guard_numeric_override_tag_and_value(
     builder: &mut FunctionBuilder<'_>,
     reg: u32,
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<(Value, Value)> {
-    if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
-        return Some((
-            builder.ins().iconst(types::I8, LUA_VNUMFLT as i64),
-            builder.use_var(carried.raw_var),
-        ));
-    }
-
-    if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, reg) {
-        return Some(match hoisted {
+    if let Some(override_value) = lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
+    {
+        return Some(match override_value {
             HoistedNumericGuardSource::FloatRaw(raw) => (
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64),
                 raw,
@@ -7591,15 +7770,23 @@ fn emit_guard_numeric_override_tag_and_value(
         });
     }
 
+    if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
+        return Some((
+            builder.ins().iconst(types::I8, LUA_VNUMFLT as i64),
+            builder.use_var(carried.raw_var),
+        ));
+    }
+
     None
 }
 
 fn emit_guard_numeric_override_integer_value(
     builder: &mut FunctionBuilder<'_>,
     reg: u32,
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<Value> {
-    lookup_hoisted_numeric_guard_value(hoisted_numeric, reg).and_then(|hoisted| match hoisted {
+    lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg).and_then(|hoisted| match hoisted {
         HoistedNumericGuardSource::Integer(value) => Some(value),
         HoistedNumericGuardSource::FloatRaw(_) => {
             let _ = builder;
@@ -7784,6 +7971,7 @@ fn emit_numeric_step(
     fallback_block: Block,
     step: NumericStep,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    current_numeric_values: &mut CurrentNumericGuardValues,
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
@@ -7791,14 +7979,26 @@ fn emit_numeric_step(
         NumericStep::Move { dst, src } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
             let src_kind = if let Some((src_tag, src_val)) =
-                emit_guard_numeric_override_tag_and_value(builder, src, carried_float, hoisted_numeric)
+                emit_guard_numeric_override_tag_and_value(
+                    builder,
+                    src,
+                    current_numeric_values,
+                    carried_float,
+                    hoisted_numeric,
+                )
             {
                 let mem = MemFlags::new();
                 builder.ins().store(mem, src_val, dst_ptr, LUA_VALUE_VALUE_OFFSET);
                 builder.ins().store(mem, src_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+                if let Some(source) = lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, src)
+                {
+                    set_current_numeric_guard_value(current_numeric_values, dst, source);
+                } else {
+                    clear_current_numeric_guard_value(current_numeric_values, dst);
+                }
                 match src_tag {
                     _ if carried_float.is_some_and(|carried| carried.reg == src) => TraceValueKind::Float,
-                    _ => lookup_hoisted_numeric_guard_value(hoisted_numeric, src)
+                    _ => lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, src)
                         .map(|hoisted| match hoisted {
                             HoistedNumericGuardSource::FloatRaw(_) => TraceValueKind::Float,
                             HoistedNumericGuardSource::Integer(_) => TraceValueKind::Integer,
@@ -7808,6 +8008,7 @@ fn emit_numeric_step(
             } else {
                 let src_ptr = slot_addr(builder, abi.base_ptr, src);
                 emit_copy_luavalue(builder, dst_ptr, src_ptr);
+                clear_current_numeric_guard_value(current_numeric_values, dst);
                 numeric_reg_value_kind(known_value_kinds, src)
             };
             set_numeric_reg_value_kind(known_value_kinds, dst, src_kind);
@@ -7820,6 +8021,7 @@ fn emit_numeric_step(
                 TraceValueKind::Boolean
             );
             emit_store_boolean_with_known_tag(builder, dst_ptr, value, dst_known_boolean);
+            clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Boolean);
             Some(())
         }
@@ -7831,16 +8033,27 @@ fn emit_numeric_step(
                 TraceValueKind::Integer
             );
             emit_store_integer_with_known_tag(builder, dst_ptr, value, dst_known_integer);
+            set_current_numeric_guard_value(
+                current_numeric_values,
+                dst,
+                HoistedNumericGuardSource::Integer(value),
+            );
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Integer);
             Some(())
         }
         NumericStep::LoadF { dst, imm } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
+            let raw = builder.ins().iconst(types::I64, (imm as f64).to_bits() as i64);
             let dst_known_float = matches!(
                 numeric_reg_value_kind(known_value_kinds, dst),
                 TraceValueKind::Float
             );
             emit_store_float_with_known_tag(builder, dst_ptr, imm as f64, dst_known_float);
+            set_current_numeric_guard_value(
+                current_numeric_values,
+                dst,
+                HoistedNumericGuardSource::FloatRaw(raw),
+            );
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Float);
             Some(())
         }
@@ -7852,6 +8065,7 @@ fn emit_numeric_step(
                 .call(native_helpers.get_upval, &[dst_ptr, abi.upvalue_ptrs, upvalue_index]);
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Unknown);
             Some(())
         }
@@ -7882,6 +8096,7 @@ fn emit_numeric_step(
             );
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
             Some(())
         }
@@ -7912,6 +8127,7 @@ fn emit_numeric_step(
                 .call(native_helpers.get_table_int, &[abi.lua_state_ptr, dst_ptr, table_ptr, index_ptr]);
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
             Some(())
         }
@@ -7924,6 +8140,7 @@ fn emit_numeric_step(
                 .call(native_helpers.get_table_field, &[abi.lua_state_ptr, dst_ptr, table_ptr, key_ptr]);
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
             Some(())
         }
@@ -7935,6 +8152,7 @@ fn emit_numeric_step(
                 .call(native_helpers.len, &[abi.lua_state_ptr, dst_ptr, value_ptr]);
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
             Some(())
         }
@@ -7979,9 +8197,11 @@ fn emit_numeric_step(
                     known_value_kinds,
                     matches!(dst_known_kind, TraceValueKind::Integer),
                     matches!(dst_known_kind, TraceValueKind::Float),
+                    current_numeric_values,
                     carried_float,
                     hoisted_numeric,
                 )?;
+                clear_current_numeric_guard_value(current_numeric_values, dst);
                 set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
                 return Some(());
             }
@@ -7999,9 +8219,11 @@ fn emit_numeric_step(
                     rhs,
                     known_value_kinds,
                     matches!(dst_known_kind, TraceValueKind::Float),
+                    current_numeric_values,
                     carried_float,
                     hoisted_numeric,
                 )?;
+                clear_current_numeric_guard_value(current_numeric_values, dst);
                 set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
                 return Some(());
             }
@@ -8019,9 +8241,11 @@ fn emit_numeric_step(
                     rhs,
                     known_value_kinds,
                     matches!(dst_known_kind, TraceValueKind::Float),
+                    current_numeric_values,
                     carried_float,
                     hoisted_numeric,
                 )?;
+                clear_current_numeric_guard_value(current_numeric_values, dst);
                 set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
                 return Some(());
             }
@@ -8035,6 +8259,7 @@ fn emit_numeric_step(
                     fallback_block,
                     lhs,
                     known_value_kinds,
+                    current_numeric_values,
                     carried_float,
                     hoisted_numeric,
                 )?;
@@ -8046,6 +8271,7 @@ fn emit_numeric_step(
                     fallback_block,
                     rhs,
                     known_value_kinds,
+                    current_numeric_values,
                     carried_float,
                     hoisted_numeric,
                 )?;
@@ -8073,6 +8299,7 @@ fn emit_numeric_step(
                         matches!(dst_known_kind, TraceValueKind::Integer),
                     );
                 }
+                clear_current_numeric_guard_value(current_numeric_values, dst);
                 set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Integer);
                 return Some(());
             }
@@ -8107,6 +8334,7 @@ fn emit_numeric_step(
                 );
                 let success = builder.inst_results(call)[0];
                 emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+                clear_current_numeric_guard_value(current_numeric_values, dst);
                 return Some(());
             }
 
@@ -8118,6 +8346,7 @@ fn emit_numeric_step(
                 fallback_block,
                 lhs,
                 known_value_kinds,
+                current_numeric_values,
                 carried_float,
                 hoisted_numeric,
             )?;
@@ -8129,6 +8358,7 @@ fn emit_numeric_step(
                 fallback_block,
                 rhs,
                 known_value_kinds,
+                current_numeric_values,
                 carried_float,
                 hoisted_numeric,
             )?;
@@ -8159,6 +8389,7 @@ fn emit_numeric_step(
                 result,
                 matches!(dst_known_kind, TraceValueKind::Integer),
             );
+            clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Integer);
             Some(())
         }
@@ -8173,6 +8404,7 @@ fn emit_numeric_integer_operand(
     fallback_block: Block,
     operand: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<Value> {
@@ -8180,7 +8412,12 @@ fn emit_numeric_integer_operand(
     match operand {
         NumericOperand::ImmI(imm) => Some(builder.ins().iconst(types::I64, i64::from(imm))),
         NumericOperand::Reg(reg) => {
-            if let Some(value) = emit_guard_numeric_override_integer_value(builder, reg, hoisted_numeric) {
+            if let Some(value) = emit_guard_numeric_override_integer_value(
+                builder,
+                reg,
+                current_numeric_values,
+                hoisted_numeric,
+            ) {
                 return Some(value);
             }
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
@@ -8188,6 +8425,7 @@ fn emit_numeric_integer_operand(
                 builder,
                 abi,
                 reg,
+                current_numeric_values,
                 carried_float,
                 hoisted_numeric,
             );
@@ -8212,6 +8450,7 @@ fn emit_numeric_operand_tag_and_value(
     fallback_block: Block,
     operand: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<(Value, Value)> {
@@ -8223,7 +8462,13 @@ fn emit_numeric_operand_tag_and_value(
         )),
         NumericOperand::Reg(reg) => {
             if let Some(result) =
-                emit_guard_numeric_override_tag_and_value(builder, reg, carried_float, hoisted_numeric)
+                emit_guard_numeric_override_tag_and_value(
+                    builder,
+                    reg,
+                    current_numeric_values,
+                    carried_float,
+                    hoisted_numeric,
+                )
             {
                 return Some(result);
             }
@@ -8256,14 +8501,29 @@ fn emit_numeric_binary_helper_call(
     lhs: NumericOperand,
     rhs: NumericOperand,
     op: NumericBinaryOp,
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
     if let NumericOperand::Reg(reg) = lhs {
-        let _ = emit_materialize_guard_numeric_override(builder, abi, reg, carried_float, hoisted_numeric);
+        let _ = emit_materialize_guard_numeric_override(
+            builder,
+            abi,
+            reg,
+            current_numeric_values,
+            carried_float,
+            hoisted_numeric,
+        );
     }
     if let NumericOperand::Reg(reg) = rhs {
-        let _ = emit_materialize_guard_numeric_override(builder, abi, reg, carried_float, hoisted_numeric);
+        let _ = emit_materialize_guard_numeric_override(
+            builder,
+            abi,
+            reg,
+            current_numeric_values,
+            carried_float,
+            hoisted_numeric,
+        );
     }
     let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
     let (lhs_kind, lhs_payload) = emit_numeric_operand_kind_and_payload(builder, lhs);
@@ -8302,6 +8562,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     dst_known_integer: bool,
     dst_known_float: bool,
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
@@ -8313,6 +8574,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         fallback_block,
         lhs,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8324,6 +8586,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         fallback_block,
         rhs,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8449,6 +8712,7 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
         lhs,
         rhs,
         op,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8472,6 +8736,7 @@ fn emit_numeric_div_with_helper_fallback(
     rhs: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     dst_known_float: bool,
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
@@ -8483,6 +8748,7 @@ fn emit_numeric_div_with_helper_fallback(
         fallback_block,
         lhs,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8494,6 +8760,7 @@ fn emit_numeric_div_with_helper_fallback(
         fallback_block,
         rhs,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8537,6 +8804,7 @@ fn emit_numeric_div_with_helper_fallback(
         lhs,
         rhs,
         NumericBinaryOp::Div,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8560,6 +8828,7 @@ fn emit_numeric_pow_with_helper_fallback(
     rhs: NumericOperand,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
     dst_known_float: bool,
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
@@ -8571,6 +8840,7 @@ fn emit_numeric_pow_with_helper_fallback(
         fallback_block,
         lhs,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8582,6 +8852,7 @@ fn emit_numeric_pow_with_helper_fallback(
         fallback_block,
         rhs,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8622,6 +8893,7 @@ fn emit_numeric_pow_with_helper_fallback(
         lhs,
         rhs,
         NumericBinaryOp::Pow,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8718,6 +8990,7 @@ fn emit_numeric_condition_value(
     fallback_block: Block,
     cond: NumericIfElseCond,
     known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<Value> {
@@ -8726,10 +8999,10 @@ fn emit_numeric_condition_value(
         NumericIfElseCond::RegCompare { op, lhs, rhs } => {
             let lhs_ptr = slot_addr(builder, abi.base_ptr, lhs);
             let rhs_ptr = slot_addr(builder, abi.base_ptr, rhs);
-            let lhs_tag = if carried_float.is_some_and(|carried| carried.reg == lhs) {
-                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, lhs) {
-                match hoisted {
+            let lhs_tag = if let Some(override_value) =
+                lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, lhs)
+            {
+                match override_value {
                     HoistedNumericGuardSource::FloatRaw(_) => {
                         builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
                     }
@@ -8737,15 +9010,17 @@ fn emit_numeric_condition_value(
                         builder.ins().iconst(types::I8, LUA_VNUMINT as i64)
                     }
                 }
+            } else if carried_float.is_some_and(|carried| carried.reg == lhs) {
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
             } else if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, lhs)) {
                 builder.ins().iconst(types::I8, i64::from(tag))
             } else {
                 builder.ins().load(types::I8, mem, lhs_ptr, LUA_VALUE_TT_OFFSET)
             };
-            let rhs_tag = if carried_float.is_some_and(|carried| carried.reg == rhs) {
-                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, rhs) {
-                match hoisted {
+            let rhs_tag = if let Some(override_value) =
+                lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, rhs)
+            {
+                match override_value {
                     HoistedNumericGuardSource::FloatRaw(_) => {
                         builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
                     }
@@ -8753,6 +9028,8 @@ fn emit_numeric_condition_value(
                         builder.ins().iconst(types::I8, LUA_VNUMINT as i64)
                     }
                 }
+            } else if carried_float.is_some_and(|carried| carried.reg == rhs) {
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
             } else if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, rhs)) {
                 builder.ins().iconst(types::I8, i64::from(tag))
             } else {
@@ -8775,8 +9052,10 @@ fn emit_numeric_condition_value(
 
             let lhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == lhs) {
                 builder.use_var(carried.raw_var)
-            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, lhs) {
-                match hoisted {
+            } else if let Some(override_value) =
+                lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, lhs)
+            {
+                match override_value {
                     HoistedNumericGuardSource::FloatRaw(raw) => raw,
                     HoistedNumericGuardSource::Integer(value) => value,
                 }
@@ -8785,8 +9064,10 @@ fn emit_numeric_condition_value(
             };
             let rhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == rhs) {
                 builder.use_var(carried.raw_var)
-            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, rhs) {
-                match hoisted {
+            } else if let Some(override_value) =
+                lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, rhs)
+            {
+                match override_value {
                     HoistedNumericGuardSource::FloatRaw(raw) => raw,
                     HoistedNumericGuardSource::Integer(value) => value,
                 }
@@ -8799,10 +9080,10 @@ fn emit_numeric_condition_value(
         }
         NumericIfElseCond::Truthy { reg } => {
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
-            let tag = if carried_float.is_some_and(|carried| carried.reg == reg) {
-                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(hoisted) = lookup_hoisted_numeric_guard_value(hoisted_numeric, reg) {
-                match hoisted {
+            let tag = if let Some(override_value) =
+                lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
+            {
+                match override_value {
                     HoistedNumericGuardSource::FloatRaw(_) => {
                         builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
                     }
@@ -8810,6 +9091,8 @@ fn emit_numeric_condition_value(
                         builder.ins().iconst(types::I8, LUA_VNUMINT as i64)
                     }
                 }
+            } else if carried_float.is_some_and(|carried| carried.reg == reg) {
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
             } else {
                 builder.ins().load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET)
             };
@@ -8865,6 +9148,7 @@ fn emit_numeric_guard_flow(
     continue_block: Block,
     exit_block: Block,
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
+    current_numeric_values: &mut CurrentNumericGuardValues,
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<()> {
@@ -8876,6 +9160,7 @@ fn emit_numeric_guard_flow(
         fallback_block,
         cond,
         known_value_kinds,
+        current_numeric_values,
         carried_float,
         hoisted_numeric,
     )?;
@@ -8900,6 +9185,7 @@ fn emit_numeric_guard_flow(
             fallback_block,
             *step,
             known_value_kinds,
+            current_numeric_values,
             carried_float,
             hoisted_numeric,
         )?;
@@ -8910,6 +9196,7 @@ fn emit_numeric_guard_flow(
 
     builder.switch_to_block(fail_block);
     if let Some(step) = exit_preset {
+        let mut exit_numeric_values = current_numeric_values.clone();
         emit_numeric_step(
             builder,
             abi,
@@ -8919,6 +9206,7 @@ fn emit_numeric_guard_flow(
             fallback_block,
             *step,
             known_value_kinds,
+            &mut exit_numeric_values,
             carried_float,
             hoisted_numeric,
         )?;
