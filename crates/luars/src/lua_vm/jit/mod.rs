@@ -145,6 +145,7 @@ pub(crate) fn record_redundant_side_exit_fast_dispatch(lua_state: &mut LuaState)
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 pub(crate) unsafe fn resolve_trace_exit(
     lua_state: &mut LuaState,
     ci: &CallInfo,
@@ -180,6 +181,7 @@ pub(crate) unsafe fn resolve_trace_exit(
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 pub(crate) unsafe fn resolve_trace_exit_by_index(
     lua_state: &mut LuaState,
     ci: &CallInfo,

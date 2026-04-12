@@ -29,6 +29,30 @@ struct TableIntKeyState {
     read_since_last_store: bool,
 }
 
+/// Key for tracking string-keyed table field values in the mid-end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TableFieldSource {
+    /// Field loaded via upvalue table (`GetTabUpField`/`SetTabUpField`).
+    TabUp(u32),
+    /// Field loaded via register-held table (`GetTableField`/`SetTableField`).
+    /// The `u32` is the register root_value from alias resolution.
+    Register(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct TableFieldKey {
+    source: TableFieldSource,
+    /// Constant pool index for the short-string key.
+    key: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TableFieldKeyState {
+    available_value_reg: Option<u32>,
+    last_store_output: Option<usize>,
+    read_since_last_store: bool,
+}
+
 fn fresh_register_value_id(next_value_id: &mut u32) -> u32 {
     let value_id = *next_value_id;
     *next_value_id = next_value_id.saturating_sub(1);
@@ -94,6 +118,19 @@ fn clear_table_int_value_register(
     for (&key, state) in key_states.iter_mut() {
         if state.available_value_reg == Some(reg) {
             state.available_value_reg = find_table_int_alias_reg(register_slots, key);
+        }
+    }
+}
+
+/// When a register `reg` is overwritten, clear any table-field forwarding state
+/// that referenced it as the available value.
+fn clear_table_field_value_register(
+    field_states: &mut std::collections::HashMap<TableFieldKey, TableFieldKeyState>,
+    reg: u32,
+) {
+    for state in field_states.values_mut() {
+        if state.available_value_reg == Some(reg) {
+            state.available_value_reg = None;
         }
     }
 }
@@ -440,6 +477,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
     let mut key_states = std::collections::HashMap::<TableIntKey, TableIntKeyState>::new();
     let mut register_aliases = std::collections::HashMap::<u32, RegisterAlias>::new();
     let mut move_aliases = std::collections::HashMap::<u32, u32>::new();
+    let mut field_states = std::collections::HashMap::<TableFieldKey, TableFieldKeyState>::new();
     let mut next_value_id = u32::MAX;
     let mut read_counts = std::collections::HashMap::<u32, usize>::new();
 
@@ -454,6 +492,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             NumericStep::Move { dst, src } => {
                 let src = resolve_numeric_move_alias(&move_aliases, src);
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 let resolved = resolve_register_alias(&register_values, &register_aliases, src);
                 set_register_value(
@@ -475,6 +514,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::LoadBool { dst, value } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -486,6 +526,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::LoadI { dst, imm } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -497,6 +538,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::LoadF { dst, imm } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -509,6 +551,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             NumericStep::Len { dst, src } => {
                 let src = resolve_numeric_move_alias(&move_aliases, src);
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -520,6 +563,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::GetUpval { dst, upvalue } => {
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -531,10 +575,26 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::SetUpval { src, upvalue } => {
                 let src = resolve_numeric_move_alias(&move_aliases, src);
+                // Invalidate all TabUp field entries for this upvalue since the
+                // upvalue itself is being overwritten.
+                field_states.retain(|k, _| {
+                    !matches!(k.source, TableFieldSource::TabUp(u) if u == upvalue)
+                });
                 optimized.push(Some(NumericStep::SetUpval { src, upvalue }));
             }
             NumericStep::GetTabUpField { dst, upvalue, key } => {
+                let field_key = TableFieldKey {
+                    source: TableFieldSource::TabUp(upvalue),
+                    key,
+                };
+                // Check forwarding BEFORE clearing dst (dst may hold the
+                // previous available value for this same key).
+                let forward_src = field_states
+                    .get(&field_key)
+                    .and_then(|s| s.available_value_reg);
+
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -542,16 +602,49 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                     &mut next_value_id,
                     dst,
                 );
+
+                if let Some(src) = forward_src {
+                    let state = field_states.entry(field_key).or_default();
+                    state.available_value_reg = Some(dst);
+                    if state.last_store_output.is_some() {
+                        state.read_since_last_store = true;
+                    }
+                    if src != dst {
+                        optimized.push(Some(NumericStep::Move { dst, src }));
+                    }
+                    continue;
+                }
+
                 optimized.push(Some(NumericStep::GetTabUpField { dst, upvalue, key }));
+                let state = field_states.entry(field_key).or_default();
+                state.available_value_reg = Some(dst);
             }
             NumericStep::SetTabUpField { upvalue, key, value } => {
                 let value = resolve_numeric_move_alias(&move_aliases, value);
+                let field_key = TableFieldKey {
+                    source: TableFieldSource::TabUp(upvalue),
+                    key,
+                };
+                // DSE: if previous store to same key with no intervening read.
+                if let Some(state) = field_states.get(&field_key) {
+                    if let Some(prev_output) = state.last_store_output
+                        && !state.read_since_last_store
+                    {
+                        optimized[prev_output] = None;
+                    }
+                }
+                let output_index = optimized.len();
                 optimized.push(Some(NumericStep::SetTabUpField { upvalue, key, value }));
+                let state = field_states.entry(field_key).or_default();
+                state.available_value_reg = Some(value);
+                state.last_store_output = Some(output_index);
+                state.read_since_last_store = false;
             }
             NumericStep::GetTableInt { dst, table, index } => {
                 let table = resolve_numeric_move_alias(&move_aliases, table);
                 let index = resolve_numeric_move_alias(&move_aliases, index);
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -609,7 +702,20 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
             }
             NumericStep::GetTableField { dst, table, key } => {
                 let table = resolve_numeric_move_alias(&move_aliases, table);
+                let table_value = resolve_register_alias(
+                    &register_values, &register_aliases, table,
+                ).root_value;
+                let field_key = TableFieldKey {
+                    source: TableFieldSource::Register(table_value),
+                    key,
+                };
+                // Check forwarding BEFORE clearing dst.
+                let forward_src = field_states
+                    .get(&field_key)
+                    .and_then(|s| s.available_value_reg);
+
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -617,12 +723,47 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                     &mut next_value_id,
                     dst,
                 );
+
+                if let Some(src) = forward_src {
+                    let state = field_states.entry(field_key).or_default();
+                    state.available_value_reg = Some(dst);
+                    if state.last_store_output.is_some() {
+                        state.read_since_last_store = true;
+                    }
+                    if src != dst {
+                        optimized.push(Some(NumericStep::Move { dst, src }));
+                    }
+                    continue;
+                }
+
                 optimized.push(Some(NumericStep::GetTableField { dst, table, key }));
+                let state = field_states.entry(field_key).or_default();
+                state.available_value_reg = Some(dst);
             }
             NumericStep::SetTableField { table, key, value } => {
                 let table = resolve_numeric_move_alias(&move_aliases, table);
                 let value = resolve_numeric_move_alias(&move_aliases, value);
+                let table_value = resolve_register_alias(
+                    &register_values, &register_aliases, table,
+                ).root_value;
+                let field_key = TableFieldKey {
+                    source: TableFieldSource::Register(table_value),
+                    key,
+                };
+                // DSE: if previous store to same key with no intervening read.
+                if let Some(state) = field_states.get(&field_key) {
+                    if let Some(prev_output) = state.last_store_output
+                        && !state.read_since_last_store
+                    {
+                        optimized[prev_output] = None;
+                    }
+                }
+                let output_index = optimized.len();
                 optimized.push(Some(NumericStep::SetTableField { table, key, value }));
+                let state = field_states.entry(field_key).or_default();
+                state.available_value_reg = Some(value);
+                state.last_store_output = Some(output_index);
+                state.read_since_last_store = false;
             }
             NumericStep::Binary { dst, lhs, rhs, op } => {
                 let lhs = normalize_numeric_operand_alias(&move_aliases, lhs);
@@ -648,6 +789,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                 };
 
                 clear_table_int_value_register(&mut register_slots, &mut key_states, dst);
+                clear_table_field_value_register(&mut field_states, dst);
                 move_aliases.remove(&dst);
                 reset_register_value(
                     &mut register_values,
@@ -1062,9 +1204,17 @@ fn detect_integer_self_update_value_flow(
 
         let dst_entry_kind = lowered_trace.entry_register_value_kind(dst);
         let dst_stable_kind = lowered_trace.entry_stable_register_value_kind(dst);
-        if !matches!(dst_entry_kind, Some(TraceValueKind::Integer))
-            && !matches!(dst_stable_kind, Some(TraceValueKind::Integer))
-        {
+        // Reject types that are definitely not integer.  Unknown (None) and
+        // Numeric are accepted because the tag guard at the native entry block
+        // will verify the actual type at runtime before any loop iteration.
+        let reject_integer = matches!(
+            dst_entry_kind,
+            Some(TraceValueKind::Float | TraceValueKind::Table | TraceValueKind::Boolean | TraceValueKind::Closure)
+        ) || matches!(
+            dst_stable_kind,
+            Some(TraceValueKind::Float | TraceValueKind::Table | TraceValueKind::Boolean | TraceValueKind::Closure)
+        );
+        if reject_integer {
             continue;
         }
 
@@ -1389,10 +1539,95 @@ fn detect_numeric_self_update_value_flow(
     None
 }
 
-fn build_numeric_value_state(steps: &[NumericStep], lowered_trace: &LoweredTrace) -> NumericValueState {
+pub(super) fn build_numeric_value_state(steps: &[NumericStep], lowered_trace: &LoweredTrace) -> NumericValueState {
     NumericValueState {
         self_update: detect_numeric_self_update_value_flow(steps, lowered_trace),
     }
+}
+
+/// Extract loop-invariant steps from the loop body into a prologue that runs once
+/// before the loop, and detect cross-iteration table field forwarding opportunities.
+///
+/// Returns `(prologue_steps, body_steps)`.
+///
+/// Phase 1 – LICM (Loop-Invariant Code Motion):
+///   A `GetTabUpField(dst, upvalue, key)` is hoisted if:
+///   1. No `SetUpval` for `upvalue` exists in the body.
+///   2. No `SetTabUpField` for the same `upvalue` exists in the body.
+///   3. No other step writes to `dst`.
+///
+/// Phase 2 – Cross-iteration table field forwarding:
+///   If the body ends with `SetTableField(table, key, value)` and begins with
+///   `GetTableField(dst, table, key)` where `dst == value`, the `GetTableField`
+///   can be moved into the prologue because the carried value from the previous
+///   iteration's `SetTableField` already resides in `dst`.
+pub(super) fn extract_loop_prologue(steps: &[NumericStep]) -> (Vec<NumericStep>, Vec<NumericStep>) {
+    let mut prologue = Vec::new();
+    let mut body: Vec<NumericStep> = steps.to_vec();
+
+    // Phase 1: LICM – hoist invariant GetTabUpField steps.
+    let mut hoist_indices = Vec::new();
+    for (i, step) in body.iter().enumerate() {
+        if let NumericStep::GetTabUpField { dst, upvalue, key: _ } = *step {
+            let has_set_upval = body.iter().any(|s| {
+                matches!(s, NumericStep::SetUpval { upvalue: up, .. } if *up == upvalue)
+            });
+            if has_set_upval {
+                continue;
+            }
+            let has_set_tab_up = body.iter().any(|s| {
+                matches!(s, NumericStep::SetTabUpField { upvalue: up, .. } if *up == upvalue)
+            });
+            if has_set_tab_up {
+                continue;
+            }
+            let other_writes_dst = body.iter().enumerate().any(|(j, s)| {
+                j != i && numeric_step_writes(*s).any(|w| w == dst)
+            });
+            if other_writes_dst {
+                continue;
+            }
+            hoist_indices.push(i);
+        }
+    }
+    for &i in hoist_indices.iter().rev() {
+        prologue.push(body.remove(i));
+    }
+    prologue.reverse();
+
+    // Phase 2: cross-iteration table field forwarding.
+    // Only applicable when at least one upvalue-table load was already hoisted
+    // (phase 1), guaranteeing the table register is truly loop-invariant.
+    if !prologue.is_empty() && body.len() >= 2 {
+        let first = body[0];
+        let last = body[body.len() - 1];
+        if let (
+            NumericStep::GetTableField {
+                dst: get_dst,
+                table: get_table,
+                key: get_key,
+            },
+            NumericStep::SetTableField {
+                table: set_table,
+                key: set_key,
+                value: set_value,
+            },
+        ) = (first, last)
+        {
+            if get_table == set_table
+                && get_key == set_key
+                && get_dst == set_value
+                && !body
+                    .iter()
+                    .any(|s| numeric_step_writes(*s).any(|w| w == get_table))
+            {
+                let get_step = body.remove(0);
+                prologue.push(get_step);
+            }
+        }
+    }
+
+    (prologue, body)
 }
 
 fn compile_numeric_lowering(

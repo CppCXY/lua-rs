@@ -228,6 +228,7 @@ pub(crate) enum LinearIntLoopGuard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CompiledTraceExecution {
     LoweredOnly,
+    LoweredSnippet,
     Native(NativeCompiledTrace),
 }
 
@@ -239,6 +240,7 @@ impl CompiledTraceExecution {
     pub(crate) fn family(&self) -> &'static str {
         match self {
             Self::LoweredOnly => "SummaryOnly",
+            Self::LoweredSnippet => "LoweredSnippet",
             Self::Native(native) => match native {
                 NativeCompiledTrace::Return { .. } => "NativeReturn",
                 NativeCompiledTrace::Return0 { .. } => "NativeReturn0",
@@ -247,6 +249,7 @@ impl CompiledTraceExecution {
                 NativeCompiledTrace::LinearIntJmpLoop { .. } => "NativeLinearIntJmpLoop",
                 NativeCompiledTrace::NumericForLoop { .. } => "NativeNumericForLoop",
                 NativeCompiledTrace::GuardedNumericForLoop { .. } => "NativeGuardedNumericForLoop",
+                NativeCompiledTrace::GuardedCallPrefix { .. } => "NativeGuardedCallPrefix",
                 NativeCompiledTrace::CallForLoop { .. } => "NativeCallForLoop",
                 NativeCompiledTrace::TForLoop { .. } => "NativeTForLoop",
                 NativeCompiledTrace::NumericJmpLoop { .. } => "NativeNumericJmpLoop",
@@ -313,6 +316,7 @@ pub(crate) enum NativeCompiledTrace {
     LinearIntJmpLoop { entry: NativeTraceEntry },
     NumericForLoop { entry: NativeTraceEntry },
     GuardedNumericForLoop { entry: NativeTraceEntry },
+    GuardedCallPrefix { entry: NativeTraceEntry },
     CallForLoop { entry: NativeTraceEntry },
     TForLoop { entry: NativeTraceEntry },
     NumericJmpLoop { entry: NativeTraceEntry },
@@ -348,6 +352,10 @@ impl PartialEq for NativeCompiledTrace {
             (
                 Self::GuardedNumericForLoop { entry: lhs },
                 Self::GuardedNumericForLoop { entry: rhs },
+            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (
+                Self::GuardedCallPrefix { entry: lhs },
+                Self::GuardedCallPrefix { entry: rhs },
             ) => std::ptr::fn_addr_eq(*lhs, *rhs),
             (Self::CallForLoop { entry: lhs }, Self::CallForLoop { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
@@ -415,7 +423,7 @@ impl CompiledTrace {
         lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> Option<Self> {
-        let execution = CompiledTraceExecution::LoweredOnly;
+        let execution = lowered_execution_for_artifact(artifact);
         Self::from_artifact_helper_plan_with_execution(
             artifact,
             ir,
@@ -639,9 +647,58 @@ fn execution_summary_for_dispatch(
     helper_plan_summary: HelperPlanDispatchSummary,
 ) -> HelperPlanDispatchSummary {
     match execution {
-        CompiledTraceExecution::LoweredOnly => helper_plan_summary,
+        CompiledTraceExecution::LoweredOnly | CompiledTraceExecution::LoweredSnippet => {
+            helper_plan_summary
+        }
         CompiledTraceExecution::Native(_) => native_dispatch_summary(native_profile),
     }
+}
+
+pub(crate) fn lowered_execution_for_artifact(artifact: &TraceArtifact) -> CompiledTraceExecution {
+    if supports_lowered_trace_snippet(artifact.ops.as_slice()) {
+        CompiledTraceExecution::LoweredSnippet
+    } else {
+        CompiledTraceExecution::LoweredOnly
+    }
+}
+
+fn supports_lowered_trace_snippet(ops: &[crate::lua_vm::jit::trace_recorder::TraceOp]) -> bool {
+    if ops.is_empty() {
+        return false;
+    }
+
+    if !matches!(
+        ops.last().map(|op| op.opcode),
+        Some(crate::OpCode::ForLoop | crate::OpCode::Jmp | crate::OpCode::Return0)
+    ) {
+        return false;
+    }
+
+    ops.iter().all(|op| {
+        matches!(
+            op.opcode,
+            crate::OpCode::Lt
+                | crate::OpCode::Le
+                | crate::OpCode::LeI
+                | crate::OpCode::Move
+                | crate::OpCode::AddI
+                | crate::OpCode::Sub
+                | crate::OpCode::LoadI
+                | crate::OpCode::LoadK
+                | crate::OpCode::GetUpval
+                | crate::OpCode::GetTabUp
+                | crate::OpCode::GetTable
+                | crate::OpCode::Len
+                | crate::OpCode::Add
+                | crate::OpCode::ModK
+                | crate::OpCode::SetTable
+                | crate::OpCode::Test
+                | crate::OpCode::Jmp
+                | crate::OpCode::Call
+                | crate::OpCode::ForLoop
+                | crate::OpCode::Return0
+        )
+    })
 }
 
 fn native_dispatch_summary(

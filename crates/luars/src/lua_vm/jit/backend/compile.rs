@@ -1468,4 +1468,123 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn lower_numeric_steps_forwards_duplicate_get_tabup_field() {
+        // Simulates: global_table.value = global_table.value + 1
+        // GetTabUp R5, 0, K0("global_table")
+        // GetField R6, R5, K1("value")
+        // AddI R6, R6, 1
+        // MmBinI companion
+        // GetTabUp R7, 0, K0("global_table") ← should be forwarded
+        // SetField R7, K1, R6
+        let mut vm = LuaVM::new(SafeOption::default());
+        let globals_key = vm.create_string("global_table").unwrap();
+        let value_key = vm.create_string("value").unwrap();
+        let lowered_trace = lowered_trace_with_constants(vec![globals_key, value_key]);
+
+        let insts = vec![
+            TraceIrInst {
+                pc: 100,
+                opcode: crate::OpCode::GetTabUp,
+                raw_instruction: Instruction::create_abck(crate::OpCode::GetTabUp, 5, 0, 0, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Upvalue(0), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![TraceIrOperand::Register(5)],
+            },
+            TraceIrInst {
+                pc: 101,
+                opcode: crate::OpCode::GetField,
+                raw_instruction: Instruction::create_abck(crate::OpCode::GetField, 6, 5, 1, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Register(5), TraceIrOperand::ConstantIndex(1)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            TraceIrInst {
+                pc: 102,
+                opcode: crate::OpCode::AddI,
+                raw_instruction: Instruction::create_abc(crate::OpCode::AddI, 6, 6, 128).as_u32(),
+                kind: TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(6)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            TraceIrInst {
+                pc: 103,
+                opcode: crate::OpCode::MmBinI,
+                raw_instruction: Instruction::create_abc(crate::OpCode::MmBinI, 6, 128, 6).as_u32(),
+                kind: TraceIrInstKind::MetamethodFallback,
+                reads: vec![TraceIrOperand::Register(6)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 104,
+                opcode: crate::OpCode::GetTabUp,
+                raw_instruction: Instruction::create_abck(crate::OpCode::GetTabUp, 7, 0, 0, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![TraceIrOperand::Upvalue(0), TraceIrOperand::ConstantIndex(0)],
+                writes: vec![TraceIrOperand::Register(7)],
+            },
+            TraceIrInst {
+                pc: 105,
+                opcode: crate::OpCode::SetField,
+                raw_instruction: Instruction::create_abck(crate::OpCode::SetField, 7, 1, 6, false)
+                    .as_u32(),
+                kind: TraceIrInstKind::TableAccess,
+                reads: vec![
+                    TraceIrOperand::Register(7),
+                    TraceIrOperand::ConstantIndex(1),
+                    TraceIrOperand::Register(6),
+                ],
+                writes: Vec::new(),
+            },
+        ];
+
+        let steps = lower_numeric_steps_for_native(&insts, &lowered_trace).unwrap();
+
+        // The second GetTabUp should be forwarded away, and the Move should
+        // be eliminated by alias resolution, leaving 4 steps:
+        // GetTabUpField, GetTableField, Binary(AddI), SetTableField
+        assert_eq!(steps.len(), 4);
+        assert!(matches!(steps[0], NumericStep::GetTabUpField { dst: 5, upvalue: 0, key: 0 }));
+        assert!(matches!(steps[1], NumericStep::GetTableField { dst: 6, table: 5, key: 1 }));
+        assert!(matches!(steps[2], NumericStep::Binary { dst: 6, op: NumericBinaryOp::Add, .. }));
+        // After forwarding + alias: SetTableField should use the original table register
+        assert!(matches!(steps[3], NumericStep::SetTableField { table: 5, key: 1, value: 6 }));
+    }
+
+    #[test]
+    fn extract_loop_prologue_hoists_invariant_and_cross_iter_carry() {
+        // Starting steps after mid-end: [GetTabUpField(5,0,0), GetTableField(6,5,1), Binary(6,Add), SetTableField(5,1,6)]
+        // LICM should hoist GetTabUpField(5,0,0) to prologue.
+        // Cross-iteration forwarding should detect SetTableField(5,1,6) → GetTableField(6,5,1)
+        // and hoist GetTableField to prologue as well.
+        // Result: prologue = [GetTabUpField(5,0,0), GetTableField(6,5,1)],
+        //         body    = [Binary(6,Add), SetTableField(5,1,6)]
+        let steps = vec![
+            NumericStep::GetTabUpField { dst: 5, upvalue: 0, key: 0 },
+            NumericStep::GetTableField { dst: 6, table: 5, key: 1 },
+            NumericStep::Binary {
+                dst: 6,
+                lhs: NumericOperand::Reg(6),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            },
+            NumericStep::SetTableField { table: 5, key: 1, value: 6 },
+        ];
+
+        let (prologue, body) = extract_loop_prologue(&steps);
+
+        // Prologue should contain the hoisted steps
+        assert_eq!(prologue.len(), 2, "prologue: {prologue:?}");
+        assert!(matches!(prologue[0], NumericStep::GetTabUpField { dst: 5, upvalue: 0, key: 0 }));
+        assert!(matches!(prologue[1], NumericStep::GetTableField { dst: 6, table: 5, key: 1 }));
+
+        // Body should be just Binary + SetTableField
+        assert_eq!(body.len(), 2, "body: {body:?}");
+        assert!(matches!(body[0], NumericStep::Binary { dst: 6, op: NumericBinaryOp::Add, .. }));
+        assert!(matches!(body[1], NumericStep::SetTableField { table: 5, key: 1, value: 6 }));
+    }
 }

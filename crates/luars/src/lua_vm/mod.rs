@@ -1795,6 +1795,8 @@ impl LuaVM {
         let snapshot = self.jit.stats_snapshot();
         let counters = snapshot.counters;
         let aborts = snapshot.aborts;
+        let cache_hits = self.jit.dispatch_cache_hits;
+        let cache_misses = self.jit.dispatch_cache_misses;
         let top_unsupported_opcode = snapshot
             .top_unsupported_opcode
             .map(|(opcode, count)| format!("{:?}={}", opcode, count))
@@ -1855,7 +1857,9 @@ impl LuaVM {
             - Recorded slots: {}\n\
             - Lowered-only slots: {}\n\
             - Executable slots: {}\n\
-            - Blacklisted slots: {}",
+            - Blacklisted slots: {}\n\
+            - Dispatch cache hits: {}\n\
+            - Dispatch cache misses: {}",
             counters.hot_headers,
             counters.hot_exits,
             counters.record_attempts,
@@ -1911,6 +1915,8 @@ impl LuaVM {
             snapshot.lowered_count,
             snapshot.executable_count,
             snapshot.blacklisted_count,
+            cache_hits,
+            cache_misses,
         )
     }
 

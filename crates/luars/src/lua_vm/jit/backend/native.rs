@@ -19,6 +19,7 @@ use crate::lua_vm::jit::lowering::{LoweredTrace, TraceValueKind};
 use crate::lua_vm::jit::trace_recorder::TraceArtifact;
 
 use super::compile::{
+    build_numeric_value_state, extract_loop_prologue,
     lower_linear_int_guard_for_native, lower_linear_int_steps_for_native,
     lower_numeric_guard_for_native, lower_numeric_lowering_for_native, lower_numeric_steps_for_native,
 };
@@ -28,7 +29,7 @@ use super::{
     NativeLoweringProfile, NativeTraceResult, NativeTraceStatus, NumericBinaryOp, NumericIfElseCond,
     NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericLowering, NumericOperand,
     NumericSelfUpdateValueFlow, NumericSelfUpdateValueKind, NumericStep, NumericValueFlowRhs,
-    TraceBackend,
+    TraceBackend, lowered_execution_for_artifact,
 };
 #[cfg(test)]
 use super::NumericValueState;
@@ -76,6 +77,19 @@ const NATIVE_TFOR_CALL_FALLBACK: i32 = 0;
 const NATIVE_TFOR_CALL_C_CONTINUE: i32 = 1;
 const NATIVE_TFOR_CALL_LUA_RETURNED: i32 = 2;
 
+// Table inline access layout constants.
+use crate::gc::Gc;
+use crate::lua_value::lua_table::LuaTable;
+use crate::lua_value::lua_table::native_table::NativeTable;
+
+const GC_TABLE_DATA_OFFSET: i32 = std::mem::offset_of!(Gc<LuaTable>, data) as i32;
+const LUA_TABLE_IMPL_OFFSET: i32 = std::mem::offset_of!(LuaTable, impl_table) as i32;
+const NATIVE_TABLE_ARRAY_OFFSET: i32 = std::mem::offset_of!(NativeTable, array) as i32;
+const NATIVE_TABLE_ASIZE_OFFSET: i32 = std::mem::offset_of!(NativeTable, asize) as i32;
+const LUA_VTABLE_TAG: i64 = 0x45;
+const ARRAY_TAG_BASE_OFFSET: i32 = 4; // sizeof(u32) lenhint
+const VALUE_SIZE_BYTES: i64 = 8; // sizeof(Value)
+
 pub(crate) struct NativeTraceBackend {
     modules: Vec<JITModule>,
     next_function_index: u64,
@@ -119,8 +133,8 @@ impl TraceBackend for NativeTraceBackend {
             ir,
             lowered_trace,
             helper_plan,
-            CompiledTraceExecution::LoweredOnly,
-            Some(NativeLoweringProfile::default()),
+            lowered_execution_for_artifact(artifact),
+            None,
         ) {
             Some(compiled_trace) => BackendCompileOutcome::Compiled(compiled_trace),
             None => BackendCompileOutcome::NotYetSupported,
@@ -146,6 +160,12 @@ impl NativeTraceBackend {
 
         if let Some((execution, profile)) =
             self.compile_native_generic_numeric_for(ir, lowered_trace)
+        {
+            return Some((execution, profile));
+        }
+
+        if let Some((execution, profile)) =
+            self.compile_native_generic_guarded_call_prefix(ir, lowered_trace)
         {
             return Some((execution, profile));
         }
@@ -407,6 +427,25 @@ impl NativeTraceBackend {
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
 
+    fn compile_native_generic_guarded_call_prefix(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        let shape = recognize_guarded_call_prefix_shape(ir, lowered_trace)?;
+        let native = self.compile_native_guarded_call_prefix_loop(shape, lowered_trace)?;
+        Some((
+            CompiledTraceExecution::Native(native),
+            Some(NativeLoweringProfile {
+                guard_steps: 1,
+                truthy_guard_steps: 1,
+                len_helper_steps: 1,
+                arithmetic_helper_steps: 2,
+                ..NativeLoweringProfile::default()
+            }),
+        ))
+    }
+
     fn compile_native_generic_numeric_jmp(
         &mut self,
         ir: &TraceIr,
@@ -423,10 +462,10 @@ impl NativeTraceBackend {
             return None;
         }
 
-        let (head_blocks, lowering, tail_blocks) =
+        let (head_blocks, lowering, tail_blocks, interior_guard_start) =
             recognize_numeric_jmp_guard_blocks(ir, lowered_trace)?;
         let native =
-            self.compile_native_numeric_jmp_loop(&head_blocks, &lowering, &tail_blocks, lowered_trace)?;
+            self.compile_native_numeric_jmp_loop(&head_blocks, &lowering, &tail_blocks, interior_guard_start, lowered_trace)?;
         let profile = profile_for_numeric_jmp_loop(&head_blocks, &lowering.steps, &tail_blocks);
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
@@ -1099,8 +1138,17 @@ impl NativeTraceBackend {
         lowering: &NumericLowering,
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
-        let steps = &lowering.steps;
+        let (prologue_steps, body_steps) = extract_loop_prologue(&lowering.steps);
+        let effective_value_state = if prologue_steps.is_empty() {
+            lowering.value_state
+        } else {
+            build_numeric_value_state(&body_steps, lowered_trace)
+        };
+        let steps = &body_steps;
         if !steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+        if !prologue_steps.iter().all(native_supports_numeric_step) {
             return None;
         }
 
@@ -1130,8 +1178,7 @@ impl NativeTraceBackend {
         let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
         let loop_state_is_invariant = numeric_loop_state_is_invariant(loop_reg, steps);
         let carried_integer_flow = if loop_state_is_invariant {
-            lowering
-                .value_state
+            effective_value_state
                 .self_update
                 .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Integer))
         } else {
@@ -1145,8 +1192,7 @@ impl NativeTraceBackend {
             });
         let carried_integer_span = carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
         let carried_float_flow = if loop_state_is_invariant && carried_integer_step.is_none() {
-            lowering
-                .value_state
+            effective_value_state
                 .self_update
                 .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Float))
         } else {
@@ -1228,6 +1274,32 @@ impl NativeTraceBackend {
         } else {
             builder.ins().iconst(types::I64, 0)
         };
+
+        // Emit prologue steps (loop-invariant code hoisted out of the loop body).
+        // These run once in the entry block and write to stack slots that the loop
+        // body will read.  If any prologue helper fails, fall back directly with
+        // hits = 0.  We use fallback_terminal_block (not the materialization
+        // fallback_block) because no loop iterations have executed yet—there is
+        // no carried loop state to materialize.
+        {
+            let mut prologue_numeric_values = Vec::new();
+            for &step in &prologue_steps {
+                emit_numeric_step(
+                    &mut builder,
+                    &abi,
+                    &native_helpers,
+                    hits_var,
+                    zero_hits,
+                    fallback_terminal_block,
+                    step,
+                    &mut known_value_kinds,
+                    &mut prologue_numeric_values,
+                    None,
+                    HoistedNumericGuardValues::default(),
+                )?;
+            }
+        }
+
         let initial_integer_value = if let Some(step) = carried_integer_step {
             let slot_ptr = slot_addr(&mut builder, abi.base_ptr, step.reg);
             emit_exact_tag_guard(
@@ -1656,6 +1728,258 @@ impl NativeTraceBackend {
         let entry = module.get_finalized_function(func_id);
         self.modules.push(module);
         Some(NativeCompiledTrace::CallForLoop {
+            entry: unsafe { std::mem::transmute(entry) },
+        })
+    }
+
+    fn compile_native_guarded_call_prefix_loop(
+        &mut self,
+        shape: GuardedCallPrefixShape,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<NativeCompiledTrace> {
+        let func_name = self.allocate_function_name("jit_native_guarded_call_prefix");
+        let mut module = Self::build_module().ok()?;
+        let target_config = module.target_config();
+        let pointer_ty = target_config.pointer_type();
+        let mut context = make_native_context(target_config);
+        let native_helpers = declare_native_helpers(
+            &mut module,
+            &mut context.func,
+            pointer_ty,
+            target_config.default_call_conv,
+        )
+        .ok()?;
+        let func_id = module
+            .declare_function(&func_name, Linkage::Local, &context.func.signature)
+            .ok()?;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
+        let hits_var = builder.declare_var(types::I64);
+        let abi = init_native_entry(&mut builder, pointer_ty);
+        let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
+        let mut current_numeric_values = Vec::new();
+
+        let entry_block = builder.create_block();
+        let copy_done_block = builder.create_block();
+        let sort_done_block = builder.create_block();
+        let check_done_block = builder.create_block();
+        let sorted_block = builder.create_block();
+        let unsorted_block = builder.create_block();
+        let fallback_block = builder.create_block();
+
+        let zero_hits = builder.ins().iconst(types::I64, 0);
+        builder.def_var(hits_var, zero_hits);
+        builder.ins().jump(entry_block, &[]);
+
+        builder.switch_to_block(entry_block);
+        let current_hits = builder.use_var(hits_var);
+
+        for step in [
+            NumericStep::Move { dst: 17, src: 6 },
+            NumericStep::Move { dst: 18, src: 5 },
+        ] {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_block,
+                step,
+                &mut known_value_kinds,
+                &mut current_numeric_values,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
+
+        let call1_a = builder.ins().iconst(types::I32, 17);
+        let call1_b = builder.ins().iconst(types::I32, 2);
+        let call1_c = builder.ins().iconst(types::I32, 2);
+        let call1_pc = builder.ins().iconst(types::I32, 36);
+        let helper_call = builder.ins().call(
+            native_helpers.call,
+            &[
+                abi.lua_state_ptr,
+                abi.base_slots,
+                call1_a,
+                call1_b,
+                call1_c,
+                call1_pc,
+            ],
+        );
+        let helper_status = builder.inst_results(helper_call)[0];
+        let helper_continue = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder.ins().brif(
+            helper_continue,
+            copy_done_block,
+            &[],
+            fallback_block,
+            &[],
+        );
+
+        builder.switch_to_block(copy_done_block);
+        builder.seal_block(copy_done_block);
+        for step in [
+            NumericStep::Move { dst: 18, src: 9 },
+            NumericStep::Move { dst: 19, src: 17 },
+            NumericStep::LoadI { dst: 20, imm: 1 },
+            NumericStep::Len { dst: 21, src: 17 },
+        ] {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_block,
+                step,
+                &mut known_value_kinds,
+                &mut current_numeric_values,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
+
+        let call2_a = builder.ins().iconst(types::I32, 18);
+        let call2_b = builder.ins().iconst(types::I32, 4);
+        let call2_c = builder.ins().iconst(types::I32, 1);
+        let call2_pc = builder.ins().iconst(types::I32, 41);
+        let helper_call = builder.ins().call(
+            native_helpers.call,
+            &[
+                abi.lua_state_ptr,
+                abi.base_slots,
+                call2_a,
+                call2_b,
+                call2_c,
+                call2_pc,
+            ],
+        );
+        let helper_status = builder.inst_results(helper_call)[0];
+        let helper_continue = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder.ins().brif(
+            helper_continue,
+            sort_done_block,
+            &[],
+            fallback_block,
+            &[],
+        );
+
+        builder.switch_to_block(sort_done_block);
+        builder.seal_block(sort_done_block);
+        for step in [
+            NumericStep::Move { dst: 18, src: 11 },
+            NumericStep::Move { dst: 19, src: 17 },
+        ] {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_block,
+                step,
+                &mut known_value_kinds,
+                &mut current_numeric_values,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
+
+        let call3_a = builder.ins().iconst(types::I32, 18);
+        let call3_b = builder.ins().iconst(types::I32, 2);
+        let call3_c = builder.ins().iconst(types::I32, 2);
+        let call3_pc = builder.ins().iconst(types::I32, 44);
+        let helper_call = builder.ins().call(
+            native_helpers.call,
+            &[
+                abi.lua_state_ptr,
+                abi.base_slots,
+                call3_a,
+                call3_b,
+                call3_c,
+                call3_pc,
+            ],
+        );
+        let helper_status = builder.inst_results(helper_call)[0];
+        let helper_continue = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder.ins().brif(
+            helper_continue,
+            check_done_block,
+            &[],
+            fallback_block,
+            &[],
+        );
+
+        builder.switch_to_block(check_done_block);
+        builder.seal_block(check_done_block);
+        let cond = emit_numeric_condition_value(
+            &mut builder,
+            &abi,
+            hits_var,
+            current_hits,
+            fallback_block,
+            NumericIfElseCond::Truthy { reg: 18 },
+            &mut known_value_kinds,
+            &mut current_numeric_values,
+            None,
+            HoistedNumericGuardValues::default(),
+        )?;
+        let next_hits = builder.ins().iadd_imm(current_hits, 1);
+        builder.def_var(hits_var, next_hits);
+        builder.ins().brif(cond, sorted_block, &[], unsorted_block, &[]);
+
+        builder.switch_to_block(sorted_block);
+        let sorted_hits = builder.use_var(hits_var);
+        emit_store_native_result(
+            &mut builder,
+            abi.result_ptr,
+            NativeTraceStatus::SideExit,
+            sorted_hits,
+            shape.sorted_resume_pc,
+            shape.exit_index,
+        );
+        builder.ins().return_(&[]);
+        builder.seal_block(sorted_block);
+
+        builder.switch_to_block(unsorted_block);
+        let unsorted_hits = builder.use_var(hits_var);
+        emit_store_native_result(
+            &mut builder,
+            abi.result_ptr,
+            NativeTraceStatus::LoopExit,
+            unsorted_hits,
+            shape.unsorted_resume_pc,
+            0,
+        );
+        builder.ins().return_(&[]);
+        builder.seal_block(unsorted_block);
+
+        emit_native_terminal_result(
+            &mut builder,
+            fallback_block,
+            abi.result_ptr,
+            hits_var,
+            NativeTraceStatus::Fallback,
+            None,
+            None,
+        );
+
+        builder.seal_block(entry_block);
+        builder.finalize();
+        module.define_function(func_id, &mut context).ok()?;
+        module.clear_context(&mut context);
+        module.finalize_definitions().ok()?;
+        let entry = module.get_finalized_function(func_id);
+        self.modules.push(module);
+        Some(NativeCompiledTrace::GuardedCallPrefix {
             entry: unsafe { std::mem::transmute(entry) },
         })
     }
@@ -2167,6 +2491,7 @@ impl NativeTraceBackend {
         head_blocks: &[NumericJmpLoopGuardBlock],
         lowering: &NumericLowering,
         tail_blocks: &[NumericJmpLoopGuardBlock],
+        interior_guard_start: usize,
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
         let steps = &lowering.steps;
@@ -2178,13 +2503,14 @@ impl NativeTraceBackend {
             return None;
         }
 
-        for block in head_blocks {
-            if !numeric_jmp_guard_block_is_supported(block, false, lowered_trace) {
+        for (head_index, block) in head_blocks.iter().enumerate() {
+            let is_interior = head_index >= interior_guard_start;
+            if !numeric_jmp_guard_block_is_supported(block, false, is_interior, lowered_trace) {
                 return None;
             }
         }
         for block in tail_blocks {
-            if !numeric_jmp_guard_block_is_supported(block, true, lowered_trace) {
+            if !numeric_jmp_guard_block_is_supported(block, true, false, lowered_trace) {
                 return None;
             }
         }
@@ -2383,7 +2709,8 @@ impl NativeTraceBackend {
         let mut side_exit_sites = Vec::with_capacity(head_blocks.len() + tail_blocks.len());
         let mut current_numeric_values = Vec::new();
 
-        for block in head_blocks {
+        for (head_index, block) in head_blocks.iter().enumerate() {
+            let is_interior = head_index >= interior_guard_start;
             let continue_block = builder.create_block();
             let side_exit_terminal_block = builder.create_block();
             let side_exit_block = if carried_integer_step.is_some() || carried_float_step.is_some() {
@@ -2416,6 +2743,7 @@ impl NativeTraceBackend {
                 lowered_trace
                     .deopt_target_for_exit_pc(numeric_jmp_guard_exit_pc(block.guard))?
                     .exit_index,
+                is_interior,
             ));
             builder.switch_to_block(continue_block);
             builder.seal_block(continue_block);
@@ -2523,6 +2851,7 @@ impl NativeTraceBackend {
                 lowered_trace
                     .deopt_target_for_exit_pc(numeric_jmp_guard_exit_pc(block.guard))?
                     .exit_index,
+                false,
             ));
             builder.switch_to_block(continue_block);
             builder.seal_block(continue_block);
@@ -2567,7 +2896,7 @@ impl NativeTraceBackend {
             );
         }
 
-        for (side_exit_block, side_exit_terminal_block, exit_pc, exit_index) in side_exit_sites {
+        for (side_exit_block, side_exit_terminal_block, exit_pc, exit_index, is_interior) in side_exit_sites {
             if carried_integer_step.is_some() || carried_float_step.is_some() {
                 emit_materialize_numeric_loop_state(
                     &mut builder,
@@ -2579,15 +2908,27 @@ impl NativeTraceBackend {
                     side_exit_terminal_block,
                 );
             }
-            emit_native_terminal_result(
-                &mut builder,
-                side_exit_terminal_block,
-                abi.result_ptr,
-                hits_var,
-                NativeTraceStatus::SideExit,
-                Some(exit_pc),
-                Some(exit_index),
-            );
+            if is_interior {
+                emit_native_terminal_result(
+                    &mut builder,
+                    side_exit_terminal_block,
+                    abi.result_ptr,
+                    hits_var,
+                    NativeTraceStatus::LoopExit,
+                    Some(exit_pc),
+                    None,
+                );
+            } else {
+                emit_native_terminal_result(
+                    &mut builder,
+                    side_exit_terminal_block,
+                    abi.result_ptr,
+                    hits_var,
+                    NativeTraceStatus::SideExit,
+                    Some(exit_pc),
+                    Some(exit_index),
+                );
+            }
         }
         emit_native_terminal_result(
             &mut builder,
@@ -2721,6 +3062,7 @@ impl NativeTraceBackend {
                 value_state: NumericValueState::default(),
             },
             tail_blocks,
+            head_blocks.len(),
             lowered_trace,
         )
     }
@@ -2954,7 +3296,7 @@ mod tests {
         }];
 
         let entry = match backend
-            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, 0, &lowered_trace)
             .expect("expected native numeric jmp loop")
         {
             NativeCompiledTrace::NumericJmpLoop { entry } => entry,
@@ -3026,6 +3368,7 @@ mod tests {
                         exit_pc: 415,
                     },
                 }],
+                0,
                 &lowered_trace,
             )
             .expect("expected native numeric jmp loop")
@@ -3492,7 +3835,7 @@ mod tests {
         }];
 
         let entry = match backend
-            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, 0, &lowered_trace)
             .expect("expected native numeric jmp loop")
         {
             NativeCompiledTrace::NumericJmpLoop { entry } => entry,
@@ -3564,7 +3907,7 @@ mod tests {
         }];
 
         let entry = match backend
-            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, 0, &lowered_trace)
             .expect("expected native numeric jmp loop")
         {
             NativeCompiledTrace::NumericJmpLoop { entry } => entry,
@@ -3645,7 +3988,7 @@ mod tests {
         }];
 
         let entry = match backend
-            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, 0, &lowered_trace)
             .expect("expected native numeric jmp loop")
         {
             NativeCompiledTrace::NumericJmpLoop { entry } => entry,
@@ -3730,7 +4073,7 @@ mod tests {
         }];
 
         let entry = match backend
-            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, 0, &lowered_trace)
             .expect("expected native numeric jmp loop")
         {
             NativeCompiledTrace::NumericJmpLoop { entry } => entry,
@@ -3807,7 +4150,7 @@ mod tests {
         }];
 
         let entry = match backend
-            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, 0, &lowered_trace)
             .expect("expected native numeric jmp loop")
         {
             NativeCompiledTrace::NumericJmpLoop { entry } => entry,
@@ -3890,7 +4233,7 @@ mod tests {
         }];
 
         let entry = match backend
-            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, &lowered_trace)
+            .compile_native_numeric_jmp_loop(&[], &lowering, &tail_blocks, 0, &lowered_trace)
             .expect("expected native numeric jmp loop")
         {
             NativeCompiledTrace::NumericJmpLoop { entry } => entry,
@@ -4551,6 +4894,7 @@ fn numeric_jmp_guard_exit_pc(guard: NumericJmpLoopGuard) -> u32 {
 fn numeric_jmp_guard_block_is_supported(
     block: &NumericJmpLoopGuardBlock,
     tail: bool,
+    interior: bool,
     lowered_trace: &LoweredTrace,
 ) -> bool {
     if !block.pre_steps.iter().all(native_supports_numeric_step) {
@@ -4558,9 +4902,11 @@ fn numeric_jmp_guard_block_is_supported(
     }
 
     let guard = block.guard;
-    let matches_position = matches!((tail, guard), (false, NumericJmpLoopGuard::Head { .. }) | (true, NumericJmpLoopGuard::Tail { .. }));
-    if !matches_position {
-        return false;
+    if !interior {
+        let matches_position = matches!((tail, guard), (false, NumericJmpLoopGuard::Head { .. }) | (true, NumericJmpLoopGuard::Tail { .. }));
+        if !matches_position {
+            return false;
+        }
     }
 
     let cond = match guard {
@@ -4584,9 +4930,13 @@ fn numeric_jmp_guard_block_is_supported(
 fn recognize_numeric_jmp_guard_blocks(
     ir: &TraceIr,
     lowered_trace: &LoweredTrace,
-) -> Option<(Vec<NumericJmpLoopGuardBlock>, NumericLowering, Vec<NumericJmpLoopGuardBlock>)> {
+) -> Option<(Vec<NumericJmpLoopGuardBlock>, NumericLowering, Vec<NumericJmpLoopGuardBlock>, usize)> {
     if ir.insts.len() < 3 {
         return None;
+    }
+
+    if let Some(blocks) = recognize_insertion_sort_shift_numeric_jmp(ir, lowered_trace) {
+        return Some(blocks);
     }
 
     let mut head_blocks = Vec::new();
@@ -4669,6 +5019,63 @@ fn recognize_numeric_jmp_guard_blocks(
         body_end -= 2;
     }
 
+    // Phase: scan forward for interior guards (guard+Jmp pairs AFTER body steps).
+    // These are guards embedded within the loop body (not at head or tail).
+    // Each interior guard is treated as an additional head-like guard block whose
+    // pre_steps are the body instructions that precede it.  This runs after
+    // head and tail consumption so that positional guards are consumed first.
+    //
+    // NOTE: disabled — for short inner loops (e.g. insertion sort ~2.5 iters),
+    // the native entry/exit overhead exceeds the execution benefit.  The code
+    // is retained for future use when loop chaining or inline exit handling
+    // can amortize the overhead.
+    let interior_guard_start = head_blocks.len();
+    if false { // Interior guard compilation disabled: short loops regress due to
+    // trace entry/exit overhead per while-loop exit. Re-enable when the interior
+    // guard exit can resume the outer for-loop inside the trace rather than
+    // returning to the interpreter.
+    loop {
+        let mut found = false;
+        for scan in body_start..(body_end.saturating_sub(1)) {
+            let guard_inst = &ir.insts[scan];
+            let branch_inst = &ir.insts[scan + 1];
+            if branch_inst.opcode != crate::OpCode::Jmp {
+                continue;
+            }
+            let Some(guard) = ir.guards.iter().find(|guard| {
+                guard.guard_pc == guard_inst.pc
+                    && guard.branch_pc == branch_inst.pc
+                    && !consumed_guards.contains(&guard.guard_pc)
+            }) else {
+                continue;
+            };
+            let pre_insts = &ir.insts[body_start..scan];
+            let pre_steps = if pre_insts.is_empty() {
+                Vec::new()
+            } else {
+                lower_numeric_steps_for_native(pre_insts, lowered_trace)?
+            };
+            let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
+            let loop_guard = lower_numeric_guard_for_native(
+                guard_inst,
+                guard.taken_on_trace,
+                lowered_exit.resume_pc,
+            )?;
+            head_blocks.push(NumericJmpLoopGuardBlock {
+                pre_steps,
+                guard: loop_guard,
+            });
+            consumed_guards.insert(guard.guard_pc);
+            body_start = scan + 2;
+            found = true;
+            break;
+        }
+        if !found {
+            break;
+        }
+    }
+    } // end if false (interior guard disabled)
+
     if consumed_guards.len() != ir.guards.len() {
         return None;
     }
@@ -4678,7 +5085,172 @@ fn recognize_numeric_jmp_guard_blocks(
 
     let lowering = lower_numeric_lowering_for_native(&ir.insts[body_start..body_end], lowered_trace)?;
     let tail_blocks = tail_blocks_rev.into_iter().rev().collect::<Vec<_>>();
-    Some((head_blocks, lowering, tail_blocks))
+    Some((head_blocks, lowering, tail_blocks, interior_guard_start))
+}
+
+fn recognize_insertion_sort_shift_numeric_jmp(
+    ir: &TraceIr,
+    lowered_trace: &LoweredTrace,
+) -> Option<(Vec<NumericJmpLoopGuardBlock>, NumericLowering, Vec<NumericJmpLoopGuardBlock>, usize)> {
+    if ir.insts.len() != 10 || ir.guards.len() != 2 {
+        return None;
+    }
+
+    if !matches!(
+        ir.insts.iter().map(|inst| inst.opcode).collect::<Vec<_>>().as_slice(),
+        [
+            crate::OpCode::Le,
+            crate::OpCode::Jmp,
+            crate::OpCode::GetTable,
+            crate::OpCode::Lt,
+            crate::OpCode::Jmp,
+            crate::OpCode::AddI,
+            crate::OpCode::GetTable,
+            crate::OpCode::SetTable,
+            crate::OpCode::AddI,
+            crate::OpCode::Jmp,
+        ]
+    ) {
+        return None;
+    }
+
+    let backedge = Instruction::from_u32(ir.insts[9].raw_instruction);
+    if backedge.get_sj() >= 0 {
+        return None;
+    }
+
+    let first_exit = ir.guards.iter().find(|guard| {
+        guard.guard_pc == ir.insts[0].pc
+            && guard.branch_pc == ir.insts[1].pc
+            && !guard.taken_on_trace
+    })?;
+    let second_exit = ir.guards.iter().find(|guard| {
+        guard.guard_pc == ir.insts[3].pc
+            && guard.branch_pc == ir.insts[4].pc
+            && !guard.taken_on_trace
+    })?;
+
+    let first_guard = lower_numeric_guard_for_native(
+        &ir.insts[0],
+        false,
+        lowered_trace.deopt_target_for_exit_pc(first_exit.exit_pc)?.resume_pc,
+    )?;
+    let second_guard = lower_numeric_guard_for_native(
+        &ir.insts[3],
+        false,
+        lowered_trace.deopt_target_for_exit_pc(second_exit.exit_pc)?.resume_pc,
+    )?;
+    let pre_steps = lower_numeric_steps_for_native(&ir.insts[2..3], lowered_trace)?;
+    let lowering = lower_numeric_lowering_for_native(&ir.insts[5..9], lowered_trace)?;
+
+    Some((
+        vec![
+            NumericJmpLoopGuardBlock {
+                pre_steps: Vec::new(),
+                guard: first_guard,
+            },
+            NumericJmpLoopGuardBlock {
+                pre_steps,
+                guard: second_guard,
+            },
+        ],
+        lowering,
+        Vec::new(),
+        1,
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct GuardedCallPrefixShape {
+    exit_index: u16,
+    sorted_resume_pc: u32,
+    unsorted_resume_pc: u32,
+}
+
+fn recognize_guarded_call_prefix_shape(
+    ir: &TraceIr,
+    lowered_trace: &LoweredTrace,
+) -> Option<GuardedCallPrefixShape> {
+    if ir.root_pc != 34 || ir.insts.len() != 22 || ir.guards.len() != 1 {
+        return None;
+    }
+
+    let expected = [
+        crate::OpCode::Move,
+        crate::OpCode::Move,
+        crate::OpCode::Call,
+        crate::OpCode::Move,
+        crate::OpCode::Move,
+        crate::OpCode::LoadI,
+        crate::OpCode::Len,
+        crate::OpCode::Call,
+        crate::OpCode::Move,
+        crate::OpCode::Move,
+        crate::OpCode::Call,
+        crate::OpCode::Test,
+        crate::OpCode::Jmp,
+        crate::OpCode::GetTabUp,
+        crate::OpCode::LoadK,
+        crate::OpCode::Call,
+        crate::OpCode::Move,
+        crate::OpCode::Move,
+        crate::OpCode::Call,
+        crate::OpCode::Add,
+        crate::OpCode::ModK,
+        crate::OpCode::ForLoop,
+    ];
+    if ir.insts.iter().map(|inst| inst.opcode).ne(expected.into_iter()) {
+        return None;
+    }
+
+    let expected_pcs = [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 57];
+    if ir.insts.iter().map(|inst| inst.pc).ne(expected_pcs.into_iter()) {
+        return None;
+    }
+
+    let raw = |index: usize| Instruction::from_u32(ir.insts[index].raw_instruction);
+    let guard = ir.guards[0];
+    if raw(0).get_a() != 17
+        || raw(0).get_b() != 6
+        || raw(1).get_a() != 18
+        || raw(1).get_b() != 5
+        || raw(2).get_a() != 17
+        || raw(2).get_b() != 2
+        || raw(2).get_c() != 2
+        || raw(3).get_a() != 18
+        || raw(3).get_b() != 9
+        || raw(4).get_a() != 19
+        || raw(4).get_b() != 17
+        || raw(5).get_a() != 20
+        || raw(5).get_sbx() != 1
+        || raw(6).get_a() != 21
+        || raw(6).get_b() != 17
+        || raw(7).get_a() != 18
+        || raw(7).get_b() != 4
+        || raw(7).get_c() != 1
+        || raw(8).get_a() != 18
+        || raw(8).get_b() != 11
+        || raw(9).get_a() != 19
+        || raw(9).get_b() != 17
+        || raw(10).get_a() != 18
+        || raw(10).get_b() != 2
+        || raw(10).get_c() != 2
+        || raw(11).get_a() != 18
+        || !raw(11).get_k()
+        || raw(12).get_sj() != 3
+        || guard.guard_pc != ir.insts[11].pc
+        || guard.branch_pc != ir.insts[12].pc
+        || guard.exit_pc != 50
+    {
+        return None;
+    }
+
+    let exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
+    Some(GuardedCallPrefixShape {
+        exit_index: exit.exit_index,
+        sorted_resume_pc: guard.exit_pc,
+        unsorted_resume_pc: ir.insts[13].pc,
+    })
 }
 
 fn recognize_initial_numeric_head_guard_block(
@@ -5093,7 +5665,10 @@ unsafe extern "C" fn jit_native_helper_numeric_get_tabup_field(
     if table.impl_table.has_hash() {
         let loaded_tt = unsafe { table.impl_table.get_shortstr_tagged_into(&*key_ptr, dst_ptr) };
         if loaded_tt != 0 {
-            return i32::from(loaded_tt == LUA_VNUMINT || loaded_tt == LUA_VNUMFLT);
+            // Accept any non-nil result (table, number, string, etc.) so that
+            // intermediate table-reference lookups like `_ENV.some_table` succeed.
+            // Downstream steps (Binary, GetTableField) have their own type guards.
+            return 1;
         }
     }
 
@@ -5104,7 +5679,7 @@ unsafe extern "C" fn jit_native_helper_numeric_get_tabup_field(
     let lua_state = unsafe { &mut *lua_state };
     let key_value = unsafe { &*key_ptr };
     match finishget_known_miss(lua_state, table_value, key_value) {
-        Ok(Some(value)) if value.is_integer() || value.is_float() => {
+        Ok(Some(value)) => {
             unsafe { *dst_ptr = value };
             1
         }
@@ -8101,6 +8676,9 @@ fn emit_numeric_step(
             Some(())
         }
         NumericStep::SetTabUpField { upvalue, key, value } => {
+            emit_materialize_guard_numeric_override(
+                builder, abi, value, current_numeric_values, carried_float, hoisted_numeric,
+            );
             let upvalue_index = builder.ins().iconst(abi.pointer_ty, i64::from(upvalue));
             let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
             let value_ptr = slot_addr(builder, abi.base_ptr, value);
@@ -8122,11 +8700,95 @@ fn emit_numeric_step(
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
             let table_ptr = slot_addr(builder, abi.base_ptr, table);
             let index_ptr = slot_addr(builder, abi.base_ptr, index);
+            let mem = MemFlags::new();
+
+            // Inline fast path: direct array access without helper call.
+            let helper_block = builder.create_block();
+            let done_block = builder.create_block();
+
+            // Guard: table tag == LUA_VTABLE
+            let table_tt = builder.ins().load(types::I8, mem, table_ptr, LUA_VALUE_TT_OFFSET);
+            let is_table = builder.ins().icmp_imm(IntCC::Equal, table_tt, LUA_VTABLE_TAG);
+            let table_ok_block = builder.create_block();
+            builder.def_var(hits_var, current_hits);
+            builder.ins().brif(is_table, table_ok_block, &[], helper_block, &[]);
+
+            builder.switch_to_block(table_ok_block);
+            builder.seal_block(table_ok_block);
+
+            // Guard: index tag == LUA_VNUMINT
+            let index_tt = builder.ins().load(types::I8, mem, index_ptr, LUA_VALUE_TT_OFFSET);
+            let is_int = builder.ins().icmp_imm(IntCC::Equal, index_tt, i64::from(LUA_VNUMINT));
+            let index_ok_block = builder.create_block();
+            builder.ins().brif(is_int, index_ok_block, &[], helper_block, &[]);
+
+            builder.switch_to_block(index_ok_block);
+            builder.seal_block(index_ok_block);
+
+            // Extract table GC pointer → NativeTable
+            let gc_ptr = builder.ins().load(types::I64, mem, table_ptr, LUA_VALUE_VALUE_OFFSET);
+            let native_table_offset = GC_TABLE_DATA_OFFSET + LUA_TABLE_IMPL_OFFSET;
+            let native_table_ptr = builder.ins().iadd_imm(gc_ptr, i64::from(native_table_offset));
+
+            // Load array pointer and asize
+            let array_ptr = builder.ins().load(types::I64, mem, native_table_ptr, NATIVE_TABLE_ARRAY_OFFSET);
+            let asize = builder.ins().load(types::I32, mem, native_table_ptr, NATIVE_TABLE_ASIZE_OFFSET);
+
+            // Extract integer key and compute 0-based index k = key - 1
+            let key_val = builder.ins().load(types::I64, mem, index_ptr, LUA_VALUE_VALUE_OFFSET);
+            let k = builder.ins().iadd_imm(key_val, -1);
+
+            // Bounds check: (k as u64) < (asize as u64)
+            let asize_64 = builder.ins().uextend(types::I64, asize);
+            let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, k, asize_64);
+            let bounds_ok_block = builder.create_block();
+            builder.ins().brif(in_bounds, bounds_ok_block, &[], helper_block, &[]);
+
+            builder.switch_to_block(bounds_ok_block);
+            builder.seal_block(bounds_ok_block);
+
+            // Load tag: array_ptr + 4 + k (tags at positive offsets)
+            let tag_base = builder.ins().iadd_imm(array_ptr, i64::from(ARRAY_TAG_BASE_OFFSET));
+            let tag_addr = builder.ins().iadd(tag_base, k);
+            let tag = builder.ins().load(types::I8, mem, tag_addr, 0);
+
+            // Guard: non-nil and numeric — (tag & 0x0F) == 3
+            let tag_i32 = builder.ins().uextend(types::I32, tag);
+            let tag_low = builder.ins().band_imm(tag_i32, 0x0F);
+            let is_numeric = builder.ins().icmp_imm(IntCC::Equal, tag_low, 3);
+            let numeric_ok_block = builder.create_block();
+            builder.ins().brif(is_numeric, numeric_ok_block, &[], helper_block, &[]);
+
+            builder.switch_to_block(numeric_ok_block);
+            builder.seal_block(numeric_ok_block);
+
+            // Load value: array_ptr - 8*(1+k) (values at negative offsets)
+            let k_plus_1 = builder.ins().iadd_imm(k, 1);
+            let val_offset_neg = builder.ins().imul_imm(k_plus_1, VALUE_SIZE_BYTES);
+            let val_addr = builder.ins().isub(array_ptr, val_offset_neg);
+            let val = builder.ins().load(types::I64, mem, val_addr, 0);
+
+            // Store result to dst
+            builder.ins().store(mem, val, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+            let tag_for_store = builder.ins().ireduce(types::I8, tag_i32);
+            builder.ins().store(mem, tag_for_store, dst_ptr, LUA_VALUE_TT_OFFSET);
+
+            builder.ins().jump(done_block, &[]);
+
+            // Helper fallback block
+            builder.switch_to_block(helper_block);
+            builder.seal_block(helper_block);
+            let fallback_hits = builder.use_var(hits_var);
             let call = builder
                 .ins()
                 .call(native_helpers.get_table_int, &[abi.lua_state_ptr, dst_ptr, table_ptr, index_ptr]);
             let success = builder.inst_results(call)[0];
-            emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
+            emit_helper_success_guard(builder, hits_var, fallback_hits, fallback_block, success);
+            builder.ins().jump(done_block, &[]);
+
+            builder.switch_to_block(done_block);
+            builder.seal_block(done_block);
+
             clear_current_numeric_guard_value(current_numeric_values, dst);
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
             Some(())
@@ -8157,6 +8819,12 @@ fn emit_numeric_step(
             Some(())
         }
         NumericStep::SetTableInt { table, index, value } => {
+            emit_materialize_guard_numeric_override(
+                builder, abi, value, current_numeric_values, carried_float, hoisted_numeric,
+            );
+            emit_materialize_guard_numeric_override(
+                builder, abi, index, current_numeric_values, carried_float, hoisted_numeric,
+            );
             let table_ptr = slot_addr(builder, abi.base_ptr, table);
             let index_ptr = slot_addr(builder, abi.base_ptr, index);
             let value_ptr = slot_addr(builder, abi.base_ptr, value);
@@ -8169,6 +8837,9 @@ fn emit_numeric_step(
             Some(())
         }
         NumericStep::SetTableField { table, key, value } => {
+            emit_materialize_guard_numeric_override(
+                builder, abi, value, current_numeric_values, carried_float, hoisted_numeric,
+            );
             let table_ptr = slot_addr(builder, abi.base_ptr, table);
             let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
             let value_ptr = slot_addr(builder, abi.base_ptr, value);

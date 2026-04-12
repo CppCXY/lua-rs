@@ -9,6 +9,7 @@ use native_table::NativeTable;
 /// With u32, we cover all 26 TmKind values (bits 0-25).
 const MASK_FLAGS: u32 = (1u32 << 26) - 1;
 
+#[repr(C)]
 pub struct LuaTable {
     meta: TablePtr,
     /// Bit-flag cache for absent metamethods (fasttm).
