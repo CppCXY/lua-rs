@@ -5,6 +5,8 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaValue, LuaValueKind};
+#[cfg(feature = "jit")]
+use crate::lua_vm::CFunction;
 use crate::lua_vm::LuaResult;
 use crate::lua_vm::LuaState;
 use crate::lua_vm::{LuaError, LuaRng};
@@ -314,9 +316,7 @@ fn math_max(l: &mut LuaState) -> LuaResult<usize> {
     let mut max_arg = first;
 
     for i in 2..=argc {
-        let arg = l
-            .get_arg(i)
-            .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
+        let arg = unsafe { l.get_arg_unchecked(i) };
         let _ = arg
             .as_number()
             .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
@@ -359,9 +359,7 @@ fn math_min(l: &mut LuaState) -> LuaResult<usize> {
     let mut min_arg = first;
 
     for i in 2..=argc {
-        let arg = l
-            .get_arg(i)
-            .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
+        let arg = unsafe { l.get_arg_unchecked(i) };
         let _ = arg
             .as_number()
             .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
@@ -414,23 +412,19 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
         0 => {
             // No arguments: return float in [0, 1)
             let r = l.vm_mut().rng.next_float();
-            l.push_value(LuaValue::float(r))?;
+            unsafe { l.push_value_unchecked(LuaValue::float(r)) };
             Ok(1)
         }
         1 => {
             let rv = l.vm_mut().rng.next_rand();
-            let up = l
-                .get_arg(1)
-                .ok_or_else(|| {
-                    l.error("bad argument #1 to 'random' (number expected)".to_string())
-                })?
+            let up = unsafe { l.get_arg_unchecked(1) }
                 .as_integer()
                 .ok_or_else(|| {
                     l.error("bad argument #1 to 'random' (number expected, got float)".to_string())
                 })?;
             if up == 0 {
                 // random(0): return raw random integer
-                l.push_value(LuaValue::integer(rv as i64))?;
+                unsafe { l.push_value_unchecked(LuaValue::integer(rv as i64)) };
                 return Ok(1);
             }
             // random(n): return random integer in [1, n]
@@ -438,25 +432,17 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
                 return Err(l.error("bad argument #1 to 'random' (interval is empty)".to_string()));
             }
             let result = project(rv, 1, up as u64)?;
-            l.push_value(LuaValue::integer(result))?;
+            unsafe { l.push_value_unchecked(LuaValue::integer(result)) };
             Ok(1)
         }
         _ => {
             let rv = l.vm_mut().rng.next_rand();
-            let low = l
-                .get_arg(1)
-                .ok_or_else(|| {
-                    l.error("bad argument #1 to 'random' (number expected)".to_string())
-                })?
+            let low = unsafe { l.get_arg_unchecked(1) }
                 .as_integer()
                 .ok_or_else(|| {
                     l.error("bad argument #1 to 'random' (number expected, got float)".to_string())
                 })?;
-            let up = l
-                .get_arg(2)
-                .ok_or_else(|| {
-                    l.error("bad argument #2 to 'random' (number expected)".to_string())
-                })?
+            let up = unsafe { l.get_arg_unchecked(2) }
                 .as_integer()
                 .ok_or_else(|| {
                     l.error("bad argument #2 to 'random' (number expected, got float)".to_string())
@@ -465,7 +451,7 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
                 return Err(l.error("bad argument #2 to 'random' (interval is empty)".to_string()));
             }
             let result = project(rv, low as u64, up as u64)?;
-            l.push_value(LuaValue::integer(result))?;
+            unsafe { l.push_value_unchecked(LuaValue::integer(result)) };
             Ok(1)
         }
     }
@@ -482,6 +468,287 @@ fn project(rv: u64, low: u64, up: u64) -> LuaResult<i64> {
         // Compute rv % range using rejection sampling to avoid bias
         // Simple version: just use modulo (C Lua does this too for the common case)
         Ok(low.wrapping_add(rv % range) as i64)
+    }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_stack_arg(func_idx: usize, index: usize) -> usize {
+    func_idx + index
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_checknumber(
+    l: &mut LuaState,
+    func_idx: usize,
+    nargs: usize,
+    index: usize,
+    fname: &str,
+) -> Result<f64, LuaError> {
+    let value = if index <= nargs {
+        unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, index)) }
+    } else {
+        LuaValue::nil()
+    };
+    if let Some(f) = value.as_number() {
+        return Ok(f);
+    }
+    let t = crate::stdlib::debug::objtypename(l, &value);
+    Err(l.error(format!(
+        "bad argument #{} to '{}' (number expected, got {})",
+        index, fname, t
+    )))
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn finish_fast_single_result(
+    l: &mut LuaState,
+    func_idx: usize,
+    nresults: i32,
+    result: LuaValue,
+) -> LuaResult<()> {
+    let caller_top = l
+        .current_frame()
+        .map(|frame| frame.top as usize)
+        .ok_or_else(|| l.error("attempted fast math call without a caller frame".to_string()))?;
+
+    unsafe {
+        let stack = l.stack_mut();
+        match nresults {
+            0 => {}
+            1 => {
+                *stack.get_unchecked_mut(func_idx) = result;
+            }
+            _ if nresults > 0 => {
+                let wanted = nresults as usize;
+                *stack.get_unchecked_mut(func_idx) = result;
+                for i in 1..wanted {
+                    *stack.get_unchecked_mut(func_idx + i) = LuaValue::nil();
+                }
+            }
+            _ => {
+                *stack.get_unchecked_mut(func_idx) = result;
+            }
+        }
+    }
+
+    if nresults >= 0 {
+        l.set_top_raw(caller_top);
+    } else {
+        let new_top = func_idx + 1;
+        if caller_top < new_top && let Some(frame) = l.current_frame_mut() {
+            frame.top = new_top as u32;
+        }
+        l.set_top_raw(new_top);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_call_unary_float_math(
+    l: &mut LuaState,
+    func_idx: usize,
+    nargs: usize,
+    nresults: i32,
+    fname: &str,
+    op: fn(f64) -> f64,
+) -> LuaResult<()> {
+    let x = fast_checknumber(l, func_idx, nargs, 1, fname)?;
+    finish_fast_single_result(l, func_idx, nresults, LuaValue::float(op(x)))
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_call_floor(l: &mut LuaState, func_idx: usize, nargs: usize, nresults: i32) -> LuaResult<()> {
+    let value = if nargs >= 1 {
+        unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, 1)) }
+    } else {
+        LuaValue::nil()
+    };
+
+    let result = if let Some(i) = value.as_integer() {
+        LuaValue::integer(i)
+    } else if let Some(f) = value.as_float() {
+        let floored = f.floor();
+        if floored >= (i64::MIN as f64) && floored < -(i64::MIN as f64) {
+            LuaValue::integer(floored as i64)
+        } else {
+            LuaValue::float(floored)
+        }
+    } else {
+        let t = crate::stdlib::debug::objtypename(l, &value);
+        return Err(l.error(format!(
+            "bad argument #1 to 'floor' (number expected, got {})",
+            t
+        )));
+    };
+
+    finish_fast_single_result(l, func_idx, nresults, result)
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_call_ceil(l: &mut LuaState, func_idx: usize, nargs: usize, nresults: i32) -> LuaResult<()> {
+    let value = if nargs >= 1 {
+        unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, 1)) }
+    } else {
+        LuaValue::nil()
+    };
+
+    let result = if let Some(i) = value.as_integer() {
+        LuaValue::integer(i)
+    } else if let Some(f) = value.as_float() {
+        let ceiled = f.ceil();
+        if ceiled >= (i64::MIN as f64) && ceiled < -(i64::MIN as f64) {
+            LuaValue::integer(ceiled as i64)
+        } else {
+            LuaValue::float(ceiled)
+        }
+    } else {
+        let t = crate::stdlib::debug::objtypename(l, &value);
+        return Err(l.error(format!(
+            "bad argument #1 to 'ceil' (number expected, got {})",
+            t
+        )));
+    };
+
+    finish_fast_single_result(l, func_idx, nresults, result)
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_call_max(l: &mut LuaState, func_idx: usize, nargs: usize, nresults: i32) -> LuaResult<()> {
+    if nargs == 0 {
+        return Err(l.error("bad argument to 'max' (value expected)".to_string()));
+    }
+
+    let first = unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, 1)) };
+    let _ = first
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
+    let mut max_arg = first;
+
+    for i in 2..=nargs {
+        let arg = unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, i)) };
+        let _ = arg
+            .as_number()
+            .ok_or_else(|| l.error(format!("bad argument #{} to 'max' (number expected)", i)))?;
+        if lua_num_lt(&max_arg, &arg) {
+            max_arg = arg;
+        }
+    }
+
+    finish_fast_single_result(l, func_idx, nresults, max_arg)
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_call_min(l: &mut LuaState, func_idx: usize, nargs: usize, nresults: i32) -> LuaResult<()> {
+    if nargs == 0 {
+        return Err(l.error("bad argument to 'min' (value expected)".to_string()));
+    }
+
+    let first = unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, 1)) };
+    let _ = first
+        .as_number()
+        .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
+    let mut min_arg = first;
+
+    for i in 2..=nargs {
+        let arg = unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, i)) };
+        let _ = arg
+            .as_number()
+            .ok_or_else(|| l.error(format!("bad argument #{} to 'min' (number expected)", i)))?;
+        if lua_num_lt(&arg, &min_arg) {
+            min_arg = arg;
+        }
+    }
+
+    finish_fast_single_result(l, func_idx, nresults, min_arg)
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+fn fast_call_random(
+    l: &mut LuaState,
+    func_idx: usize,
+    nargs: usize,
+    nresults: i32,
+) -> LuaResult<()> {
+    if nargs > 2 {
+        return Err(l.error("wrong number of arguments to 'random'".to_string()));
+    }
+
+    let result = match nargs {
+        0 => LuaValue::float(l.vm_mut().rng.next_float()),
+        1 => {
+            let rv = l.vm_mut().rng.next_rand();
+            let up = unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, 1)) }
+                .as_integer()
+                .ok_or_else(|| {
+                    l.error("bad argument #1 to 'random' (number expected, got float)".to_string())
+                })?;
+            if up == 0 {
+                LuaValue::integer(rv as i64)
+            } else {
+                if up < 1 {
+                    return Err(
+                        l.error("bad argument #1 to 'random' (interval is empty)".to_string())
+                    );
+                }
+                LuaValue::integer(project(rv, 1, up as u64)?)
+            }
+        }
+        _ => {
+            let rv = l.vm_mut().rng.next_rand();
+            let low = unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, 1)) }
+                .as_integer()
+                .ok_or_else(|| {
+                    l.error("bad argument #1 to 'random' (number expected, got float)".to_string())
+                })?;
+            let up = unsafe { *l.stack().get_unchecked(fast_stack_arg(func_idx, 2)) }
+                .as_integer()
+                .ok_or_else(|| {
+                    l.error("bad argument #2 to 'random' (number expected, got float)".to_string())
+                })?;
+            if low > up {
+                return Err(l.error("bad argument #2 to 'random' (interval is empty)".to_string()));
+            }
+            LuaValue::integer(project(rv, low as u64, up as u64)?)
+        }
+    };
+
+    finish_fast_single_result(l, func_idx, nresults, result)
+}
+
+#[cfg(feature = "jit")]
+pub(crate) fn try_call_fast_math(
+    l: &mut LuaState,
+    func: CFunction,
+    func_idx: usize,
+    nargs: usize,
+    nresults: i32,
+) -> Option<LuaResult<()>> {
+    if std::ptr::fn_addr_eq(func, math_sqrt as CFunction) {
+        Some(fast_call_unary_float_math(l, func_idx, nargs, nresults, "sqrt", f64::sqrt))
+    } else if std::ptr::fn_addr_eq(func, math_sin as CFunction) {
+        Some(fast_call_unary_float_math(l, func_idx, nargs, nresults, "sin", f64::sin))
+    } else if std::ptr::fn_addr_eq(func, math_floor as CFunction) {
+        Some(fast_call_floor(l, func_idx, nargs, nresults))
+    } else if std::ptr::fn_addr_eq(func, math_ceil as CFunction) {
+        Some(fast_call_ceil(l, func_idx, nargs, nresults))
+    } else if std::ptr::fn_addr_eq(func, math_max as CFunction) {
+        Some(fast_call_max(l, func_idx, nargs, nresults))
+    } else if std::ptr::fn_addr_eq(func, math_min as CFunction) {
+        Some(fast_call_min(l, func_idx, nargs, nresults))
+    } else if std::ptr::fn_addr_eq(func, math_random as CFunction) {
+        Some(fast_call_random(l, func_idx, nargs, nresults))
+    } else {
+        None
     }
 }
 

@@ -136,6 +136,31 @@ fn test_function_vararg_count() {
 }
 
 #[test]
+fn test_function_vararg_named_params_table_pack() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.execute(
+        r#"
+        local function capture(prefix, ...)
+            local packed = table.pack(...)
+            assert(prefix == "tag")
+            assert(packed.n == 3)
+            assert(packed[1] == nil)
+            assert(packed[2] == 42)
+            assert(packed[3] == "tail")
+            return packed.n
+        end
+
+        assert(capture("tag", nil, 42, "tail") == 3)
+    "#,
+    );
+    if let Err(e) = &result {
+        eprintln!("Error: {:?}", e);
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_function_vararg_select() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();

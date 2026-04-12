@@ -118,6 +118,98 @@ fn call_for_loop_test_helper_plan() -> HelperPlan {
     }
 }
 
+fn call_for_loop_with_post_move_test_ir() -> TraceIr {
+    TraceIr {
+        root_pc: 0,
+        loop_tail_pc: 4,
+        insts: vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 0, 4, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: OpCode::AddI,
+                raw_instruction: Instruction::create_abc(OpCode::AddI, 1, 1, 129).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![
+                    TraceIrOperand::Register(1),
+                    TraceIrOperand::SignedImmediate(1),
+                ],
+                writes: vec![TraceIrOperand::Register(1)],
+            },
+            TraceIrInst {
+                pc: 2,
+                opcode: OpCode::Call,
+                raw_instruction: Instruction::create_abc(OpCode::Call, 0, 2, 2).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Call,
+                reads: vec![TraceIrOperand::Register(0), TraceIrOperand::Register(1)],
+                writes: vec![TraceIrOperand::RegisterRange { start: 0, count: 1 }],
+            },
+            TraceIrInst {
+                pc: 3,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 2, 0, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(0)],
+                writes: vec![TraceIrOperand::Register(2)],
+            },
+            TraceIrInst {
+                pc: 4,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 8, 5).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    }
+}
+
+fn call_for_loop_with_post_move_test_helper_plan() -> HelperPlan {
+    HelperPlan {
+        root_pc: 0,
+        loop_tail_pc: 4,
+        steps: vec![
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![
+                    TraceIrOperand::Register(1),
+                    TraceIrOperand::SignedImmediate(1),
+                ],
+                writes: vec![TraceIrOperand::Register(1)],
+            },
+            HelperPlanStep::Call {
+                reads: vec![TraceIrOperand::Register(0), TraceIrOperand::Register(1)],
+                writes: vec![TraceIrOperand::RegisterRange { start: 0, count: 1 }],
+            },
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(0)],
+                writes: vec![TraceIrOperand::Register(2)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 5,
+            guards_observed: 0,
+            call_steps: 1,
+            metamethod_steps: 0,
+        },
+    }
+}
+
 fn tfor_loop_test_ir() -> TraceIr {
     TraceIr {
         root_pc: 0,
@@ -304,6 +396,96 @@ fn native_backend_compiles_linear_int_forloop_to_native_execution() {
     };
 
     match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert!(matches!(
+                compiled.execution(),
+                CompiledTraceExecution::Native(NativeCompiledTrace::LinearIntForLoop { .. })
+            ));
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
+fn native_backend_compiles_linked_side_trace_shape_to_native_execution() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 20,
+        loop_tail_pc: 22,
+        insts: vec![
+            TraceIrInst {
+                pc: 20,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 5, 7, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(5)],
+            },
+            TraceIrInst {
+                pc: 21,
+                opcode: OpCode::Add,
+                raw_instruction: Instruction::create_abck(OpCode::Add, 6, 6, 12, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(6), TraceIrOperand::Register(12)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            TraceIrInst {
+                pc: 22,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 10, 3).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(20)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 20,
+        loop_tail_pc: 22,
+        steps: vec![
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(7)],
+                writes: vec![TraceIrOperand::Register(5)],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(6), TraceIrOperand::Register(12)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(20)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 3,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 0,
+        },
+    };
+    let artifact = crate::lua_vm::jit::trace_recorder::TraceArtifact {
+        seed: crate::lua_vm::jit::trace_recorder::TraceSeed {
+            start_pc: 20,
+            root_chunk_addr: 0,
+            instruction_budget: 3,
+        },
+        ops: ir
+            .insts
+            .iter()
+            .map(|inst| crate::lua_vm::jit::trace_recorder::TraceOp {
+                pc: inst.pc,
+                instruction: Instruction::from_u32(inst.raw_instruction),
+                opcode: inst.opcode,
+            })
+            .collect(),
+        exits: Vec::new(),
+        loop_header_pc: 10,
+        loop_tail_pc: 22,
+    };
+
+    match backend.compile_test_with_artifact(&artifact, &ir, &helper_plan) {
         BackendCompileOutcome::Compiled(compiled) => {
             assert!(matches!(
                 compiled.execution(),
@@ -3215,6 +3397,23 @@ fn native_backend_compiles_call_for_loop_to_native_execution() {
 }
 
 #[test]
+fn native_backend_compiles_call_for_loop_with_post_call_move_to_native_execution() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = call_for_loop_with_post_move_test_ir();
+    let helper_plan = call_for_loop_with_post_move_test_helper_plan();
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert!(matches!(
+                compiled.execution(),
+                CompiledTraceExecution::Native(NativeCompiledTrace::CallForLoop { .. })
+            ));
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
 fn native_call_for_loop_with_c_callable_executes_and_loop_exits() {
     let mut backend = NativeTraceBackend::default();
     let ir = call_for_loop_test_ir();
@@ -3254,16 +3453,6 @@ fn native_call_for_loop_with_c_callable_executes_and_loop_exits() {
         );
     }
 
-    eprintln!(
-        "c-call result={:?} hits={} r0={:?} r4={:?} r8={:?} r9={:?} r10={:?}",
-        result.status,
-        result.hits,
-        state.stack_get(0),
-        state.stack_get(4),
-        state.stack_get(8),
-        state.stack_get(9),
-        state.stack_get(10)
-    );
     assert_eq!(result.status, NativeTraceStatus::LoopExit);
     assert_eq!(result.hits, 3);
     assert_eq!(
@@ -3324,21 +3513,64 @@ fn native_call_for_loop_with_table_call_metamethod_executes_and_loop_exits() {
         );
     }
 
-    eprintln!(
-        "tm-call result={:?} hits={} r0={:?} r4={:?} r8={:?} r9={:?} r10={:?}",
-        result.status,
-        result.hits,
-        state.stack_get(0),
-        state.stack_get(4),
-        state.stack_get(8),
-        state.stack_get(9),
-        state.stack_get(10)
-    );
     assert_eq!(result.status, NativeTraceStatus::LoopExit);
     assert_eq!(result.hits, 3);
     assert_eq!(
         state.stack_get(0).and_then(|value| value.as_integer()),
         Some(8)
+    );
+}
+
+#[test]
+fn native_call_for_loop_with_post_call_move_executes_and_loop_exits() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = call_for_loop_with_post_move_test_ir();
+    let helper_plan = call_for_loop_with_post_move_test_helper_plan();
+
+    let entry = match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => match compiled.execution() {
+            CompiledTraceExecution::Native(NativeCompiledTrace::CallForLoop { entry }) => entry,
+            other => panic!("expected native call-for execution, got {other:?}"),
+        },
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    };
+
+    let mut vm = LuaVM::new(SafeOption::default());
+    let state = vm.main_state();
+    state.push_c_frame(0, 16, -1).unwrap();
+    {
+        let stack = state.stack_mut();
+        stack[1] = LuaValue::integer(0);
+        stack[4] = LuaValue::cfunction(test_native_call_increment);
+        stack[8] = LuaValue::integer(2);
+        stack[9] = LuaValue::integer(1);
+        stack[10] = LuaValue::integer(1);
+    }
+
+    let lua_state_ptr: *mut crate::lua_vm::LuaState = state;
+    let stack_ptr = state.stack_mut().as_mut_ptr();
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack_ptr,
+            0,
+            std::ptr::null(),
+            0,
+            lua_state_ptr,
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(
+        state.stack_get(0).and_then(|value| value.as_integer()),
+        Some(11)
+    );
+    assert_eq!(
+        state.stack_get(2).and_then(|value| value.as_integer()),
+        Some(11)
     );
 }
 

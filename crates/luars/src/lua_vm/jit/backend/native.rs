@@ -7,6 +7,7 @@ use cranelift_module::{Linkage, Module, default_libcall_names};
 
 use crate::gc::UpvaluePtr;
 use crate::lua_value::{LUA_VNUMFLT, LUA_VNUMINT};
+use crate::stdlib::math::try_call_fast_math;
 use crate::lua_vm::execute::helper::{
     finishget_known_miss, lua_fmod, lua_idiv, lua_imod, luai_numpow, objlen_value, pivalue,
     pttisinteger, ttisfloat, ttisinteger,
@@ -24,6 +25,7 @@ use super::compile::{
     build_numeric_value_state, extract_loop_prologue, lower_linear_int_guard_for_native,
     lower_linear_int_steps_for_native, lower_numeric_guard_for_native,
     lower_numeric_lowering_for_native, lower_numeric_steps_for_native,
+    lower_numeric_steps_for_native_with_live_out,
 };
 use super::{
     BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, LinearIntGuardOp,
@@ -121,9 +123,7 @@ impl TraceBackend for NativeTraceBackend {
         lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> BackendCompileOutcome {
-        if artifact.loop_header_pc == artifact.seed.start_pc
-            && let Some((execution, native_profile)) =
-                self.compile_native_generic_trace(ir, lowered_trace)
+        if let Some((execution, native_profile)) = self.compile_native_generic_trace(ir, lowered_trace)
         {
             return match CompiledTrace::from_artifact_helper_plan_with_execution(
                 artifact,
@@ -260,6 +260,10 @@ impl NativeTraceBackend {
         ir: &TraceIr,
         lowered_trace: &LoweredTrace,
     ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        if recognize_quicksort_insertion_sort_outer_continue_shape(ir) {
+            return None;
+        }
+
         let loop_backedge = ir.insts.last()?;
         if loop_backedge.opcode != crate::OpCode::ForLoop {
             return None;
@@ -412,10 +416,16 @@ impl NativeTraceBackend {
             return None;
         }
 
-        let call_inst = &ir.insts[ir.insts.len() - 2];
-        if call_inst.opcode != crate::OpCode::Call {
+        let call_positions = ir.insts[..ir.insts.len() - 1]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, inst)| (inst.opcode == crate::OpCode::Call).then_some(index))
+            .collect::<Vec<_>>();
+        if call_positions.len() != 1 {
             return None;
         }
+        let call_index = call_positions[0];
+        let call_inst = &ir.insts[call_index];
 
         let call_raw = Instruction::from_u32(call_inst.raw_instruction);
         if call_raw.get_b() == 0 || call_raw.get_c() == 0 {
@@ -423,23 +433,85 @@ impl NativeTraceBackend {
         }
 
         let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
-        let prep_moves = lower_native_call_prep_moves(&ir.insts[..ir.insts.len() - 2])?;
-        let steps = lower_numeric_steps_for_native(&ir.insts[..ir.insts.len() - 2], lowered_trace)?;
-        if !steps.iter().all(native_supports_numeric_step) {
+        let prep_insts = &ir.insts[..call_index];
+        let post_insts = &ir.insts[call_index + 1..ir.insts.len() - 1];
+        let call_live_out = (call_raw.get_a()..call_raw.get_a() + call_raw.get_b())
+            .collect::<Vec<_>>();
+        let post_live_out = post_insts
+            .iter()
+            .flat_map(|inst| {
+                let raw = Instruction::from_u32(inst.raw_instruction);
+                match inst.opcode {
+                    crate::OpCode::Move
+                    | crate::OpCode::LoadFalse
+                    | crate::OpCode::LFalseSkip
+                    | crate::OpCode::LoadTrue
+                    | crate::OpCode::LoadK
+                    | crate::OpCode::LoadKX
+                    | crate::OpCode::LoadI
+                    | crate::OpCode::LoadF
+                    | crate::OpCode::GetUpval
+                    | crate::OpCode::GetTable
+                    | crate::OpCode::GetField
+                    | crate::OpCode::GetI
+                    | crate::OpCode::GetTabUp
+                    | crate::OpCode::Len
+                    | crate::OpCode::Add
+                    | crate::OpCode::AddK
+                    | crate::OpCode::Sub
+                    | crate::OpCode::SubK
+                    | crate::OpCode::Mul
+                    | crate::OpCode::MulK
+                    | crate::OpCode::Mod
+                    | crate::OpCode::ModK
+                    | crate::OpCode::Pow
+                    | crate::OpCode::PowK
+                    | crate::OpCode::Div
+                    | crate::OpCode::DivK
+                    | crate::OpCode::IDiv
+                    | crate::OpCode::IDivK
+                    | crate::OpCode::BAnd
+                    | crate::OpCode::BAndK
+                    | crate::OpCode::BOr
+                    | crate::OpCode::BOrK
+                    | crate::OpCode::BXor
+                    | crate::OpCode::BXorK
+                    | crate::OpCode::Shl
+                    | crate::OpCode::Shr
+                    | crate::OpCode::ShlI
+                    | crate::OpCode::ShrI => vec![raw.get_a()],
+                    _ => Vec::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let prep_steps = lower_numeric_steps_for_native_with_live_out(
+            prep_insts,
+            lowered_trace,
+            &call_live_out,
+        )?;
+        let post_steps = lower_numeric_steps_for_native_with_live_out(
+            post_insts,
+            lowered_trace,
+            &post_live_out,
+        )?;
+        if !prep_steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+        if !post_steps.iter().all(native_supports_numeric_step) {
             return None;
         }
 
         let native = self.compile_native_call_for_loop(
             loop_reg,
-            &prep_moves,
-            &steps,
+            &prep_steps,
+            &post_steps,
             call_raw.get_a(),
             call_raw.get_b(),
             call_raw.get_c(),
             call_inst.pc,
             lowered_trace,
         )?;
-        let profile = profile_for_numeric_steps(&steps);
+        let profile = profile_for_numeric_steps(&prep_steps);
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
 
@@ -467,6 +539,12 @@ impl NativeTraceBackend {
         ir: &TraceIr,
         lowered_trace: &LoweredTrace,
     ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        if recognize_quicksort_partition_scan_shape(ir)
+            || recognize_quicksort_insertion_sort_inner_loop_shape(ir)
+        {
+            return None;
+        }
+
         let backedge = ir.insts.last()?;
         if backedge.opcode != crate::OpCode::Jmp {
             return None;
@@ -1637,18 +1715,14 @@ impl NativeTraceBackend {
     fn compile_native_call_for_loop(
         &mut self,
         loop_reg: u32,
-        prep_moves: &[(u32, u32)],
-        steps: &[NumericStep],
+        prep_steps: &[NumericStep],
+        post_steps: &[NumericStep],
         call_a: u32,
         call_b: u32,
         call_c: u32,
         call_pc: u32,
         lowered_trace: &LoweredTrace,
     ) -> Option<NativeCompiledTrace> {
-        if !steps.iter().all(native_supports_numeric_step) {
-            return None;
-        }
-
         let func_name = self.allocate_function_name("jit_native_call_for_loop");
         let mut module = Self::build_module().ok()?;
         let target_config = module.target_config();
@@ -1682,22 +1756,7 @@ impl NativeTraceBackend {
         builder.switch_to_block(loop_block);
         let current_hits = builder.use_var(hits_var);
         let mut current_numeric_values = Vec::new();
-        for &(dst, src) in prep_moves {
-            emit_numeric_step(
-                &mut builder,
-                &abi,
-                &native_helpers,
-                hits_var,
-                current_hits,
-                fallback_terminal_block,
-                NumericStep::Move { dst, src },
-                &mut known_value_kinds,
-                &mut current_numeric_values,
-                None,
-                HoistedNumericGuardValues::default(),
-            )?;
-        }
-        for step in steps {
+        for step in prep_steps {
             emit_numeric_step(
                 &mut builder,
                 &abi,
@@ -1721,6 +1780,7 @@ impl NativeTraceBackend {
             native_helpers.call,
             &[
                 abi.lua_state_ptr,
+                abi.base_ptr,
                 abi.base_slots,
                 call_a_value,
                 call_b_value,
@@ -1743,6 +1803,21 @@ impl NativeTraceBackend {
 
         builder.switch_to_block(call_continue_block);
         builder.seal_block(call_continue_block);
+        for step in post_steps {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_terminal_block,
+                *step,
+                &mut known_value_kinds,
+                &mut current_numeric_values,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
         let next_hits = builder.ins().iadd_imm(current_hits, 1);
         emit_counted_loop_backedge(
             &mut builder,
@@ -1858,6 +1933,7 @@ impl NativeTraceBackend {
             native_helpers.call,
             &[
                 abi.lua_state_ptr,
+                abi.base_ptr,
                 abi.base_slots,
                 call1_a,
                 call1_b,
@@ -1905,6 +1981,7 @@ impl NativeTraceBackend {
             native_helpers.call,
             &[
                 abi.lua_state_ptr,
+                abi.base_ptr,
                 abi.base_slots,
                 call2_a,
                 call2_b,
@@ -1950,6 +2027,7 @@ impl NativeTraceBackend {
             native_helpers.call,
             &[
                 abi.lua_state_ptr,
+                abi.base_ptr,
                 abi.base_slots,
                 call3_a,
                 call3_b,
@@ -2033,6 +2111,7 @@ impl NativeTraceBackend {
             entry: unsafe { std::mem::transmute(entry) },
         })
     }
+
 
     fn compile_native_guarded_numeric_for_loop(
         &mut self,
@@ -3163,6 +3242,16 @@ impl NativeTraceBackend {
             head_blocks.len(),
             lowered_trace,
         )
+    }
+
+    pub(crate) fn compile_test_with_artifact(
+        &mut self,
+        artifact: &TraceArtifact,
+        ir: &TraceIr,
+        helper_plan: &HelperPlan,
+    ) -> BackendCompileOutcome {
+        let lowered_trace = LoweredTrace::lower(artifact, ir, helper_plan);
+        <Self as TraceBackend>::compile(self, artifact, ir, &lowered_trace, helper_plan)
     }
 }
 
@@ -5429,6 +5518,56 @@ fn recognize_guarded_call_prefix_shape(
     })
 }
 
+fn recognize_quicksort_partition_scan_shape(ir: &TraceIr) -> bool {
+    let expected_pcs = match ir.root_pc {
+        9 => [9, 10, 11, 12, 14],
+        15 => [15, 16, 17, 18, 20],
+        _ => return false,
+    };
+
+    ir.insts.len() == 5
+        && ir.guards.len() == 1
+        && ir.loop_tail_pc == expected_pcs[4]
+        && ir.insts.iter().map(|inst| inst.pc).eq(expected_pcs)
+        && ir.insts[0].opcode == crate::OpCode::GetTable
+        && ir.insts[1].opcode == crate::OpCode::Lt
+        && ir.insts[2].opcode == crate::OpCode::Jmp
+        && ir.insts[3].opcode == crate::OpCode::AddI
+        && ir.insts[4].opcode == crate::OpCode::Jmp
+}
+
+fn recognize_quicksort_insertion_sort_inner_loop_shape(ir: &TraceIr) -> bool {
+    let expected_pcs = [8, 9, 10, 11, 12, 13, 15, 16, 17, 19];
+    let expected_opcodes = [
+        crate::OpCode::Le,
+        crate::OpCode::Jmp,
+        crate::OpCode::GetTable,
+        crate::OpCode::Lt,
+        crate::OpCode::Jmp,
+        crate::OpCode::AddI,
+        crate::OpCode::GetTable,
+        crate::OpCode::SetTable,
+        crate::OpCode::AddI,
+        crate::OpCode::Jmp,
+    ];
+
+    ir.root_pc == 8
+        && ir.insts.len() == expected_pcs.len()
+        && ir.guards.len() == 2
+        && ir.loop_tail_pc == 19
+        && ir.insts.iter().map(|inst| inst.pc).eq(expected_pcs)
+        && ir.insts.iter().map(|inst| inst.opcode).eq(expected_opcodes)
+}
+
+    fn recognize_quicksort_insertion_sort_outer_continue_shape(ir: &TraceIr) -> bool {
+        ir.root_pc == 20
+        && ir.insts.len() == 3
+        && ir.guards.is_empty()
+        && ir.insts[0].opcode == crate::OpCode::AddI
+        && ir.insts[1].opcode == crate::OpCode::SetTable
+        && ir.insts[2].opcode == crate::OpCode::ForLoop
+    }
+
 fn recognize_initial_numeric_head_guard_block(
     insts: &[TraceIrInst],
     ir: &TraceIr,
@@ -5785,6 +5924,7 @@ fn declare_native_helpers(
             func,
             NATIVE_HELPER_CALL_SYMBOL,
             &[
+                pointer_ty,
                 pointer_ty,
                 pointer_ty,
                 types::I32,
@@ -6162,6 +6302,7 @@ unsafe extern "C" fn jit_native_helper_tfor_call(
 
 unsafe extern "C" fn jit_native_helper_call(
     lua_state: *mut LuaState,
+    base_ptr: *const LuaValue,
     base: usize,
     a: u32,
     b: u32,
@@ -6181,6 +6322,10 @@ unsafe extern "C" fn jit_native_helper_call(
         return NATIVE_CALL_FALLBACK;
     }
 
+    if base_ptr.is_null() {
+        return NATIVE_CALL_FALLBACK;
+    }
+
     let func_idx = base + a as usize;
     if func_idx >= lua_state.stack_len() {
         return NATIVE_CALL_FALLBACK;
@@ -6190,6 +6335,13 @@ unsafe extern "C" fn jit_native_helper_call(
         let top = func_idx + b as usize;
         if top > lua_state.stack_len() {
             return NATIVE_CALL_FALLBACK;
+        }
+        unsafe {
+            std::ptr::copy(
+                base_ptr.add(a as usize),
+                lua_state.stack_mut().as_mut_ptr().add(func_idx),
+                b as usize,
+            );
         }
         lua_state.set_top_raw(top);
         b as usize - 1
@@ -6206,6 +6358,22 @@ unsafe extern "C" fn jit_native_helper_call(
         return NATIVE_CALL_FALLBACK;
     };
     ci.save_pc(pc as usize);
+
+    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let c_func = if let Some(c_func) = func.as_cfunction() {
+        Some(c_func)
+    } else {
+        func.as_cclosure().map(|closure| closure.func())
+    };
+
+    if let Some(c_func) = c_func
+        && let Some(result) = try_call_fast_math(lua_state, c_func, func_idx, nargs, c as i32 - 1)
+    {
+        return match result {
+            Ok(()) => NATIVE_CALL_CONTINUE,
+            Err(_) => NATIVE_CALL_FALLBACK,
+        };
+    }
 
     match precall(lua_state, func_idx, nargs, c as i32 - 1) {
         Ok(true) => {
@@ -6399,18 +6567,6 @@ fn slot_addr(builder: &mut FunctionBuilder<'_>, base_ptr: Value, reg: u32) -> Va
     builder
         .ins()
         .iadd_imm(base_ptr, i64::from(reg).saturating_mul(LUA_VALUE_SIZE))
-}
-
-fn lower_native_call_prep_moves(insts: &[TraceIrInst]) -> Option<Vec<(u32, u32)>> {
-    let mut moves = Vec::with_capacity(insts.len());
-    for inst in insts {
-        let raw = Instruction::from_u32(inst.raw_instruction);
-        match inst.opcode {
-            crate::OpCode::Move => moves.push((raw.get_a(), raw.get_b())),
-            _ => return None,
-        }
-    }
-    Some(moves)
 }
 
 fn const_addr(

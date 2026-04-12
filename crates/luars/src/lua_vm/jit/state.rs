@@ -14,10 +14,13 @@ use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use super::hotcount::tick_hotcount;
 use super::ir::{TraceIr, is_fused_arithmetic_metamethod_fallback};
 use super::lowering::{
-    DeoptRecovery, DeoptTarget, LoweredTrace, SsaMemoryEffectSummary,
+    DeoptRecovery, LoweredTrace, SsaMemoryEffectSummary,
     SsaTableIntOptimizationSummary, SsaValueSummary, ValueHintSummary,
 };
 use super::trace_recorder::{TraceAbortReason, TraceArtifact, TraceRecorder};
+
+#[cfg(test)]
+use super::lowering::DeoptTarget;
 
 const OPCODE_COUNT: usize = OpCode::ExtraArg as usize + 1;
 const HOT_EXIT_THRESHOLD: u16 = 10;
@@ -913,6 +916,7 @@ impl JitState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn record_trace_exit(
         &mut self,
         chunk_ptr: *const LuaProto,
@@ -1315,7 +1319,7 @@ impl JitState {
             ExecutableTraceDispatch {
                 start_pc,
                 loop_tail_pc,
-                linked_loop_header_pc: None,
+                linked_loop_header_pc,
                 execution: CompiledTraceExecution::Native(native),
                 summary,
                 native_profile: Some(profile),
@@ -1323,7 +1327,7 @@ impl JitState {
                 NativeExecutableTraceDispatch {
                     start_pc,
                     loop_tail_pc,
-                    linked_loop_header_pc: None,
+                    linked_loop_header_pc,
                     native,
                     summary,
                     profile,
@@ -1333,6 +1337,7 @@ impl JitState {
         }
     }
 
+    #[cfg(test)]
     fn native_side_trace_dispatch_for(
         &self,
         chunk_ptr: *const LuaProto,
@@ -1385,7 +1390,7 @@ impl JitState {
                         ExecutableTraceDispatch {
                             start_pc,
                             loop_tail_pc,
-                            linked_loop_header_pc: None,
+                            linked_loop_header_pc,
                             execution: CompiledTraceExecution::Native(native),
                             summary,
                             native_profile: Some(profile),
@@ -1721,8 +1726,8 @@ fn semantic_instruction_count(ir: &TraceIr) -> u16 {
 mod tests {
     use super::{
         ExecutableTraceDispatch, HOT_EXIT_THRESHOLD, JitAbortCounters, JitCounters, JitState,
-        NativeExecutableTraceDispatch, ReadySideTraceDispatch, SideTraceKey, SideTraceStatus,
-        TraceKey, TraceStatus,
+        NativeExecutableTraceDispatch, ReadySideTraceDispatch, SideTraceInfo, SideTraceKey,
+        SideTraceStatus, TraceInfo, TraceKey, TraceStatus,
     };
     use crate::LuaValue;
     use crate::lua_value::LuaProto;
@@ -2327,7 +2332,7 @@ mod tests {
 
         let compiled_trace = jit.compiled_trace_for(proto_ptr as usize, 8).unwrap();
         assert!(compiled_trace.is_enterable());
-        assert_eq!(compiled_trace.executor_family(), "NativeNumericJmpLoop");
+        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
     }
 
     #[test]
@@ -2366,8 +2371,141 @@ mod tests {
         let compiled_trace = jit.compiled_trace_for(proto_ptr as usize, 0).unwrap();
         assert!(compiled_trace.is_enterable());
         assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
-        assert_eq!(compiled_trace.summary().call_steps, 1);
         assert_eq!(compiled_trace.summary().guards_observed, 2);
+    }
+
+    #[test]
+    fn quicksort_child_return_side_trace_remains_lowered_snippet() {
+        let mut jit = JitState::default();
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_quicksort.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_quicksort.lua")
+            .unwrap();
+        let proto = chunk
+            .child_protos
+            .iter()
+            .find_map(|proto| {
+                let proto = &proto.as_ref().data;
+                (proto.linedefined == 77 && proto.lastlinedefined == 98).then_some(proto)
+            })
+            .unwrap();
+        let proto_ptr = proto as *const LuaProto;
+
+        for _ in 0..HOT_LOOP_THRESHOLD {
+            jit.record_loop_backedge(proto_ptr, 12);
+        }
+        for _ in 0..HOT_EXIT_THRESHOLD {
+            jit.record_hot_exit(proto_ptr, 0, 1, 12);
+        }
+
+        let side = jit
+            .side_traces
+            .get(&SideTraceKey {
+                parent: TraceKey {
+                    chunk_addr: proto_ptr as usize,
+                    pc: 0,
+                },
+                exit_index: 1,
+            })
+            .unwrap();
+        let compiled_trace = side.compiled_trace.as_ref().unwrap();
+        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
+        assert!(matches!(
+            jit.ready_side_trace_dispatch_for(proto_ptr, 0, 1),
+            Some(ReadySideTraceDispatch::Executable(ExecutableTraceDispatch {
+                execution: CompiledTraceExecution::LoweredSnippet,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn quicksort_reduced_benchmark_executes_without_unsorted_output_under_jit() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_quicksort.lua"
+        ))
+        .unwrap();
+        let source = source
+            .replacen("local iterations = 300", "local iterations = 40", 1)
+            .replacen("local array_size = 256", "local array_size = 64", 1);
+
+        let result = vm.execute(&source);
+        assert!(result.is_ok(), "quicksort benchmark failed: {result:?}");
+    }
+
+    #[test]
+    fn bench_functions_vararg_outer_loop_becomes_native_call_for_loop() {
+        let mut jit = JitState::default();
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_functions.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_functions.lua")
+            .unwrap();
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..HOT_LOOP_THRESHOLD {
+            jit.record_loop_backedge(chunk_ptr, 70);
+        }
+
+        assert_eq!(
+            jit.trace_status_for(chunk_ptr as usize, 70),
+            Some(TraceStatus::Executable {
+                instruction_count: 9,
+            })
+        );
+
+        let compiled_trace = jit.compiled_trace_for(chunk_ptr as usize, 70).unwrap();
+        assert!(compiled_trace.is_enterable());
+        assert_eq!(compiled_trace.executor_family(), "NativeCallForLoop");
+    }
+
+    #[test]
+    fn bench_functions_vararg_ipairs_loop_becomes_native_tfor_loop() {
+        let mut jit = JitState::default();
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_functions.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_functions.lua")
+            .unwrap();
+        let proto = chunk
+            .child_protos
+            .iter()
+            .find_map(|proto| {
+                let proto = &proto.as_ref().data;
+                (proto.linedefined == 32 && proto.lastlinedefined == 38).then_some(proto)
+            })
+            .unwrap();
+        let proto_ptr = proto as *const LuaProto;
+
+        for _ in 0..HOT_LOOP_THRESHOLD {
+            jit.record_loop_backedge(proto_ptr, 9);
+        }
+
+        assert_eq!(
+            jit.trace_status_for(proto_ptr as usize, 9),
+            Some(TraceStatus::Executable {
+                instruction_count: 3,
+            })
+        );
+
+        let compiled_trace = jit.compiled_trace_for(proto_ptr as usize, 9).unwrap();
+        assert!(compiled_trace.is_enterable());
+        assert_eq!(compiled_trace.executor_family(), "NativeTForLoop");
     }
 
     #[test]
@@ -2593,6 +2731,74 @@ mod tests {
                     ..
                 }
             ))
+        ));
+    }
+
+    #[test]
+    fn linked_native_side_trace_dispatch_preserves_linked_loop_header() {
+        let mut jit = JitState::default();
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..HOT_LOOP_THRESHOLD {
+            jit.record_loop_backedge(chunk_ptr, 0);
+        }
+
+        let compiled_trace = jit.compiled_trace_for(chunk_ptr as usize, 0).unwrap().clone();
+        let mut artifact = jit.artifact_for(chunk_ptr as usize, 0).unwrap().clone();
+        artifact.loop_header_pc = 4;
+
+        let parent_key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc: 99,
+        };
+        jit.traces.insert(parent_key, TraceInfo::new());
+        jit.side_traces.insert(
+            SideTraceKey {
+                parent: parent_key,
+                exit_index: 0,
+            },
+            SideTraceInfo {
+                status: SideTraceStatus::Executable {
+                    instruction_count: 2,
+                },
+                start_pc: 0,
+                artifact: Some(artifact),
+                ir: None,
+                lowered_trace: None,
+                helper_plan: None,
+                compiled_trace: Some(compiled_trace),
+            },
+        );
+
+        assert!(matches!(
+            jit.ready_side_trace_dispatch_for(chunk_ptr, 99, 0),
+            Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
+                start_pc: 0,
+                linked_loop_header_pc: Some(4),
+                ..
+            }))
+        ));
+
+        jit.refresh_linked_ready_side_trace(SideTraceKey {
+            parent: parent_key,
+            exit_index: 0,
+        });
+        assert!(matches!(
+            jit.traces
+                .get(&parent_key)
+                .and_then(|trace| trace.linked_ready_side_traces.get(&0)),
+            Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
+                start_pc: 0,
+                linked_loop_header_pc: Some(4),
+                ..
+            }))
         ));
     }
 

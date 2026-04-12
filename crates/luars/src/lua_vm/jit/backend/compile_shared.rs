@@ -269,8 +269,11 @@ fn normalize_numeric_operand_alias(
     }
 }
 
-fn prune_dead_pure_numeric_defs(steps: Vec<NumericStep>) -> Vec<NumericStep> {
-    let mut live = std::collections::HashSet::<u32>::new();
+fn prune_dead_pure_numeric_defs_with_live_seed(
+    steps: Vec<NumericStep>,
+    live_seed: &[u32],
+) -> Vec<NumericStep> {
+    let mut live = live_seed.iter().copied().collect::<std::collections::HashSet<u32>>();
     let mut killed_by_later_write = std::collections::HashSet::<u32>::new();
     let mut kept = Vec::with_capacity(steps.len());
 
@@ -452,14 +455,21 @@ fn run_numeric_forwarding_pass(steps: Vec<NumericStep>) -> Vec<NumericStep> {
     forward_local_numeric_binary_moves(steps)
 }
 
-fn run_numeric_normalize_and_prune_pass(steps: Vec<NumericStep>) -> Vec<NumericStep> {
-    optimize_numeric_steps(steps)
+#[cfg(test)]
+pub(super) fn run_numeric_midend_passes(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+    run_numeric_midend_passes_with_live_out(steps, &[])
 }
 
-pub(super) fn run_numeric_midend_passes(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+pub(super) fn run_numeric_midend_passes_with_live_out(
+    steps: Vec<NumericStep>,
+    live_out: &[u32],
+) -> Vec<NumericStep> {
     let mut current = steps;
     for _ in 0..4 {
-        let next = run_numeric_normalize_and_prune_pass(run_numeric_forwarding_pass(current.clone()));
+        let next = optimize_numeric_steps_with_live_seed(
+            run_numeric_forwarding_pass(current.clone()),
+            live_out,
+        );
         if next == current {
             return next;
         }
@@ -469,7 +479,7 @@ pub(super) fn run_numeric_midend_passes(steps: Vec<NumericStep>) -> Vec<NumericS
     current
 }
 
-fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
+fn optimize_numeric_steps_with_live_seed(steps: Vec<NumericStep>, live_seed: &[u32]) -> Vec<NumericStep> {
     let mut optimized = Vec::with_capacity(steps.len());
     let mut register_values = std::collections::HashMap::<u32, u32>::new();
     let mut register_slots = std::collections::HashMap::<u32, TableIntKey>::new();
@@ -480,6 +490,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
     let mut field_states = std::collections::HashMap::<TableFieldKey, TableFieldKeyState>::new();
     let mut next_value_id = u32::MAX;
     let mut read_counts = std::collections::HashMap::<u32, usize>::new();
+    let live_seed_set = live_seed.iter().copied().collect::<std::collections::HashSet<u32>>();
 
     for step in &steps {
         for reg in numeric_step_reads(*step) {
@@ -508,7 +519,10 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
                         .available_value_reg = Some(dst);
                 }
 
-                if dst != src && read_counts.get(&dst).copied().unwrap_or(0) > 0 {
+                if dst != src
+                    && (live_seed_set.contains(&dst)
+                        || read_counts.get(&dst).copied().unwrap_or(0) > 0)
+                {
                     optimized.push(Some(NumericStep::Move { dst, src }));
                 }
             }
@@ -806,7 +820,7 @@ fn optimize_numeric_steps(steps: Vec<NumericStep>) -> Vec<NumericStep> {
         }
     }
 
-    prune_dead_pure_numeric_defs(optimized.into_iter().flatten().collect())
+    prune_dead_pure_numeric_defs_with_live_seed(optimized.into_iter().flatten().collect(), live_seed)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1634,6 +1648,14 @@ fn compile_numeric_lowering(
     insts: &[TraceIrInst],
     lowered_trace: &LoweredTrace,
 ) -> Option<NumericLowering> {
+    compile_numeric_lowering_with_live_out(insts, lowered_trace, &[])
+}
+
+fn compile_numeric_lowering_with_live_out(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+    live_out: &[u32],
+) -> Option<NumericLowering> {
     let mut steps = Vec::with_capacity(insts.len());
     let mut index = 0usize;
 
@@ -1940,7 +1962,7 @@ fn compile_numeric_lowering(
         index += 1;
     }
 
-    let steps = run_numeric_midend_passes(steps);
+    let steps = run_numeric_midend_passes_with_live_out(steps, live_out);
     let value_state = build_numeric_value_state(&steps, lowered_trace);
     Some(NumericLowering { steps, value_state })
 }

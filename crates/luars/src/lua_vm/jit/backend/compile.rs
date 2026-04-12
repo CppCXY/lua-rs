@@ -32,6 +32,15 @@ pub(super) fn lower_numeric_steps_for_native(
     compile_numeric_lowering(insts, lowered_trace).map(|lowering| lowering.steps)
 }
 
+pub(super) fn lower_numeric_steps_for_native_with_live_out(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+    live_out: &[u32],
+) -> Option<Vec<NumericStep>> {
+    compile_numeric_lowering_with_live_out(insts, lowered_trace, live_out)
+        .map(|lowering| lowering.steps)
+}
+
 pub(super) fn lower_numeric_lowering_for_native(
     insts: &[TraceIrInst],
     lowered_trace: &LoweredTrace,
@@ -166,6 +175,71 @@ mod tests {
                 value: 11,
             }]
         );
+    }
+
+    #[test]
+    fn lower_numeric_steps_with_live_out_keeps_move_only_used_by_live_out() {
+        let insts = vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: crate::OpCode::Move,
+                raw_instruction: Instruction::create_abc(crate::OpCode::Move, 0, 4, 0).as_u32(),
+                kind: TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: crate::OpCode::Move,
+                raw_instruction: Instruction::create_abc(crate::OpCode::Move, 1, 10, 0).as_u32(),
+                kind: TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(10)],
+                writes: vec![TraceIrOperand::Register(1)],
+            },
+        ];
+
+        let steps = lower_numeric_steps_for_native_with_live_out(
+            &insts,
+            &lowered_trace_with_constants(Vec::new()),
+            &[0, 1],
+        )
+        .unwrap();
+
+        assert_eq!(
+            steps,
+            vec![NumericStep::Move { dst: 0, src: 4 }, NumericStep::Move { dst: 1, src: 10 }]
+        );
+    }
+
+    #[test]
+    fn lower_numeric_steps_with_live_out_still_prunes_unrelated_dead_move() {
+        let insts = vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: crate::OpCode::Move,
+                raw_instruction: Instruction::create_abc(crate::OpCode::Move, 0, 4, 0).as_u32(),
+                kind: TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: crate::OpCode::Move,
+                raw_instruction: Instruction::create_abc(crate::OpCode::Move, 7, 8, 0).as_u32(),
+                kind: TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(8)],
+                writes: vec![TraceIrOperand::Register(7)],
+            },
+        ];
+
+        let steps = lower_numeric_steps_for_native_with_live_out(
+            &insts,
+            &lowered_trace_with_constants(Vec::new()),
+            &[0],
+        )
+        .unwrap();
+
+        assert_eq!(steps, vec![NumericStep::Move { dst: 0, src: 4 }]);
     }
 
     #[test]

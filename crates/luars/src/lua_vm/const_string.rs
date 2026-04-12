@@ -38,6 +38,7 @@ pub struct ConstString {
     pub str_false: LuaValue,    // "false"
     pub str_integer: LuaValue,  // "integer" (for math.type)
     pub str_float: LuaValue,    // "float"   (for math.type)
+    pub str_n: LuaValue,        // "n" (vararg/table.pack count field)
 
     // Pre-cached debug hook event name strings
     pub str_hook_call: LuaValue,      // "call"
@@ -72,6 +73,7 @@ impl ConstString {
             str_false: nil,
             str_integer: nil,
             str_float: nil,
+            str_n: nil,
             str_hook_call: nil,
             str_hook_return: nil,
             str_hook_line: nil,
@@ -137,6 +139,7 @@ impl ConstString {
         cs.str_false = allocator.create_string(gc, "false").unwrap();
         cs.str_integer = allocator.create_string(gc, "integer").unwrap();
         cs.str_float = allocator.create_string(gc, "float").unwrap();
+        cs.str_n = allocator.create_string(gc, "n").unwrap();
 
         // Fix all metamethod name strings — they should never be collected
         // (like Lua's luaC_fix in luaT_init)
@@ -163,6 +166,7 @@ impl ConstString {
         gc.fixed(cs.str_false.as_gc_ptr().unwrap());
         gc.fixed(cs.str_integer.as_gc_ptr().unwrap());
         gc.fixed(cs.str_float.as_gc_ptr().unwrap());
+        gc.fixed(cs.str_n.as_gc_ptr().unwrap());
 
         // Pre-create debug hook event name strings
         cs.str_hook_call = allocator.create_string(gc, "call").unwrap();

@@ -455,6 +455,7 @@ impl CompiledTrace {
         Self::from_artifact_helper_plan(&artifact, ir, &lowered_trace, helper_plan)
     }
 
+    #[cfg(test)]
     fn from_artifact_helper_plan(
         artifact: &TraceArtifact,
         ir: &TraceIr,
@@ -576,6 +577,7 @@ impl CompiledTrace {
         self.summary
     }
 
+    #[cfg(test)]
     pub(crate) fn exits(&self) -> &[CompiledTraceExit] {
         &self.exits
     }
@@ -597,9 +599,11 @@ impl CompiledTrace {
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct NullTraceBackend;
 
+#[cfg(test)]
 impl TraceBackend for NullTraceBackend {
     fn compile(
         &mut self,

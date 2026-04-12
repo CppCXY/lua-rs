@@ -1,5 +1,6 @@
 use crate::gc::UpvaluePtr;
 use crate::lua_value::LuaProto;
+use crate::stdlib::math::try_call_fast_math;
 use crate::lua_vm::execute::{
     call::{call_c_function, precall},
     execute_loop::lua_execute,
@@ -1014,7 +1015,21 @@ unsafe fn dispatch_lowered_trace_snippet(
                         return Some(JitTraceAction::ContinueAt(op_pc));
                     }
                 } else if func.is_c_callable() {
-                    if call_c_function(context.lua_state, func_idx, nargs, c - 1).is_err() {
+                    let c_func = if let Some(c_func) = func.as_cfunction() {
+                        Some(c_func)
+                    } else {
+                        func.as_cclosure().map(|closure| closure.func())
+                    };
+                    let call_result = if let Some(c_func) = c_func {
+                        if let Some(result) = try_call_fast_math(context.lua_state, c_func, func_idx, nargs, c - 1) {
+                            result
+                        } else {
+                            call_c_function(context.lua_state, func_idx, nargs, c - 1)
+                        }
+                    } else {
+                        call_c_function(context.lua_state, func_idx, nargs, c - 1)
+                    };
+                    if call_result.is_err() {
                         record_completed_hits(context, completed_hits);
                         return Some(JitTraceAction::ContinueAt(op_pc));
                     }

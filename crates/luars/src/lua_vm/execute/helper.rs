@@ -528,6 +528,7 @@ pub fn finishget(
     finishget_inner(lua_state, obj, key, false)
 }
 
+#[cfg(feature = "jit")]
 pub fn finishget_known_miss(
     lua_state: &mut LuaState,
     obj: &LuaValue,

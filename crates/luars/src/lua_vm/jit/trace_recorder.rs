@@ -606,6 +606,17 @@ mod tests {
             .unwrap()
     }
 
+    fn load_bench_functions_chunk() -> LuaProto {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_functions.lua"
+        ))
+        .unwrap();
+        vm.compile_with_name(&source, "@bench_functions.lua")
+            .unwrap()
+    }
+
     fn find_child_proto(chunk: &LuaProto, linedefined: usize, lastlinedefined: usize) -> &LuaProto {
         chunk
             .child_protos
@@ -1203,6 +1214,37 @@ mod tests {
             1
         );
         assert_eq!(lowered.ssa_memory_effect_summary().call_count, 5);
+    }
+
+    #[test]
+    fn recorder_inspects_bench_functions_vararg_outer_loop_trace() {
+        let chunk = load_bench_functions_chunk();
+        let artifact = TraceRecorder::record_root(&chunk as *const LuaProto, 70).unwrap();
+
+        let ops = artifact
+            .ops
+            .iter()
+            .map(|op| (op.pc, op.opcode))
+            .collect::<Vec<_>>();
+
+        println!("bench_functions outer trace={ops:?} exits={:?}", artifact.exits);
+
+        assert_eq!(artifact.seed.start_pc, 70);
+        assert_eq!(artifact.loop_tail_pc, 78);
+        assert_eq!(artifact.ops.len(), 9);
+        assert_eq!(ops.last(), Some(&(78, OpCode::ForLoop)));
+        assert_eq!(ops.iter().filter(|(_, opcode)| *opcode == OpCode::Call).count(), 1);
+        assert!(artifact.exits.is_empty());
+    }
+
+    #[test]
+    fn recorder_reports_varargprep_blocker_for_bench_functions_vararg_child_entry() {
+        let chunk = load_bench_functions_chunk();
+        let proto = find_child_proto(&chunk, 32, 38);
+        assert_eq!(
+            TraceRecorder::record_root(proto as *const LuaProto, 0),
+            Err(TraceAbortReason::UnsupportedOpcode(OpCode::VarargPrep))
+        );
     }
 
     #[test]

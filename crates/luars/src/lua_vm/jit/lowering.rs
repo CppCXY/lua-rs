@@ -915,6 +915,7 @@ fn collect_restore_operands(ir: &TraceIr) -> Vec<SnapshotOperand> {
     compact_restore_operands(collect_written_restore_operands(ir))
 }
 
+#[cfg(test)]
 fn collect_written_restore_operands(ir: &TraceIr) -> Vec<SnapshotOperand> {
     collect_written_restore_operands_from_insts(ir.insts.iter(), None, None)
 }

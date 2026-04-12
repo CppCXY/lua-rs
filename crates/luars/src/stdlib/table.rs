@@ -534,8 +534,7 @@ fn table_pack(l: &mut LuaState) -> LuaResult<usize> {
     let n = l.arg_count();
     let table = l.create_table(n, 1)?;
 
-    // Set 'n' field
-    let n_key = l.create_string("n")?;
+    let n_key = l.vm_mut().const_strings.str_n;
 
     // Get raw table pointer — safe because table is on GC heap, not on stack.
     // This avoids per-element vm_mut() → as_table_mut() → set_int indirection.
@@ -620,12 +619,16 @@ fn table_unpack(l: &mut LuaState) -> LuaResult<usize> {
     l.ensure_stack_capacity(count)?;
 
     if !has_meta {
-        // Fast path: raw access, no metamethod overhead
+        // Fast path: raw access plus batched stack writes, no per-result push overhead.
         let table = table_val.as_table_mut().unwrap();
-        for idx in i..=j {
-            let val = table.raw_geti(idx).unwrap_or(LuaValue::nil());
-            l.push_value(val)?;
+        let top = l.get_top();
+        unsafe {
+            let stack_ptr = l.stack_mut().as_mut_ptr().add(top);
+            for (offset, idx) in (i..=j).enumerate() {
+                *stack_ptr.add(offset) = table.raw_geti(idx).unwrap_or(LuaValue::nil());
+            }
         }
+        l.set_top_raw(top + count);
     } else {
         // Metamethod path: use table_geti to respect __index
         for idx in i..=j {

@@ -2,7 +2,10 @@
 
 param(
     [switch]$NoColor,
-    [switch]$JitStats
+    [switch]$JitStats,
+    [string]$CompareBaseReport,
+    [string]$CompareTargetReport,
+    [switch]$CompareLatest
 )
 
 $benchmarks = @(
@@ -262,6 +265,273 @@ function Write-JitStatsSummary {
     Write-ColorHost "Saved JIT summary to $ReportPath" "Gray"
 }
 
+function Get-BenchmarkRuntimeSamples {
+    param([object[]]$Lines)
+
+    $samples = New-Object System.Collections.Generic.List[object]
+    $pattern = '(?<seconds>\d+(?:\.\d+)?) seconds(?: \((?<throughput>\d+(?:\.\d+)?) (?<unit>[^)]+)\))?'
+
+    foreach ($lineObject in $Lines) {
+        $line = [string]$lineObject
+        if ($line -notmatch $pattern) {
+            continue
+        }
+
+        $sample = [ordered]@{
+            Line = $line
+            Seconds = [double]$matches.seconds
+        }
+
+        if ($matches.throughput) {
+            $sample.Throughput = [double]$matches.throughput
+        }
+
+        if ($matches.unit) {
+            $sample.ThroughputUnit = $matches.unit.Trim()
+        }
+
+        $samples.Add([pscustomobject]$sample) | Out-Null
+    }
+
+    return $samples.ToArray()
+}
+
+function Get-TotalRuntimeSeconds {
+    param([object[]]$Samples)
+
+    if ($null -eq $Samples -or $Samples.Count -eq 0) {
+        return $null
+    }
+
+    $total = 0.0
+    foreach ($sample in $Samples) {
+        $total += [double]$sample.Seconds
+    }
+
+    return [math]::Round($total, 6)
+}
+
+function Load-JitSummaryReport {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        throw "Report not found: $Path"
+    }
+
+    return Get-Content -Path $Path -Raw | ConvertFrom-Json
+}
+
+function Get-LatestJitSummaryPaths {
+    param([string]$Directory)
+
+    if (-not (Test-Path $Directory)) {
+        throw "Benchmark report directory not found: $Directory"
+    }
+
+    $reports = Get-ChildItem -Path $Directory -Filter 'jit-stats-summary-*.json' |
+        Sort-Object -Property LastWriteTimeUtc -Descending
+
+    if ($reports.Count -lt 2) {
+        throw "Need at least two JIT summary reports in $Directory to compare latest results."
+    }
+
+    return @($reports[1].FullName, $reports[0].FullName)
+}
+
+function Get-RowValue {
+    param(
+        [psobject]$Row,
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Row) {
+        return $null
+    }
+
+    $property = $Row.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function Get-NumericRowValue {
+    param(
+        [psobject]$Row,
+        [string]$PropertyName,
+        [double]$DefaultValue = 0.0
+    )
+
+    $value = Get-RowValue -Row $Row -PropertyName $PropertyName
+    if ($null -eq $value) {
+        return $DefaultValue
+    }
+
+    return [double]$value
+}
+
+function Get-OptionalDelta {
+    param(
+        [object]$BaseValue,
+        [object]$TargetValue
+    )
+
+    if ($null -eq $BaseValue -or $null -eq $TargetValue) {
+        return $null
+    }
+
+    return [math]::Round(([double]$TargetValue - [double]$BaseValue), 6)
+}
+
+function Format-OptionalNumber {
+    param(
+        [object]$Value,
+        [int]$Decimals = 3
+    )
+
+    if ($null -eq $Value) {
+        return '-'
+    }
+
+    return ('{0:N' + $Decimals + '}') -f [double]$Value
+}
+
+function Format-DeltaValue {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return '-'
+    }
+
+    if ($Value -is [double] -or $Value -is [single] -or $Value -is [decimal]) {
+        return ('{0:+0.000;-0.000;0.000}' -f [double]$Value)
+    }
+
+    return ('{0:+0;-0;0}' -f [double]$Value)
+}
+
+function Format-PercentDelta {
+    param(
+        [object]$BaseValue,
+        [object]$TargetValue,
+        [switch]$InvertSign
+    )
+
+    if ($null -eq $BaseValue -or $null -eq $TargetValue) {
+        return '-'
+    }
+
+    $base = [double]$BaseValue
+    if ($base -eq 0) {
+        return '-'
+    }
+
+    $percent = (([double]$TargetValue - $base) / $base) * 100.0
+    if ($InvertSign) {
+        $percent *= -1.0
+    }
+
+    return ('{0:+0.0;-0.0;0.0}%' -f $percent)
+}
+
+function Write-JitStatsComparison {
+    param(
+        [string]$BaseReportPath,
+        [string]$TargetReportPath
+    )
+
+    $baseReport = Load-JitSummaryReport -Path $BaseReportPath
+    $targetReport = Load-JitSummaryReport -Path $TargetReportPath
+
+    $baseRows = @{}
+    foreach ($row in @($baseReport.rows)) {
+        $baseRows[$row.Benchmark] = $row
+    }
+
+    $targetRows = @{}
+    foreach ($row in @($targetReport.rows)) {
+        $targetRows[$row.Benchmark] = $row
+    }
+
+    $benchmarks = @($baseRows.Keys + $targetRows.Keys | Sort-Object -Unique)
+    $runtimeRows = New-Object System.Collections.Generic.List[object]
+    $jitRows = New-Object System.Collections.Generic.List[object]
+
+    foreach ($benchmark in $benchmarks) {
+        $baseRow = $baseRows[$benchmark]
+        $targetRow = $targetRows[$benchmark]
+
+        $baseLuaRsSeconds = Get-RowValue -Row $baseRow -PropertyName 'LuaRsTotalSeconds'
+        $targetLuaRsSeconds = Get-RowValue -Row $targetRow -PropertyName 'LuaRsTotalSeconds'
+        $baseNativeSeconds = Get-RowValue -Row $baseRow -PropertyName 'NativeTotalSeconds'
+        $targetNativeSeconds = Get-RowValue -Row $targetRow -PropertyName 'NativeTotalSeconds'
+
+        if ($null -ne $baseLuaRsSeconds -or $null -ne $targetLuaRsSeconds -or $null -ne $baseNativeSeconds -or $null -ne $targetNativeSeconds) {
+            $runtimeRows.Add([pscustomobject]@{
+                Benchmark = $benchmark
+                BaseLuaRsSec = Format-OptionalNumber -Value $baseLuaRsSeconds
+                TargetLuaRsSec = Format-OptionalNumber -Value $targetLuaRsSeconds
+                DeltaLuaRsSec = Format-OptionalNumber -Value (Get-OptionalDelta -BaseValue $baseLuaRsSeconds -TargetValue $targetLuaRsSeconds)
+                LuaRsPct = Format-PercentDelta -BaseValue $baseLuaRsSeconds -TargetValue $targetLuaRsSeconds -InvertSign
+                BaseNativeSec = Format-OptionalNumber -Value $baseNativeSeconds
+                TargetNativeSec = Format-OptionalNumber -Value $targetNativeSeconds
+                NativePct = Format-PercentDelta -BaseValue $baseNativeSeconds -TargetValue $targetNativeSeconds -InvertSign
+            }) | Out-Null
+        }
+
+        $jitRows.Add([pscustomobject]@{
+            Benchmark = $benchmark
+            DeltaRecordedTraces = Format-DeltaValue ((Get-NumericRowValue -Row $targetRow -PropertyName 'RecordedTraces') - (Get-NumericRowValue -Row $baseRow -PropertyName 'RecordedTraces'))
+            DeltaRecordAborts = Format-DeltaValue ((Get-NumericRowValue -Row $targetRow -PropertyName 'RecordAborts') - (Get-NumericRowValue -Row $baseRow -PropertyName 'RecordAborts'))
+            DeltaRootNative = Format-DeltaValue ((Get-NumericRowValue -Row $targetRow -PropertyName 'RootNativeDispatches') - (Get-NumericRowValue -Row $baseRow -PropertyName 'RootNativeDispatches'))
+            DeltaSideNative = Format-DeltaValue ((Get-NumericRowValue -Row $targetRow -PropertyName 'SideNativeDispatches') - (Get-NumericRowValue -Row $baseRow -PropertyName 'SideNativeDispatches'))
+            DeltaHelperDispatch = Format-DeltaValue ((Get-NumericRowValue -Row $targetRow -PropertyName 'HelperPlanDispatches') - (Get-NumericRowValue -Row $baseRow -PropertyName 'HelperPlanDispatches'))
+            DeltaTableHelpers = Format-DeltaValue ((Get-NumericRowValue -Row $targetRow -PropertyName 'NativeProfileTableHelpers') - (Get-NumericRowValue -Row $baseRow -PropertyName 'NativeProfileTableHelpers'))
+        }) | Out-Null
+    }
+
+    Write-Output ""
+    Write-ColorHost "========================================" "Cyan"
+    Write-ColorHost "  JIT Summary Comparison" "Cyan"
+    Write-ColorHost "========================================" "Cyan"
+    Write-ColorHost "Base:   $BaseReportPath" "Gray"
+    Write-ColorHost "Target: $TargetReportPath" "Gray"
+
+    if ($runtimeRows.Count -gt 0) {
+        Write-Output ""
+        Write-ColorHost "Runtime Delta" "Cyan"
+        $runtimeRows |
+            Sort-Object -Property Benchmark |
+            Format-Table Benchmark, BaseLuaRsSec, TargetLuaRsSec, DeltaLuaRsSec, LuaRsPct, BaseNativeSec, TargetNativeSec, NativePct -AutoSize |
+            Out-String -Width 220 |
+            Write-Output
+    }
+
+    Write-Output ""
+    Write-ColorHost "JIT Counter Delta" "Cyan"
+    $jitRows |
+        Sort-Object -Property Benchmark |
+        Format-Table Benchmark, DeltaRecordedTraces, DeltaRecordAborts, DeltaRootNative, DeltaSideNative, DeltaHelperDispatch, DeltaTableHelpers -AutoSize |
+        Out-String -Width 220 |
+        Write-Output
+}
+
+if ($CompareLatest -or $CompareBaseReport -or $CompareTargetReport) {
+    if ($CompareLatest) {
+        $latestPaths = Get-LatestJitSummaryPaths -Directory '.\benchmark_reports'
+        $CompareBaseReport = $latestPaths[0]
+        $CompareTargetReport = $latestPaths[1]
+    }
+
+    if ([string]::IsNullOrWhiteSpace($CompareBaseReport) -or [string]::IsNullOrWhiteSpace($CompareTargetReport)) {
+        throw 'Comparison requires both -CompareBaseReport and -CompareTargetReport, or use -CompareLatest.'
+    }
+
+    Write-JitStatsComparison -BaseReportPath $CompareBaseReport -TargetReportPath $CompareTargetReport
+    return
+}
+
 Ensure-LuarsBinary -Executable $luarsBinary -WithJit:$JitStats
 
 Write-Output ""
@@ -288,9 +558,14 @@ foreach ($bench in $benchmarks) {
 
     if ($JitStats) {
         $parsedStats = Get-JitStatsFromOutput -Lines $luarsResult.Output
+        $luarsSamples = Get-BenchmarkRuntimeSamples -Lines $luarsResult.Output
+        $nativeSamples = @()
         if ($null -ne $parsedStats) {
             $jitRows.Add([pscustomobject]@{
                 Benchmark = $bench
+                LuaRsTotalSeconds = Get-TotalRuntimeSeconds -Samples $luarsSamples
+                LuaRsSampleCount = $luarsSamples.Count
+                LuaRsSamples = @($luarsSamples)
                 TraceHeadersSeen = $parsedStats.TraceHeadersSeen
                 RecordAttempts = $parsedStats.RecordAttempts
                 RecordedTraces = $parsedStats.RecordedTraces
@@ -335,6 +610,14 @@ foreach ($bench in $benchmarks) {
     Write-ColorHost "--- Native Lua ---" "Green"
     $nativeResult = Invoke-BenchmarkRuntime -Executable $nativeLua -ScriptPath "benchmarks\$bench"
     Write-OutputLines -Lines $nativeResult.Output
+
+    if ($JitStats -and $jitRows.Count -gt 0) {
+        $nativeSamples = Get-BenchmarkRuntimeSamples -Lines $nativeResult.Output
+        $lastRow = $jitRows[$jitRows.Count - 1]
+        $lastRow | Add-Member -NotePropertyName NativeTotalSeconds -NotePropertyValue (Get-TotalRuntimeSeconds -Samples $nativeSamples) -Force
+        $lastRow | Add-Member -NotePropertyName NativeSampleCount -NotePropertyValue $nativeSamples.Count -Force
+        $lastRow | Add-Member -NotePropertyName NativeSamples -NotePropertyValue @($nativeSamples) -Force
+    }
 
     Write-Output ""
     Write-Output "----------------------------------------"

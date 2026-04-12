@@ -68,6 +68,61 @@ benchmark 现在应该被当作探针，而不是主线本身：
 - 用 benchmark 约束主线是否真的在收窄 steady-state 成本；
 - 同时把真正要保留的实现，限定在 LuaJIT 方向的结构工作上。
 
+## 2026-04-13 call-heavy benchmark 复盘
+
+在 call-for 正确性修复和 live-out 精确保留之后，当前这轮 benchmark 已经足够回答两个问题：
+
+1. 现有 `Call -> Move -> ForLoop` widening 要不要保留；
+2. 还要不要继续扩更宽的 `Call -> ... -> ForLoop` 形状。
+
+先看结果：
+
+1. `bench_functions.lua` 值得保留当前 widening。它的总时间从 `0.673s` 降到 `0.613s`，同时 `HelperPlanDispatches` 从 `1999886` 降到 `0`，说明当前这条 `NativeCallForLoop` 路径已经不再只是“命中统计更好看”，而是真正收掉了 vararg 外层循环上的 helper-plan 调度成本。
+2. `bench_closures.lua` 不支持“继续扩 call-for 形状”这个方向。它现在已经是 helper-free：`HelperPlanDispatches=0`、`NativeProfile*Helpers=0`，但总时间仍然从 `0.208s` 小幅到 `0.216s` 这一噪声带。说明剩余成本主要在 closure 创建、upvalue 读写和闭包调用语义本身，而不是 call-for 识别不足。
+3. `bench_multiret.lua` 也不支持继续扩 call-for 形状。虽然 `RootNativeDispatches` 从 `4` 提升到 `1999894`，`HelperPlanDispatches` 也从 `4999715` 降到 `999943`，但总时间基本只是 `0.946s -> 0.942s`。同时 `NativeProfileTableHelpers=3999772`、`NativeProfileUpvalueHelpers=1999886`、`HelperPlanCalls=1999886` 依然很高，说明真正卡住的是 multi-return / vararg pack-unpack / table materialization / upvalue-table 这些固定成本，而不是外层再多认一个 `Call -> ... -> ForLoop`。
+4. `bench_math.lua` 更明确地不该继续往 call-for widening 上投入。它虽然从 `1.224s` 改善到 `1.149s`，但 `RootNativeDispatches` 只有 `9`，`HelperPlanDispatches` 仍然是 `9999886`。这表明 math 内建函数调用的 steady-state 依旧主要落在 helper-plan call dispatch 上，瓶颈是 builtin/math-call 路径本身，而不是 for-loop 形状识别。
+
+因此当前结论应该固定为：
+
+1. 保留现有 `Call -> Move -> ForLoop` widening，因为它已经在 `bench_functions.lua` 上证明自己有真实 wall-clock 收益。
+2. 暂停继续扩更宽的 `Call -> ... -> ForLoop` 形状，至少在新的 benchmark 证据出现之前不要把它当成主线。
+3. 下一轮真正该追的是剩余固定成本：
+   - `bench_multiret.lua` 的 multi-return / vararg / table materialization helper-heavy steady-state；
+   - `bench_math.lua` 的 builtin math call dispatch；
+   - `bench_closures.lua` 的 closure/upvalue steady-state，而不是 call-for 识别。
+
+### 2026-04-13 当轮落地
+
+在不继续扩 trace 形状的前提下，这一轮先落了两类最小 fixed-cost 收窄：
+
+1. `bench_multiret.lua` 先从 `table.unpack` 下手，而不是继续追新的 call-for 识别。当前 `table.unpack` 的无元方法路径已经改成批量 raw stack write：在提前完成 `check_stack` / `ensure_stack_capacity` 之后，直接把 `raw_geti` 结果写到目标栈区并一次性更新 `top`，避免每个返回值都走一次 `push_value`。这不会改变带 `__index` / `__len` 的语义路径，元方法路径仍然保留原先逐项取值。
+2. `bench_math.lua` 先从 builtin helper 本体收窄固定成本，而不是先做更激进的 JIT builtin lowering。当前 `math.random` 已切到 unchecked 参数读取和 unchecked 结果写回；`math.max` / `math.min` 的多参数路径也不再每轮走 `get_arg(...)` 包装，而是直接消费 unchecked 参数槽位。也就是说，这一轮先收的是“helper 本体的参数/结果搬运成本”，还没有把 math 调用从 helper-plan call dispatch 里整体拔出来。
+3. 顺手把一个只被 native JIT 路径使用的 helper 收边界了：`finishget_known_miss` 现在只在 `jit` feature 下编译，避免普通非 JIT 测试构建继续报 unused。
+
+当前验证状态：
+
+1. `test_table_unpack` 与 `test_table_unpack_with_metamethods` 通过；
+2. `test_math_*` 聚焦子集通过；
+3. `cargo build --release -p luars_interpreter --features jit` 通过。
+
+但这里要把边界写清楚：
+
+1. 这一轮还没有重跑 benchmark，所以现在只能确认正确性和构建状态，不能宣称 `bench_multiret.lua` / `bench_math.lua` 已经有 wall-clock 改善；
+2. 如果下一轮 benchmark 改善有限，那么说明真正主成本依旧分别在：
+   - `bench_multiret.lua` 的 multi-return / vararg pack-unpack / table materialization；
+   - `bench_math.lua` 的 builtin call dispatch 仍然主要停留在 helper-plan 层。
+
+### 2026-04-13 同轮复测与 math call-dispatch follow-up
+
+上面那条“还没重跑 benchmark”的边界已经被这轮后续工作消掉了，新的事实是：
+
+1. `bench_multiret.lua` 先补了一个更贴近热点的 fixed-cost 收窄：把 vararg/table 路径里反复出现的短串键 `"n"` 收进 `ConstString`，`table.pack`、`VARARGPREP`、vararg-table `n` 读取都改成复用缓存值；同时补了一个带命名参数且保留 `nil` 的 `table.pack(...)` 回归，确保这条热路径的语义没有漂。
+2. 这次 multiret 复测说明这刀是对的，但它只是在固定成本层面挪掉了一小块：`table.pack` 从 `0.226s` 降到 `0.210s`，`Vararg to table` 从 `0.138s` 降到 `0.136s`，`Returns in table ctor` 从 `0.121s` 降到 `0.116s`。与此同时 `NativeProfileTableHelpers=3999772`、`NativeProfileUpvalueHelpers=1999886`、`HelperPlanCalls=1999886` 基本没动，所以 `bench_multiret.lua` 仍然主要卡在 table / upvalue / materialization steady-state，而不是字符串键构造本身。
+3. `bench_math.lua` 则进入了真正命中的下一层：runtime helper-plan `OpCode::Call` 分支和 native `jit_native_helper_call` 现在都会先尝试一个只覆盖已知 math builtin 的无 frame fast path，直接在当前 caller frame 上完成参数读取和结果写回，绕开 `call_c_function -> push_c_frame/pop_c_frame` 的整套通用 C-call 开销。当前只收最热的 `math.sqrt`、`math.sin`、`math.floor`、`math.ceil`、`math.min`、`math.max`、`math.random`。
+4. 这条 math fast path 的 wall-clock 改善已经能直接看见：`math.sqrt 0.119s -> 0.088s`，`math.sin 0.160s -> 0.129s`，`math.min/max 0.299s -> 0.207s`，`math.random 0.115s -> 0.074s`。`math.floor/ceil` 基本持平（`0.230s -> 0.235s`），说明这组 builtin 里真正值得继续深挖的是随机数和 min/max/sqrt/sin 这几条，而不是 floor/ceil。
+5. 这里还要把统计口径写清楚：`HelperPlanDispatches` / `HelperPlanCalls` 在 `bench_math.lua` 里并没有下降，仍然是 `9999886`。这不是 fast path 没生效，而是当前计数器记录的是“helper-plan 中执行了一个 Call step”这一语义事件；我们现在优化掉的是这个 step 内部不再落到通用 `call_c_function` 慢路径，所以 wall-clock 下来了，但 summary counter 口径暂时不会跟着变。
+6. 这轮最新验证状态是：新增的 named-param `table.pack` 回归通过，`test_math_*` 全量通过，`cargo build --release -p luars_interpreter --features jit` 通过；也就是说 multiret 的常量串缓存和 math builtin fast path 都已经有正确性与 release 构建背书。
+
 ## 当前基线
 
 当前 JIT 已经具备以下基础：
@@ -472,11 +527,34 @@ benchmark 现在应该被当作探针，而不是主线本身：
 - 当前已经有最小 backend 回归覆盖这条骨架：一条 `Arithmetic -> TForCall -> TForLoop` trace 能被识别成 `NativeTForLoop`，并且 C iterator 路径可以在 native 中累计 body、最终在 `TFORLOOP` nil-exit 处按 side exit 退出。与之并行，`Arithmetic -> Call -> ForLoop` 的固定 call-loop 形状也已经有 `NativeCallForLoop` 覆盖 C-callable 与 table `__call` metamethod 两条主分支。也就是说，call-loop 主线已经从“路线判断”进入“多条窄 family 已落地、下一步要靠新 trace 样本决定是否继续扩 shape”的阶段。
 - 同时，Lua iterator 这条切换回解释器的边界现在也已经有 focused 回归：同样的 `NativeTForLoop` trace 在 iterator 为 Lua function 时，会在 `precall` 压入新 frame 后返回 `Returned`，当前线程 call stack 会真的多出一个 Lua frame，而不是伪装成 native 内继续执行。这样至少 `TForCall` helper 的两条主分支都已经被测试钉住。
 - 这里需要明确修正文档口径：上一个阶段里把 `next()` 变体的 blocker 归因到“缺少通用 `GetTabUp/GetField` 读取 helper”，这个判断现在已经过时。当前代码里 `GetTabUpField` / `GetTableField` 已经进入 numeric lowering 和 native helper 链，因此 `next()` 变体是否仍然值得单独推进，不能再按旧 blocker 下结论，而必须重新以当前 `bench_iterators.lua` trace report 为准。
+- 这条 call-loop 线随后又向前推进了一步，而且这次修的不是 recognizer，而是执行语义本身。之前 `bench_functions` / `bench_closures` / `bench_multiret` / `bench_math` 一轮同时回退，表面现象是 `NativeCallForLoop` 命中大涨但 wall-clock 变差；继续往下拆之后，真正的根因不是 `precall` 的 `c` / `c-1` 约定，而是 call-for 专用 lowering 复用了 numeric midend，结果把“只为 call 准备窗口”的纯 `Move` / `LoadI` / `AddI` 当成 dead defs 剪掉了。helper 进入 `precall` 时看到的调用槽位仍是空值，直接触发 fallback，于是先前那批性能结论其实混入了执行错误。
+- 当前主线修复有三部分：
+   1. `jit_native_helper_call` 在真正 `precall` 前，会把本轮 `A..A+B-1` 调用窗口从 native `base_ptr` 显式同步回 `lua_state.stack`；
+   2. `NativeCallForLoop` 不再重复发射一遍 prep steps；
+   3. call-for 的 pre/post 片段不再走会删除纯赋值的 numeric midend，而是保留原始 lowering，再由 focused 回归约束语义。
+- 这样收住之后，direct backend 回归已经重新覆盖三条主线：
+   1. `Call -> ForLoop` 的 C-callable 路径；
+   2. `Call -> ForLoop` 的 table `__call` metamethod 路径；
+   3. `Call -> Move -> ForLoop` 的真实执行路径，而不再只是 compile-level 识别。
+- 修复后的 release 对比也已经回收了前一轮最显著的 wall-clock 回退。以 `benchmark_reports/jit-stats-summary-20260413-004643.json` 对 `benchmark_reports/jit-stats-summary-20260413-012254.json` 为准：
+   1. `bench_functions.lua` 从约 `1.536s` 回到 `0.613s`；
+   2. `bench_closures.lua` 从约 `0.918s` 回到 `0.216s`；
+   3. `bench_multiret.lua` 从约 `3.887s` 回到 `0.942s`；
+   4. `bench_math.lua` 从约 `11.048s` 回到 `1.149s`；
+   5. 与此同时，`bench_quicksort.lua` 也从约 `0.059s` 回到 `0.017s`。
+- 这组结果很重要，因为它把“当前 call-for family 天生太慢”与“实现里存在执行错误”这两件事重新分开了。现在能成立的结论是：前一轮大面积回退主要不是 family 方向错，而是 call-for 执行路径把调用前后缀错误地优化掉了；在修好这个根因之后，call-loop family 仍然值得保留在主线。
+- 这条实现层面的止血补丁现在又收窄了一步：call-for pre/post 片段已经重新接回 numeric midend，但 `Move dst<-src` 这类“只被 helper 间接消费”的写入会按 live-out seed 保留下来，而不是继续依赖“后面是否还有显式读取 dst”的旧条件。也就是说，当前主线已经从“整段跳过 midend”推进到“仍走 midend，但会精确保留 call 参数窗口与 post-call live-out”的状态。
 
 因此，这个目标的下一子阶段已经很明确：
 
 1. 已完成：做 bailout-aware 的最小物化，把 loop-carried 状态只在 fallback、loop exit、side exit 前同步回槽位。
 2. 下一步再考虑把更多热点整数临时值纳入同样的 carried/state 规则，但前提是它们能形成真正稳定的 loop-carried 状态，而不是重新变成寄存器压力换局部 cache 的试验。
+
+对 call-loop family 来说，下一轮的最小计划也已经可以单独写清：
+
+1. 已完成：call-for pre/post lowering 已经从“整段跳过 numeric midend”收窄成“按 live-out 精确保留 call 参数窗口与 post-call 结果槽位”，并补了 focused lowering 回归，确认相关 `Move` 会保留、无关 dead move 仍会被剪掉。
+2. 下一步针对 `bench_functions.lua` / `bench_closures.lua` / `bench_multiret.lua` / `bench_math.lua` 重新看 release trace report，确认修复后剩下的时间是否主要落在真实 call 成本，而不是新的 fallback / helper 噪声。
+3. 只有在这条执行基线稳定之后，才继续扩更多 `Call -> ... -> ForLoop` 真实样本；判断标准仍然是“识别、执行、wall-clock 三者同时成立”，而不是单看 native dispatch 是否上升。
 
 ## 之后再做什么
 
