@@ -94,20 +94,65 @@ pub(crate) enum NumericOperand {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NumericStep {
-    Move { dst: u32, src: u32 },
+    Move {
+        dst: u32,
+        src: u32,
+    },
     #[allow(dead_code)]
-    LoadBool { dst: u32, value: bool },
-    LoadI { dst: u32, imm: i32 },
-    LoadF { dst: u32, imm: i32 },
-    Len { dst: u32, src: u32 },
-    GetUpval { dst: u32, upvalue: u32 },
-    SetUpval { src: u32, upvalue: u32 },
-    GetTabUpField { dst: u32, upvalue: u32, key: u32 },
-    SetTabUpField { upvalue: u32, key: u32, value: u32 },
-    GetTableInt { dst: u32, table: u32, index: u32 },
-    SetTableInt { table: u32, index: u32, value: u32 },
-    GetTableField { dst: u32, table: u32, key: u32 },
-    SetTableField { table: u32, key: u32, value: u32 },
+    LoadBool {
+        dst: u32,
+        value: bool,
+    },
+    LoadI {
+        dst: u32,
+        imm: i32,
+    },
+    LoadF {
+        dst: u32,
+        imm: i32,
+    },
+    Len {
+        dst: u32,
+        src: u32,
+    },
+    GetUpval {
+        dst: u32,
+        upvalue: u32,
+    },
+    SetUpval {
+        src: u32,
+        upvalue: u32,
+    },
+    GetTabUpField {
+        dst: u32,
+        upvalue: u32,
+        key: u32,
+    },
+    SetTabUpField {
+        upvalue: u32,
+        key: u32,
+        value: u32,
+    },
+    GetTableInt {
+        dst: u32,
+        table: u32,
+        index: u32,
+    },
+    SetTableInt {
+        table: u32,
+        index: u32,
+        value: u32,
+    },
+    GetTableField {
+        dst: u32,
+        table: u32,
+        key: u32,
+    },
+    SetTableField {
+        table: u32,
+        key: u32,
+        value: u32,
+    },
     Binary {
         dst: u32,
         lhs: NumericOperand,
@@ -334,18 +379,12 @@ impl PartialEq for NativeCompiledTrace {
             (Self::Return1 { entry: lhs }, Self::Return1 { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
             }
-            (
-                Self::LinearIntForLoop { entry: lhs },
-                Self::LinearIntForLoop { entry: rhs },
-            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
-            (
-                Self::LinearIntJmpLoop {
-                    entry: lhs,
-                },
-                Self::LinearIntJmpLoop {
-                    entry: rhs,
-                },
-            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (Self::LinearIntForLoop { entry: lhs }, Self::LinearIntForLoop { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
+            (Self::LinearIntJmpLoop { entry: lhs }, Self::LinearIntJmpLoop { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
             (Self::NumericForLoop { entry: lhs }, Self::NumericForLoop { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
             }
@@ -353,10 +392,9 @@ impl PartialEq for NativeCompiledTrace {
                 Self::GuardedNumericForLoop { entry: lhs },
                 Self::GuardedNumericForLoop { entry: rhs },
             ) => std::ptr::fn_addr_eq(*lhs, *rhs),
-            (
-                Self::GuardedCallPrefix { entry: lhs },
-                Self::GuardedCallPrefix { entry: rhs },
-            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
+            (Self::GuardedCallPrefix { entry: lhs }, Self::GuardedCallPrefix { entry: rhs }) => {
+                std::ptr::fn_addr_eq(*lhs, *rhs)
+            }
             (Self::CallForLoop { entry: lhs }, Self::CallForLoop { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
             }
@@ -468,20 +506,20 @@ impl CompiledTrace {
                 HelperPlanStep::Branch { .. } => CompiledTraceStepKind::Branch,
                 HelperPlanStep::LoopBackedge { .. } => CompiledTraceStepKind::LoopBackedge,
             };
-            helper_plan_summary.steps_executed = helper_plan_summary.steps_executed.saturating_add(1);
+            helper_plan_summary.steps_executed =
+                helper_plan_summary.steps_executed.saturating_add(1);
             match kind {
                 CompiledTraceStepKind::Call => {
-                    helper_plan_summary.call_steps = helper_plan_summary.call_steps.saturating_add(1);
+                    helper_plan_summary.call_steps =
+                        helper_plan_summary.call_steps.saturating_add(1);
                 }
                 CompiledTraceStepKind::MetamethodFallback => {
-                    helper_plan_summary.metamethod_steps = helper_plan_summary
-                        .metamethod_steps
-                        .saturating_add(1);
+                    helper_plan_summary.metamethod_steps =
+                        helper_plan_summary.metamethod_steps.saturating_add(1);
                 }
                 CompiledTraceStepKind::Guard => {
-                    helper_plan_summary.guards_observed = helper_plan_summary
-                        .guards_observed
-                        .saturating_add(1);
+                    helper_plan_summary.guards_observed =
+                        helper_plan_summary.guards_observed.saturating_add(1);
                 }
                 CompiledTraceStepKind::LoadMove
                 | CompiledTraceStepKind::UpvalueAccess
@@ -497,13 +535,14 @@ impl CompiledTrace {
             steps.push(kind);
         }
 
-        let recognized_lowered = matches!(execution, CompiledTraceExecution::LoweredOnly)
-            && native_profile.is_some();
+        let recognized_lowered =
+            matches!(execution, CompiledTraceExecution::LoweredOnly) && native_profile.is_some();
         if !has_helper_call && !execution.is_enterable() && !recognized_lowered {
             return None;
         }
 
-        let summary = execution_summary_for_dispatch(execution.clone(), native_profile, helper_plan_summary);
+        let summary =
+            execution_summary_for_dispatch(execution.clone(), native_profile, helper_plan_summary);
 
         let exits = lowered_trace
             .exits
@@ -556,7 +595,6 @@ impl CompiledTrace {
     pub(crate) fn native_profile(&self) -> Option<NativeLoweringProfile> {
         self.native_profile
     }
-
 }
 
 #[derive(Default)]
@@ -618,6 +656,7 @@ pub(super) fn synthetic_artifact_for_ir(ir: &TraceIr) -> TraceArtifact {
                 kind: TraceExitKind::GuardExit,
             })
             .collect(),
+        loop_header_pc: ir.root_pc,
         loop_tail_pc: ir.loop_tail_pc,
     }
 }

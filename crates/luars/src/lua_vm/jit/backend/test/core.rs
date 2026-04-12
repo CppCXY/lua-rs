@@ -104,4 +104,3 @@ fn compiled_trace_requires_helper_call_family() {
 
     assert_eq!(CompiledTrace::from_helper_plan(&ir, &helper_plan), None);
 }
-

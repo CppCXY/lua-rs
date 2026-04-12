@@ -435,7 +435,6 @@ pub(crate) fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
-
 /// string.sub(s, i [, j]) - Extract substring
 /// ULTRA-OPTIMIZED: Uses create_substring to avoid allocations when possible
 fn string_sub(l: &mut LuaState) -> LuaResult<usize> {

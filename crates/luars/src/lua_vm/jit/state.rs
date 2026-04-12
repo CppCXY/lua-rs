@@ -2,13 +2,13 @@ use ahash::AHashMap;
 use std::collections::hash_map::Entry;
 use std::fmt::Write;
 
+use crate::OpCode;
 use crate::gc::UpvaluePtr;
 use crate::lua_value::{LuaProto, LuaValue};
-use crate::OpCode;
 
 use super::backend::{
-    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution,
-    NativeCompiledTrace, NativeLoweringProfile, NativeTraceBackend, TraceBackend,
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, NativeCompiledTrace,
+    NativeLoweringProfile, NativeTraceBackend, TraceBackend,
 };
 use super::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
 use super::hotcount::tick_hotcount;
@@ -38,12 +38,17 @@ struct DispatchCacheEntry {
 #[inline(always)]
 fn dispatch_cache_index(chunk_addr: usize, pc: u32) -> usize {
     // Simple hash combining chunk address and pc
-    let hash = chunk_addr.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(pc as usize);
+    let hash = chunk_addr
+        .wrapping_mul(0x9e3779b97f4a7c15)
+        .wrapping_add(pc as usize);
     hash % DISPATCH_CACHE_SIZE
 }
 
 #[inline(always)]
-fn invalidate_dispatch_cache_entry(cache: &mut [DispatchCacheEntry; DISPATCH_CACHE_SIZE], key: TraceKey) {
+fn invalidate_dispatch_cache_entry(
+    cache: &mut [DispatchCacheEntry; DISPATCH_CACHE_SIZE],
+    key: TraceKey,
+) {
     let idx = dispatch_cache_index(key.chunk_addr, key.pc);
     let entry = &mut cache[idx];
     if entry.chunk_addr == key.chunk_addr && entry.pc == key.pc {
@@ -76,12 +81,24 @@ struct SideTraceKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TraceStatus {
-    Counting { hits: u16 },
-    Recording { attempts: u8 },
-    Recorded { instruction_count: u16 },
-    Lowered { instruction_count: u16 },
-    Executable { instruction_count: u16 },
-    Redirected { root_pc: u32 },
+    Counting {
+        hits: u16,
+    },
+    Recording {
+        attempts: u8,
+    },
+    Recorded {
+        instruction_count: u16,
+    },
+    Lowered {
+        instruction_count: u16,
+    },
+    Executable {
+        instruction_count: u16,
+    },
+    Redirected {
+        root_pc: u32,
+    },
     Blacklisted {
         attempts: u8,
         reason: TraceAbortReason,
@@ -115,12 +132,25 @@ impl TraceInfo {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SideTraceStatus {
-    Counting { hits: u16 },
-    Recording { attempts: u8 },
-    Recorded { instruction_count: u16 },
-    Lowered { instruction_count: u16 },
-    Executable { instruction_count: u16 },
-    Blacklisted { attempts: u8, reason: TraceAbortReason },
+    Counting {
+        hits: u16,
+    },
+    Recording {
+        attempts: u8,
+    },
+    Recorded {
+        instruction_count: u16,
+    },
+    Lowered {
+        instruction_count: u16,
+    },
+    Executable {
+        instruction_count: u16,
+    },
+    Blacklisted {
+        attempts: u8,
+        reason: TraceAbortReason,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +182,7 @@ impl SideTraceInfo {
 pub(crate) struct ExecutableTraceDispatch {
     pub start_pc: u32,
     pub loop_tail_pc: u32,
+    pub linked_loop_header_pc: Option<u32>,
     pub execution: CompiledTraceExecution,
     pub summary: HelperPlanDispatchSummary,
     pub native_profile: Option<NativeLoweringProfile>,
@@ -161,6 +192,7 @@ pub(crate) struct ExecutableTraceDispatch {
 pub(crate) struct NativeExecutableTraceDispatch {
     pub start_pc: u32,
     pub loop_tail_pc: u32,
+    pub linked_loop_header_pc: Option<u32>,
     pub native: NativeCompiledTrace,
     pub summary: HelperPlanDispatchSummary,
     pub profile: NativeLoweringProfile,
@@ -191,6 +223,9 @@ pub struct JitCounters {
     pub blacklist_hits: u32,
     pub trace_enter_checks: u32,
     pub trace_enter_hits: u32,
+    pub linked_root_reentry_attempts: u32,
+    pub linked_root_reentry_hits: u32,
+    pub linked_root_reentry_fallbacks: u32,
     pub helper_plan_dispatches: u32,
     pub helper_plan_steps: u32,
     pub helper_plan_guards: u32,
@@ -257,9 +292,17 @@ struct TraceStepCounts {
     loop_backedge: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LinkedRootReentryCounts {
+    attempts: u32,
+    hits: u32,
+    fallbacks: u32,
+}
+
 pub(crate) struct JitState {
     traces: AHashMap<TraceKey, TraceInfo>,
     side_traces: AHashMap<SideTraceKey, SideTraceInfo>,
+    linked_root_reentries: AHashMap<TraceKey, LinkedRootReentryCounts>,
     counters: JitCounters,
     backend: NativeTraceBackend,
     dispatch_cache: [DispatchCacheEntry; DISPATCH_CACHE_SIZE],
@@ -272,6 +315,7 @@ impl Default for JitState {
         Self {
             traces: AHashMap::default(),
             side_traces: AHashMap::default(),
+            linked_root_reentries: AHashMap::default(),
             counters: JitCounters::default(),
             backend: NativeTraceBackend::default(),
             dispatch_cache: [DispatchCacheEntry::default(); DISPATCH_CACHE_SIZE],
@@ -442,6 +486,39 @@ impl JitState {
         report
     }
 
+    pub(crate) fn linked_root_reentry_report(&self) -> String {
+        let mut entries = self
+            .linked_root_reentries
+            .iter()
+            .filter(|(_, counts)| counts.attempts != 0)
+            .map(|(key, counts)| (*key, *counts))
+            .collect::<Vec<_>>();
+
+        if entries.is_empty() {
+            return String::new();
+        }
+
+        entries.sort_by(|(lhs_key, lhs_counts), (rhs_key, rhs_counts)| {
+            rhs_counts
+                .fallbacks
+                .cmp(&lhs_counts.fallbacks)
+                .then_with(|| rhs_counts.attempts.cmp(&lhs_counts.attempts))
+                .then_with(|| lhs_key.chunk_addr.cmp(&rhs_key.chunk_addr))
+                .then_with(|| lhs_key.pc.cmp(&rhs_key.pc))
+        });
+
+        let mut report = String::from("Linked root reentry by target header:\n");
+        for (key, counts) in entries.into_iter().take(8) {
+            let _ = writeln!(
+                report,
+                "- chunk=0x{:x} pc={} attempts={} hits={} fallbacks={}",
+                key.chunk_addr, key.pc, counts.attempts, counts.hits, counts.fallbacks,
+            );
+        }
+
+        report
+    }
+
     #[cfg(test)]
     pub(crate) fn try_enter_trace(&mut self, chunk_ptr: *const LuaProto, pc: u32) -> bool {
         let key = TraceKey {
@@ -486,10 +563,7 @@ impl JitState {
         }
         self.dispatch_cache_misses = self.dispatch_cache_misses.saturating_add(1);
 
-        let key = TraceKey {
-            chunk_addr,
-            pc,
-        };
+        let key = TraceKey { chunk_addr, pc };
 
         let mut should_record = false;
         match self.traces.entry(key) {
@@ -501,6 +575,7 @@ impl JitState {
                     return Some(ExecutableTraceDispatch {
                         start_pc: compiled_trace.root_pc,
                         loop_tail_pc: compiled_trace.loop_tail_pc,
+                        linked_loop_header_pc: None,
                         execution: compiled_trace.execution(),
                         summary: compiled_trace.summary(),
                         native_profile: compiled_trace.native_profile(),
@@ -509,8 +584,7 @@ impl JitState {
 
                 match &mut trace.status {
                     TraceStatus::Counting { hits } => should_record = tick_hotcount(&mut *hits),
-                    TraceStatus::Recording { .. }
-                    | TraceStatus::Recorded { .. } => {}
+                    TraceStatus::Recording { .. } | TraceStatus::Recorded { .. } => {}
                     TraceStatus::Lowered { .. }
                     | TraceStatus::Executable { .. }
                     | TraceStatus::Redirected { .. } => {
@@ -523,7 +597,8 @@ impl JitState {
                         };
                     }
                     TraceStatus::Blacklisted { .. } => {
-                        self.counters.blacklist_hits = self.counters.blacklist_hits.saturating_add(1);
+                        self.counters.blacklist_hits =
+                            self.counters.blacklist_hits.saturating_add(1);
                         self.dispatch_cache[cache_idx] = DispatchCacheEntry {
                             chunk_addr,
                             pc,
@@ -546,6 +621,42 @@ impl JitState {
         }
 
         None
+    }
+
+    pub(crate) fn executable_trace_dispatch(
+        &self,
+        chunk_ptr: *const LuaProto,
+        pc: u32,
+    ) -> Option<ExecutableTraceDispatch> {
+        let key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc,
+        };
+        let trace = self.traces.get(&key)?;
+        let compiled_trace = trace.compiled_trace.as_ref()?;
+        if !compiled_trace.is_enterable() {
+            return None;
+        }
+
+        Some(ExecutableTraceDispatch {
+            start_pc: compiled_trace.root_pc,
+            loop_tail_pc: compiled_trace.loop_tail_pc,
+            linked_loop_header_pc: None,
+            execution: compiled_trace.execution(),
+            summary: compiled_trace.summary(),
+            native_profile: compiled_trace.native_profile(),
+        })
+    }
+
+    pub(crate) fn redirected_root_pc(&self, chunk_ptr: *const LuaProto, pc: u32) -> Option<u32> {
+        let key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc,
+        };
+        match self.traces.get(&key)?.status {
+            TraceStatus::Redirected { root_pc } => Some(root_pc),
+            _ => None,
+        }
     }
 
     pub(crate) fn record_root_dispatch(&mut self, execution: &CompiledTraceExecution) {
@@ -655,6 +766,80 @@ impl JitState {
         self.counters.trace_enter_checks = self.counters.trace_enter_checks.saturating_add(checks);
         self.counters.trace_enter_hits = self.counters.trace_enter_hits.saturating_add(hits);
         self.apply_helper_plan_summary_n(summary, hits);
+    }
+
+    pub(crate) fn record_linked_root_reentry_attempt(
+        &mut self,
+        chunk_ptr: *const LuaProto,
+        pc: u32,
+    ) {
+        self.counters.linked_root_reentry_attempts =
+            self.counters.linked_root_reentry_attempts.saturating_add(1);
+        let counts = self
+            .linked_root_reentries
+            .entry(TraceKey {
+                chunk_addr: chunk_ptr as usize,
+                pc,
+            })
+            .or_default();
+        counts.attempts = counts.attempts.saturating_add(1);
+    }
+
+    pub(crate) fn record_linked_root_reentry_hit(&mut self, chunk_ptr: *const LuaProto, pc: u32) {
+        self.counters.linked_root_reentry_hits =
+            self.counters.linked_root_reentry_hits.saturating_add(1);
+        let counts = self
+            .linked_root_reentries
+            .entry(TraceKey {
+                chunk_addr: chunk_ptr as usize,
+                pc,
+            })
+            .or_default();
+        counts.hits = counts.hits.saturating_add(1);
+    }
+
+    pub(crate) fn prepare_linked_root_reentry_target(
+        &mut self,
+        chunk_ptr: *const LuaProto,
+        pc: u32,
+    ) {
+        let key = TraceKey {
+            chunk_addr: chunk_ptr as usize,
+            pc,
+        };
+
+        let should_record = match self.traces.get(&key).map(|trace| trace.status) {
+            Some(TraceStatus::Counting { .. }) => true,
+            Some(TraceStatus::Blacklisted { .. }) => {
+                self.counters.blacklist_hits = self.counters.blacklist_hits.saturating_add(1);
+                false
+            }
+            _ => false,
+        };
+
+        if should_record {
+            self.counters.hot_headers = self.counters.hot_headers.saturating_add(1);
+            self.begin_recording(key, chunk_ptr);
+        }
+    }
+
+    pub(crate) fn record_linked_root_reentry_fallback(
+        &mut self,
+        chunk_ptr: *const LuaProto,
+        pc: u32,
+    ) {
+        self.counters.linked_root_reentry_fallbacks = self
+            .counters
+            .linked_root_reentry_fallbacks
+            .saturating_add(1);
+        let counts = self
+            .linked_root_reentries
+            .entry(TraceKey {
+                chunk_addr: chunk_ptr as usize,
+                pc,
+            })
+            .or_default();
+        counts.fallbacks = counts.fallbacks.saturating_add(1);
     }
 
     pub(crate) fn record_loop_backedge(&mut self, chunk_ptr: *const LuaProto, pc: u32) {
@@ -806,7 +991,13 @@ impl JitState {
             .get(&key)
             .and_then(|trace| trace.lowered_trace.as_ref())
             .and_then(|lowered_trace| unsafe {
-                lowered_trace.recover_exit_by_index(exit_index, stack, base, constants, upvalue_ptrs)
+                lowered_trace.recover_exit_by_index(
+                    exit_index,
+                    stack,
+                    base,
+                    constants,
+                    upvalue_ptrs,
+                )
             })?;
 
         self.counters.native_exit_index_resolve_hits = self
@@ -823,7 +1014,6 @@ impl JitState {
         parent_pc: u32,
         recovery: DeoptRecovery,
     ) -> Option<TraceExitDispatch> {
-
         self.record_hot_exit(
             chunk_ptr,
             parent_pc,
@@ -831,11 +1021,8 @@ impl JitState {
             recovery.target.resume_pc,
         );
 
-        let ready_side_trace = self.ready_side_trace_dispatch_for(
-            chunk_ptr,
-            parent_pc,
-            recovery.target.exit_index,
-        );
+        let ready_side_trace =
+            self.ready_side_trace_dispatch_for(chunk_ptr, parent_pc, recovery.target.exit_index);
 
         Some(TraceExitDispatch {
             recovery,
@@ -850,7 +1037,9 @@ impl JitState {
 
     #[cfg(test)]
     fn trace_status_for(&self, chunk_addr: usize, pc: u32) -> Option<TraceStatus> {
-        self.traces.get(&TraceKey { chunk_addr, pc }).map(|trace| trace.status)
+        self.traces
+            .get(&TraceKey { chunk_addr, pc })
+            .map(|trace| trace.status)
     }
 
     #[cfg(test)]
@@ -914,7 +1103,9 @@ impl JitState {
                 let ir = TraceIr::lower(&artifact);
                 let helper_plan = HelperPlan::lower(&ir);
                 let lowered_trace = LoweredTrace::lower(&artifact, &ir, &helper_plan);
-                let backend_outcome = self.backend.compile(&artifact, &ir, &lowered_trace, &helper_plan);
+                let backend_outcome =
+                    self.backend
+                        .compile(&artifact, &ir, &lowered_trace, &helper_plan);
                 self.counters.recorded_traces = self.counters.recorded_traces.saturating_add(1);
                 if storage_key != key {
                     if let Some(trace) = self.traces.get_mut(&key) {
@@ -933,14 +1124,13 @@ impl JitState {
                     let instruction_count = semantic_instruction_count(&ir);
                     let compiled_trace = match backend_outcome {
                         BackendCompileOutcome::Compiled(compiled_trace) => {
-                            trace.status = status_for_compiled_trace(instruction_count, &compiled_trace);
+                            trace.status =
+                                status_for_compiled_trace(instruction_count, &compiled_trace);
                             invalidate_dispatch_cache_entry(&mut self.dispatch_cache, storage_key);
                             Some(compiled_trace)
                         }
                         BackendCompileOutcome::NotYetSupported => {
-                            trace.status = TraceStatus::Recorded {
-                                instruction_count,
-                            };
+                            trace.status = TraceStatus::Recorded { instruction_count };
                             None
                         }
                     };
@@ -955,14 +1145,13 @@ impl JitState {
                     let instruction_count = semantic_instruction_count(&ir);
                     let compiled_trace = match backend_outcome {
                         BackendCompileOutcome::Compiled(compiled_trace) => {
-                            trace.status = status_for_compiled_trace(instruction_count, &compiled_trace);
+                            trace.status =
+                                status_for_compiled_trace(instruction_count, &compiled_trace);
                             invalidate_dispatch_cache_entry(&mut self.dispatch_cache, storage_key);
                             Some(compiled_trace)
                         }
                         BackendCompileOutcome::NotYetSupported => {
-                            trace.status = TraceStatus::Recorded {
-                                instruction_count,
-                            };
+                            trace.status = TraceStatus::Recorded { instruction_count };
                             None
                         }
                     };
@@ -991,7 +1180,12 @@ impl JitState {
         }
     }
 
-    fn begin_side_recording(&mut self, key: SideTraceKey, chunk_ptr: *const LuaProto, start_pc: u32) {
+    fn begin_side_recording(
+        &mut self,
+        key: SideTraceKey,
+        chunk_ptr: *const LuaProto,
+        start_pc: u32,
+    ) {
         self.counters.side_record_attempts = self.counters.side_record_attempts.saturating_add(1);
 
         let attempts = if let Some(trace) = self.side_traces.get_mut(&key) {
@@ -1016,25 +1210,26 @@ impl JitState {
             return;
         };
 
-        match TraceRecorder::record_root(chunk_ptr, start_pc) {
+        match TraceRecorder::record_side(chunk_ptr, start_pc) {
             Ok(artifact) => {
                 let ir = TraceIr::lower(&artifact);
                 let helper_plan = HelperPlan::lower(&ir);
                 let lowered_trace = LoweredTrace::lower(&artifact, &ir, &helper_plan);
-                let backend_outcome = self.backend.compile(&artifact, &ir, &lowered_trace, &helper_plan);
+                let backend_outcome =
+                    self.backend
+                        .compile(&artifact, &ir, &lowered_trace, &helper_plan);
                 let instruction_count = semantic_instruction_count(&ir);
                 self.counters.recorded_side_traces =
                     self.counters.recorded_side_traces.saturating_add(1);
                 if let Some(trace) = self.side_traces.get_mut(&key) {
                     let compiled_trace = match backend_outcome {
                         BackendCompileOutcome::Compiled(compiled_trace) => {
-                            trace.status = side_status_for_compiled_trace(instruction_count, &compiled_trace);
+                            trace.status =
+                                side_status_for_compiled_trace(instruction_count, &compiled_trace);
                             Some(compiled_trace)
                         }
                         BackendCompileOutcome::NotYetSupported => {
-                            trace.status = SideTraceStatus::Recorded {
-                                instruction_count,
-                            };
+                            trace.status = SideTraceStatus::Recorded { instruction_count };
                             None
                         }
                     };
@@ -1084,9 +1279,13 @@ impl JitState {
         if !compiled_trace.is_enterable() || compiled_trace.root_pc != trace.start_pc {
             return None;
         }
+        let linked_loop_header_pc = trace.artifact.as_ref().and_then(|artifact| {
+            (artifact.loop_header_pc != artifact.seed.start_pc).then_some(artifact.loop_header_pc)
+        });
         Some(ExecutableTraceDispatch {
             start_pc: trace.start_pc,
             loop_tail_pc: compiled_trace.loop_tail_pc,
+            linked_loop_header_pc,
             execution: compiled_trace.execution(),
             summary: compiled_trace.summary(),
             native_profile: compiled_trace.native_profile(),
@@ -1116,16 +1315,20 @@ impl JitState {
             ExecutableTraceDispatch {
                 start_pc,
                 loop_tail_pc,
+                linked_loop_header_pc: None,
                 execution: CompiledTraceExecution::Native(native),
                 summary,
                 native_profile: Some(profile),
-            } => Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
-                start_pc,
-                loop_tail_pc,
-                native,
-                summary,
-                profile,
-            })),
+            } => Some(ReadySideTraceDispatch::Native(
+                NativeExecutableTraceDispatch {
+                    start_pc,
+                    loop_tail_pc,
+                    linked_loop_header_pc: None,
+                    native,
+                    summary,
+                    profile,
+                },
+            )),
             dispatch => Some(ReadySideTraceDispatch::Executable(dispatch)),
         }
     }
@@ -1144,7 +1347,9 @@ impl JitState {
 
     fn clear_linked_ready_side_trace(&mut self, key: SideTraceKey) {
         if let Some(parent_trace) = self.traces.get_mut(&key.parent) {
-            parent_trace.linked_ready_side_traces.remove(&key.exit_index);
+            parent_trace
+                .linked_ready_side_traces
+                .remove(&key.exit_index);
         }
     }
 
@@ -1164,9 +1369,14 @@ impl JitState {
                 if compiled_trace.root_pc != side_trace.start_pc {
                     None
                 } else {
+                    let linked_loop_header_pc = side_trace.artifact.as_ref().and_then(|artifact| {
+                        (artifact.loop_header_pc != artifact.seed.start_pc)
+                            .then_some(artifact.loop_header_pc)
+                    });
                     let dispatch = ExecutableTraceDispatch {
                         start_pc: side_trace.start_pc,
                         loop_tail_pc: compiled_trace.loop_tail_pc,
+                        linked_loop_header_pc,
                         execution: compiled_trace.execution(),
                         summary: compiled_trace.summary(),
                         native_profile: compiled_trace.native_profile(),
@@ -1175,12 +1385,14 @@ impl JitState {
                         ExecutableTraceDispatch {
                             start_pc,
                             loop_tail_pc,
+                            linked_loop_header_pc: None,
                             execution: CompiledTraceExecution::Native(native),
                             summary,
                             native_profile: Some(profile),
                         } => ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
                             start_pc,
                             loop_tail_pc,
+                            linked_loop_header_pc,
                             native,
                             summary,
                             profile,
@@ -1202,7 +1414,9 @@ impl JitState {
                     .insert(key.exit_index, dispatch);
             }
             None => {
-                parent_trace.linked_ready_side_traces.remove(&key.exit_index);
+                parent_trace
+                    .linked_ready_side_traces
+                    .remove(&key.exit_index);
             }
         }
     }
@@ -1297,7 +1511,9 @@ fn helper_plan_step_counts(plan: &HelperPlan) -> TraceStepCounts {
 
     for step in &plan.steps {
         match step {
-            HelperPlanStep::LoadMove { .. } => counts.load_move = counts.load_move.saturating_add(1),
+            HelperPlanStep::LoadMove { .. } => {
+                counts.load_move = counts.load_move.saturating_add(1)
+            }
             HelperPlanStep::UpvalueAccess { .. } => {
                 counts.upvalue_access = counts.upvalue_access.saturating_add(1)
             }
@@ -1318,7 +1534,9 @@ fn helper_plan_step_counts(plan: &HelperPlan) -> TraceStepCounts {
             HelperPlanStep::ClosureCreation { .. } => {
                 counts.closure_creation = counts.closure_creation.saturating_add(1)
             }
-            HelperPlanStep::LoopPrep { .. } => counts.loop_prep = counts.loop_prep.saturating_add(1),
+            HelperPlanStep::LoopPrep { .. } => {
+                counts.loop_prep = counts.loop_prep.saturating_add(1)
+            }
             HelperPlanStep::Guard { .. } => counts.guard = counts.guard.saturating_add(1),
             HelperPlanStep::Branch { .. } => counts.branch = counts.branch.saturating_add(1),
             HelperPlanStep::LoopBackedge { .. } => {
@@ -1502,17 +1720,17 @@ fn semantic_instruction_count(ir: &TraceIr) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        HOT_EXIT_THRESHOLD, JitAbortCounters, JitCounters, JitState,
+        ExecutableTraceDispatch, HOT_EXIT_THRESHOLD, JitAbortCounters, JitCounters, JitState,
         NativeExecutableTraceDispatch, ReadySideTraceDispatch, SideTraceKey, SideTraceStatus,
         TraceKey, TraceStatus,
     };
-    use crate::lua_vm::jit::backend::NativeCompiledTrace;
-    use crate::{LuaVM, SafeOption};
     use crate::LuaValue;
     use crate::lua_value::LuaProto;
+    use crate::lua_vm::jit::backend::{CompiledTraceExecution, NativeCompiledTrace};
     use crate::lua_vm::jit::hotcount::HOT_LOOP_THRESHOLD;
     use crate::lua_vm::jit::trace_recorder::TraceAbortReason;
     use crate::{Instruction, OpCode};
+    use crate::{LuaVM, SafeOption};
 
     #[test]
     fn hot_trace_blacklists_after_first_record_attempt() {
@@ -1548,6 +1766,9 @@ mod tests {
                 blacklist_hits: 0,
                 trace_enter_checks: 0,
                 trace_enter_hits: 0,
+                linked_root_reentry_attempts: 0,
+                linked_root_reentry_hits: 0,
+                linked_root_reentry_fallbacks: 0,
                 helper_plan_dispatches: 0,
                 helper_plan_steps: 0,
                 helper_plan_guards: 0,
@@ -1605,15 +1826,22 @@ mod tests {
                 reason: TraceAbortReason::UnsupportedOpcode(OpCode::TailCall),
             })
         );
-        assert_eq!(jit.counters().blacklist_hits, (HOT_LOOP_THRESHOLD * 2) as u32);
+        assert_eq!(
+            jit.counters().blacklist_hits,
+            (HOT_LOOP_THRESHOLD * 2) as u32
+        );
     }
 
     #[test]
     fn counting_state_stays_cold_before_threshold() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..(HOT_LOOP_THRESHOLD - 1) {
@@ -1632,8 +1860,12 @@ mod tests {
     fn supported_trace_is_recorded_and_cached() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_LOOP_THRESHOLD {
@@ -1646,7 +1878,9 @@ mod tests {
                 instruction_count: 2,
             })
         );
-        let dispatch = jit.executable_trace_dispatch_or_record(chunk_ptr, 0).unwrap();
+        let dispatch = jit
+            .executable_trace_dispatch_or_record(chunk_ptr, 0)
+            .unwrap();
         let artifact = jit.artifact_for(chunk_ptr as usize, 0).unwrap();
         let ir = jit.ir_for(chunk_ptr as usize, 0).unwrap();
         let helper_plan = jit.helper_plan_for(chunk_ptr as usize, 0).unwrap();
@@ -1658,18 +1892,88 @@ mod tests {
         assert_eq!(helper_plan.steps.len(), 2);
         assert_eq!(dispatch.start_pc, 0);
         assert_eq!(dispatch.loop_tail_pc, 1);
+        let direct_dispatch = jit.executable_trace_dispatch(chunk_ptr, 0).unwrap();
+        assert_eq!(direct_dispatch.start_pc, 0);
+        assert_eq!(direct_dispatch.loop_tail_pc, 1);
         assert_eq!(jit.counters().recorded_traces, 1);
         assert_eq!(jit.counters().record_aborts, 0);
+    }
+
+    #[test]
+    fn linked_root_reentry_report_lists_hottest_fallback_headers() {
+        let mut jit = JitState::default();
+        let mut chunk_a = LuaProto::new();
+        chunk_a
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        let chunk_a_ptr = &chunk_a as *const LuaProto;
+        let mut chunk_b = LuaProto::new();
+        chunk_b
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        let chunk_b_ptr = &chunk_b as *const LuaProto;
+
+        jit.record_linked_root_reentry_attempt(chunk_a_ptr, 34);
+        jit.record_linked_root_reentry_fallback(chunk_a_ptr, 34);
+        jit.record_linked_root_reentry_attempt(chunk_a_ptr, 34);
+        jit.record_linked_root_reentry_hit(chunk_a_ptr, 34);
+        jit.record_linked_root_reentry_attempt(chunk_b_ptr, 8);
+        jit.record_linked_root_reentry_fallback(chunk_b_ptr, 8);
+        jit.record_linked_root_reentry_attempt(chunk_b_ptr, 8);
+        jit.record_linked_root_reentry_fallback(chunk_b_ptr, 8);
+
+        let report = jit.linked_root_reentry_report();
+        assert!(report.contains("Linked root reentry by target header:"));
+        assert!(report.contains(&format!(
+            "chunk=0x{:x} pc=8 attempts=2 hits=0 fallbacks=2",
+            chunk_b_ptr as usize
+        )));
+        assert!(report.contains(&format!(
+            "chunk=0x{:x} pc=34 attempts=2 hits=1 fallbacks=1",
+            chunk_a_ptr as usize
+        )));
+    }
+
+    #[test]
+    fn linked_root_reentry_prepare_immediately_promotes_counting_header_to_root_trace() {
+        let mut jit = JitState::default();
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        jit.record_loop_backedge(chunk_ptr, 0);
+        jit.prepare_linked_root_reentry_target(chunk_ptr, 0);
+
+        assert!(matches!(
+            jit.trace_status_for(chunk_ptr as usize, 0),
+            Some(TraceStatus::Executable {
+                instruction_count: 2,
+            })
+        ));
+        assert!(jit.executable_trace_dispatch(chunk_ptr, 0).is_some());
+        assert_eq!(jit.counters().linked_root_reentry_fallbacks, 0);
+        assert_eq!(jit.counters().hot_headers, 1);
     }
 
     #[test]
     fn guarded_trace_is_recorded_with_exit_metadata() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -1697,8 +2001,12 @@ mod tests {
     fn executable_upvalue_trace_entry_is_enterable() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_LOOP_THRESHOLD {
@@ -1721,9 +2029,15 @@ mod tests {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(1));
-        chunk.code.push(Instruction::create_abc(OpCode::AddK, 0, 0, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::MmBinK, 0, 0, 6));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 3));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::AddK, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::MmBinK, 0, 0, 6));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 3));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_LOOP_THRESHOLD {
@@ -1742,10 +2056,16 @@ mod tests {
     fn guarded_trace_entry_is_enterable_after_generic_guard_native_recognition() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::GetUpval, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -1763,13 +2083,21 @@ mod tests {
     }
 
     #[test]
-    fn summary_only_compiled_trace_entry_is_skipped() {
+    fn helper_call_compiled_trace_entry_is_enterable() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Call, 0, 2, 2));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 1, 2, false));
-        chunk.code.push(Instruction::create_abc(OpCode::MmBin, 1, 2, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Call, 0, 2, 2));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 1, 2, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::MmBin, 1, 2, 0));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -1777,21 +2105,29 @@ mod tests {
             jit.record_loop_backedge(chunk_ptr, 0);
         }
 
-        assert!(!jit.try_enter_trace(chunk_ptr, 0));
-        assert_eq!(jit.counters().trace_enter_hits, 0);
-        assert_eq!(jit.counters().helper_plan_dispatches, 0);
-        assert_eq!(jit.counters().helper_plan_calls, 0);
+        assert!(jit.try_enter_trace(chunk_ptr, 0));
+        assert_eq!(jit.counters().trace_enter_hits, 1);
+        assert_eq!(jit.counters().helper_plan_dispatches, 1);
+        assert_eq!(jit.counters().helper_plan_calls, 1);
         assert_eq!(jit.counters().helper_plan_metamethods, 0);
     }
 
     #[test]
-    fn helper_call_trace_is_marked_lowered() {
+    fn helper_call_trace_is_marked_executable() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Call, 0, 2, 2));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 1, 2, false));
-        chunk.code.push(Instruction::create_abc(OpCode::MmBin, 1, 2, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Call, 0, 2, 2));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 1, 2, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::MmBin, 1, 2, 0));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -1801,13 +2137,14 @@ mod tests {
 
         assert_eq!(
             jit.trace_status_for(chunk_ptr as usize, 0),
-            Some(TraceStatus::Lowered {
+            Some(TraceStatus::Executable {
                 instruction_count: 4,
             })
         );
         let compiled_trace = jit.compiled_trace_for(chunk_ptr as usize, 0).unwrap();
         assert_eq!(compiled_trace.root_pc, 0);
         assert_eq!(compiled_trace.loop_tail_pc, 4);
+        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
     }
 
     #[test]
@@ -1842,7 +2179,7 @@ mod tests {
     }
 
     #[test]
-    fn quicksort_top_level_side_trace_does_not_dispatch_mismatched_root_trace() {
+    fn quicksort_top_level_side_trace_preserves_resume_pc_identity() {
         let mut jit = JitState::default();
         let mut vm = LuaVM::new(SafeOption::default());
         let source = std::fs::read_to_string(concat!(
@@ -1877,14 +2214,18 @@ mod tests {
         assert!(matches!(
             side.status,
             SideTraceStatus::Executable {
-                instruction_count: 22,
+                instruction_count: 6,
             }
         ));
+        assert_eq!(side.start_pc, 50);
+        let artifact = side.artifact.as_ref().unwrap();
+        assert_eq!(artifact.seed.start_pc, 50);
+        assert_eq!(artifact.loop_header_pc, 34);
+        assert_eq!(artifact.loop_tail_pc, 57);
 
         let compiled_trace = side.compiled_trace.as_ref().unwrap();
-        assert_eq!(side.start_pc, 50);
-        assert_eq!(compiled_trace.root_pc, 34);
-        assert_eq!(compiled_trace.executor_family(), "NativeGuardedCallPrefix");
+        assert_eq!(compiled_trace.root_pc, 50);
+        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
 
         let parent = jit.traces.get(&TraceKey {
             chunk_addr: chunk_ptr as usize,
@@ -1892,9 +2233,24 @@ mod tests {
         });
         assert!(matches!(
             parent.and_then(|trace| trace.linked_ready_side_traces.get(&0)),
-            None
+            Some(ReadySideTraceDispatch::Executable(
+                ExecutableTraceDispatch {
+                    start_pc: 50,
+                    linked_loop_header_pc: Some(34),
+                    execution: CompiledTraceExecution::LoweredSnippet,
+                    ..
+                }
+            ))
         ));
-        assert!(jit.side_trace_dispatch_for(chunk_ptr, 34, 0).is_none());
+        assert!(matches!(
+            jit.side_trace_dispatch_for(chunk_ptr, 34, 0),
+            Some(ExecutableTraceDispatch {
+                start_pc: 50,
+                linked_loop_header_pc: Some(34),
+                execution: CompiledTraceExecution::LoweredSnippet,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2018,8 +2374,12 @@ mod tests {
     fn trace_retains_lowered_artifact() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_LOOP_THRESHOLD {
@@ -2042,8 +2402,12 @@ mod tests {
     fn hot_exit_records_side_trace_slot() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_EXIT_THRESHOLD {
@@ -2075,10 +2439,16 @@ mod tests {
     fn root_trace_exit_resolves_snapshot_and_starts_side_counting() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -2109,10 +2479,16 @@ mod tests {
     fn resolved_trace_exit_returns_recovery_and_ready_side_trace() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -2123,7 +2499,11 @@ mod tests {
             jit.record_hot_exit(chunk_ptr, 0, 0, 3);
         }
 
-        let stack = [LuaValue::integer(11), LuaValue::integer(22), LuaValue::integer(33)];
+        let stack = [
+            LuaValue::integer(11),
+            LuaValue::integer(22),
+            LuaValue::integer(33),
+        ];
         let exit = unsafe {
             jit.resolve_trace_exit(
                 chunk_ptr,
@@ -2138,28 +2518,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(exit.recovery.target.resume_pc, 3);
-        assert!(exit
-            .recovery
-            .register_restores
-            .iter()
-            .any(|(reg, value)| *reg == 0 && *value == LuaValue::integer(22)));
-        assert!(jit
-            .side_traces
-            .contains_key(&SideTraceKey {
-                parent: TraceKey {
-                    chunk_addr: chunk_ptr as usize,
-                    pc: 0,
-                },
-                exit_index: 0,
-            }));
+        assert!(
+            exit.recovery
+                .register_restores
+                .iter()
+                .any(|(reg, value)| *reg == 0 && *value == LuaValue::integer(22))
+        );
+        assert!(jit.side_traces.contains_key(&SideTraceKey {
+            parent: TraceKey {
+                chunk_addr: chunk_ptr as usize,
+                pc: 0,
+            },
+            exit_index: 0,
+        }));
     }
 
     #[test]
     fn executable_side_trace_produces_dispatch_plan() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_EXIT_THRESHOLD {
@@ -2175,8 +2558,12 @@ mod tests {
     fn native_executable_side_trace_produces_native_dispatch_plan() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_EXIT_THRESHOLD {
@@ -2197,13 +2584,15 @@ mod tests {
         let ready_dispatch = jit.ready_side_trace_dispatch_for(chunk_ptr, 0, 0);
         assert!(matches!(
             ready_dispatch,
-            Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
-                start_pc: 0,
-                loop_tail_pc: 1,
-                native: NativeCompiledTrace::LinearIntForLoop { .. }
-                    | NativeCompiledTrace::NumericForLoop { .. },
-                ..
-            }))
+            Some(ReadySideTraceDispatch::Native(
+                NativeExecutableTraceDispatch {
+                    start_pc: 0,
+                    loop_tail_pc: 1,
+                    native: NativeCompiledTrace::LinearIntForLoop { .. }
+                        | NativeCompiledTrace::NumericForLoop { .. },
+                    ..
+                }
+            ))
         ));
     }
 
@@ -2211,8 +2600,12 @@ mod tests {
     fn ready_side_trace_dispatch_is_cached_on_parent_trace() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         let chunk_ptr = &chunk as *const LuaProto;
 
         for _ in 0..HOT_LOOP_THRESHOLD {
@@ -2228,13 +2621,15 @@ mod tests {
         });
         assert!(matches!(
             parent.and_then(|trace| trace.linked_ready_side_traces.get(&0)),
-            Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
-                start_pc: 0,
-                loop_tail_pc: 1,
-                native: NativeCompiledTrace::LinearIntForLoop { .. }
-                    | NativeCompiledTrace::NumericForLoop { .. },
-                ..
-            }))
+            Some(ReadySideTraceDispatch::Native(
+                NativeExecutableTraceDispatch {
+                    start_pc: 0,
+                    loop_tail_pc: 1,
+                    native: NativeCompiledTrace::LinearIntForLoop { .. }
+                        | NativeCompiledTrace::NumericForLoop { .. },
+                    ..
+                }
+            ))
         ));
     }
 
@@ -2307,10 +2702,18 @@ mod tests {
     fn nested_loop_recording_redirects_to_inner_header() {
         let mut jit = JitState::default();
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 2, 3, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 2, 3, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -2328,17 +2731,28 @@ mod tests {
                 instruction_count: 2,
             })
         );
+        assert!(jit.executable_trace_dispatch(chunk_ptr, 0).is_none());
     }
 
     #[test]
     fn trace_report_lists_slot_status_and_step_details() {
         let mut jit = JitState::default();
         let mut helper_chunk = LuaProto::new();
-        helper_chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        helper_chunk.code.push(Instruction::create_abc(OpCode::Call, 0, 2, 2));
-        helper_chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 1, 2, false));
-        helper_chunk.code.push(Instruction::create_abc(OpCode::MmBin, 1, 2, 0));
-        helper_chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
+        helper_chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        helper_chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Call, 0, 2, 2));
+        helper_chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 1, 2, false));
+        helper_chunk
+            .code
+            .push(Instruction::create_abc(OpCode::MmBin, 1, 2, 0));
+        helper_chunk
+            .code
+            .push(Instruction::create_sj(OpCode::Jmp, -5));
         let helper_ptr = &helper_chunk as *const LuaProto;
 
         let mut bad_chunk = LuaProto::new();
@@ -2353,11 +2767,13 @@ mod tests {
         }
 
         let report = jit.trace_report();
-        assert!(report.contains("status=Lowered(instr=4)"));
-        assert!(report.contains("executor=SummaryOnly"));
+        assert!(report.contains("status=Executable(instr=4)"));
+        assert!(report.contains("executor=LoweredSnippet"));
         assert!(report.contains("details=load=1,arith=1,call=1,backedge=1"));
         assert!(report.contains("ssa_ti_opt=none"));
-        assert!(report.contains("status=Blacklisted(attempts=1, reason=UnsupportedOpcode(TailCall))"));
+        assert!(
+            report.contains("status=Blacklisted(attempts=1, reason=UnsupportedOpcode(TailCall))")
+        );
     }
 
     #[test]
@@ -2403,7 +2819,10 @@ mod tests {
             .find(|trace| trace.executor_family() == "NativeGuardedNumericForLoop")
             .unwrap();
         assert!(compiled_trace.is_enterable());
-        assert_eq!(compiled_trace.executor_family(), "NativeGuardedNumericForLoop");
+        assert_eq!(
+            compiled_trace.executor_family(),
+            "NativeGuardedNumericForLoop"
+        );
         assert!(report.contains("status=Executable(instr=6) executor=NativeGuardedNumericForLoop"));
     }
 
@@ -2456,7 +2875,11 @@ mod tests {
 
         let deopt = vm
             .jit
-            .record_trace_exit(trace_key.chunk_addr as *const LuaProto, trace_key.pc, guard_exit_pc)
+            .record_trace_exit(
+                trace_key.chunk_addr as *const LuaProto,
+                trace_key.pc,
+                guard_exit_pc,
+            )
             .unwrap();
         assert_eq!(deopt.exit_index, 0);
         assert_eq!(deopt.resume_pc, guard_exit_pc);
@@ -2473,7 +2896,10 @@ mod tests {
         assert!(matches!(side.status, SideTraceStatus::Counting { hits: 1 }));
 
         let report = vm.jit.trace_report();
-        assert!(report.contains(&format!("start_pc={} status=Counting(hits=1)", guard_exit_pc)));
+        assert!(report.contains(&format!(
+            "start_pc={} status=Counting(hits=1)",
+            guard_exit_pc
+        )));
     }
 
     #[test]
@@ -2503,6 +2929,64 @@ mod tests {
         assert!(report.contains("LinearIntJmpLoop"));
         assert!(report.contains("status=Executable"));
         assert!(vm.jit.stats_snapshot().counters.trace_enter_hits > 0);
+    }
+
+    #[test]
+    fn iterator_next_loop_linked_root_reentry_avoids_fallbacks() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+        let results = vm
+            .execute(
+                r#"
+                local array = {}
+                for i = 1, 100 do
+                    array[i] = i
+                end
+
+                local sum = 0
+                for outer = 1, 80 do
+                    local k, v = next(array)
+                    while k do
+                        sum = sum + v
+                        k, v = next(array, k)
+                    end
+                end
+
+                return sum
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].as_integer(), Some(404000));
+
+        let snapshot = vm.jit.stats_snapshot();
+        assert!(snapshot.counters.linked_root_reentry_attempts > 0);
+        assert!(snapshot.counters.linked_root_reentry_hits > 0);
+        assert_eq!(snapshot.counters.linked_root_reentry_fallbacks, 0);
+
+        let stats = vm.jit_stats();
+        assert!(stats.contains("Linked root reentry by target header:"));
+    }
+
+    #[test]
+    fn bench_iterators_file_linked_root_reentry_stays_fallback_free() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_iterators.lua"
+        ))
+        .unwrap();
+
+        vm.execute(&source).unwrap();
+
+        let snapshot = vm.jit_stats_snapshot();
+        assert!(snapshot.counters.linked_root_reentry_attempts > 0);
+        assert_eq!(
+            snapshot.counters.linked_root_reentry_hits,
+            snapshot.counters.linked_root_reentry_attempts
+        );
+        assert_eq!(snapshot.counters.linked_root_reentry_fallbacks, 0);
     }
 
     #[test]

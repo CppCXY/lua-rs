@@ -35,6 +35,8 @@ use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
 use crate::lua_vm::execute::lua_execute;
 use crate::lua_vm::file_layout::inspect_file_chunk_layout;
+#[cfg(feature = "jit")]
+pub use crate::lua_vm::jit::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
 pub use crate::lua_vm::lua_ref::{
@@ -43,8 +45,6 @@ pub use crate::lua_vm::lua_ref::{
 };
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
-#[cfg(feature = "jit")]
-pub use crate::lua_vm::jit::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 #[cfg(feature = "sandbox")]
 pub use crate::lua_vm::sandbox::SandboxConfig;
 use crate::platform_time::{PlatformInstant, unix_nanos};
@@ -1797,11 +1797,12 @@ impl LuaVM {
         let aborts = snapshot.aborts;
         let cache_hits = self.jit.dispatch_cache_hits;
         let cache_misses = self.jit.dispatch_cache_misses;
+        let linked_root_reentry_report = self.jit.linked_root_reentry_report();
         let top_unsupported_opcode = snapshot
             .top_unsupported_opcode
             .map(|(opcode, count)| format!("{:?}={}", opcode, count))
             .unwrap_or_else(|| "none".to_string());
-        format!(
+        let mut stats = format!(
             "JIT Stats:\n\
             - Trace headers seen: {}\n\
             - Hot exits seen: {}\n\
@@ -1822,6 +1823,9 @@ impl LuaVM {
             - Blacklist hits: {}\n\
             - Trace enter checks: {}\n\
             - Trace enter hits: {}\n\
+            - Linked root reentry attempts: {}\n\
+            - Linked root reentry hits: {}\n\
+            - Linked root reentry fallbacks: {}\n\
             - Root native dispatches: {}\n\
             - Root native return dispatches: {}\n\
             - Root native linear-int for dispatches: {}\n\
@@ -1879,6 +1883,9 @@ impl LuaVM {
             counters.blacklist_hits,
             counters.trace_enter_checks,
             counters.trace_enter_hits,
+            counters.linked_root_reentry_attempts,
+            counters.linked_root_reentry_hits,
+            counters.linked_root_reentry_fallbacks,
             counters.root_native_dispatches,
             counters.root_native_return_dispatches,
             counters.root_native_linear_int_for_dispatches,
@@ -1917,7 +1924,12 @@ impl LuaVM {
             snapshot.blacklisted_count,
             cache_hits,
             cache_misses,
-        )
+        );
+        if !linked_root_reentry_report.is_empty() {
+            stats.push('\n');
+            stats.push_str(&linked_root_reentry_report);
+        }
+        stats
     }
 
     #[cfg(feature = "jit")]

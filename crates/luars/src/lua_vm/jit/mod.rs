@@ -1,6 +1,6 @@
 mod backend;
-mod hotcount;
 mod helper_plan;
+mod hotcount;
 mod ir;
 mod lowering;
 mod runtime;
@@ -76,6 +76,43 @@ pub(crate) fn executable_trace_dispatch_or_record(
 }
 
 #[inline(always)]
+pub(crate) fn executable_trace_dispatch(
+    lua_state: &mut LuaState,
+    chunk_ptr: *const LuaProto,
+    target_pc: usize,
+) -> Option<ExecutableTraceDispatch> {
+    if chunk_ptr.is_null() || !should_track(lua_state) {
+        return None;
+    }
+
+    let Ok(pc) = u32::try_from(target_pc) else {
+        return None;
+    };
+
+    lua_state
+        .vm_mut()
+        .jit
+        .executable_trace_dispatch(chunk_ptr, pc)
+}
+
+#[inline(always)]
+pub(crate) fn redirected_root_pc(
+    lua_state: &mut LuaState,
+    chunk_ptr: *const LuaProto,
+    target_pc: usize,
+) -> Option<u32> {
+    if chunk_ptr.is_null() || !should_track(lua_state) {
+        return None;
+    }
+
+    let Ok(pc) = u32::try_from(target_pc) else {
+        return None;
+    };
+
+    lua_state.vm_mut().jit.redirected_root_pc(chunk_ptr, pc)
+}
+
+#[inline(always)]
 pub(crate) fn record_batched_trace_execution(
     lua_state: &mut LuaState,
     checks: u32,
@@ -109,6 +146,86 @@ pub(crate) fn record_root_trace_dispatch(
 }
 
 #[inline(always)]
+pub(crate) fn record_linked_root_reentry_attempt_at(
+    lua_state: &mut LuaState,
+    chunk_ptr: *const LuaProto,
+    target_pc: usize,
+) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    let Ok(pc) = u32::try_from(target_pc) else {
+        return;
+    };
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_linked_root_reentry_attempt(chunk_ptr, pc);
+}
+
+#[inline(always)]
+pub(crate) fn record_linked_root_reentry_hit_at(
+    lua_state: &mut LuaState,
+    chunk_ptr: *const LuaProto,
+    target_pc: usize,
+) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    let Ok(pc) = u32::try_from(target_pc) else {
+        return;
+    };
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_linked_root_reentry_hit(chunk_ptr, pc);
+}
+
+#[inline(always)]
+pub(crate) fn prepare_linked_root_reentry_target_at(
+    lua_state: &mut LuaState,
+    chunk_ptr: *const LuaProto,
+    target_pc: usize,
+) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    let Ok(pc) = u32::try_from(target_pc) else {
+        return;
+    };
+
+    lua_state
+        .vm_mut()
+        .jit
+        .prepare_linked_root_reentry_target(chunk_ptr, pc);
+}
+
+#[inline(always)]
+pub(crate) fn record_linked_root_reentry_fallback_at(
+    lua_state: &mut LuaState,
+    chunk_ptr: *const LuaProto,
+    target_pc: usize,
+) {
+    if !should_track(lua_state) {
+        return;
+    }
+
+    let Ok(pc) = u32::try_from(target_pc) else {
+        return;
+    };
+
+    lua_state
+        .vm_mut()
+        .jit
+        .record_linked_root_reentry_fallback(chunk_ptr, pc);
+}
+
+#[inline(always)]
 pub(crate) fn record_ready_side_trace_dispatch(
     lua_state: &mut LuaState,
     dispatch: &ReadySideTraceDispatch,
@@ -126,10 +243,7 @@ pub(crate) fn record_redundant_side_exit_recovery(lua_state: &mut LuaState) {
         return;
     }
 
-    lua_state
-        .vm_mut()
-        .jit
-        .record_redundant_side_exit_recovery();
+    lua_state.vm_mut().jit.record_redundant_side_exit_recovery();
 }
 
 #[inline(always)]
@@ -212,4 +326,3 @@ pub(crate) unsafe fn resolve_trace_exit_by_index(
         )
     }
 }
-

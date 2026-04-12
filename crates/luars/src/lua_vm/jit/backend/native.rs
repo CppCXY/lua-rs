@@ -1,38 +1,38 @@
 use cranelift::codegen::isa::{CallConv, TargetFrontendConfig};
-use cranelift_codegen::ir::FuncRef;
 use cranelift::codegen::settings;
 use cranelift::prelude::*;
+use cranelift_codegen::ir::FuncRef;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{default_libcall_names, Linkage, Module};
+use cranelift_module::{Linkage, Module, default_libcall_names};
 
 use crate::gc::UpvaluePtr;
 use crate::lua_value::{LUA_VNUMFLT, LUA_VNUMINT};
-use crate::lua_vm::execute::{call::precall, execute_loop::lua_execute};
 use crate::lua_vm::execute::helper::{
     finishget_known_miss, lua_fmod, lua_idiv, lua_imod, luai_numpow, objlen_value, pivalue,
     pttisinteger, ttisfloat, ttisinteger,
 };
-use crate::{Instruction, LuaState, LuaValue};
+use crate::lua_vm::execute::{call::precall, execute_loop::lua_execute};
 use crate::lua_vm::jit::helper_plan::HelperPlan;
 use crate::lua_vm::jit::ir::{TraceIr, TraceIrInst};
 use crate::lua_vm::jit::lowering::{LoweredTrace, TraceValueKind};
 use crate::lua_vm::jit::trace_recorder::TraceArtifact;
+use crate::{Instruction, LuaState, LuaValue};
 
-use super::compile::{
-    build_numeric_value_state, extract_loop_prologue,
-    lower_linear_int_guard_for_native, lower_linear_int_steps_for_native,
-    lower_numeric_guard_for_native, lower_numeric_lowering_for_native, lower_numeric_steps_for_native,
-};
-use super::{
-    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution,
-    LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NativeCompiledTrace,
-    NativeLoweringProfile, NativeTraceResult, NativeTraceStatus, NumericBinaryOp, NumericIfElseCond,
-    NumericJmpLoopGuard, NumericJmpLoopGuardBlock, NumericLowering, NumericOperand,
-    NumericSelfUpdateValueFlow, NumericSelfUpdateValueKind, NumericStep, NumericValueFlowRhs,
-    TraceBackend, lowered_execution_for_artifact,
-};
 #[cfg(test)]
 use super::NumericValueState;
+use super::compile::{
+    build_numeric_value_state, extract_loop_prologue, lower_linear_int_guard_for_native,
+    lower_linear_int_steps_for_native, lower_numeric_guard_for_native,
+    lower_numeric_lowering_for_native, lower_numeric_steps_for_native,
+};
+use super::{
+    BackendCompileOutcome, CompiledTrace, CompiledTraceExecution, LinearIntGuardOp,
+    LinearIntLoopGuard, LinearIntStep, NativeCompiledTrace, NativeLoweringProfile,
+    NativeTraceResult, NativeTraceStatus, NumericBinaryOp, NumericIfElseCond, NumericJmpLoopGuard,
+    NumericJmpLoopGuardBlock, NumericLowering, NumericOperand, NumericSelfUpdateValueFlow,
+    NumericSelfUpdateValueKind, NumericStep, NumericValueFlowRhs, TraceBackend,
+    lowered_execution_for_artifact,
+};
 
 const LUA_VALUE_SIZE: i64 = std::mem::size_of::<LuaValue>() as i64;
 const LUA_VALUE_TT_OFFSET: i32 = std::mem::offset_of!(LuaValue, tt) as i32;
@@ -42,12 +42,16 @@ const LUA_VFALSE_TAG: u8 = 1;
 const LUA_VTRUE_TAG: u8 = 17;
 const NATIVE_HELPER_NUMERIC_GET_UPVAL_SYMBOL: &str = "jit_native_helper_numeric_get_upval";
 const NATIVE_HELPER_NUMERIC_SET_UPVAL_SYMBOL: &str = "jit_native_helper_numeric_set_upval";
-const NATIVE_HELPER_NUMERIC_GET_TABUP_FIELD_SYMBOL: &str = "jit_native_helper_numeric_get_tabup_field";
-const NATIVE_HELPER_NUMERIC_SET_TABUP_FIELD_SYMBOL: &str = "jit_native_helper_numeric_set_tabup_field";
+const NATIVE_HELPER_NUMERIC_GET_TABUP_FIELD_SYMBOL: &str =
+    "jit_native_helper_numeric_get_tabup_field";
+const NATIVE_HELPER_NUMERIC_SET_TABUP_FIELD_SYMBOL: &str =
+    "jit_native_helper_numeric_set_tabup_field";
 const NATIVE_HELPER_NUMERIC_GET_TABLE_INT_SYMBOL: &str = "jit_native_helper_numeric_get_table_int";
 const NATIVE_HELPER_NUMERIC_SET_TABLE_INT_SYMBOL: &str = "jit_native_helper_numeric_set_table_int";
-const NATIVE_HELPER_NUMERIC_GET_TABLE_FIELD_SYMBOL: &str = "jit_native_helper_numeric_get_table_field";
-const NATIVE_HELPER_NUMERIC_SET_TABLE_FIELD_SYMBOL: &str = "jit_native_helper_numeric_set_table_field";
+const NATIVE_HELPER_NUMERIC_GET_TABLE_FIELD_SYMBOL: &str =
+    "jit_native_helper_numeric_get_table_field";
+const NATIVE_HELPER_NUMERIC_SET_TABLE_FIELD_SYMBOL: &str =
+    "jit_native_helper_numeric_set_table_field";
 const NATIVE_HELPER_NUMERIC_LEN_SYMBOL: &str = "jit_native_helper_numeric_len";
 const NATIVE_HELPER_NUMERIC_BINARY_SYMBOL: &str = "jit_native_helper_numeric_binary";
 const NATIVE_HELPER_NUMERIC_POW_SYMBOL: &str = "jit_native_helper_numeric_pow";
@@ -55,12 +59,17 @@ const NATIVE_HELPER_SHIFT_LEFT_SYMBOL: &str = "jit_native_helper_shift_left";
 const NATIVE_HELPER_SHIFT_RIGHT_SYMBOL: &str = "jit_native_helper_shift_right";
 const NATIVE_HELPER_CALL_SYMBOL: &str = "jit_native_helper_call";
 const NATIVE_HELPER_TFOR_CALL_SYMBOL: &str = "jit_native_helper_tfor_call";
-const NATIVE_TRACE_RESULT_STATUS_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, status) as i32;
+const NATIVE_TRACE_RESULT_STATUS_OFFSET: i32 =
+    std::mem::offset_of!(NativeTraceResult, status) as i32;
 const NATIVE_TRACE_RESULT_HITS_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, hits) as i32;
-const NATIVE_TRACE_RESULT_EXIT_PC_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, exit_pc) as i32;
-const NATIVE_TRACE_RESULT_START_REG_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, start_reg) as i32;
-const NATIVE_TRACE_RESULT_RESULT_COUNT_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, result_count) as i32;
-const NATIVE_TRACE_RESULT_EXIT_INDEX_OFFSET: i32 = std::mem::offset_of!(NativeTraceResult, exit_index) as i32;
+const NATIVE_TRACE_RESULT_EXIT_PC_OFFSET: i32 =
+    std::mem::offset_of!(NativeTraceResult, exit_pc) as i32;
+const NATIVE_TRACE_RESULT_START_REG_OFFSET: i32 =
+    std::mem::offset_of!(NativeTraceResult, start_reg) as i32;
+const NATIVE_TRACE_RESULT_RESULT_COUNT_OFFSET: i32 =
+    std::mem::offset_of!(NativeTraceResult, result_count) as i32;
+const NATIVE_TRACE_RESULT_EXIT_INDEX_OFFSET: i32 =
+    std::mem::offset_of!(NativeTraceResult, exit_index) as i32;
 const NATIVE_NUMERIC_OPERAND_REG: i32 = 0;
 const NATIVE_NUMERIC_OPERAND_IMM_I: i32 = 1;
 const NATIVE_NUMERIC_OPERAND_CONST: i32 = 2;
@@ -112,8 +121,9 @@ impl TraceBackend for NativeTraceBackend {
         lowered_trace: &LoweredTrace,
         helper_plan: &HelperPlan,
     ) -> BackendCompileOutcome {
-        if let Some((execution, native_profile)) =
-            self.compile_native_generic_trace(ir, lowered_trace)
+        if artifact.loop_header_pc == artifact.seed.start_pc
+            && let Some((execution, native_profile)) =
+                self.compile_native_generic_trace(ir, lowered_trace)
         {
             return match CompiledTrace::from_artifact_helper_plan_with_execution(
                 artifact,
@@ -170,8 +180,7 @@ impl NativeTraceBackend {
             return Some((execution, profile));
         }
 
-        if let Some((execution, profile)) =
-            self.compile_native_generic_call_for(ir, lowered_trace)
+        if let Some((execution, profile)) = self.compile_native_generic_call_for(ir, lowered_trace)
         {
             return Some((execution, profile));
         }
@@ -237,7 +246,8 @@ impl NativeTraceBackend {
         }
 
         let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
-        let steps = lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
+        let steps =
+            lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
         let native = self.compile_native_linear_int_for_loop(loop_reg, &steps, lowered_trace)?;
         Some((
             CompiledTraceExecution::Native(native),
@@ -258,8 +268,10 @@ impl NativeTraceBackend {
         let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
 
         if ir.guards.is_empty() {
-            let lowering = lower_numeric_lowering_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
-            let native = self.compile_native_numeric_for_loop(loop_reg, &lowering, lowered_trace)?;
+            let lowering =
+                lower_numeric_lowering_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
+            let native =
+                self.compile_native_numeric_for_loop(loop_reg, &lowering, lowered_trace)?;
             return Some((
                 CompiledTraceExecution::Native(native),
                 Some(profile_for_numeric_for_loop(&lowering.steps)),
@@ -272,15 +284,15 @@ impl NativeTraceBackend {
 
         let guard = ir.guards[0];
         let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
-        let guard_index = ir
-            .insts
-            .iter()
-            .position(|inst| {
-                matches!(
-                    inst.opcode,
-                    crate::OpCode::Test | crate::OpCode::TestSet | crate::OpCode::Lt | crate::OpCode::Le
-                )
-            })?;
+        let guard_index = ir.insts.iter().position(|inst| {
+            matches!(
+                inst.opcode,
+                crate::OpCode::Test
+                    | crate::OpCode::TestSet
+                    | crate::OpCode::Lt
+                    | crate::OpCode::Le
+            )
+        })?;
         if guard_index + 2 != ir.insts.len() - 1 {
             return None;
         }
@@ -289,9 +301,14 @@ impl NativeTraceBackend {
         }
 
         let lowering = lower_numeric_lowering_for_native(&ir.insts[..guard_index], lowered_trace)?;
-        let loop_guard = lower_numeric_guard_for_native(&ir.insts[guard_index], true, lowered_exit.resume_pc)?;
-        let native =
-            self.compile_native_guarded_numeric_for_loop(loop_reg, &lowering, loop_guard, lowered_trace)?;
+        let loop_guard =
+            lower_numeric_guard_for_native(&ir.insts[guard_index], true, lowered_exit.resume_pc)?;
+        let native = self.compile_native_guarded_numeric_for_loop(
+            loop_reg,
+            &lowering,
+            loop_guard,
+            lowered_trace,
+        )?;
         let profile = profile_for_guarded_numeric_for_loop(&lowering.steps, loop_guard);
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
@@ -321,7 +338,8 @@ impl NativeTraceBackend {
             }
 
             let guard_inst = &ir.insts[ir.insts.len() - 2];
-            let loop_guard = lower_linear_int_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
+            let loop_guard =
+                lower_linear_int_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
             let steps =
                 lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 2], lowered_trace)?;
             (steps, loop_guard)
@@ -330,12 +348,10 @@ impl NativeTraceBackend {
                 return None;
             }
 
-            let loop_guard = lower_linear_int_guard_for_native(
-                &ir.insts[0],
-                false,
-                lowered_exit.resume_pc,
-            )?;
-            let steps = lower_linear_int_steps_for_native(&ir.insts[2..ir.insts.len() - 1], lowered_trace)?;
+            let loop_guard =
+                lower_linear_int_guard_for_native(&ir.insts[0], false, lowered_exit.resume_pc)?;
+            let steps =
+                lower_linear_int_steps_for_native(&ir.insts[2..ir.insts.len() - 1], lowered_trace)?;
             (steps, loop_guard)
         };
 
@@ -464,8 +480,13 @@ impl NativeTraceBackend {
 
         let (head_blocks, lowering, tail_blocks, interior_guard_start) =
             recognize_numeric_jmp_guard_blocks(ir, lowered_trace)?;
-        let native =
-            self.compile_native_numeric_jmp_loop(&head_blocks, &lowering, &tail_blocks, interior_guard_start, lowered_trace)?;
+        let native = self.compile_native_numeric_jmp_loop(
+            &head_blocks,
+            &lowering,
+            &tail_blocks,
+            interior_guard_start,
+            lowered_trace,
+        )?;
         let profile = profile_for_numeric_jmp_loop(&head_blocks, &lowering.steps, &tail_blocks);
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
@@ -475,7 +496,12 @@ impl NativeTraceBackend {
     }
 
     fn compile_native_return1(&mut self, src_reg: u32) -> Option<NativeCompiledTrace> {
-        self.compile_native_return_trace("jit_native_return1", src_reg, 1, NativeReturnKind::Return1)
+        self.compile_native_return_trace(
+            "jit_native_return1",
+            src_reg,
+            1,
+            NativeReturnKind::Return1,
+        )
     }
 
     fn compile_native_return(
@@ -551,7 +577,10 @@ impl NativeTraceBackend {
             NATIVE_HELPER_SHIFT_RIGHT_SYMBOL,
             jit_native_helper_shift_right as *const u8,
         );
-        builder.symbol(NATIVE_HELPER_CALL_SYMBOL, jit_native_helper_call as *const u8);
+        builder.symbol(
+            NATIVE_HELPER_CALL_SYMBOL,
+            jit_native_helper_call as *const u8,
+        );
         builder.symbol(
             NATIVE_HELPER_TFOR_CALL_SYMBOL,
             jit_native_helper_tfor_call as *const u8,
@@ -660,62 +689,49 @@ impl NativeTraceBackend {
             let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
             let step_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(1));
             let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
-            emit_integer_guard(
-                &mut builder,
-                loop_ptr,
-                hits_var,
-                zero_hits,
-                fallback_block,
-            );
-            emit_integer_guard(
-                &mut builder,
+            emit_integer_guard(&mut builder, loop_ptr, hits_var, zero_hits, fallback_block);
+            emit_integer_guard(&mut builder, step_ptr, hits_var, zero_hits, fallback_block);
+            emit_integer_guard(&mut builder, index_ptr, hits_var, zero_hits, fallback_block);
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
                 step_ptr,
-                hits_var,
-                zero_hits,
-                fallback_block,
-            );
-            emit_integer_guard(
-                &mut builder,
-                index_ptr,
-                hits_var,
-                zero_hits,
-                fallback_block,
-            );
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), step_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
         let initial_remaining = if loop_state_is_invariant {
             let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
-            builder
-                .ins()
-                .load(types::I64, MemFlags::new(), loop_ptr, LUA_VALUE_VALUE_OFFSET)
+            builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                loop_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            )
         } else {
             builder.ins().iconst(types::I64, 0)
         };
         let initial_index = if loop_state_is_invariant {
             let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
-            builder
-                .ins()
-                .load(types::I64, MemFlags::new(), index_ptr, LUA_VALUE_VALUE_OFFSET)
+            builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                index_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            )
         } else {
             builder.ins().iconst(types::I64, 0)
         };
 
         if loop_state_is_invariant {
-            builder
-                .ins()
-                .jump(
-                    loop_block,
-                    &[
-                        cranelift::codegen::ir::BlockArg::Value(initial_remaining),
-                        cranelift::codegen::ir::BlockArg::Value(initial_index),
-                    ],
-                );
+            builder.ins().jump(
+                loop_block,
+                &[
+                    cranelift::codegen::ir::BlockArg::Value(initial_remaining),
+                    cranelift::codegen::ir::BlockArg::Value(initial_index),
+                ],
+            );
         } else {
             builder.ins().jump(loop_block, &[]);
         }
@@ -896,15 +912,19 @@ impl NativeTraceBackend {
             );
             builder.def_var(hits_var, current_hits);
             if continue_when {
-                builder.ins().brif(cond, body_block, &[], side_exit_block, &[]);
+                builder
+                    .ins()
+                    .brif(cond, body_block, &[], side_exit_block, &[]);
             } else {
-                builder.ins().brif(cond, side_exit_block, &[], body_block, &[]);
+                builder
+                    .ins()
+                    .brif(cond, side_exit_block, &[], body_block, &[]);
             }
         } else {
             builder.ins().jump(body_block, &[]);
         }
 
-    builder.switch_to_block(body_block);
+        builder.switch_to_block(body_block);
         let mut current_integer_values = Vec::new();
         for step in steps {
             emit_linear_int_step(
@@ -936,9 +956,13 @@ impl NativeTraceBackend {
             );
             builder.def_var(hits_var, next_hits);
             if continue_when {
-                builder.ins().brif(cond, guard_block, &[], side_exit_block, &[]);
+                builder
+                    .ins()
+                    .brif(cond, guard_block, &[], side_exit_block, &[]);
             } else {
-                builder.ins().brif(cond, side_exit_block, &[], guard_block, &[]);
+                builder
+                    .ins()
+                    .brif(cond, side_exit_block, &[], guard_block, &[]);
             }
         } else {
             builder.def_var(hits_var, next_hits);
@@ -1057,12 +1081,16 @@ impl NativeTraceBackend {
             ],
         );
         let helper_status = builder.inst_results(helper_call)[0];
-        let helper_continue = builder
-            .ins()
-            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_TFOR_CALL_C_CONTINUE));
-        let helper_returned = builder
-            .ins()
-            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_TFOR_CALL_LUA_RETURNED));
+        let helper_continue = builder.ins().icmp_imm(
+            IntCC::Equal,
+            helper_status,
+            i64::from(NATIVE_TFOR_CALL_C_CONTINUE),
+        );
+        let helper_returned = builder.ins().icmp_imm(
+            IntCC::Equal,
+            helper_status,
+            i64::from(NATIVE_TFOR_CALL_LUA_RETURNED),
+        );
         builder.ins().brif(
             helper_continue,
             call_continuation_block,
@@ -1072,18 +1100,24 @@ impl NativeTraceBackend {
         );
 
         builder.switch_to_block(helper_non_continue_block);
-        builder.ins().brif(helper_returned, returned_block, &[], fallback_block, &[]);
+        builder
+            .ins()
+            .brif(helper_returned, returned_block, &[], fallback_block, &[]);
 
         builder.switch_to_block(call_continuation_block);
         let control_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(3));
-        let control_tag = builder
-            .ins()
-            .load(types::I8, MemFlags::new(), control_ptr, LUA_VALUE_TT_OFFSET);
-        let control_is_nil = builder
-            .ins()
-            .icmp_imm(IntCC::Equal, control_tag, i64::from(LUA_VNIL_TAG));
+        let control_tag =
+            builder
+                .ins()
+                .load(types::I8, MemFlags::new(), control_ptr, LUA_VALUE_TT_OFFSET);
+        let control_is_nil =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, control_tag, i64::from(LUA_VNIL_TAG));
         let continue_hits = builder.ins().iadd_imm(current_hits, 1);
-        builder.ins().brif(control_is_nil, side_exit_block, &[], continue_block, &[]);
+        builder
+            .ins()
+            .brif(control_is_nil, side_exit_block, &[], continue_block, &[]);
 
         builder.switch_to_block(continue_block);
         builder.def_var(hits_var, continue_hits);
@@ -1190,7 +1224,8 @@ impl NativeTraceBackend {
                 carried_integer_rhs_stable_reg(*step)
                     .is_none_or(|reg| numeric_steps_preserve_reg(steps, reg))
             });
-        let carried_integer_span = carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
+        let carried_integer_span =
+            carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
         let carried_float_flow = if loop_state_is_invariant && carried_integer_step.is_none() {
             effective_value_state
                 .self_update
@@ -1204,7 +1239,8 @@ impl NativeTraceBackend {
                 carried_float_rhs_stable_reg(*step)
                     .is_none_or(|reg| numeric_steps_preserve_reg(steps, reg))
             });
-        let carried_float_span = carried_float_flow.and_then(|flow| float_self_update_step_span(steps, flow));
+        let carried_float_span =
+            carried_float_flow.and_then(|flow| float_self_update_step_span(steps, flow));
 
         let loop_block = builder.create_block();
         if loop_state_is_invariant {
@@ -1250,27 +1286,34 @@ impl NativeTraceBackend {
                 loop_reg.saturating_add(2),
                 TraceValueKind::Integer,
             );
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), step_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                step_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
         let initial_remaining = if loop_state_is_invariant {
             let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
-            builder
-                .ins()
-                .load(types::I64, MemFlags::new(), loop_ptr, LUA_VALUE_VALUE_OFFSET)
+            builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                loop_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            )
         } else {
             builder.ins().iconst(types::I64, 0)
         };
         let initial_index = if loop_state_is_invariant {
             let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
-            builder
-                .ins()
-                .load(types::I64, MemFlags::new(), index_ptr, LUA_VALUE_VALUE_OFFSET)
+            builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                index_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            )
         } else {
             builder.ins().iconst(types::I64, 0)
         };
@@ -1311,11 +1354,12 @@ impl NativeTraceBackend {
                 fallback_block,
             );
             set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Integer);
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                slot_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
@@ -1330,11 +1374,12 @@ impl NativeTraceBackend {
                 fallback_block,
             );
             set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Float);
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                slot_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
@@ -1409,7 +1454,8 @@ impl NativeTraceBackend {
                 steps,
                 carried_integer_var,
                 step,
-                carried_integer_rhs.expect("plain numeric carried-integer path requires resolved rhs"),
+                carried_integer_rhs
+                    .expect("plain numeric carried-integer path requires resolved rhs"),
                 span_start,
                 span_len,
                 None,
@@ -1429,7 +1475,8 @@ impl NativeTraceBackend {
                     steps,
                     carried_float_raw_var,
                     step,
-                    carried_float_rhs.expect("plain numeric carried-float path requires resolved rhs"),
+                    carried_float_rhs
+                        .expect("plain numeric carried-float path requires resolved rhs"),
                     span_start,
                     span_len,
                     None,
@@ -1441,7 +1488,8 @@ impl NativeTraceBackend {
                     &mut builder,
                     carried_float_raw_var,
                     step,
-                    carried_float_rhs.expect("plain numeric carried-float path requires resolved rhs"),
+                    carried_float_rhs
+                        .expect("plain numeric carried-float path requires resolved rhs"),
                     &mut known_value_kinds,
                 );
             }
@@ -1526,7 +1574,11 @@ impl NativeTraceBackend {
             emit_materialize_numeric_loop_state(
                 &mut builder,
                 abi.base_ptr,
-                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                loop_state_is_invariant.then_some((
+                    loop_reg,
+                    carried_remaining_var,
+                    carried_index_var,
+                )),
                 carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 fallback_block,
@@ -1535,7 +1587,11 @@ impl NativeTraceBackend {
             emit_materialize_numeric_loop_state(
                 &mut builder,
                 abi.base_ptr,
-                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                loop_state_is_invariant.then_some((
+                    loop_reg,
+                    carried_remaining_var,
+                    carried_index_var,
+                )),
                 carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 loop_exit_block,
@@ -1673,9 +1729,10 @@ impl NativeTraceBackend {
             ],
         );
         let helper_status = builder.inst_results(helper_call)[0];
-        let helper_continue = builder
-            .ins()
-            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        let helper_continue =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
         builder.ins().brif(
             helper_continue,
             call_continue_block,
@@ -1809,16 +1866,13 @@ impl NativeTraceBackend {
             ],
         );
         let helper_status = builder.inst_results(helper_call)[0];
-        let helper_continue = builder
+        let helper_continue =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder
             .ins()
-            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
-        builder.ins().brif(
-            helper_continue,
-            copy_done_block,
-            &[],
-            fallback_block,
-            &[],
-        );
+            .brif(helper_continue, copy_done_block, &[], fallback_block, &[]);
 
         builder.switch_to_block(copy_done_block);
         builder.seal_block(copy_done_block);
@@ -1859,16 +1913,13 @@ impl NativeTraceBackend {
             ],
         );
         let helper_status = builder.inst_results(helper_call)[0];
-        let helper_continue = builder
+        let helper_continue =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder
             .ins()
-            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
-        builder.ins().brif(
-            helper_continue,
-            sort_done_block,
-            &[],
-            fallback_block,
-            &[],
-        );
+            .brif(helper_continue, sort_done_block, &[], fallback_block, &[]);
 
         builder.switch_to_block(sort_done_block);
         builder.seal_block(sort_done_block);
@@ -1907,16 +1958,13 @@ impl NativeTraceBackend {
             ],
         );
         let helper_status = builder.inst_results(helper_call)[0];
-        let helper_continue = builder
+        let helper_continue =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder
             .ins()
-            .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
-        builder.ins().brif(
-            helper_continue,
-            check_done_block,
-            &[],
-            fallback_block,
-            &[],
-        );
+            .brif(helper_continue, check_done_block, &[], fallback_block, &[]);
 
         builder.switch_to_block(check_done_block);
         builder.seal_block(check_done_block);
@@ -1934,7 +1982,9 @@ impl NativeTraceBackend {
         )?;
         let next_hits = builder.ins().iadd_imm(current_hits, 1);
         builder.def_var(hits_var, next_hits);
-        builder.ins().brif(cond, sorted_block, &[], unsorted_block, &[]);
+        builder
+            .ins()
+            .brif(cond, sorted_block, &[], unsorted_block, &[]);
 
         builder.switch_to_block(sorted_block);
         let sorted_hits = builder.use_var(hits_var);
@@ -2006,11 +2056,17 @@ impl NativeTraceBackend {
             } => (cond, continue_when, continue_preset, exit_preset, exit_pc),
             NumericJmpLoopGuard::Head { .. } => return None,
         };
-        let side_exit_index = lowered_trace.deopt_target_for_exit_pc(side_exit_pc)?.exit_index;
+        let side_exit_index = lowered_trace
+            .deopt_target_for_exit_pc(side_exit_pc)?
+            .exit_index;
 
         if !native_supports_numeric_cond(cond)
-            || continue_preset.as_ref().is_some_and(|step| !native_supports_numeric_step(step))
-            || exit_preset.as_ref().is_some_and(|step| !native_supports_numeric_step(step))
+            || continue_preset
+                .as_ref()
+                .is_some_and(|step| !native_supports_numeric_step(step))
+            || exit_preset
+                .as_ref()
+                .is_some_and(|step| !native_supports_numeric_step(step))
         {
             return None;
         }
@@ -2055,13 +2111,13 @@ impl NativeTraceBackend {
             .and_then(carried_integer_loop_step_from_value_flow)
             .filter(|step| {
                 !numeric_guard_writes_reg_outside_condition(guard, step.reg)
-                    && carried_integer_rhs_stable_reg(*step)
-                        .is_none_or(|reg| {
-                            numeric_steps_preserve_reg(steps, reg)
-                                && !numeric_guard_writes_reg_outside_condition(guard, reg)
-                        })
+                    && carried_integer_rhs_stable_reg(*step).is_none_or(|reg| {
+                        numeric_steps_preserve_reg(steps, reg)
+                            && !numeric_guard_writes_reg_outside_condition(guard, reg)
+                    })
             });
-        let carried_integer_span = carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
+        let carried_integer_span =
+            carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
         let carried_float_flow = if loop_state_is_invariant && carried_integer_step.is_none() {
             lowering
                 .value_state
@@ -2080,7 +2136,8 @@ impl NativeTraceBackend {
                             && !numeric_guard_writes_reg_outside_condition(guard, reg)
                     })
             });
-        let carried_float_span = carried_float_flow.and_then(|flow| float_self_update_step_span(steps, flow));
+        let carried_float_span =
+            carried_float_flow.and_then(|flow| float_self_update_step_span(steps, flow));
 
         let loop_block = builder.create_block();
         if loop_state_is_invariant {
@@ -2096,17 +2153,26 @@ impl NativeTraceBackend {
         let fallback_terminal_block = builder.create_block();
         let loop_exit_terminal_block = builder.create_block();
         let side_exit_terminal_block = builder.create_block();
-        let fallback_block = if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
+        let fallback_block = if loop_state_is_invariant
+            || carried_integer_step.is_some()
+            || carried_float_step.is_some()
+        {
             builder.create_block()
         } else {
             fallback_terminal_block
         };
-        let loop_exit_block = if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
+        let loop_exit_block = if loop_state_is_invariant
+            || carried_integer_step.is_some()
+            || carried_float_step.is_some()
+        {
             builder.create_block()
         } else {
             loop_exit_terminal_block
         };
-        let side_exit_block = if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
+        let side_exit_block = if loop_state_is_invariant
+            || carried_integer_step.is_some()
+            || carried_float_step.is_some()
+        {
             builder.create_block()
         } else {
             side_exit_terminal_block
@@ -2132,27 +2198,34 @@ impl NativeTraceBackend {
                 loop_reg.saturating_add(2),
                 TraceValueKind::Integer,
             );
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), step_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                step_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
         let initial_remaining = if loop_state_is_invariant {
             let loop_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg);
-            builder
-                .ins()
-                .load(types::I64, MemFlags::new(), loop_ptr, LUA_VALUE_VALUE_OFFSET)
+            builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                loop_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            )
         } else {
             builder.ins().iconst(types::I64, 0)
         };
         let initial_index = if loop_state_is_invariant {
             let index_ptr = slot_addr(&mut builder, abi.base_ptr, loop_reg.saturating_add(2));
-            builder
-                .ins()
-                .load(types::I64, MemFlags::new(), index_ptr, LUA_VALUE_VALUE_OFFSET)
+            builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                index_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            )
         } else {
             builder.ins().iconst(types::I64, 0)
         };
@@ -2167,11 +2240,12 @@ impl NativeTraceBackend {
                 fallback_block,
             );
             set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Integer);
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                slot_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
@@ -2186,11 +2260,12 @@ impl NativeTraceBackend {
                 fallback_block,
             );
             set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Float);
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                slot_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
@@ -2217,9 +2292,12 @@ impl NativeTraceBackend {
         let hoisted_guard_rhs = carried_float_step
             .zip(carried_float_rhs)
             .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_rhs(step, rhs));
-        let hoisted_integer_rhs = carried_integer_step
-            .zip(carried_integer_rhs)
-            .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_integer_rhs(step, rhs));
+        let hoisted_integer_rhs =
+            carried_integer_step
+                .zip(carried_integer_rhs)
+                .and_then(|(step, rhs)| {
+                    hoisted_numeric_guard_value_from_carried_integer_rhs(step, rhs)
+                });
 
         let mut initial_args = Vec::new();
         if loop_state_is_invariant {
@@ -2260,8 +2338,9 @@ impl NativeTraceBackend {
         let mut current_numeric_values = Vec::new();
 
         if let Some(step) = carried_integer_step {
-            let (span_start, span_len) = carried_integer_span
-                .expect("guarded numeric carried-integer path requires a matching self-update span");
+            let (span_start, span_len) = carried_integer_span.expect(
+                "guarded numeric carried-integer path requires a matching self-update span",
+            );
             emit_numeric_steps_with_carried_integer(
                 &mut builder,
                 &abi,
@@ -2272,7 +2351,8 @@ impl NativeTraceBackend {
                 steps,
                 carried_integer_var,
                 step,
-                carried_integer_rhs.expect("guarded numeric carried-integer path requires resolved rhs"),
+                carried_integer_rhs
+                    .expect("guarded numeric carried-integer path requires resolved rhs"),
                 span_start,
                 span_len,
                 hoisted_integer_rhs,
@@ -2291,7 +2371,8 @@ impl NativeTraceBackend {
                     steps,
                     carried_float_raw_var,
                     step,
-                    carried_float_rhs.expect("guarded numeric carried-float path requires resolved rhs"),
+                    carried_float_rhs
+                        .expect("guarded numeric carried-float path requires resolved rhs"),
                     span_start,
                     span_len,
                     hoisted_guard_rhs,
@@ -2303,7 +2384,8 @@ impl NativeTraceBackend {
                     &mut builder,
                     carried_float_raw_var,
                     step,
-                    carried_float_rhs.expect("guarded numeric carried-float path requires resolved rhs"),
+                    carried_float_rhs
+                        .expect("guarded numeric carried-float path requires resolved rhs"),
                     &mut known_value_kinds,
                 );
             }
@@ -2326,10 +2408,11 @@ impl NativeTraceBackend {
         }
 
         let continue_block = builder.create_block();
-        let carried_integer_guard_value = carried_integer_step.map(|step| HoistedNumericGuardValue {
-            reg: step.reg,
-            source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
-        });
+        let carried_integer_guard_value =
+            carried_integer_step.map(|step| HoistedNumericGuardValue {
+                reg: step.reg,
+                source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
+            });
         let hoisted_numeric = HoistedNumericGuardValues {
             first: carried_integer_guard_value.or(hoisted_guard_rhs),
             second: hoisted_integer_rhs,
@@ -2416,11 +2499,16 @@ impl NativeTraceBackend {
             );
         }
 
-        if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some() {
+        if loop_state_is_invariant || carried_integer_step.is_some() || carried_float_step.is_some()
+        {
             emit_materialize_numeric_loop_state(
                 &mut builder,
                 abi.base_ptr,
-                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                loop_state_is_invariant.then_some((
+                    loop_reg,
+                    carried_remaining_var,
+                    carried_index_var,
+                )),
                 carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 fallback_block,
@@ -2429,7 +2517,11 @@ impl NativeTraceBackend {
             emit_materialize_numeric_loop_state(
                 &mut builder,
                 abi.base_ptr,
-                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                loop_state_is_invariant.then_some((
+                    loop_reg,
+                    carried_remaining_var,
+                    carried_index_var,
+                )),
                 carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 loop_exit_block,
@@ -2438,7 +2530,11 @@ impl NativeTraceBackend {
             emit_materialize_numeric_loop_state(
                 &mut builder,
                 abi.base_ptr,
-                loop_state_is_invariant.then_some((loop_reg, carried_remaining_var, carried_index_var)),
+                loop_state_is_invariant.then_some((
+                    loop_reg,
+                    carried_remaining_var,
+                    carried_index_var,
+                )),
                 carried_integer_step.map(|step| (step.reg, carried_integer_var)),
                 carried_float_step.map(|step| (step.reg, carried_float_raw_var)),
                 side_exit_block,
@@ -2550,51 +2646,40 @@ impl NativeTraceBackend {
                     .any(|block| numeric_guard_block_touches_reg(block, step.reg))
                     && carried_integer_rhs_stable_reg(*step).is_none_or(|reg| {
                         numeric_steps_preserve_reg(steps, reg)
-                            && !head_blocks
-                                .iter()
-                                .chain(tail_blocks.iter())
-                                .any(|block| {
-                                    numeric_guard_block_writes_reg_outside_condition(block, reg)
-                                })
+                            && !head_blocks.iter().chain(tail_blocks.iter()).any(|block| {
+                                numeric_guard_block_writes_reg_outside_condition(block, reg)
+                            })
                     })
             });
-        let carried_integer_span = carried_integer_flow
-            .and_then(|flow| integer_self_update_step_span(steps, flow));
-        let carried_float_flow = carried_integer_step
-            .is_none()
-            .then_some(())
-            .and_then(|_| {
-                lowering
-                    .value_state
-                    .self_update
-                    .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Float))
-            })
-            ;
-        let carried_float_step = carried_float_flow
-            .and_then(|flow| carried_float_loop_step_from_value_flow(flow, lowered_trace))
-            .or_else(|| exact_float_self_update_step(steps, lowered_trace))
-            .filter(|step| {
-                !head_blocks
-                    .iter()
-                    .chain(tail_blocks.iter())
-                    .any(|block| numeric_guard_block_writes_reg_outside_condition(block, step.reg))
-                    && (!head_blocks
+        let carried_integer_span =
+            carried_integer_flow.and_then(|flow| integer_self_update_step_span(steps, flow));
+        let carried_float_flow = carried_integer_step.is_none().then_some(()).and_then(|_| {
+            lowering
+                .value_state
+                .self_update
+                .filter(|flow| matches!(flow.kind, NumericSelfUpdateValueKind::Float))
+        });
+        let carried_float_step =
+            carried_float_flow
+                .and_then(|flow| carried_float_loop_step_from_value_flow(flow, lowered_trace))
+                .or_else(|| exact_float_self_update_step(steps, lowered_trace))
+                .filter(|step| {
+                    !head_blocks.iter().chain(tail_blocks.iter()).any(|block| {
+                        numeric_guard_block_writes_reg_outside_condition(block, step.reg)
+                    }) && (!head_blocks
                         .iter()
                         .chain(tail_blocks.iter())
                         .any(|block| numeric_guard_block_touches_reg(block, step.reg))
                         || entry_reg_has_explicit_float_hint(lowered_trace, step.reg))
-                    && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
-                        numeric_steps_preserve_reg(steps, reg)
-                            && !head_blocks
-                                .iter()
-                                .chain(tail_blocks.iter())
-                                .any(|block| {
+                        && carried_float_rhs_stable_reg(*step).is_none_or(|reg| {
+                            numeric_steps_preserve_reg(steps, reg)
+                                && !head_blocks.iter().chain(tail_blocks.iter()).any(|block| {
                                     numeric_guard_block_writes_reg_outside_condition(block, reg)
                                 })
-                    })
-            });
-                    let carried_float_span = carried_float_flow
-                        .and_then(|flow| float_self_update_step_span(steps, flow));
+                        })
+                });
+        let carried_float_span =
+            carried_float_flow.and_then(|flow| float_self_update_step_span(steps, flow));
 
         let loop_block = builder.create_block();
         if carried_integer_step.is_some() {
@@ -2623,11 +2708,12 @@ impl NativeTraceBackend {
                 fallback_block,
             );
             set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Integer);
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                slot_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
@@ -2642,11 +2728,12 @@ impl NativeTraceBackend {
                 fallback_block,
             );
             set_numeric_reg_value_kind(&mut known_value_kinds, step.reg, TraceValueKind::Float);
-            Some(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), slot_ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            Some(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                slot_ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         } else {
             None
         };
@@ -2673,9 +2760,12 @@ impl NativeTraceBackend {
         let hoisted_guard_rhs = carried_float_step
             .zip(carried_float_rhs)
             .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_rhs(step, rhs));
-        let hoisted_integer_rhs = carried_integer_step
-            .zip(carried_integer_rhs)
-            .and_then(|(step, rhs)| hoisted_numeric_guard_value_from_carried_integer_rhs(step, rhs));
+        let hoisted_integer_rhs =
+            carried_integer_step
+                .zip(carried_integer_rhs)
+                .and_then(|(step, rhs)| {
+                    hoisted_numeric_guard_value_from_carried_integer_rhs(step, rhs)
+                });
         let mut initial_args = Vec::new();
         if let Some(value) = initial_integer_value {
             initial_args.push(cranelift::codegen::ir::BlockArg::Value(value));
@@ -2697,10 +2787,11 @@ impl NativeTraceBackend {
             builder.def_var(carried_float_raw_var, carried_float_raw);
         }
 
-        let carried_integer_guard_value = carried_integer_step.map(|step| HoistedNumericGuardValue {
-            reg: step.reg,
-            source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
-        });
+        let carried_integer_guard_value =
+            carried_integer_step.map(|step| HoistedNumericGuardValue {
+                reg: step.reg,
+                source: HoistedNumericGuardSource::Integer(builder.use_var(carried_integer_var)),
+            });
         let hoisted_numeric = HoistedNumericGuardValues {
             first: carried_integer_guard_value.or(hoisted_guard_rhs),
             second: hoisted_integer_rhs,
@@ -2713,7 +2804,8 @@ impl NativeTraceBackend {
             let is_interior = head_index >= interior_guard_start;
             let continue_block = builder.create_block();
             let side_exit_terminal_block = builder.create_block();
-            let side_exit_block = if carried_integer_step.is_some() || carried_float_step.is_some() {
+            let side_exit_block = if carried_integer_step.is_some() || carried_float_step.is_some()
+            {
                 builder.create_block()
             } else {
                 side_exit_terminal_block
@@ -2762,7 +2854,8 @@ impl NativeTraceBackend {
                 steps,
                 carried_integer_var,
                 step,
-                carried_integer_rhs.expect("numeric jmp carried-integer path requires resolved rhs"),
+                carried_integer_rhs
+                    .expect("numeric jmp carried-integer path requires resolved rhs"),
                 span_start,
                 span_len,
                 hoisted_integer_rhs,
@@ -2781,7 +2874,8 @@ impl NativeTraceBackend {
                     steps,
                     carried_float_raw_var,
                     step,
-                    carried_float_rhs.expect("numeric jmp carried-float path requires resolved rhs"),
+                    carried_float_rhs
+                        .expect("numeric jmp carried-float path requires resolved rhs"),
                     span_start,
                     span_len,
                     hoisted_guard_rhs,
@@ -2793,7 +2887,8 @@ impl NativeTraceBackend {
                     &mut builder,
                     carried_float_raw_var,
                     step,
-                    carried_float_rhs.expect("numeric jmp carried-float path requires resolved rhs"),
+                    carried_float_rhs
+                        .expect("numeric jmp carried-float path requires resolved rhs"),
                     &mut known_value_kinds,
                 );
             }
@@ -2821,7 +2916,8 @@ impl NativeTraceBackend {
         for block in tail_blocks {
             let continue_block = builder.create_block();
             let side_exit_terminal_block = builder.create_block();
-            let side_exit_block = if carried_integer_step.is_some() || carried_float_step.is_some() {
+            let side_exit_block = if carried_integer_step.is_some() || carried_float_step.is_some()
+            {
                 builder.create_block()
             } else {
                 side_exit_terminal_block
@@ -2896,7 +2992,9 @@ impl NativeTraceBackend {
             );
         }
 
-        for (side_exit_block, side_exit_terminal_block, exit_pc, exit_index, is_interior) in side_exit_sites {
+        for (side_exit_block, side_exit_terminal_block, exit_pc, exit_index, is_interior) in
+            side_exit_sites
+        {
             if carried_integer_step.is_some() || carried_float_step.is_some() {
                 emit_materialize_numeric_loop_state(
                     &mut builder,
@@ -3071,8 +3169,8 @@ impl NativeTraceBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lua_vm::{LuaVM, SafeOption};
     use crate::lua_vm::jit::lowering::{DeoptRestoreSummary, LoweredExit, LoweredSsaTrace};
+    use crate::lua_vm::{LuaVM, SafeOption};
 
     fn lowered_trace_with_entry_hints(hints: &[(u32, TraceValueKind)]) -> LoweredTrace {
         let hints = hints
@@ -3348,7 +3446,12 @@ mod tests {
                 }),
             },
         };
-        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(410, 411, &[(410, 411, 415)], &[(4, TraceValueKind::Integer)]);
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            410,
+            411,
+            &[(410, 411, 415)],
+            &[(4, TraceValueKind::Integer)],
+        );
 
         let entry = match backend
             .compile_native_numeric_jmp_loop(
@@ -3493,10 +3596,8 @@ mod tests {
             ],
             value_state: NumericValueState::default(),
         };
-        let lowered_trace = lowered_trace_with_entry_hints_and_constants(
-            &[(3, TraceValueKind::Table)],
-            vec![key],
-        );
+        let lowered_trace =
+            lowered_trace_with_entry_hints_and_constants(&[(3, TraceValueKind::Table)], vec![key]);
 
         let entry = match backend
             .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
@@ -3528,7 +3629,11 @@ mod tests {
         assert_eq!(result.status, NativeTraceStatus::LoopExit);
         assert_eq!(result.hits, 3);
         assert_eq!(stack[4].as_integer(), Some(4));
-        assert_eq!(vm.raw_get(&stack[3], &key).and_then(|value| value.as_integer()), Some(4));
+        assert_eq!(
+            vm.raw_get(&stack[3], &key)
+                .and_then(|value| value.as_integer()),
+            Some(4)
+        );
     }
 
     #[test]
@@ -3592,7 +3697,11 @@ mod tests {
         assert_eq!(result.status, NativeTraceStatus::LoopExit);
         assert_eq!(result.hits, 3);
         assert_eq!(stack[4].as_integer(), Some(4));
-        assert_eq!(vm.raw_get(&table, &key).and_then(|value| value.as_integer()), Some(4));
+        assert_eq!(
+            vm.raw_get(&table, &key)
+                .and_then(|value| value.as_integer()),
+            Some(4)
+        );
     }
 
     #[test]
@@ -3670,7 +3779,10 @@ mod tests {
 
         assert_eq!(result.status, NativeTraceStatus::LoopExit);
         assert_eq!(result.hits, 3);
-        assert_eq!(state.stack_get(2).and_then(|value| value.as_integer()), Some(6));
+        assert_eq!(
+            state.stack_get(2).and_then(|value| value.as_integer()),
+            Some(6)
+        );
     }
 
     #[test]
@@ -3965,7 +4077,11 @@ mod tests {
             424,
             426,
             &[(425, 426, 427)],
-            &[(4, TraceValueKind::Integer), (6, TraceValueKind::Integer), (9, TraceValueKind::Integer)],
+            &[
+                (4, TraceValueKind::Integer),
+                (6, TraceValueKind::Integer),
+                (9, TraceValueKind::Integer),
+            ],
         );
         let tail_blocks = vec![NumericJmpLoopGuardBlock {
             pre_steps: Vec::new(),
@@ -4348,7 +4464,8 @@ mod tests {
     }
 
     #[test]
-    fn compile_native_guarded_numeric_for_loop_materializes_carried_integer_only_on_fallback_boundary() {
+    fn compile_native_guarded_numeric_for_loop_materializes_carried_integer_only_on_fallback_boundary()
+     {
         let mut backend = NativeTraceBackend::default();
         let lowering = NumericLowering {
             steps: vec![NumericStep::Binary {
@@ -4366,7 +4483,12 @@ mod tests {
                 }),
             },
         };
-        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(430, 431, &[(430, 431, 435)], &[(4, TraceValueKind::Integer)]);
+        let lowered_trace = lowered_trace_for_numeric_jmp_blocks(
+            430,
+            431,
+            &[(430, 431, 435)],
+            &[(4, TraceValueKind::Integer)],
+        );
 
         let entry = match backend
             .compile_native_guarded_numeric_for_loop(
@@ -4682,13 +4804,22 @@ mod tests {
 }
 
 fn profile_for_linear_int_for_loop(steps: &[LinearIntStep]) -> NativeLoweringProfile {
-    steps.iter().copied().fold(NativeLoweringProfile::default(), |acc, step| {
-        merge_native_profiles(acc, profile_for_linear_int_step(step))
-    })
+    steps
+        .iter()
+        .copied()
+        .fold(NativeLoweringProfile::default(), |acc, step| {
+            merge_native_profiles(acc, profile_for_linear_int_step(step))
+        })
 }
 
-fn profile_for_linear_int_jmp_loop(steps: &[LinearIntStep], _guard: LinearIntLoopGuard) -> NativeLoweringProfile {
-    merge_native_profiles(profile_for_linear_int_for_loop(steps), profile_for_linear_guard())
+fn profile_for_linear_int_jmp_loop(
+    steps: &[LinearIntStep],
+    _guard: LinearIntLoopGuard,
+) -> NativeLoweringProfile {
+    merge_native_profiles(
+        profile_for_linear_int_for_loop(steps),
+        profile_for_linear_guard(),
+    )
 }
 
 fn profile_for_linear_int_step(step: LinearIntStep) -> NativeLoweringProfile {
@@ -4743,9 +4874,12 @@ fn profile_for_numeric_jmp_loop(
 }
 
 fn profile_for_numeric_steps(steps: &[NumericStep]) -> NativeLoweringProfile {
-    steps.iter().copied().fold(NativeLoweringProfile::default(), |acc, step| {
-        merge_native_profiles(acc, profile_for_numeric_step(step))
-    })
+    steps
+        .iter()
+        .copied()
+        .fold(NativeLoweringProfile::default(), |acc, step| {
+            merge_native_profiles(acc, profile_for_numeric_step(step))
+        })
 }
 
 fn profile_for_numeric_step(step: NumericStep) -> NativeLoweringProfile {
@@ -4754,22 +4888,18 @@ fn profile_for_numeric_step(step: NumericStep) -> NativeLoweringProfile {
             upvalue_helper_steps: 1,
             ..NativeLoweringProfile::default()
         },
-        NumericStep::GetTabUpField { .. } => {
-            NativeLoweringProfile {
-                upvalue_helper_steps: 1,
-                table_helper_steps: 1,
-                table_get_helper_steps: 1,
-                ..NativeLoweringProfile::default()
-            }
-        }
-        NumericStep::SetTabUpField { .. } => {
-            NativeLoweringProfile {
-                upvalue_helper_steps: 1,
-                table_helper_steps: 1,
-                table_set_helper_steps: 1,
-                ..NativeLoweringProfile::default()
-            }
-        }
+        NumericStep::GetTabUpField { .. } => NativeLoweringProfile {
+            upvalue_helper_steps: 1,
+            table_helper_steps: 1,
+            table_get_helper_steps: 1,
+            ..NativeLoweringProfile::default()
+        },
+        NumericStep::SetTabUpField { .. } => NativeLoweringProfile {
+            upvalue_helper_steps: 1,
+            table_helper_steps: 1,
+            table_set_helper_steps: 1,
+            ..NativeLoweringProfile::default()
+        },
         NumericStep::GetTableInt { .. } | NumericStep::GetTableField { .. } => {
             NativeLoweringProfile {
                 table_helper_steps: 1,
@@ -4784,16 +4914,14 @@ fn profile_for_numeric_step(step: NumericStep) -> NativeLoweringProfile {
                 ..NativeLoweringProfile::default()
             }
         }
-        NumericStep::Len { .. } => {
-            NativeLoweringProfile {
-                table_helper_steps: 1,
-                len_helper_steps: 1,
-                ..NativeLoweringProfile::default()
-            }
-        }
+        NumericStep::Len { .. } => NativeLoweringProfile {
+            table_helper_steps: 1,
+            len_helper_steps: 1,
+            ..NativeLoweringProfile::default()
+        },
         NumericStep::Binary { op, .. } => match op {
             NumericBinaryOp::Pow => NativeLoweringProfile::default(),
-            
+
             NumericBinaryOp::Shl | NumericBinaryOp::Shr => NativeLoweringProfile {
                 shift_helper_steps: 1,
                 ..NativeLoweringProfile::default()
@@ -4821,18 +4949,24 @@ fn merge_native_profiles(
 ) -> NativeLoweringProfile {
     NativeLoweringProfile {
         guard_steps: lhs.guard_steps.saturating_add(rhs.guard_steps),
-        linear_guard_steps: lhs.linear_guard_steps.saturating_add(rhs.linear_guard_steps),
+        linear_guard_steps: lhs
+            .linear_guard_steps
+            .saturating_add(rhs.linear_guard_steps),
         numeric_int_compare_guard_steps: lhs
             .numeric_int_compare_guard_steps
             .saturating_add(rhs.numeric_int_compare_guard_steps),
         numeric_reg_compare_guard_steps: lhs
             .numeric_reg_compare_guard_steps
             .saturating_add(rhs.numeric_reg_compare_guard_steps),
-        truthy_guard_steps: lhs.truthy_guard_steps.saturating_add(rhs.truthy_guard_steps),
+        truthy_guard_steps: lhs
+            .truthy_guard_steps
+            .saturating_add(rhs.truthy_guard_steps),
         arithmetic_helper_steps: lhs
             .arithmetic_helper_steps
             .saturating_add(rhs.arithmetic_helper_steps),
-        table_helper_steps: lhs.table_helper_steps.saturating_add(rhs.table_helper_steps),
+        table_helper_steps: lhs
+            .table_helper_steps
+            .saturating_add(rhs.table_helper_steps),
         table_get_helper_steps: lhs
             .table_get_helper_steps
             .saturating_add(rhs.table_get_helper_steps),
@@ -4840,8 +4974,12 @@ fn merge_native_profiles(
             .table_set_helper_steps
             .saturating_add(rhs.table_set_helper_steps),
         len_helper_steps: lhs.len_helper_steps.saturating_add(rhs.len_helper_steps),
-        upvalue_helper_steps: lhs.upvalue_helper_steps.saturating_add(rhs.upvalue_helper_steps),
-        shift_helper_steps: lhs.shift_helper_steps.saturating_add(rhs.shift_helper_steps),
+        upvalue_helper_steps: lhs
+            .upvalue_helper_steps
+            .saturating_add(rhs.upvalue_helper_steps),
+        shift_helper_steps: lhs
+            .shift_helper_steps
+            .saturating_add(rhs.shift_helper_steps),
     }
 }
 
@@ -4873,8 +5011,12 @@ fn profile_for_numeric_guard(guard: NumericJmpLoopGuard) -> NativeLoweringProfil
 
 fn guard_continue_preset(guard: NumericJmpLoopGuard) -> Option<NumericStep> {
     match guard {
-        NumericJmpLoopGuard::Head { continue_preset, .. }
-        | NumericJmpLoopGuard::Tail { continue_preset, .. } => continue_preset,
+        NumericJmpLoopGuard::Head {
+            continue_preset, ..
+        }
+        | NumericJmpLoopGuard::Tail {
+            continue_preset, ..
+        } => continue_preset,
     }
 }
 
@@ -4887,7 +5029,9 @@ fn guard_exit_preset(guard: NumericJmpLoopGuard) -> Option<NumericStep> {
 
 fn numeric_jmp_guard_exit_pc(guard: NumericJmpLoopGuard) -> u32 {
     match guard {
-        NumericJmpLoopGuard::Head { exit_pc, .. } | NumericJmpLoopGuard::Tail { exit_pc, .. } => exit_pc,
+        NumericJmpLoopGuard::Head { exit_pc, .. } | NumericJmpLoopGuard::Tail { exit_pc, .. } => {
+            exit_pc
+        }
     }
 }
 
@@ -4903,7 +5047,10 @@ fn numeric_jmp_guard_block_is_supported(
 
     let guard = block.guard;
     if !interior {
-        let matches_position = matches!((tail, guard), (false, NumericJmpLoopGuard::Head { .. }) | (true, NumericJmpLoopGuard::Tail { .. }));
+        let matches_position = matches!(
+            (tail, guard),
+            (false, NumericJmpLoopGuard::Head { .. }) | (true, NumericJmpLoopGuard::Tail { .. })
+        );
         if !matches_position {
             return false;
         }
@@ -4930,7 +5077,12 @@ fn numeric_jmp_guard_block_is_supported(
 fn recognize_numeric_jmp_guard_blocks(
     ir: &TraceIr,
     lowered_trace: &LoweredTrace,
-) -> Option<(Vec<NumericJmpLoopGuardBlock>, NumericLowering, Vec<NumericJmpLoopGuardBlock>, usize)> {
+) -> Option<(
+    Vec<NumericJmpLoopGuardBlock>,
+    NumericLowering,
+    Vec<NumericJmpLoopGuardBlock>,
+    usize,
+)> {
     if ir.insts.len() < 3 {
         return None;
     }
@@ -4961,8 +5113,7 @@ fn recognize_numeric_jmp_guard_blocks(
             return None;
         };
         let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
-        let loop_guard =
-            lower_numeric_guard_for_native(guard_inst, false, lowered_exit.resume_pc)?;
+        let loop_guard = lower_numeric_guard_for_native(guard_inst, false, lowered_exit.resume_pc)?;
         head_blocks.push(NumericJmpLoopGuardBlock {
             pre_steps,
             guard: loop_guard,
@@ -4985,8 +5136,7 @@ fn recognize_numeric_jmp_guard_blocks(
             break;
         };
         let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
-        let loop_guard =
-            lower_numeric_guard_for_native(guard_inst, false, lowered_exit.resume_pc)?;
+        let loop_guard = lower_numeric_guard_for_native(guard_inst, false, lowered_exit.resume_pc)?;
         head_blocks.push(NumericJmpLoopGuardBlock {
             pre_steps: Vec::new(),
             guard: loop_guard,
@@ -5009,8 +5159,7 @@ fn recognize_numeric_jmp_guard_blocks(
             break;
         };
         let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
-        let loop_guard =
-            lower_numeric_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
+        let loop_guard = lower_numeric_guard_for_native(guard_inst, true, lowered_exit.resume_pc)?;
         tail_blocks_rev.push(NumericJmpLoopGuardBlock {
             pre_steps: Vec::new(),
             guard: loop_guard,
@@ -5030,50 +5179,51 @@ fn recognize_numeric_jmp_guard_blocks(
     // is retained for future use when loop chaining or inline exit handling
     // can amortize the overhead.
     let interior_guard_start = head_blocks.len();
-    if false { // Interior guard compilation disabled: short loops regress due to
-    // trace entry/exit overhead per while-loop exit. Re-enable when the interior
-    // guard exit can resume the outer for-loop inside the trace rather than
-    // returning to the interpreter.
-    loop {
-        let mut found = false;
-        for scan in body_start..(body_end.saturating_sub(1)) {
-            let guard_inst = &ir.insts[scan];
-            let branch_inst = &ir.insts[scan + 1];
-            if branch_inst.opcode != crate::OpCode::Jmp {
-                continue;
+    if false {
+        // Interior guard compilation disabled: short loops regress due to
+        // trace entry/exit overhead per while-loop exit. Re-enable when the interior
+        // guard exit can resume the outer for-loop inside the trace rather than
+        // returning to the interpreter.
+        loop {
+            let mut found = false;
+            for scan in body_start..(body_end.saturating_sub(1)) {
+                let guard_inst = &ir.insts[scan];
+                let branch_inst = &ir.insts[scan + 1];
+                if branch_inst.opcode != crate::OpCode::Jmp {
+                    continue;
+                }
+                let Some(guard) = ir.guards.iter().find(|guard| {
+                    guard.guard_pc == guard_inst.pc
+                        && guard.branch_pc == branch_inst.pc
+                        && !consumed_guards.contains(&guard.guard_pc)
+                }) else {
+                    continue;
+                };
+                let pre_insts = &ir.insts[body_start..scan];
+                let pre_steps = if pre_insts.is_empty() {
+                    Vec::new()
+                } else {
+                    lower_numeric_steps_for_native(pre_insts, lowered_trace)?
+                };
+                let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
+                let loop_guard = lower_numeric_guard_for_native(
+                    guard_inst,
+                    guard.taken_on_trace,
+                    lowered_exit.resume_pc,
+                )?;
+                head_blocks.push(NumericJmpLoopGuardBlock {
+                    pre_steps,
+                    guard: loop_guard,
+                });
+                consumed_guards.insert(guard.guard_pc);
+                body_start = scan + 2;
+                found = true;
+                break;
             }
-            let Some(guard) = ir.guards.iter().find(|guard| {
-                guard.guard_pc == guard_inst.pc
-                    && guard.branch_pc == branch_inst.pc
-                    && !consumed_guards.contains(&guard.guard_pc)
-            }) else {
-                continue;
-            };
-            let pre_insts = &ir.insts[body_start..scan];
-            let pre_steps = if pre_insts.is_empty() {
-                Vec::new()
-            } else {
-                lower_numeric_steps_for_native(pre_insts, lowered_trace)?
-            };
-            let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard.exit_pc)?;
-            let loop_guard = lower_numeric_guard_for_native(
-                guard_inst,
-                guard.taken_on_trace,
-                lowered_exit.resume_pc,
-            )?;
-            head_blocks.push(NumericJmpLoopGuardBlock {
-                pre_steps,
-                guard: loop_guard,
-            });
-            consumed_guards.insert(guard.guard_pc);
-            body_start = scan + 2;
-            found = true;
-            break;
+            if !found {
+                break;
+            }
         }
-        if !found {
-            break;
-        }
-    }
     } // end if false (interior guard disabled)
 
     if consumed_guards.len() != ir.guards.len() {
@@ -5083,7 +5233,8 @@ fn recognize_numeric_jmp_guard_blocks(
         return None;
     }
 
-    let lowering = lower_numeric_lowering_for_native(&ir.insts[body_start..body_end], lowered_trace)?;
+    let lowering =
+        lower_numeric_lowering_for_native(&ir.insts[body_start..body_end], lowered_trace)?;
     let tail_blocks = tail_blocks_rev.into_iter().rev().collect::<Vec<_>>();
     Some((head_blocks, lowering, tail_blocks, interior_guard_start))
 }
@@ -5091,13 +5242,22 @@ fn recognize_numeric_jmp_guard_blocks(
 fn recognize_insertion_sort_shift_numeric_jmp(
     ir: &TraceIr,
     lowered_trace: &LoweredTrace,
-) -> Option<(Vec<NumericJmpLoopGuardBlock>, NumericLowering, Vec<NumericJmpLoopGuardBlock>, usize)> {
+) -> Option<(
+    Vec<NumericJmpLoopGuardBlock>,
+    NumericLowering,
+    Vec<NumericJmpLoopGuardBlock>,
+    usize,
+)> {
     if ir.insts.len() != 10 || ir.guards.len() != 2 {
         return None;
     }
 
     if !matches!(
-        ir.insts.iter().map(|inst| inst.opcode).collect::<Vec<_>>().as_slice(),
+        ir.insts
+            .iter()
+            .map(|inst| inst.opcode)
+            .collect::<Vec<_>>()
+            .as_slice(),
         [
             crate::OpCode::Le,
             crate::OpCode::Jmp,
@@ -5133,12 +5293,16 @@ fn recognize_insertion_sort_shift_numeric_jmp(
     let first_guard = lower_numeric_guard_for_native(
         &ir.insts[0],
         false,
-        lowered_trace.deopt_target_for_exit_pc(first_exit.exit_pc)?.resume_pc,
+        lowered_trace
+            .deopt_target_for_exit_pc(first_exit.exit_pc)?
+            .resume_pc,
     )?;
     let second_guard = lower_numeric_guard_for_native(
         &ir.insts[3],
         false,
-        lowered_trace.deopt_target_for_exit_pc(second_exit.exit_pc)?.resume_pc,
+        lowered_trace
+            .deopt_target_for_exit_pc(second_exit.exit_pc)?
+            .resume_pc,
     )?;
     let pre_steps = lower_numeric_steps_for_native(&ir.insts[2..3], lowered_trace)?;
     let lowering = lower_numeric_lowering_for_native(&ir.insts[5..9], lowered_trace)?;
@@ -5199,12 +5363,24 @@ fn recognize_guarded_call_prefix_shape(
         crate::OpCode::ModK,
         crate::OpCode::ForLoop,
     ];
-    if ir.insts.iter().map(|inst| inst.opcode).ne(expected.into_iter()) {
+    if ir
+        .insts
+        .iter()
+        .map(|inst| inst.opcode)
+        .ne(expected.into_iter())
+    {
         return None;
     }
 
-    let expected_pcs = [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 57];
-    if ir.insts.iter().map(|inst| inst.pc).ne(expected_pcs.into_iter()) {
+    let expected_pcs = [
+        34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 57,
+    ];
+    if ir
+        .insts
+        .iter()
+        .map(|inst| inst.pc)
+        .ne(expected_pcs.into_iter())
+    {
         return None;
     }
 
@@ -5423,13 +5599,41 @@ fn make_native_context(target_config: TargetFrontendConfig) -> cranelift_codegen
     let mut context = cranelift_codegen::Context::new();
     context.func.signature.call_conv = target_config.default_call_conv;
     let pointer_ty = target_config.pointer_type();
-    context.func.signature.params.push(AbiParam::new(pointer_ty));
-    context.func.signature.params.push(AbiParam::new(pointer_ty));
-    context.func.signature.params.push(AbiParam::new(pointer_ty));
-    context.func.signature.params.push(AbiParam::new(pointer_ty));
-    context.func.signature.params.push(AbiParam::new(pointer_ty));
-    context.func.signature.params.push(AbiParam::new(pointer_ty));
-    context.func.signature.params.push(AbiParam::new(pointer_ty));
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(pointer_ty));
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(pointer_ty));
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(pointer_ty));
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(pointer_ty));
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(pointer_ty));
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(pointer_ty));
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(pointer_ty));
     context
 }
 
@@ -5580,7 +5784,14 @@ fn declare_native_helpers(
             module,
             func,
             NATIVE_HELPER_CALL_SYMBOL,
-            &[pointer_ty, pointer_ty, types::I32, types::I32, types::I32, types::I32],
+            &[
+                pointer_ty,
+                pointer_ty,
+                types::I32,
+                types::I32,
+                types::I32,
+                types::I32,
+            ],
             &[types::I32],
             call_conv,
         )?,
@@ -5663,7 +5874,11 @@ unsafe extern "C" fn jit_native_helper_numeric_get_tabup_field(
 
     let table = table_value.hvalue();
     if table.impl_table.has_hash() {
-        let loaded_tt = unsafe { table.impl_table.get_shortstr_tagged_into(&*key_ptr, dst_ptr) };
+        let loaded_tt = unsafe {
+            table
+                .impl_table
+                .get_shortstr_tagged_into(&*key_ptr, dst_ptr)
+        };
         if loaded_tt != 0 {
             // Accept any non-nil result (table, number, string, etc.) so that
             // intermediate table-reference lookups like `_ENV.some_table` succeed.
@@ -5772,7 +5987,10 @@ unsafe extern "C" fn jit_native_helper_numeric_set_table_int(
     let table = unsafe { (*table_ptr).hvalue_mut() };
     let index = unsafe { pivalue(index_ptr) };
     let value = unsafe { *value_ptr };
-    if !table.impl_table.fast_seti_parts(index, value.value, value.tt) {
+    if !table
+        .impl_table
+        .fast_seti_parts(index, value.value, value.tt)
+    {
         return 0;
     }
 
@@ -5799,7 +6017,11 @@ unsafe extern "C" fn jit_native_helper_numeric_get_table_field(
 
     let table = unsafe { (*table_ptr).hvalue() };
     if table.impl_table.has_hash() {
-        let loaded_tt = unsafe { table.impl_table.get_shortstr_tagged_into(&*key_ptr, dst_ptr) };
+        let loaded_tt = unsafe {
+            table
+                .impl_table
+                .get_shortstr_tagged_into(&*key_ptr, dst_ptr)
+        };
         if loaded_tt != 0 {
             return i32::from(loaded_tt == LUA_VNUMINT || loaded_tt == LUA_VNUMFLT);
         }
@@ -6072,7 +6294,9 @@ unsafe extern "C" fn jit_native_helper_numeric_binary(
     let rhs = unsafe { &*rhs_ptr };
     let result = match op {
         NATIVE_NUMERIC_BINARY_ADD => {
-            if let (Some(lhs_int), Some(rhs_int)) = (lhs.as_integer_strict(), rhs.as_integer_strict()) {
+            if let (Some(lhs_int), Some(rhs_int)) =
+                (lhs.as_integer_strict(), rhs.as_integer_strict())
+            {
                 LuaValue::integer(lhs_int.wrapping_add(rhs_int))
             } else {
                 let lhs_num = lhs.as_float().unwrap_or(f64::NAN);
@@ -6084,7 +6308,9 @@ unsafe extern "C" fn jit_native_helper_numeric_binary(
             }
         }
         NATIVE_NUMERIC_BINARY_SUB => {
-            if let (Some(lhs_int), Some(rhs_int)) = (lhs.as_integer_strict(), rhs.as_integer_strict()) {
+            if let (Some(lhs_int), Some(rhs_int)) =
+                (lhs.as_integer_strict(), rhs.as_integer_strict())
+            {
                 LuaValue::integer(lhs_int.wrapping_sub(rhs_int))
             } else {
                 let lhs_num = lhs.as_float().unwrap_or(f64::NAN);
@@ -6096,7 +6322,9 @@ unsafe extern "C" fn jit_native_helper_numeric_binary(
             }
         }
         NATIVE_NUMERIC_BINARY_MUL => {
-            if let (Some(lhs_int), Some(rhs_int)) = (lhs.as_integer_strict(), rhs.as_integer_strict()) {
+            if let (Some(lhs_int), Some(rhs_int)) =
+                (lhs.as_integer_strict(), rhs.as_integer_strict())
+            {
                 LuaValue::integer(lhs_int.wrapping_mul(rhs_int))
             } else {
                 let lhs_num = lhs.as_float().unwrap_or(f64::NAN);
@@ -6116,7 +6344,9 @@ unsafe extern "C" fn jit_native_helper_numeric_binary(
             LuaValue::float(lhs_num / rhs_num)
         }
         NATIVE_NUMERIC_BINARY_IDIV => {
-            if let (Some(lhs_int), Some(rhs_int)) = (lhs.as_integer_strict(), rhs.as_integer_strict()) {
+            if let (Some(lhs_int), Some(rhs_int)) =
+                (lhs.as_integer_strict(), rhs.as_integer_strict())
+            {
                 if rhs_int == 0 {
                     return 0;
                 }
@@ -6131,7 +6361,9 @@ unsafe extern "C" fn jit_native_helper_numeric_binary(
             }
         }
         NATIVE_NUMERIC_BINARY_MOD => {
-            if let (Some(lhs_int), Some(rhs_int)) = (lhs.as_integer_strict(), rhs.as_integer_strict()) {
+            if let (Some(lhs_int), Some(rhs_int)) =
+                (lhs.as_integer_strict(), rhs.as_integer_strict())
+            {
                 if rhs_int == 0 {
                     return 0;
                 }
@@ -6195,20 +6427,31 @@ fn const_addr(
         .icmp(IntCC::UnsignedLessThan, idx_value, abi.constants_len);
     let continue_block = builder.create_block();
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(in_bounds, continue_block, &[], fallback_block, &[]);
-    builder.switch_to_block(continue_block);
-    builder.seal_block(continue_block);
     builder
         .ins()
-        .iadd_imm(abi.constants_ptr, i64::from(index).saturating_mul(LUA_VALUE_SIZE))
+        .brif(in_bounds, continue_block, &[], fallback_block, &[]);
+    builder.switch_to_block(continue_block);
+    builder.seal_block(continue_block);
+    builder.ins().iadd_imm(
+        abi.constants_ptr,
+        i64::from(index).saturating_mul(LUA_VALUE_SIZE),
+    )
 }
 
 fn emit_copy_luavalue(builder: &mut FunctionBuilder<'_>, dst_ptr: Value, src_ptr: Value) {
     let mem = MemFlags::new();
-    let raw_value = builder.ins().load(types::I64, mem, src_ptr, LUA_VALUE_VALUE_OFFSET);
-    let raw_tag = builder.ins().load(types::I8, mem, src_ptr, LUA_VALUE_TT_OFFSET);
-    builder.ins().store(mem, raw_value, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-    builder.ins().store(mem, raw_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+    let raw_value = builder
+        .ins()
+        .load(types::I64, mem, src_ptr, LUA_VALUE_VALUE_OFFSET);
+    let raw_tag = builder
+        .ins()
+        .load(types::I8, mem, src_ptr, LUA_VALUE_TT_OFFSET);
+    builder
+        .ins()
+        .store(mem, raw_value, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    builder
+        .ins()
+        .store(mem, raw_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
 }
 
 fn emit_store_boolean_with_known_tag(
@@ -6219,13 +6462,21 @@ fn emit_store_boolean_with_known_tag(
 ) {
     let mem = MemFlags::new();
     let zero = builder.ins().iconst(types::I64, 0);
-    builder.ins().store(mem, zero, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    builder
+        .ins()
+        .store(mem, zero, dst_ptr, LUA_VALUE_VALUE_OFFSET);
     if !dst_known_boolean {
         let bool_tag = builder.ins().iconst(
             types::I8,
-            if value { LUA_VTRUE_TAG as i64 } else { LUA_VFALSE_TAG as i64 },
+            if value {
+                LUA_VTRUE_TAG as i64
+            } else {
+                LUA_VFALSE_TAG as i64
+            },
         );
-        builder.ins().store(mem, bool_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, bool_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
     }
 }
 
@@ -6237,10 +6488,14 @@ fn emit_store_float_with_known_tag(
 ) {
     let mem = MemFlags::new();
     let raw = builder.ins().iconst(types::I64, value.to_bits() as i64);
-    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    builder
+        .ins()
+        .store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
     if !dst_known_float {
         let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
     }
 }
 
@@ -6252,10 +6507,14 @@ fn emit_store_float_value_with_known_tag(
 ) {
     let mem = MemFlags::new();
     let raw = builder.ins().bitcast(types::I64, mem, value);
-    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    builder
+        .ins()
+        .store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
     if !dst_known_float {
         let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
     }
 }
 
@@ -6277,15 +6536,21 @@ fn emit_numeric_operand_kind_and_payload(
 ) -> (Value, Value) {
     match operand {
         NumericOperand::Reg(reg) => (
-            builder.ins().iconst(types::I32, i64::from(NATIVE_NUMERIC_OPERAND_REG)),
+            builder
+                .ins()
+                .iconst(types::I32, i64::from(NATIVE_NUMERIC_OPERAND_REG)),
             builder.ins().iconst(types::I64, i64::from(reg)),
         ),
         NumericOperand::ImmI(imm) => (
-            builder.ins().iconst(types::I32, i64::from(NATIVE_NUMERIC_OPERAND_IMM_I)),
+            builder
+                .ins()
+                .iconst(types::I32, i64::from(NATIVE_NUMERIC_OPERAND_IMM_I)),
             builder.ins().iconst(types::I64, i64::from(imm)),
         ),
         NumericOperand::Const(index) => (
-            builder.ins().iconst(types::I32, i64::from(NATIVE_NUMERIC_OPERAND_CONST)),
+            builder
+                .ins()
+                .iconst(types::I32, i64::from(NATIVE_NUMERIC_OPERAND_CONST)),
             builder.ins().iconst(types::I64, i64::from(index)),
         ),
     }
@@ -6315,7 +6580,14 @@ fn emit_integer_guard(
     current_hits: Value,
     bail_block: Block,
 ) {
-    emit_exact_tag_guard(builder, slot_ptr, LUA_VNUMINT, hits_var, current_hits, bail_block);
+    emit_exact_tag_guard(
+        builder,
+        slot_ptr,
+        LUA_VNUMINT,
+        hits_var,
+        current_hits,
+        bail_block,
+    );
 }
 
 fn emit_exact_tag_guard(
@@ -6327,11 +6599,17 @@ fn emit_exact_tag_guard(
     bail_block: Block,
 ) {
     let mem = MemFlags::new();
-    let tt = builder.ins().load(types::I8, mem, slot_ptr, LUA_VALUE_TT_OFFSET);
-    let tag_matches = builder.ins().icmp_imm(IntCC::Equal, tt, i64::from(expected_tag));
+    let tt = builder
+        .ins()
+        .load(types::I8, mem, slot_ptr, LUA_VALUE_TT_OFFSET);
+    let tag_matches = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, tt, i64::from(expected_tag));
     let next_block = builder.create_block();
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(tag_matches, next_block, &[], bail_block, &[]);
+    builder
+        .ins()
+        .brif(tag_matches, next_block, &[], bail_block, &[]);
     builder.switch_to_block(next_block);
     builder.seal_block(next_block);
 }
@@ -6396,24 +6674,39 @@ fn emit_store_native_result_extended(
     let start_reg_value = builder.ins().iconst(types::I32, i64::from(start_reg));
     let result_count_value = builder.ins().iconst(types::I32, i64::from(result_count));
     let exit_index_value = builder.ins().iconst(types::I32, i64::from(exit_index));
-    builder
-        .ins()
-        .store(mem, status_value, result_ptr, NATIVE_TRACE_RESULT_STATUS_OFFSET);
+    builder.ins().store(
+        mem,
+        status_value,
+        result_ptr,
+        NATIVE_TRACE_RESULT_STATUS_OFFSET,
+    );
     builder
         .ins()
         .store(mem, hits_value, result_ptr, NATIVE_TRACE_RESULT_HITS_OFFSET);
-    builder
-        .ins()
-        .store(mem, exit_pc_value, result_ptr, NATIVE_TRACE_RESULT_EXIT_PC_OFFSET);
-    builder
-        .ins()
-        .store(mem, start_reg_value, result_ptr, NATIVE_TRACE_RESULT_START_REG_OFFSET);
-    builder
-        .ins()
-        .store(mem, result_count_value, result_ptr, NATIVE_TRACE_RESULT_RESULT_COUNT_OFFSET);
-    builder
-        .ins()
-        .store(mem, exit_index_value, result_ptr, NATIVE_TRACE_RESULT_EXIT_INDEX_OFFSET);
+    builder.ins().store(
+        mem,
+        exit_pc_value,
+        result_ptr,
+        NATIVE_TRACE_RESULT_EXIT_PC_OFFSET,
+    );
+    builder.ins().store(
+        mem,
+        start_reg_value,
+        result_ptr,
+        NATIVE_TRACE_RESULT_START_REG_OFFSET,
+    );
+    builder.ins().store(
+        mem,
+        result_count_value,
+        result_ptr,
+        NATIVE_TRACE_RESULT_RESULT_COUNT_OFFSET,
+    );
+    builder.ins().store(
+        mem,
+        exit_index_value,
+        result_ptr,
+        NATIVE_TRACE_RESULT_EXIT_INDEX_OFFSET,
+    );
 }
 
 fn emit_native_return_result(
@@ -6451,21 +6744,22 @@ fn emit_linear_int_counted_loop_backedge(
         .icmp_imm(IntCC::UnsignedGreaterThan, carried_remaining, 0);
     let continue_block = builder.create_block();
     builder.def_var(hits_var, next_hits);
-    builder.ins().brif(has_more, continue_block, &[], loop_exit_block, &[]);
-
-    builder.switch_to_block(continue_block);
-    let step_val = hoisted_step_value.expect("linear-int for-loop invariant path requires hoisted step");
-    let updated_remaining = builder.ins().iadd_imm(carried_remaining, -1);
-    let updated_index = builder.ins().iadd(carried_index, step_val);
     builder
         .ins()
-        .jump(
-            loop_block,
-            &[
-                cranelift::codegen::ir::BlockArg::Value(updated_remaining),
-                cranelift::codegen::ir::BlockArg::Value(updated_index),
-            ],
-        );
+        .brif(has_more, continue_block, &[], loop_exit_block, &[]);
+
+    builder.switch_to_block(continue_block);
+    let step_val =
+        hoisted_step_value.expect("linear-int for-loop invariant path requires hoisted step");
+    let updated_remaining = builder.ins().iadd_imm(carried_remaining, -1);
+    let updated_index = builder.ins().iadd(carried_index, step_val);
+    builder.ins().jump(
+        loop_block,
+        &[
+            cranelift::codegen::ir::BlockArg::Value(updated_remaining),
+            cranelift::codegen::ir::BlockArg::Value(updated_index),
+        ],
+    );
     builder.seal_block(continue_block);
 }
 
@@ -6485,7 +6779,9 @@ fn emit_numeric_counted_loop_backedge_with_carried_integer(
         .icmp_imm(IntCC::UnsignedGreaterThan, carried_remaining, 0);
     let continue_block = builder.create_block();
     builder.def_var(hits_var, next_hits);
-    builder.ins().brif(has_more, continue_block, &[], loop_exit_block, &[]);
+    builder
+        .ins()
+        .brif(has_more, continue_block, &[], loop_exit_block, &[]);
 
     builder.switch_to_block(continue_block);
     let step_val = hoisted_step_value.expect("numeric invariant path requires hoisted step");
@@ -6502,38 +6798,40 @@ fn emit_numeric_counted_loop_backedge_with_carried_integer(
     builder.seal_block(continue_block);
 }
 
-    fn emit_numeric_counted_loop_backedge_with_carried_float(
-        builder: &mut FunctionBuilder<'_>,
-        hits_var: Variable,
-        next_hits: Value,
-        carried_remaining: Value,
-        carried_index: Value,
-        hoisted_step_value: Option<Value>,
-        carried_float_raw: Value,
-        loop_block: Block,
-        loop_exit_block: Block,
-    ) {
-        let has_more = builder
-            .ins()
-            .icmp_imm(IntCC::UnsignedGreaterThan, carried_remaining, 0);
-        let continue_block = builder.create_block();
-        builder.def_var(hits_var, next_hits);
-        builder.ins().brif(has_more, continue_block, &[], loop_exit_block, &[]);
+fn emit_numeric_counted_loop_backedge_with_carried_float(
+    builder: &mut FunctionBuilder<'_>,
+    hits_var: Variable,
+    next_hits: Value,
+    carried_remaining: Value,
+    carried_index: Value,
+    hoisted_step_value: Option<Value>,
+    carried_float_raw: Value,
+    loop_block: Block,
+    loop_exit_block: Block,
+) {
+    let has_more = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, carried_remaining, 0);
+    let continue_block = builder.create_block();
+    builder.def_var(hits_var, next_hits);
+    builder
+        .ins()
+        .brif(has_more, continue_block, &[], loop_exit_block, &[]);
 
-        builder.switch_to_block(continue_block);
-        let step_val = hoisted_step_value.expect("numeric invariant path requires hoisted step");
-        let updated_remaining = builder.ins().iadd_imm(carried_remaining, -1);
-        let updated_index = builder.ins().iadd(carried_index, step_val);
-        builder.ins().jump(
-            loop_block,
-            &[
-                cranelift::codegen::ir::BlockArg::Value(updated_remaining),
-                cranelift::codegen::ir::BlockArg::Value(updated_index),
-                cranelift::codegen::ir::BlockArg::Value(carried_float_raw),
-            ],
-        );
-        builder.seal_block(continue_block);
-    }
+    builder.switch_to_block(continue_block);
+    let step_val = hoisted_step_value.expect("numeric invariant path requires hoisted step");
+    let updated_remaining = builder.ins().iadd_imm(carried_remaining, -1);
+    let updated_index = builder.ins().iadd(carried_index, step_val);
+    builder.ins().jump(
+        loop_block,
+        &[
+            cranelift::codegen::ir::BlockArg::Value(updated_remaining),
+            cranelift::codegen::ir::BlockArg::Value(updated_index),
+            cranelift::codegen::ir::BlockArg::Value(carried_float_raw),
+        ],
+    );
+    builder.seal_block(continue_block);
+}
 
 fn emit_linear_int_materialize_loop_state(
     builder: &mut FunctionBuilder<'_>,
@@ -6562,10 +6860,14 @@ fn emit_store_float_raw_with_known_tag(
     dst_known_float: bool,
 ) {
     let mem = MemFlags::new();
-    builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    builder
+        .ins()
+        .store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
     if !dst_known_float {
         let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
     }
 }
 
@@ -6624,18 +6926,27 @@ fn emit_counted_loop_backedge(
     }
 
     let mem = MemFlags::new();
-    let remaining = builder.ins().load(types::I64, mem, loop_ptr, LUA_VALUE_VALUE_OFFSET);
+    let remaining = builder
+        .ins()
+        .load(types::I64, mem, loop_ptr, LUA_VALUE_VALUE_OFFSET);
     let has_more = builder
         .ins()
         .icmp_imm(IntCC::UnsignedGreaterThan, remaining, 0);
     let continue_block = builder.create_block();
     builder.def_var(hits_var, next_hits);
-    builder.ins().brif(has_more, continue_block, &[], loop_exit_block, &[]);
+    builder
+        .ins()
+        .brif(has_more, continue_block, &[], loop_exit_block, &[]);
 
     builder.switch_to_block(continue_block);
-    let step_val = hoisted_step_value
-        .unwrap_or_else(|| builder.ins().load(types::I64, mem, step_ptr, LUA_VALUE_VALUE_OFFSET));
-    let index_val = builder.ins().load(types::I64, mem, index_ptr, LUA_VALUE_VALUE_OFFSET);
+    let step_val = hoisted_step_value.unwrap_or_else(|| {
+        builder
+            .ins()
+            .load(types::I64, mem, step_ptr, LUA_VALUE_VALUE_OFFSET)
+    });
+    let index_val = builder
+        .ins()
+        .load(types::I64, mem, index_ptr, LUA_VALUE_VALUE_OFFSET);
     let updated_remaining = builder.ins().iadd_imm(remaining, -1);
     let updated_index = builder.ins().iadd(index_val, step_val);
     builder
@@ -6646,8 +6957,12 @@ fn emit_counted_loop_backedge(
         .store(mem, updated_index, index_ptr, LUA_VALUE_VALUE_OFFSET);
     if !loop_state_is_invariant {
         let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
-        builder.ins().store(mem, int_tag, loop_ptr, LUA_VALUE_TT_OFFSET);
-        builder.ins().store(mem, int_tag, index_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, int_tag, loop_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, int_tag, index_ptr, LUA_VALUE_TT_OFFSET);
     }
     builder.ins().jump(loop_block, &[]);
     builder.seal_block(continue_block);
@@ -6726,9 +7041,11 @@ fn numeric_step_reads_reg(step: NumericStep, reg: u32) -> bool {
         NumericStep::SetTabUpField { value, .. } => value == reg,
         NumericStep::GetTableInt { table, index, .. } => table == reg || index == reg,
         NumericStep::GetTableField { table, .. } => table == reg,
-        NumericStep::SetTableInt { table, index, value } => {
-            table == reg || index == reg || value == reg
-        }
+        NumericStep::SetTableInt {
+            table,
+            index,
+            value,
+        } => table == reg || index == reg || value == reg,
         NumericStep::SetTableField { table, value, .. } => table == reg || value == reg,
         NumericStep::Binary { lhs, rhs, .. } => {
             numeric_operand_reads_reg(lhs, reg) || numeric_operand_reads_reg(rhs, reg)
@@ -6750,7 +7067,10 @@ fn numeric_loop_state_is_invariant(loop_reg: u32, steps: &[NumericStep]) -> bool
 }
 
 fn numeric_steps_preserve_reg(steps: &[NumericStep], reg: u32) -> bool {
-    !steps.iter().copied().any(|step| numeric_step_writes_reg(step, reg))
+    !steps
+        .iter()
+        .copied()
+        .any(|step| numeric_step_writes_reg(step, reg))
 }
 
 fn numeric_cond_reads_reg(cond: NumericIfElseCond, reg: u32) -> bool {
@@ -6799,34 +7119,37 @@ fn entry_reg_has_explicit_float_hint(lowered_trace: &LoweredTrace, reg: u32) -> 
         || lowered_trace.entry_stable_register_value_kind(reg) == Some(TraceValueKind::Float)
 }
 
-    fn numeric_guard_writes_reg_outside_condition(guard: NumericJmpLoopGuard, reg: u32) -> bool {
-        let (_, continue_preset, exit_preset) = match guard {
-            NumericJmpLoopGuard::Head {
-                cond: _,
-                continue_preset,
-                exit_preset,
-                ..
-            }
-            | NumericJmpLoopGuard::Tail {
-                cond: _,
-                continue_preset,
-                exit_preset,
-                ..
-            } => ((), continue_preset, exit_preset),
-        };
+fn numeric_guard_writes_reg_outside_condition(guard: NumericJmpLoopGuard, reg: u32) -> bool {
+    let (_, continue_preset, exit_preset) = match guard {
+        NumericJmpLoopGuard::Head {
+            cond: _,
+            continue_preset,
+            exit_preset,
+            ..
+        }
+        | NumericJmpLoopGuard::Tail {
+            cond: _,
+            continue_preset,
+            exit_preset,
+            ..
+        } => ((), continue_preset, exit_preset),
+    };
 
-        continue_preset.is_some_and(|step| numeric_step_writes_reg(step, reg))
-            || exit_preset.is_some_and(|step| numeric_step_writes_reg(step, reg))
-    }
+    continue_preset.is_some_and(|step| numeric_step_writes_reg(step, reg))
+        || exit_preset.is_some_and(|step| numeric_step_writes_reg(step, reg))
+}
 
-    fn numeric_guard_block_writes_reg_outside_condition(block: &NumericJmpLoopGuardBlock, reg: u32) -> bool {
-        block
-            .pre_steps
-            .iter()
-            .copied()
-            .any(|step| numeric_step_writes_reg(step, reg))
-            || numeric_guard_writes_reg_outside_condition(block.guard, reg)
-    }
+fn numeric_guard_block_writes_reg_outside_condition(
+    block: &NumericJmpLoopGuardBlock,
+    reg: u32,
+) -> bool {
+    block
+        .pre_steps
+        .iter()
+        .copied()
+        .any(|step| numeric_step_writes_reg(step, reg))
+        || numeric_guard_writes_reg_outside_condition(block.guard, reg)
+}
 
 fn linear_int_reg_is_known_integer(known_integer_regs: &[u32], reg: u32) -> bool {
     known_integer_regs.contains(&reg)
@@ -6838,7 +7161,10 @@ fn mark_linear_int_reg_known_integer(known_integer_regs: &mut Vec<u32>, reg: u32
     }
 }
 
-fn numeric_reg_value_kind(known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint], reg: u32) -> TraceValueKind {
+fn numeric_reg_value_kind(
+    known_value_kinds: &[crate::lua_vm::jit::lowering::RegisterValueHint],
+    reg: u32,
+) -> TraceValueKind {
     known_value_kinds
         .iter()
         .rev()
@@ -6851,7 +7177,11 @@ fn set_numeric_reg_value_kind(
     reg: u32,
     kind: TraceValueKind,
 ) {
-    if let Some(existing) = known_value_kinds.iter_mut().rev().find(|hint| hint.reg == reg) {
+    if let Some(existing) = known_value_kinds
+        .iter_mut()
+        .rev()
+        .find(|hint| hint.reg == reg)
+    {
         existing.kind = kind;
     } else {
         known_value_kinds.push(crate::lua_vm::jit::lowering::RegisterValueHint { reg, kind });
@@ -6874,10 +7204,14 @@ fn emit_store_integer_with_known_tag(
     dst_known_integer: bool,
 ) {
     let mem = MemFlags::new();
-    builder.ins().store(mem, value, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+    builder
+        .ins()
+        .store(mem, value, dst_ptr, LUA_VALUE_VALUE_OFFSET);
     if !dst_known_integer {
         let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
-        builder.ins().store(mem, int_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, int_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
     }
 }
 
@@ -6910,7 +7244,9 @@ fn emit_known_linear_int_reg_value(
     if !linear_int_reg_is_known_integer(known_integer_regs, reg) {
         emit_integer_guard(builder, reg_ptr, hits_var, current_hits, bail_block);
     }
-    builder.ins().load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET)
+    builder
+        .ins()
+        .load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET)
 }
 
 fn set_current_linear_int_reg_value(
@@ -7577,9 +7913,13 @@ fn emit_linear_int_shift_op(
         rhs,
     );
     let call = if shift_left {
-        builder.ins().call(native_helpers.shift_left, &[lhs_val, rhs_val])
+        builder
+            .ins()
+            .call(native_helpers.shift_left, &[lhs_val, rhs_val])
     } else {
-        builder.ins().call(native_helpers.shift_right, &[lhs_val, rhs_val])
+        builder
+            .ins()
+            .call(native_helpers.shift_right, &[lhs_val, rhs_val])
     };
     let result = builder.inst_results(call)[0];
     let dst_ptr = slot_addr(builder, base_ptr, dst);
@@ -7615,7 +7955,9 @@ fn emit_linear_int_shift_imm_lhs(
         loop_carried_values,
         src,
     );
-    let call = builder.ins().call(native_helpers.shift_left, &[lhs_val, rhs_val]);
+    let call = builder
+        .ins()
+        .call(native_helpers.shift_left, &[lhs_val, rhs_val]);
     let result = builder.inst_results(call)[0];
     let dst_ptr = slot_addr(builder, base_ptr, dst);
     let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
@@ -7650,7 +7992,9 @@ fn emit_linear_int_imm_shift_rhs(
         src,
     );
     let rhs_val = builder.ins().iconst(types::I64, i64::from(imm));
-    let call = builder.ins().call(native_helpers.shift_right, &[lhs_val, rhs_val]);
+    let call = builder
+        .ins()
+        .call(native_helpers.shift_right, &[lhs_val, rhs_val]);
     let result = builder.inst_results(call)[0];
     let dst_ptr = slot_addr(builder, base_ptr, dst);
     let dst_known_integer = linear_int_reg_is_known_integer(known_integer_regs, dst);
@@ -7715,7 +8059,9 @@ fn emit_helper_success_guard(
     let continue_block = builder.create_block();
     let ok = builder.ins().icmp_imm(IntCC::NotEqual, success, 0);
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(ok, continue_block, &[], fallback_block, &[]);
+    builder
+        .ins()
+        .brif(ok, continue_block, &[], fallback_block, &[]);
     builder.switch_to_block(continue_block);
     builder.seal_block(continue_block);
 }
@@ -7727,20 +8073,30 @@ fn exact_float_self_update_step(
     let (dst, lhs, rhs, op) = match steps {
         [NumericStep::Binary { dst, lhs, rhs, op }] => (*dst, *lhs, *rhs, *op),
         [
-            NumericStep::Move { dst: alias_dst, src: alias_src },
+            NumericStep::Move {
+                dst: alias_dst,
+                src: alias_src,
+            },
             NumericStep::Binary { dst, lhs, rhs, op },
         ] if matches!(rhs, NumericOperand::Reg(reg) if *reg == *alias_dst)
             && *alias_dst != *dst
-            && *alias_src != *dst => {
-                (*dst, *lhs, NumericOperand::Reg(*alias_src), *op)
-            }
+            && *alias_src != *dst =>
+        {
+            (*dst, *lhs, NumericOperand::Reg(*alias_src), *op)
+        }
         _ => return None,
     };
     let NumericOperand::Reg(lhs_reg) = lhs else {
         return None;
     };
     if dst != lhs_reg
-        || !matches!(op, NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul | NumericBinaryOp::Div)
+        || !matches!(
+            op,
+            NumericBinaryOp::Add
+                | NumericBinaryOp::Sub
+                | NumericBinaryOp::Mul
+                | NumericBinaryOp::Div
+        )
     {
         return None;
     }
@@ -7789,11 +8145,7 @@ fn exact_float_self_update_step(
             }
         }
     };
-    Some(CarriedFloatLoopStep {
-        reg: dst,
-        op,
-        rhs,
-    })
+    Some(CarriedFloatLoopStep { reg: dst, op, rhs })
 }
 
 fn carried_float_loop_step_from_value_flow(
@@ -7812,7 +8164,9 @@ fn carried_float_loop_step_from_value_flow(
                 .or_else(|| lowered_trace.integer_constant(index).map(f64::from))?,
         ),
         NumericValueFlowRhs::StableReg { reg, kind } => match kind {
-            TraceValueKind::Integer | TraceValueKind::Float => CarriedFloatRhs::StableReg { reg, kind },
+            TraceValueKind::Integer | TraceValueKind::Float => {
+                CarriedFloatRhs::StableReg { reg, kind }
+            }
             TraceValueKind::Unknown
             | TraceValueKind::Numeric
             | TraceValueKind::Boolean
@@ -7828,7 +8182,9 @@ fn carried_float_loop_step_from_value_flow(
     })
 }
 
-fn carried_integer_loop_step_from_value_flow(value_flow: NumericSelfUpdateValueFlow) -> Option<CarriedIntegerLoopStep> {
+fn carried_integer_loop_step_from_value_flow(
+    value_flow: NumericSelfUpdateValueFlow,
+) -> Option<CarriedIntegerLoopStep> {
     if !matches!(value_flow.kind, NumericSelfUpdateValueKind::Integer) {
         return None;
     }
@@ -7863,7 +8219,10 @@ fn carried_integer_rhs_stable_reg(step: CarriedIntegerLoopStep) -> Option<u32> {
     }
 }
 
-fn numeric_value_flow_rhs_matches_operand(rhs: NumericValueFlowRhs, operand: NumericOperand) -> bool {
+fn numeric_value_flow_rhs_matches_operand(
+    rhs: NumericValueFlowRhs,
+    operand: NumericOperand,
+) -> bool {
     match (rhs, operand) {
         (NumericValueFlowRhs::ImmI(expected), NumericOperand::ImmI(actual)) => expected == actual,
         (NumericValueFlowRhs::Const(expected), NumericOperand::Const(actual)) => expected == actual,
@@ -8135,11 +8494,12 @@ fn resolve_carried_integer_rhs(
                 current_hits,
                 bail_block,
             );
-            ResolvedCarriedIntegerRhs::Integer(
-                builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), ptr, LUA_VALUE_VALUE_OFFSET),
-            )
+            ResolvedCarriedIntegerRhs::Integer(builder.ins().load(
+                types::I64,
+                MemFlags::new(),
+                ptr,
+                LUA_VALUE_VALUE_OFFSET,
+            ))
         }
     }
 }
@@ -8166,11 +8526,12 @@ fn resolve_carried_float_rhs(
                         current_hits,
                         bail_block,
                     );
-                    ResolvedCarriedFloatRhs::FloatRaw(
-                        builder
-                            .ins()
-                            .load(types::I64, MemFlags::new(), ptr, LUA_VALUE_VALUE_OFFSET),
-                    )
+                    ResolvedCarriedFloatRhs::FloatRaw(builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        ptr,
+                        LUA_VALUE_VALUE_OFFSET,
+                    ))
                 }
                 TraceValueKind::Integer => {
                     emit_exact_tag_guard(
@@ -8181,11 +8542,12 @@ fn resolve_carried_float_rhs(
                         current_hits,
                         bail_block,
                     );
-                    ResolvedCarriedFloatRhs::Integer(
-                        builder
-                            .ins()
-                            .load(types::I64, MemFlags::new(), ptr, LUA_VALUE_VALUE_OFFSET),
-                    )
+                    ResolvedCarriedFloatRhs::Integer(builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        ptr,
+                        LUA_VALUE_VALUE_OFFSET,
+                    ))
                 }
                 _ => unreachable!(),
             }
@@ -8298,13 +8660,18 @@ fn emit_materialize_guard_numeric_override(
     let dst_ptr = slot_addr(builder, abi.base_ptr, reg);
     let mem = MemFlags::new();
 
-    if let Some(override_value) = lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
+    if let Some(override_value) =
+        lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
     {
         match override_value {
             HoistedNumericGuardSource::FloatRaw(raw) => {
                 let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-                builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-                builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+                builder
+                    .ins()
+                    .store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+                builder
+                    .ins()
+                    .store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
             }
             HoistedNumericGuardSource::Integer(value) => {
                 emit_store_integer_with_known_tag(builder, dst_ptr, value, false);
@@ -8316,8 +8683,12 @@ fn emit_materialize_guard_numeric_override(
     if let Some(carried) = carried_float.filter(|carried| carried.reg == reg) {
         let raw = builder.use_var(carried.raw_var);
         let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
-        builder.ins().store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-        builder.ins().store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+        builder
+            .ins()
+            .store(mem, raw, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+        builder
+            .ins()
+            .store(mem, float_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
         return true;
     }
 
@@ -8331,17 +8702,16 @@ fn emit_guard_numeric_override_tag_and_value(
     carried_float: Option<CarriedFloatGuardValue>,
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<(Value, Value)> {
-    if let Some(override_value) = lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
+    if let Some(override_value) =
+        lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
     {
         return Some(match override_value {
-            HoistedNumericGuardSource::FloatRaw(raw) => (
-                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64),
-                raw,
-            ),
-            HoistedNumericGuardSource::Integer(value) => (
-                builder.ins().iconst(types::I8, LUA_VNUMINT as i64),
-                value,
-            ),
+            HoistedNumericGuardSource::FloatRaw(raw) => {
+                (builder.ins().iconst(types::I8, LUA_VNUMFLT as i64), raw)
+            }
+            HoistedNumericGuardSource::Integer(value) => {
+                (builder.ins().iconst(types::I8, LUA_VNUMINT as i64), value)
+            }
         });
     }
 
@@ -8361,11 +8731,13 @@ fn emit_guard_numeric_override_integer_value(
     current_numeric_values: &[(u32, HoistedNumericGuardSource)],
     hoisted_numeric: HoistedNumericGuardValues,
 ) -> Option<Value> {
-    lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg).and_then(|hoisted| match hoisted {
-        HoistedNumericGuardSource::Integer(value) => Some(value),
-        HoistedNumericGuardSource::FloatRaw(_) => {
-            let _ = builder;
-            None
+    lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg).and_then(|hoisted| {
+        match hoisted {
+            HoistedNumericGuardSource::Integer(value) => Some(value),
+            HoistedNumericGuardSource::FloatRaw(_) => {
+                let _ = builder;
+                None
+            }
         }
     })
 }
@@ -8378,7 +8750,9 @@ fn emit_carried_float_loop_step(
     known_value_kinds: &mut Vec<crate::lua_vm::jit::lowering::RegisterValueHint>,
 ) {
     let carried_raw = builder.use_var(carried_float_raw_var);
-    let lhs = builder.ins().bitcast(types::F64, MemFlags::new(), carried_raw);
+    let lhs = builder
+        .ins()
+        .bitcast(types::F64, MemFlags::new(), carried_raw);
     let rhs = match rhs {
         ResolvedCarriedFloatRhs::Imm(value) => {
             let rhs_raw = builder.ins().iconst(types::I64, value.to_bits() as i64);
@@ -8420,9 +8794,13 @@ fn emit_carried_integer_loop_step(
             let lhs_xor_result = builder.ins().bxor(lhs, result);
             let rhs_xor_result = builder.ins().bxor(rhs, result);
             let overflow_bits = builder.ins().band(lhs_xor_result, rhs_xor_result);
-            let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
+            let overflow = builder
+                .ins()
+                .icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
             let ok_block = builder.create_block();
-            builder.ins().brif(overflow, fallback_block, &[], ok_block, &[]);
+            builder
+                .ins()
+                .brif(overflow, fallback_block, &[], ok_block, &[]);
             builder.switch_to_block(ok_block);
             builder.seal_block(ok_block);
             result
@@ -8432,9 +8810,13 @@ fn emit_carried_integer_loop_step(
             let lhs_xor_rhs = builder.ins().bxor(lhs, rhs);
             let lhs_xor_result = builder.ins().bxor(lhs, result);
             let overflow_bits = builder.ins().band(lhs_xor_rhs, lhs_xor_result);
-            let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
+            let overflow = builder
+                .ins()
+                .icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
             let ok_block = builder.create_block();
-            builder.ins().brif(overflow, fallback_block, &[], ok_block, &[]);
+            builder
+                .ins()
+                .brif(overflow, fallback_block, &[], ok_block, &[]);
             builder.switch_to_block(ok_block);
             builder.seal_block(ok_block);
             result
@@ -8449,7 +8831,9 @@ fn emit_carried_integer_loop_step(
             let nonzero_block = builder.create_block();
             let done_block = builder.create_block();
             let result_var = builder.declare_var(types::I64);
-            builder.ins().brif(either_zero, zero_block, &[], nonzero_block, &[]);
+            builder
+                .ins()
+                .brif(either_zero, zero_block, &[], nonzero_block, &[]);
 
             builder.switch_to_block(zero_block);
             builder.def_var(result_var, zero);
@@ -8466,13 +8850,21 @@ fn emit_carried_integer_loop_step(
             let special_overflow = builder.ins().bor(lhs_min_rhs_neg_one, rhs_min_lhs_neg_one);
             let mul_compute_block = builder.create_block();
             let mul_store_block = builder.create_block();
-            builder.ins().brif(special_overflow, fallback_block, &[], mul_compute_block, &[]);
+            builder.ins().brif(
+                special_overflow,
+                fallback_block,
+                &[],
+                mul_compute_block,
+                &[],
+            );
 
             builder.switch_to_block(mul_compute_block);
             let result = builder.ins().imul(lhs, rhs);
             let quotient = builder.ins().sdiv(result, rhs);
             let overflow = builder.ins().icmp(IntCC::NotEqual, quotient, lhs);
-            builder.ins().brif(overflow, fallback_block, &[], mul_store_block, &[]);
+            builder
+                .ins()
+                .brif(overflow, fallback_block, &[], mul_store_block, &[]);
             builder.seal_block(mul_compute_block);
 
             builder.switch_to_block(mul_store_block);
@@ -8530,11 +8922,17 @@ fn native_supports_numeric_step(step: &NumericStep) -> bool {
 }
 
 fn native_supports_numeric_operand(operand: &NumericOperand) -> bool {
-    matches!(operand, NumericOperand::Reg(_) | NumericOperand::ImmI(_) | NumericOperand::Const(_))
+    matches!(
+        operand,
+        NumericOperand::Reg(_) | NumericOperand::ImmI(_) | NumericOperand::Const(_)
+    )
 }
 
 fn native_supports_numeric_cond(cond: NumericIfElseCond) -> bool {
-    matches!(cond, NumericIfElseCond::RegCompare { .. } | NumericIfElseCond::Truthy { .. })
+    matches!(
+        cond,
+        NumericIfElseCond::RegCompare { .. } | NumericIfElseCond::Truthy { .. }
+    )
 }
 
 fn emit_numeric_step(
@@ -8560,19 +8958,25 @@ fn emit_numeric_step(
                     current_numeric_values,
                     carried_float,
                     hoisted_numeric,
-                )
-            {
+                ) {
                 let mem = MemFlags::new();
-                builder.ins().store(mem, src_val, dst_ptr, LUA_VALUE_VALUE_OFFSET);
-                builder.ins().store(mem, src_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
-                if let Some(source) = lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, src)
+                builder
+                    .ins()
+                    .store(mem, src_val, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+                builder
+                    .ins()
+                    .store(mem, src_tag, dst_ptr, LUA_VALUE_TT_OFFSET);
+                if let Some(source) =
+                    lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, src)
                 {
                     set_current_numeric_guard_value(current_numeric_values, dst, source);
                 } else {
                     clear_current_numeric_guard_value(current_numeric_values, dst);
                 }
                 match src_tag {
-                    _ if carried_float.is_some_and(|carried| carried.reg == src) => TraceValueKind::Float,
+                    _ if carried_float.is_some_and(|carried| carried.reg == src) => {
+                        TraceValueKind::Float
+                    }
                     _ => lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, src)
                         .map(|hoisted| match hoisted {
                             HoistedNumericGuardSource::FloatRaw(_) => TraceValueKind::Float,
@@ -8618,7 +9022,9 @@ fn emit_numeric_step(
         }
         NumericStep::LoadF { dst, imm } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
-            let raw = builder.ins().iconst(types::I64, (imm as f64).to_bits() as i64);
+            let raw = builder
+                .ins()
+                .iconst(types::I64, (imm as f64).to_bits() as i64);
             let dst_known_float = matches!(
                 numeric_reg_value_kind(known_value_kinds, dst),
                 TraceValueKind::Float
@@ -8635,9 +9041,10 @@ fn emit_numeric_step(
         NumericStep::GetUpval { dst, upvalue } => {
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
             let upvalue_index = builder.ins().iconst(abi.pointer_ty, i64::from(upvalue));
-            let call = builder
-                .ins()
-                .call(native_helpers.get_upval, &[dst_ptr, abi.upvalue_ptrs, upvalue_index]);
+            let call = builder.ins().call(
+                native_helpers.get_upval,
+                &[dst_ptr, abi.upvalue_ptrs, upvalue_index],
+            );
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
             clear_current_numeric_guard_value(current_numeric_values, dst);
@@ -8675,9 +9082,18 @@ fn emit_numeric_step(
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
             Some(())
         }
-        NumericStep::SetTabUpField { upvalue, key, value } => {
+        NumericStep::SetTabUpField {
+            upvalue,
+            key,
+            value,
+        } => {
             emit_materialize_guard_numeric_override(
-                builder, abi, value, current_numeric_values, carried_float, hoisted_numeric,
+                builder,
+                abi,
+                value,
+                current_numeric_values,
+                carried_float,
+                hoisted_numeric,
             );
             let upvalue_index = builder.ins().iconst(abi.pointer_ty, i64::from(upvalue));
             let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
@@ -8707,48 +9123,76 @@ fn emit_numeric_step(
             let done_block = builder.create_block();
 
             // Guard: table tag == LUA_VTABLE
-            let table_tt = builder.ins().load(types::I8, mem, table_ptr, LUA_VALUE_TT_OFFSET);
-            let is_table = builder.ins().icmp_imm(IntCC::Equal, table_tt, LUA_VTABLE_TAG);
+            let table_tt = builder
+                .ins()
+                .load(types::I8, mem, table_ptr, LUA_VALUE_TT_OFFSET);
+            let is_table = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, table_tt, LUA_VTABLE_TAG);
             let table_ok_block = builder.create_block();
             builder.def_var(hits_var, current_hits);
-            builder.ins().brif(is_table, table_ok_block, &[], helper_block, &[]);
+            builder
+                .ins()
+                .brif(is_table, table_ok_block, &[], helper_block, &[]);
 
             builder.switch_to_block(table_ok_block);
             builder.seal_block(table_ok_block);
 
             // Guard: index tag == LUA_VNUMINT
-            let index_tt = builder.ins().load(types::I8, mem, index_ptr, LUA_VALUE_TT_OFFSET);
-            let is_int = builder.ins().icmp_imm(IntCC::Equal, index_tt, i64::from(LUA_VNUMINT));
+            let index_tt = builder
+                .ins()
+                .load(types::I8, mem, index_ptr, LUA_VALUE_TT_OFFSET);
+            let is_int = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, index_tt, i64::from(LUA_VNUMINT));
             let index_ok_block = builder.create_block();
-            builder.ins().brif(is_int, index_ok_block, &[], helper_block, &[]);
+            builder
+                .ins()
+                .brif(is_int, index_ok_block, &[], helper_block, &[]);
 
             builder.switch_to_block(index_ok_block);
             builder.seal_block(index_ok_block);
 
             // Extract table GC pointer → NativeTable
-            let gc_ptr = builder.ins().load(types::I64, mem, table_ptr, LUA_VALUE_VALUE_OFFSET);
+            let gc_ptr = builder
+                .ins()
+                .load(types::I64, mem, table_ptr, LUA_VALUE_VALUE_OFFSET);
             let native_table_offset = GC_TABLE_DATA_OFFSET + LUA_TABLE_IMPL_OFFSET;
-            let native_table_ptr = builder.ins().iadd_imm(gc_ptr, i64::from(native_table_offset));
+            let native_table_ptr = builder
+                .ins()
+                .iadd_imm(gc_ptr, i64::from(native_table_offset));
 
             // Load array pointer and asize
-            let array_ptr = builder.ins().load(types::I64, mem, native_table_ptr, NATIVE_TABLE_ARRAY_OFFSET);
-            let asize = builder.ins().load(types::I32, mem, native_table_ptr, NATIVE_TABLE_ASIZE_OFFSET);
+            let array_ptr =
+                builder
+                    .ins()
+                    .load(types::I64, mem, native_table_ptr, NATIVE_TABLE_ARRAY_OFFSET);
+            let asize =
+                builder
+                    .ins()
+                    .load(types::I32, mem, native_table_ptr, NATIVE_TABLE_ASIZE_OFFSET);
 
             // Extract integer key and compute 0-based index k = key - 1
-            let key_val = builder.ins().load(types::I64, mem, index_ptr, LUA_VALUE_VALUE_OFFSET);
+            let key_val = builder
+                .ins()
+                .load(types::I64, mem, index_ptr, LUA_VALUE_VALUE_OFFSET);
             let k = builder.ins().iadd_imm(key_val, -1);
 
             // Bounds check: (k as u64) < (asize as u64)
             let asize_64 = builder.ins().uextend(types::I64, asize);
             let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, k, asize_64);
             let bounds_ok_block = builder.create_block();
-            builder.ins().brif(in_bounds, bounds_ok_block, &[], helper_block, &[]);
+            builder
+                .ins()
+                .brif(in_bounds, bounds_ok_block, &[], helper_block, &[]);
 
             builder.switch_to_block(bounds_ok_block);
             builder.seal_block(bounds_ok_block);
 
             // Load tag: array_ptr + 4 + k (tags at positive offsets)
-            let tag_base = builder.ins().iadd_imm(array_ptr, i64::from(ARRAY_TAG_BASE_OFFSET));
+            let tag_base = builder
+                .ins()
+                .iadd_imm(array_ptr, i64::from(ARRAY_TAG_BASE_OFFSET));
             let tag_addr = builder.ins().iadd(tag_base, k);
             let tag = builder.ins().load(types::I8, mem, tag_addr, 0);
 
@@ -8757,7 +9201,9 @@ fn emit_numeric_step(
             let tag_low = builder.ins().band_imm(tag_i32, 0x0F);
             let is_numeric = builder.ins().icmp_imm(IntCC::Equal, tag_low, 3);
             let numeric_ok_block = builder.create_block();
-            builder.ins().brif(is_numeric, numeric_ok_block, &[], helper_block, &[]);
+            builder
+                .ins()
+                .brif(is_numeric, numeric_ok_block, &[], helper_block, &[]);
 
             builder.switch_to_block(numeric_ok_block);
             builder.seal_block(numeric_ok_block);
@@ -8769,9 +9215,13 @@ fn emit_numeric_step(
             let val = builder.ins().load(types::I64, mem, val_addr, 0);
 
             // Store result to dst
-            builder.ins().store(mem, val, dst_ptr, LUA_VALUE_VALUE_OFFSET);
+            builder
+                .ins()
+                .store(mem, val, dst_ptr, LUA_VALUE_VALUE_OFFSET);
             let tag_for_store = builder.ins().ireduce(types::I8, tag_i32);
-            builder.ins().store(mem, tag_for_store, dst_ptr, LUA_VALUE_TT_OFFSET);
+            builder
+                .ins()
+                .store(mem, tag_for_store, dst_ptr, LUA_VALUE_TT_OFFSET);
 
             builder.ins().jump(done_block, &[]);
 
@@ -8779,9 +9229,10 @@ fn emit_numeric_step(
             builder.switch_to_block(helper_block);
             builder.seal_block(helper_block);
             let fallback_hits = builder.use_var(hits_var);
-            let call = builder
-                .ins()
-                .call(native_helpers.get_table_int, &[abi.lua_state_ptr, dst_ptr, table_ptr, index_ptr]);
+            let call = builder.ins().call(
+                native_helpers.get_table_int,
+                &[abi.lua_state_ptr, dst_ptr, table_ptr, index_ptr],
+            );
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, fallback_hits, fallback_block, success);
             builder.ins().jump(done_block, &[]);
@@ -8797,9 +9248,10 @@ fn emit_numeric_step(
             let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
             let table_ptr = slot_addr(builder, abi.base_ptr, table);
             let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
-            let call = builder
-                .ins()
-                .call(native_helpers.get_table_field, &[abi.lua_state_ptr, dst_ptr, table_ptr, key_ptr]);
+            let call = builder.ins().call(
+                native_helpers.get_table_field,
+                &[abi.lua_state_ptr, dst_ptr, table_ptr, key_ptr],
+            );
             let success = builder.inst_results(call)[0];
             emit_helper_success_guard(builder, hits_var, current_hits, fallback_block, success);
             clear_current_numeric_guard_value(current_numeric_values, dst);
@@ -8818,12 +9270,26 @@ fn emit_numeric_step(
             set_numeric_reg_value_kind(known_value_kinds, dst, TraceValueKind::Numeric);
             Some(())
         }
-        NumericStep::SetTableInt { table, index, value } => {
+        NumericStep::SetTableInt {
+            table,
+            index,
+            value,
+        } => {
             emit_materialize_guard_numeric_override(
-                builder, abi, value, current_numeric_values, carried_float, hoisted_numeric,
+                builder,
+                abi,
+                value,
+                current_numeric_values,
+                carried_float,
+                hoisted_numeric,
             );
             emit_materialize_guard_numeric_override(
-                builder, abi, index, current_numeric_values, carried_float, hoisted_numeric,
+                builder,
+                abi,
+                index,
+                current_numeric_values,
+                carried_float,
+                hoisted_numeric,
             );
             let table_ptr = slot_addr(builder, abi.base_ptr, table);
             let index_ptr = slot_addr(builder, abi.base_ptr, index);
@@ -8838,7 +9304,12 @@ fn emit_numeric_step(
         }
         NumericStep::SetTableField { table, key, value } => {
             emit_materialize_guard_numeric_override(
-                builder, abi, value, current_numeric_values, carried_float, hoisted_numeric,
+                builder,
+                abi,
+                value,
+                current_numeric_values,
+                carried_float,
+                hoisted_numeric,
             );
             let table_ptr = slot_addr(builder, abi.base_ptr, table);
             let key_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, key);
@@ -8853,7 +9324,10 @@ fn emit_numeric_step(
         }
         NumericStep::Binary { dst, lhs, rhs, op } => {
             let dst_known_kind = numeric_reg_value_kind(known_value_kinds, dst);
-            if matches!(op, NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul) {
+            if matches!(
+                op,
+                NumericBinaryOp::Add | NumericBinaryOp::Sub | NumericBinaryOp::Mul
+            ) {
                 emit_integer_add_sub_mul_with_helper_fallback(
                     builder,
                     abi,
@@ -9042,11 +9516,15 @@ fn emit_numeric_step(
                 NumericBinaryOp::BOr => builder.ins().bor(lhs_val, rhs_val),
                 NumericBinaryOp::BXor => builder.ins().bxor(lhs_val, rhs_val),
                 NumericBinaryOp::Shl => {
-                    let call = builder.ins().call(native_helpers.shift_left, &[lhs_val, rhs_val]);
+                    let call = builder
+                        .ins()
+                        .call(native_helpers.shift_left, &[lhs_val, rhs_val]);
                     builder.inst_results(call)[0]
                 }
                 NumericBinaryOp::Shr => {
-                    let call = builder.ins().call(native_helpers.shift_right, &[lhs_val, rhs_val]);
+                    let call = builder
+                        .ins()
+                        .call(native_helpers.shift_right, &[lhs_val, rhs_val]);
                     builder.inst_results(call)[0]
                 }
                 NumericBinaryOp::Div
@@ -9100,15 +9578,26 @@ fn emit_numeric_integer_operand(
                 carried_float,
                 hoisted_numeric,
             );
-            if !matches!(numeric_reg_value_kind(known_value_kinds, reg), TraceValueKind::Integer) {
+            if !matches!(
+                numeric_reg_value_kind(known_value_kinds, reg),
+                TraceValueKind::Integer
+            ) {
                 emit_integer_guard(builder, reg_ptr, hits_var, current_hits, fallback_block);
             }
-            Some(builder.ins().load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET))
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
         }
         NumericOperand::Const(index) => {
             let const_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, index);
             emit_integer_guard(builder, const_ptr, hits_var, current_hits, fallback_block);
-            Some(builder.ins().load(types::I64, mem, const_ptr, LUA_VALUE_VALUE_OFFSET))
+            Some(
+                builder
+                    .ins()
+                    .load(types::I64, mem, const_ptr, LUA_VALUE_VALUE_OFFSET),
+            )
         }
     }
 }
@@ -9132,30 +9621,38 @@ fn emit_numeric_operand_tag_and_value(
             builder.ins().iconst(types::I64, i64::from(imm)),
         )),
         NumericOperand::Reg(reg) => {
-            if let Some(result) =
-                emit_guard_numeric_override_tag_and_value(
-                    builder,
-                    reg,
-                    current_numeric_values,
-                    carried_float,
-                    hoisted_numeric,
-                )
-            {
+            if let Some(result) = emit_guard_numeric_override_tag_and_value(
+                builder,
+                reg,
+                current_numeric_values,
+                carried_float,
+                hoisted_numeric,
+            ) {
                 return Some(result);
             }
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
-            let tag = if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, reg)) {
+            let tag = if let Some(tag) =
+                trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, reg))
+            {
                 builder.ins().iconst(types::I8, i64::from(tag))
             } else {
-                builder.ins().load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET)
+                builder
+                    .ins()
+                    .load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET)
             };
-            let value = builder.ins().load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET);
+            let value = builder
+                .ins()
+                .load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET);
             Some((tag, value))
         }
         NumericOperand::Const(index) => {
             let const_ptr = const_addr(builder, abi, hits_var, current_hits, fallback_block, index);
-            let tag = builder.ins().load(types::I8, mem, const_ptr, LUA_VALUE_TT_OFFSET);
-            let value = builder.ins().load(types::I64, mem, const_ptr, LUA_VALUE_VALUE_OFFSET);
+            let tag = builder
+                .ins()
+                .load(types::I8, mem, const_ptr, LUA_VALUE_TT_OFFSET);
+            let value = builder
+                .ins()
+                .load(types::I64, mem, const_ptr, LUA_VALUE_VALUE_OFFSET);
             Some((tag, value))
         }
     }
@@ -9278,7 +9775,9 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
     let rhs_is_numeric = builder.ins().bor(rhs_is_int, rhs_is_float);
     let both_numeric = builder.ins().band(lhs_is_numeric, rhs_is_numeric);
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(both_int, int_fast_block, &[], numeric_fast_block, &[]);
+    builder
+        .ins()
+        .brif(both_int, int_fast_block, &[], numeric_fast_block, &[]);
 
     builder.switch_to_block(int_fast_block);
     match op {
@@ -9288,8 +9787,12 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             let lhs_xor_result = builder.ins().bxor(lhs_val, result);
             let rhs_xor_result = builder.ins().bxor(rhs_val, result);
             let overflow_bits = builder.ins().band(lhs_xor_result, rhs_xor_result);
-            let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
-            builder.ins().brif(overflow, helper_block, &[], int_store_block, &[]);
+            let overflow = builder
+                .ins()
+                .icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
+            builder
+                .ins()
+                .brif(overflow, helper_block, &[], int_store_block, &[]);
 
             builder.switch_to_block(int_store_block);
             emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
@@ -9302,8 +9805,12 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             let lhs_xor_rhs = builder.ins().bxor(lhs_val, rhs_val);
             let lhs_xor_result = builder.ins().bxor(lhs_val, result);
             let overflow_bits = builder.ins().band(lhs_xor_rhs, lhs_xor_result);
-            let overflow = builder.ins().icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
-            builder.ins().brif(overflow, helper_block, &[], int_store_block, &[]);
+            let overflow = builder
+                .ins()
+                .icmp_imm(IntCC::SignedLessThan, overflow_bits, 0);
+            builder
+                .ins()
+                .brif(overflow, helper_block, &[], int_store_block, &[]);
 
             builder.switch_to_block(int_store_block);
             emit_store_integer_with_known_tag(builder, dst_ptr, result, dst_known_integer);
@@ -9319,7 +9826,9 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             let zero_block = builder.create_block();
             let nonzero_block = builder.create_block();
             let mul_store_block = builder.create_block();
-            builder.ins().brif(either_zero, zero_block, &[], nonzero_block, &[]);
+            builder
+                .ins()
+                .brif(either_zero, zero_block, &[], nonzero_block, &[]);
 
             builder.switch_to_block(zero_block);
             emit_store_integer_with_known_tag(builder, dst_ptr, zero, dst_known_integer);
@@ -9335,13 +9844,17 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
             let rhs_min_lhs_neg_one = builder.ins().band(rhs_is_min, lhs_is_neg_one);
             let special_overflow = builder.ins().bor(lhs_min_rhs_neg_one, rhs_min_lhs_neg_one);
             let mul_compute_block = builder.create_block();
-            builder.ins().brif(special_overflow, helper_block, &[], mul_compute_block, &[]);
+            builder
+                .ins()
+                .brif(special_overflow, helper_block, &[], mul_compute_block, &[]);
 
             builder.switch_to_block(mul_compute_block);
             let result = builder.ins().imul(lhs_val, rhs_val);
             let quotient = builder.ins().sdiv(result, rhs_val);
             let overflow = builder.ins().icmp(IntCC::NotEqual, quotient, lhs_val);
-            builder.ins().brif(overflow, helper_block, &[], mul_store_block, &[]);
+            builder
+                .ins()
+                .brif(overflow, helper_block, &[], mul_store_block, &[]);
             builder.seal_block(mul_compute_block);
 
             builder.switch_to_block(mul_store_block);
@@ -9355,7 +9868,9 @@ fn emit_integer_add_sub_mul_with_helper_fallback(
     builder.seal_block(int_fast_block);
 
     builder.switch_to_block(numeric_fast_block);
-    builder.ins().brif(both_numeric, float_store_block, &[], helper_block, &[]);
+    builder
+        .ins()
+        .brif(both_numeric, float_store_block, &[], helper_block, &[]);
     builder.seal_block(numeric_fast_block);
 
     builder.switch_to_block(float_store_block);
@@ -9449,15 +9964,21 @@ fn emit_numeric_div_with_helper_fallback(
     let done_block = builder.create_block();
     let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(both_numeric, fast_block, &[], helper_block, &[]);
+    builder
+        .ins()
+        .brif(both_numeric, fast_block, &[], helper_block, &[]);
 
     builder.switch_to_block(fast_block);
     let lhs_as_float_int = builder.ins().fcvt_from_sint(types::F64, lhs_val);
     let lhs_as_float_raw = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
-    let lhs_as_float = builder.ins().select(lhs_is_int, lhs_as_float_int, lhs_as_float_raw);
+    let lhs_as_float = builder
+        .ins()
+        .select(lhs_is_int, lhs_as_float_int, lhs_as_float_raw);
     let rhs_as_float_int = builder.ins().fcvt_from_sint(types::F64, rhs_val);
     let rhs_as_float_raw = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
-    let rhs_as_float = builder.ins().select(rhs_is_int, rhs_as_float_int, rhs_as_float_raw);
+    let rhs_as_float = builder
+        .ins()
+        .select(rhs_is_int, rhs_as_float_int, rhs_as_float_raw);
     let result = builder.ins().fdiv(lhs_as_float, rhs_as_float);
     emit_store_float_value_with_known_tag(builder, dst_ptr, result, dst_known_float);
     builder.ins().jump(done_block, &[]);
@@ -9541,12 +10062,16 @@ fn emit_numeric_pow_with_helper_fallback(
     let done_block = builder.create_block();
     let dst_ptr = slot_addr(builder, abi.base_ptr, dst);
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(both_numeric, fast_block, &[], helper_block, &[]);
+    builder
+        .ins()
+        .brif(both_numeric, fast_block, &[], helper_block, &[]);
 
     builder.switch_to_block(fast_block);
     let lhs_num = emit_numeric_tagged_value_to_float(builder, lhs_tag, lhs_val);
     let rhs_num = emit_numeric_tagged_value_to_float(builder, rhs_tag, rhs_val);
-    let call = builder.ins().call(native_helpers.numeric_pow, &[lhs_num, rhs_num]);
+    let call = builder
+        .ins()
+        .call(native_helpers.numeric_pow, &[lhs_num, rhs_num]);
     let result = builder.inst_results(call)[0];
     emit_store_float_value_with_known_tag(builder, dst_ptr, result, dst_known_float);
     builder.ins().jump(done_block, &[]);
@@ -9590,7 +10115,9 @@ fn emit_integer_mod(
     let rhs_is_zero = builder.ins().icmp(IntCC::Equal, rhs_val, zero);
     let compute_block = builder.create_block();
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(rhs_is_zero, fallback_block, &[], compute_block, &[]);
+    builder
+        .ins()
+        .brif(rhs_is_zero, fallback_block, &[], compute_block, &[]);
 
     builder.switch_to_block(compute_block);
     builder.seal_block(compute_block);
@@ -9622,13 +10149,17 @@ fn emit_integer_idiv(
     let normal_block = builder.create_block();
     let done_block = builder.create_block();
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(rhs_is_zero, fallback_block, &[], compute_block, &[]);
+    builder
+        .ins()
+        .brif(rhs_is_zero, fallback_block, &[], compute_block, &[]);
 
     builder.switch_to_block(compute_block);
     builder.seal_block(compute_block);
     let rhs_is_neg_one = builder.ins().icmp(IntCC::Equal, rhs_val, neg_one);
     builder.def_var(hits_var, current_hits);
-    builder.ins().brif(rhs_is_neg_one, neg_one_block, &[], normal_block, &[]);
+    builder
+        .ins()
+        .brif(rhs_is_neg_one, neg_one_block, &[], normal_block, &[]);
 
     builder.switch_to_block(neg_one_block);
     builder.seal_block(neg_one_block);
@@ -9683,10 +10214,14 @@ fn emit_numeric_condition_value(
                 }
             } else if carried_float.is_some_and(|carried| carried.reg == lhs) {
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, lhs)) {
+            } else if let Some(tag) =
+                trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, lhs))
+            {
                 builder.ins().iconst(types::I8, i64::from(tag))
             } else {
-                builder.ins().load(types::I8, mem, lhs_ptr, LUA_VALUE_TT_OFFSET)
+                builder
+                    .ins()
+                    .load(types::I8, mem, lhs_ptr, LUA_VALUE_TT_OFFSET)
             };
             let rhs_tag = if let Some(override_value) =
                 lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, rhs)
@@ -9701,10 +10236,14 @@ fn emit_numeric_condition_value(
                 }
             } else if carried_float.is_some_and(|carried| carried.reg == rhs) {
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
-            } else if let Some(tag) = trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, rhs)) {
+            } else if let Some(tag) =
+                trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, rhs))
+            {
                 builder.ins().iconst(types::I8, i64::from(tag))
             } else {
-                builder.ins().load(types::I8, mem, rhs_ptr, LUA_VALUE_TT_OFFSET)
+                builder
+                    .ins()
+                    .load(types::I8, mem, rhs_ptr, LUA_VALUE_TT_OFFSET)
             };
             let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
             let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
@@ -9717,11 +10256,14 @@ fn emit_numeric_condition_value(
             let both_numeric = builder.ins().band(lhs_is_numeric, rhs_is_numeric);
             let compare_block = builder.create_block();
             builder.def_var(hits_var, current_hits);
-            builder.ins().brif(both_numeric, compare_block, &[], fallback_block, &[]);
+            builder
+                .ins()
+                .brif(both_numeric, compare_block, &[], fallback_block, &[]);
             builder.switch_to_block(compare_block);
             builder.seal_block(compare_block);
 
-            let lhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == lhs) {
+            let lhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == lhs)
+            {
                 builder.use_var(carried.raw_var)
             } else if let Some(override_value) =
                 lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, lhs)
@@ -9731,9 +10273,12 @@ fn emit_numeric_condition_value(
                     HoistedNumericGuardSource::Integer(value) => value,
                 }
             } else {
-                builder.ins().load(types::I64, mem, lhs_ptr, LUA_VALUE_VALUE_OFFSET)
+                builder
+                    .ins()
+                    .load(types::I64, mem, lhs_ptr, LUA_VALUE_VALUE_OFFSET)
             };
-            let rhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == rhs) {
+            let rhs_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == rhs)
+            {
                 builder.use_var(carried.raw_var)
             } else if let Some(override_value) =
                 lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, rhs)
@@ -9743,7 +10288,9 @@ fn emit_numeric_condition_value(
                     HoistedNumericGuardSource::Integer(value) => value,
                 }
             } else {
-                builder.ins().load(types::I64, mem, rhs_ptr, LUA_VALUE_VALUE_OFFSET)
+                builder
+                    .ins()
+                    .load(types::I64, mem, rhs_ptr, LUA_VALUE_VALUE_OFFSET)
             };
             let lhs_num = emit_numeric_tagged_value_to_float(builder, lhs_tag, lhs_val);
             let rhs_num = emit_numeric_tagged_value_to_float(builder, rhs_tag, rhs_val);
@@ -9765,10 +10312,16 @@ fn emit_numeric_condition_value(
             } else if carried_float.is_some_and(|carried| carried.reg == reg) {
                 builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
             } else {
-                builder.ins().load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET)
+                builder
+                    .ins()
+                    .load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET)
             };
-            let is_nil = builder.ins().icmp_imm(IntCC::Equal, tag, LUA_VNIL_TAG as i64);
-            let is_false = builder.ins().icmp_imm(IntCC::Equal, tag, LUA_VFALSE_TAG as i64);
+            let is_nil = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, LUA_VNIL_TAG as i64);
+            let is_false = builder
+                .ins()
+                .icmp_imm(IntCC::Equal, tag, LUA_VFALSE_TAG as i64);
             let is_falsey = builder.ins().bor(is_nil, is_false);
             Some(builder.ins().bnot(is_falsey))
         }
@@ -9786,7 +10339,9 @@ fn emit_linear_compare(
         LinearIntGuardOp::Lt => builder.ins().icmp(IntCC::SignedLessThan, lhs, rhs),
         LinearIntGuardOp::Le => builder.ins().icmp(IntCC::SignedLessThanOrEqual, lhs, rhs),
         LinearIntGuardOp::Gt => builder.ins().icmp(IntCC::SignedGreaterThan, lhs, rhs),
-        LinearIntGuardOp::Ge => builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lhs, rhs),
+        LinearIntGuardOp::Ge => builder
+            .ins()
+            .icmp(IntCC::SignedGreaterThanOrEqual, lhs, rhs),
     }
 }
 
@@ -9840,9 +10395,13 @@ fn emit_numeric_guard_flow(
     let fail_block = builder.create_block();
     builder.def_var(hits_var, current_hits);
     if continue_when {
-        builder.ins().brif(cond_value, hold_block, &[], fail_block, &[]);
+        builder
+            .ins()
+            .brif(cond_value, hold_block, &[], fail_block, &[]);
     } else {
-        builder.ins().brif(cond_value, fail_block, &[], hold_block, &[]);
+        builder
+            .ins()
+            .brif(cond_value, fail_block, &[], hold_block, &[]);
     }
 
     builder.switch_to_block(hold_block);

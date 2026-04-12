@@ -1,12 +1,12 @@
 use crate::Instruction;
 
-use crate::lua_vm::jit::ir::TraceIrInst;
-use crate::lua_vm::jit::lowering::{LoweredTrace, SsaTableIntRewrite, TraceValueKind};
 use super::model::{
     LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NumericBinaryOp, NumericIfElseCond,
     NumericJmpLoopGuard, NumericLowering, NumericOperand, NumericSelfUpdateValueFlow,
     NumericSelfUpdateValueKind, NumericStep, NumericValueFlowRhs, NumericValueState,
 };
+use crate::lua_vm::jit::ir::TraceIrInst;
+use crate::lua_vm::jit::lowering::{LoweredTrace, SsaTableIntRewrite, TraceValueKind};
 
 include!("compile_shared.rs");
 
@@ -50,12 +50,12 @@ pub(super) fn lower_numeric_guard_for_native(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lua_vm::{LuaVM, SafeOption};
+    use crate::LuaValue;
+    use crate::lua_vm::jit::backend::model::synthetic_artifact_for_ir;
     use crate::lua_vm::jit::helper_plan::HelperPlan;
     use crate::lua_vm::jit::ir::{TraceIr, TraceIrInst, TraceIrInstKind, TraceIrOperand};
     use crate::lua_vm::jit::lowering::{LoweredSsaTrace, LoweredTrace};
-    use crate::lua_vm::jit::backend::model::synthetic_artifact_for_ir;
-    use crate::LuaValue;
+    use crate::lua_vm::{LuaVM, SafeOption};
 
     fn lowered_trace_with_constants(constants: Vec<LuaValue>) -> LoweredTrace {
         LoweredTrace {
@@ -80,8 +80,14 @@ mod tests {
                 TraceIrInst {
                     pc: 40,
                     opcode: crate::OpCode::SetTable,
-                    raw_instruction: Instruction::create_abck(crate::OpCode::SetTable, 3, 7, 8, false)
-                        .as_u32(),
+                    raw_instruction: Instruction::create_abck(
+                        crate::OpCode::SetTable,
+                        3,
+                        7,
+                        8,
+                        false,
+                    )
+                    .as_u32(),
                     kind: TraceIrInstKind::TableAccess,
                     reads: vec![
                         TraceIrOperand::Register(3),
@@ -93,8 +99,14 @@ mod tests {
                 TraceIrInst {
                     pc: 41,
                     opcode: crate::OpCode::GetTable,
-                    raw_instruction: Instruction::create_abck(crate::OpCode::GetTable, 9, 3, 7, false)
-                        .as_u32(),
+                    raw_instruction: Instruction::create_abck(
+                        crate::OpCode::GetTable,
+                        9,
+                        3,
+                        7,
+                        false,
+                    )
+                    .as_u32(),
                     kind: TraceIrInstKind::TableAccess,
                     reads: vec![TraceIrOperand::Register(3), TraceIrOperand::Register(7)],
                     writes: vec![TraceIrOperand::Register(9)],
@@ -102,8 +114,14 @@ mod tests {
                 TraceIrInst {
                     pc: 42,
                     opcode: crate::OpCode::SetTable,
-                    raw_instruction: Instruction::create_abck(crate::OpCode::SetTable, 3, 7, 10, false)
-                        .as_u32(),
+                    raw_instruction: Instruction::create_abck(
+                        crate::OpCode::SetTable,
+                        3,
+                        7,
+                        10,
+                        false,
+                    )
+                    .as_u32(),
                     kind: TraceIrInstKind::TableAccess,
                     reads: vec![
                         TraceIrOperand::Register(3),
@@ -115,8 +133,14 @@ mod tests {
                 TraceIrInst {
                     pc: 43,
                     opcode: crate::OpCode::SetTable,
-                    raw_instruction: Instruction::create_abck(crate::OpCode::SetTable, 3, 7, 11, false)
-                        .as_u32(),
+                    raw_instruction: Instruction::create_abck(
+                        crate::OpCode::SetTable,
+                        3,
+                        7,
+                        11,
+                        false,
+                    )
+                    .as_u32(),
                     kind: TraceIrInstKind::TableAccess,
                     reads: vec![
                         TraceIrOperand::Register(3),
@@ -153,7 +177,10 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::AddK, 4, 3, 0, false)
                     .as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::ConstantIndex(0)],
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::ConstantIndex(0),
+                ],
                 writes: vec![TraceIrOperand::Register(4)],
             },
             TraceIrInst {
@@ -162,12 +189,16 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::SubK, 5, 4, 1, false)
                     .as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(1)],
+                reads: vec![
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::ConstantIndex(1),
+                ],
                 writes: vec![TraceIrOperand::Register(5)],
             },
         ];
 
-        let lowered_trace = lowered_trace_with_constants(vec![LuaValue::integer(7), LuaValue::integer(2)]);
+        let lowered_trace =
+            lowered_trace_with_constants(vec![LuaValue::integer(7), LuaValue::integer(2)]);
 
         let steps = lower_linear_int_steps_for_native(&insts, &lowered_trace).unwrap();
 
@@ -197,7 +228,10 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::AddK, 4, 3, 0, false)
                     .as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::ConstantIndex(0)],
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::ConstantIndex(0),
+                ],
                 writes: vec![TraceIrOperand::Register(4)],
             },
             TraceIrInst {
@@ -206,12 +240,16 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::BAndK, 5, 4, 1, false)
                     .as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(1)],
+                reads: vec![
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::ConstantIndex(1),
+                ],
                 writes: vec![TraceIrOperand::Register(5)],
             },
         ];
 
-        let lowered_trace = lowered_trace_with_constants(vec![LuaValue::integer(9), LuaValue::integer(3)]);
+        let lowered_trace =
+            lowered_trace_with_constants(vec![LuaValue::integer(9), LuaValue::integer(3)]);
 
         let steps = lower_numeric_steps_for_native(&insts, &lowered_trace).unwrap();
 
@@ -340,7 +378,10 @@ mod tests {
                     rhs: NumericOperand::ImmI(2),
                     op: NumericBinaryOp::Add,
                 },
-                NumericStep::SetUpval { src: 12, upvalue: 2 },
+                NumericStep::SetUpval {
+                    src: 12,
+                    upvalue: 2
+                },
             ]
         );
     }
@@ -388,7 +429,10 @@ mod tests {
                     rhs: NumericOperand::Reg(6),
                     op: NumericBinaryOp::Mul,
                 },
-                NumericStep::SetUpval { src: 12, upvalue: 3 },
+                NumericStep::SetUpval {
+                    src: 12,
+                    upvalue: 3
+                },
             ]
         );
     }
@@ -453,8 +497,14 @@ mod tests {
                     op: NumericBinaryOp::Add,
                 },
                 NumericStep::LoadI { dst: 20, imm: 7 },
-                NumericStep::SetUpval { src: 20, upvalue: 4 },
-                NumericStep::SetUpval { src: 12, upvalue: 4 },
+                NumericStep::SetUpval {
+                    src: 20,
+                    upvalue: 4
+                },
+                NumericStep::SetUpval {
+                    src: 12,
+                    upvalue: 4
+                },
             ]
         );
     }
@@ -496,7 +546,10 @@ mod tests {
             steps,
             vec![
                 NumericStep::LoadF { dst: 22, imm: 3 },
-                NumericStep::SetUpval { src: 22, upvalue: 5 },
+                NumericStep::SetUpval {
+                    src: 22,
+                    upvalue: 5
+                },
             ]
         );
     }
@@ -570,8 +623,14 @@ mod tests {
                     op: NumericBinaryOp::Mul,
                 },
                 NumericStep::LoadI { dst: 20, imm: 8 },
-                NumericStep::SetUpval { src: 20, upvalue: 6 },
-                NumericStep::SetUpval { src: 13, upvalue: 6 },
+                NumericStep::SetUpval {
+                    src: 20,
+                    upvalue: 6
+                },
+                NumericStep::SetUpval {
+                    src: 13,
+                    upvalue: 6
+                },
             ]
         );
     }
@@ -645,8 +704,14 @@ mod tests {
                     op: NumericBinaryOp::Mul,
                 },
                 NumericStep::LoadI { dst: 20, imm: 9 },
-                NumericStep::SetUpval { src: 13, upvalue: 8 },
-                NumericStep::SetUpval { src: 20, upvalue: 8 },
+                NumericStep::SetUpval {
+                    src: 13,
+                    upvalue: 8
+                },
+                NumericStep::SetUpval {
+                    src: 20,
+                    upvalue: 8
+                },
             ]
         );
     }
@@ -728,7 +793,10 @@ mod tests {
                     index: 7,
                     value: 13,
                 },
-                NumericStep::SetUpval { src: 20, upvalue: 9 },
+                NumericStep::SetUpval {
+                    src: 20,
+                    upvalue: 9
+                },
             ]
         );
     }
@@ -780,8 +848,14 @@ mod tests {
             TraceIrInst {
                 pc: 72,
                 opcode: crate::OpCode::SetUpval,
-                raw_instruction: Instruction::create_abck(crate::OpCode::SetUpval, 20, 11, 0, false)
-                    .as_u32(),
+                raw_instruction: Instruction::create_abck(
+                    crate::OpCode::SetUpval,
+                    20,
+                    11,
+                    0,
+                    false,
+                )
+                .as_u32(),
                 kind: TraceIrInstKind::UpvalueMutation,
                 reads: vec![TraceIrOperand::Register(20)],
                 writes: Vec::new(),
@@ -789,8 +863,14 @@ mod tests {
             TraceIrInst {
                 pc: 73,
                 opcode: crate::OpCode::SetUpval,
-                raw_instruction: Instruction::create_abck(crate::OpCode::SetUpval, 15, 11, 0, false)
-                    .as_u32(),
+                raw_instruction: Instruction::create_abck(
+                    crate::OpCode::SetUpval,
+                    15,
+                    11,
+                    0,
+                    false,
+                )
+                .as_u32(),
                 kind: TraceIrInstKind::UpvalueMutation,
                 reads: vec![TraceIrOperand::Register(15)],
                 writes: Vec::new(),
@@ -816,8 +896,14 @@ mod tests {
                     rhs: NumericOperand::ImmI(2),
                     op: NumericBinaryOp::Add,
                 },
-                NumericStep::SetUpval { src: 20, upvalue: 11 },
-                NumericStep::SetUpval { src: 15, upvalue: 11 },
+                NumericStep::SetUpval {
+                    src: 20,
+                    upvalue: 11
+                },
+                NumericStep::SetUpval {
+                    src: 15,
+                    upvalue: 11
+                },
             ]
         );
     }
@@ -861,8 +947,14 @@ mod tests {
             TraceIrInst {
                 pc: 78,
                 opcode: crate::OpCode::SetUpval,
-                raw_instruction: Instruction::create_abck(crate::OpCode::SetUpval, 16, 13, 0, false)
-                    .as_u32(),
+                raw_instruction: Instruction::create_abck(
+                    crate::OpCode::SetUpval,
+                    16,
+                    13,
+                    0,
+                    false,
+                )
+                .as_u32(),
                 kind: TraceIrInstKind::UpvalueMutation,
                 reads: vec![TraceIrOperand::Register(16)],
                 writes: Vec::new(),
@@ -887,7 +979,10 @@ mod tests {
                     rhs: NumericOperand::ImmI(2),
                     op: NumericBinaryOp::Add,
                 },
-                NumericStep::SetUpval { src: 15, upvalue: 13 },
+                NumericStep::SetUpval {
+                    src: 15,
+                    upvalue: 13
+                },
             ]
         );
     }
@@ -929,7 +1024,10 @@ mod tests {
             steps,
             vec![
                 NumericStep::LoadI { dst: 21, imm: 5 },
-                NumericStep::SetUpval { src: 21, upvalue: 7 },
+                NumericStep::SetUpval {
+                    src: 21,
+                    upvalue: 7
+                },
             ]
         );
     }
@@ -956,8 +1054,14 @@ mod tests {
             TraceIrInst {
                 pc: 66,
                 opcode: crate::OpCode::SetUpval,
-                raw_instruction: Instruction::create_abck(crate::OpCode::SetUpval, 22, 10, 0, false)
-                    .as_u32(),
+                raw_instruction: Instruction::create_abck(
+                    crate::OpCode::SetUpval,
+                    22,
+                    10,
+                    0,
+                    false,
+                )
+                .as_u32(),
                 kind: TraceIrInstKind::UpvalueMutation,
                 reads: vec![TraceIrOperand::Register(22)],
                 writes: Vec::new(),
@@ -971,7 +1075,10 @@ mod tests {
             steps,
             vec![
                 NumericStep::LoadI { dst: 22, imm: 5 },
-                NumericStep::SetUpval { src: 22, upvalue: 10 },
+                NumericStep::SetUpval {
+                    src: 22,
+                    upvalue: 10
+                },
             ]
         );
     }
@@ -979,9 +1086,15 @@ mod tests {
     #[test]
     fn lower_numeric_steps_prunes_overwritten_bool_materialization() {
         let steps = vec![
-            NumericStep::LoadBool { dst: 23, value: true },
+            NumericStep::LoadBool {
+                dst: 23,
+                value: true,
+            },
             NumericStep::LoadI { dst: 23, imm: 6 },
-            NumericStep::SetUpval { src: 23, upvalue: 12 },
+            NumericStep::SetUpval {
+                src: 23,
+                upvalue: 12,
+            },
         ];
 
         let steps = super::run_numeric_midend_passes(steps);
@@ -990,7 +1103,10 @@ mod tests {
             steps,
             vec![
                 NumericStep::LoadI { dst: 23, imm: 6 },
-                NumericStep::SetUpval { src: 23, upvalue: 12 },
+                NumericStep::SetUpval {
+                    src: 23,
+                    upvalue: 12
+                },
             ]
         );
     }
@@ -1039,7 +1155,10 @@ mod tests {
                     op: NumericBinaryOp::IDiv,
                 },
                 NumericStep::LoadI { dst: 21, imm: 5 },
-                NumericStep::SetUpval { src: 21, upvalue: 7 },
+                NumericStep::SetUpval {
+                    src: 21,
+                    upvalue: 7
+                },
             ]
         );
     }
@@ -1053,7 +1172,10 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::BAndK, 4, 3, 0, false)
                     .as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::ConstantIndex(0)],
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::ConstantIndex(0),
+                ],
                 writes: vec![TraceIrOperand::Register(4)],
             },
             TraceIrInst {
@@ -1071,7 +1193,10 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::BXorK, 6, 5, 1, false)
                     .as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(5), TraceIrOperand::ConstantIndex(1)],
+                reads: vec![
+                    TraceIrOperand::Register(5),
+                    TraceIrOperand::ConstantIndex(1),
+                ],
                 writes: vec![TraceIrOperand::Register(6)],
             },
             TraceIrInst {
@@ -1093,7 +1218,8 @@ mod tests {
             },
         ];
 
-        let lowered_trace = lowered_trace_with_constants(vec![LuaValue::integer(7), LuaValue::integer(3)]);
+        let lowered_trace =
+            lowered_trace_with_constants(vec![LuaValue::integer(7), LuaValue::integer(3)]);
 
         let steps = lower_linear_int_steps_for_native(&insts, &lowered_trace).unwrap();
 
@@ -1137,7 +1263,10 @@ mod tests {
                 opcode: crate::OpCode::IDivK,
                 raw_instruction: Instruction::create_abc(crate::OpCode::IDivK, 4, 3, 0).as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::ConstantIndex(0)],
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::ConstantIndex(0),
+                ],
                 writes: vec![TraceIrOperand::Register(4)],
             },
             TraceIrInst {
@@ -1382,7 +1511,10 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::GetField, 4, 3, 0, false)
                     .as_u32(),
                 kind: TraceIrInstKind::TableAccess,
-                reads: vec![TraceIrOperand::Register(3), TraceIrOperand::ConstantIndex(0)],
+                reads: vec![
+                    TraceIrOperand::Register(3),
+                    TraceIrOperand::ConstantIndex(0),
+                ],
                 writes: vec![TraceIrOperand::Register(4)],
             },
             TraceIrInst {
@@ -1499,7 +1631,10 @@ mod tests {
                 raw_instruction: Instruction::create_abck(crate::OpCode::GetField, 6, 5, 1, false)
                     .as_u32(),
                 kind: TraceIrInstKind::TableAccess,
-                reads: vec![TraceIrOperand::Register(5), TraceIrOperand::ConstantIndex(1)],
+                reads: vec![
+                    TraceIrOperand::Register(5),
+                    TraceIrOperand::ConstantIndex(1),
+                ],
                 writes: vec![TraceIrOperand::Register(6)],
             },
             TraceIrInst {
@@ -1548,11 +1683,39 @@ mod tests {
         // be eliminated by alias resolution, leaving 4 steps:
         // GetTabUpField, GetTableField, Binary(AddI), SetTableField
         assert_eq!(steps.len(), 4);
-        assert!(matches!(steps[0], NumericStep::GetTabUpField { dst: 5, upvalue: 0, key: 0 }));
-        assert!(matches!(steps[1], NumericStep::GetTableField { dst: 6, table: 5, key: 1 }));
-        assert!(matches!(steps[2], NumericStep::Binary { dst: 6, op: NumericBinaryOp::Add, .. }));
+        assert!(matches!(
+            steps[0],
+            NumericStep::GetTabUpField {
+                dst: 5,
+                upvalue: 0,
+                key: 0
+            }
+        ));
+        assert!(matches!(
+            steps[1],
+            NumericStep::GetTableField {
+                dst: 6,
+                table: 5,
+                key: 1
+            }
+        ));
+        assert!(matches!(
+            steps[2],
+            NumericStep::Binary {
+                dst: 6,
+                op: NumericBinaryOp::Add,
+                ..
+            }
+        ));
         // After forwarding + alias: SetTableField should use the original table register
-        assert!(matches!(steps[3], NumericStep::SetTableField { table: 5, key: 1, value: 6 }));
+        assert!(matches!(
+            steps[3],
+            NumericStep::SetTableField {
+                table: 5,
+                key: 1,
+                value: 6
+            }
+        ));
     }
 
     #[test]
@@ -1564,27 +1727,67 @@ mod tests {
         // Result: prologue = [GetTabUpField(5,0,0), GetTableField(6,5,1)],
         //         body    = [Binary(6,Add), SetTableField(5,1,6)]
         let steps = vec![
-            NumericStep::GetTabUpField { dst: 5, upvalue: 0, key: 0 },
-            NumericStep::GetTableField { dst: 6, table: 5, key: 1 },
+            NumericStep::GetTabUpField {
+                dst: 5,
+                upvalue: 0,
+                key: 0,
+            },
+            NumericStep::GetTableField {
+                dst: 6,
+                table: 5,
+                key: 1,
+            },
             NumericStep::Binary {
                 dst: 6,
                 lhs: NumericOperand::Reg(6),
                 rhs: NumericOperand::ImmI(1),
                 op: NumericBinaryOp::Add,
             },
-            NumericStep::SetTableField { table: 5, key: 1, value: 6 },
+            NumericStep::SetTableField {
+                table: 5,
+                key: 1,
+                value: 6,
+            },
         ];
 
         let (prologue, body) = extract_loop_prologue(&steps);
 
         // Prologue should contain the hoisted steps
         assert_eq!(prologue.len(), 2, "prologue: {prologue:?}");
-        assert!(matches!(prologue[0], NumericStep::GetTabUpField { dst: 5, upvalue: 0, key: 0 }));
-        assert!(matches!(prologue[1], NumericStep::GetTableField { dst: 6, table: 5, key: 1 }));
+        assert!(matches!(
+            prologue[0],
+            NumericStep::GetTabUpField {
+                dst: 5,
+                upvalue: 0,
+                key: 0
+            }
+        ));
+        assert!(matches!(
+            prologue[1],
+            NumericStep::GetTableField {
+                dst: 6,
+                table: 5,
+                key: 1
+            }
+        ));
 
         // Body should be just Binary + SetTableField
         assert_eq!(body.len(), 2, "body: {body:?}");
-        assert!(matches!(body[0], NumericStep::Binary { dst: 6, op: NumericBinaryOp::Add, .. }));
-        assert!(matches!(body[1], NumericStep::SetTableField { table: 5, key: 1, value: 6 }));
+        assert!(matches!(
+            body[0],
+            NumericStep::Binary {
+                dst: 6,
+                op: NumericBinaryOp::Add,
+                ..
+            }
+        ));
+        assert!(matches!(
+            body[1],
+            NumericStep::SetTableField {
+                table: 5,
+                key: 1,
+                value: 6
+            }
+        ));
     }
 }

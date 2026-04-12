@@ -1,4 +1,3 @@
-use crate::{CallInfo, LuaState, LuaValue};
 use crate::gc::UpvaluePtr;
 use crate::lua_value::LuaProto;
 use crate::lua_vm::execute::{
@@ -9,14 +8,15 @@ use crate::lua_vm::execute::{
         pttisinteger, setivalue, setobj2s, setobjs2s,
     },
 };
+use crate::{CallInfo, LuaState, LuaValue};
 
-use super::{
-    CompiledTraceExecution, ExecutableTraceDispatch, HelperPlanDispatchSummary,
-    JitTraceAction, ReadySideTraceDispatch, TraceExitDispatch,
-};
 use super::backend::{NativeCompiledTrace, NativeTraceResult, NativeTraceStatus};
 use super::ir::is_fused_arithmetic_metamethod_pair;
 use super::state::NativeExecutableTraceDispatch;
+use super::{
+    CompiledTraceExecution, ExecutableTraceDispatch, HelperPlanDispatchSummary, JitTraceAction,
+    ReadySideTraceDispatch, TraceExitDispatch,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolvedExitKind {
@@ -70,7 +70,8 @@ pub(crate) unsafe fn dispatch_root_trace_or_record(
     target_pc: usize,
     loop_exit_pc_override: Option<usize>,
 ) -> Option<JitTraceAction> {
-    let Some(dispatch) = super::executable_trace_dispatch_or_record(lua_state, ci.chunk_ptr, target_pc)
+    let Some(dispatch) =
+        super::executable_trace_dispatch_or_record(lua_state, ci.chunk_ptr, target_pc)
     else {
         return None;
     };
@@ -118,7 +119,7 @@ unsafe fn finish_trace_exit_by_index_in_context(
     trace_hits: u32,
     summary: HelperPlanDispatchSummary,
     exit_index: u16,
-    fallback_exit_pc: usize,
+    exit_pc: usize,
 ) -> JitTraceAction {
     super::record_batched_trace_execution(context.lua_state, trace_hits, trace_hits, summary);
 
@@ -134,7 +135,7 @@ unsafe fn finish_trace_exit_by_index_in_context(
             context.upvalue_ptrs,
         )
     }) else {
-        return JitTraceAction::ContinueAt(fallback_exit_pc);
+        return JitTraceAction::ContinueAt(exit_pc);
     };
 
     unsafe { continue_after_resolved_exit(context, dispatch, ResolvedExitKind::SideExit) }
@@ -171,9 +172,9 @@ unsafe fn continue_after_resolved_exit(
             let ready_dispatch = ReadySideTraceDispatch::Native(native_dispatch);
             super::record_ready_side_trace_dispatch(context.lua_state, &ready_dispatch);
             super::record_redundant_side_exit_fast_dispatch(context.lua_state);
-            if let Some(action) = unsafe {
-                dispatch_native_ready_side_trace_fast(context, native_dispatch)
-            } {
+            if let Some(action) =
+                unsafe { dispatch_native_ready_side_trace_fast(context, native_dispatch) }
+            {
                 return action;
             }
             JitTraceAction::ContinueAt(resume_pc)
@@ -219,13 +220,22 @@ unsafe fn dispatch_native_trace_result(
         }
         NativeTraceStatus::LoopExit => {
             if result.exit_pc != 0 {
-                // Interior guard exit — return directly to interpreter at the guard's
-                // exit PC, bypassing side-trace resolution and dispatch entirely.
-                super::record_batched_trace_execution(context.lua_state, result.hits, result.hits, summary);
+                super::record_batched_trace_execution(
+                    context.lua_state,
+                    result.hits,
+                    result.hits,
+                    summary,
+                );
                 Some(JitTraceAction::ContinueAt(result.exit_pc as usize))
             } else {
                 Some(unsafe {
-                    finish_trace_exit_in_context(context, target_pc, result.hits, summary, loop_exit_pc)
+                    finish_trace_exit_in_context(
+                        context,
+                        target_pc,
+                        result.hits,
+                        summary,
+                        loop_exit_pc,
+                    )
                 })
             }
         }
@@ -240,9 +250,29 @@ unsafe fn dispatch_native_trace_result(
             )
         }),
         NativeTraceStatus::Returned => {
-            super::record_batched_trace_execution(context.lua_state, result.hits, result.hits, summary);
+            super::record_batched_trace_execution(
+                context.lua_state,
+                result.hits,
+                result.hits,
+                summary,
+            );
             Some(JitTraceAction::Returned)
         }
+    }
+}
+
+#[inline(always)]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn postprocess_linked_side_trace_completion(
+    context: &mut JitExecutionContext<'_>,
+    action: Option<JitTraceAction>,
+    linked_loop_header_pc: Option<usize>,
+) -> Option<JitTraceAction> {
+    match (linked_loop_header_pc, action) {
+        (Some(loop_header_pc), Some(JitTraceAction::ContinueAt(pc))) if pc == loop_header_pc => {
+            Some(unsafe { dispatch_root_trace_from_context_or_continue(context, loop_header_pc) })
+        }
+        (_, action) => action,
     }
 }
 
@@ -253,16 +283,26 @@ unsafe fn dispatch_ready_side_trace(
     dispatch: ReadySideTraceDispatch,
 ) -> Option<JitTraceAction> {
     match dispatch {
-        ReadySideTraceDispatch::Executable(dispatch) => {
-            unsafe { dispatch_executable_trace(context, dispatch, None) }
-        }
+        ReadySideTraceDispatch::Executable(dispatch) => unsafe {
+            let action = dispatch_executable_trace(context, dispatch.clone(), None);
+            postprocess_linked_side_trace_completion(
+                context,
+                action,
+                dispatch.linked_loop_header_pc.map(|pc| pc as usize),
+            )
+        },
         ReadySideTraceDispatch::Native(dispatch) => unsafe {
-            dispatch_native_compiled_trace(
-            context,
-            dispatch.start_pc as usize,
-            dispatch.summary,
-            dispatch.loop_tail_pc as usize,
-            dispatch.native,
+            let action = dispatch_native_compiled_trace(
+                context,
+                dispatch.start_pc as usize,
+                dispatch.summary,
+                dispatch.loop_tail_pc as usize,
+                dispatch.native,
+            );
+            postprocess_linked_side_trace_completion(
+                context,
+                action,
+                dispatch.linked_loop_header_pc.map(|pc| pc as usize),
             )
         },
     }
@@ -275,12 +315,17 @@ unsafe fn dispatch_native_ready_side_trace_fast(
     dispatch: NativeExecutableTraceDispatch,
 ) -> Option<JitTraceAction> {
     unsafe {
-        dispatch_native_compiled_trace(
+        let action = dispatch_native_compiled_trace(
             context,
             dispatch.start_pc as usize,
             dispatch.summary,
             dispatch.loop_tail_pc as usize,
             dispatch.native,
+        );
+        postprocess_linked_side_trace_completion(
+            context,
+            action,
+            dispatch.linked_loop_header_pc.map(|pc| pc as usize),
         )
     }
 }
@@ -324,10 +369,84 @@ unsafe fn dispatch_native_compiled_trace(
 
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn dispatch_root_trace_from_context_or_continue(
+    context: &mut JitExecutionContext<'_>,
+    target_pc: usize,
+) -> JitTraceAction {
+    super::record_linked_root_reentry_attempt_at(context.lua_state, context.chunk_ptr, target_pc);
+
+    if let Some(dispatch) =
+        super::executable_trace_dispatch(context.lua_state, context.chunk_ptr, target_pc)
+    {
+        super::record_linked_root_reentry_hit_at(context.lua_state, context.chunk_ptr, target_pc);
+        super::record_root_trace_dispatch(context.lua_state, &dispatch);
+        return match unsafe { dispatch_executable_trace(context, dispatch, None) } {
+            Some(action) => action,
+            None => JitTraceAction::ContinueAt(target_pc),
+        };
+    }
+
+    if let Some(root_pc) =
+        super::redirected_root_pc(context.lua_state, context.chunk_ptr, target_pc)
+    {
+        let prefix_action = unsafe {
+            dispatch_lowered_trace_snippet(
+                context,
+                target_pc,
+                HelperPlanDispatchSummary::default(),
+                None,
+                Some(root_pc as usize),
+            )
+        };
+        if matches!(prefix_action, Some(JitTraceAction::ContinueAt(pc)) if pc == root_pc as usize)
+            && let Some(dispatch) = super::executable_trace_dispatch(
+                context.lua_state,
+                context.chunk_ptr,
+                root_pc as usize,
+            )
+        {
+            super::record_linked_root_reentry_hit_at(
+                context.lua_state,
+                context.chunk_ptr,
+                target_pc,
+            );
+            super::record_root_trace_dispatch(context.lua_state, &dispatch);
+            return match unsafe { dispatch_executable_trace(context, dispatch, None) } {
+                Some(action) => action,
+                None => JitTraceAction::ContinueAt(root_pc as usize),
+            };
+        }
+    }
+
+    super::prepare_linked_root_reentry_target_at(context.lua_state, context.chunk_ptr, target_pc);
+
+    if let Some(dispatch) =
+        super::executable_trace_dispatch(context.lua_state, context.chunk_ptr, target_pc)
+    {
+        super::record_linked_root_reentry_hit_at(context.lua_state, context.chunk_ptr, target_pc);
+        super::record_root_trace_dispatch(context.lua_state, &dispatch);
+        return match unsafe { dispatch_executable_trace(context, dispatch, None) } {
+            Some(action) => action,
+            None => JitTraceAction::ContinueAt(target_pc),
+        };
+    }
+
+    super::record_linked_root_reentry_fallback_at(
+        context.lua_state,
+        context.chunk_ptr,
+        target_pc,
+    );
+    JitTraceAction::ContinueAt(target_pc)
+}
+
+#[inline(always)]
+#[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn dispatch_lowered_trace_snippet(
     context: &mut JitExecutionContext<'_>,
     target_pc: usize,
     summary: HelperPlanDispatchSummary,
+    linked_loop_header_pc: Option<usize>,
+    stop_at_pc: Option<usize>,
 ) -> Option<JitTraceAction> {
     if context.chunk_ptr.is_null() || context.lua_state.hook_mask != 0 {
         return None;
@@ -346,6 +465,11 @@ unsafe fn dispatch_lowered_trace_snippet(
     };
 
     while pc < code.len() {
+        if Some(pc) == stop_at_pc {
+            record_completed_hits(context, completed_hits);
+            return Some(JitTraceAction::ContinueAt(pc));
+        }
+
         let op_pc = pc;
         let instr = unsafe { *code.get_unchecked(pc) };
         let opcode = instr.get_opcode();
@@ -362,7 +486,8 @@ unsafe fn dispatch_lowered_trace_snippet(
             crate::OpCode::AddI => {
                 let dst = context.base + instr.get_a() as usize;
                 let src = context.base + instr.get_b() as usize;
-                let src_ptr = unsafe { context.lua_state.stack_mut().as_mut_ptr().add(src) } as *const LuaValue;
+                let src_ptr = unsafe { context.lua_state.stack_mut().as_mut_ptr().add(src) }
+                    as *const LuaValue;
                 let dst_ptr = unsafe { context.lua_state.stack_mut().as_mut_ptr().add(dst) };
                 let imm = instr.get_sc() as i64;
                 if unsafe { pttisinteger(src_ptr) } {
@@ -389,14 +514,17 @@ unsafe fn dispatch_lowered_trace_snippet(
                 let dst_ptr = unsafe { sp.add(dst) };
                 if unsafe { pttisinteger(lhs_ptr) && pttisinteger(rhs_ptr) } {
                     unsafe {
-                        *dst_ptr = LuaValue::integer(pivalue(lhs_ptr).wrapping_sub(pivalue(rhs_ptr)))
+                        *dst_ptr =
+                            LuaValue::integer(pivalue(lhs_ptr).wrapping_sub(pivalue(rhs_ptr)))
                     };
                 } else if unsafe { pttisfloat(lhs_ptr) && pttisfloat(rhs_ptr) } {
                     unsafe { *dst_ptr = LuaValue::float(pfltvalue(lhs_ptr) - pfltvalue(rhs_ptr)) };
                 } else {
                     let mut lhs_num = 0.0;
                     let mut rhs_num = 0.0;
-                    if unsafe { ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num) } {
+                    if unsafe {
+                        ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num)
+                    } {
                         unsafe { *dst_ptr = LuaValue::float(lhs_num - rhs_num) };
                     } else {
                         record_completed_hits(context, completed_hits);
@@ -413,7 +541,11 @@ unsafe fn dispatch_lowered_trace_snippet(
             }
             crate::OpCode::LoadK => {
                 let value = unsafe { context.constants.get_unchecked(instr.get_bx() as usize) };
-                setobj2s(context.lua_state, context.base + instr.get_a() as usize, value);
+                setobj2s(
+                    context.lua_state,
+                    context.base + instr.get_a() as usize,
+                    value,
+                );
             }
             crate::OpCode::GetUpval => {
                 if context.upvalue_ptrs.is_null() {
@@ -508,7 +640,11 @@ unsafe fn dispatch_lowered_trace_snippet(
                         return Some(JitTraceAction::ContinueAt(op_pc));
                     }
                 };
-                setobj2s(context.lua_state, context.base + instr.get_a() as usize, &value);
+                setobj2s(
+                    context.lua_state,
+                    context.base + instr.get_a() as usize,
+                    &value,
+                );
             }
             crate::OpCode::Add => {
                 let dst = context.base + instr.get_a() as usize;
@@ -519,13 +655,18 @@ unsafe fn dispatch_lowered_trace_snippet(
                 let rhs_ptr = unsafe { sp.add(rhs) } as *const LuaValue;
                 let dst_ptr = unsafe { sp.add(dst) };
                 if unsafe { pttisinteger(lhs_ptr) && pttisinteger(rhs_ptr) } {
-                    unsafe { *dst_ptr = LuaValue::integer(pivalue(lhs_ptr).wrapping_add(pivalue(rhs_ptr))) };
+                    unsafe {
+                        *dst_ptr =
+                            LuaValue::integer(pivalue(lhs_ptr).wrapping_add(pivalue(rhs_ptr)))
+                    };
                 } else if unsafe { pttisfloat(lhs_ptr) && pttisfloat(rhs_ptr) } {
                     unsafe { *dst_ptr = LuaValue::float(pfltvalue(lhs_ptr) + pfltvalue(rhs_ptr)) };
                 } else {
                     let mut lhs_num = 0.0;
                     let mut rhs_num = 0.0;
-                    if unsafe { ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num) } {
+                    if unsafe {
+                        ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num)
+                    } {
                         unsafe { *dst_ptr = LuaValue::float(lhs_num + rhs_num) };
                     } else {
                         record_completed_hits(context, completed_hits);
@@ -549,11 +690,15 @@ unsafe fn dispatch_lowered_trace_snippet(
                     }
                     unsafe { *dst_ptr = LuaValue::integer(lua_imod(pivalue(lhs_ptr), divisor)) };
                 } else if unsafe { pttisfloat(lhs_ptr) && pttisfloat(rhs_ptr) } {
-                    unsafe { *dst_ptr = LuaValue::float(lua_fmod(pfltvalue(lhs_ptr), pfltvalue(rhs_ptr))) };
+                    unsafe {
+                        *dst_ptr = LuaValue::float(lua_fmod(pfltvalue(lhs_ptr), pfltvalue(rhs_ptr)))
+                    };
                 } else {
                     let mut lhs_num = 0.0;
                     let mut rhs_num = 0.0;
-                    if unsafe { ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num) } {
+                    if unsafe {
+                        ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num)
+                    } {
                         unsafe { *dst_ptr = LuaValue::float(lua_fmod(lhs_num, rhs_num)) };
                     } else {
                         record_completed_hits(context, completed_hits);
@@ -576,7 +721,12 @@ unsafe fn dispatch_lowered_trace_snippet(
                 let table = unsafe { (*table_ptr).hvalue_mut() };
                 let key = unsafe { pivalue(key_ptr) };
                 let meta = table.meta_ptr();
-                if !(meta.is_null() || meta.as_mut_ref().data.no_tm(crate::lua_vm::TmKind::NewIndex.into())) {
+                if !(meta.is_null()
+                    || meta
+                        .as_mut_ref()
+                        .data
+                        .no_tm(crate::lua_vm::TmKind::NewIndex.into()))
+                {
                     record_completed_hits(context, completed_hits);
                     return Some(JitTraceAction::ContinueAt(op_pc));
                 }
@@ -603,9 +753,10 @@ unsafe fn dispatch_lowered_trace_snippet(
 
                 let delta = table.impl_table.set_int_slow(key, value);
                 if delta != 0 {
-                    context
-                        .lua_state
-                        .gc_track_table_resize(unsafe { table_value.as_table_ptr_unchecked() }, delta);
+                    context.lua_state.gc_track_table_resize(
+                        unsafe { table_value.as_table_ptr_unchecked() },
+                        delta,
+                    );
                 }
                 if value.is_collectable() {
                     context
@@ -626,7 +777,9 @@ unsafe fn dispatch_lowered_trace_snippet(
                 } else {
                     let mut lhs_num = 0.0;
                     let mut rhs_num = 0.0;
-                    if unsafe { ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num) } {
+                    if unsafe {
+                        ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num)
+                    } {
                         lhs_num < rhs_num
                     } else {
                         record_completed_hits(context, completed_hits);
@@ -664,7 +817,9 @@ unsafe fn dispatch_lowered_trace_snippet(
                 } else {
                     let mut lhs_num = 0.0;
                     let mut rhs_num = 0.0;
-                    if unsafe { ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num) } {
+                    if unsafe {
+                        ptonumberns(lhs_ptr, &mut lhs_num) && ptonumberns(rhs_ptr, &mut rhs_num)
+                    } {
                         lhs_num <= rhs_num
                     } else {
                         record_completed_hits(context, completed_hits);
@@ -691,13 +846,8 @@ unsafe fn dispatch_lowered_trace_snippet(
             }
             crate::OpCode::LeI => {
                 let value_reg = context.base + instr.get_a() as usize;
-                let value_ptr = unsafe {
-                    context
-                        .lua_state
-                        .stack_mut()
-                        .as_mut_ptr()
-                        .add(value_reg)
-                } as *const LuaValue;
+                let value_ptr = unsafe { context.lua_state.stack_mut().as_mut_ptr().add(value_reg) }
+                    as *const LuaValue;
                 let imm = instr.get_sb() as i64;
                 let cond = if unsafe { pttisinteger(value_ptr) } {
                     unsafe { pivalue(value_ptr) <= imm }
@@ -759,6 +909,12 @@ unsafe fn dispatch_lowered_trace_snippet(
                 let target = (pc as isize + instr.get_sj() as isize) as usize;
                 if target <= op_pc {
                     completed_hits = completed_hits.saturating_add(1);
+                    if let Some(loop_header_pc) = linked_loop_header_pc
+                        && target < target_pc
+                    {
+                        record_completed_hits(context, completed_hits);
+                        return Some(JitTraceAction::ContinueAt(loop_header_pc));
+                    }
                 }
                 pc = target;
             }
@@ -887,7 +1043,13 @@ unsafe fn dispatch_lowered_trace_snippet(
             crate::OpCode::ForLoop => {
                 let a = instr.get_a() as usize;
                 let bx = instr.get_bx() as usize;
-                let ra = unsafe { context.lua_state.stack_mut().as_mut_ptr().add(context.base + a) };
+                let ra = unsafe {
+                    context
+                        .lua_state
+                        .stack_mut()
+                        .as_mut_ptr()
+                        .add(context.base + a)
+                };
                 if unsafe { !pttisinteger(ra.add(1)) } {
                     record_completed_hits(context, completed_hits);
                     return Some(JitTraceAction::ContinueAt(op_pc));
@@ -897,11 +1059,22 @@ unsafe fn dispatch_lowered_trace_snippet(
                 if count > 0 {
                     let step = unsafe { pivalue(ra.add(1)) };
                     let idx = unsafe { pivalue(ra.add(2)) };
+                    let target = pc.saturating_sub(bx);
+                    if let Some(loop_header_pc) = linked_loop_header_pc
+                        && target < target_pc
+                    {
+                        unsafe {
+                            (*ra).value.i = count as i64 - 1;
+                            (*ra.add(2)).value.i = idx.wrapping_add(step);
+                        }
+                        record_completed_hits(context, completed_hits);
+                        return Some(JitTraceAction::ContinueAt(loop_header_pc));
+                    }
                     unsafe {
                         (*ra).value.i = count as i64 - 1;
                         (*ra.add(2)).value.i = idx.wrapping_add(step);
                     }
-                    pc = pc.saturating_sub(bx);
+                    pc = target;
                     continue;
                 } else {
                     record_completed_hits(context, completed_hits);
@@ -946,7 +1119,13 @@ unsafe fn dispatch_executable_trace(
     match execution {
         CompiledTraceExecution::LoweredOnly => None,
         CompiledTraceExecution::LoweredSnippet => unsafe {
-            dispatch_lowered_trace_snippet(context, target_pc, summary)
+            dispatch_lowered_trace_snippet(
+                context,
+                target_pc,
+                summary,
+                dispatch.linked_loop_header_pc.map(|pc| pc as usize),
+                None,
+            )
         },
         CompiledTraceExecution::Native(native) => unsafe {
             dispatch_native_compiled_trace(context, target_pc, summary, exit_pc, native)
@@ -990,10 +1169,10 @@ unsafe fn apply_deopt_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Instruction, OpCode};
-    use crate::lua_vm::{LuaVM, SafeOption};
     use crate::lua_vm::jit::backend::NativeLoweringProfile;
     use crate::lua_vm::jit::lowering::{DeoptRecovery, DeoptTarget, MaterializedSnapshot};
+    use crate::lua_vm::{LuaVM, SafeOption};
+    use crate::{Instruction, OpCode};
 
     unsafe extern "C" fn native_return0_test_entry(
         _stack: *mut LuaValue,
@@ -1034,15 +1213,18 @@ mod tests {
                 register_range_restores: Vec::new(),
                 upvalue_restores: Vec::new(),
             },
-            ready_side_trace: Some(ReadySideTraceDispatch::Native(NativeExecutableTraceDispatch {
-                start_pc: 12,
-                loop_tail_pc: 12,
-                native: NativeCompiledTrace::Return0 {
-                    entry: native_return0_test_entry,
+            ready_side_trace: Some(ReadySideTraceDispatch::Native(
+                NativeExecutableTraceDispatch {
+                    start_pc: 12,
+                    loop_tail_pc: 12,
+                    linked_loop_header_pc: None,
+                    native: NativeCompiledTrace::Return0 {
+                        entry: native_return0_test_entry,
+                    },
+                    summary: HelperPlanDispatchSummary::default(),
+                    profile: NativeLoweringProfile::default(),
                 },
-                summary: HelperPlanDispatchSummary::default(),
-                profile: NativeLoweringProfile::default(),
-            })),
+            )),
         };
 
         let mut context = JitExecutionContext {
@@ -1061,7 +1243,10 @@ mod tests {
         let snapshot = context.lua_state.vm_mut().jit.stats_snapshot();
         assert_eq!(snapshot.counters.side_native_dispatches, 1);
         assert_eq!(snapshot.counters.native_redundant_side_exit_recoveries, 1);
-        assert_eq!(snapshot.counters.native_redundant_side_exit_fast_dispatches, 1);
+        assert_eq!(
+            snapshot.counters.native_redundant_side_exit_fast_dispatches,
+            1
+        );
     }
 
     #[test]
@@ -1075,8 +1260,12 @@ mod tests {
         lua_state.stack_set(3, LuaValue::integer(0)).unwrap();
 
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Add, 3, 3, 2));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Add, 3, 3, 2));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
 
         let mut context = JitExecutionContext {
             lua_state,
@@ -1096,13 +1285,24 @@ mod tests {
                     call_steps: 0,
                     metamethod_steps: 0,
                 },
+                None,
+                None,
             )
         };
 
         assert_eq!(action, Some(JitTraceAction::ContinueAt(2)));
-        assert_eq!(context.lua_state.stack_get(0).unwrap().as_integer(), Some(0));
-        assert_eq!(context.lua_state.stack_get(2).unwrap().as_integer(), Some(12));
-        assert_eq!(context.lua_state.stack_get(3).unwrap().as_integer(), Some(33));
+        assert_eq!(
+            context.lua_state.stack_get(0).unwrap().as_integer(),
+            Some(0)
+        );
+        assert_eq!(
+            context.lua_state.stack_get(2).unwrap().as_integer(),
+            Some(12)
+        );
+        assert_eq!(
+            context.lua_state.stack_get(3).unwrap().as_integer(),
+            Some(33)
+        );
 
         let snapshot = context.lua_state.vm_mut().jit.stats_snapshot();
         assert_eq!(snapshot.counters.trace_enter_hits, 3);
@@ -1110,4 +1310,285 @@ mod tests {
         assert_eq!(snapshot.counters.helper_plan_steps, 6);
     }
 
+    unsafe extern "C" fn native_linked_side_exit_test_entry(
+        _stack: *mut LuaValue,
+        _base: usize,
+        _constants: *const LuaValue,
+        _constant_count: usize,
+        _lua_state: *mut LuaState,
+        _upvalue_ptrs: *const crate::gc::UpvaluePtr,
+        result: *mut NativeTraceResult,
+    ) {
+        unsafe {
+            *result = NativeTraceResult {
+                status: NativeTraceStatus::LoopExit,
+                hits: 1,
+                exit_pc: 2,
+                start_reg: 0,
+                result_count: 0,
+                exit_index: 0,
+            };
+        }
+    }
+
+    #[test]
+    fn native_linked_side_trace_reenters_root_trace() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let lua_state = vm.main_state();
+        lua_state.set_top(4).unwrap();
+        lua_state.stack_set(0, LuaValue::integer(0)).unwrap();
+        lua_state.stack_set(1, LuaValue::integer(1)).unwrap();
+        lua_state.stack_set(2, LuaValue::integer(10)).unwrap();
+        lua_state.stack_set(3, LuaValue::integer(0)).unwrap();
+
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Add, 3, 3, 2));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..super::super::hotcount::HOT_LOOP_THRESHOLD {
+            lua_state.vm_mut().jit.record_loop_backedge(chunk_ptr, 2);
+        }
+
+        let mut context = JitExecutionContext {
+            lua_state,
+            chunk_ptr,
+            upvalue_ptrs: std::ptr::null(),
+            base: 0,
+            constants: &[],
+        };
+
+        let action = unsafe {
+            dispatch_native_ready_side_trace_fast(
+                &mut context,
+                NativeExecutableTraceDispatch {
+                    start_pc: 5,
+                    loop_tail_pc: 5,
+                    linked_loop_header_pc: Some(2),
+                    native: NativeCompiledTrace::Return0 {
+                        entry: native_linked_side_exit_test_entry,
+                    },
+                    summary: HelperPlanDispatchSummary::default(),
+                    profile: NativeLoweringProfile::default(),
+                },
+            )
+        };
+
+        assert_eq!(action, Some(JitTraceAction::ContinueAt(3)));
+        assert_eq!(
+            context.lua_state.stack_get(0).unwrap().as_integer(),
+            Some(0)
+        );
+        assert_eq!(
+            context.lua_state.stack_get(2).unwrap().as_integer(),
+            Some(10)
+        );
+        assert_eq!(
+            context.lua_state.stack_get(3).unwrap().as_integer(),
+            Some(10)
+        );
+
+        let snapshot = context.lua_state.vm_mut().jit.stats_snapshot();
+        assert_eq!(snapshot.counters.trace_enter_hits, 2);
+        assert_eq!(snapshot.counters.linked_root_reentry_attempts, 1);
+        assert_eq!(snapshot.counters.linked_root_reentry_hits, 1);
+        assert_eq!(snapshot.counters.linked_root_reentry_fallbacks, 0);
+        assert_eq!(snapshot.counters.root_native_dispatches, 1);
+    }
+
+    #[test]
+    fn redirected_linked_root_reentry_stitches_prefix_before_root_dispatch() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let lua_state = vm.main_state();
+        lua_state.set_top(4).unwrap();
+        lua_state.stack_set(0, LuaValue::integer(0)).unwrap();
+        lua_state.stack_set(1, LuaValue::integer(1)).unwrap();
+        lua_state.stack_set(2, LuaValue::integer(10)).unwrap();
+        lua_state.stack_set(3, LuaValue::integer(0)).unwrap();
+
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Add, 3, 3, 1));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..super::super::hotcount::HOT_LOOP_THRESHOLD {
+            lua_state.vm_mut().jit.record_loop_backedge(chunk_ptr, 0);
+        }
+
+        assert_eq!(
+            lua_state.vm_mut().jit.redirected_root_pc(chunk_ptr, 0),
+            Some(2)
+        );
+        assert!(
+            lua_state
+                .vm_mut()
+                .jit
+                .executable_trace_dispatch(chunk_ptr, 2)
+                .is_some()
+        );
+
+        let mut context = JitExecutionContext {
+            lua_state,
+            chunk_ptr,
+            upvalue_ptrs: std::ptr::null(),
+            base: 0,
+            constants: &[],
+        };
+
+        let action = unsafe { dispatch_root_trace_from_context_or_continue(&mut context, 0) };
+
+        assert_eq!(action, JitTraceAction::ContinueAt(3));
+        assert_eq!(
+            context.lua_state.stack_get(0).unwrap().as_integer(),
+            Some(0)
+        );
+        assert_eq!(
+            context.lua_state.stack_get(1).unwrap().as_integer(),
+            Some(10)
+        );
+        assert_eq!(
+            context.lua_state.stack_get(2).unwrap().as_integer(),
+            Some(20)
+        );
+        assert_eq!(
+            context.lua_state.stack_get(3).unwrap().as_integer(),
+            Some(20)
+        );
+
+        let snapshot = context.lua_state.vm_mut().jit.stats_snapshot();
+        assert_eq!(snapshot.counters.linked_root_reentry_attempts, 1);
+        assert_eq!(snapshot.counters.linked_root_reentry_hits, 1);
+        assert_eq!(snapshot.counters.linked_root_reentry_fallbacks, 0);
+        assert!(snapshot.counters.trace_enter_hits >= 1);
+    }
+
+    #[test]
+    fn linked_root_reentry_prepares_and_dispatches_root_immediately_for_counting_header() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let lua_state = vm.main_state();
+        lua_state.set_top(4).unwrap();
+        lua_state.stack_set(0, LuaValue::integer(0)).unwrap();
+        lua_state.stack_set(1, LuaValue::integer(1)).unwrap();
+        lua_state.stack_set(2, LuaValue::integer(10)).unwrap();
+        lua_state.stack_set(3, LuaValue::integer(0)).unwrap();
+
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Add, 3, 3, 2));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 2));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        let mut context = JitExecutionContext {
+            lua_state,
+            chunk_ptr,
+            upvalue_ptrs: std::ptr::null(),
+            base: 0,
+            constants: &[],
+        };
+
+        context.lua_state.vm_mut().jit.record_loop_backedge(chunk_ptr, 2);
+
+        let action = unsafe { dispatch_root_trace_from_context_or_continue(&mut context, 2) };
+        assert_eq!(action, JitTraceAction::ContinueAt(3));
+        assert_eq!(
+            context.lua_state.stack_get(3).unwrap().as_integer(),
+            Some(10)
+        );
+
+        let snapshot = context.lua_state.vm_mut().jit.stats_snapshot();
+        assert_eq!(snapshot.counters.linked_root_reentry_attempts, 1);
+        assert_eq!(snapshot.counters.linked_root_reentry_hits, 1);
+        assert_eq!(snapshot.counters.linked_root_reentry_fallbacks, 0);
+        assert_eq!(snapshot.counters.root_native_dispatches, 1);
+    }
+
+    #[test]
+    fn lowered_trace_snippet_side_trace_returns_to_linked_loop_header() {
+        let mut vm = LuaVM::new(SafeOption::default());
+        let lua_state = vm.main_state();
+        lua_state.set_top(4).unwrap();
+        lua_state.stack_set(0, LuaValue::integer(0)).unwrap();
+        lua_state.stack_set(1, LuaValue::integer(5)).unwrap();
+        lua_state.stack_set(2, LuaValue::integer(8)).unwrap();
+        lua_state.stack_set(3, LuaValue::integer(0)).unwrap();
+
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Add, 3, 3, 1));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Lt, 2, 3, 0, false));
+        chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
+
+        let mut context = JitExecutionContext {
+            lua_state,
+            chunk_ptr: &chunk as *const LuaProto,
+            upvalue_ptrs: std::ptr::null(),
+            base: 0,
+            constants: &[],
+        };
+
+        let action = unsafe {
+            dispatch_lowered_trace_snippet(
+                &mut context,
+                2,
+                HelperPlanDispatchSummary {
+                    steps_executed: 3,
+                    guards_observed: 1,
+                    call_steps: 0,
+                    metamethod_steps: 0,
+                },
+                Some(0),
+                None,
+            )
+        };
+
+        assert_eq!(action, Some(JitTraceAction::ContinueAt(0)));
+        assert_eq!(
+            context.lua_state.stack_get(3).unwrap().as_integer(),
+            Some(5)
+        );
+
+        let snapshot = context.lua_state.vm_mut().jit.stats_snapshot();
+        assert_eq!(snapshot.counters.trace_enter_hits, 1);
+        assert_eq!(snapshot.counters.helper_plan_dispatches, 1);
+        assert_eq!(snapshot.counters.helper_plan_steps, 3);
+    }
 }

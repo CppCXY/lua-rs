@@ -3,24 +3,39 @@ use std::collections::BTreeSet;
 
 use super::helper_plan::HelperPlan;
 use super::ir::{
-    instruction_reads, instruction_writes, is_fused_arithmetic_metamethod_fallback, TraceIr,
-    TraceIrGuardKind, TraceIrInst,
-    TraceIrInstKind, TraceIrOperand,
+    TraceIr, TraceIrGuardKind, TraceIrInst, TraceIrInstKind, TraceIrOperand, instruction_reads,
+    instruction_writes, is_fused_arithmetic_metamethod_fallback,
 };
 use super::trace_recorder::TraceArtifact;
-use crate::gc::UpvaluePtr;
-use crate::lua_value::{LuaProto, LuaValue};
 use crate::Instruction;
 use crate::OpCode;
+use crate::gc::UpvaluePtr;
+use crate::lua_value::{LuaProto, LuaValue};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotOperand {
     Register(u32),
-    RegisterRange { start: u32, count: u32 },
-    RestoreRegisterFromRegister { reg: u32, source: u32 },
-    RestoreRegisterFromConstantIndex { reg: u32, index: u32 },
-    RestoreRegisterFromIntegerImmediate { reg: u32, value: i32 },
-    RestoreRegisterFromIntegerAddImm { reg: u32, source: u32, offset: i32 },
+    RegisterRange {
+        start: u32,
+        count: u32,
+    },
+    RestoreRegisterFromRegister {
+        reg: u32,
+        source: u32,
+    },
+    RestoreRegisterFromConstantIndex {
+        reg: u32,
+        index: u32,
+    },
+    RestoreRegisterFromIntegerImmediate {
+        reg: u32,
+        value: i32,
+    },
+    RestoreRegisterFromIntegerAddImm {
+        reg: u32,
+        source: u32,
+        offset: i32,
+    },
     RestoreRegisterFromIntegerBitwiseK {
         reg: u32,
         source: u32,
@@ -33,9 +48,17 @@ pub(crate) enum SnapshotOperand {
         imm: i32,
         op: IntegerShiftImmOp,
     },
-    RestoreRegisterFromFloatImmediate { reg: u32, value: i32 },
-    RestoreRegisterFromBool { reg: u32, value: bool },
-    RestoreRegisterFromNil { reg: u32 },
+    RestoreRegisterFromFloatImmediate {
+        reg: u32,
+        value: i32,
+    },
+    RestoreRegisterFromBool {
+        reg: u32,
+        value: bool,
+    },
+    RestoreRegisterFromNil {
+        reg: u32,
+    },
     ConstantIndex(u32),
     Upvalue(u32),
     SignedImmediate(i32),
@@ -117,7 +140,10 @@ pub(crate) struct SsaValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SsaOperand {
     Value(SsaValueId),
-    ValueRange { start_reg: u32, values: Vec<SsaValueId> },
+    ValueRange {
+        start_reg: u32,
+        values: Vec<SsaValueId>,
+    },
     ConstantIndex(u32),
     Upvalue(u32),
     SignedImmediate(i32),
@@ -260,7 +286,10 @@ enum RegisterRestoreSource {
     Register(u32),
     ConstantIndex(u32),
     IntegerImmediate(i32),
-    IntegerAddImm { source: u32, offset: i32 },
+    IntegerAddImm {
+        source: u32,
+        offset: i32,
+    },
     IntegerBitwiseK {
         source: u32,
         index: u32,
@@ -374,11 +403,7 @@ impl DeoptRecovery {
 }
 
 impl LoweredTrace {
-    pub(crate) fn lower(
-        artifact: &TraceArtifact,
-        ir: &TraceIr,
-        helper_plan: &HelperPlan,
-    ) -> Self {
+    pub(crate) fn lower(artifact: &TraceArtifact, ir: &TraceIr, helper_plan: &HelperPlan) -> Self {
         let ssa_trace = build_minimal_ssa_trace(ir);
         let snapshot_operands = collect_snapshot_operands(ir);
         let chunk = unsafe { (artifact.seed.root_chunk_addr as *const LuaProto).as_ref() };
@@ -426,7 +451,9 @@ impl LoweredTrace {
             snapshots,
             exits,
             helper_plan_step_count: helper_plan.steps.len().min(u16::MAX as usize) as u16,
-            constants: chunk.map(|chunk| chunk.constants.clone()).unwrap_or_default(),
+            constants: chunk
+                .map(|chunk| chunk.constants.clone())
+                .unwrap_or_default(),
             root_register_hints: collect_root_register_hints(ir),
             entry_stable_register_hints: collect_entry_stable_register_hints(ir),
             ssa_trace,
@@ -489,10 +516,13 @@ impl LoweredTrace {
     }
 
     pub(crate) fn entry_register_value_kind(&self, reg: u32) -> Option<TraceValueKind> {
-        self.ssa_trace.values.iter().find_map(|value| match value.origin {
-            SsaValueOrigin::EntryRegister(entry_reg) if entry_reg == reg => Some(value.kind),
-            _ => None,
-        })
+        self.ssa_trace
+            .values
+            .iter()
+            .find_map(|value| match value.origin {
+                SsaValueOrigin::EntryRegister(entry_reg) if entry_reg == reg => Some(value.kind),
+                _ => None,
+            })
     }
 
     pub(crate) fn entry_ssa_register_hints(&self) -> Vec<RegisterValueHint> {
@@ -531,7 +561,10 @@ impl LoweredTrace {
     }
 
     pub(crate) fn deopt_target_for_exit_index(&self, exit_index: u16) -> Option<DeoptTarget> {
-        let exit = self.exits.iter().find(|exit| exit.exit_index == exit_index)?;
+        let exit = self
+            .exits
+            .iter()
+            .find(|exit| exit.exit_index == exit_index)?;
         Some(DeoptTarget {
             exit_index: exit.exit_index,
             snapshot_id: exit.snapshot_id,
@@ -666,7 +699,11 @@ unsafe fn materialize_snapshot(
                     value: LuaValue::integer(*value as i64),
                 }
             }
-            SnapshotOperand::RestoreRegisterFromIntegerAddImm { reg, source, offset } => {
+            SnapshotOperand::RestoreRegisterFromIntegerAddImm {
+                reg,
+                source,
+                offset,
+            } => {
                 let source_value = unsafe { *stack.add(base + *source as usize) };
                 let value = if source_value.is_integer() {
                     LuaValue::integer(source_value.ivalue().saturating_add(*offset as i64))
@@ -686,7 +723,12 @@ unsafe fn materialize_snapshot(
                 let value = materialize_integer_bitwise_k(source_value, constant_value, *op);
                 MaterializedSnapshotOperand::Register { reg: *reg, value }
             }
-            SnapshotOperand::RestoreRegisterFromIntegerShiftImm { reg, source, imm, op } => {
+            SnapshotOperand::RestoreRegisterFromIntegerShiftImm {
+                reg,
+                source,
+                imm,
+                op,
+            } => {
                 let source_value = unsafe { *stack.add(base + *source as usize) };
                 let value = materialize_integer_shift_imm(source_value, *imm, *op);
                 MaterializedSnapshotOperand::Register { reg: *reg, value }
@@ -703,10 +745,12 @@ unsafe fn materialize_snapshot(
                     value: LuaValue::boolean(*value),
                 }
             }
-            SnapshotOperand::RestoreRegisterFromNil { reg } => MaterializedSnapshotOperand::Register {
-                reg: *reg,
-                value: LuaValue::nil(),
-            },
+            SnapshotOperand::RestoreRegisterFromNil { reg } => {
+                MaterializedSnapshotOperand::Register {
+                    reg: *reg,
+                    value: LuaValue::nil(),
+                }
+            }
             SnapshotOperand::Upvalue(index) => {
                 if upvalue_ptrs.is_null() {
                     return None;
@@ -768,7 +812,11 @@ unsafe fn materialize_snapshot(
                     value: LuaValue::integer(*value as i64),
                 }
             }
-            SnapshotOperand::RestoreRegisterFromIntegerAddImm { reg, source, offset } => {
+            SnapshotOperand::RestoreRegisterFromIntegerAddImm {
+                reg,
+                source,
+                offset,
+            } => {
                 let source_value = unsafe { *stack.add(base + *source as usize) };
                 let value = if source_value.is_integer() {
                     LuaValue::integer(source_value.ivalue().saturating_add(*offset as i64))
@@ -788,7 +836,12 @@ unsafe fn materialize_snapshot(
                 let value = materialize_integer_bitwise_k(source_value, constant_value, *op);
                 MaterializedSnapshotOperand::Register { reg: *reg, value }
             }
-            SnapshotOperand::RestoreRegisterFromIntegerShiftImm { reg, source, imm, op } => {
+            SnapshotOperand::RestoreRegisterFromIntegerShiftImm {
+                reg,
+                source,
+                imm,
+                op,
+            } => {
                 let source_value = unsafe { *stack.add(base + *source as usize) };
                 let value = materialize_integer_shift_imm(source_value, *imm, *op);
                 MaterializedSnapshotOperand::Register { reg: *reg, value }
@@ -805,10 +858,12 @@ unsafe fn materialize_snapshot(
                     value: LuaValue::boolean(*value),
                 }
             }
-            SnapshotOperand::RestoreRegisterFromNil { reg } => MaterializedSnapshotOperand::Register {
-                reg: *reg,
-                value: LuaValue::nil(),
-            },
+            SnapshotOperand::RestoreRegisterFromNil { reg } => {
+                MaterializedSnapshotOperand::Register {
+                    reg: *reg,
+                    value: LuaValue::nil(),
+                }
+            }
             SnapshotOperand::Upvalue(index) => {
                 if upvalue_ptrs.is_null() {
                     return None;
@@ -936,17 +991,27 @@ fn collect_restore_operands_for_operands(
             }
             SnapshotOperand::RestoreRegisterFromIntegerImmediate { reg, value } => {
                 if live.registers.contains(&reg) {
-                    filtered.push(SnapshotOperand::RestoreRegisterFromIntegerImmediate { reg, value });
+                    filtered
+                        .push(SnapshotOperand::RestoreRegisterFromIntegerImmediate { reg, value });
                 }
             }
-            SnapshotOperand::RestoreRegisterFromIntegerAddImm { reg, source, offset } => {
+            SnapshotOperand::RestoreRegisterFromIntegerAddImm {
+                reg,
+                source,
+                offset,
+            } => {
                 if live.registers.contains(&reg) {
-                    filtered.push(SnapshotOperand::RestoreRegisterFromIntegerAddImm { reg, source, offset });
+                    filtered.push(SnapshotOperand::RestoreRegisterFromIntegerAddImm {
+                        reg,
+                        source,
+                        offset,
+                    });
                 }
             }
             SnapshotOperand::RestoreRegisterFromFloatImmediate { reg, value } => {
                 if live.registers.contains(&reg) {
-                    filtered.push(SnapshotOperand::RestoreRegisterFromFloatImmediate { reg, value });
+                    filtered
+                        .push(SnapshotOperand::RestoreRegisterFromFloatImmediate { reg, value });
                 }
             }
             SnapshotOperand::RestoreRegisterFromBool { reg, value } => {
@@ -1142,9 +1207,15 @@ fn restore_source_for_single_write(
                     .map(RegisterRestoreSource::Register)
                     .unwrap_or(RegisterRestoreSource::Register(0))
             }),
-        OpCode::LoadI => RegisterRestoreSource::IntegerImmediate(Instruction::from_u32(inst.raw_instruction).get_sbx()),
-        OpCode::LoadF => RegisterRestoreSource::FloatImmediate(Instruction::from_u32(inst.raw_instruction).get_sbx()),
-        OpCode::LoadK => RegisterRestoreSource::ConstantIndex(Instruction::from_u32(inst.raw_instruction).get_bx()),
+        OpCode::LoadI => RegisterRestoreSource::IntegerImmediate(
+            Instruction::from_u32(inst.raw_instruction).get_sbx(),
+        ),
+        OpCode::LoadF => RegisterRestoreSource::FloatImmediate(
+            Instruction::from_u32(inst.raw_instruction).get_sbx(),
+        ),
+        OpCode::LoadK => RegisterRestoreSource::ConstantIndex(
+            Instruction::from_u32(inst.raw_instruction).get_bx(),
+        ),
         OpCode::LoadFalse => RegisterRestoreSource::Bool(false),
         OpCode::LoadTrue => RegisterRestoreSource::Bool(true),
         OpCode::AddI => {
@@ -1163,7 +1234,9 @@ fn restore_source_for_single_write(
                     .get(&source_reg)
                     .copied()
                     .or(Some(RegisterRestoreSource::Register(source_reg)))
-                    .and_then(|source| integer_restore_source_with_offset(source, offset, constants))
+                    .and_then(|source| {
+                        integer_restore_source_with_offset(source, offset, constants)
+                    })
                     .unwrap_or_else(|| {
                         single_written_register(inst)
                             .map(RegisterRestoreSource::Register)
@@ -1180,7 +1253,13 @@ fn restore_source_for_single_write(
             let source_reg = raw.get_b();
             let constant_offset = constants
                 .and_then(|constants| integer_constant_at(constants, raw.get_c()))
-                .map(|value| if inst.opcode == OpCode::SubK { value.saturating_neg() } else { value });
+                .map(|value| {
+                    if inst.opcode == OpCode::SubK {
+                        value.saturating_neg()
+                    } else {
+                        value
+                    }
+                });
             if can_restore_integer_source(
                 source_reg,
                 inst,
@@ -1195,7 +1274,9 @@ fn restore_source_for_single_write(
                             .get(&source_reg)
                             .copied()
                             .or(Some(RegisterRestoreSource::Register(source_reg)))
-                            .and_then(|source| integer_restore_source_with_offset(source, offset, constants))
+                            .and_then(|source| {
+                                integer_restore_source_with_offset(source, offset, constants)
+                            })
                     })
                     .unwrap_or_else(|| {
                         single_written_register(inst)
@@ -1219,8 +1300,9 @@ fn restore_source_for_single_write(
                 register_sources,
                 constants,
                 ssa_trace,
-            )
-                && constants.and_then(|constants| integer_constant_at(constants, index)).is_some()
+            ) && constants
+                .and_then(|constants| integer_constant_at(constants, index))
+                .is_some()
             {
                 RegisterRestoreSource::IntegerBitwiseK {
                     source: source_reg,
@@ -1312,8 +1394,9 @@ fn can_restore_integer_source(
         | Some(RegisterRestoreSource::FloatImmediate(_))
         | Some(RegisterRestoreSource::Bool(_))
         | Some(RegisterRestoreSource::Nil)
-        | None => ssa_trace
-            .is_some_and(|ssa_trace| ssa_integer_kind_for_register_read(ssa_trace, inst, source_reg)),
+        | None => ssa_trace.is_some_and(|ssa_trace| {
+            ssa_integer_kind_for_register_read(ssa_trace, inst, source_reg)
+        }),
     }
 }
 
@@ -1356,9 +1439,8 @@ fn integer_restore_source_with_offset(
         RegisterRestoreSource::IntegerImmediate(value) => Some(
             RegisterRestoreSource::IntegerImmediate(value.saturating_add(offset)),
         ),
-        RegisterRestoreSource::ConstantIndex(index) => integer_constant_at(constants?, index).map(|value| {
-            RegisterRestoreSource::IntegerImmediate(value.saturating_add(offset))
-        }),
+        RegisterRestoreSource::ConstantIndex(index) => integer_constant_at(constants?, index)
+            .map(|value| RegisterRestoreSource::IntegerImmediate(value.saturating_add(offset))),
         RegisterRestoreSource::Register(source) => {
             Some(RegisterRestoreSource::IntegerAddImm { source, offset })
         }
@@ -1371,8 +1453,7 @@ fn integer_restore_source_with_offset(
         }),
         RegisterRestoreSource::IntegerBitwiseK { .. }
         | RegisterRestoreSource::IntegerShiftImm { .. }
-        |
-        RegisterRestoreSource::FloatImmediate(_)
+        | RegisterRestoreSource::FloatImmediate(_)
         | RegisterRestoreSource::Bool(_)
         | RegisterRestoreSource::Nil => None,
     }
@@ -1397,9 +1478,9 @@ fn conditional_writes_on_exit(
     guard: &super::ir::TraceIrGuard,
 ) -> Option<bool> {
     match inst.opcode {
-        OpCode::TestSet => {
-            Some(guard_branch_target_pc(ir, guard).is_some_and(|target_pc| target_pc == guard.exit_pc))
-        }
+        OpCode::TestSet => Some(
+            guard_branch_target_pc(ir, guard).is_some_and(|target_pc| target_pc == guard.exit_pc),
+        ),
         OpCode::ForLoop => Some(guard.taken_on_trace),
         _ => None,
     }
@@ -1433,7 +1514,11 @@ fn restore_snapshot_operand_for_source(reg: u32, source: RegisterRestoreSource) 
             SnapshotOperand::RestoreRegisterFromIntegerImmediate { reg, value }
         }
         RegisterRestoreSource::IntegerAddImm { source, offset } => {
-            SnapshotOperand::RestoreRegisterFromIntegerAddImm { reg, source, offset }
+            SnapshotOperand::RestoreRegisterFromIntegerAddImm {
+                reg,
+                source,
+                offset,
+            }
         }
         RegisterRestoreSource::IntegerBitwiseK { source, index, op } => {
             SnapshotOperand::RestoreRegisterFromIntegerBitwiseK {
@@ -1454,7 +1539,9 @@ fn restore_snapshot_operand_for_source(reg: u32, source: RegisterRestoreSource) 
         RegisterRestoreSource::FloatImmediate(value) => {
             SnapshotOperand::RestoreRegisterFromFloatImmediate { reg, value }
         }
-        RegisterRestoreSource::Bool(value) => SnapshotOperand::RestoreRegisterFromBool { reg, value },
+        RegisterRestoreSource::Bool(value) => {
+            SnapshotOperand::RestoreRegisterFromBool { reg, value }
+        }
         RegisterRestoreSource::Nil => SnapshotOperand::RestoreRegisterFromNil { reg },
     }
 }
@@ -1486,8 +1573,12 @@ fn materialize_integer_shift_imm(
     if source_value.is_integer() {
         let source = source_value.ivalue();
         let result = match op {
-            IntegerShiftImmOp::ShlI => crate::lua_vm::execute::helper::lua_shiftl(imm as i64, source),
-            IntegerShiftImmOp::ShrI => crate::lua_vm::execute::helper::lua_shiftr(source, imm as i64),
+            IntegerShiftImmOp::ShlI => {
+                crate::lua_vm::execute::helper::lua_shiftl(imm as i64, source)
+            }
+            IntegerShiftImmOp::ShrI => {
+                crate::lua_vm::execute::helper::lua_shiftr(source, imm as i64)
+            }
         };
         LuaValue::integer(result)
     } else {
@@ -1604,7 +1695,10 @@ fn compute_live_vm_state(chunk: &LuaProto) -> Vec<LiveVmState> {
                 merge_live_vm_state(&mut next_state, &live_in[succ]);
             }
 
-            remove_defined_operands(&mut next_state, instruction_must_writes(instruction, opcode));
+            remove_defined_operands(
+                &mut next_state,
+                instruction_must_writes(instruction, opcode),
+            );
             add_read_operands(
                 &mut next_state,
                 instruction_reads(pc as u32, instruction, opcode),
@@ -1690,10 +1784,9 @@ fn instruction_successors(
         OpCode::ForPrep | OpCode::TForPrep => {
             bounded_successors(&[jump_target_pc(pc, instruction, opcode)], code_len)
         }
-        OpCode::ForLoop | OpCode::TForLoop => bounded_successors(
-            &[pc + 1, jump_target_pc(pc, instruction, opcode)],
-            code_len,
-        ),
+        OpCode::ForLoop | OpCode::TForLoop => {
+            bounded_successors(&[pc + 1, jump_target_pc(pc, instruction, opcode)], code_len)
+        }
         OpCode::Eq
         | OpCode::Lt
         | OpCode::Le
@@ -1749,6 +1842,7 @@ mod tests {
 
     use crate::Instruction;
     use crate::OpCode;
+    use crate::lua_value::LuaProto;
     use crate::lua_value::LuaValue;
     use crate::lua_vm::jit::helper_plan::HelperPlan;
     use crate::lua_vm::jit::ir::{
@@ -1761,7 +1855,6 @@ mod tests {
         TraceValueKind,
     };
     use crate::lua_vm::jit::trace_recorder::TraceRecorder;
-    use crate::lua_value::LuaProto;
 
     use super::{
         IntegerBitwiseKOp, IntegerShiftImmOp, collect_restore_operands,
@@ -1771,10 +1864,16 @@ mod tests {
     #[test]
     fn lowering_creates_entry_and_exit_snapshots() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 0, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
         let chunk_ptr = &chunk as *const LuaProto;
 
@@ -1787,7 +1886,10 @@ mod tests {
         assert_eq!(lowered.loop_tail_pc, artifact.loop_tail_pc);
         assert_eq!(lowered.exits.len(), 1);
         assert_eq!(lowered.snapshots.len(), 2);
-        assert_eq!(lowered.register_value_kind(0), Some(TraceValueKind::Unknown));
+        assert_eq!(
+            lowered.register_value_kind(0),
+            Some(TraceValueKind::Unknown)
+        );
         assert_eq!(lowered.snapshots[0].resume_pc, 0);
         assert_eq!(lowered.snapshots[1].resume_pc, lowered.exits[0].exit_pc);
         assert_eq!(lowered.exits[0].snapshot_id, 1);
@@ -1796,12 +1898,18 @@ mod tests {
         assert_eq!(lowered.exits[0].restore_summary.register_range_count, 0);
         assert_eq!(lowered.exits[0].restore_summary.upvalue_count, 0);
 
-        let deopt = lowered.deopt_target_for_exit_pc(lowered.exits[0].exit_pc).unwrap();
+        let deopt = lowered
+            .deopt_target_for_exit_pc(lowered.exits[0].exit_pc)
+            .unwrap();
         assert_eq!(deopt.exit_index, 0);
         assert_eq!(deopt.snapshot_id, 1);
         assert_eq!(deopt.resume_pc, lowered.exits[0].exit_pc);
 
-        let stack = [LuaValue::integer(11), LuaValue::integer(22), LuaValue::integer(33)];
+        let stack = [
+            LuaValue::integer(11),
+            LuaValue::integer(22),
+            LuaValue::integer(33),
+        ];
         let materialized = unsafe {
             lowered.materialize_snapshot(
                 deopt.snapshot_id,
@@ -1829,10 +1937,12 @@ mod tests {
         }
         .unwrap();
         assert_eq!(recovery.target.exit_index, 0);
-        assert!(recovery
-            .register_restores
-            .iter()
-            .any(|(reg, value)| *reg == 0 && *value == LuaValue::integer(22)));
+        assert!(
+            recovery
+                .register_restores
+                .iter()
+                .any(|(reg, value)| *reg == 0 && *value == LuaValue::integer(22))
+        );
         assert!(recovery.register_restores.iter().all(|(reg, _)| *reg != 1));
     }
 
@@ -1897,14 +2007,30 @@ mod tests {
     #[test]
     fn lowering_collects_root_register_value_hints() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 0, 4));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadF, 1, 2));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 2, 0, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::LoadTrue, 3, 0, 0));
-        chunk.code.push(Instruction::create_abx(OpCode::Closure, 4, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::NewTable, 5, 0, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 6, 0, 2, false));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 0, 4));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadF, 1, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 2, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::LoadTrue, 3, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::Closure, 4, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::NewTable, 5, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 6, 0, 2, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -1912,22 +2038,45 @@ mod tests {
         let helper_plan = HelperPlan::lower(&ir);
         let lowered = LoweredTrace::lower(&artifact, &ir, &helper_plan);
 
-        assert_eq!(lowered.register_value_kind(0), Some(TraceValueKind::Integer));
+        assert_eq!(
+            lowered.register_value_kind(0),
+            Some(TraceValueKind::Integer)
+        );
         assert_eq!(lowered.register_value_kind(1), Some(TraceValueKind::Float));
-        assert_eq!(lowered.register_value_kind(2), Some(TraceValueKind::Integer));
-        assert_eq!(lowered.register_value_kind(3), Some(TraceValueKind::Boolean));
-        assert_eq!(lowered.register_value_kind(4), Some(TraceValueKind::Closure));
+        assert_eq!(
+            lowered.register_value_kind(2),
+            Some(TraceValueKind::Integer)
+        );
+        assert_eq!(
+            lowered.register_value_kind(3),
+            Some(TraceValueKind::Boolean)
+        );
+        assert_eq!(
+            lowered.register_value_kind(4),
+            Some(TraceValueKind::Closure)
+        );
         assert_eq!(lowered.register_value_kind(5), Some(TraceValueKind::Table));
-        assert_eq!(lowered.register_value_kind(6), Some(TraceValueKind::Numeric));
+        assert_eq!(
+            lowered.register_value_kind(6),
+            Some(TraceValueKind::Numeric)
+        );
     }
 
     #[test]
     fn lowering_tracks_entry_stable_register_hints_separately() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 0, 4));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 0, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 0, 4));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 0, 0, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -1935,8 +2084,14 @@ mod tests {
         let helper_plan = HelperPlan::lower(&ir);
         let lowered = LoweredTrace::lower(&artifact, &ir, &helper_plan);
 
-        assert_eq!(lowered.register_value_kind(0), Some(TraceValueKind::Numeric));
-        assert_eq!(lowered.register_value_kind(1), Some(TraceValueKind::Integer));
+        assert_eq!(
+            lowered.register_value_kind(0),
+            Some(TraceValueKind::Numeric)
+        );
+        assert_eq!(
+            lowered.register_value_kind(1),
+            Some(TraceValueKind::Integer)
+        );
         assert_eq!(lowered.entry_stable_register_value_kind(0), None);
         assert_eq!(lowered.entry_stable_register_value_kind(1), None);
     }
@@ -1981,12 +2136,20 @@ mod tests {
     #[test]
     fn lowering_prunes_exit_restore_operands_to_live_vm_state() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 2, 3, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 4, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 2, 3, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 4, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2021,12 +2184,20 @@ mod tests {
     #[test]
     fn lowering_restores_testset_write_when_side_exit_takes_branch_target() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::TestSet, 0, 1, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::TestSet, 0, 1, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 2));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 3, 4, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 3, 4, 0));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2052,19 +2223,30 @@ mod tests {
             lowered.recover_exit(5, stack.as_ptr(), 0, &chunk.constants, std::ptr::null())
         }
         .unwrap();
-        assert_eq!(recovery.register_restores, vec![(0, LuaValue::integer(222))]);
+        assert_eq!(
+            recovery.register_restores,
+            vec![(0, LuaValue::integer(222))]
+        );
     }
 
     #[test]
     fn lowering_skips_testset_write_when_side_exit_is_fallthrough_arm() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::TestSet, 0, 1, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::TestSet, 0, 1, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 2));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 3, 4, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 3, 4, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2074,7 +2256,10 @@ mod tests {
 
         assert_eq!(lowered.exits.len(), 1);
         assert_eq!(lowered.exits[0].resume_pc, 6);
-        assert_eq!(lowered.snapshots[1].restore_operands, Vec::<SnapshotOperand>::new());
+        assert_eq!(
+            lowered.snapshots[1].restore_operands,
+            Vec::<SnapshotOperand>::new()
+        );
 
         let stack = [
             LuaValue::integer(999),
@@ -2093,11 +2278,17 @@ mod tests {
     #[test]
     fn lowering_restores_live_register_from_integer_immediate_source() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 0, 7));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 0, 7));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -4));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2125,12 +2316,20 @@ mod tests {
     #[test]
     fn lowering_restores_live_register_from_integer_addi_source() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
-        chunk.code.push(Instruction::create_abc(OpCode::AddI, 0, 1, 131));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::AddI, 0, 1, 131));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2160,12 +2359,20 @@ mod tests {
     fn lowering_restores_live_register_from_integer_addk_source() {
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(5));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
-        chunk.code.push(Instruction::create_abck(OpCode::AddK, 0, 1, 0, false));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::AddK, 0, 1, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2196,12 +2403,20 @@ mod tests {
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(20));
         chunk.constants.push(LuaValue::integer(3));
-        chunk.code.push(Instruction::create_abx(OpCode::LoadK, 1, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::SubK, 0, 1, 1, false));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::LoadK, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::SubK, 0, 1, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2231,12 +2446,20 @@ mod tests {
     fn lowering_restores_live_register_from_integer_bandk_source() {
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(6));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
-        chunk.code.push(Instruction::create_abck(OpCode::BAndK, 0, 1, 0, false));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::BAndK, 0, 1, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2271,12 +2494,20 @@ mod tests {
     fn lowering_restores_live_register_from_integer_bork_source() {
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(8));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
-        chunk.code.push(Instruction::create_abck(OpCode::BOrK, 0, 1, 0, false));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::BOrK, 0, 1, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2299,12 +2530,20 @@ mod tests {
     fn lowering_restores_live_register_from_integer_bxork_source() {
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(3));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
-        chunk.code.push(Instruction::create_abck(OpCode::BXorK, 0, 1, 0, false));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 7));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::BXorK, 0, 1, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2326,12 +2565,20 @@ mod tests {
     #[test]
     fn lowering_restores_live_register_from_integer_shri_source() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 20));
-        chunk.code.push(Instruction::create_abc(OpCode::ShrI, 0, 1, 129));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 20));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::ShrI, 0, 1, 129));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2365,12 +2612,20 @@ mod tests {
     #[test]
     fn lowering_restores_live_register_from_integer_shli_source() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 3));
-        chunk.code.push(Instruction::create_abc(OpCode::ShlI, 0, 1, 130));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 3));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::ShlI, 0, 1, 130));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2437,7 +2692,10 @@ mod tests {
             opcode: OpCode::AddI,
             raw_instruction: Instruction::create_abc(OpCode::AddI, 0, 1, 131).as_u32(),
             kind: TraceIrInstKind::Arithmetic,
-            reads: vec![TraceIrOperand::Register(1), TraceIrOperand::SignedImmediate(4)],
+            reads: vec![
+                TraceIrOperand::Register(1),
+                TraceIrOperand::SignedImmediate(4),
+            ],
             writes: vec![TraceIrOperand::Register(0)],
         };
         let ssa_trace = LoweredSsaTrace {
@@ -2466,7 +2724,10 @@ mod tests {
                 Some(&ssa_trace),
                 &BTreeMap::new(),
             ),
-            super::RegisterRestoreSource::IntegerAddImm { source: 1, offset: 4 }
+            super::RegisterRestoreSource::IntegerAddImm {
+                source: 1,
+                offset: 4
+            }
         );
     }
 
@@ -2474,11 +2735,17 @@ mod tests {
     fn lowering_restores_live_register_from_constant_source() {
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(41));
-        chunk.code.push(Instruction::create_abx(OpCode::LoadK, 0, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::LoadK, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 1));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -4));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2491,7 +2758,11 @@ mod tests {
             vec![SnapshotOperand::RestoreRegisterFromConstantIndex { reg: 0, index: 0 }]
         );
 
-        let stack = [LuaValue::integer(999), LuaValue::integer(22), LuaValue::integer(33)];
+        let stack = [
+            LuaValue::integer(999),
+            LuaValue::integer(22),
+            LuaValue::integer(33),
+        ];
         let recovery = unsafe {
             lowered.recover_exit(4, stack.as_ptr(), 0, &chunk.constants, std::ptr::null())
         }
@@ -2502,13 +2773,23 @@ mod tests {
     #[test]
     fn lowering_ignores_writes_after_side_exit_guard_when_building_restore_set() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Test, 2, 0, 0, false));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, 3));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 4, 5, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 6, 7, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 4, 5, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 6, 7, 0));
         chunk.code.push(Instruction::create_sj(OpCode::Jmp, -6));
-        chunk.code.push(Instruction::create_abc(OpCode::Return1, 4, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return1, 4, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2519,7 +2800,10 @@ mod tests {
         assert_eq!(lowered.exits.len(), 1);
         assert_eq!(lowered.exits[0].guard_pc, 1);
         assert_eq!(lowered.exits[0].resume_pc, 6);
-        assert_eq!(lowered.snapshots[1].restore_operands, Vec::<SnapshotOperand>::new());
+        assert_eq!(
+            lowered.snapshots[1].restore_operands,
+            Vec::<SnapshotOperand>::new()
+        );
         assert_eq!(lowered.exits[0].restore_summary.register_count, 0);
 
         let stack = [
@@ -2542,10 +2826,18 @@ mod tests {
     #[test]
     fn lowering_builds_minimal_ssa_trace() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 0, 4));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 0, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::Add, 2, 0, 1, false));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 0, 4));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::Add, 2, 0, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2555,10 +2847,13 @@ mod tests {
 
         assert_eq!(lowered.ssa_trace.instructions.len(), 4);
         assert_eq!(lowered.ssa_trace.values.len(), 3);
-        assert!(lowered.ssa_trace.values.iter().all(|value| matches!(
-            value.origin,
-            SsaValueOrigin::InstructionOutput { .. }
-        )));
+        assert!(
+            lowered
+                .ssa_trace
+                .values
+                .iter()
+                .all(|value| matches!(value.origin, SsaValueOrigin::InstructionOutput { .. }))
+        );
         assert_eq!(lowered.ssa_value_summary().entry_count, 0);
         assert_eq!(lowered.ssa_value_summary().derived_count, 3);
         assert_eq!(lowered.ssa_value_summary().integer_count, 2);
@@ -2572,8 +2867,12 @@ mod tests {
     #[test]
     fn lowering_creates_entry_ssa_values_for_live_in_reads() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2582,13 +2881,19 @@ mod tests {
         let lowered = LoweredTrace::lower(&artifact, &ir, &helper_plan);
 
         assert_eq!(lowered.ssa_trace.values.len(), 2);
-        assert!(lowered.ssa_trace.values.iter().any(|value| matches!(
-            value.origin,
-            SsaValueOrigin::EntryRegister(1)
-        )));
+        assert!(
+            lowered
+                .ssa_trace
+                .values
+                .iter()
+                .any(|value| matches!(value.origin, SsaValueOrigin::EntryRegister(1)))
+        );
         assert_eq!(lowered.ssa_value_summary().entry_count, 1);
         assert_eq!(lowered.ssa_value_summary().derived_count, 1);
-        assert_eq!(lowered.ssa_trace.instructions[0].inputs, vec![SsaOperand::Value(0)]);
+        assert_eq!(
+            lowered.ssa_trace.instructions[0].inputs,
+            vec![SsaOperand::Value(0)]
+        );
         assert_eq!(lowered.entry_ssa_register_hints().len(), 1);
         assert_eq!(lowered.entry_ssa_register_hints()[0].reg, 1);
     }
@@ -2596,11 +2901,21 @@ mod tests {
     #[test]
     fn lowering_attaches_ssa_memory_effects() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abck(OpCode::GetTable, 0, 1, 2, false));
-        chunk.code.push(Instruction::create_abc(OpCode::GetI, 3, 1, 6));
-        chunk.code.push(Instruction::create_abc(OpCode::SetI, 1, 6, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::SetUpval, 0, 3, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::GetTable, 0, 1, 2, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::GetI, 3, 1, 6));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::SetI, 1, 6, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::SetUpval, 0, 3, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2656,9 +2971,15 @@ mod tests {
     fn lowering_skips_fused_arithmetic_metamethod_in_ssa_trace() {
         let mut chunk = LuaProto::new();
         chunk.constants.push(LuaValue::integer(1));
-        chunk.code.push(Instruction::create_abck(OpCode::AddK, 0, 0, 0, false));
-        chunk.code.push(Instruction::create_abck(OpCode::MmBinK, 0, 0, 6, false));
-        chunk.code.push(Instruction::create_abx(OpCode::ForLoop, 0, 3));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::AddK, 0, 0, 0, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::MmBinK, 0, 0, 6, false));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 3));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2667,22 +2988,37 @@ mod tests {
         let lowered = LoweredTrace::lower(&artifact, &ir, &helper_plan);
 
         assert_eq!(lowered.ssa_trace.instructions.len(), 2);
-        assert!(lowered
-            .ssa_trace
-            .instructions
-            .iter()
-            .all(|instruction| !matches!(instruction.opcode, OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK)));
+        assert!(
+            lowered
+                .ssa_trace
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(
+                    instruction.opcode,
+                    OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK
+                ))
+        );
         assert_eq!(lowered.ssa_memory_effect_summary().metamethod_count, 0);
     }
 
     #[test]
     fn lowering_bumps_ssa_table_int_region_version_after_generic_table_write() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::NewTable, 0, 0, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::GetI, 1, 0, 6));
-        chunk.code.push(Instruction::create_abck(OpCode::SetField, 0, 7, 1, false));
-        chunk.code.push(Instruction::create_abc(OpCode::GetI, 2, 0, 6));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::NewTable, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::GetI, 1, 0, 6));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::SetField, 0, 7, 1, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::GetI, 2, 0, 6));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2710,20 +3046,41 @@ mod tests {
                 key: SsaTableKey::UnsignedImmediate(6),
             }]
         );
-        assert_eq!(lowered.ssa_table_int_optimization_summary().forwardable_read_count, 0);
+        assert_eq!(
+            lowered
+                .ssa_table_int_optimization_summary()
+                .forwardable_read_count,
+            0
+        );
     }
 
     #[test]
     fn lowering_detects_ssa_table_int_forwardable_reads_and_dead_stores() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::NewTable, 0, 0, 0));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 1, 11));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 2, 22));
-        chunk.code.push(Instruction::create_abc(OpCode::SetI, 0, 6, 1));
-        chunk.code.push(Instruction::create_abc(OpCode::GetI, 3, 0, 6));
-        chunk.code.push(Instruction::create_abc(OpCode::SetI, 0, 7, 1));
-        chunk.code.push(Instruction::create_abc(OpCode::SetI, 0, 7, 2));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::NewTable, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 1, 11));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 2, 22));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::SetI, 0, 6, 1));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::GetI, 3, 0, 6));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::SetI, 0, 7, 1));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::SetI, 0, 7, 2));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2731,24 +3088,56 @@ mod tests {
         let helper_plan = HelperPlan::lower(&ir);
         let lowered = LoweredTrace::lower(&artifact, &ir, &helper_plan);
 
-        assert_eq!(lowered.ssa_trace.instructions[4].table_int_rewrite, Some(SsaTableIntRewrite::ForwardFromRegister { reg: 1, value: 1 }));
-        assert_eq!(lowered.ssa_trace.instructions[5].table_int_rewrite, Some(SsaTableIntRewrite::DeadStore));
+        assert_eq!(
+            lowered.ssa_trace.instructions[4].table_int_rewrite,
+            Some(SsaTableIntRewrite::ForwardFromRegister { reg: 1, value: 1 })
+        );
+        assert_eq!(
+            lowered.ssa_trace.instructions[5].table_int_rewrite,
+            Some(SsaTableIntRewrite::DeadStore)
+        );
         assert_eq!(lowered.ssa_trace.instructions[6].table_int_rewrite, None);
-        assert_eq!(lowered.ssa_table_int_optimization_summary().forwardable_read_count, 1);
-        assert_eq!(lowered.ssa_table_int_optimization_summary().dead_store_count, 1);
+        assert_eq!(
+            lowered
+                .ssa_table_int_optimization_summary()
+                .forwardable_read_count,
+            1
+        );
+        assert_eq!(
+            lowered
+                .ssa_table_int_optimization_summary()
+                .dead_store_count,
+            1
+        );
     }
 
     #[test]
     fn lowering_normalizes_ssa_table_keys_across_move_and_addi_aliases() {
         let mut chunk = LuaProto::new();
-        chunk.code.push(Instruction::create_abc(OpCode::NewTable, 0, 0, 0));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 1, 0, 0));
-        chunk.code.push(Instruction::create_asbx(OpCode::LoadI, 2, 4));
-        chunk.code.push(Instruction::create_abc(OpCode::AddI, 3, 2, 128));
-        chunk.code.push(Instruction::create_abc(OpCode::Move, 6, 3, 0));
-        chunk.code.push(Instruction::create_abck(OpCode::GetTable, 4, 1, 3, false));
-        chunk.code.push(Instruction::create_abck(OpCode::GetTable, 5, 0, 6, false));
-        chunk.code.push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::NewTable, 0, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 0, 0));
+        chunk
+            .code
+            .push(Instruction::create_asbx(OpCode::LoadI, 2, 4));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::AddI, 3, 2, 128));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 6, 3, 0));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::GetTable, 4, 1, 3, false));
+        chunk
+            .code
+            .push(Instruction::create_abck(OpCode::GetTable, 5, 0, 6, false));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Return0, 0, 0, 0));
         let chunk_ptr = &chunk as *const LuaProto;
 
         let artifact = TraceRecorder::record_root(chunk_ptr, 0).unwrap();
@@ -2866,7 +3255,10 @@ fn build_minimal_ssa_trace(ir: &TraceIr) -> LoweredSsaTrace {
 
     apply_ssa_table_int_rewrites(&mut instructions);
 
-    LoweredSsaTrace { values, instructions }
+    LoweredSsaTrace {
+        values,
+        instructions,
+    }
 }
 
 fn ssa_operand_for_read(
@@ -2924,7 +3316,10 @@ fn ensure_entry_ssa_value(
     *next_value_id = next_value_id.saturating_add(1);
     values.push(SsaValue {
         id: value_id,
-        kind: entry_hints.get(&reg).copied().unwrap_or(TraceValueKind::Unknown),
+        kind: entry_hints
+            .get(&reg)
+            .copied()
+            .unwrap_or(TraceValueKind::Unknown),
         origin: SsaValueOrigin::EntryRegister(reg),
     });
     current_values.insert(reg, value_id);
@@ -2979,7 +3374,10 @@ fn push_ssa_output_value(
     *next_value_id = next_value_id.saturating_add(1);
     values.push(SsaValue {
         id: value_id,
-        kind: current_hints.get(&reg).copied().unwrap_or(TraceValueKind::Unknown),
+        kind: current_hints
+            .get(&reg)
+            .copied()
+            .unwrap_or(TraceValueKind::Unknown),
         origin: SsaValueOrigin::InstructionOutput {
             pc: inst.pc,
             kind: inst.kind,
@@ -3071,7 +3469,9 @@ fn ssa_memory_effects_for_instruction(
             table: inputs
                 .first()
                 .and_then(ssa_operand_value_id)
-                .map(|value_id| normalize_ssa_passthrough_value(value_id, value_producers, instructions)),
+                .map(|value_id| {
+                    normalize_ssa_passthrough_value(value_id, value_producers, instructions)
+                }),
             key: inputs
                 .get(1)
                 .map(|operand| ssa_table_key_from_operand(operand, value_producers, instructions))
@@ -3113,12 +3513,16 @@ fn ssa_memory_effects_for_instruction(
             let table = inputs
                 .first()
                 .and_then(ssa_operand_value_id)
-                .map(|value_id| normalize_ssa_passthrough_value(value_id, value_producers, instructions));
+                .map(|value_id| {
+                    normalize_ssa_passthrough_value(value_id, value_producers, instructions)
+                });
             let effects = vec![SsaMemoryEffect::TableWrite {
                 table,
                 key: inputs
                     .get(1)
-                    .map(|operand| ssa_table_key_from_operand(operand, value_producers, instructions))
+                    .map(|operand| {
+                        ssa_table_key_from_operand(operand, value_producers, instructions)
+                    })
                     .unwrap_or(SsaTableKey::Unknown),
                 value: inputs.get(2).and_then(ssa_operand_value_id),
             }];
@@ -3141,13 +3545,17 @@ fn ssa_memory_effects_for_instruction(
                 SsaOperand::Upvalue(index) => Some(*index),
                 _ => None,
             })
-            .map(|index| vec![SsaMemoryEffect::UpvalueWrite {
-                index,
-                value: inputs.first().and_then(ssa_operand_value_id),
-            }])
+            .map(|index| {
+                vec![SsaMemoryEffect::UpvalueWrite {
+                    index,
+                    value: inputs.first().and_then(ssa_operand_value_id),
+                }]
+            })
             .unwrap_or_default(),
         OpCode::Call | OpCode::TForCall => vec![SsaMemoryEffect::Call],
-        OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => vec![SsaMemoryEffect::MetamethodFallback],
+        OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
+            vec![SsaMemoryEffect::MetamethodFallback]
+        }
         _ => Vec::new(),
     }
 }
@@ -3172,7 +3580,8 @@ fn ssa_table_key_from_operand(
 ) -> SsaTableKey {
     match operand {
         SsaOperand::Value(value_id) => {
-            let (base, offset) = normalize_ssa_affine_value(*value_id, value_producers, instructions);
+            let (base, offset) =
+                normalize_ssa_affine_value(*value_id, value_producers, instructions);
             if offset == 0 {
                 SsaTableKey::Value(base)
             } else {
@@ -3223,13 +3632,15 @@ fn normalize_ssa_affine_value(
         let instruction = &instructions[instruction_index];
         match instruction.opcode {
             OpCode::Move => {
-                let Some(next_value_id) = instruction.inputs.first().and_then(ssa_operand_value_id) else {
+                let Some(next_value_id) = instruction.inputs.first().and_then(ssa_operand_value_id)
+                else {
                     return (value_id, offset);
                 };
                 value_id = next_value_id;
             }
             OpCode::AddI => {
-                let Some(next_value_id) = instruction.inputs.first().and_then(ssa_operand_value_id) else {
+                let Some(next_value_id) = instruction.inputs.first().and_then(ssa_operand_value_id)
+                else {
                     return (value_id, offset);
                 };
                 let Some(imm) = instruction.inputs.get(1).and_then(|operand| match operand {
@@ -3333,9 +3744,8 @@ fn apply_ssa_table_int_rewrites(instructions: &mut [SsaInstruction]) {
                     let slot = SsaTableIntSlotKey { region, key };
                     if let Some(state) = last_writes.get_mut(&slot) {
                         if let (Some(value), Some(reg)) = (state.value, state.source_register) {
-                            instructions[instruction_index].table_int_rewrite = Some(
-                                SsaTableIntRewrite::ForwardFromRegister { reg, value },
-                            );
+                            instructions[instruction_index].table_int_rewrite =
+                                Some(SsaTableIntRewrite::ForwardFromRegister { reg, value });
                         }
                         state.read_since_write = true;
                     }

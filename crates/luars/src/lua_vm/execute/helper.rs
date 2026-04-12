@@ -8,8 +8,7 @@ use crate::{
             CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
         },
         execute::{
-            call::poscall, call_tm_res, call_tm_res1, concat::concat,
-            metamethod::call_tm_res_into,
+            call::poscall, call_tm_res, call_tm_res1, concat::concat, metamethod::call_tm_res_into,
         },
         lua_limits::{EXTRA_STACK, MAXTAGLOOP},
     },

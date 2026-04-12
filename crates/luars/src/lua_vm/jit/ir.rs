@@ -111,10 +111,7 @@ impl TraceIr {
     }
 }
 
-pub(crate) fn is_fused_arithmetic_metamethod_fallback(
-    insts: &[TraceIrInst],
-    index: usize,
-) -> bool {
+pub(crate) fn is_fused_arithmetic_metamethod_fallback(insts: &[TraceIrInst], index: usize) -> bool {
     let Some(inst) = insts.get(index) else {
         return false;
     };
@@ -179,10 +176,7 @@ pub(crate) fn is_fused_arithmetic_metamethod_pair(
     }
 }
 
-fn arithmetic_metamethod_pair_matches(
-    arithmetic: &TraceIrInst,
-    metamethod: &TraceIrInst,
-) -> bool {
+fn arithmetic_metamethod_pair_matches(arithmetic: &TraceIrInst, metamethod: &TraceIrInst) -> bool {
     is_fused_arithmetic_metamethod_pair(
         arithmetic.opcode,
         Instruction::from_u32(arithmetic.raw_instruction),
@@ -225,10 +219,14 @@ fn jump_target(pc: u32, instruction: Instruction, opcode: OpCode) -> TraceIrOper
 fn collect_reads(pc: u32, instruction: Instruction, opcode: OpCode) -> Vec<TraceIrOperand> {
     match opcode {
         OpCode::Move => vec![TraceIrOperand::Register(instruction.get_b())],
-        OpCode::LoadI | OpCode::LoadF => vec![TraceIrOperand::SignedImmediate(instruction.get_sbx())],
+        OpCode::LoadI | OpCode::LoadF => {
+            vec![TraceIrOperand::SignedImmediate(instruction.get_sbx())]
+        }
         OpCode::LoadK => vec![TraceIrOperand::ConstantIndex(instruction.get_bx())],
         OpCode::LoadKX => vec![TraceIrOperand::UnsignedImmediate(instruction.get_a())],
-        OpCode::LoadFalse | OpCode::LoadTrue => vec![TraceIrOperand::Bool(opcode == OpCode::LoadTrue)],
+        OpCode::LoadFalse | OpCode::LoadTrue => {
+            vec![TraceIrOperand::Bool(opcode == OpCode::LoadTrue)]
+        }
         OpCode::LoadNil => vec![TraceIrOperand::UnsignedImmediate(instruction.get_b())],
         OpCode::GetUpval => vec![TraceIrOperand::Upvalue(instruction.get_b())],
         OpCode::SetUpval => vec![
@@ -675,6 +673,7 @@ mod tests {
                 taken_on_trace: false,
                 kind: TraceExitKind::GuardExit,
             }],
+            loop_header_pc: 0,
             loop_tail_pc: 4,
         };
 
@@ -729,6 +728,7 @@ mod tests {
                 taken_on_trace: true,
                 kind: TraceExitKind::GuardExit,
             }],
+            loop_header_pc: 0,
             loop_tail_pc: 2,
         };
 
@@ -767,6 +767,7 @@ mod tests {
                 },
             ],
             exits: vec![],
+            loop_header_pc: 0,
             loop_tail_pc: 2,
         };
 
@@ -794,7 +795,10 @@ mod tests {
                 opcode: OpCode::AddK,
                 raw_instruction: Instruction::create_abck(OpCode::AddK, 4, 4, 0, false).as_u32(),
                 kind: TraceIrInstKind::Arithmetic,
-                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                reads: vec![
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::ConstantIndex(0),
+                ],
                 writes: vec![TraceIrOperand::Register(4)],
             },
             TraceIrInst {
@@ -802,7 +806,10 @@ mod tests {
                 opcode: OpCode::MmBinK,
                 raw_instruction: Instruction::create_abck(OpCode::MmBinK, 4, 0, 6, false).as_u32(),
                 kind: TraceIrInstKind::MetamethodFallback,
-                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                reads: vec![
+                    TraceIrOperand::Register(4),
+                    TraceIrOperand::ConstantIndex(0),
+                ],
                 writes: vec![],
             },
         ];
@@ -832,6 +839,7 @@ mod tests {
                 },
             ],
             exits: vec![],
+            loop_header_pc: 0,
             loop_tail_pc: 1,
         };
 
@@ -873,6 +881,7 @@ mod tests {
                 },
             ],
             exits: Vec::new(),
+            loop_header_pc: 0,
             loop_tail_pc: 2,
         };
 
@@ -907,6 +916,7 @@ mod tests {
                 },
             ],
             exits: Vec::new(),
+            loop_header_pc: 0,
             loop_tail_pc: 2,
         };
 
@@ -946,6 +956,7 @@ mod tests {
                 },
             ],
             exits: Vec::new(),
+            loop_header_pc: 0,
             loop_tail_pc: 3,
         };
 
@@ -995,6 +1006,7 @@ mod tests {
                 },
             ],
             exits: Vec::new(),
+            loop_header_pc: 0,
             loop_tail_pc: 3,
         };
 
@@ -1007,7 +1019,10 @@ mod tests {
         assert_eq!(ir.insts[1].kind, TraceIrInstKind::UpvalueMutation);
         assert_eq!(ir.insts[1].writes, vec![TraceIrOperand::Upvalue(3)]);
         assert_eq!(ir.insts[2].kind, TraceIrInstKind::ClosureCreation);
-        assert_eq!(ir.insts[2].reads, vec![TraceIrOperand::UnsignedImmediate(6)]);
+        assert_eq!(
+            ir.insts[2].reads,
+            vec![TraceIrOperand::UnsignedImmediate(6)]
+        );
         assert_eq!(ir.insts[2].writes, vec![TraceIrOperand::Register(4)]);
     }
 
@@ -1048,6 +1063,7 @@ mod tests {
                 taken_on_trace: true,
                 kind: TraceExitKind::GuardExit,
             }],
+            loop_header_pc: 0,
             loop_tail_pc: 3,
         };
 
@@ -1079,6 +1095,7 @@ mod tests {
                 opcode: OpCode::Return1,
             }],
             exits: vec![],
+            loop_header_pc: 4,
             loop_tail_pc: 4,
         };
 
@@ -1102,6 +1119,7 @@ mod tests {
                 opcode: OpCode::Return,
             }],
             exits: vec![],
+            loop_header_pc: 8,
             loop_tail_pc: 8,
         };
 

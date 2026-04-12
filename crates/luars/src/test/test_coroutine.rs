@@ -218,3 +218,45 @@ fn test_coroutine_error_handling() {
 
     assert!(result.is_ok());
 }
+
+#[test]
+fn test_coroutine_wrap_big_lua_after_generational_gc() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let gengc_source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../lua_tests/testes/gengc.lua"
+    ))
+    .unwrap();
+    let big_source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../lua_tests/testes/big.lua"
+    ))
+    .unwrap();
+
+    vm.execute(&gengc_source).unwrap();
+
+    let harness = format!(
+        r#"
+        local big = [==[
+{big_source}
+]==]
+
+        local f = coroutine.wrap(assert(load(big, "@big.lua")))
+        assert(f() == 'b')
+        assert(f() == 'a')
+        "#
+    );
+
+    let result = vm.execute(&harness);
+
+    if let Err(e) = &result {
+        eprintln!(
+            "test_coroutine_wrap_big_lua_after_generational_gc Error: {}",
+            vm.get_error_message(*e)
+        );
+    }
+
+    assert!(result.is_ok());
+}

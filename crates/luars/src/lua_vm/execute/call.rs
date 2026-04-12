@@ -4,9 +4,11 @@
 use crate::{
     CallInfo, LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
     lua_vm::{
-        CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, TmKind, call_info::call_status,
+        CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, TmKind,
+        call_info::call_status,
         execute::{helper::get_metamethod_from_meta_ptr, hook::hook_on_return},
-        get_metamethod_event, lua_limits::EXTRA_STACK,
+        get_metamethod_event,
+        lua_limits::EXTRA_STACK,
     },
 };
 

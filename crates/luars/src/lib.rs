@@ -54,8 +54,6 @@ pub use lua_value::{LuaFunction, LuaProto, LuaTable, LuaValue, LuaValueKind, chu
 pub use lua_vm::SafeOption;
 #[cfg(feature = "sandbox")]
 pub use lua_vm::SandboxConfig;
-#[cfg(feature = "jit")]
-pub use lua_vm::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 pub use lua_vm::async_thread::{
     AsyncCallHandle, AsyncFuture, AsyncReturnValue, AsyncThread, IntoAsyncLua,
 };
@@ -65,5 +63,7 @@ pub use lua_vm::{
     CFunction, CallInfo, DebugInfo, Instruction, LuaAnyRef, LuaFunctionRef, LuaResult, LuaState,
     LuaStringRef, LuaTableRef, LuaVM, OpCode, UserDataRef,
 };
+#[cfg(feature = "jit")]
+pub use lua_vm::{JitAbortCounters, JitCounters, JitStatsSnapshot};
 pub use lua_vm::{LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET};
 pub use stdlib::Stdlib;

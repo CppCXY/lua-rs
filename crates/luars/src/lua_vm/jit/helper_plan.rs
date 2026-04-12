@@ -205,10 +205,7 @@ fn execute_call_helper(
     summary.call_steps = summary.call_steps.saturating_add(1);
 }
 
-fn execute_metamethod_helper(
-    _reads: &[TraceIrOperand],
-    summary: &mut HelperPlanDispatchSummary,
-) {
+fn execute_metamethod_helper(_reads: &[TraceIrOperand], summary: &mut HelperPlanDispatchSummary) {
     record_helper_step(summary);
     summary.metamethod_steps = summary.metamethod_steps.saturating_add(1);
 }
@@ -298,13 +295,11 @@ fn summarize_steps(steps: &[HelperPlanStep]) -> HelperPlanDispatchSummary {
 #[cfg(test)]
 mod tests {
     use crate::Instruction;
-    use crate::lua_vm::jit::helper_plan::{
-        HelperPlan, HelperPlanDispatchSummary, HelperPlanStep,
-    };
+    use crate::OpCode;
+    use crate::lua_vm::jit::helper_plan::{HelperPlan, HelperPlanDispatchSummary, HelperPlanStep};
     use crate::lua_vm::jit::ir::{
         TraceIr, TraceIrGuard, TraceIrGuardKind, TraceIrInst, TraceIrInstKind, TraceIrOperand,
     };
-    use crate::OpCode;
 
     #[test]
     fn lower_ir_to_helper_plan() {
@@ -425,17 +420,25 @@ mod tests {
                 TraceIrInst {
                     pc: 0,
                     opcode: OpCode::AddK,
-                    raw_instruction: Instruction::create_abck(OpCode::AddK, 4, 4, 0, false).as_u32(),
+                    raw_instruction: Instruction::create_abck(OpCode::AddK, 4, 4, 0, false)
+                        .as_u32(),
                     kind: TraceIrInstKind::Arithmetic,
-                    reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                    reads: vec![
+                        TraceIrOperand::Register(4),
+                        TraceIrOperand::ConstantIndex(0),
+                    ],
                     writes: vec![TraceIrOperand::Register(4)],
                 },
                 TraceIrInst {
                     pc: 1,
                     opcode: OpCode::MmBinK,
-                    raw_instruction: Instruction::create_abck(OpCode::MmBinK, 4, 0, 6, false).as_u32(),
+                    raw_instruction: Instruction::create_abck(OpCode::MmBinK, 4, 0, 6, false)
+                        .as_u32(),
                     kind: TraceIrInstKind::MetamethodFallback,
-                    reads: vec![TraceIrOperand::Register(4), TraceIrOperand::ConstantIndex(0)],
+                    reads: vec![
+                        TraceIrOperand::Register(4),
+                        TraceIrOperand::ConstantIndex(0),
+                    ],
                     writes: vec![],
                 },
                 TraceIrInst {
@@ -493,7 +496,10 @@ mod tests {
         };
 
         let plan = HelperPlan::lower(&ir);
-        assert!(matches!(plan.steps[0], HelperPlanStep::UpvalueAccess { .. }));
+        assert!(matches!(
+            plan.steps[0],
+            HelperPlanStep::UpvalueAccess { .. }
+        ));
         assert!(matches!(plan.steps[1], HelperPlanStep::LoopPrep { .. }));
         assert_eq!(
             plan.dispatch(),
@@ -550,8 +556,14 @@ mod tests {
 
         let plan = HelperPlan::lower(&ir);
         assert!(matches!(plan.steps[0], HelperPlanStep::Call { .. }));
-        assert!(matches!(plan.steps[1], HelperPlanStep::UpvalueMutation { .. }));
-        assert!(matches!(plan.steps[2], HelperPlanStep::ClosureCreation { .. }));
+        assert!(matches!(
+            plan.steps[1],
+            HelperPlanStep::UpvalueMutation { .. }
+        ));
+        assert!(matches!(
+            plan.steps[2],
+            HelperPlanStep::ClosureCreation { .. }
+        ));
         assert_eq!(
             plan.dispatch(),
             HelperPlanDispatchSummary {

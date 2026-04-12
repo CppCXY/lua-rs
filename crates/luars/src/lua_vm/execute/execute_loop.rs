@@ -62,7 +62,9 @@ unsafe fn jit_dispatch_root_trace_or_record(
     target_pc: usize,
     loop_exit_pc_override: Option<usize>,
 ) -> Option<jit::JitTraceAction> {
-    unsafe { jit::dispatch_root_trace_or_record(lua_state, ci, base, target_pc, loop_exit_pc_override) }
+    unsafe {
+        jit::dispatch_root_trace_or_record(lua_state, ci, base, target_pc, loop_exit_pc_override)
+    }
 }
 
 #[cfg(feature = "jit")]
@@ -1803,9 +1805,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let target_pc = (pc as isize + sj as isize) as usize;
                     #[cfg(feature = "jit")]
                     if sj < 0 {
-                        if let Some(action) = unsafe {
-                            jit_try_handle_backedge(lua_state, ci, base, target_pc, None)
-                        } {
+                        if let Some(action) =
+                            unsafe { jit_try_handle_backedge(lua_state, ci, base, target_pc, None) }
+                        {
                             apply_jit_trace_action!(action);
                             updatetrap!();
                             continue;
@@ -2113,7 +2115,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a();
                     let b = instr.get_b();
                     let k = instr.get_k();
- 
+
                     let rb = *stack_val!(b);
                     let cond = rb.is_nil() || rb.ttisfalse();
                     if cond == k {
@@ -2319,9 +2321,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 #[cfg(feature = "jit")]
                                 {
                                     if let Some(action) = jit_try_handle_backedge(
-                                        lua_state, ci, base, pc, Some(pc + bx),
-                                    )
-                                    {
+                                        lua_state,
+                                        ci,
+                                        base,
+                                        pc,
+                                        Some(pc + bx),
+                                    ) {
                                         apply_jit_trace_action!(action);
                                     }
                                 }
@@ -2537,7 +2542,3 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
     }
 }
-
-
-
-

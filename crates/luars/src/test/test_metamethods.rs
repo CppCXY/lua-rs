@@ -413,7 +413,10 @@ fn test_len_metamethod_receives_single_argument() {
     "#,
     );
     if let Err(e) = &result {
-        eprintln!("test_len_metamethod_receives_single_argument error: {:?}", e);
+        eprintln!(
+            "test_len_metamethod_receives_single_argument error: {:?}",
+            e
+        );
     }
     assert!(result.is_ok());
 }
@@ -449,8 +452,14 @@ fn test_call_metamethod_rclosure() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     vm.register_function("rust_call", |state| {
         assert!(state.get_arg(1).map(|v| v.is_table()).unwrap_or(false));
-        let a = state.get_arg(2).and_then(|v| v.as_integer()).unwrap_or_default();
-        let b = state.get_arg(3).and_then(|v| v.as_integer()).unwrap_or_default();
+        let a = state
+            .get_arg(2)
+            .and_then(|v| v.as_integer())
+            .unwrap_or_default();
+        let b = state
+            .get_arg(3)
+            .and_then(|v| v.as_integer())
+            .unwrap_or_default();
         state.push_value(LuaValue::integer(a + b))?;
         Ok(1)
     })

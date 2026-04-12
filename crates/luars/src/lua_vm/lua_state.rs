@@ -2362,7 +2362,11 @@ impl LuaState {
         }
         if obj.ttistable() {
             if let Some(mm) = obj.as_table().and_then(|table| {
-                execute::helper::get_metamethod_from_meta_ptr(self, table.meta_ptr(), execute::TmKind::Len)
+                execute::helper::get_metamethod_from_meta_ptr(
+                    self,
+                    table.meta_ptr(),
+                    execute::TmKind::Len,
+                )
             }) {
                 let result = execute::call_tm_res1(self, mm, *obj)?;
                 return result

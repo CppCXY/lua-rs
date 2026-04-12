@@ -1,6 +1,141 @@
 // Tests for table library functions
 use crate::*;
 
+fn decode_newtable_sizes(proto: &LuaProto) -> (u32, u32) {
+    let pc = proto
+        .code
+        .iter()
+        .position(|instr| instr.get_opcode() == OpCode::NewTable)
+        .expect("expected NEWTABLE instruction");
+    let instr = proto.code[pc];
+
+    let mut array_size = instr.get_vc();
+    if instr.get_k() {
+        let extra = proto.code[pc + 1];
+        assert_eq!(extra.get_opcode(), OpCode::ExtraArg);
+        array_size += extra.get_ax() * (Instruction::MAX_V_C + 1);
+    }
+
+    let hash_size = match instr.get_vb() {
+        0 => 0,
+        vb if vb <= 31 => 1 << (vb - 1),
+        _ => 0,
+    };
+
+    (array_size, hash_size)
+}
+
+fn decode_setlist_entries(proto: &LuaProto) -> Vec<(u32, u32)> {
+    let mut entries = Vec::new();
+
+    for (pc, instr) in proto.code.iter().copied().enumerate() {
+        if instr.get_opcode() != OpCode::SetList {
+            continue;
+        }
+
+        let mut start_index = instr.get_vc();
+        if instr.get_k() {
+            let extra = proto.code[pc + 1];
+            assert_eq!(extra.get_opcode(), OpCode::ExtraArg);
+            start_index += extra.get_ax() * (Instruction::MAX_V_C + 1);
+        }
+
+        entries.push((instr.get_vb(), start_index));
+    }
+
+    entries
+}
+
+#[test]
+fn test_table_constructor_bytecode_sizes_for_mixed_fields() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let proto = vm
+        .compile_with_name("local t = {1, 2, 3, a = 4, b = 5}", "@mixed_table.lua")
+        .unwrap();
+
+    let (array_size, hash_size) = decode_newtable_sizes(&proto);
+    assert_eq!(array_size, 3);
+    assert_eq!(hash_size, 2);
+
+    let setlists = decode_setlist_entries(&proto);
+    assert_eq!(setlists, vec![(3, 0)]);
+}
+
+#[test]
+fn test_table_constructor_uses_single_setlist_at_flush_boundary() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let fields = (1..=50)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("local t = {{{}}}", fields);
+    let proto = vm
+        .compile_with_name(&source, "@flush_boundary_table.lua")
+        .unwrap();
+
+    let setlists = decode_setlist_entries(&proto);
+    assert_eq!(setlists, vec![(50, 0)]);
+}
+
+#[test]
+fn test_table_constructor_flushes_twice_past_boundary() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let fields = (1..=51)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("local t = {{{}}}", fields);
+    let proto = vm
+        .compile_with_name(&source, "@post_boundary_table.lua")
+        .unwrap();
+
+    let setlists = decode_setlist_entries(&proto);
+    assert_eq!(setlists, vec![(50, 0), (1, 50)]);
+}
+
+#[test]
+fn test_table_constructor_bytecode_sizes_for_large_arrays() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let fields = (1..=1100)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("local t = {{{}}}", fields);
+    let proto = vm.compile_with_name(&source, "@large_table.lua").unwrap();
+
+    let (array_size, hash_size) = decode_newtable_sizes(&proto);
+    assert_eq!(array_size, 1100);
+    assert_eq!(hash_size, 0);
+
+    let setlists = decode_setlist_entries(&proto);
+    assert_eq!(setlists.len(), 22);
+    assert_eq!(setlists.first().copied(), Some((50, 0)));
+    assert_eq!(setlists.last().copied(), Some((50, 1050)));
+}
+
+#[test]
+fn test_table_constructor_bytecode_sizes_for_tail_multret() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let proto = vm
+        .compile_with_name(
+            r#"
+            local function f()
+                return 10, 20, 30
+            end
+            local t = {1, 2, f()}
+        "#,
+            "@tail_multret_table.lua",
+        )
+        .unwrap();
+
+    let (array_size, hash_size) = decode_newtable_sizes(&proto);
+    assert_eq!(array_size, 2);
+    assert_eq!(hash_size, 0);
+
+    let setlists = decode_setlist_entries(&proto);
+    assert_eq!(setlists, vec![(0, 0)]);
+}
+
 #[test]
 fn test_table_insert() {
     let mut vm = LuaVM::new(SafeOption::default());
