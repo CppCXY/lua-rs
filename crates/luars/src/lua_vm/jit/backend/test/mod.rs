@@ -6,3 +6,4 @@ use crate::lua_vm::jit::ir::{TraceIr, TraceIrInst, TraceIrOperand};
 
 mod core;
 mod native;
+mod compile;

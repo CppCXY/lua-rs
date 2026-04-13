@@ -614,3 +614,60 @@ benchmark 现在应该被当作探针，而不是主线本身：
 这还不是 LuaJIT 级别的 `SNAP_NORESTORE` 体系，但它已经把“最小恢复”从 runtime 判重推进成了真正的 lowering 规则。
 
 这也意味着下一步的重点不该再是给 deopt 再加一层统计，而是继续扩大这种 lowering 侧的可证明最小恢复范围，并让更多 SSA/value 流信息参与 restore 决策。
+
+## 2026-04-13 模块化后的下一步计划
+
+native backend 和 native backend 测试在这一轮已经完成按主题拆分，这件事本身不直接带来 LuaJIT 级能力，但它把后续主线重新收清楚了：接下来不该再靠单文件里不断堆新 family 或局部特判前进，而要把已经存在的 seam 变成真正可复用的 tracing-compiler 主干。
+
+下一步建议固定成下面五段，而且顺序不要再反过来：
+
+1. 先把 compile_shared.rs 明确收成真正的 numeric midend 入口。
+
+- 当前它已经承担 move-alias normalize、forwarding、dead-step elimination、`NumericLowering { steps, value_state }` 这些第一批真实中端职责。
+- 下一刀不该再继续在 family 内部追加一段新的局部 rewrite，而应该把更多“可证明的值流事实”统一汇入这里，例如：
+   - carried rhs 是否真的全 trace 稳定；
+   - 哪些 residual steps 不会破坏 carried seam；
+   - 哪些 table/upvalue/field 读写可以被视作可前推或仅边界物化。
+- 验收标准应改成：新增一条值流/重写规则时，至少同时被两个以上 native family 复用，而不是只服务单一 benchmark shape。
+
+2. 再把 registerized carried state 从最小 self-update 扩到真正可组合的 block-param/value 流。
+
+- 当前 `NumericForLoop`、`GuardedNumericForLoop`、`NumericJmpLoop` 已经共享最小 integer/float self-update seam，但覆盖面还停在单寄存器 carried 子集。
+- 下一阶段应优先扩的不是“更多新 family”，而是：
+   - multiple carried values；
+   - table/global short-string RMW 热点的 carried base/key/value；
+   - guard pre-step / preset / loop body 共用同一组当前值，而不是各自回槽位取值。
+- 简化目标就是：让 trace body 内真正热的值尽量留在当前 trace 的 value flow 中，只在 fallback、loop exit、side exit 前统一物化。
+
+3. 同步把 snapshot/deopt 推成 lowering-time 的最小恢复规则。
+
+- 现在已经有 per-exit restore 收窄、prefix 写集合、简单 source-based restore、以及 SSA kind 参与 restore 选择，这说明方向是对的。
+- 下一步应该补的是更接近 LuaJIT 的 no-restore/boundary-only materialization 规则：
+   - 明确哪些 carried/intermediate values 根本不进入 restore；
+   - 明确哪些值只在某个 exit arm 上需要物化；
+   - 明确哪些 table/upvalue 写在当前 exit 上对解释器不可见，因此不必恢复。
+- 这一步的验收不应只看 recovery 统计，而应看 lowering 产物本身是否已经显式表达“哪些状态不会恢复”。
+
+4. helper-heavy steady-state 继续做，但前提是统一挂到前面两条 seam 上。
+
+- 这包含三类当前最值得继续压薄的热点：
+   - function-valued `__index` / `__newindex` / 其余 metamethod helper-heavy 路径；
+   - multi-return / vararg / table materialization；
+   - builtin call dispatch，尤其是还没从 helper-plan call 慢路径里彻底拔出来的部分。
+- 这里的原则要固定：如果一个优化只是增加 native dispatch，而没有减少 steady-state 的 helper/call/materialization 成本，就不应进入主线。
+
+5. 最后再做 native child trace linking 和更深的 code patch/link。
+
+- 这仍然是 LuaJIT 方向必须补的能力，但在当前阶段它排在 registerized value flow 和最小恢复之后。
+- 原因已经很清楚：如果 parent/child trace 内部还保留大量 `LuaValue` 往返和 helper-heavy steady-state，那么先把 bridge 再缩短一层，收益上限也有限。
+- 只有当前三步形成稳定基线后，native-native side trace patch/link 才会真正体现结构收益，而不是只让 dispatch 统计更漂亮。
+
+按这个顺序执行，下一阶段最具体的落地目标可以压成一句话：
+
+先把 compile_shared.rs 推成真正消费 SSA/value-state 的通用 numeric midend，再让 numeric/table/global 热点 family 共享更宽的 carried block-param 与 boundary-only materialization，最后才进入 native child trace 直连。
+
+如果要给这一阶段设一个明确的停表条件，那么应当是：
+
+1. 至少一条 numeric family 和一条 table/global 热点 family 共享同一条多值 carried seam；
+2. lowering 能显式表达一批“不恢复”或“只在特定 exit 恢复”的值；
+3. benchmark 上至少有一类 helper-heavy steady-state 的 wall-clock 改善来自 trace 变薄，而不是 native 命中数增加。

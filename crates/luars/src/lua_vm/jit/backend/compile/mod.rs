@@ -1,3 +1,14 @@
+use crate::Instruction;
+
+use super::model::{
+    LinearIntGuardOp, LinearIntLoopGuard, LinearIntStep, NumericBinaryOp, NumericIfElseCond,
+    NumericJmpLoopGuard, NumericLowering, NumericOperand, NumericSelfUpdateValueFlow,
+    NumericSelfUpdateValueKind, NumericStep, NumericValueFlowRhs, NumericValueState,
+};
+use crate::lua_vm::jit::ir::TraceIrInst;
+use crate::lua_vm::jit::lowering::{LoweredTrace, SsaTableIntRewrite, TraceValueKind};
+
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TableIntRegion {
     table_value: u32,
@@ -455,10 +466,6 @@ fn run_numeric_forwarding_pass(steps: Vec<NumericStep>) -> Vec<NumericStep> {
     forward_local_numeric_binary_moves(steps)
 }
 
-#[cfg(test)]
-pub(super) fn run_numeric_midend_passes(steps: Vec<NumericStep>) -> Vec<NumericStep> {
-    run_numeric_midend_passes_with_live_out(steps, &[])
-}
 
 pub(super) fn run_numeric_midend_passes_with_live_out(
     steps: Vec<NumericStep>,
@@ -2053,3 +2060,48 @@ fn compile_linear_int_guard(
 }
 
 
+pub(super) fn lower_linear_int_steps_for_native(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+) -> Option<Vec<LinearIntStep>> {
+    compile_linear_int_steps(insts, lowered_trace)
+}
+
+pub(super) fn lower_linear_int_guard_for_native(
+    inst: &TraceIrInst,
+    tail: bool,
+    exit_pc: u32,
+) -> Option<LinearIntLoopGuard> {
+    compile_linear_int_guard(inst, tail, exit_pc)
+}
+
+pub(super) fn lower_numeric_steps_for_native(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+) -> Option<Vec<NumericStep>> {
+    compile_numeric_lowering(insts, lowered_trace).map(|lowering| lowering.steps)
+}
+
+pub(super) fn lower_numeric_steps_for_native_with_live_out(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+    live_out: &[u32],
+) -> Option<Vec<NumericStep>> {
+    compile_numeric_lowering_with_live_out(insts, lowered_trace, live_out)
+        .map(|lowering| lowering.steps)
+}
+
+pub(super) fn lower_numeric_lowering_for_native(
+    insts: &[TraceIrInst],
+    lowered_trace: &LoweredTrace,
+) -> Option<NumericLowering> {
+    compile_numeric_lowering(insts, lowered_trace)
+}
+
+pub(super) fn lower_numeric_guard_for_native(
+    inst: &TraceIrInst,
+    tail: bool,
+    exit_pc: u32,
+) -> Option<NumericJmpLoopGuard> {
+    compile_numeric_jmp_guard(inst, tail, exit_pc)
+}
