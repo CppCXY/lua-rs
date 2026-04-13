@@ -1711,7 +1711,8 @@ fn extract_loop_prologue_hoists_invariant_and_cross_iter_carry() {
         },
     ];
 
-    let (prologue, body) = extract_loop_prologue(&steps);
+    let lowered_trace = lowered_trace_with_constants(Vec::new());
+    let (prologue, body) = extract_loop_prologue(&steps, &lowered_trace);
 
     // Prologue should contain the hoisted steps
     assert_eq!(prologue.len(), 2, "prologue: {prologue:?}");
@@ -1750,4 +1751,297 @@ fn extract_loop_prologue_hoists_invariant_and_cross_iter_carry() {
             value: 6
         }
     ));
+}
+
+#[test]
+fn extract_loop_prologue_cross_iter_carry_for_entry_stable_local_table() {
+    let steps = vec![
+        NumericStep::GetTableField {
+            dst: 6,
+            table: 5,
+            key: 1,
+        },
+        NumericStep::Binary {
+            dst: 6,
+            lhs: NumericOperand::Reg(6),
+            rhs: NumericOperand::ImmI(1),
+            op: NumericBinaryOp::Add,
+        },
+        NumericStep::SetTableField {
+            table: 5,
+            key: 1,
+            value: 6,
+        },
+    ];
+
+    let mut lowered_trace = lowered_trace_with_constants(Vec::new());
+    lowered_trace.entry_stable_register_hints = vec![crate::lua_vm::jit::lowering::RegisterValueHint {
+        reg: 5,
+        kind: TraceValueKind::Table,
+    }];
+    let (prologue, body) = extract_loop_prologue(&steps, &lowered_trace);
+
+    assert_eq!(prologue.len(), 1, "prologue: {prologue:?}");
+    assert!(matches!(
+        prologue[0],
+        NumericStep::GetTableField {
+            dst: 6,
+            table: 5,
+            key: 1
+        }
+    ));
+    assert_eq!(body.len(), 2, "body: {body:?}");
+    assert!(matches!(
+        body[0],
+        NumericStep::Binary {
+            dst: 6,
+            op: NumericBinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        body[1],
+        NumericStep::SetTableField {
+            table: 5,
+            key: 1,
+            value: 6
+        }
+    ));
+}
+
+#[test]
+fn extract_loop_prologue_cross_iter_carry_for_upvalue() {
+    let lowered_trace = lowered_trace_with_constants(Vec::new());
+    let steps = vec![
+        NumericStep::GetUpval { dst: 4, upvalue: 0 },
+        NumericStep::Binary {
+            dst: 4,
+            lhs: NumericOperand::Reg(4),
+            rhs: NumericOperand::ImmI(1),
+            op: NumericBinaryOp::Add,
+        },
+        NumericStep::SetUpval { src: 4, upvalue: 0 },
+    ];
+
+    let (prologue, body) = extract_loop_prologue(&steps, &lowered_trace);
+
+    assert_eq!(prologue.len(), 1, "prologue: {prologue:?}");
+    assert!(matches!(
+        prologue[0],
+        NumericStep::GetUpval { dst: 4, upvalue: 0 }
+    ));
+    assert_eq!(body.len(), 2, "body: {body:?}");
+    assert!(matches!(
+        body[0],
+        NumericStep::Binary {
+            dst: 4,
+            op: NumericBinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        body[1],
+        NumericStep::SetUpval { src: 4, upvalue: 0 }
+    ));
+}
+
+#[test]
+fn extract_loop_prologue_cross_iter_carry_for_tabup_field() {
+    let lowered_trace = lowered_trace_with_constants(Vec::new());
+    let steps = vec![
+        NumericStep::GetTabUpField {
+            dst: 4,
+            upvalue: 0,
+            key: 1,
+        },
+        NumericStep::Binary {
+            dst: 4,
+            lhs: NumericOperand::Reg(4),
+            rhs: NumericOperand::ImmI(1),
+            op: NumericBinaryOp::Add,
+        },
+        NumericStep::SetTabUpField {
+            upvalue: 0,
+            key: 1,
+            value: 4,
+        },
+    ];
+
+    let (prologue, body) = extract_loop_prologue(&steps, &lowered_trace);
+
+    assert_eq!(prologue.len(), 1, "prologue: {prologue:?}");
+    assert!(matches!(
+        prologue[0],
+        NumericStep::GetTabUpField {
+            dst: 4,
+            upvalue: 0,
+            key: 1
+        }
+    ));
+    assert_eq!(body.len(), 2, "body: {body:?}");
+    assert!(matches!(
+        body[0],
+        NumericStep::Binary {
+            dst: 4,
+            op: NumericBinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        body[1],
+        NumericStep::SetTabUpField {
+            upvalue: 0,
+            key: 1,
+            value: 4
+        }
+    ));
+}
+
+#[test]
+fn extract_loop_prologue_cross_iter_carry_for_entry_stable_table_int() {
+    let steps = vec![
+        NumericStep::GetTableInt {
+            dst: 6,
+            table: 5,
+            index: 4,
+        },
+        NumericStep::Binary {
+            dst: 6,
+            lhs: NumericOperand::Reg(6),
+            rhs: NumericOperand::ImmI(1),
+            op: NumericBinaryOp::Add,
+        },
+        NumericStep::SetTableInt {
+            table: 5,
+            index: 4,
+            value: 6,
+        },
+    ];
+
+    let mut lowered_trace = lowered_trace_with_constants(Vec::new());
+    lowered_trace.entry_stable_register_hints = vec![
+        crate::lua_vm::jit::lowering::RegisterValueHint {
+            reg: 4,
+            kind: TraceValueKind::Integer,
+        },
+        crate::lua_vm::jit::lowering::RegisterValueHint {
+            reg: 5,
+            kind: TraceValueKind::Table,
+        },
+    ];
+    let (prologue, body) = extract_loop_prologue(&steps, &lowered_trace);
+
+    assert_eq!(prologue.len(), 1, "prologue: {prologue:?}");
+    assert!(matches!(
+        prologue[0],
+        NumericStep::GetTableInt {
+            dst: 6,
+            table: 5,
+            index: 4
+        }
+    ));
+    assert_eq!(body.len(), 2, "body: {body:?}");
+    assert!(matches!(
+        body[0],
+        NumericStep::Binary {
+            dst: 6,
+            op: NumericBinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        body[1],
+        NumericStep::SetTableInt {
+            table: 5,
+            index: 4,
+            value: 6
+        }
+    ));
+}
+
+#[test]
+fn extract_loop_prologue_cross_iter_carry_for_upvalue_table_field() {
+    let steps = vec![
+        NumericStep::GetUpval { dst: 5, upvalue: 0 },
+        NumericStep::GetTableField {
+            dst: 6,
+            table: 5,
+            key: 1,
+        },
+        NumericStep::Binary {
+            dst: 6,
+            lhs: NumericOperand::Reg(6),
+            rhs: NumericOperand::ImmI(1),
+            op: NumericBinaryOp::Add,
+        },
+        NumericStep::SetTableField {
+            table: 5,
+            key: 1,
+            value: 6,
+        },
+    ];
+
+    let lowered_trace = lowered_trace_with_constants(Vec::new());
+    let (prologue, body) = extract_loop_prologue(&steps, &lowered_trace);
+
+    assert_eq!(prologue.len(), 2, "prologue: {prologue:?}");
+    assert!(matches!(
+        prologue[0],
+        NumericStep::GetUpval { dst: 5, upvalue: 0 }
+    ));
+    assert!(matches!(
+        prologue[1],
+        NumericStep::GetTableField {
+            dst: 6,
+            table: 5,
+            key: 1
+        }
+    ));
+    assert_eq!(body.len(), 2, "body: {body:?}");
+    assert!(matches!(
+        body[0],
+        NumericStep::Binary {
+            dst: 6,
+            op: NumericBinaryOp::Add,
+            ..
+        }
+    ));
+    assert!(matches!(
+        body[1],
+        NumericStep::SetTableField {
+            table: 5,
+            key: 1,
+            value: 6
+        }
+    ));
+}
+
+#[test]
+fn extract_loop_prologue_hoists_invariant_upvalue_table_field_read_chain() {
+    let steps = vec![
+        NumericStep::GetUpval { dst: 5, upvalue: 0 },
+        NumericStep::GetTableField {
+            dst: 6,
+            table: 5,
+            key: 1,
+        },
+    ];
+
+    let lowered_trace = lowered_trace_with_constants(Vec::new());
+    let (prologue, body) = extract_loop_prologue(&steps, &lowered_trace);
+
+    assert_eq!(prologue.len(), 2, "prologue: {prologue:?}");
+    assert!(matches!(
+        prologue[0],
+        NumericStep::GetUpval { dst: 5, upvalue: 0 }
+    ));
+    assert!(matches!(
+        prologue[1],
+        NumericStep::GetTableField {
+            dst: 6,
+            table: 5,
+            key: 1
+        }
+    ));
+    assert!(body.is_empty(), "body: {body:?}");
 }

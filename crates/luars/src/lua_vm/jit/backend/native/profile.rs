@@ -208,6 +208,11 @@ fn profile_for_numeric_guard(guard: NumericJmpLoopGuard) -> NativeLoweringProfil
             numeric_reg_compare_guard_steps: 1,
             ..NativeLoweringProfile::default()
         },
+        NumericIfElseCond::RegImmCompare { .. } => NativeLoweringProfile {
+            guard_steps: 1,
+            numeric_int_compare_guard_steps: 1,
+            ..NativeLoweringProfile::default()
+        },
         NumericIfElseCond::Truthy { .. } => NativeLoweringProfile {
             guard_steps: 1,
             truthy_guard_steps: 1,
@@ -634,47 +639,6 @@ pub(super) fn recognize_guarded_call_prefix_shape(
         sorted_resume_pc: guard.exit_pc,
         unsorted_resume_pc: ir.insts[13].pc,
     })
-}
-
-pub(super) fn recognize_quicksort_partition_scan_shape(ir: &TraceIr) -> bool {
-    let expected_pcs = match ir.root_pc {
-        9 => [9, 10, 11, 12, 14],
-        15 => [15, 16, 17, 18, 20],
-        _ => return false,
-    };
-
-    ir.insts.len() == 5
-        && ir.guards.len() == 1
-        && ir.loop_tail_pc == expected_pcs[4]
-        && ir.insts.iter().map(|inst| inst.pc).eq(expected_pcs)
-        && ir.insts[0].opcode == crate::OpCode::GetTable
-        && ir.insts[1].opcode == crate::OpCode::Lt
-        && ir.insts[2].opcode == crate::OpCode::Jmp
-        && ir.insts[3].opcode == crate::OpCode::AddI
-        && ir.insts[4].opcode == crate::OpCode::Jmp
-}
-
-pub(super) fn recognize_quicksort_insertion_sort_inner_loop_shape(ir: &TraceIr) -> bool {
-    let expected_pcs = [8, 9, 10, 11, 12, 13, 15, 16, 17, 19];
-    let expected_opcodes = [
-        crate::OpCode::Le,
-        crate::OpCode::Jmp,
-        crate::OpCode::GetTable,
-        crate::OpCode::Lt,
-        crate::OpCode::Jmp,
-        crate::OpCode::AddI,
-        crate::OpCode::GetTable,
-        crate::OpCode::SetTable,
-        crate::OpCode::AddI,
-        crate::OpCode::Jmp,
-    ];
-
-    ir.root_pc == 8
-        && ir.insts.len() == expected_pcs.len()
-        && ir.guards.len() == 2
-        && ir.loop_tail_pc == 19
-        && ir.insts.iter().map(|inst| inst.pc).eq(expected_pcs)
-        && ir.insts.iter().map(|inst| inst.opcode).eq(expected_opcodes)
 }
 
 pub(super) fn recognize_quicksort_insertion_sort_outer_continue_shape(ir: &TraceIr) -> bool {

@@ -904,6 +904,35 @@ fn compile_numeric_jmp_guard(
                 None,
             )
         }
+        crate::OpCode::EqI
+        | crate::OpCode::LtI
+        | crate::OpCode::LeI
+        | crate::OpCode::GtI
+        | crate::OpCode::GeI => {
+            if raw.get_c() != 0 {
+                return None;
+            }
+
+            let op = match inst.opcode {
+                crate::OpCode::EqI => LinearIntGuardOp::Eq,
+                crate::OpCode::LtI => LinearIntGuardOp::Lt,
+                crate::OpCode::LeI => LinearIntGuardOp::Le,
+                crate::OpCode::GtI => LinearIntGuardOp::Gt,
+                crate::OpCode::GeI => LinearIntGuardOp::Ge,
+                _ => unreachable!(),
+            };
+
+            (
+                NumericIfElseCond::RegImmCompare {
+                    op,
+                    reg: raw.get_a(),
+                    imm: raw.get_sb(),
+                },
+                position.continue_when(raw.get_k()),
+                None,
+                None,
+            )
+        }
         crate::OpCode::Test => (
             NumericIfElseCond::Truthy { reg: raw.get_a() },
             position.continue_when(raw.get_k()),
@@ -1572,43 +1601,98 @@ pub(super) fn build_numeric_value_state(steps: &[NumericStep], lowered_trace: &L
 /// Returns `(prologue_steps, body_steps)`.
 ///
 /// Phase 1 – LICM (Loop-Invariant Code Motion):
+///   A `GetUpval(dst, upvalue)` is hoisted if:
+///   1. No `SetUpval` for `upvalue` exists in the body.
+///   2. No other step writes to `dst`.
+///
 ///   A `GetTabUpField(dst, upvalue, key)` is hoisted if:
 ///   1. No `SetUpval` for `upvalue` exists in the body.
 ///   2. No `SetTabUpField` for the same `upvalue` exists in the body.
 ///   3. No other step writes to `dst`.
 ///
-/// Phase 2 – Cross-iteration table field forwarding:
+///   After hoisting those roots, a `GetTableField(dst, table, key)` is hoisted
+///   if `table` is loop-invariant (because it is entry-stable `Table` or was
+///   itself hoisted into the prologue), no `SetTableField(table, key, ..)`
+///   exists in the body, and no other step writes to `dst`.
+///
+///   A `GetTableInt(dst, table, index)` is hoisted if both `table` and `index`
+///   are loop-invariant (entry-stable or already hoisted) and no
+///   `SetTableInt(table, index, ..)` exists in the body, and no other step
+///   writes to `dst`.
+///
+/// Phase 2 – Cross-iteration carried-read forwarding:
+///   If the body ends with `SetUpval(src, upvalue)` and begins with
+///   `GetUpval(dst, upvalue)` where `dst == src`, the `GetUpval` can be moved
+///   into the prologue because the carried value from the previous iteration's
+///   `SetUpval` already resides in `dst`.
+///
+///   If the body ends with `SetTabUpField(upvalue, key, value)` and begins with
+///   `GetTabUpField(dst, upvalue, key)` where `dst == value`, the
+///   `GetTabUpField` can be moved into the prologue because the carried value
+///   from the previous iteration's `SetTabUpField` already resides in `dst`.
+///
 ///   If the body ends with `SetTableField(table, key, value)` and begins with
 ///   `GetTableField(dst, table, key)` where `dst == value`, the `GetTableField`
 ///   can be moved into the prologue because the carried value from the previous
 ///   iteration's `SetTableField` already resides in `dst`.
-pub(super) fn extract_loop_prologue(steps: &[NumericStep]) -> (Vec<NumericStep>, Vec<NumericStep>) {
+///
+///   If the body ends with `SetTableInt(table, index, value)` and begins with
+///   `GetTableInt(dst, table, index)` where `dst == value`, the `GetTableInt`
+///   can be moved into the prologue when both `table` and `index` are
+///   loop-invariant, because the carried value from the previous iteration's
+///   `SetTableInt` already resides in `dst`.
+pub(super) fn extract_loop_prologue(
+    steps: &[NumericStep],
+    lowered_trace: &LoweredTrace,
+) -> (Vec<NumericStep>, Vec<NumericStep>) {
     let mut prologue = Vec::new();
     let mut body: Vec<NumericStep> = steps.to_vec();
 
-    // Phase 1: LICM – hoist invariant GetTabUpField steps.
+    // Phase 1: LICM – hoist invariant GetUpval/GetTabUpField steps.
     let mut hoist_indices = Vec::new();
     for (i, step) in body.iter().enumerate() {
-        if let NumericStep::GetTabUpField { dst, upvalue, key: _ } = *step {
-            let has_set_upval = body.iter().any(|s| {
-                matches!(s, NumericStep::SetUpval { upvalue: up, .. } if *up == upvalue)
-            });
-            if has_set_upval {
-                continue;
+        match *step {
+            NumericStep::GetUpval { dst, upvalue } => {
+                let has_set_upval = body.iter().any(|s| {
+                    matches!(s, NumericStep::SetUpval { upvalue: up, .. } if *up == upvalue)
+                });
+                if has_set_upval {
+                    continue;
+                }
+                let other_writes_dst = body.iter().enumerate().any(|(j, s)| {
+                    j != i && numeric_step_writes(*s).any(|w| w == dst)
+                });
+                if other_writes_dst {
+                    continue;
+                }
+                hoist_indices.push(i);
             }
-            let has_set_tab_up = body.iter().any(|s| {
-                matches!(s, NumericStep::SetTabUpField { upvalue: up, .. } if *up == upvalue)
-            });
-            if has_set_tab_up {
-                continue;
+            NumericStep::GetTabUpField {
+                dst,
+                upvalue,
+                key: _,
+            } => {
+                let has_set_upval = body.iter().any(|s| {
+                    matches!(s, NumericStep::SetUpval { upvalue: up, .. } if *up == upvalue)
+                });
+                if has_set_upval {
+                    continue;
+                }
+                let has_set_tab_up = body.iter().any(|s| {
+                    matches!(s, NumericStep::SetTabUpField { upvalue: up, .. } if *up == upvalue)
+                });
+                if has_set_tab_up {
+                    continue;
+                }
+                let other_writes_dst = body.iter().enumerate().any(|(j, s)| {
+                    j != i && numeric_step_writes(*s).any(|w| w == dst)
+                });
+                if other_writes_dst {
+                    continue;
+                }
+                hoist_indices.push(i);
             }
-            let other_writes_dst = body.iter().enumerate().any(|(j, s)| {
-                j != i && numeric_step_writes(*s).any(|w| w == dst)
-            });
-            if other_writes_dst {
-                continue;
-            }
-            hoist_indices.push(i);
+            _ => {}
         }
     }
     for &i in hoist_indices.iter().rev() {
@@ -1616,10 +1700,190 @@ pub(super) fn extract_loop_prologue(steps: &[NumericStep]) -> (Vec<NumericStep>,
     }
     prologue.reverse();
 
-    // Phase 2: cross-iteration table field forwarding.
-    // Only applicable when at least one upvalue-table load was already hoisted
-    // (phase 1), guaranteeing the table register is truly loop-invariant.
-    if !prologue.is_empty() && body.len() >= 2 {
+    let mut hoist_indices = Vec::new();
+    for (i, step) in body.iter().enumerate() {
+        match *step {
+            NumericStep::GetTableField { dst, table, key } => {
+                let table_is_loop_invariant = prologue.iter().any(|step| {
+                    matches!(
+                        step,
+                        NumericStep::GetUpval { dst, .. } if *dst == table
+                    ) || matches!(
+                        step,
+                        NumericStep::GetTabUpField { dst, .. } if *dst == table
+                    ) || matches!(
+                        step,
+                        NumericStep::GetTableField { dst, .. } if *dst == table
+                    )
+                }) || matches!(
+                    lowered_trace.entry_stable_register_value_kind(table),
+                    Some(TraceValueKind::Table)
+                );
+                if !table_is_loop_invariant {
+                    continue;
+                }
+                let has_conflicting_store = body.iter().any(|s| {
+                    matches!(
+                        s,
+                        NumericStep::SetTableField {
+                            table: set_table,
+                            key: set_key,
+                            ..
+                        } if *set_table == table && *set_key == key
+                    )
+                });
+                if has_conflicting_store {
+                    continue;
+                }
+                let other_writes_dst = body.iter().enumerate().any(|(j, s)| {
+                    j != i && numeric_step_writes(*s).any(|w| w == dst)
+                });
+                if other_writes_dst {
+                    continue;
+                }
+                hoist_indices.push(i);
+            }
+            NumericStep::GetTableInt {
+                dst,
+                table,
+                index,
+            } => {
+                let table_is_loop_invariant = prologue.iter().any(|step| {
+                    matches!(
+                        step,
+                        NumericStep::GetUpval { dst, .. } if *dst == table
+                    ) || matches!(
+                        step,
+                        NumericStep::GetTabUpField { dst, .. } if *dst == table
+                    ) || matches!(
+                        step,
+                        NumericStep::GetTableField { dst, .. } if *dst == table
+                    ) || matches!(
+                        step,
+                        NumericStep::GetTableInt { dst, .. } if *dst == table
+                    )
+                }) || matches!(
+                    lowered_trace.entry_stable_register_value_kind(table),
+                    Some(TraceValueKind::Table)
+                );
+                let index_is_loop_invariant = prologue.iter().any(|step| {
+                    matches!(
+                        step,
+                        NumericStep::GetUpval { dst, .. } if *dst == index
+                    ) || matches!(
+                        step,
+                        NumericStep::GetTableInt { dst, .. } if *dst == index
+                    ) || matches!(
+                        step,
+                        NumericStep::GetTableField { dst, .. } if *dst == index
+                    )
+                }) || matches!(
+                    lowered_trace.entry_stable_register_value_kind(index),
+                    Some(TraceValueKind::Integer)
+                );
+                if !table_is_loop_invariant || !index_is_loop_invariant {
+                    continue;
+                }
+                let has_conflicting_store = body.iter().any(|s| {
+                    matches!(
+                        s,
+                        NumericStep::SetTableInt {
+                            table: set_table,
+                            index: set_index,
+                            ..
+                        } if *set_table == table && *set_index == index
+                    )
+                });
+                if has_conflicting_store {
+                    continue;
+                }
+                let other_writes_dst = body.iter().enumerate().any(|(j, s)| {
+                    j != i && numeric_step_writes(*s).any(|w| w == dst)
+                });
+                if other_writes_dst {
+                    continue;
+                }
+                hoist_indices.push(i);
+            }
+            _ => {}
+        }
+    }
+    for &i in hoist_indices.iter().rev() {
+        prologue.push(body.remove(i));
+    }
+
+    // Phase 2a: cross-iteration upvalue forwarding.
+    if body.len() >= 2 {
+        let first = body[0];
+        let last = body[body.len() - 1];
+        if let (
+            NumericStep::GetUpval {
+                dst: get_dst,
+                upvalue: get_upvalue,
+            },
+            NumericStep::SetUpval {
+                src: set_src,
+                upvalue: set_upvalue,
+            },
+        ) = (first, last)
+        {
+            if get_upvalue == set_upvalue
+                && get_dst == set_src
+                && !body[..body.len() - 1].iter().any(|step| {
+                    matches!(
+                        step,
+                        NumericStep::SetUpval { upvalue, .. } if *upvalue == get_upvalue
+                    )
+                })
+            {
+                let get_step = body.remove(0);
+                prologue.push(get_step);
+            }
+        }
+    }
+
+    // Phase 2b: cross-iteration tabup field forwarding.
+    if body.len() >= 2 {
+        let first = body[0];
+        let last = body[body.len() - 1];
+        if let (
+            NumericStep::GetTabUpField {
+                dst: get_dst,
+                upvalue: get_upvalue,
+                key: get_key,
+            },
+            NumericStep::SetTabUpField {
+                upvalue: set_upvalue,
+                key: set_key,
+                value: set_value,
+            },
+        ) = (first, last)
+        {
+            if get_upvalue == set_upvalue
+                && get_key == set_key
+                && get_dst == set_value
+                && !body[..body.len() - 1].iter().any(|step| {
+                    matches!(
+                        step,
+                        NumericStep::SetUpval { upvalue, .. } if *upvalue == get_upvalue
+                    ) || matches!(
+                        step,
+                        NumericStep::SetTabUpField { upvalue, key, .. }
+                            if *upvalue == get_upvalue && *key == get_key
+                    )
+                })
+            {
+                let get_step = body.remove(0);
+                prologue.push(get_step);
+            }
+        }
+    }
+
+    // Phase 2c: cross-iteration table field forwarding.
+    // This is safe when the table register is loop-invariant, either because a
+    // GetTabUpField feeding it was hoisted into the prologue or because the
+    // register is entry-stable and known to hold a table.
+    if body.len() >= 2 {
         let first = body[0];
         let last = body[body.len() - 1];
         if let (
@@ -1635,12 +1899,73 @@ pub(super) fn extract_loop_prologue(steps: &[NumericStep]) -> (Vec<NumericStep>,
             },
         ) = (first, last)
         {
+            let table_is_loop_invariant = prologue.iter().any(|step| {
+                matches!(
+                    step,
+                    NumericStep::GetUpval { dst, .. } if *dst == get_table
+                ) || matches!(
+                    step,
+                    NumericStep::GetTabUpField { dst, .. } if *dst == get_table
+                )
+            }) || matches!(
+                lowered_trace.entry_stable_register_value_kind(get_table),
+                Some(TraceValueKind::Table)
+            );
             if get_table == set_table
                 && get_key == set_key
                 && get_dst == set_value
+                && table_is_loop_invariant
                 && !body
                     .iter()
                     .any(|s| numeric_step_writes(*s).any(|w| w == get_table))
+            {
+                let get_step = body.remove(0);
+                prologue.push(get_step);
+            }
+        }
+    }
+
+    // Phase 2d: cross-iteration table-int forwarding.
+    if body.len() >= 2 {
+        let first = body[0];
+        let last = body[body.len() - 1];
+        if let (
+            NumericStep::GetTableInt {
+                dst: get_dst,
+                table: get_table,
+                index: get_index,
+            },
+            NumericStep::SetTableInt {
+                table: set_table,
+                index: set_index,
+                value: set_value,
+            },
+        ) = (first, last)
+        {
+            let table_is_loop_invariant = prologue.iter().any(|step| {
+                matches!(
+                    step,
+                    NumericStep::GetUpval { dst, .. } if *dst == get_table
+                ) || matches!(
+                    step,
+                    NumericStep::GetTabUpField { dst, .. } if *dst == get_table
+                )
+            }) || matches!(
+                lowered_trace.entry_stable_register_value_kind(get_table),
+                Some(TraceValueKind::Table)
+            );
+            let index_is_loop_invariant = matches!(
+                lowered_trace.entry_stable_register_value_kind(get_index),
+                Some(TraceValueKind::Integer)
+            );
+            if get_table == set_table
+                && get_index == set_index
+                && get_dst == set_value
+                && table_is_loop_invariant
+                && index_is_loop_invariant
+                && !body
+                    .iter()
+                    .any(|s| numeric_step_writes(*s).any(|w| w == get_table || w == get_index))
             {
                 let get_step = body.remove(0);
                 prologue.push(get_step);

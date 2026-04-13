@@ -200,6 +200,11 @@ pub(crate) enum NumericIfElseCond {
         lhs: u32,
         rhs: u32,
     },
+    RegImmCompare {
+        op: LinearIntGuardOp,
+        reg: u32,
+        imm: i32,
+    },
     Truthy {
         reg: u32,
     },

@@ -2236,7 +2236,7 @@ mod tests {
 
         let compiled_trace = side.compiled_trace.as_ref().unwrap();
         assert_eq!(compiled_trace.root_pc, 50);
-        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
+        assert_eq!(compiled_trace.executor_family(), "NativeCallForLoop");
 
         let parent = jit.traces.get(&TraceKey {
             chunk_addr: chunk_ptr as usize,
@@ -2244,21 +2244,21 @@ mod tests {
         });
         assert!(matches!(
             parent.and_then(|trace| trace.linked_ready_side_traces.get(&0)),
-            Some(ReadySideTraceDispatch::Executable(
-                ExecutableTraceDispatch {
+            Some(ReadySideTraceDispatch::Native(
+                NativeExecutableTraceDispatch {
                     start_pc: 50,
                     linked_loop_header_pc: Some(34),
-                    execution: CompiledTraceExecution::LoweredSnippet,
+                    native: NativeCompiledTrace::CallForLoop { .. },
                     ..
                 }
             ))
         ));
         assert!(matches!(
-            jit.side_trace_dispatch_for(chunk_ptr, 34, 0),
-            Some(ExecutableTraceDispatch {
+            jit.native_side_trace_dispatch_for(chunk_ptr, 34, 0),
+            Some(NativeExecutableTraceDispatch {
                 start_pc: 50,
                 linked_loop_header_pc: Some(34),
-                execution: CompiledTraceExecution::LoweredSnippet,
+                native: NativeCompiledTrace::CallForLoop { .. },
                 ..
             })
         ));
@@ -2304,7 +2304,7 @@ mod tests {
     }
 
     #[test]
-    fn quicksort_insertion_sort_inner_loop_becomes_enterable_lowered_snippet() {
+    fn quicksort_insertion_sort_inner_loop_becomes_enterable_native_numeric_jmp_loop() {
         let mut jit = JitState::default();
         let mut vm = LuaVM::new(SafeOption::default());
         let source = std::fs::read_to_string(concat!(
@@ -2338,11 +2338,60 @@ mod tests {
 
         let compiled_trace = jit.compiled_trace_for(proto_ptr as usize, 8).unwrap();
         assert!(compiled_trace.is_enterable());
-        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
+        assert_eq!(compiled_trace.executor_family(), "NativeNumericJmpLoop");
     }
 
     #[test]
-    fn quicksort_child_return_trace_becomes_enterable_lowered_snippet() {
+    fn quicksort_partition_scan_loops_become_enterable_native_numeric_jmp_loops() {
+        let mut jit = JitState::default();
+        let mut vm = LuaVM::new(SafeOption::default());
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/bench_quicksort.lua"
+        ))
+        .unwrap();
+        let chunk = vm
+            .compile_with_name(&source, "@bench_quicksort.lua")
+            .unwrap();
+        let proto = chunk
+            .child_protos
+            .iter()
+            .find_map(|proto| {
+                let proto = &proto.as_ref().data;
+                (proto.linedefined == 50 && proto.lastlinedefined == 75).then_some(proto)
+            })
+            .unwrap();
+        let proto_ptr = proto as *const LuaProto;
+
+        for _ in 0..HOT_LOOP_THRESHOLD {
+            jit.record_loop_backedge(proto_ptr, 14);
+            jit.record_loop_backedge(proto_ptr, 20);
+        }
+
+        assert_eq!(
+            jit.trace_status_for(proto_ptr as usize, 9),
+            Some(TraceStatus::Executable {
+                instruction_count: 5,
+            })
+        );
+        assert_eq!(
+            jit.trace_status_for(proto_ptr as usize, 15),
+            Some(TraceStatus::Executable {
+                instruction_count: 5,
+            })
+        );
+
+        let left_scan = jit.compiled_trace_for(proto_ptr as usize, 9).unwrap();
+        assert!(left_scan.is_enterable());
+        assert_eq!(left_scan.executor_family(), "NativeNumericJmpLoop");
+
+        let right_scan = jit.compiled_trace_for(proto_ptr as usize, 15).unwrap();
+        assert!(right_scan.is_enterable());
+        assert_eq!(right_scan.executor_family(), "NativeNumericJmpLoop");
+    }
+
+    #[test]
+    fn quicksort_child_return_trace_becomes_enterable_native_guarded_call_prefix() {
         let mut jit = JitState::default();
         let mut vm = LuaVM::new(SafeOption::default());
         let source = std::fs::read_to_string(concat!(
@@ -2376,8 +2425,11 @@ mod tests {
 
         let compiled_trace = jit.compiled_trace_for(proto_ptr as usize, 0).unwrap();
         assert!(compiled_trace.is_enterable());
-        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
-        assert_eq!(compiled_trace.summary().guards_observed, 2);
+        assert_eq!(compiled_trace.executor_family(), "NativeGuardedCallPrefix");
+        assert_eq!(
+            compiled_trace.native_profile().map(|profile| profile.guard_steps),
+            Some(2)
+        );
     }
 
     #[test]

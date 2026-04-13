@@ -1640,6 +1640,7 @@ pub(super) fn numeric_steps_preserve_reg(steps: &[NumericStep], reg: u32) -> boo
 fn numeric_cond_reads_reg(cond: NumericIfElseCond, reg: u32) -> bool {
     match cond {
         NumericIfElseCond::RegCompare { lhs, rhs, .. } => lhs == reg || rhs == reg,
+        NumericIfElseCond::RegImmCompare { reg: cond_reg, .. } => cond_reg == reg,
         NumericIfElseCond::Truthy { reg: cond_reg } => cond_reg == reg,
     }
 }
@@ -3495,7 +3496,9 @@ fn native_supports_numeric_operand(operand: &NumericOperand) -> bool {
 pub(super) fn native_supports_numeric_cond(cond: NumericIfElseCond) -> bool {
     matches!(
         cond,
-        NumericIfElseCond::RegCompare { .. } | NumericIfElseCond::Truthy { .. }
+        NumericIfElseCond::RegCompare { .. }
+            | NumericIfElseCond::RegImmCompare { .. }
+            | NumericIfElseCond::Truthy { .. }
     )
 }
 
@@ -3616,6 +3619,14 @@ pub(super) fn emit_numeric_step(
             Some(())
         }
         NumericStep::SetUpval { src, upvalue } => {
+            emit_materialize_guard_numeric_override(
+                builder,
+                abi,
+                src,
+                current_numeric_values,
+                carried_float,
+                hoisted_numeric,
+            );
             let src_ptr = slot_addr(builder, abi.base_ptr, src);
             let upvalue_index = builder.ins().iconst(abi.pointer_ty, i64::from(upvalue));
             let call = builder.ins().call(
@@ -4859,6 +4870,62 @@ pub(super) fn emit_numeric_condition_value(
             let lhs_num = emit_numeric_tagged_value_to_float(builder, lhs_tag, lhs_val);
             let rhs_num = emit_numeric_tagged_value_to_float(builder, rhs_tag, rhs_val);
             Some(emit_numeric_compare(builder, lhs_num, rhs_num, op))
+        }
+        NumericIfElseCond::RegImmCompare { op, reg, imm } => {
+            let reg_ptr = slot_addr(builder, abi.base_ptr, reg);
+            let reg_tag = if let Some(override_value) =
+                lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
+            {
+                match override_value {
+                    HoistedNumericGuardSource::FloatRaw(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+                    }
+                    HoistedNumericGuardSource::Integer(_) => {
+                        builder.ins().iconst(types::I8, LUA_VNUMINT as i64)
+                    }
+                }
+            } else if carried_float.is_some_and(|carried| carried.reg == reg) {
+                builder.ins().iconst(types::I8, LUA_VNUMFLT as i64)
+            } else if let Some(tag) =
+                trace_value_kind_tag(numeric_reg_value_kind(known_value_kinds, reg))
+            {
+                builder.ins().iconst(types::I8, i64::from(tag))
+            } else {
+                builder
+                    .ins()
+                    .load(types::I8, mem, reg_ptr, LUA_VALUE_TT_OFFSET)
+            };
+            let int_tag = builder.ins().iconst(types::I8, LUA_VNUMINT as i64);
+            let float_tag = builder.ins().iconst(types::I8, LUA_VNUMFLT as i64);
+            let reg_is_int = builder.ins().icmp(IntCC::Equal, reg_tag, int_tag);
+            let reg_is_float = builder.ins().icmp(IntCC::Equal, reg_tag, float_tag);
+            let reg_is_numeric = builder.ins().bor(reg_is_int, reg_is_float);
+            let compare_block = builder.create_block();
+            builder.def_var(hits_var, current_hits);
+            builder
+                .ins()
+                .brif(reg_is_numeric, compare_block, &[], fallback_block, &[]);
+            builder.switch_to_block(compare_block);
+            builder.seal_block(compare_block);
+
+            let reg_val = if let Some(carried) = carried_float.filter(|carried| carried.reg == reg)
+            {
+                builder.use_var(carried.raw_var)
+            } else if let Some(override_value) =
+                lookup_numeric_guard_value(current_numeric_values, hoisted_numeric, reg)
+            {
+                match override_value {
+                    HoistedNumericGuardSource::FloatRaw(raw) => raw,
+                    HoistedNumericGuardSource::Integer(value) => value,
+                }
+            } else {
+                builder
+                    .ins()
+                    .load(types::I64, mem, reg_ptr, LUA_VALUE_VALUE_OFFSET)
+            };
+            let reg_num = emit_numeric_tagged_value_to_float(builder, reg_tag, reg_val);
+            let imm_num = builder.ins().f64const(f64::from(imm));
+            Some(emit_numeric_compare(builder, reg_num, imm_num, op))
         }
         NumericIfElseCond::Truthy { reg } => {
             let reg_ptr = slot_addr(builder, abi.base_ptr, reg);

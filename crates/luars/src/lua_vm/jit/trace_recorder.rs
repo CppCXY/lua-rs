@@ -1607,6 +1607,63 @@ mod tests {
     }
 
     #[test]
+    fn recorder_preserves_quicksort_child_return_side_trace_identity() {
+        let chunk = load_bench_quicksort_chunk();
+        let quicksort = find_child_proto(&chunk, 77, 98);
+        let artifact = TraceRecorder::record_side(quicksort as *const LuaProto, 12).unwrap();
+
+        assert_eq!(artifact.seed.start_pc, 12);
+        assert_eq!(artifact.loop_header_pc, 0);
+        assert_eq!(artifact.loop_tail_pc, 31);
+        assert_eq!(
+            artifact
+                .ops
+                .iter()
+                .map(|op| (op.pc, op.opcode))
+                .collect::<Vec<_>>(),
+            vec![
+                (12, OpCode::GetUpval),
+                (13, OpCode::Move),
+                (14, OpCode::Move),
+                (15, OpCode::Move),
+                (16, OpCode::Call),
+                (17, OpCode::Sub),
+                (19, OpCode::Sub),
+                (21, OpCode::Lt),
+                (22, OpCode::Jmp),
+                (23, OpCode::Lt),
+                (24, OpCode::Jmp),
+                (25, OpCode::GetUpval),
+                (26, OpCode::Move),
+                (27, OpCode::Move),
+                (28, OpCode::Move),
+                (29, OpCode::Call),
+                (30, OpCode::Move),
+                (31, OpCode::Jmp),
+            ]
+        );
+        assert_eq!(
+            artifact.exits,
+            vec![
+                TraceExit {
+                    guard_pc: 21,
+                    branch_pc: 22,
+                    exit_pc: 32,
+                    taken_on_trace: false,
+                    kind: TraceExitKind::GuardExit,
+                },
+                TraceExit {
+                    guard_pc: 23,
+                    branch_pc: 24,
+                    exit_pc: 30,
+                    taken_on_trace: false,
+                    kind: TraceExitKind::GuardExit,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn recorder_records_forward_guard_exit_inside_loop() {
         let mut chunk = LuaProto::new();
         chunk

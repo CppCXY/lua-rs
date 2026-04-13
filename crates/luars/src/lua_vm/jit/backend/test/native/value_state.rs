@@ -401,6 +401,78 @@ fn compile_native_numeric_for_loop_with_short_string_field_steps() {
 }
 
 #[test]
+fn compile_native_numeric_for_loop_materializes_carried_value_for_set_table_field() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let key = vm.create_string("value").unwrap();
+    let table = vm.create_table(0, 1).unwrap();
+    assert!(vm.raw_set(&table, key, LuaValue::integer(1)));
+
+    let mut backend = NativeTraceBackend::default();
+    let lowering = NumericLowering {
+        steps: vec![
+            NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            },
+            NumericStep::SetTableField {
+                table: 3,
+                key: 0,
+                value: 4,
+            },
+        ],
+        value_state: NumericValueState {
+            self_update: Some(NumericSelfUpdateValueFlow {
+                reg: 4,
+                op: NumericBinaryOp::Add,
+                kind: NumericSelfUpdateValueKind::Integer,
+                rhs: NumericValueFlowRhs::ImmI(1),
+            }),
+        },
+    };
+    let lowered_trace =
+        lowered_trace_with_entry_hints_and_constants(&[(3, TraceValueKind::Table)], vec![key]);
+
+    let entry = match backend
+        .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+        .expect("expected native numeric forloop")
+    {
+        NativeCompiledTrace::NumericForLoop { entry } => entry,
+        other => panic!("expected native numeric forloop, got {other:?}"),
+    };
+
+    let mut stack = [LuaValue::nil(); 8];
+    stack[3] = table;
+    stack[4] = LuaValue::integer(1);
+    stack[5] = LuaValue::integer(2);
+    stack[6] = LuaValue::integer(1);
+    stack[7] = LuaValue::integer(0);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            lowered_trace.constants.as_ptr(),
+            lowered_trace.constants.len(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(stack[4].as_integer(), Some(4));
+    assert_eq!(
+        vm.raw_get(&stack[3], &key)
+            .and_then(|value| value.as_integer()),
+        Some(4)
+    );
+}
+
+#[test]
 fn compile_native_numeric_for_loop_with_short_string_tabup_field_steps() {
     let mut vm = LuaVM::new(SafeOption::default());
     let key = vm.create_string("value").unwrap();
@@ -465,6 +537,294 @@ fn compile_native_numeric_for_loop_with_short_string_tabup_field_steps() {
         vm.raw_get(&table, &key)
             .and_then(|value| value.as_integer()),
         Some(4)
+    );
+}
+
+#[test]
+fn compile_native_numeric_for_loop_with_upvalue_table_field_steps() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let key = vm.create_string("value").unwrap();
+    let table = vm.create_table(0, 1).unwrap();
+    assert!(vm.raw_set(&table, key, LuaValue::integer(1)));
+    let upvalue = vm.create_upvalue_closed(table).unwrap();
+
+    let mut backend = NativeTraceBackend::default();
+    let lowering = NumericLowering {
+        steps: vec![
+            NumericStep::GetUpval { dst: 3, upvalue: 0 },
+            NumericStep::GetTableField {
+                dst: 4,
+                table: 3,
+                key: 0,
+            },
+            NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            },
+            NumericStep::SetTableField {
+                table: 3,
+                key: 0,
+                value: 4,
+            },
+        ],
+        value_state: NumericValueState::default(),
+    };
+    let lowered_trace = lowered_trace_with_entry_hints_and_constants(&[], vec![key]);
+
+    let entry = match backend
+        .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+        .expect("expected native numeric forloop")
+    {
+        NativeCompiledTrace::NumericForLoop { entry } => entry,
+        other => panic!("expected native numeric forloop, got {other:?}"),
+    };
+
+    let mut stack = [LuaValue::nil(); 8];
+    stack[5] = LuaValue::integer(2);
+    stack[6] = LuaValue::integer(1);
+    stack[7] = LuaValue::integer(0);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            lowered_trace.constants.as_ptr(),
+            lowered_trace.constants.len(),
+            std::ptr::null_mut(),
+            std::slice::from_ref(&upvalue).as_ptr(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(stack[4].as_integer(), Some(4));
+    assert_eq!(
+        vm.raw_get(&table, &key)
+            .and_then(|value| value.as_integer()),
+        Some(4)
+    );
+}
+
+#[test]
+fn compile_native_numeric_for_loop_with_pure_upvalue_table_field_read_steps() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let sub_key = vm.create_string("sub").unwrap();
+    let value_key = vm.create_string("value").unwrap();
+    let inner = vm.create_table(0, 1).unwrap();
+    assert!(vm.raw_set(&inner, value_key, LuaValue::integer(42)));
+    let outer = vm.create_table(0, 1).unwrap();
+    assert!(vm.raw_set(&outer, sub_key, inner));
+    let upvalue = vm.create_upvalue_closed(outer).unwrap();
+
+    let mut backend = NativeTraceBackend::default();
+    let lowering = NumericLowering {
+        steps: vec![
+            NumericStep::GetTabUpField {
+                dst: 3,
+                upvalue: 0,
+                key: 0,
+            },
+            NumericStep::GetTableField {
+                dst: 4,
+                table: 3,
+                key: 1,
+            },
+        ],
+        value_state: NumericValueState::default(),
+    };
+    let lowered_trace = lowered_trace_with_entry_hints_and_constants(&[], vec![sub_key, value_key]);
+
+    let entry = match backend
+        .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+        .expect("expected native numeric forloop")
+    {
+        NativeCompiledTrace::NumericForLoop { entry } => entry,
+        other => panic!("expected native numeric forloop, got {other:?}"),
+    };
+
+    let mut stack = [LuaValue::nil(); 8];
+    stack[5] = LuaValue::integer(2);
+    stack[6] = LuaValue::integer(1);
+    stack[7] = LuaValue::integer(0);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            lowered_trace.constants.as_ptr(),
+            lowered_trace.constants.len(),
+            std::ptr::null_mut(),
+            std::slice::from_ref(&upvalue).as_ptr(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(stack[4].as_integer(), Some(42));
+}
+
+#[test]
+fn compile_native_numeric_for_loop_materializes_carried_value_for_set_tabup_field() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let key = vm.create_string("value").unwrap();
+    let table = vm.create_table(0, 1).unwrap();
+    assert!(vm.raw_set(&table, key, LuaValue::integer(1)));
+    let upvalue = vm.create_upvalue_closed(table).unwrap();
+
+    let mut backend = NativeTraceBackend::default();
+    let lowering = NumericLowering {
+        steps: vec![
+            NumericStep::Binary {
+                dst: 4,
+                lhs: NumericOperand::Reg(4),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            },
+            NumericStep::SetTabUpField {
+                upvalue: 0,
+                key: 0,
+                value: 4,
+            },
+        ],
+        value_state: NumericValueState {
+            self_update: Some(NumericSelfUpdateValueFlow {
+                reg: 4,
+                op: NumericBinaryOp::Add,
+                kind: NumericSelfUpdateValueKind::Integer,
+                rhs: NumericValueFlowRhs::ImmI(1),
+            }),
+        },
+    };
+    let lowered_trace = lowered_trace_with_entry_hints_and_constants(&[], vec![key]);
+
+    let entry = match backend
+        .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+        .expect("expected native numeric forloop")
+    {
+        NativeCompiledTrace::NumericForLoop { entry } => entry,
+        other => panic!("expected native numeric forloop, got {other:?}"),
+    };
+
+    let mut stack = [LuaValue::nil(); 8];
+    stack[4] = LuaValue::integer(1);
+    stack[5] = LuaValue::integer(2);
+    stack[6] = LuaValue::integer(1);
+    stack[7] = LuaValue::integer(0);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            lowered_trace.constants.as_ptr(),
+            lowered_trace.constants.len(),
+            std::ptr::null_mut(),
+            std::slice::from_ref(&upvalue).as_ptr(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(stack[4].as_integer(), Some(4));
+    assert_eq!(
+        vm.raw_get(&table, &key)
+            .and_then(|value| value.as_integer()),
+        Some(4)
+    );
+}
+
+#[test]
+fn compile_native_numeric_for_loop_materializes_carried_index_for_set_table_int() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    let table = vm.create_table(4, 0).unwrap();
+    let indices = [
+        LuaValue::integer(1),
+        LuaValue::integer(2),
+        LuaValue::integer(3),
+        LuaValue::integer(4),
+    ];
+    for index in indices {
+        assert!(vm.raw_set(&table, index, LuaValue::integer(0)));
+    }
+
+    let mut backend = NativeTraceBackend::default();
+    let lowering = NumericLowering {
+        steps: vec![
+            NumericStep::Binary {
+                dst: 2,
+                lhs: NumericOperand::Reg(2),
+                rhs: NumericOperand::ImmI(1),
+                op: NumericBinaryOp::Add,
+            },
+            NumericStep::SetTableInt {
+                table: 3,
+                index: 2,
+                value: 4,
+            },
+        ],
+        value_state: NumericValueState {
+            self_update: Some(NumericSelfUpdateValueFlow {
+                reg: 2,
+                op: NumericBinaryOp::Add,
+                kind: NumericSelfUpdateValueKind::Integer,
+                rhs: NumericValueFlowRhs::ImmI(1),
+            }),
+        },
+    };
+    let lowered_trace = lowered_trace_with_entry_hints(&[
+        (2, TraceValueKind::Integer),
+        (3, TraceValueKind::Table),
+        (4, TraceValueKind::Integer),
+    ]);
+
+    let entry = match backend
+        .compile_native_numeric_for_loop(5, &lowering, &lowered_trace)
+        .expect("expected native numeric forloop")
+    {
+        NativeCompiledTrace::NumericForLoop { entry } => entry,
+        other => panic!("expected native numeric forloop, got {other:?}"),
+    };
+
+    let mut stack = [LuaValue::nil(); 8];
+    stack[2] = LuaValue::integer(1);
+    stack[3] = table;
+    stack[4] = LuaValue::integer(9);
+    stack[5] = LuaValue::integer(2);
+    stack[6] = LuaValue::integer(1);
+    stack[7] = LuaValue::integer(0);
+
+    let mut result = NativeTraceResult::default();
+    unsafe {
+        entry(
+            stack.as_mut_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut result,
+        );
+    }
+
+    assert_eq!(result.status, NativeTraceStatus::LoopExit);
+    assert_eq!(result.hits, 3);
+    assert_eq!(stack[2].as_integer(), Some(4));
+    assert_eq!(
+        vm.raw_get(&stack[3], &LuaValue::integer(4))
+            .and_then(|value| value.as_integer()),
+        Some(9)
+    );
+    assert_eq!(
+        vm.raw_get(&stack[3], &LuaValue::integer(1))
+            .and_then(|value| value.as_integer()),
+        Some(0)
     );
 }
 

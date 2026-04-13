@@ -168,6 +168,77 @@ fn native_backend_compiles_call_for_loop_with_post_call_move_to_native_execution
 }
 
 #[test]
+fn native_backend_rejects_call_for_loop_with_upvalue_prep() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 0,
+        loop_tail_pc: 2,
+        insts: vec![
+            TraceIrInst {
+                pc: 0,
+                opcode: OpCode::GetUpval,
+                raw_instruction: Instruction::create_abc(OpCode::GetUpval, 0, 0, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::UpvalueAccess,
+                reads: vec![TraceIrOperand::Upvalue(0)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            TraceIrInst {
+                pc: 1,
+                opcode: OpCode::Call,
+                raw_instruction: Instruction::create_abc(OpCode::Call, 0, 1, 1).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Call,
+                reads: vec![TraceIrOperand::Register(0)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 2,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 8, 3).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 0,
+        loop_tail_pc: 2,
+        steps: vec![
+            HelperPlanStep::UpvalueAccess {
+                reads: vec![TraceIrOperand::Upvalue(0)],
+                writes: vec![TraceIrOperand::Register(0)],
+            },
+            HelperPlanStep::Call {
+                reads: vec![TraceIrOperand::Register(0)],
+                writes: Vec::new(),
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(0)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 3,
+            guards_observed: 0,
+            call_steps: 1,
+            metamethod_steps: 0,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert!(!matches!(
+                compiled.execution(),
+                CompiledTraceExecution::Native(NativeCompiledTrace::CallForLoop { .. })
+            ));
+        }
+        BackendCompileOutcome::NotYetSupported => {}
+    }
+}
+
+#[test]
 fn native_call_for_loop_with_c_callable_executes_and_loop_exits() {
     let mut backend = NativeTraceBackend::default();
     let ir = call_for_loop_test_ir();
