@@ -70,6 +70,16 @@ pub(super) fn profile_for_numeric_jmp_loop(
     profile
 }
 
+pub(super) fn profile_for_guarded_call_jmp_loop(
+    prep_steps: &[NumericStep],
+    post_steps: &[NumericStep],
+    guard: NumericJmpLoopGuard,
+) -> NativeLoweringProfile {
+    let mut profile = profile_for_numeric_steps(prep_steps);
+    profile = merge_native_profiles(profile, profile_for_numeric_steps(post_steps));
+    merge_native_profiles(profile, profile_for_numeric_guard(guard))
+}
+
 pub(super) fn profile_for_numeric_steps(steps: &[NumericStep]) -> NativeLoweringProfile {
     steps
         .iter()

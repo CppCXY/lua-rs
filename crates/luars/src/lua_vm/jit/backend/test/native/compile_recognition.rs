@@ -454,6 +454,50 @@ fn native_backend_compiles_numeric_for_loop_to_native_execution() {
 }
 
 #[test]
+fn native_backend_rejects_empty_numeric_for_loop_body() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 90,
+        loop_tail_pc: 90,
+        insts: vec![TraceIrInst {
+            pc: 90,
+            opcode: OpCode::ForLoop,
+            raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 1).as_u32(),
+            kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+            reads: vec![TraceIrOperand::JumpTarget(90)],
+            writes: Vec::new(),
+        }],
+        guards: Vec::new(),
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 90,
+        loop_tail_pc: 90,
+        steps: vec![HelperPlanStep::LoopBackedge {
+            reads: vec![TraceIrOperand::JumpTarget(90)],
+            writes: Vec::new(),
+        }],
+        guard_count: 0,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 1,
+            guards_observed: 0,
+            call_steps: 0,
+            metamethod_steps: 0,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert!(!matches!(
+                compiled.execution(),
+                CompiledTraceExecution::Native(NativeCompiledTrace::LinearIntForLoop { .. })
+                    | CompiledTraceExecution::Native(NativeCompiledTrace::NumericForLoop { .. })
+            ));
+        }
+        BackendCompileOutcome::NotYetSupported => {}
+    }
+}
+
+#[test]
 fn native_backend_compiles_guarded_numeric_for_loop_to_native_execution() {
     let mut backend = NativeTraceBackend::default();
     let ir = TraceIr {
@@ -540,6 +584,220 @@ fn native_backend_compiles_guarded_numeric_for_loop_to_native_execution() {
             assert!(matches!(
                 compiled.execution(),
                 CompiledTraceExecution::Native(NativeCompiledTrace::GuardedNumericForLoop { .. })
+            ));
+        }
+        BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),
+    }
+}
+
+#[test]
+fn native_backend_rejects_empty_guarded_numeric_for_loop_body() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 100,
+        loop_tail_pc: 102,
+        insts: vec![
+            TraceIrInst {
+                pc: 100,
+                opcode: OpCode::Lt,
+                raw_instruction: Instruction::create_abck(OpCode::Lt, 4, 6, 0, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Guard,
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(6)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 101,
+                opcode: OpCode::Jmp,
+                raw_instruction: Instruction::create_sj(OpCode::Jmp, 2).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Branch,
+                reads: vec![TraceIrOperand::JumpTarget(104)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 102,
+                opcode: OpCode::ForLoop,
+                raw_instruction: Instruction::create_abx(OpCode::ForLoop, 5, 3).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(100)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: vec![crate::lua_vm::jit::ir::TraceIrGuard {
+            guard_pc: 100,
+            branch_pc: 101,
+            exit_pc: 104,
+            taken_on_trace: false,
+            kind: crate::lua_vm::jit::ir::TraceIrGuardKind::SideExit,
+        }],
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 100,
+        loop_tail_pc: 102,
+        steps: vec![
+            HelperPlanStep::Guard {
+                reads: vec![TraceIrOperand::Register(4), TraceIrOperand::Register(6)],
+            },
+            HelperPlanStep::Branch {
+                reads: vec![TraceIrOperand::JumpTarget(104)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(100)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 1,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 3,
+            guards_observed: 1,
+            call_steps: 0,
+            metamethod_steps: 0,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert!(!matches!(
+                compiled.execution(),
+                CompiledTraceExecution::Native(NativeCompiledTrace::LinearIntForLoop { .. })
+                    | CompiledTraceExecution::Native(NativeCompiledTrace::NumericForLoop { .. })
+                    | CompiledTraceExecution::Native(
+                        NativeCompiledTrace::GuardedNumericForLoop { .. }
+                    )
+            ));
+        }
+        BackendCompileOutcome::NotYetSupported => {}
+    }
+}
+
+#[test]
+fn native_backend_compiles_guarded_call_jmp_loop_to_native_execution() {
+    let mut backend = NativeTraceBackend::default();
+    let ir = TraceIr {
+        root_pc: 17,
+        loop_tail_pc: 24,
+        insts: vec![
+            TraceIrInst {
+                pc: 17,
+                opcode: OpCode::Test,
+                raw_instruction: Instruction::create_abc(OpCode::Test, 4, 0, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Guard,
+                reads: vec![TraceIrOperand::Register(4)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 18,
+                opcode: OpCode::Jmp,
+                raw_instruction: Instruction::create_sj(OpCode::Jmp, 7).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Branch,
+                reads: vec![TraceIrOperand::JumpTarget(26)],
+                writes: Vec::new(),
+            },
+            TraceIrInst {
+                pc: 19,
+                opcode: OpCode::Add,
+                raw_instruction: Instruction::create_abck(OpCode::Add, 5, 5, 6, false).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Arithmetic,
+                reads: vec![TraceIrOperand::Register(5), TraceIrOperand::Register(6)],
+                writes: vec![TraceIrOperand::Register(5)],
+            },
+            TraceIrInst {
+                pc: 20,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 8, 5, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(5)],
+                writes: vec![TraceIrOperand::Register(8)],
+            },
+            TraceIrInst {
+                pc: 21,
+                opcode: OpCode::Call,
+                raw_instruction: Instruction::create_abc(OpCode::Call, 8, 2, 3).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::Call,
+                reads: vec![TraceIrOperand::Register(8), TraceIrOperand::Register(9)],
+                writes: vec![TraceIrOperand::Register(8), TraceIrOperand::Register(9)],
+            },
+            TraceIrInst {
+                pc: 22,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 6, 8, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(8)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            TraceIrInst {
+                pc: 23,
+                opcode: OpCode::Move,
+                raw_instruction: Instruction::create_abc(OpCode::Move, 7, 9, 0).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoadMove,
+                reads: vec![TraceIrOperand::Register(9)],
+                writes: vec![TraceIrOperand::Register(7)],
+            },
+            TraceIrInst {
+                pc: 24,
+                opcode: OpCode::Jmp,
+                raw_instruction: Instruction::create_sj(OpCode::Jmp, -8).as_u32(),
+                kind: crate::lua_vm::jit::ir::TraceIrInstKind::LoopBackedge,
+                reads: vec![TraceIrOperand::JumpTarget(17)],
+                writes: Vec::new(),
+            },
+        ],
+        guards: vec![crate::lua_vm::jit::ir::TraceIrGuard {
+            guard_pc: 17,
+            branch_pc: 18,
+            exit_pc: 26,
+            taken_on_trace: false,
+            kind: crate::lua_vm::jit::ir::TraceIrGuardKind::SideExit,
+        }],
+    };
+    let helper_plan = HelperPlan {
+        root_pc: 17,
+        loop_tail_pc: 24,
+        steps: vec![
+            HelperPlanStep::Guard {
+                reads: vec![TraceIrOperand::Register(4)],
+            },
+            HelperPlanStep::Branch {
+                reads: vec![TraceIrOperand::JumpTarget(26)],
+            },
+            HelperPlanStep::Arithmetic {
+                reads: vec![TraceIrOperand::Register(5), TraceIrOperand::Register(6)],
+                writes: vec![TraceIrOperand::Register(5)],
+            },
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(5)],
+                writes: vec![TraceIrOperand::Register(8)],
+            },
+            HelperPlanStep::Call {
+                reads: vec![TraceIrOperand::Register(8), TraceIrOperand::Register(9)],
+                writes: vec![TraceIrOperand::Register(8), TraceIrOperand::Register(9)],
+            },
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(8)],
+                writes: vec![TraceIrOperand::Register(6)],
+            },
+            HelperPlanStep::LoadMove {
+                reads: vec![TraceIrOperand::Register(9)],
+                writes: vec![TraceIrOperand::Register(7)],
+            },
+            HelperPlanStep::LoopBackedge {
+                reads: vec![TraceIrOperand::JumpTarget(17)],
+                writes: Vec::new(),
+            },
+        ],
+        guard_count: 1,
+        summary: HelperPlanDispatchSummary {
+            steps_executed: 8,
+            guards_observed: 1,
+            call_steps: 1,
+            metamethod_steps: 0,
+        },
+    };
+
+    match backend.compile_test(&ir, &helper_plan) {
+        BackendCompileOutcome::Compiled(compiled) => {
+            assert!(matches!(
+                compiled.execution(),
+                CompiledTraceExecution::Native(NativeCompiledTrace::GuardedCallJmpLoop { .. })
             ));
         }
         BackendCompileOutcome::NotYetSupported => panic!("expected compiled trace"),

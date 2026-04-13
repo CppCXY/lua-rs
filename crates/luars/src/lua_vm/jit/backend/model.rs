@@ -296,6 +296,7 @@ impl CompiledTraceExecution {
                 NativeCompiledTrace::GuardedNumericForLoop { .. } => "NativeGuardedNumericForLoop",
                 NativeCompiledTrace::GuardedCallPrefix { .. } => "NativeGuardedCallPrefix",
                 NativeCompiledTrace::CallForLoop { .. } => "NativeCallForLoop",
+                NativeCompiledTrace::GuardedCallJmpLoop { .. } => "NativeGuardedCallJmpLoop",
                 NativeCompiledTrace::TForLoop { .. } => "NativeTForLoop",
                 NativeCompiledTrace::NumericJmpLoop { .. } => "NativeNumericJmpLoop",
             },
@@ -363,6 +364,7 @@ pub(crate) enum NativeCompiledTrace {
     GuardedNumericForLoop { entry: NativeTraceEntry },
     GuardedCallPrefix { entry: NativeTraceEntry },
     CallForLoop { entry: NativeTraceEntry },
+    GuardedCallJmpLoop { entry: NativeTraceEntry },
     TForLoop { entry: NativeTraceEntry },
     NumericJmpLoop { entry: NativeTraceEntry },
 }
@@ -398,6 +400,10 @@ impl PartialEq for NativeCompiledTrace {
             (Self::CallForLoop { entry: lhs }, Self::CallForLoop { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
             }
+            (
+                Self::GuardedCallJmpLoop { entry: lhs },
+                Self::GuardedCallJmpLoop { entry: rhs },
+            ) => std::ptr::fn_addr_eq(*lhs, *rhs),
             (Self::TForLoop { entry: lhs }, Self::TForLoop { entry: rhs }) => {
                 std::ptr::fn_addr_eq(*lhs, *rhs)
             }

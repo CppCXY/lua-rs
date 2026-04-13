@@ -350,6 +350,7 @@ unsafe fn dispatch_native_compiled_trace(
         | NativeCompiledTrace::GuardedNumericForLoop { entry }
         | NativeCompiledTrace::GuardedCallPrefix { entry }
         | NativeCompiledTrace::CallForLoop { entry }
+        | NativeCompiledTrace::GuardedCallJmpLoop { entry }
         | NativeCompiledTrace::TForLoop { entry }
         | NativeCompiledTrace::NumericJmpLoop { entry } => entry,
     };

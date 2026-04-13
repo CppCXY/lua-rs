@@ -713,6 +713,12 @@ impl JitState {
                             .root_native_call_for_dispatches
                             .saturating_add(1);
                     }
+                    NativeCompiledTrace::GuardedCallJmpLoop { .. } => {
+                        self.counters.root_native_call_for_dispatches = self
+                            .counters
+                            .root_native_call_for_dispatches
+                            .saturating_add(1);
+                    }
                     NativeCompiledTrace::TForLoop { .. } => {
                         self.counters.root_native_numeric_for_dispatches = self
                             .counters
@@ -2427,6 +2433,7 @@ mod tests {
     #[test]
     fn quicksort_reduced_benchmark_executes_without_unsorted_output_under_jit() {
         let mut vm = LuaVM::new(SafeOption::default());
+        vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
         let source = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../benchmarks/bench_quicksort.lua"
@@ -2732,6 +2739,78 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn bare_forloop_side_trace_stays_lowered_and_never_becomes_native_ready_dispatch() {
+        let mut jit = JitState::default();
+        let mut chunk = LuaProto::new();
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 0, 1, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 1, 2, 0));
+        chunk
+            .code
+            .push(Instruction::create_abc(OpCode::Move, 2, 3, 0));
+        chunk
+            .code
+            .push(Instruction::create_abx(OpCode::ForLoop, 0, 4));
+        chunk.code.push(Instruction::create_sj(OpCode::Jmp, -5));
+        let chunk_ptr = &chunk as *const LuaProto;
+
+        for _ in 0..HOT_EXIT_THRESHOLD {
+            jit.record_hot_exit(chunk_ptr, 0, 0, 3);
+        }
+
+        let side = jit
+            .side_traces
+            .get(&SideTraceKey {
+                parent: TraceKey {
+                    chunk_addr: chunk_ptr as usize,
+                    pc: 0,
+                },
+                exit_index: 0,
+            })
+            .unwrap();
+
+        assert_eq!(side.start_pc, 3);
+        assert!(matches!(
+            side.status,
+            SideTraceStatus::Executable {
+                instruction_count: 1,
+            }
+        ));
+
+        let artifact = side.artifact.as_ref().unwrap();
+        assert_eq!(artifact.seed.start_pc, 3);
+        assert_eq!(artifact.loop_header_pc, 0);
+        assert_eq!(artifact.loop_tail_pc, 3);
+
+        let compiled_trace = side.compiled_trace.as_ref().unwrap();
+        assert_eq!(compiled_trace.root_pc, 3);
+        assert_eq!(compiled_trace.executor_family(), "LoweredSnippet");
+
+        assert!(matches!(
+            jit.side_trace_dispatch_for(chunk_ptr, 0, 0),
+            Some(ExecutableTraceDispatch {
+                start_pc: 3,
+                linked_loop_header_pc: Some(0),
+                execution: CompiledTraceExecution::LoweredSnippet,
+                ..
+            })
+        ));
+        assert!(matches!(
+            jit.ready_side_trace_dispatch_for(chunk_ptr, 0, 0),
+            Some(ReadySideTraceDispatch::Executable(ExecutableTraceDispatch {
+                start_pc: 3,
+                linked_loop_header_pc: Some(0),
+                execution: CompiledTraceExecution::LoweredSnippet,
+                ..
+            }))
+        ));
+        assert!(jit.native_side_trace_dispatch_for(chunk_ptr, 0, 0).is_none());
     }
 
     #[test]
@@ -3166,12 +3245,11 @@ mod tests {
         assert_eq!(results[0].as_integer(), Some(404000));
 
         let snapshot = vm.jit.stats_snapshot();
-        assert!(snapshot.counters.linked_root_reentry_attempts > 0);
-        assert!(snapshot.counters.linked_root_reentry_hits > 0);
+        assert!(snapshot.counters.root_native_call_for_dispatches > 0);
         assert_eq!(snapshot.counters.linked_root_reentry_fallbacks, 0);
 
-        let stats = vm.jit_stats();
-        assert!(stats.contains("Linked root reentry by target header:"));
+        let report = vm.jit.trace_report();
+        assert!(report.contains("executor=NativeGuardedCallJmpLoop"));
     }
 
     #[test]
@@ -3187,12 +3265,11 @@ mod tests {
         vm.execute(&source).unwrap();
 
         let snapshot = vm.jit_stats_snapshot();
-        assert!(snapshot.counters.linked_root_reentry_attempts > 0);
-        assert_eq!(
-            snapshot.counters.linked_root_reentry_hits,
-            snapshot.counters.linked_root_reentry_attempts
-        );
+        assert!(snapshot.counters.root_native_call_for_dispatches > 0);
         assert_eq!(snapshot.counters.linked_root_reentry_fallbacks, 0);
+
+        let report = vm.jit.trace_report();
+        assert!(report.contains("executor=NativeGuardedCallJmpLoop"));
     }
 
     #[test]

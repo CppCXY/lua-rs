@@ -35,6 +35,12 @@ impl NativeTraceBackend {
             return Some((execution, profile));
         }
 
+        if let Some((execution, profile)) =
+            self.compile_native_generic_guarded_call_jmp(ir, lowered_trace)
+        {
+            return Some((execution, profile));
+        }
+
         if let Some((execution, profile)) = self.compile_native_generic_tfor(ir, lowered_trace) {
             return Some((execution, profile));
         }
@@ -98,6 +104,9 @@ impl NativeTraceBackend {
         let loop_reg = Instruction::from_u32(loop_backedge.raw_instruction).get_a();
         let steps =
             lower_linear_int_steps_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
+        if steps.is_empty() {
+            return None;
+        }
         let native = self.compile_native_linear_int_for_loop(loop_reg, &steps, lowered_trace)?;
         Some((
             CompiledTraceExecution::Native(native),
@@ -124,6 +133,9 @@ impl NativeTraceBackend {
         if ir.guards.is_empty() {
             let lowering =
                 lower_numeric_lowering_for_native(&ir.insts[..ir.insts.len() - 1], lowered_trace)?;
+            if lowering.steps.is_empty() {
+                return None;
+            }
             let native =
                 self.compile_native_numeric_for_loop(loop_reg, &lowering, lowered_trace)?;
             return Some((
@@ -155,6 +167,9 @@ impl NativeTraceBackend {
         }
 
         let lowering = lower_numeric_lowering_for_native(&ir.insts[..guard_index], lowered_trace)?;
+        if lowering.steps.is_empty() {
+            return None;
+        }
         let loop_guard =
             lower_numeric_guard_for_native(&ir.insts[guard_index], true, lowered_exit.resume_pc)?;
         let native = self.compile_native_guarded_numeric_for_loop(
@@ -350,6 +365,12 @@ impl NativeTraceBackend {
         if !post_steps.iter().all(native_supports_numeric_step) {
             return None;
         }
+        if !post_steps
+            .iter()
+            .all(|step| matches!(step, NumericStep::Move { .. }))
+        {
+            return None;
+        }
 
         let native = self.compile_native_call_for_loop(
             loop_reg,
@@ -362,6 +383,148 @@ impl NativeTraceBackend {
             lowered_trace,
         )?;
         let profile = profile_for_numeric_steps(&prep_steps);
+        Some((CompiledTraceExecution::Native(native), Some(profile)))
+    }
+
+    fn compile_native_generic_guarded_call_jmp(
+        &mut self,
+        ir: &TraceIr,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<(CompiledTraceExecution, Option<NativeLoweringProfile>)> {
+        let loop_backedge = ir.insts.last()?;
+        if loop_backedge.opcode != crate::OpCode::Jmp {
+            return None;
+        }
+        if Instruction::from_u32(loop_backedge.raw_instruction).get_sj() >= 0 {
+            return None;
+        }
+        if ir.guards.len() != 1 || ir.insts.len() < 6 {
+            return None;
+        }
+        if ir.insts[1].opcode != crate::OpCode::Jmp {
+            return None;
+        }
+
+        let guard_meta = ir.guards[0];
+        if guard_meta.guard_pc != ir.insts[0].pc
+            || guard_meta.branch_pc != ir.insts[1].pc
+            || guard_meta.taken_on_trace
+        {
+            return None;
+        }
+
+        let call_positions = ir.insts[2..ir.insts.len() - 1]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, inst)| (inst.opcode == crate::OpCode::Call).then_some(index + 2))
+            .collect::<Vec<_>>();
+        if call_positions.len() != 1 {
+            return None;
+        }
+        let call_index = call_positions[0];
+        let call_inst = &ir.insts[call_index];
+        let call_raw = Instruction::from_u32(call_inst.raw_instruction);
+        if call_raw.get_b() == 0 || call_raw.get_c() == 0 {
+            return None;
+        }
+
+        let lowered_exit = lowered_trace.deopt_target_for_exit_pc(guard_meta.exit_pc)?;
+        let guard = lower_numeric_guard_for_native(&ir.insts[0], false, lowered_exit.resume_pc)?;
+        if !matches!(
+            guard,
+            NumericJmpLoopGuard::Head {
+                cond: NumericIfElseCond::Truthy { .. },
+                ..
+            }
+        ) {
+            return None;
+        }
+
+        let prep_insts = &ir.insts[2..call_index];
+        let post_insts = &ir.insts[call_index + 1..ir.insts.len() - 1];
+        let call_live_out = (call_raw.get_a()..call_raw.get_a() + call_raw.get_b())
+            .collect::<Vec<_>>();
+        let post_live_out = post_insts
+            .iter()
+            .flat_map(|inst| {
+                let raw = Instruction::from_u32(inst.raw_instruction);
+                match inst.opcode {
+                    crate::OpCode::Move
+                    | crate::OpCode::LoadFalse
+                    | crate::OpCode::LFalseSkip
+                    | crate::OpCode::LoadTrue
+                    | crate::OpCode::LoadK
+                    | crate::OpCode::LoadKX
+                    | crate::OpCode::LoadI
+                    | crate::OpCode::LoadF
+                    | crate::OpCode::GetUpval
+                    | crate::OpCode::GetTable
+                    | crate::OpCode::GetField
+                    | crate::OpCode::GetI
+                    | crate::OpCode::GetTabUp
+                    | crate::OpCode::Len
+                    | crate::OpCode::Add
+                    | crate::OpCode::AddK
+                    | crate::OpCode::Sub
+                    | crate::OpCode::SubK
+                    | crate::OpCode::Mul
+                    | crate::OpCode::MulK
+                    | crate::OpCode::Mod
+                    | crate::OpCode::ModK
+                    | crate::OpCode::Pow
+                    | crate::OpCode::PowK
+                    | crate::OpCode::Div
+                    | crate::OpCode::DivK
+                    | crate::OpCode::IDiv
+                    | crate::OpCode::IDivK
+                    | crate::OpCode::BAnd
+                    | crate::OpCode::BAndK
+                    | crate::OpCode::BOr
+                    | crate::OpCode::BOrK
+                    | crate::OpCode::BXor
+                    | crate::OpCode::BXorK
+                    | crate::OpCode::Shl
+                    | crate::OpCode::Shr
+                    | crate::OpCode::ShlI
+                    | crate::OpCode::ShrI => vec![raw.get_a()],
+                    _ => Vec::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let prep_steps = lower_numeric_steps_for_native_with_live_out(
+            prep_insts,
+            lowered_trace,
+            &call_live_out,
+        )?;
+        let post_steps = lower_numeric_steps_for_native_with_live_out(
+            post_insts,
+            lowered_trace,
+            &post_live_out,
+        )?;
+        if !prep_steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+        if !post_steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+        if !post_steps
+            .iter()
+            .all(|step| matches!(step, NumericStep::Move { .. }))
+        {
+            return None;
+        }
+
+        let native = self.compile_native_guarded_call_jmp_loop(
+            &prep_steps,
+            &post_steps,
+            guard,
+            call_raw.get_a(),
+            call_raw.get_b(),
+            call_raw.get_c(),
+            call_inst.pc,
+            lowered_trace,
+        )?;
+        let profile = profile_for_guarded_call_jmp_loop(&prep_steps, &post_steps, guard);
         Some((CompiledTraceExecution::Native(native), Some(profile)))
     }
 
@@ -1710,6 +1873,202 @@ impl NativeTraceBackend {
         let entry = module.get_finalized_function(func_id);
         self.modules.push(module);
         Some(NativeCompiledTrace::CallForLoop {
+            entry: unsafe { std::mem::transmute(entry) },
+        })
+    }
+
+    fn compile_native_guarded_call_jmp_loop(
+        &mut self,
+        prep_steps: &[NumericStep],
+        post_steps: &[NumericStep],
+        guard: NumericJmpLoopGuard,
+        call_a: u32,
+        call_b: u32,
+        call_c: u32,
+        call_pc: u32,
+        lowered_trace: &LoweredTrace,
+    ) -> Option<NativeCompiledTrace> {
+        if !prep_steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+        if !post_steps.iter().all(native_supports_numeric_step) {
+            return None;
+        }
+
+        let (cond, continue_when, continue_preset, exit_preset, side_exit_pc) = match guard {
+            NumericJmpLoopGuard::Head {
+                cond,
+                continue_when,
+                continue_preset,
+                exit_preset,
+                exit_pc,
+            } => (cond, continue_when, continue_preset, exit_preset, exit_pc),
+            NumericJmpLoopGuard::Tail { .. } => return None,
+        };
+        let side_exit_index = lowered_trace
+            .deopt_target_for_exit_pc(side_exit_pc)?
+            .exit_index;
+
+        if !native_supports_numeric_cond(cond)
+            || continue_preset
+                .as_ref()
+                .is_some_and(|step| !native_supports_numeric_step(step))
+            || exit_preset
+                .as_ref()
+                .is_some_and(|step| !native_supports_numeric_step(step))
+        {
+            return None;
+        }
+
+        let func_name = self.allocate_function_name("jit_native_guarded_call_jmp_loop");
+        let mut module = Self::build_module().ok()?;
+        let target_config = module.target_config();
+        let pointer_ty = target_config.pointer_type();
+        let mut context = make_native_context(target_config);
+        let native_helpers = declare_native_helpers(
+            &mut module,
+            &mut context.func,
+            pointer_ty,
+            target_config.default_call_conv,
+        )
+        .ok()?;
+        let func_id = module
+            .declare_function(&func_name, Linkage::Local, &context.func.signature)
+            .ok()?;
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_ctx);
+        let hits_var = builder.declare_var(types::I64);
+        let abi = init_native_entry(&mut builder, pointer_ty);
+        let mut known_value_kinds = lowered_trace.entry_ssa_register_hints();
+
+        let loop_block = builder.create_block();
+        let guard_continue_block = builder.create_block();
+        let helper_continue_block = builder.create_block();
+        let side_exit_terminal_block = builder.create_block();
+        let fallback_terminal_block = builder.create_block();
+
+        let zero_hits = builder.ins().iconst(types::I64, 0);
+        builder.def_var(hits_var, zero_hits);
+        builder.ins().jump(loop_block, &[]);
+
+        builder.switch_to_block(loop_block);
+        let current_hits = builder.use_var(hits_var);
+        let mut current_numeric_values = Vec::new();
+        emit_numeric_guard_flow(
+            &mut builder,
+            &abi,
+            &native_helpers,
+            hits_var,
+            current_hits,
+            fallback_terminal_block,
+            cond,
+            continue_when,
+            continue_preset.as_ref(),
+            exit_preset.as_ref(),
+            guard_continue_block,
+            side_exit_terminal_block,
+            &mut known_value_kinds,
+            &mut current_numeric_values,
+            None,
+            HoistedNumericGuardValues::default(),
+        )?;
+
+        builder.switch_to_block(guard_continue_block);
+        builder.seal_block(guard_continue_block);
+        for step in prep_steps {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_terminal_block,
+                *step,
+                &mut known_value_kinds,
+                &mut current_numeric_values,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
+
+        let call_a_value = builder.ins().iconst(types::I32, i64::from(call_a));
+        let call_b_value = builder.ins().iconst(types::I32, i64::from(call_b));
+        let call_c_value = builder.ins().iconst(types::I32, i64::from(call_c));
+        let call_pc_value = builder.ins().iconst(types::I32, i64::from(call_pc));
+        let helper_call = builder.ins().call(
+            native_helpers.call,
+            &[
+                abi.lua_state_ptr,
+                abi.base_ptr,
+                abi.base_slots,
+                call_a_value,
+                call_b_value,
+                call_c_value,
+                call_pc_value,
+            ],
+        );
+        let helper_status = builder.inst_results(helper_call)[0];
+        let helper_continue =
+            builder
+                .ins()
+                .icmp_imm(IntCC::Equal, helper_status, i64::from(NATIVE_CALL_CONTINUE));
+        builder.ins().brif(
+            helper_continue,
+            helper_continue_block,
+            &[],
+            fallback_terminal_block,
+            &[],
+        );
+
+        builder.switch_to_block(helper_continue_block);
+        builder.seal_block(helper_continue_block);
+        for step in post_steps {
+            emit_numeric_step(
+                &mut builder,
+                &abi,
+                &native_helpers,
+                hits_var,
+                current_hits,
+                fallback_terminal_block,
+                *step,
+                &mut known_value_kinds,
+                &mut current_numeric_values,
+                None,
+                HoistedNumericGuardValues::default(),
+            )?;
+        }
+
+        let next_hits = builder.ins().iadd_imm(current_hits, 1);
+        builder.def_var(hits_var, next_hits);
+        builder.ins().jump(loop_block, &[]);
+
+        emit_native_terminal_result(
+            &mut builder,
+            side_exit_terminal_block,
+            abi.result_ptr,
+            hits_var,
+            NativeTraceStatus::SideExit,
+            Some(side_exit_pc),
+            Some(side_exit_index),
+        );
+        emit_native_terminal_result(
+            &mut builder,
+            fallback_terminal_block,
+            abi.result_ptr,
+            hits_var,
+            NativeTraceStatus::Fallback,
+            None,
+            None,
+        );
+
+        builder.seal_block(loop_block);
+        builder.finalize();
+        module.define_function(func_id, &mut context).ok()?;
+        module.clear_context(&mut context);
+        module.finalize_definitions().ok()?;
+        let entry = module.get_finalized_function(func_id);
+        self.modules.push(module);
+        Some(NativeCompiledTrace::GuardedCallJmpLoop {
             entry: unsafe { std::mem::transmute(entry) },
         })
     }
