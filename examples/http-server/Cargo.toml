@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-luars = { workspace = true, features = ["sandbox"] }
+luars = { version = "0.18.1", features = ["sandbox"] }
 tokio = { version = "1", features = ["full"] }
