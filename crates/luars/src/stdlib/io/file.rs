@@ -737,127 +737,19 @@ fn file_read(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("file:read requires file handle".to_string()))?;
 
-    // Collect all format arguments
     let mut formats: Vec<LuaValue> = Vec::new();
     let mut i = 2;
     while let Some(v) = l.get_arg(i) {
         formats.push(v);
         i += 1;
     }
-    // Default: read a line
-    if formats.is_empty() {
-        formats.push(LuaValue::nil()); // sentinel for default "l"
-    }
 
     // Extract LuaFile from userdata using direct pointer access
     if let Some(ud) = file_val.as_userdata_mut() {
         let data = ud.get_data_mut();
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
-            let mut nresults = 0;
-            let mut success = true;
-
-            for fmt in &formats {
-                if !success {
-                    // After first nil result, all subsequent are nil
-                    l.push_value(LuaValue::nil())?;
-                    nresults += 1;
-                    continue;
-                }
-
-                // Helper macro-like: on IO error, return (nil, errmsg) like C Lua
-                macro_rules! handle_read_err {
-                    ($e:expr, $l:expr, $nresults:expr) => {{
-                        $l.push_value(LuaValue::nil())?;
-                        let msg = $l.create_string(&format!("{}", $e))?;
-                        $l.push_value(msg)?;
-                        let errno = $e.raw_os_error().unwrap_or(0);
-                        $l.push_value(LuaValue::integer(errno as i64))?;
-                        return Ok($nresults + 3);
-                    }};
-                }
-
-                // Check if format is a number (byte count)
-                if let Some(n) = fmt.as_integer() {
-                    let n = n as usize;
-                    if n == 0 {
-                        // read(0) returns "" if not EOF, nil if EOF
-                        match lua_file.is_eof() {
-                            Ok(true) => {
-                                l.push_value(LuaValue::nil())?;
-                                success = false;
-                            }
-                            _ => {
-                                let s = l.create_string("")?;
-                                l.push_value(s)?;
-                            }
-                        }
-                        nresults += 1;
-                        continue;
-                    }
-                    match lua_file.read_bytes(n) {
-                        Ok(bytes) => {
-                            if bytes.is_empty() {
-                                l.push_value(LuaValue::nil())?;
-                                success = false;
-                            } else {
-                                let str_val = super::bytes_to_lua_value(l, bytes)?;
-                                l.push_value(str_val)?;
-                            }
-                        }
-                        Err(e) => handle_read_err!(e, l, nresults),
-                    }
-                    nresults += 1;
-                    continue;
-                }
-
-                // Get format string (default "l" for nil sentinel)
-                let format_str = fmt
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "l".to_string());
-                let format = format_str.strip_prefix('*').unwrap_or(&format_str);
-
-                let first_char = format.chars().next().unwrap_or('l');
-                let result: LuaValue = match first_char {
-                    'l' => match lua_file.read_line() {
-                        Ok(Some(line)) => l.create_string(&line)?,
-                        Ok(None) => {
-                            success = false;
-                            LuaValue::nil()
-                        }
-                        Err(e) => handle_read_err!(e, l, nresults),
-                    },
-                    'L' => match lua_file.read_line_with_newline() {
-                        Ok(Some(line)) => l.create_string(&line)?,
-                        Ok(None) => {
-                            success = false;
-                            LuaValue::nil()
-                        }
-                        Err(e) => handle_read_err!(e, l, nresults),
-                    },
-                    'a' => match lua_file.read_all() {
-                        Ok(content) => super::bytes_to_lua_value(l, content)?,
-                        Err(e) => handle_read_err!(e, l, nresults),
-                    },
-                    'n' => match lua_file.read_number() {
-                        Ok(Some(ReadNumberResult::Integer(n))) => LuaValue::integer(n),
-                        Ok(Some(ReadNumberResult::Float(n))) => LuaValue::float(n),
-                        Ok(None) => {
-                            success = false;
-                            LuaValue::nil()
-                        }
-                        Err(e) => handle_read_err!(e, l, nresults),
-                    },
-                    _ => {
-                        return Err(l.error(format!("invalid format: {}", format)));
-                    }
-                };
-
-                l.push_value(result)?;
-                nresults += 1;
-            }
-
-            return Ok(nresults);
+            let read_result = super::read_many_formats_file(l, lua_file, &formats)?;
+            return super::push_read_results(l, read_result);
         }
     }
 

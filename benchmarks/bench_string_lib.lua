@@ -142,11 +142,3 @@ for i = 1, iterations do
 end
 elapsed = os.clock() - start
 print(string.format("String equality: %.3f seconds (%.2f K ops/sec)", elapsed, iterations / elapsed / 1000))
-
--- String concatenation with ..
-start = os.clock()
-for i = 1, iterations do
-    local s = "Hello" .. " " .. "World" .. "!"
-end
-elapsed = os.clock() - start
-print(string.format("Concat (4 parts): %.3f seconds (%.2f K ops/sec)", elapsed, iterations / elapsed / 1000))

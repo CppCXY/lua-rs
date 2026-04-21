@@ -9,6 +9,18 @@ pub use file::{LuaFile, create_file_metatable};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 
+pub(crate) enum ReadOneResult {
+    Value(LuaValue),
+    Fail,
+    IoError(io::Error),
+}
+
+pub(crate) enum ReadManyResult {
+    Values(Vec<LuaValue>),
+    Fail(Vec<LuaValue>),
+    IoError(io::Error),
+}
+
 /// Create a LuaValue from raw bytes. If valid UTF-8 and ASCII-only, creates a string.
 /// Otherwise creates a binary value to preserve exact byte values.
 fn bytes_to_lua_value(l: &mut LuaState, bytes: Vec<u8>) -> LuaResult<LuaValue> {
@@ -247,37 +259,15 @@ fn io_read(l: &mut LuaState) -> LuaResult<usize> {
             if lua_file.is_closed() {
                 return Err(l.error("default input file is closed".to_string()));
             }
-            // Collect all format arguments
             let mut formats: Vec<LuaValue> = Vec::new();
             let mut i = 1;
             while let Some(v) = l.get_arg(i) {
                 formats.push(v);
                 i += 1;
             }
-            // Default: read a line
-            if formats.is_empty() {
-                formats.push(LuaValue::nil()); // sentinel for default "l"
-            }
 
-            let mut nresults = 0;
-            let mut success = true;
-
-            for fmt in &formats {
-                if !success {
-                    l.push_value(LuaValue::nil())?;
-                    nresults += 1;
-                    continue;
-                }
-
-                let result = read_one_format_file(l, lua_file, fmt)?;
-                if result.is_nil() {
-                    success = false;
-                }
-                l.push_value(result)?;
-                nresults += 1;
-            }
-
-            return Ok(nresults);
+            let read_result = read_many_formats_file(l, lua_file, &formats)?;
+            return push_read_results(l, read_result);
         }
     }
 
@@ -290,7 +280,7 @@ fn read_one_format_file(
     l: &mut LuaState,
     lua_file: &mut LuaFile,
     fmt: &LuaValue,
-) -> LuaResult<LuaValue> {
+) -> LuaResult<ReadOneResult> {
     use file::ReadNumberResult;
 
     // Check if format is an integer (byte count)
@@ -299,19 +289,19 @@ fn read_one_format_file(
         if n == 0 {
             // read(0) returns "" if not EOF, nil if EOF
             match lua_file.is_eof() {
-                Ok(true) => return Ok(LuaValue::nil()),
-                Ok(false) => return l.create_string(""),
-                Err(_) => return Ok(LuaValue::nil()),
+                Ok(true) => return Ok(ReadOneResult::Fail),
+                Ok(false) => return Ok(ReadOneResult::Value(l.create_string("")?)),
+                Err(e) => return Ok(ReadOneResult::IoError(e)),
             }
         }
         match lua_file.read_bytes(n) {
             Ok(bytes) => {
                 if bytes.is_empty() {
-                    return Ok(LuaValue::nil());
+                    return Ok(ReadOneResult::Fail);
                 }
-                return bytes_to_lua_value(l, bytes);
+                return Ok(ReadOneResult::Value(bytes_to_lua_value(l, bytes)?));
             }
-            Err(_) => return Ok(LuaValue::nil()),
+            Err(e) => return Ok(ReadOneResult::IoError(e)),
         }
     }
 
@@ -325,26 +315,77 @@ fn read_one_format_file(
     let first_char = format.chars().next().unwrap_or('l');
     match first_char {
         'l' => match lua_file.read_line() {
-            Ok(Some(line)) => Ok(l.create_string(&line)?),
-            Ok(None) => Ok(LuaValue::nil()),
-            Err(_) => Ok(LuaValue::nil()),
+            Ok(Some(line)) => Ok(ReadOneResult::Value(l.create_string(&line)?)),
+            Ok(None) => Ok(ReadOneResult::Fail),
+            Err(e) => Ok(ReadOneResult::IoError(e)),
         },
         'L' => match lua_file.read_line_with_newline() {
-            Ok(Some(line)) => Ok(l.create_string(&line)?),
-            Ok(None) => Ok(LuaValue::nil()),
-            Err(_) => Ok(LuaValue::nil()),
+            Ok(Some(line)) => Ok(ReadOneResult::Value(l.create_string(&line)?)),
+            Ok(None) => Ok(ReadOneResult::Fail),
+            Err(e) => Ok(ReadOneResult::IoError(e)),
         },
         'a' => match lua_file.read_all() {
-            Ok(content) => Ok(bytes_to_lua_value(l, content)?),
-            Err(_) => Ok(LuaValue::nil()),
+            Ok(content) => Ok(ReadOneResult::Value(bytes_to_lua_value(l, content)?)),
+            Err(e) => Ok(ReadOneResult::IoError(e)),
         },
         'n' => match lua_file.read_number() {
-            Ok(Some(ReadNumberResult::Integer(n))) => Ok(LuaValue::integer(n)),
-            Ok(Some(ReadNumberResult::Float(n))) => Ok(LuaValue::float(n)),
-            Ok(None) => Ok(LuaValue::nil()),
-            Err(_) => Ok(LuaValue::nil()),
+            Ok(Some(ReadNumberResult::Integer(n))) => Ok(ReadOneResult::Value(LuaValue::integer(n))),
+            Ok(Some(ReadNumberResult::Float(n))) => Ok(ReadOneResult::Value(LuaValue::float(n))),
+            Ok(None) => Ok(ReadOneResult::Fail),
+            Err(e) => Ok(ReadOneResult::IoError(e)),
         },
         _ => Err(l.error("invalid format".to_string())),
+    }
+}
+
+pub(crate) fn read_many_formats_file(
+    l: &mut LuaState,
+    lua_file: &mut LuaFile,
+    formats: &[LuaValue],
+) -> LuaResult<ReadManyResult> {
+    let effective_formats: Vec<LuaValue> = if formats.is_empty() {
+        vec![LuaValue::nil()]
+    } else {
+        formats.to_vec()
+    };
+
+    let mut values = Vec::with_capacity(effective_formats.len());
+    for fmt in &effective_formats {
+        match read_one_format_file(l, lua_file, fmt)? {
+            ReadOneResult::Value(value) => values.push(value),
+            ReadOneResult::Fail => return Ok(ReadManyResult::Fail(values)),
+            ReadOneResult::IoError(error) => return Ok(ReadManyResult::IoError(error)),
+        }
+    }
+
+    Ok(ReadManyResult::Values(values))
+}
+
+pub(crate) fn push_read_results(l: &mut LuaState, result: ReadManyResult) -> LuaResult<usize> {
+    match result {
+        ReadManyResult::Values(values) => {
+            let nresults = values.len();
+            for value in values {
+                l.push_value(value)?;
+            }
+            Ok(nresults)
+        }
+        ReadManyResult::Fail(values) => {
+            let nresults = values.len() + 1;
+            for value in values {
+                l.push_value(value)?;
+            }
+            l.push_value(LuaValue::nil())?;
+            Ok(nresults)
+        }
+        ReadManyResult::IoError(error) => {
+            l.push_value(LuaValue::nil())?;
+            let msg = l.create_string(&format!("{}", error))?;
+            l.push_value(msg)?;
+            let errno = error.raw_os_error().unwrap_or(0);
+            l.push_value(LuaValue::integer(errno as i64))?;
+            Ok(3)
+        }
     }
 }
 
@@ -659,27 +700,38 @@ fn io_lines_call_inner(l: &mut LuaState, state_val: &LuaValue) -> LuaResult<usiz
                     Err(e) => return Err(l.error(format!("read error: {}", e))),
                 }
             } else {
-                // Read using formats
-                let mut results = Vec::with_capacity(nfmts);
+                let mut formats = Vec::with_capacity(nfmts);
                 for idx in 1..=nfmts {
                     let fmt = if let Some(ft) = fmts_table.as_table() {
                         ft.raw_geti(idx as i64).unwrap_or(LuaValue::nil())
                     } else {
                         LuaValue::nil()
                     };
-
-                    let result = read_one_format_file(l, lua_file, &fmt)?;
-                    results.push(result);
+                    formats.push(fmt);
                 }
-                // If the first result is nil, it means EOF
-                if results.first().is_none_or(|v| v.is_nil()) {
-                    return io_lines_close_on_eof(l, lua_file, state_val, &closed_key);
+                match read_many_formats_file(l, lua_file, &formats)? {
+                    ReadManyResult::Values(results) => {
+                        let nresults = results.len();
+                        for result in results {
+                            l.push_value(result)?;
+                        }
+                        return Ok(nresults);
+                    }
+                    ReadManyResult::Fail(results) => {
+                        if results.is_empty() {
+                            return io_lines_close_on_eof(l, lua_file, state_val, &closed_key);
+                        }
+                        let nresults = results.len() + 1;
+                        for result in results {
+                            l.push_value(result)?;
+                        }
+                        l.push_value(LuaValue::nil())?;
+                        return Ok(nresults);
+                    }
+                    ReadManyResult::IoError(error) => {
+                        return Err(l.error(format!("{}", error)));
+                    }
                 }
-                let nresults = results.len();
-                for r in results {
-                    l.push_value(r)?;
-                }
-                return Ok(nresults);
             }
         }
     }

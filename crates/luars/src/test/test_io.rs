@@ -372,3 +372,63 @@ fn test_io_read_eof() {
 
     assert!(result.is_ok(), "Error: {:?}", result);
 }
+
+#[test]
+fn test_io_read_stops_after_first_failure() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let test_dir = get_test_data_dir();
+
+    let result = vm.execute(&format!(
+        r#"
+        io.input("{}/lines.txt")
+        local t = table.pack(io.read("*l", "*l", "*l", "*l", "*l", "*l"))
+        assert(t.n == 6)
+        assert(t[1] == "line1")
+        assert(t[5] == "line5")
+        assert(t[6] == nil)
+
+        io.input("{}/sample.txt")
+        local f = io.open("{}/one_line.txt", "w")
+        f:write("only-line\n")
+        f:close()
+        io.input("{}/one_line.txt")
+        local t2 = table.pack(io.read("*l", "*l", "*l"))
+        assert(t2.n == 2)
+        assert(t2[1] == "only-line")
+        assert(t2[2] == nil)
+        os.remove("{}/one_line.txt")
+        "#,
+        test_dir, test_dir, test_dir, test_dir, test_dir
+    ));
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
+fn test_file_read_stops_after_first_failure() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let test_dir = get_test_data_dir();
+
+    let result = vm.execute(&format!(
+        r#"
+        local path = "{}/one_line_file_read.txt"
+        local wf = io.open(path, "w")
+        wf:write("only-line\n")
+        wf:close()
+
+        local f = io.open(path, "r")
+        local t = table.pack(f:read("*l", "*l", "*l"))
+        f:close()
+        os.remove(path)
+
+        assert(t.n == 2)
+        assert(t[1] == "only-line")
+        assert(t[2] == nil)
+        "#,
+        test_dir
+    ));
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}

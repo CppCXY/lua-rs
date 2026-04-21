@@ -369,6 +369,44 @@ fn test_function_ipairs_wrapper() {
 }
 
 #[test]
+fn test_function_returns_in_table_constructor() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.execute(
+        r#"
+        local function triple()
+            return 1, 2, 3
+        end
+
+        local t = {triple()}
+        assert(#t == 3)
+        assert(t[1] == 1 and t[2] == 2 and t[3] == 3)
+        "#,
+    );
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
+fn test_function_returns_as_function_arguments() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.execute(
+        r#"
+        local function triple()
+            return 1, 2, 3
+        end
+
+        local function sum3(a, b, c)
+            return a + b + c
+        end
+
+        assert(sum3(triple()) == 6)
+        "#,
+    );
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
 fn test_function_reduce() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
