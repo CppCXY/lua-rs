@@ -1,6 +1,7 @@
 // IO library implementation
 // Implements: close, flush, input, lines, open, output, read, write, type
 mod file;
+mod popen;
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaUserdata, LuaValue};
@@ -60,11 +61,18 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
     let stdin_val = create_stdin(l)?;
     let stdin_key = l.create_string("stdin")?;
     l.raw_set(&io_table, stdin_key, stdin_val);
+    let registry = l.vm_mut().registry;
+    let input_key = l.create_string("_IO_input")?;
+    l.raw_set(&registry, input_key, stdin_val);
+    l.vm_mut().io_default_input = Some(stdin_val);
 
     // Create stdout
     let stdout_val = create_stdout(l)?;
     let stdout_key = l.create_string("stdout")?;
     l.raw_set(&io_table, stdout_key, stdout_val);
+    let output_key = l.create_string("_IO_output")?;
+    l.raw_set(&registry, output_key, stdout_val);
+    l.vm_mut().io_default_output = Some(stdout_val);
 
     // Create stderr
     let stderr_val = create_stderr(l)?;
@@ -329,7 +337,9 @@ fn read_one_format_file(
             Err(e) => Ok(ReadOneResult::IoError(e)),
         },
         'n' => match lua_file.read_number() {
-            Ok(Some(ReadNumberResult::Integer(n))) => Ok(ReadOneResult::Value(LuaValue::integer(n))),
+            Ok(Some(ReadNumberResult::Integer(n))) => {
+                Ok(ReadOneResult::Value(LuaValue::integer(n)))
+            }
             Ok(Some(ReadNumberResult::Float(n))) => Ok(ReadOneResult::Value(LuaValue::float(n))),
             Ok(None) => Ok(ReadOneResult::Fail),
             Err(e) => Ok(ReadOneResult::IoError(e)),
@@ -983,14 +993,28 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
                 l.push_value(msg)?;
                 return Ok(2);
             }
-            match lua_file.close() {
-                Ok(_) => {
+            match lua_file.close_with_result() {
+                Ok(file::LuaFileCloseResult::Closed) => {
                     // Invalidate cached handle if we closed the default output
                     if is_default_output {
                         l.vm_mut().io_default_output = None;
                     }
                     l.push_value(LuaValue::boolean(true))?;
                     return Ok(1);
+                }
+                Ok(file::LuaFileCloseResult::Process(status)) => {
+                    if is_default_output {
+                        l.vm_mut().io_default_output = None;
+                    }
+                    if status.success {
+                        l.push_value(LuaValue::boolean(true))?;
+                    } else {
+                        l.push_value(LuaValue::nil())?;
+                    }
+                    let kind = l.create_string(status.kind)?;
+                    l.push_value(kind)?;
+                    l.push_value(LuaValue::integer(status.code as i64))?;
+                    return Ok(3);
                 }
                 Err(e) => return Err(l.error(format!("close error: {}", e))),
             }
@@ -1002,7 +1026,35 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
 
 /// io.popen(prog [, mode]) - Execute program and return file handle
 fn io_popen(l: &mut LuaState) -> LuaResult<usize> {
-    // io.popen is platform-specific and potentially dangerous
-    // Stub for now
-    Err(l.error("io.popen not yet implemented".to_string()))
+    let command = l
+        .get_arg(1)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .ok_or_else(|| l.error("bad argument #1 to 'popen' (string expected)".to_string()))?;
+    let mode = l
+        .get_arg(2)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "r".to_string());
+
+    match LuaFile::popen(&command, &mode) {
+        Ok(file) => {
+            let file_mt = create_file_metatable(l)?;
+            let userdata = l.create_userdata(LuaUserdata::new(file))?;
+
+            if let Some(ud) = userdata.as_userdata_mut() {
+                ud.set_metatable(file_mt);
+            }
+
+            l.vm_mut().gc.check_finalizer(&userdata);
+            l.push_value(userdata)?;
+            Ok(1)
+        }
+        Err(error) => {
+            l.push_value(LuaValue::nil())?;
+            let err_str = l.create_string(&error.to_string())?;
+            l.push_value(err_str)?;
+            let errno = error.raw_os_error().unwrap_or(0) as i64;
+            l.push_value(LuaValue::integer(errno))?;
+            Ok(3)
+        }
+    }
 }

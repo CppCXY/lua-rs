@@ -1,6 +1,8 @@
 // Tests for I/O library functions
 use crate::*;
 use std::env;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 // Helper to get the test data directory path
 fn get_test_data_dir() -> String {
@@ -428,6 +430,80 @@ fn test_file_read_stops_after_first_failure() {
         assert(t[2] == nil)
         "#,
         test_dir
+    ));
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
+fn test_io_lines_uses_initialized_default_input() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local iter = io.lines(nil)
+        assert(iter ~= nil)
+        assert(io.type(io.input()) == "file")
+        "#,
+    );
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_io_popen_read_mode() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local f = assert(io.popen("echo hello", "r"))
+        local line = f:read("*l")
+        local ok, how, code = f:close()
+        assert(line == "hello")
+        assert(ok == true)
+        assert(how == "exit")
+        assert(code == 0)
+        "#,
+    );
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_io_popen_write_mode() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let path = PathBuf::from("popen_write_output.txt");
+    let path_str = path.to_string_lossy().to_string();
+
+    let command = if cfg!(target_os = "windows") {
+        format!("sort > {}", path_str)
+    } else {
+        format!("cat > {}", path_str)
+    };
+
+    let result = vm.execute(&format!(
+        r#"
+        local f = assert(io.popen("{command}", "w"))
+        f:write("pipe-data\n")
+        local ok, how, code = f:close()
+        assert(ok == true)
+        assert(how == "exit")
+        assert(code == 0)
+
+        local rf = assert(io.open("{path}", "r"))
+        local content = rf:read("*a")
+        rf:close()
+        assert(content:find("pipe%-data", 1) == 1)
+        os.remove("{path}")
+        "#,
+        command = command.replace('\\', "\\\\").replace('"', "\\\""),
+        path = path_str.replace('\\', "\\\\").replace('"', "\\\"")
     ));
 
     assert!(result.is_ok(), "Error: {:?}", result);

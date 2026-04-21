@@ -8,6 +8,10 @@ use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaValue, LuaValueKind};
 use crate::lua_vm::{LuaResult, LuaState};
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::popen::{PopenFile, PopenReader, PopenWriter};
+use super::popen::{ProcessExit, spawn_popen, validate_popen_mode};
+
 pub enum ReadNumberResult {
     Integer(i64),
     Float(f64),
@@ -88,10 +92,19 @@ pub struct LuaFile {
     inner: FileInner,
 }
 
+pub enum LuaFileCloseResult {
+    Closed,
+    Process(ProcessExit),
+}
+
 enum FileInner {
     Read(BufReader<File>),
     Write(BufWriter<File>),
     ReadWrite(BufReader<File>),
+    #[cfg(not(target_arch = "wasm32"))]
+    PopenRead(PopenReader),
+    #[cfg(not(target_arch = "wasm32"))]
+    PopenWrite(PopenWriter),
     Stdin,
     Stdout,
     Stderr,
@@ -195,6 +208,28 @@ impl LuaFile {
         }
     }
 
+    pub fn popen(command: &str, mode: &str) -> io::Result<Self> {
+        if !validate_popen_mode(mode) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid mode"));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = command;
+            let _ = mode;
+            Err(io::Error::other("popen is not supported on wasm"))
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let inner = match spawn_popen(command, mode)? {
+                PopenFile::Read(reader) => FileInner::PopenRead(reader),
+                PopenFile::Write(writer) => FileInner::PopenWrite(writer),
+            };
+            Ok(LuaFile { inner })
+        }
+    }
+
     /// Check if file is closed
     pub fn is_closed(&self) -> bool {
         matches!(self.inner, FileInner::Closed)
@@ -241,6 +276,8 @@ impl LuaFile {
                     Ok(Some(line))
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenRead(reader) => reader.read_line(false),
             FileInner::Stdin => {
                 let stdin = io::stdin();
                 let n = stdin.lock().read_line(&mut line)?;
@@ -272,6 +309,8 @@ impl LuaFile {
                 let n = reader.read_line(&mut line)?;
                 if n == 0 { Ok(None) } else { Ok(Some(line)) }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenRead(reader) => reader.read_line(true),
             FileInner::Stdin => {
                 let stdin = io::stdin();
                 let n = stdin.lock().read_line(&mut line)?;
@@ -313,6 +352,8 @@ impl LuaFile {
                             Ok(Some(byte_buf[0]))
                         }
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    FileInner::PopenRead(reader) => reader.read_byte(),
                     FileInner::Stdin => {
                         let n = io::stdin().lock().read(&mut byte_buf[..])?;
                         if n == 0 {
@@ -325,12 +366,16 @@ impl LuaFile {
                 }
             };
 
-        let ungetc = |inner: &mut FileInner| match inner {
+        let ungetc = |inner: &mut FileInner, byte: u8| match inner {
             FileInner::Read(reader) => {
                 let _ = reader.seek(std::io::SeekFrom::Current(-1));
             }
             FileInner::ReadWrite(reader) => {
                 let _ = reader.seek(std::io::SeekFrom::Current(-1));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenRead(reader) => {
+                reader.unread_byte(byte);
             }
             _ => {}
         };
@@ -491,7 +536,7 @@ impl LuaFile {
 
         // Unread the look-ahead character
         if c != 0 {
-            ungetc(&mut self.inner);
+            ungetc(&mut self.inner, c);
         }
 
         if buf.is_empty() || digit_count == 0 {
@@ -529,6 +574,8 @@ impl LuaFile {
                 reader.read_to_end(&mut content)?;
                 Ok(content)
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenRead(reader) => reader.read_all(),
             FileInner::Stdin => {
                 io::stdin().lock().read_to_end(&mut content)?;
                 Ok(content)
@@ -548,6 +595,13 @@ impl LuaFile {
             let bytes_read = match &mut self.inner {
                 FileInner::Read(reader) => reader.read(&mut buffer[total_read..])?,
                 FileInner::ReadWrite(reader) => reader.read(&mut buffer[total_read..])?,
+                #[cfg(not(target_arch = "wasm32"))]
+                FileInner::PopenRead(reader) => {
+                    let bytes = reader.read_bytes(n - total_read)?;
+                    let len = bytes.len();
+                    buffer[total_read..total_read + len].copy_from_slice(&bytes);
+                    len
+                }
                 FileInner::Stdin => io::stdin().lock().read(&mut buffer[total_read..])?,
                 _ => {
                     return Err(io::Error::other("File not opened for reading"));
@@ -584,6 +638,8 @@ impl LuaFile {
                 reader.seek(SeekFrom::Current(-1))?;
                 Ok(false)
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenRead(reader) => reader.is_eof(),
             FileInner::Stdin => {
                 // Can't easily check EOF on stdin without blocking
                 Ok(false)
@@ -614,6 +670,8 @@ impl LuaFile {
                 reader.get_mut().write_all(data)?;
                 Ok(())
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenWrite(writer) => writer.write_bytes(data),
             FileInner::Stdout => {
                 io::stdout().write_all(data)?;
                 Ok(())
@@ -630,6 +688,8 @@ impl LuaFile {
         match &mut self.inner {
             FileInner::Write(writer) => writer.flush(),
             FileInner::ReadWrite(reader) => reader.get_mut().flush(),
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenWrite(writer) => writer.flush(),
             FileInner::Stdout => io::stdout().flush(),
             FileInner::Stderr => io::stderr().flush(),
             _ => Ok(()),
@@ -637,13 +697,23 @@ impl LuaFile {
     }
 
     pub fn close(&mut self) -> io::Result<()> {
+        let _ = self.close_with_result()?;
+        Ok(())
+    }
+
+    pub fn close_with_result(&mut self) -> io::Result<LuaFileCloseResult> {
         // Attempt to flush before closing, but ignore errors —
         // like C's fclose, which discards the buffer on close even
         // if fflush failed.  The file handle is released regardless.
         let _ = self.flush();
-        // Replace the inner with Closed to drop the file handles
-        self.inner = FileInner::Closed;
-        Ok(())
+        let inner = std::mem::replace(&mut self.inner, FileInner::Closed);
+        match inner {
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenRead(reader) => reader.close().map(LuaFileCloseResult::Process),
+            #[cfg(not(target_arch = "wasm32"))]
+            FileInner::PopenWrite(writer) => writer.close().map(LuaFileCloseResult::Process),
+            _ => Ok(LuaFileCloseResult::Closed),
+        }
     }
 }
 
@@ -859,7 +929,7 @@ fn file_gc_close(l: &mut LuaState) -> LuaResult<usize> {
         let data = ud.get_data_mut();
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if !lua_file.is_closed() && !lua_file.is_std_stream() {
-                let _ = lua_file.close();
+                let _ = lua_file.close_with_result();
             }
             return Ok(0);
         }
@@ -895,18 +965,32 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
                 l.push_value(msg)?;
                 return Ok(2);
             }
-            if let Err(e) = lua_file.close() {
-                // Return nil, errmsg, errno (like C Lua)
-                l.push_value(LuaValue::nil())?;
-                let msg = format!("{}", e);
-                let errno = e.raw_os_error().unwrap_or(0) as i64;
-                let err_str = l.create_string(&msg)?;
-                l.push_value(err_str)?;
-                l.push_value(LuaValue::integer(errno))?;
-                return Ok(3);
+            match lua_file.close_with_result() {
+                Ok(LuaFileCloseResult::Closed) => {
+                    l.push_value(LuaValue::boolean(true))?;
+                    return Ok(1);
+                }
+                Ok(LuaFileCloseResult::Process(status)) => {
+                    if status.success {
+                        l.push_value(LuaValue::boolean(true))?;
+                    } else {
+                        l.push_value(LuaValue::nil())?;
+                    }
+                    let kind = l.create_string(status.kind)?;
+                    l.push_value(kind)?;
+                    l.push_value(LuaValue::integer(status.code as i64))?;
+                    return Ok(3);
+                }
+                Err(e) => {
+                    l.push_value(LuaValue::nil())?;
+                    let msg = format!("{}", e);
+                    let errno = e.raw_os_error().unwrap_or(0) as i64;
+                    let err_str = l.create_string(&msg)?;
+                    l.push_value(err_str)?;
+                    l.push_value(LuaValue::integer(errno))?;
+                    return Ok(3);
+                }
             }
-            l.push_value(LuaValue::boolean(true))?;
-            return Ok(1);
         }
     }
 
@@ -1020,6 +1104,14 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
                 FileInner::Read(reader) => reader.seek(seek_from),
                 FileInner::Write(writer) => writer.seek(seek_from),
                 FileInner::ReadWrite(reader) => reader.seek(seek_from),
+                #[cfg(not(target_arch = "wasm32"))]
+                FileInner::PopenRead(_) | FileInner::PopenWrite(_) => {
+                    l.push_value(LuaValue::nil())?;
+                    let msg = l.create_string("cannot seek on piped stream")?;
+                    l.push_value(msg)?;
+                    l.push_value(LuaValue::integer(29))?;
+                    return Ok(3);
+                }
                 FileInner::Closed => {
                     return Err(l.error("file is closed".to_string()));
                 }
