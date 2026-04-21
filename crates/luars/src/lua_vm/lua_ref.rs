@@ -451,10 +451,8 @@ impl LuaTableRef {
         let table = self.inner.to_value();
         let mut values = Vec::new();
         let mut index = 1_i64;
-        loop {
-            let Some(value) = vm.raw_geti(&table, index) else {
-                break;
-            };
+
+        while let Some(value) = vm.raw_geti(&table, index) {
             if value.is_nil() {
                 break;
             }

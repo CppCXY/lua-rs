@@ -219,24 +219,21 @@ fn validate_format(spec: &FormatSpec, fmt_char: char, l: &mut LuaState) -> LuaRe
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
         }
-        's' => {
+        's'
             // %s cannot have 0 flag
-            if spec.zero_pad {
+            if spec.zero_pad => {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
-        }
-        'd' | 'i' => {
+        'd' | 'i'
             // %d/%i cannot have # flag
-            if spec.alt_form {
+            if spec.alt_form => {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
-        }
-        'p' => {
+        'p'
             // %p cannot have precision
-            if spec.precision.is_some() {
+            if spec.precision.is_some() => {
                 return Err(l.error("invalid format (invalid conversion)".to_string()));
             }
-        }
         _ => {}
     }
 

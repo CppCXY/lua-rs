@@ -214,12 +214,10 @@ fn basicgetobjname(chunk: &LuaProto, pc: &mut i32, reg: u32) -> Option<(&'static
                     return Some(("constant", name));
                 }
             }
-            OpCode::LoadKX => {
-                if (setreg_pc as usize + 1) < chunk.code.len() {
-                    let ax = chunk.code[setreg_pc as usize + 1].get_ax() as usize;
-                    if let Some(name) = kname(chunk, ax) {
-                        return Some(("constant", name));
-                    }
+            OpCode::LoadKX if (setreg_pc as usize + 1) < chunk.code.len() => {
+                let ax = chunk.code[setreg_pc as usize + 1].get_ax() as usize;
+                if let Some(name) = kname(chunk, ax) {
+                    return Some(("constant", name));
                 }
             }
             _ => {}

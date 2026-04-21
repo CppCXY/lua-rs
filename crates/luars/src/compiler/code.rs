@@ -182,10 +182,10 @@ pub fn finish(fs: &mut FuncState) {
         let opcode = instr.get_opcode();
 
         match opcode {
-            OpCode::Return0 | OpCode::Return1 => {
+            OpCode::Return0 | OpCode::Return1
                 // lcode.c:1941-1944: Convert RETURN0/RETURN1 to RETURN if needed
                 // Only convert when needclose OR use_hidden_vararg (PF_VAHID)
-                if needclose || use_hidden_vararg {
+                if (needclose || use_hidden_vararg) => {
                     // Convert to RETURN
                     let a = instr.get_a();
                     // For RETURN0, B=1 (0 returns + 1); for RETURN1, B=2 (1 return + 1)
@@ -202,7 +202,6 @@ pub fn finish(fs: &mut FuncState) {
 
                     *instr = new_instr;
                 }
-            }
             OpCode::Return | OpCode::TailCall => {
                 // lcode.c:1948-1950: Set k and C fields for existing RETURN/TAILCALL
                 if needclose {
@@ -212,22 +211,20 @@ pub fn finish(fs: &mut FuncState) {
                     instr.set_c((num_params + 1) as u32);
                 }
             }
-            OpCode::GetVarg => {
+            OpCode::GetVarg
                 // lcode.c:1953-1956: GETVARG instruction handling
                 // If function has a vararg table (PF_VATAB), convert to GETTABLE
-                if needs_vararg_table {
+                if needs_vararg_table => {
                     let pc = &mut fs.chunk.code[i];
                     pc.set_opcode(OpCode::GetTable);
                 }
-            }
-            OpCode::Vararg => {
+            OpCode::Vararg
                 // lcode.c:1958-1961: VARARG instruction k flag handling
                 // If function has a vararg table (PF_VATAB), set k flag
-                if needs_vararg_table {
+                if needs_vararg_table => {
                     let pc = &mut fs.chunk.code[i];
                     pc.set_k(true);
                 }
-            }
             OpCode::Jmp => {
                 // lcode.c:1963-1966: Fix jumps to final target
                 let target = finaltarget(&fs.chunk.code, i);
@@ -679,10 +676,8 @@ pub fn discharge2reg(fs: &mut FuncState, e: &mut ExpDesc, reg: u8) {
                 code_k(fs, reg as u32, k_idx as u32);
             }
         }
-        ExpKind::VNONRELOC => {
-            if e.u.info() != reg as i32 {
-                code_abc(fs, OpCode::Move, reg as u32, e.u.info() as u32, 0);
-            }
+        ExpKind::VNONRELOC if e.u.info() != reg as i32 => {
+            code_abc(fs, OpCode::Move, reg as u32, e.u.info() as u32, 0);
         }
         ExpKind::VVARGVAR => {
             // Lua 5.5: vararg parameter used as value (not indexed)

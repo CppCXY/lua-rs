@@ -533,11 +533,11 @@ fn lua_main() -> i32 {
             eprintln!("lua: {}", e);
             return 1;
         }
-    } else if opts.read_stdin {
-        if let Err(e) = execute_stdin(&mut vm) {
-            eprintln!("lua: {}", e);
-            return 1;
-        }
+    } else if opts.read_stdin
+        && let Err(e) = execute_stdin(&mut vm)
+    {
+        eprintln!("lua: {}", e);
+        return 1;
     }
 
     // Enter interactive mode if requested or if no script was provided
