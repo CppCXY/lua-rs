@@ -1,5 +1,5 @@
 -- Benchmark: String library functions (extended)
-local iterations = 100000
+local iterations = 1000000
 
 print("=== String Library Extended Benchmark ===")
 print("Iterations:", iterations)

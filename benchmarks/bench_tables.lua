@@ -1,5 +1,5 @@
 -- Benchmark: Table operations
-local iterations = 1000000
+local iterations = 10000000
 
 print("=== Table Operations Benchmark ===")
 print("Iterations:", iterations)

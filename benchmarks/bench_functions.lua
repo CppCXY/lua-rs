@@ -1,5 +1,5 @@
 -- Benchmark: Function calls
-local iterations = 1000000
+local iterations = 10000000
 
 print("=== Function Call Benchmark ===")
 print("Iterations:", iterations)

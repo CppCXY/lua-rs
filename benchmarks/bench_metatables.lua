@@ -1,5 +1,5 @@
 -- Benchmark: Metatables and Metamethods
-local iterations = 500000
+local iterations = 5000000
 
 print("=== Metatables & Metamethods Benchmark ===")
 print("Iterations:", iterations)

@@ -16,12 +16,12 @@ print(string.format("table.insert (end): %.3f seconds (%.2f K ops/sec)", elapsed
 -- table.insert (at position)
 t = {1, 2, 3, 4, 5}
 start = os.clock()
-for i = 1, iterations / 10 do
+for i = 1, iterations do
     table.insert(t, 3, i)
     table.remove(t, 3)  -- Keep size stable
 end
 elapsed = os.clock() - start
-print(string.format("table.insert (middle): %.3f seconds (%.2f K ops/sec)", elapsed, (iterations / 10) / elapsed / 1000))
+print(string.format("table.insert (middle): %.3f seconds (%.2f K ops/sec)", elapsed, (iterations) / elapsed / 1000))
 
 -- table.remove (from end)
 t = {}
