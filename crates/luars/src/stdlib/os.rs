@@ -562,11 +562,11 @@ fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(LuaValue::integer(exit_code as i64))?;
             Ok(3)
         }
-        Err(_) => {
-            let exit_str = l.create_string("exit")?;
+        Err(error) => {
+            let msg = l.create_string(&error.to_string())?;
             l.push_value(LuaValue::nil())?;
-            l.push_value(exit_str)?;
-            l.push_value(LuaValue::integer(-1))?;
+            l.push_value(msg)?;
+            l.push_value(LuaValue::integer(error.raw_os_error().unwrap_or(0) as i64))?;
             Ok(3)
         }
     }
