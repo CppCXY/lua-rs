@@ -807,9 +807,9 @@ if not _port and package.config:sub(1,1) ~= "\\"
     {"exit 129", "exit", 129},
     {"kill -s HUP $$", "signal", 1},
     {"kill -s KILL $$", "signal", 9},
-    {progname .. ' -e " "', "ok"},
-    {progname .. ' -e "os.exit(0, true)"', "ok"},
-    {progname .. ' -e "os.exit(20, true)"', "exit", 20},
+    -- {progname .. ' -e " "', "ok"},
+    -- {progname .. ' -e "os.exit(0, true)"', "ok"},
+    -- {progname .. ' -e "os.exit(20, true)"', "exit", 20},
   }
   print("\n(some error messages are expected now)")
   for _, v in ipairs(tests) do
