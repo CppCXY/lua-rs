@@ -1,5 +1,5 @@
 -- Benchmark: Arithmetic operations
-local iterations = 10000000
+local iterations = 100000000
 
 print("=== Arithmetic Benchmark ===")
 print("Iterations:", iterations)

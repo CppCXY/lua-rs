@@ -403,8 +403,7 @@ pub fn precall(
     precall_meta(lua_state, func_idx, nargs, nresults)
 }
 
-/// Cold path for precall: resolve __call chain then retry.
-#[cold]
+/// Resolve __call chain then retry.
 fn precall_meta(
     lua_state: &mut LuaState,
     func_idx: usize,
