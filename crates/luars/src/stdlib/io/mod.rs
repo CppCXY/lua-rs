@@ -1035,6 +1035,10 @@ fn io_popen(l: &mut LuaState) -> LuaResult<usize> {
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "r".to_string());
 
+    if !popen::validate_popen_mode(&mode) {
+        return Err(l.error("bad argument #2 to 'popen' (invalid mode)".to_string()));
+    }
+
     match LuaFile::popen(&command, &mode) {
         Ok(file) => {
             let file_mt = create_file_metatable(l)?;

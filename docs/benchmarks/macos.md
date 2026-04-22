@@ -6,10 +6,10 @@ Environment:
 - Script runner: `run_benchmarks.sh`
 - Platform: macOS
 - Baseline: native Lua 5.5 on the same machine
+- CPU: macOS Apple Silicon M4 (by @sniper00)
 
 Method:
 - Values are shown as `luars / native Lua * 100`
-- Each script summary is computed as the geometric mean of the per-subtest throughput ratios parsed from [2.txt](2.txt)
 - `100` means parity with native Lua
 - `120` means luars is about 20% faster
 - `80` means luars is about 20% slower

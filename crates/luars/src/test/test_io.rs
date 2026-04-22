@@ -474,6 +474,24 @@ fn test_io_popen_read_mode() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_io_popen_invalid_mode_raises() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local ok, err = pcall(io.popen, "cat", "r+")
+        assert(ok == false)
+        assert(type(err) == "string")
+        assert(err:find("invalid mode", 1, true) ~= nil)
+        "#,
+    );
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_io_popen_write_mode() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();

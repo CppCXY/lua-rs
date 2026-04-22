@@ -31,6 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Benchmarks
+
+see 
+- [docs/benchmarks/macos.md](docs/benchmarks/macos.md) for the latest macOS benchmark snapshot
+- [docs/benchmarks/windows.md](docs/benchmarks/windows.md) for the latest Windows benchmark snapshot
+- I don't have a physical Linux machine, but you can refer to the GitHub Actions VM CI results: https://github.com/CppCXY/lua-rs/actions. If this repository includes a `benchmarks` workflow, view it directly at https://github.com/CppCXY/lua-rs/actions/workflows/benchmarks.yml
+
 ## What The High-Level API Covers
 
 - Execute chunks with `lua.load(...).exec()`, `eval()`, and `eval_multi()`
