@@ -270,6 +270,31 @@ fn test_os_exit() {
     assert!(result.is_ok(), "Error: {:?}", result);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_os_execute_nonzero_exit_returns_nil() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let command = if cfg!(target_os = "windows") {
+        "exit /b 3"
+    } else {
+        "exit 3"
+    };
+
+    let result = vm.execute(&format!(
+        r#"
+        local ok, how, code = os.execute("{}")
+        assert(ok == nil)
+        assert(how == "exit")
+        assert(code == 3)
+        "#,
+        command
+    ));
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
 #[test]
 fn test_os_setlocale() {
     let mut vm = LuaVM::new(SafeOption::default());

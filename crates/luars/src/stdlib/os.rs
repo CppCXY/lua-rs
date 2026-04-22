@@ -538,9 +538,26 @@ fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
 
     match output {
         Ok(result) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+
+                if let Some(signal) = result.status.signal() {
+                    l.push_value(LuaValue::nil())?;
+                    let signal_str = l.create_string("signal")?;
+                    l.push_value(signal_str)?;
+                    l.push_value(LuaValue::integer(signal as i64))?;
+                    return Ok(3);
+                }
+            }
+
             let exit_code = result.status.code().unwrap_or(-1);
+            if result.status.success() {
+                l.push_value(LuaValue::boolean(true))?;
+            } else {
+                l.push_value(LuaValue::nil())?;
+            }
             let exit_str = l.create_string("exit")?;
-            l.push_value(LuaValue::boolean(result.status.success()))?;
             l.push_value(exit_str)?;
             l.push_value(LuaValue::integer(exit_code as i64))?;
             Ok(3)
