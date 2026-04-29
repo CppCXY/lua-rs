@@ -1448,3 +1448,288 @@ fn test_userdata_call_multi_return() {
     assert_eq!(results[0].as_integer(), Some(4)); // 47 / 10
     assert_eq!(results[1].as_integer(), Some(7)); // 47 % 10
 }
+
+// ==================== Bitwise + Shift operator tests ====================
+
+/// Test type for bitwise operators (auto-derived from std::ops traits)
+#[derive(LuaUserData, Clone, PartialEq)]
+#[lua_impl(Display, PartialEq, BitAnd, BitOr, BitXor, Not, Shl, Shr)]
+struct Bits {
+    pub val: u32,
+}
+
+impl fmt::Display for Bits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Bits(0x{:08X})", self.val)
+    }
+}
+
+impl std::ops::BitAnd for Bits {
+    type Output = Bits;
+    fn bitand(self, rhs: Bits) -> Bits {
+        Bits {
+            val: self.val & rhs.val,
+        }
+    }
+}
+
+impl std::ops::BitOr for Bits {
+    type Output = Bits;
+    fn bitor(self, rhs: Bits) -> Bits {
+        Bits {
+            val: self.val | rhs.val,
+        }
+    }
+}
+
+impl std::ops::BitXor for Bits {
+    type Output = Bits;
+    fn bitxor(self, rhs: Bits) -> Bits {
+        Bits {
+            val: self.val ^ rhs.val,
+        }
+    }
+}
+
+impl std::ops::Not for Bits {
+    type Output = Bits;
+    fn not(self) -> Bits {
+        Bits { val: !self.val }
+    }
+}
+
+impl std::ops::Shl<i64> for Bits {
+    type Output = Bits;
+    fn shl(self, rhs: i64) -> Bits {
+        Bits {
+            val: self.val << rhs,
+        }
+    }
+}
+
+impl std::ops::Shr<i64> for Bits {
+    type Output = Bits;
+    fn shr(self, rhs: i64) -> Bits {
+        Bits {
+            val: self.val >> rhs,
+        }
+    }
+}
+
+#[lua_methods]
+impl Bits {
+    pub fn new(val: u32) -> Self {
+        Bits { val }
+    }
+}
+
+#[test]
+fn test_userdata_bitand_via_trait() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Bits>("Bits").unwrap();
+    let results = vm
+        .execute(r#"local a=Bits.new(0xFF);local b=Bits.new(0x0F);local c=a&b;return c.val"#)
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(0x0F));
+}
+
+#[test]
+fn test_userdata_bitor_via_trait() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Bits>("Bits").unwrap();
+    let results = vm
+        .execute(r#"local a=Bits.new(0xF0);local b=Bits.new(0x0F);local c=a|b;return c.val"#)
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(0xFF));
+}
+
+#[test]
+fn test_userdata_bitxor_via_trait() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Bits>("Bits").unwrap();
+    let results = vm
+        .execute(r#"local a=Bits.new(0xFF);local b=Bits.new(0x0F);local c=a~b;return c.val"#)
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(0xF0));
+}
+
+#[test]
+fn test_userdata_bnot_via_trait() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Bits>("Bits").unwrap();
+    let results = vm
+        .execute(r#"local a=Bits.new(0xFFFF0000);local b=~a;return b.val"#)
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(0x0000FFFF));
+}
+
+#[test]
+fn test_userdata_shl_via_trait() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Bits>("Bits").unwrap();
+    let results = vm
+        .execute(r#"local a=Bits.new(1);local b=a<<3;return b.val"#)
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(8));
+}
+
+#[test]
+fn test_userdata_shr_via_trait() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Bits>("Bits").unwrap();
+    let results = vm
+        .execute(r#"local a=Bits.new(16);local b=a>>2;return b.val"#)
+        .unwrap();
+    assert_eq!(results[0].as_integer(), Some(4));
+}
+
+// ==================== #[lua(close)] delegation tests ====================
+
+/// Test type: #[lua(close = "shutdown")] delegates lua_close() to shutdown()
+#[derive(LuaUserData)]
+#[lua(close = "shutdown")]
+struct Connection {
+    pub host: String,
+    closed: bool,
+}
+
+#[lua_methods]
+impl Connection {
+    pub fn new(host: &str) -> Self {
+        Connection {
+            host: host.to_string(),
+            closed: false,
+        }
+    }
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+    fn shutdown(&mut self) {
+        self.closed = true;
+    }
+}
+
+#[test]
+fn test_delegated_close_via_direct_call() {
+    let mut conn = Connection::new("localhost");
+    assert!(!conn.is_closed());
+    use crate::lua_value::userdata_trait::UserDataTrait;
+    conn.lua_close();
+    assert!(conn.is_closed());
+}
+
+#[test]
+fn test_delegated_close_via_lua_tbc() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    vm.register_type_of::<Connection>("Connection").unwrap();
+    // Verify basic access works first
+    let r = vm
+        .execute(r#"local c = Connection.new("x"); return c.host, c:is_closed()"#)
+        .unwrap();
+    assert_eq!(r[0].as_str(), Some("x"));
+    assert_eq!(r[1].as_boolean(), Some(false));
+    // Now test <close> — x goes out of scope after do-end block
+    let results = vm
+        .execute(
+            r#"
+        local c = Connection.new("localhost")
+        do
+            local x <close> = c
+        end
+        return c:is_closed()
+    "#,
+        )
+        .unwrap();
+    assert_eq!(results[0].as_boolean(), Some(true));
+}
+
+// ==================== Manual lua_close test ====================
+
+struct ManualClose {
+    closed: bool,
+}
+
+impl UserDataTrait for ManualClose {
+    fn type_name(&self) -> &'static str {
+        "ManualClose"
+    }
+    fn lua_close(&mut self) {
+        self.closed = true;
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn test_manual_lua_close_direct() {
+    let mut mc = ManualClose { closed: false };
+    assert!(!mc.closed);
+    mc.lua_close();
+    assert!(mc.closed);
+}
+
+#[test]
+fn test_manual_lua_close_via_lua_tbc() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+    let mc = ManualClose { closed: false };
+    {
+        let state = vm.main_state();
+        let ud_val = state.create_userdata(LuaUserdata::new(mc)).unwrap();
+        state.set_global("r", ud_val).unwrap();
+    }
+    // <close> fires lua_close() when r goes out of scope
+    vm.execute(r#"do local x <close> = r end"#).unwrap();
+    // Verify lua_close was called via downcasting
+    let state = vm.main_state();
+    let r_val = state.get_global("r").unwrap().unwrap();
+    let manual_close = r_val
+        .as_userdata_mut()
+        .unwrap()
+        .downcast_ref::<ManualClose>()
+        .unwrap();
+    assert!(manual_close.closed);
+}
+
+// ==================== #[lua(pow)] delegation test ====================
+
+#[derive(LuaUserData, Clone)]
+#[lua(pow = "power")]
+struct BigNum {
+    pub value: f64,
+}
+
+impl BigNum {
+    fn power(&self, other: &UdValue) -> UdValue {
+        let exp = other.to_number().unwrap_or(1.0);
+        UdValue::Number(self.value.powf(exp))
+    }
+}
+
+#[lua_methods]
+impl BigNum {
+    pub fn new(v: f64) -> Self {
+        BigNum { value: v }
+    }
+}
+
+#[test]
+fn test_delegated_pow_direct_call() {
+    let bn = BigNum { value: 2.0 };
+    let result = bn.lua_pow(&UdValue::Number(3.0));
+    match result {
+        Some(UdValue::Number(n)) => assert!((n - 8.0).abs() < 0.001),
+        other => panic!("expected Some(Number(8.0)), got {:?}", other),
+    }
+}

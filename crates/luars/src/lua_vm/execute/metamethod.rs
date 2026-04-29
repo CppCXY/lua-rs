@@ -30,6 +30,17 @@ pub fn try_unary_tm(
         stack[result_pos] = result;
         return Ok(());
     }
+    // Try trait-based __bnot for userdata
+    if tm_kind == TmKind::Bnot
+        && operand.ttisfulluserdata()
+        && let Some(ud) = operand.as_userdata_mut()
+        && let Some(udv) = ud.get_trait().lua_bnot()
+    {
+        let result = udvalue_to_lua_value(lua_state, udv)?;
+        let stack = lua_state.stack_mut();
+        stack[result_pos] = result;
+        return Ok(());
+    }
 
     // Try to get metamethod from operand
     let metamethod = get_metamethod_event(lua_state, &operand, tm_kind);
@@ -98,18 +109,25 @@ pub fn try_bin_tm(
     if p1.ttisfulluserdata() || p2.ttisfulluserdata() {
         let trait_result = if let Some(ud) = p1.as_userdata_mut() {
             let other = lua_value_to_udvalue(&p2);
-            match tm_kind {
+            Some(match tm_kind {
                 TmKind::Add => ud.get_trait().lua_add(&other),
                 TmKind::Sub => ud.get_trait().lua_sub(&other),
                 TmKind::Mul => ud.get_trait().lua_mul(&other),
                 TmKind::Div => ud.get_trait().lua_div(&other),
                 TmKind::Mod => ud.get_trait().lua_mod(&other),
+                TmKind::Pow => ud.get_trait().lua_pow(&other),
+                TmKind::IDiv => ud.get_trait().lua_idiv(&other),
+                TmKind::Band => ud.get_trait().lua_band(&other),
+                TmKind::Bor => ud.get_trait().lua_bor(&other),
+                TmKind::Bxor => ud.get_trait().lua_bxor(&other),
+                TmKind::Shl => ud.get_trait().lua_shl(&other),
+                TmKind::Shr => ud.get_trait().lua_shr(&other),
                 _ => None,
-            }
+            })
         } else {
             None
         };
-        if let Some(udv) = trait_result {
+        if let Some(Some(udv)) = trait_result {
             unsafe {
                 *lua_state.stack_mut().get_unchecked_mut(res as usize) =
                     udvalue_to_lua_value(lua_state, udv)?;
@@ -118,18 +136,25 @@ pub fn try_bin_tm(
         }
         let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
             let other = lua_value_to_udvalue(&p1);
-            match tm_kind {
+            Some(match tm_kind {
                 TmKind::Add => ud.get_trait().lua_add(&other),
                 TmKind::Sub => ud.get_trait().lua_sub(&other),
                 TmKind::Mul => ud.get_trait().lua_mul(&other),
                 TmKind::Div => ud.get_trait().lua_div(&other),
                 TmKind::Mod => ud.get_trait().lua_mod(&other),
+                TmKind::Pow => ud.get_trait().lua_pow(&other),
+                TmKind::IDiv => ud.get_trait().lua_idiv(&other),
+                TmKind::Band => ud.get_trait().lua_band(&other),
+                TmKind::Bor => ud.get_trait().lua_bor(&other),
+                TmKind::Bxor => ud.get_trait().lua_bxor(&other),
+                TmKind::Shl => ud.get_trait().lua_shl(&other),
+                TmKind::Shr => ud.get_trait().lua_shr(&other),
                 _ => None,
-            }
+            })
         } else {
             None
         };
-        if let Some(udv) = trait_result2 {
+        if let Some(Some(udv)) = trait_result2 {
             unsafe {
                 *lua_state.stack_mut().get_unchecked_mut(res as usize) =
                     udvalue_to_lua_value(lua_state, udv)?;

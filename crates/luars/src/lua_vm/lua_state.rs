@@ -1099,10 +1099,12 @@ impl LuaState {
             return Ok(());
         }
 
-        // Check that the value has a __close metamethod
+        // Check that the value has a __close metamethod (or trait-based close)
         use crate::lua_vm::execute::TmKind;
         use crate::lua_vm::execute::get_metamethod_event;
-        let has_close = get_metamethod_event(self, &value, TmKind::Close).is_some();
+        let has_metatable_close = get_metamethod_event(self, &value, TmKind::Close).is_some();
+        let has_trait_close = value.ttisfulluserdata();
+        let has_close = has_metatable_close || has_trait_close;
 
         if !has_close {
             // Try to get the variable name from locvars
@@ -1145,6 +1147,19 @@ impl LuaState {
 
             // Skip nil/false (shouldn't be in the list, but be safe)
             if value.is_falsy() {
+                continue;
+            }
+
+            // Try trait-based __close for userdata BEFORE metatable lookup.
+            // If the userdata has lua_close implemented, call it and skip the
+            // metatable path entirely (no error even if __close metamethod is absent).
+            if value.ttisfulluserdata()
+                && let Some(ud_mut) = self
+                    .stack_mut()
+                    .get_mut(tbc_idx)
+                    .and_then(|v| v.as_userdata_mut())
+            {
+                ud_mut.get_trait_mut().lua_close();
                 continue;
             }
 
@@ -1262,6 +1277,17 @@ impl LuaState {
             let value = self.stack.get(tbc_idx).copied().unwrap_or(LuaValue::nil());
 
             if value.is_falsy() {
+                continue;
+            }
+
+            // Try trait-based __close for userdata BEFORE metatable lookup
+            if value.ttisfulluserdata()
+                && let Some(ud_mut) = self
+                    .stack_mut()
+                    .get_mut(tbc_idx)
+                    .and_then(|v| v.as_userdata_mut())
+            {
+                ud_mut.get_trait_mut().lua_close();
                 continue;
             }
 

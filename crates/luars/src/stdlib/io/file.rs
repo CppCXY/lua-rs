@@ -724,11 +724,6 @@ impl UserDataTrait for LuaFile {
         "FILE*"
     }
 
-    fn lua_gc(&mut self) {
-        // Flush on GC — don't propagate errors
-        let _ = self.flush();
-    }
-
     fn lua_close(&mut self) {
         let _ = self.close();
     }

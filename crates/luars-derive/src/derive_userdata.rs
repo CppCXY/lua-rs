@@ -10,6 +10,8 @@
 //!
 //! # Struct attributes
 //! - `#[lua_impl(Display, PartialEq, PartialOrd)]` — map Rust traits to Lua metamethods
+//! - `#[lua(close = "method_name")]` — delegate `lua_close()` to a method on the struct
+//! - `#[lua(pow = "method_name")]` — delegate `lua_pow()` to a method
 //!
 //! # Enum support
 //! - C-like enums still implement `LuaEnum` for `register_enum::<T>()`
@@ -73,6 +75,8 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
 
     // Parse #[lua_impl(...)] attribute for trait detection
     let trait_impls = parse_lua_impl_attrs(&input);
+    // Parse #[lua(close = "...")] delegate attributes
+    let delegates = parse_lua_delegate_attrs(&input);
 
     // Handle named-field structs normally; tuple/unit structs get a minimal impl
     let fields_named = match &input.data {
@@ -80,7 +84,9 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
             Fields::Named(fields) => Some(&fields.named),
             _ => None, // tuple or unit struct — no field export
         },
-        Data::Enum(data) => return derive_lua_enum_userdata_impl(name, data, &trait_impls),
+        Data::Enum(data) => {
+            return derive_lua_enum_userdata_impl(name, data, &trait_impls, &delegates);
+        }
         _ => {
             return syn::Error::new_spanned(
                 &input.ident,
@@ -93,7 +99,7 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
 
     // If no named fields (tuple/unit struct), generate minimal impl
     if fields_named.is_none() {
-        return gen_minimal_impl(name, &trait_impls);
+        return gen_minimal_impl(name, &trait_impls, &delegates);
     }
     let fields = fields_named.unwrap();
 
@@ -195,6 +201,8 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
 
     // Generate metamethod impls based on #[lua_impl(...)]
     let metamethod_impls = gen_metamethods(name, &trait_impls);
+    // Generate delegation impls from #[lua(close = "...")] etc.
+    let delegate_impls = gen_delegate_methods(&delegates);
 
     // Generate lua_next + lua_len if #[lua(iter)] is present
     let iter_impls = if let Some(ref iter_info) = iter_field {
@@ -256,6 +264,8 @@ pub fn derive_lua_userdata_impl(input: DeriveInput) -> TokenStream {
 
             #iter_impls
 
+            #delegate_impls
+
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -289,6 +299,71 @@ fn parse_lua_impl_attrs(input: &DeriveInput) -> Vec<String> {
         }
     }
     impls
+}
+
+/// Delegate mapping from `#[lua(close = "method", pow = "method")]` attributes.
+struct LuaDelegates {
+    close: Option<String>,
+    pow: Option<String>,
+    idiv: Option<String>,
+    concat: Option<String>,
+}
+
+/// Parse `#[lua(...)]` struct-level attributes for method delegation.
+fn parse_lua_delegate_attrs(input: &DeriveInput) -> LuaDelegates {
+    let mut delegates = LuaDelegates {
+        close: None,
+        pow: None,
+        idiv: None,
+        concat: None,
+    };
+    for attr in &input.attrs {
+        if attr.path().is_ident("lua")
+            && let Meta::List(list) = &attr.meta
+        {
+            let _ = list.parse_nested_meta(|meta| {
+                let path = meta.path.clone();
+                if path.is_ident("close") {
+                    let val: syn::LitStr = meta.value()?.parse()?;
+                    delegates.close = Some(val.value());
+                } else if path.is_ident("pow") {
+                    let val: syn::LitStr = meta.value()?.parse()?;
+                    delegates.pow = Some(val.value());
+                } else if path.is_ident("idiv") {
+                    let val: syn::LitStr = meta.value()?.parse()?;
+                    delegates.idiv = Some(val.value());
+                } else if path.is_ident("concat") {
+                    let val: syn::LitStr = meta.value()?.parse()?;
+                    delegates.concat = Some(val.value());
+                }
+                // else: field-level attrs (skip/readonly/name/iter) — silently ignored here
+                Ok(())
+            });
+        }
+    }
+    delegates
+}
+
+/// Generate metamethod delegate implementations from `#[lua(close = "...")]` etc.
+fn gen_delegate_methods(d: &LuaDelegates) -> proc_macro2::TokenStream {
+    let mut methods = Vec::new();
+    if let Some(ref m) = d.close {
+        let ident = syn::Ident::new(m, proc_macro2::Span::call_site());
+        methods.push(quote! { fn lua_close(&mut self) { self.#ident(); } });
+    }
+    if let Some(ref m) = d.pow {
+        let ident = syn::Ident::new(m, proc_macro2::Span::call_site());
+        methods.push(quote! { fn lua_pow(&self, other: &luars::UdValue) -> Option<luars::UdValue> { Some(self.#ident(other)) } });
+    }
+    if let Some(ref m) = d.idiv {
+        let ident = syn::Ident::new(m, proc_macro2::Span::call_site());
+        methods.push(quote! { fn lua_idiv(&self, other: &luars::UdValue) -> Option<luars::UdValue> { Some(self.#ident(other)) } });
+    }
+    if let Some(ref m) = d.concat {
+        let ident = syn::Ident::new(m, proc_macro2::Span::call_site());
+        methods.push(quote! { fn lua_concat(&self, other: &luars::UdValue) -> Option<luars::UdValue> { Some(self.#ident(other)) } });
+    }
+    quote! { #(#methods)* }
 }
 
 // ==================== Metamethod generation ====================
@@ -342,47 +417,80 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
         });
     }
 
-    // Binary arithmetic operators: Add, Sub, Mul, Div, Rem
-    // Each generates a lua_XXX method that downcasts the other operand
-    // to the same type, performs the Rust operation, and returns the result
-    // as UdValue::UserdataOwned.
+    // Binary arithmetic / bitwise operators: Add, Sub, Mul, Div, Rem,
+    // BitAnd, BitOr, BitXor, Shl, Shr.
+    // Shl/Shr are special: RHS is an i64 from Lua, not a userdata.
     let binop_mapping: &[(&str, &str)] = &[
         ("Add", "lua_add"),
         ("Sub", "lua_sub"),
         ("Mul", "lua_mul"),
         ("Div", "lua_div"),
         ("Rem", "lua_mod"),
+        ("BitAnd", "lua_band"),
+        ("BitOr", "lua_bor"),
+        ("BitXor", "lua_bxor"),
+        ("Shl", "lua_shl"),
+        ("Shr", "lua_shr"),
     ];
 
     for (trait_name, method_name) in binop_mapping {
         if trait_impls.contains(&trait_name.to_string()) {
             let method_ident = syn::Ident::new(method_name, name.span());
-            // We need the specific op trait path
-            let op_expr = match *trait_name {
-                "Add" => quote! { std::ops::Add::add(self.clone(), o.clone()) },
-                "Sub" => quote! { std::ops::Sub::sub(self.clone(), o.clone()) },
-                "Mul" => quote! { std::ops::Mul::mul(self.clone(), o.clone()) },
-                "Div" => quote! { std::ops::Div::div(self.clone(), o.clone()) },
-                "Rem" => quote! { std::ops::Rem::rem(self.clone(), o.clone()) },
-                _ => unreachable!(),
-            };
+            let is_shift = *trait_name == "Shl" || *trait_name == "Shr";
 
-            methods.push(quote! {
-                fn #method_ident(&self, other: &luars::UdValue) -> Option<luars::UdValue> {
-                    other.as_userdata_ref::<#name>().map(|o| {
-                        let result: #name = #op_expr;
-                        luars::UdValue::from_userdata(result)
-                    })
-                }
-            });
+            if is_shift {
+                let shift_op = match *trait_name {
+                    "Shl" => quote! { std::ops::Shl::shl },
+                    "Shr" => quote! { std::ops::Shr::shr },
+                    _ => unreachable!(),
+                };
+                methods.push(quote! {
+                    fn #method_ident(&self, other: &luars::UdValue) -> Option<luars::UdValue> {
+                        other.to_integer()
+                            .filter(|shift| *shift >= 0 && *shift <= 63)
+                            .map(|shift| {
+                                let result: #name = #shift_op(self.clone(), shift);
+                                luars::UdValue::from_userdata(result)
+                            })
+                    }
+                });
+            } else {
+                let op_expr = match *trait_name {
+                    "Add" => quote! { std::ops::Add::add(self.clone(), o.clone()) },
+                    "Sub" => quote! { std::ops::Sub::sub(self.clone(), o.clone()) },
+                    "Mul" => quote! { std::ops::Mul::mul(self.clone(), o.clone()) },
+                    "Div" => quote! { std::ops::Div::div(self.clone(), o.clone()) },
+                    "Rem" => quote! { std::ops::Rem::rem(self.clone(), o.clone()) },
+                    "BitAnd" => quote! { std::ops::BitAnd::bitand(self.clone(), o.clone()) },
+                    "BitOr" => quote! { std::ops::BitOr::bitor(self.clone(), o.clone()) },
+                    "BitXor" => quote! { std::ops::BitXor::bitxor(self.clone(), o.clone()) },
+                    _ => unreachable!(),
+                };
+                methods.push(quote! {
+                    fn #method_ident(&self, other: &luars::UdValue) -> Option<luars::UdValue> {
+                        other.as_userdata_ref::<#name>().map(|o| {
+                            let result: #name = #op_expr;
+                            luars::UdValue::from_userdata(result)
+                        })
+                    }
+                });
+            }
         }
     }
 
-    // Neg → lua_unm (unary negation)
+    // Neg → lua_unm / Not → lua_bnot (unary ops)
     if trait_impls.contains(&"Neg".to_string()) {
         methods.push(quote! {
             fn lua_unm(&self) -> Option<luars::UdValue> {
                 let result: #name = std::ops::Neg::neg(self.clone());
+                Some(luars::UdValue::from_userdata(result))
+            }
+        });
+    }
+    if trait_impls.contains(&"Not".to_string()) {
+        methods.push(quote! {
+            fn lua_bnot(&self) -> Option<luars::UdValue> {
+                let result: #name = std::ops::Not::not(self.clone());
                 Some(luars::UdValue::from_userdata(result))
             }
         });
@@ -396,9 +504,10 @@ fn gen_metamethods(name: &Ident, trait_impls: &[String]) -> proc_macro2::TokenSt
 /// Generate a minimal UserDataTrait impl for tuple or unit structs.
 ///
 /// No field access — only type_name, method lookup, metamethods, and as_any.
-fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
+fn gen_minimal_impl(name: &Ident, trait_impls: &[String], delegates: &LuaDelegates) -> TokenStream {
     let type_name_str = name.to_string();
     let metamethod_impls = gen_metamethods(name, trait_impls);
+    let delegate_impls = gen_delegate_methods(delegates);
     let lua_convert_impls = gen_lua_convert_impls(name);
 
     let expanded = quote! {
@@ -414,6 +523,8 @@ fn gen_minimal_impl(name: &Ident, trait_impls: &[String]) -> TokenStream {
             }
 
             #metamethod_impls
+
+            #delegate_impls
 
             fn as_any(&self) -> &dyn std::any::Any {
                 self
@@ -437,8 +548,9 @@ fn derive_lua_enum_userdata_impl(
     name: &Ident,
     data: &syn::DataEnum,
     trait_impls: &[String],
+    delegates: &LuaDelegates,
 ) -> TokenStream {
-    let mut tokens = proc_macro2::TokenStream::from(gen_minimal_impl(name, trait_impls));
+    let mut tokens = proc_macro2::TokenStream::from(gen_minimal_impl(name, trait_impls, delegates));
 
     if data
         .variants

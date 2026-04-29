@@ -15,6 +15,7 @@ use std::any::Any;
 use std::fmt;
 
 use crate::lua_vm::CFunction;
+use crate::{LuaResult, LuaState, LuaUserdata, LuaValue};
 
 /// Intermediate value type for userdata field/method returns.
 ///
@@ -215,6 +216,11 @@ pub trait UserDataTrait: 'static {
         None
     }
 
+    /// `__bnot`: Bitwise NOT (`~obj`).
+    fn lua_bnot(&self) -> Option<UdValue> {
+        None
+    }
+
     /// `__add`: Addition (`obj + other`).
     /// Auto-generated when struct implements `Add`.
     fn lua_add(&self, _other: &UdValue) -> Option<UdValue> {
@@ -245,14 +251,45 @@ pub trait UserDataTrait: 'static {
         None
     }
 
+    /// `__pow`: Exponentiation (`obj ^ other`).
+    fn lua_pow(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+
+    /// `__idiv`: Integer division (`obj // other`).
+    fn lua_idiv(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+
+    /// `__band`: Bitwise AND (`obj & other`).
+    fn lua_band(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+
+    /// `__bor`: Bitwise OR (`obj | other`).
+    fn lua_bor(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+
+    /// `__bxor`: Bitwise XOR (`obj ~ other`).
+    fn lua_bxor(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+
+    /// `__shl`: Left shift (`obj << other`).
+    fn lua_shl(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+
+    /// `__shr`: Right shift (`obj >> other`).
+    fn lua_shr(&self, _other: &UdValue) -> Option<UdValue> {
+        None
+    }
+
     /// `__concat`: Concatenation (`obj .. other`).
     fn lua_concat(&self, _other: &UdValue) -> Option<UdValue> {
         None
     }
-
-    /// `__gc`: Called when the userdata is garbage collected.
-    /// Use this for cleanup (closing files, releasing resources, etc.).
-    fn lua_gc(&mut self) {}
 
     /// `__close`: Called when a to-be-closed variable goes out of scope.
     fn lua_close(&mut self) {}
@@ -277,7 +314,7 @@ pub trait UserDataTrait: 'static {
     ///     Some(call_impl)
     /// }
     /// ```
-    fn lua_call(&self) -> Option<crate::lua_vm::CFunction> {
+    fn lua_call(&self) -> Option<CFunction> {
         None
     }
 
@@ -462,11 +499,7 @@ impl fmt::Display for UdValue {
 /// Most variants are zero-cost. `UdValue::Str` requires GC allocation via `LuaState`.
 /// This is the bridge between trait-based dispatch (which returns `UdValue`) and the
 /// VM's internal representation (`LuaValue`).
-pub fn udvalue_to_lua_value(
-    lua_state: &mut crate::lua_vm::LuaState,
-    udv: UdValue,
-) -> crate::lua_vm::LuaResult<crate::lua_value::LuaValue> {
-    use crate::lua_value::LuaValue;
+pub fn udvalue_to_lua_value(lua_state: &mut LuaState, udv: UdValue) -> LuaResult<LuaValue> {
     match udv {
         UdValue::Nil => Ok(LuaValue::nil()),
         UdValue::Boolean(b) => Ok(LuaValue::boolean(b)),
@@ -476,7 +509,6 @@ pub fn udvalue_to_lua_value(
         UdValue::Function(f) => Ok(LuaValue::cfunction(f)),
         UdValue::UserdataRef(_) => Ok(LuaValue::nil()), // should not be returned
         UdValue::UserdataOwned(ud) => {
-            use crate::lua_value::LuaUserdata;
             let userdata = LuaUserdata::from_boxed(ud);
             lua_state.create_userdata(userdata)
         }
@@ -487,7 +519,7 @@ pub fn udvalue_to_lua_value(
 ///
 /// Lossless for nil, bool, int, float, string. Other types (table, function, etc.)
 /// become `UdValue::Nil` since they can't be represented in the trait world.
-pub fn lua_value_to_udvalue(value: &crate::lua_value::LuaValue) -> UdValue {
+pub fn lua_value_to_udvalue(value: &LuaValue) -> UdValue {
     if value.is_nil() {
         UdValue::Nil
     } else if let Some(b) = value.as_boolean() {
@@ -791,6 +823,10 @@ impl<T: UserDataTrait> UserDataTrait for RefUserData<T> {
         self.inner().lua_unm()
     }
 
+    fn lua_bnot(&self) -> Option<UdValue> {
+        self.inner().lua_bnot()
+    }
+
     fn lua_add(&self, other: &UdValue) -> Option<UdValue> {
         self.inner().lua_add(other)
     }
@@ -811,16 +847,41 @@ impl<T: UserDataTrait> UserDataTrait for RefUserData<T> {
         self.inner().lua_mod(other)
     }
 
+    fn lua_pow(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_pow(other)
+    }
+
+    fn lua_idiv(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_idiv(other)
+    }
+
+    fn lua_band(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_band(other)
+    }
+
+    fn lua_bor(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_bor(other)
+    }
+
+    fn lua_bxor(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_bxor(other)
+    }
+
+    fn lua_shl(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_shl(other)
+    }
+
+    fn lua_shr(&self, other: &UdValue) -> Option<UdValue> {
+        self.inner().lua_shr(other)
+    }
+
     fn lua_concat(&self, other: &UdValue) -> Option<UdValue> {
         self.inner().lua_concat(other)
     }
 
-    fn lua_gc(&mut self) {
-        // Intentionally a no-op: we don't own the data, so GC must not drop it.
-    }
-
     fn lua_close(&mut self) {
-        // Same: no-op for borrowed references.
+        // Forward to pointee — the caller owns the data, close it if needed.
+        self.inner_mut().lua_close();
     }
 
     fn field_names(&self) -> &'static [&'static str] {

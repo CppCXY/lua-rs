@@ -8,7 +8,9 @@ mod require;
 use crate::gc::{GcKind, GcState, MAJORMINOR, MINORMAJOR, MINORMUL, PAUSE, STEPMUL, STEPSIZE};
 use crate::gc::{code_param, decode_param};
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::{LuaValue, LuaValueKind, UpvalueStore};
+use crate::lua_value::{
+    LuaValue, LuaValueKind, UpvalueStore, lua_value_to_udvalue, udvalue_to_lua_value,
+};
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use require::lua_require;
@@ -616,12 +618,12 @@ fn lua_userdata_next(l: &mut LuaState) -> LuaResult<usize> {
     })?;
 
     // Convert the Lua control variable to UdValue for the trait call
-    let control = crate::lua_value::userdata_trait::lua_value_to_udvalue(&key_val);
+    let control = lua_value_to_udvalue(&key_val);
 
     match ud.get_trait().lua_next(&control) {
         Some((next_control, value)) => {
-            let k = crate::lua_value::userdata_trait::udvalue_to_lua_value(l, next_control)?;
-            let v = crate::lua_value::userdata_trait::udvalue_to_lua_value(l, value)?;
+            let k = udvalue_to_lua_value(l, next_control)?;
+            let v = udvalue_to_lua_value(l, value)?;
             l.push_value(k)?;
             l.push_value(v)?;
             Ok(2)

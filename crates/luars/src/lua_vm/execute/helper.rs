@@ -1,7 +1,7 @@
 use crate::{
     CallInfo, LuaProto, LuaResult, LuaValue,
     gc::TablePtr,
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT, udvalue_to_lua_value},
+    lua_value::{LUA_VNUMFLT, LUA_VNUMINT, lua_value_to_udvalue, udvalue_to_lua_value},
     lua_vm::{
         LuaError, LuaState, TmKind,
         call_info::call_status::{
@@ -673,7 +673,7 @@ fn finishset_inner(
                 && let Some(ud) = t.as_userdata_mut()
                 && let Some(key_str) = key.as_str()
             {
-                let udv = crate::lua_value::lua_value_to_udvalue(&value);
+                let udv = lua_value_to_udvalue(&value);
                 match ud.get_trait_mut().set_field(key_str, udv) {
                     Some(Ok(())) => return Ok(true),
                     Some(Err(msg)) => {

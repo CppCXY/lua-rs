@@ -21,6 +21,8 @@
 use std::any::Any;
 use std::collections::HashMap;
 
+use crate::{LuaResult, LuaVM, LuaValue};
+
 use super::LuaUserdata;
 use super::userdata_trait::{UdValue, UserDataTrait};
 
@@ -101,7 +103,7 @@ impl<T: 'static> UserDataBuilder<T> {
     }
 
     /// Consume the builder and create a `LuaValue` userdata in the VM.
-    pub fn build(self, vm: &mut crate::lua_vm::LuaVM) -> crate::LuaResult<crate::LuaValue> {
+    pub fn build(self, vm: &mut LuaVM) -> LuaResult<LuaValue> {
         let configured = ConfiguredUserData {
             value: self.value,
             type_name: self.type_name,
