@@ -1,13 +1,3 @@
-// Object Pool V3 - Simplified high-performance design
-//
-// Key Design Principles:
-// 1. All IDs are u32 indices into Vec storage
-// 2. Small objects (String, Function, Upvalue) use Vec<Option<T>>
-// 3. Large objects (Table, Thread) use Vec<Option<Box<T>>> to avoid copy on resize
-// 4. No chunking overhead - direct Vec indexing for O(1) access
-// 5. Free list for slot reuse
-// 6. GC headers embedded in objects for mark-sweep
-
 use crate::gc::string_interner::StringInterner;
 use crate::lua_value::UpvalueStore;
 use crate::lua_value::{
@@ -24,10 +14,6 @@ use crate::{
 
 pub type CreateResult = LuaResult<LuaValue>;
 
-/// High-performance object pool for the Lua VM
-/// - Small objects (String, Function, Upvalue) use Pool<T> with direct Vec storage
-/// - Large objects (Table, Thread) use BoxPool<T> to avoid copy on resize
-/// - ALL strings are interned via StringInterner for O(1) equality checks
 pub struct ObjectAllocator {
     strings: StringInterner, // Private - use create_string() to intern
 }
@@ -44,9 +30,7 @@ impl ObjectAllocator {
             strings: StringInterner::new(),
         }
     }
-
-    // ==================== String Operations ====================
-
+    
     /// Create or intern a string (Lua-style with proper hash collision handling)
     ///
     #[inline]
