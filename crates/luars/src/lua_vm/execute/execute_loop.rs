@@ -68,9 +68,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
 
         let mut frame_idx = current_depth - 1;
-        let (call_status, mut base, pc_init, chunk_ptr) = {
+        let (call_status, chunk_ptr) = {
             let ci = lua_state.get_call_info(frame_idx);
-            (ci.call_status, ci.base, ci.pc as usize, ci.chunk_ptr)
+            (ci.call_status, ci.chunk_ptr)
         };
         if call_status & (CIST_C | CIST_PENDING_FINISH) != 0
             && handle_pending_ops(lua_state, frame_idx)?
@@ -78,6 +78,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             continue 'startfunc;
         }
 
+        // Read base and pc AFTER handle_pending_ops — it may modify ci.pc (e.g., skip JMP)
+        let ci = lua_state.get_call_info(frame_idx);
+        let mut base = ci.base;
+        let pc_init = ci.pc as usize;
         let mut chunk = unsafe { &*chunk_ptr };
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
 
