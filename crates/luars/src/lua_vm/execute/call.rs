@@ -2,7 +2,7 @@
 ///
 /// Implements CALL and TAILCALL opcodes via `precall` / `pretailcall`.
 use crate::{
-    CallInfo, LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
+    LUA_MASKCALL, LUA_MASKRET, LuaProto, LuaValue,
     gc::UpvaluePtr,
     lua_vm::{
         CFunction, LUA_HOOKCALL, LUA_HOOKRET, LuaResult, LuaState, TmKind, call_info::call_status,
@@ -217,7 +217,7 @@ pub fn call_c_function(
 #[inline(never)]
 pub fn pretailcall_lua(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     func_idx: usize,
     base: usize,
     nargs: usize,
@@ -229,7 +229,7 @@ pub fn pretailcall_lua(
     let new_chunk_ptr = chunk_ptr;
 
     // Get current frame's func position (handles vararg func_offset)
-    let func_offset = ci.func_offset;
+    let func_offset = lua_state.get_call_info(frame_idx).func_offset;
     let func_pos = base - func_offset as usize;
 
     // Move function + arguments down (like C Lua's setobjs2s loop)
@@ -259,18 +259,21 @@ pub fn pretailcall_lua(
     }
 
     // Batch update CI fields (reuse current frame, no push/pop)
-    ci.base = new_base;
-    ci.func_offset = 1;
-    ci.top = frame_top as u32;
-    ci.pc = 0;
-    ci.nextraargs = if nargs > numparams {
-        (nargs - numparams) as i32
-    } else {
-        0
-    };
-    ci.call_status |= call_status::CIST_TAIL;
-    ci.chunk_ptr = new_chunk_ptr;
-    ci.upvalue_ptrs = upvalue_ptrs;
+    {
+        let ci = lua_state.get_call_info_mut(frame_idx);
+        ci.base = new_base;
+        ci.func_offset = 1;
+        ci.top = frame_top as u32;
+        ci.pc = 0;
+        ci.nextraargs = if nargs > numparams {
+            (nargs - numparams) as i32
+        } else {
+            0
+        };
+        ci.call_status |= call_status::CIST_TAIL;
+        ci.chunk_ptr = new_chunk_ptr;
+        ci.upvalue_ptrs = upvalue_ptrs;
+    }
 
     lua_state.set_top_raw(new_base + actual_nargs);
 
@@ -479,7 +482,7 @@ fn precall_meta(
 ///   `Ok(false)` — C tail call: completed, caller continues (falls to next instruction)
 pub fn pretailcall(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     func_idx: usize,
     narg1: usize,
 ) -> LuaResult<bool> {
@@ -495,10 +498,10 @@ pub fn pretailcall(
                 lua_func.upvalues().as_ptr(),
             )
         };
-        let base = ci.base;
+        let base = lua_state.get_call_info(frame_idx).base;
         pretailcall_lua(
             lua_state,
-            ci,
+            frame_idx,
             func_idx,
             base,
             narg1 - 1,
@@ -514,13 +517,13 @@ pub fn pretailcall(
     }
 
     // Cold: __call metamethod
-    pretailcall_meta(lua_state, ci, func_idx, narg1)
+    pretailcall_meta(lua_state, frame_idx, func_idx, narg1)
 }
 
 /// Cold path for pretailcall: resolve __call chain then retry.
 fn pretailcall_meta(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     func_idx: usize,
     narg1: usize,
 ) -> LuaResult<bool> {
@@ -540,10 +543,10 @@ fn pretailcall_meta(
                 lua_func.upvalues().as_ptr(),
             )
         };
-        let base = ci.base;
+        let base = lua_state.get_call_info(frame_idx).base;
         pretailcall_lua(
             lua_state,
-            ci,
+            frame_idx,
             func_idx,
             base,
             actual_nargs,
@@ -573,18 +576,19 @@ fn pretailcall_meta(
 /// are at `top - nres .. top - 1`).
 pub fn poscall(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     nres: usize,
     pc: usize,
 ) -> LuaResult<()> {
-    let nresults = ci.nresults();
+    let nresults = lua_state.get_call_info(frame_idx).nresults();
 
     // Return hook (cold path — almost never fires)
     if lua_state.hook_mask & LUA_MASKRET != 0 && lua_state.allow_hook {
-        hook_on_return(lua_state, ci, pc, nres as i32)?;
+        hook_on_return(lua_state, frame_idx, pc, nres as i32)?;
     }
 
     // res = ci->func.p  (destination for results)
+    let ci = lua_state.get_call_info(frame_idx);
     let res = ci.base - ci.func_offset as usize;
 
     // moveresults: move nres values from top-nres to res, adjusted for wanted count

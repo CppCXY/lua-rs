@@ -1,5 +1,4 @@
 use crate::{
-    CallInfo,
     lua_value::{LuaProto, LuaValue},
     lua_vm::{
         LuaResult, LuaState,
@@ -47,7 +46,7 @@ fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> Lua
 /// have been modified by user code), not from CallInfo.nextraargs.
 pub fn get_varargs(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     base: usize,
     a: usize,
     b: usize,
@@ -61,7 +60,7 @@ pub fn get_varargs(
     let nargs: usize = if vatab >= 0 {
         get_vatab_len(lua_state, base, vatab as usize)?
     } else {
-        ci.nextraargs as usize
+        lua_state.get_call_info(frame_idx).nextraargs as usize
     };
 
     // Calculate how many to copy
@@ -133,12 +132,12 @@ pub fn get_varargs(
 
 pub fn get_vararg(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     base: usize,
     ra_pos: usize,
     rc_pos: usize,
 ) -> LuaResult<()> {
-    let nextra = ci.nextraargs as usize;
+    let nextra = lua_state.get_call_info(frame_idx).nextraargs as usize;
 
     // Ensure stack is large enough for rc_pos access
     if rc_pos >= lua_state.stack_len() {
@@ -192,7 +191,7 @@ pub fn get_vararg(
 /// VARARGPREP: Adjust varargs (prepare vararg function)
 pub fn exec_varargprep(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     chunk: &LuaProto,
     base: &mut usize,
 ) -> LuaResult<()> {
@@ -202,6 +201,7 @@ pub fn exec_varargprep(
     // stack_top to frame_top (base + maxstacksize) for GC safety,
     // which would give a wrong totalargs.
 
+    let ci = lua_state.get_call_info(frame_idx);
     let nextra = ci.nextraargs as usize;
     let func_pos = ci.base - 1;
     let nfixparams = chunk.param_count;
@@ -270,7 +270,7 @@ pub fn exec_varargprep(
             lua_state.grow_stack(required_size)?;
         }
 
-        let new_base = buildhiddenargs(lua_state, ci, chunk, totalargs, nfixparams, nextra)?;
+        let new_base = buildhiddenargs(lua_state, frame_idx, chunk, totalargs, nfixparams, nextra)?;
         *base = new_base;
 
         // Lua 5.5: set vararg parameter register to nil (ltm.c:288)
@@ -282,7 +282,7 @@ pub fn exec_varargprep(
     // No vararg table needed and no extra args: still need to nil the vararg register
     // so it doesn't contain stale stack values
     else if chunk.is_vararg {
-        let current_base = ci.base;
+        let current_base = lua_state.get_call_info(frame_idx).base;
         let stack = lua_state.stack_mut();
         setnilvalue(unsafe { stack.get_unchecked_mut(current_base + nfixparams) });
     }

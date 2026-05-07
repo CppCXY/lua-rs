@@ -30,7 +30,7 @@ impl ObjectAllocator {
             strings: StringInterner::new(),
         }
     }
-    
+
     /// Create or intern a string (Lua-style with proper hash collision handling)
     ///
     #[inline]

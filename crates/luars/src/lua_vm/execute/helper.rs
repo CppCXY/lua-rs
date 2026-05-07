@@ -1,5 +1,5 @@
 use crate::{
-    CallInfo, LuaProto, LuaResult, LuaValue,
+    LuaProto, LuaResult, LuaValue, OpCode,
     gc::TablePtr,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT, lua_value_to_udvalue, udvalue_to_lua_value},
     lua_vm::{
@@ -20,13 +20,13 @@ use crate::{
 ///                                          ^ ci->func
 pub fn buildhiddenargs(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     chunk: &LuaProto,
     totalargs: usize,
     nfixparams: usize,
     _nextra: usize,
 ) -> LuaResult<usize> {
-    let old_base = ci.base;
+    let old_base = lua_state.get_call_info(frame_idx).base;
     let func_pos = if old_base > 0 { old_base - 1 } else { 0 };
 
     // The new function position is right after all the original arguments.
@@ -55,9 +55,12 @@ pub fn buildhiddenargs(
         }
     }
 
-    ci.base = new_base;
-    ci.top = (new_base + chunk.max_stack_size) as u32;
-    ci.func_offset = (new_base - func_pos) as u32; // Distance from new_base to original func
+    {
+        let ci = lua_state.get_call_info_mut(frame_idx);
+        ci.base = new_base;
+        ci.top = (new_base + chunk.max_stack_size) as u32;
+        ci.func_offset = (new_base - func_pos) as u32; // Distance from new_base to original func
+    }
 
     // Update lua_state.top to match call_info.top
     let new_call_info_top = new_base + chunk.max_stack_size;
@@ -774,13 +777,16 @@ pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaVa
 /// This is the Rust equivalent of Lua 5.5's finishCcall.
 #[cold]
 #[inline(never)]
-fn finish_c_frame(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaResult<()> {
+fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
+    let ci = lua_state.get_call_info(frame_idx);
     let pcall_func_pos = ci.base - ci.func_offset as usize;
     let nresults = ci.nresults();
-    let has_recst = ci.call_status & CIST_RECST != 0;
-    let is_xpcall = ci.call_status & CIST_XPCALL != 0;
+    let call_status = ci.call_status;
+    let has_recst = call_status & CIST_RECST != 0;
+    let is_xpcall = call_status & CIST_XPCALL != 0;
+    let _ = ci;
 
-    if ci.call_status & CIST_YPCALL != 0 {
+    if call_status & CIST_YPCALL != 0 {
         if has_recst {
             // Save handler before it gets overwritten (only for xpcall)
             let handler = if is_xpcall {
@@ -921,7 +927,7 @@ fn finish_c_frame(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaResult<()> 
 
             Ok(())
         }
-    } else if ci.call_status & CIST_YCALL != 0 {
+    } else if call_status & CIST_YCALL != 0 {
         // Unprotected call (e.g. dofile) completed after yield.
         // Move results from body_start to func_pos (no true/false prefix).
         let stack_top = lua_state.get_top();
@@ -979,28 +985,32 @@ fn finish_c_frame(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaResult<()> 
 /// This is the equivalent of C Lua's luaV_finishOp.
 #[cold]
 #[inline(never)]
-pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaResult<bool> {
-    if ci.call_status & CIST_C != 0 {
-        finish_c_frame(lua_state, ci)?;
+pub fn handle_pending_ops(lua_state: &mut LuaState, ci_idx: usize) -> LuaResult<bool> {
+    if lua_state.get_call_info(ci_idx).call_status & CIST_C != 0 {
+        finish_c_frame(lua_state, ci_idx)?;
         return Ok(true); // restart startfunc
     }
     // === luaV_finishOp equivalent ===
-    // The interrupted instruction is at savedpc - 1.
-    // We need to check what opcode was interrupted and handle accordingly.
-    let saved_pc = ci.pc as usize;
-    let base_tmp = ci.base;
-    let _nresults = ci.nresults();
+    // Extract needed CI fields upfront, then drop the borrow.
+    let (saved_pc, base_tmp, _nresults, ci_chunk_ptr, ci_top) = {
+        let ci = lua_state.get_call_info_mut(ci_idx);
+        (
+            ci.pc as usize,
+            ci.base,
+            ci.nresults(),
+            ci.chunk_ptr,
+            ci.top as usize,
+        )
+    };
 
     // Get the chunk to read the interrupted instruction
-    if !ci.chunk_ptr.is_null() {
-        let chunk = unsafe { &*ci.chunk_ptr };
+    if !ci_chunk_ptr.is_null() {
+        let chunk = unsafe { &*ci_chunk_ptr };
         let code = &chunk.code;
 
         if saved_pc > 0 && saved_pc <= code.len() {
             let interrupted_instr = code[saved_pc - 1];
             let op = interrupted_instr.get_opcode();
-
-            use crate::lua_vm::OpCode;
             match op {
                 OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
                     // Arithmetic metamethod: result at stack[top-1],
@@ -1050,7 +1060,7 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaRes
                         let k = interrupted_instr.get_k();
                         if res != k {
                             // Skip the JMP instruction
-                            ci.pc += 1;
+                            lua_state.get_call_info_mut(ci_idx).pc += 1;
                         }
                     }
                 }
@@ -1080,14 +1090,15 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci: &mut CallInfo) -> LuaRes
     }
 
     // Restore ci_top
-    let ci_top = ci.top as usize;
     let current_top = lua_state.get_top();
     if current_top < ci_top {
         lua_state.set_top_raw(ci_top);
     }
 
-    ci.set_pending_finish_get(-1);
-    ci.call_status &= !CIST_PENDING_FINISH;
+    lua_state
+        .get_call_info_mut(ci_idx)
+        .set_pending_finish_get(-1);
+    lua_state.get_call_info_mut(ci_idx).call_status &= !CIST_PENDING_FINISH;
     Ok(false) // continue to hot path
 }
 
@@ -1386,7 +1397,7 @@ pub fn error_global(lua_state: &mut LuaState, global_name: &str) -> LuaError {
 #[inline(never)]
 pub fn order_tm_fallback(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     va: LuaValue,
     vb: LuaValue,
     tm: TmKind,
@@ -1396,7 +1407,7 @@ pub fn order_tm_fallback(
         Ok(Some(result)) => Ok(result),
         Ok(None) => Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb)),
         Err(LuaError::Yield) => {
-            ci.call_status |= CIST_PENDING_FINISH;
+            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1408,7 +1419,7 @@ pub fn order_tm_fallback(
 #[inline(never)]
 pub fn bin_tm_fallback(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     ra: LuaValue,
     rb: LuaValue,
     result_reg: u32,
@@ -1420,8 +1431,10 @@ pub fn bin_tm_fallback(
     match try_bin_tm(lua_state, ra, rb, result_reg, a_reg, b_reg, tm) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
-            ci.set_pending_finish_get(result_reg as i32);
-            ci.call_status |= CIST_PENDING_FINISH;
+            lua_state
+                .get_call_info_mut(frame_idx)
+                .set_pending_finish_get(result_reg as i32);
+            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1433,7 +1446,7 @@ pub fn bin_tm_fallback(
 #[inline(never)]
 pub fn unary_tm_fallback(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     rb: LuaValue,
     result_reg: usize,
     tm: TmKind,
@@ -1442,8 +1455,10 @@ pub fn unary_tm_fallback(
     match try_unary_tm(lua_state, rb, result_reg, tm) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
-            ci.set_pending_finish_get(result_reg as i32);
-            ci.call_status |= CIST_PENDING_FINISH;
+            lua_state
+                .get_call_info_mut(frame_idx)
+                .set_pending_finish_get(result_reg as i32);
+            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1456,7 +1471,7 @@ pub fn unary_tm_fallback(
 #[inline(never)]
 pub fn finishget_fallback(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     obj: &LuaValue,
     key: &LuaValue,
     dest_reg: usize,
@@ -1464,8 +1479,10 @@ pub fn finishget_fallback(
     match finishget_to_reg_known_miss(lua_state, obj, key, dest_reg) {
         Ok(()) => Ok(()),
         Err(LuaError::Yield) => {
-            ci.set_pending_finish_get(dest_reg as i32);
-            ci.call_status |= CIST_PENDING_FINISH;
+            lua_state
+                .get_call_info_mut(frame_idx)
+                .set_pending_finish_get(dest_reg as i32);
+            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1625,7 +1642,7 @@ fn finishget_to_reg_known_miss(
 #[inline(never)]
 pub fn finishset_fallback(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     obj: &LuaValue,
     key: &LuaValue,
     value: LuaValue,
@@ -1633,8 +1650,10 @@ pub fn finishset_fallback(
     match finishset(lua_state, obj, key, value) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
-            ci.set_pending_finish_get(-2);
-            ci.call_status |= CIST_PENDING_FINISH;
+            lua_state
+                .get_call_info_mut(frame_idx)
+                .set_pending_finish_get(-2);
+            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1644,7 +1663,7 @@ pub fn finishset_fallback(
 #[inline(never)]
 pub fn finishset_fallback_known_miss(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     obj: &LuaValue,
     key: &LuaValue,
     value: LuaValue,
@@ -1652,8 +1671,10 @@ pub fn finishset_fallback_known_miss(
     match finishset_known_miss(lua_state, obj, key, value) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
-            ci.set_pending_finish_get(-2);
-            ci.call_status |= CIST_PENDING_FINISH;
+            lua_state
+                .get_call_info_mut(frame_idx)
+                .set_pending_finish_get(-2);
+            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1664,14 +1685,14 @@ pub fn finishset_fallback_known_miss(
 #[inline(never)]
 pub fn eq_fallback(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     ra: LuaValue,
     rb: LuaValue,
 ) -> LuaResult<bool> {
     match equalobj(lua_state, ra, rb) {
         Ok(eq) => Ok(eq),
         Err(LuaError::Yield) => {
-            ci.call_status |= CIST_PENDING_FINISH;
+            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
@@ -1682,24 +1703,24 @@ pub fn eq_fallback(
 #[inline(never)]
 pub fn return0_with_hook(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     a_pos: usize,
     pc: usize,
 ) -> LuaResult<()> {
     lua_state.set_top_raw(a_pos);
-    ci.save_pc(pc);
-    poscall(lua_state, ci, 0, pc)
+    lua_state.get_call_info_mut(frame_idx).save_pc(pc);
+    poscall(lua_state, frame_idx, 0, pc)
 }
 
 /// Cold path: Return1 with active hooks — delegates to generic poscall
 #[inline(never)]
 pub fn return1_with_hook(
     lua_state: &mut LuaState,
-    ci: &mut CallInfo,
+    frame_idx: usize,
     a_pos: usize,
     pc: usize,
 ) -> LuaResult<()> {
     lua_state.set_top_raw(a_pos + 1);
-    ci.save_pc(pc);
-    poscall(lua_state, ci, 1, pc)
+    lua_state.get_call_info_mut(frame_idx).save_pc(pc);
+    poscall(lua_state, frame_idx, 1, pc)
 }

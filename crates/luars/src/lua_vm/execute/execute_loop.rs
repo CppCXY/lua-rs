@@ -19,8 +19,8 @@
 ----------------------------------------------------------------------*/
 
 use crate::{
-    CallInfo, Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult,
-    LuaState, LuaValue, OpCode,
+    Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult, LuaState,
+    LuaValue, OpCode,
     gc::TablePtr,
     lua_value::LUA_VNUMINT,
     lua_vm::{
@@ -67,17 +67,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             return Ok(());
         }
 
-        let frame_idx = current_depth - 1;
-        let ci_ptr = unsafe { lua_state.get_call_info_ptr(frame_idx) } as *mut CallInfo;
-        let mut ci = unsafe { &mut *ci_ptr };
-        let call_status = ci.call_status;
-        if call_status & (CIST_C | CIST_PENDING_FINISH) != 0 && handle_pending_ops(lua_state, ci)? {
+        let mut frame_idx = current_depth - 1;
+        let (call_status, mut base, pc_init, chunk_ptr) = {
+            let ci = lua_state.get_call_info(frame_idx);
+            (ci.call_status, ci.base, ci.pc as usize, ci.chunk_ptr)
+        };
+        if call_status & (CIST_C | CIST_PENDING_FINISH) != 0
+            && handle_pending_ops(lua_state, frame_idx)?
+        {
             continue 'startfunc;
         }
 
-        let mut base = ci.base;
-        let pc_init = ci.pc as usize;
-        let mut chunk = unsafe { &*ci.chunk_ptr };
+        let mut chunk = unsafe { &*chunk_ptr };
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
 
         let mut code: &[Instruction] = &chunk.code;
@@ -150,14 +151,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         macro_rules! updatebase {
             () => {
-                base = ci.base;
+                base = lua_state.get_call_info(frame_idx).base;
             };
         }
 
         macro_rules! savestate {
             () => {
-                ci.save_pc(pc);
-                lua_state.set_top_raw(ci.top as usize);
+                let ci_top = lua_state.get_call_info(frame_idx).top;
+                lua_state.get_call_info_mut(frame_idx).save_pc(pc);
+                lua_state.set_top_raw(ci_top as usize);
             };
         }
 
@@ -167,9 +169,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 if new_depth <= target_depth {
                     return Ok(());
                 }
-                let new_fi = new_depth - 1;
-                let ci_ptr = unsafe { lua_state.get_call_info_ptr(new_fi) } as *mut CallInfo;
-                ci = unsafe { &mut *ci_ptr };
+                frame_idx = new_depth - 1;
+                let ci = lua_state.get_call_info(frame_idx);
                 if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
                     continue 'startfunc;
                 }
@@ -198,7 +199,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             pc += 1;
 
             if trap {
-                trap = hook_check_instruction(lua_state, pc, chunk, ci)?;
+                trap = hook_check_instruction(lua_state, pc, chunk, frame_idx)?;
                 updatebase!();
             }
 
@@ -269,7 +270,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := UpValue[B]
                     let a = instr.get_a();
                     let b = instr.get_b();
-                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(b as usize) };
+                    let upvalue_ptr = unsafe {
+                        *lua_state
+                            .get_call_info(frame_idx)
+                            .upvalue_ptrs
+                            .add(b as usize)
+                    };
                     let src = upvalue_ptr.as_ref().data.get_value_ref();
                     let dest = unsafe { lua_state.stack_mut().as_mut_ptr().add(stack_id!(a)) };
                     unsafe {
@@ -282,7 +288,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a();
                     let b = instr.get_b();
                     unsafe {
-                        let upvalue_ptr = *ci.upvalue_ptrs.add(b as usize);
+                        let upvalue_ptr = *lua_state
+                            .get_call_info(frame_idx)
+                            .upvalue_ptrs
+                            .add(b as usize);
                         let value = lua_state.stack().get_unchecked(base + a as usize);
                         upvalue_ptr
                             .as_mut_ref()
@@ -300,7 +309,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::GetTabUp => {
                     // R[A] := UpValue[B][K[C]:shortstring]
                     let a = instr.get_a();
-                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(instr.get_b() as usize) };
+                    let upvalue_ptr = unsafe {
+                        *lua_state
+                            .get_call_info(frame_idx)
+                            .upvalue_ptrs
+                            .add(instr.get_b() as usize)
+                    };
                     let upval_value = upvalue_ptr.as_ref().data.get_value_ref();
                     let key = k_val!(instr.get_c());
                     debug_assert!(
@@ -354,7 +368,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     savestate!();
                     let upval_value = *upval_value;
-                    finishget_fallback(lua_state, ci, &upval_value, key, stack_id!(a))?;
+                    finishget_fallback(lua_state, frame_idx, &upval_value, key, stack_id!(a))?;
                     updatetrap!();
                 }
                 OpCode::GetTable => {
@@ -397,7 +411,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         savestate!();
                         let rb = unsafe { *rb_ptr };
-                        finishget_fallback(lua_state, ci, &rb, &rc, stack_id!(a))?;
+                        finishget_fallback(lua_state, frame_idx, &rb, &rc, stack_id!(a))?;
                         updatetrap!();
                         continue;
                     }
@@ -407,7 +421,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     // Metamethod / non-table fallback
                     savestate!();
-                    finishget_fallback(lua_state, ci, &rb, &rc, stack_id!(a))?;
+                    finishget_fallback(lua_state, frame_idx, &rb, &rc, stack_id!(a))?;
                     updatetrap!();
                 }
                 OpCode::GetI => {
@@ -432,7 +446,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     savestate!();
-                    finishget_fallback(lua_state, ci, &rb, &LuaValue::integer(rc), stack_id!(a))?;
+                    finishget_fallback(
+                        lua_state,
+                        frame_idx,
+                        &rb,
+                        &LuaValue::integer(rc),
+                        stack_id!(a),
+                    )?;
                     updatetrap!();
                 }
                 OpCode::GetField => {
@@ -460,7 +480,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     savestate!();
                     let rb = unsafe { *rb_ptr };
-                    finishget_fallback(lua_state, ci, &rb, key, stack_id!(instr.get_a()))?;
+                    finishget_fallback(lua_state, frame_idx, &rb, key, stack_id!(instr.get_a()))?;
                     updatetrap!();
                 }
                 OpCode::SetTabUp => {
@@ -468,7 +488,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a();
                     let b = instr.get_b();
                     let c = instr.get_c();
-                    let upvalue_ptr = unsafe { *ci.upvalue_ptrs.add(a as usize) };
+                    let upvalue_ptr = unsafe {
+                        *lua_state
+                            .get_call_info(frame_idx)
+                            .upvalue_ptrs
+                            .add(a as usize)
+                    };
                     let upval_value = upvalue_ptr.as_ref().data.get_value_ref();
                     let key = k_val!(b);
                     debug_assert!(
@@ -553,13 +578,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
                     savestate!();
                     if known_newindex_miss {
-                        if call_newindex_tm_fast(lua_state, ci, upval_value, meta, *key, rc)? {
+                        if call_newindex_tm_fast(lua_state, frame_idx, upval_value, meta, *key, rc)?
+                        {
                             updatetrap!();
                             continue;
                         }
-                        finishset_fallback_known_miss(lua_state, ci, &upval_value, key, rc)?;
+                        finishset_fallback_known_miss(lua_state, frame_idx, &upval_value, key, rc)?;
                     } else {
-                        finishset_fallback(lua_state, ci, &upval_value, key, rc)?;
+                        finishset_fallback(lua_state, frame_idx, &upval_value, key, rc)?;
                     }
                     updatetrap!();
                 }
@@ -654,11 +680,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 *stack_val!(c)
                             };
                             savestate!();
-                            if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                            if call_newindex_tm_fast(lua_state, frame_idx, ra, meta, rb, rc)? {
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
+                            finishset_fallback_known_miss(lua_state, frame_idx, &ra, &rb, rc)?;
                             updatetrap!();
                             continue;
                         }
@@ -725,17 +751,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 continue;
                             }
                             savestate!();
-                            if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                            if call_newindex_tm_fast(lua_state, frame_idx, ra, meta, rb, rc)? {
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
+                            finishset_fallback_known_miss(lua_state, frame_idx, &ra, &rb, rc)?;
                             updatetrap!();
                             continue;
                         }
                     }
                     savestate!();
-                    finishset_fallback(lua_state, ci, &ra, &rb, rc)?;
+                    finishset_fallback(lua_state, frame_idx, &ra, &rb, rc)?;
                     updatetrap!();
                 }
                 OpCode::SetI => {
@@ -808,11 +834,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let ra = *ra;
                             let rb = LuaValue::integer(b);
                             savestate!();
-                            if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                            if call_newindex_tm_fast(lua_state, frame_idx, ra, meta, rb, rc)? {
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
+                            finishset_fallback_known_miss(lua_state, frame_idx, &ra, &rb, rc)?;
                             updatetrap!();
                             continue;
                         }
@@ -825,7 +851,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = *ra;
                     let rb = LuaValue::integer(b);
                     savestate!();
-                    finishset_fallback(lua_state, ci, &ra, &rb, rc)?;
+                    finishset_fallback(lua_state, frame_idx, &ra, &rb, rc)?;
                     updatetrap!();
                 }
                 OpCode::SetField => {
@@ -926,13 +952,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = *key;
                     savestate!();
                     if known_newindex_miss {
-                        if call_newindex_tm_fast(lua_state, ci, ra, meta, rb, rc)? {
+                        if call_newindex_tm_fast(lua_state, frame_idx, ra, meta, rb, rc)? {
                             updatetrap!();
                             continue;
                         }
-                        finishset_fallback_known_miss(lua_state, ci, &ra, &rb, rc)?;
+                        finishset_fallback_known_miss(lua_state, frame_idx, &ra, &rb, rc)?;
                     } else {
-                        finishset_fallback(lua_state, ci, &ra, &rb, rc)?;
+                        finishset_fallback(lua_state, frame_idx, &ra, &rb, rc)?;
                     }
                     updatetrap!();
                 }
@@ -967,7 +993,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // lua_state.check_gc()?;
                     // let frame_top = ci.top;
                     // lua_state.set_top_raw(frame_top as usize);
-                    lua_state.check_gc_in_loop(ci, pc, new_top, &mut trap);
+                    lua_state.check_gc_in_loop(frame_idx, pc, new_top, &mut trap);
                 }
                 OpCode::Self_ => {
                     // SELF: R[A+1] := R[B]; R[A] := R[B][K[C]:string]
@@ -996,7 +1022,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     savestate!();
-                    finishget_fallback(lua_state, ci, &rb, key, stack_id!(a))?;
+                    finishget_fallback(lua_state, frame_idx, &rb, key, stack_id!(a))?;
                     updatetrap!();
                 }
                 OpCode::Add => {
@@ -1155,7 +1181,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 psetivalue(ra_ptr, lua_idiv(i1, i2));
                                 pc += 1;
                             } else {
-                                ci.save_pc(pc);
+                                lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                                 return Err(error_div_by_zero(lua_state));
                             }
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
@@ -1190,7 +1216,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 psetivalue(ra_ptr, lua_imod(i1, i2));
                                 pc += 1;
                             } else {
-                                ci.save_pc(pc);
+                                lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                                 return Err(error_mod_by_zero(lua_state));
                             }
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
@@ -1335,7 +1361,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 psetivalue(ra_ptr, lua_imod(i1, i2));
                                 pc += 1;
                             } else {
-                                ci.save_pc(pc);
+                                lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                                 return Err(error_mod_by_zero(lua_state));
                             }
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
@@ -1420,7 +1446,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 psetivalue(ra_ptr, lua_idiv(i1, i2));
                                 pc += 1;
                             } else {
-                                ci.save_pc(pc);
+                                lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                                 return Err(error_div_by_zero(lua_state));
                             }
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
@@ -1610,7 +1636,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
 
                     savestate!();
-                    bin_tm_fallback(lua_state, ci, ra, rb, result_reg, a as u32, b as u32, tm)?;
+                    bin_tm_fallback(
+                        lua_state, frame_idx, ra, rb, result_reg, a as u32, b as u32, tm,
+                    )?;
                     updatetrap!();
                 }
                 OpCode::MmBinI => {
@@ -1626,7 +1654,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = LuaValue::integer(imm as i64);
                     let r = if flip { (rb, *ra) } else { (*ra, rb) };
                     savestate!();
-                    bin_tm_fallback(lua_state, ci, r.0, r.1, result_reg, a as u32, a as u32, tm)?;
+                    bin_tm_fallback(
+                        lua_state, frame_idx, r.0, r.1, result_reg, a as u32, a as u32, tm,
+                    )?;
                     updatetrap!();
                 }
                 OpCode::MmBinK => {
@@ -1640,7 +1670,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a_reg = instr.get_a();
                     savestate!();
                     let r = if flip { (imm, ra) } else { (ra, imm) };
-                    bin_tm_fallback(lua_state, ci, r.0, r.1, result_reg, a_reg, a_reg, tm)?;
+                    bin_tm_fallback(lua_state, frame_idx, r.0, r.1, result_reg, a_reg, a_reg, tm)?;
                     updatetrap!();
                 }
                 OpCode::Unm => {
@@ -1659,7 +1689,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             savestate!();
                             let result_reg = stack_id!(a);
-                            unary_tm_fallback(lua_state, ci, rb, result_reg, TmKind::Unm)?;
+                            unary_tm_fallback(lua_state, frame_idx, rb, result_reg, TmKind::Unm)?;
                             updatetrap!();
                         }
                     }
@@ -1676,7 +1706,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         savestate!();
                         let result_reg = stack_id!(a);
-                        unary_tm_fallback(lua_state, ci, rb, result_reg, TmKind::Bnot)?;
+                        unary_tm_fallback(lua_state, frame_idx, rb, result_reg, TmKind::Bnot)?;
                         updatetrap!();
                     }
                 }
@@ -1707,14 +1737,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if n == 2 {
                         let left = *stack_val!(a);
                         let right = *stack_val!(a + 1);
-                        ci.save_pc(pc);
+                        lua_state.get_call_info_mut(frame_idx).save_pc(pc);
 
                         if let Some(result) = try_concat_pair_utf8(lua_state, left, right)? {
                             *stack_val_mut!(a) = result;
                             updatetrap!();
 
                             let top = lua_state.get_top();
-                            lua_state.check_gc_in_loop(ci, pc, top, &mut trap);
+                            lua_state.check_gc_in_loop(frame_idx, pc, top, &mut trap);
                             continue;
                         }
                     }
@@ -1723,11 +1753,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     lua_state.set_top_raw(concat_top);
 
                     // ProtectNT
-                    ci.save_pc(pc);
+                    lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                     match concat(lua_state, n as usize) {
                         Ok(()) => {}
                         Err(LuaError::Yield) => {
-                            ci.call_status |= CIST_PENDING_FINISH;
+                            lua_state.get_call_info_mut(frame_idx).call_status |=
+                                CIST_PENDING_FINISH;
                             return Err(LuaError::Yield);
                         }
                         Err(e) => return Err(e),
@@ -1735,17 +1766,17 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     updatetrap!();
 
                     let top = lua_state.get_top();
-                    lua_state.check_gc_in_loop(ci, pc, top, &mut trap);
+                    lua_state.check_gc_in_loop(frame_idx, pc, top, &mut trap);
                 }
                 OpCode::Close => {
                     let a = instr.get_a();
                     let close_from = stack_id!(a);
 
-                    ci.save_pc(pc);
+                    lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                     match lua_state.close_all(close_from) {
                         Ok(()) => {}
                         Err(LuaError::Yield) => {
-                            ci.pc -= 1;
+                            lua_state.get_call_info_mut(frame_idx).pc -= 1;
                             return Err(LuaError::Yield);
                         }
                         Err(e) => return Err(e),
@@ -1754,7 +1785,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Tbc => {
                     // Mark variable as to-be-closed
                     let a = instr.get_a();
-                    ci.save_pc(pc); // save PC so get_local_var_name finds the variable name
+                    lua_state.get_call_info_mut(frame_idx).save_pc(pc); // save PC so get_local_var_name finds the variable name
                     lua_state.mark_tbc(stack_id!(a))?;
                 }
                 OpCode::Jmp => {
@@ -1768,7 +1799,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = *stack_val!(a);
                     let rb = *stack_val!(b);
                     savestate!();
-                    let cond = eq_fallback(lua_state, ci, ra, rb)?;
+                    let cond = eq_fallback(lua_state, frame_idx, ra, rb)?;
                     updatetrap!();
                     let k = instr.get_k();
                     if cond != k {
@@ -1805,7 +1836,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let va = *ra;
                             let vb = *rb;
                             savestate!();
-                            let result = order_tm_fallback(lua_state, ci, va, vb, TmKind::Lt)?;
+                            let result =
+                                order_tm_fallback(lua_state, frame_idx, va, vb, TmKind::Lt)?;
                             updatetrap!();
                             result
                         }
@@ -1846,7 +1878,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let va = *ra;
                             let vb = *rb;
                             savestate!();
-                            let result = order_tm_fallback(lua_state, ci, va, vb, TmKind::Le)?;
+                            let result =
+                                order_tm_fallback(lua_state, frame_idx, va, vb, TmKind::Le)?;
                             updatetrap!();
                             result
                         }
@@ -1919,7 +1952,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 LuaValue::integer(im as i64)
                             };
                             savestate!();
-                            let result = order_tm_fallback(lua_state, ci, va, vb, TmKind::Lt)?;
+                            let result =
+                                order_tm_fallback(lua_state, frame_idx, va, vb, TmKind::Lt)?;
                             updatetrap!();
                             result
                         }
@@ -1954,7 +1988,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 LuaValue::integer(im as i64)
                             };
                             savestate!();
-                            let result = order_tm_fallback(lua_state, ci, va, vb, TmKind::Le)?;
+                            let result =
+                                order_tm_fallback(lua_state, frame_idx, va, vb, TmKind::Le)?;
                             updatetrap!();
                             result
                         }
@@ -1990,7 +2025,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             };
                             savestate!();
                             // GtI: a > b ≡ b < a → swap args, use Lt
-                            let result = order_tm_fallback(lua_state, ci, vb, va, TmKind::Lt)?;
+                            let result =
+                                order_tm_fallback(lua_state, frame_idx, vb, va, TmKind::Lt)?;
                             updatetrap!();
                             result
                         }
@@ -2026,7 +2062,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             };
                             savestate!();
                             // GeI: a >= b ≡ b <= a → swap args, use Le
-                            let result = order_tm_fallback(lua_state, ci, vb, va, TmKind::Le)?;
+                            let result =
+                                order_tm_fallback(lua_state, frame_idx, vb, va, TmKind::Le)?;
                             updatetrap!();
                             result
                         }
@@ -2089,7 +2126,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         lua_state.get_top() - func_idx - 1
                     };
-                    ci.save_pc(pc);
+                    lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                     if precall(lua_state, func_idx, nargs, nresults)? {
                         // Lua call: new frame pushed
                         continue 'startfunc;
@@ -2110,11 +2147,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         b = lua_state.get_top() - func_idx;
                     }
-                    ci.save_pc(pc);
+                    lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                     if instr.get_k() {
                         lua_state.close_upvalues(base);
                     }
-                    if pretailcall(lua_state, ci, func_idx, b)? {
+                    if pretailcall(lua_state, frame_idx, func_idx, b)? {
                         // Lua tail call: CI reused in place
                         continue 'startfunc;
                     }
@@ -2130,21 +2167,23 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut n;
 
                     // Check if resuming after a yield inside __close during return
-                    if ci.call_status & CIST_CLSRET != 0 {
+                    if lua_state.get_call_info(frame_idx).call_status & CIST_CLSRET != 0 {
                         // Resuming from yield-in-close: use saved nres and skip close_all
                         // (close_all already ran; remaining TBCs were closed on resume)
-                        ci.call_status &= !CIST_CLSRET;
+                        let ci = lua_state.get_call_info(frame_idx);
                         n = ci.saved_nres();
+                        let _ = ci;
+                        lua_state.get_call_info_mut(frame_idx).call_status &= !CIST_CLSRET;
 
                         // Save pc first so re-yield points to RETURN again
-                        ci.save_pc(pc);
+                        lua_state.get_call_info_mut(frame_idx).save_pc(pc);
 
                         // Continue closing remaining TBC variables (if any)
                         match lua_state.close_all(base) {
                             Ok(()) => {}
                             Err(LuaError::Yield) => {
-                                ci.call_status |= CIST_CLSRET;
-                                ci.pc -= 1;
+                                lua_state.get_call_info_mut(frame_idx).call_status |= CIST_CLSRET;
+                                lua_state.get_call_info_mut(frame_idx).pc -= 1;
                                 return Err(LuaError::Yield);
                             }
                             Err(e) => return Err(e),
@@ -2155,18 +2194,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             n = (lua_state.get_top() - a_pos) as i32;
                         }
 
-                        ci.save_pc(pc);
+                        lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                         if instr.get_k() {
                             // May have open upvalues / TBC variables
-                            ci.set_saved_nres(n);
-                            if lua_state.get_top() < ci.top as usize {
-                                lua_state.set_top_raw(ci.top as usize);
+                            lua_state.get_call_info_mut(frame_idx).set_saved_nres(n);
+                            let ci_top = lua_state.get_call_info(frame_idx).top as usize;
+                            if lua_state.get_top() < ci_top {
+                                lua_state.set_top_raw(ci_top);
                             }
                             match lua_state.close_all(base) {
                                 Ok(()) => {}
                                 Err(LuaError::Yield) => {
-                                    ci.call_status |= CIST_CLSRET;
-                                    ci.pc -= 1;
+                                    lua_state.get_call_info_mut(frame_idx).call_status |=
+                                        CIST_CLSRET;
+                                    lua_state.get_call_info_mut(frame_idx).pc -= 1;
                                     return Err(LuaError::Yield);
                                 }
                                 Err(e) => return Err(e),
@@ -2175,17 +2216,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     lua_state.set_top_raw(a_pos + n as usize);
-                    poscall(lua_state, ci, n as usize, pc)?;
+                    poscall(lua_state, frame_idx, n as usize, pc)?;
                     resume_caller_fast!();
                 }
                 OpCode::Return0 => {
                     // return (no values)
                     if lua_state.hook_mask & (LUA_MASKRET | LUA_MASKLINE) != 0 {
-                        return0_with_hook(lua_state, ci, stack_id!(instr.get_a()), pc)?;
+                        return0_with_hook(lua_state, frame_idx, stack_id!(instr.get_a()), pc)?;
                         continue 'startfunc;
                     }
 
                     // Inlined fast path: no hook, no moveresults overhead
+                    let ci = lua_state.get_call_info(frame_idx);
                     let nresults = ci.nresults();
                     let res = ci.base - ci.func_offset as usize;
                     lua_state.pop_call_frame();
@@ -2206,11 +2248,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Return1 => {
                     // return R[A]  (single value)
                     if lua_state.hook_mask & (LUA_MASKRET | LUA_MASKLINE) != 0 {
-                        return1_with_hook(lua_state, ci, stack_id!(instr.get_a()), pc)?;
+                        return1_with_hook(lua_state, frame_idx, stack_id!(instr.get_a()), pc)?;
                         continue 'startfunc;
                     }
 
                     // Inlined fast path — raw pointer for single copy
+                    let ci = lua_state.get_call_info(frame_idx);
                     let nresults = ci.nresults();
                     let res = ci.base - ci.func_offset as usize;
                     lua_state.pop_call_frame();
@@ -2313,7 +2356,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         *stack.get_unchecked_mut(ra + 3) = *stack.get_unchecked(ra);
                     }
                     lua_state.set_top_raw(func_idx + 3); // func + 2 args
-                    ci.save_pc(pc);
+                    lua_state.get_call_info_mut(frame_idx).save_pc(pc);
                     if precall(lua_state, func_idx, 2, c as i32)? {
                         // Lua iterator: new frame pushed
                         continue 'startfunc;
@@ -2343,7 +2386,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if n == 0 {
                         n = lua_state.get_top() - stack_id!(a) - 1; // adjust n based on top if vb=0
                     } else {
-                        lua_state.set_top_raw(ci.top as usize);
+                        lua_state.set_top_raw(lua_state.get_call_info(frame_idx).top as usize);
                     }
                     last += n;
                     if instr.get_k() {
@@ -2386,11 +2429,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a() as usize;
                     let proto_idx = instr.get_bx() as usize;
                     savestate!();
-                    let upvalue_ptrs =
-                        unsafe { std::slice::from_raw_parts(ci.upvalue_ptrs, chunk.upvalue_count) };
+                    let upvalue_ptrs = unsafe {
+                        std::slice::from_raw_parts(
+                            lua_state.get_call_info(frame_idx).upvalue_ptrs,
+                            chunk.upvalue_count,
+                        )
+                    };
                     push_closure(lua_state, base, a, proto_idx, chunk, upvalue_ptrs)?;
 
-                    lua_state.check_gc_in_loop(ci, pc, base + a + 1, &mut trap);
+                    lua_state.check_gc_in_loop(frame_idx, pc, base + a + 1, &mut trap);
                 }
                 OpCode::Vararg => {
                     let a = instr.get_a() as usize;
@@ -2399,12 +2446,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let vatab = if instr.get_k() { b as i32 } else { -1 };
 
                     savestate!();
-                    match get_varargs(lua_state, ci, base, a, b, vatab, n, chunk) {
+                    match get_varargs(lua_state, frame_idx, base, a, b, vatab, n, chunk) {
                         Ok(()) => {
                             updatetrap!();
                         }
                         Err(LuaError::Yield) => {
-                            ci.call_status |= CIST_PENDING_FINISH;
+                            lua_state.get_call_info_mut(frame_idx).call_status |=
+                                CIST_PENDING_FINISH;
                             return Err(LuaError::Yield);
                         }
                         Err(e) => return Err(e),
@@ -2413,7 +2461,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::GetVarg => {
                     let a = stack_id!(instr.get_a());
                     let c = stack_id!(instr.get_c());
-                    get_vararg(lua_state, ci, base, a, c)?;
+                    get_vararg(lua_state, frame_idx, base, a, c)?;
                 }
                 OpCode::ErrNNil => {
                     let a = instr.get_a();
@@ -2436,11 +2484,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                 }
                 OpCode::VarargPrep => {
-                    exec_varargprep(lua_state, ci, chunk, &mut base)?;
+                    exec_varargprep(lua_state, frame_idx, chunk, &mut base)?;
                     // After varargprep, hook call if hooks are active
                     let hook_mask = lua_state.hook_mask;
                     if hook_mask != 0 {
-                        let call_status = ci.call_status;
+                        let call_status = lua_state.get_call_info(frame_idx).call_status;
                         hook_on_call(lua_state, hook_mask, call_status, chunk)?;
                         if hook_mask & LUA_MASKLINE != 0 {
                             lua_state.oldpc = u32::MAX; // force line event on next instruction

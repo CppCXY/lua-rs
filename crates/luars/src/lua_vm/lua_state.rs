@@ -1634,11 +1634,7 @@ impl LuaState {
     /// Get debug info for a function value (not on the call stack).
     /// Only fields that don't require a stack frame are meaningful
     /// ('n' and 'l' will return empty/defaults).
-    pub fn get_info_for_func(
-        &self,
-        func: &LuaValue,
-        what: &str,
-    ) -> DebugInfo {
+    pub fn get_info_for_func(&self, func: &LuaValue, what: &str) -> DebugInfo {
         self.fill_debug_info(func, None, None, what)
     }
 
@@ -4047,7 +4043,7 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn check_gc_in_loop(
         &mut self,
-        ci: &mut CallInfo,
+        frame_idx: usize,
         pc: usize,
         c: usize,
         trap: &mut bool,
@@ -4057,7 +4053,7 @@ impl LuaState {
             return;
         }
 
-        ci.save_pc(pc);
+        self.get_call_info_mut(frame_idx).save_pc(pc);
         self.set_top_raw(c);
         vm.check_gc(self);
         *trap = self.hook_mask != 0;
