@@ -7,7 +7,12 @@ use crate::{
         call_info::call_status::{
             CIST_C, CIST_PENDING_FINISH, CIST_RECST, CIST_XPCALL, CIST_YCALL, CIST_YPCALL,
         },
-        execute::{call::poscall, call_tm_res, concat::concat, metamethod::call_tm_res_into},
+        execute::{
+            call::poscall,
+            call_tm_res,
+            concat::concat,
+            metamethod::{self, call_tm_res_into},
+        },
         lua_limits::{EXTRA_STACK, MAXTAGLOOP},
     },
 };
@@ -661,8 +666,7 @@ fn finishset_inner(
             // Key does not exist - call __newindex metamethod
             if let Some(tm) = tm_val {
                 if tm.is_function() {
-                    use crate::lua_vm::execute;
-                    execute::metamethod::call_tm(lua_state, tm, t, *key, value)?;
+                    metamethod::call_tm(lua_state, tm, t, *key, value)?;
                     return Ok(true);
                 }
 
@@ -688,10 +692,7 @@ fn finishset_inner(
             // Get __newindex metamethod
             if let Some(tm) = get_metamethod_event(lua_state, &t, TmKind::NewIndex) {
                 if tm.is_function() {
-                    // Call metamethod
-                    use crate::lua_vm::execute;
-
-                    execute::metamethod::call_tm(lua_state, tm, t, *key, value)?;
+                    metamethod::call_tm(lua_state, tm, t, *key, value)?;
 
                     return Ok(true);
                 }
@@ -784,7 +785,6 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
     let call_status = ci.call_status;
     let has_recst = call_status & CIST_RECST != 0;
     let is_xpcall = call_status & CIST_XPCALL != 0;
-    let _ = ci;
 
     if call_status & CIST_YPCALL != 0 {
         if has_recst {

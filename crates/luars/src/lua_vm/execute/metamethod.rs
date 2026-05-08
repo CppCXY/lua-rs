@@ -353,7 +353,7 @@ pub fn call_tm_res1(
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
 
-    let result_val = unsafe { *lua_state.stack_mut().as_ptr().add(func_pos) };
+    let result_val = *unsafe { lua_state.stack().get_unchecked(func_pos) };
     lua_state.set_top_raw(func_pos);
 
     Ok(result_val)
