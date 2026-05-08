@@ -5,19 +5,26 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::compiler::format_source;
 use crate::gc::{CreateResult, GcObjectPtr, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr};
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
-use crate::lua_vm::call_info::call_status::{self, CIST_C, CIST_RECST, CIST_XPCALL, CIST_YPCALL};
+use crate::lua_vm::call_info::call_status::{
+    self, CIST_C, CIST_HOOKED, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
+};
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_MAXCSTACK};
 use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 #[cfg(feature = "sandbox")]
 use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, SandboxRuntimeLimits};
-use crate::lua_vm::{CallInfo, LuaError, LuaResult, TmKind, get_metamethod_event};
+use crate::lua_vm::{
+    CallInfo, LuaError, LuaResult, LuaTypedAsyncCallback, LuaTypedCallback, TmKind,
+    get_metamethod_event,
+};
 #[cfg(feature = "sandbox")]
 use crate::platform_time::unix_nanos;
+use crate::stdlib::debug::{objtypename, ordererror, pub_getfuncname};
 use crate::{
     AsyncReturnValue, DebugInfo, LuaAnyRef, LuaFunctionRef, LuaProto, LuaRegistrable, LuaTableRef,
     LuaVM,
@@ -505,7 +512,7 @@ impl LuaState {
         _max_stack_size: usize,
         frame_top: usize,
         chunk_ptr: *const LuaProto,
-        upvalue_ptrs: *const crate::gc::UpvaluePtr,
+        upvalue_ptrs: *const UpvaluePtr,
     ) -> LuaResult<()> {
         let nextraargs = if nparams > param_count {
             (nparams - param_count) as i32
@@ -817,7 +824,7 @@ impl LuaState {
         {
             let chunk = unsafe { &*ci.chunk_ptr };
             let source = match chunk.source_name.as_deref() {
-                Some(raw) => crate::compiler::format_source(raw),
+                Some(raw) => format_source(raw),
                 None => "?".to_string(), // stripped debug info
             };
             let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
@@ -855,7 +862,7 @@ impl LuaState {
             {
                 let chunk = unsafe { &*ci.chunk_ptr };
                 let source = match chunk.source_name.as_deref() {
-                    Some(raw) => crate::compiler::format_source(raw),
+                    Some(raw) => format_source(raw),
                     None => "?".to_string(),
                 };
                 let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
@@ -926,7 +933,7 @@ impl LuaState {
                     let source = chunk.source_name.as_deref().unwrap_or("[string]");
 
                     // Format source name (strip @ prefix if present)
-                    let source_display = crate::compiler::format_source(source);
+                    let source_display = format_source(source);
 
                     // Get current line number from PC
                     let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
@@ -979,9 +986,7 @@ impl LuaState {
     #[inline(always)]
     pub fn set_pending_future(
         &mut self,
-        future: Pin<
-            Box<dyn Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>>>,
-        >,
+        future: Pin<Box<dyn Future<Output = LuaResult<Vec<AsyncReturnValue>>>>>,
     ) {
         self.pending_future = Some(future);
     }
@@ -990,11 +995,7 @@ impl LuaState {
     #[inline(always)]
     pub fn take_pending_future(
         &mut self,
-    ) -> Option<
-        Pin<
-            Box<dyn Future<Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>>>,
-        >,
-    > {
+    ) -> Option<Pin<Box<dyn Future<Output = LuaResult<Vec<AsyncReturnValue>>>>>> {
         self.pending_future.take()
     }
 
@@ -1687,9 +1688,7 @@ impl LuaState {
                     }
                     'n' => {
                         if let Some(fidx) = frame_idx {
-                            if let Some((namewhat, name)) =
-                                crate::stdlib::debug::pub_getfuncname(self, fidx)
-                            {
+                            if let Some((namewhat, name)) = pub_getfuncname(self, fidx) {
                                 info.fill_name(namewhat, &name);
                             } else {
                                 info.fill_name_empty();
@@ -1710,9 +1709,7 @@ impl LuaState {
                         // Transfer info — only meaningful inside hooks (CIST_HOOKED).
                         // Like C Lua: only return actual values when ci has CIST_HOOKED flag.
                         if let Some(ci) = ci {
-                            if ci.call_status & crate::lua_vm::call_info::call_status::CIST_HOOKED
-                                != 0
-                            {
+                            if ci.call_status & CIST_HOOKED != 0 {
                                 info.fill_transfer(self.ftransfer, self.ntransfer);
                             } else {
                                 info.fill_transfer(0, 0);
@@ -1750,9 +1747,7 @@ impl LuaState {
                     }
                     'n' => {
                         if let Some(fidx) = frame_idx {
-                            if let Some((namewhat, name)) =
-                                crate::stdlib::debug::pub_getfuncname(self, fidx)
-                            {
+                            if let Some((namewhat, name)) = pub_getfuncname(self, fidx) {
                                 info.fill_name(namewhat, &name);
                             } else {
                                 info.fill_name_empty();
@@ -1771,9 +1766,7 @@ impl LuaState {
                     }
                     'r' => {
                         if let Some(ci) = ci {
-                            if ci.call_status & crate::lua_vm::call_info::call_status::CIST_HOOKED
-                                != 0
-                            {
+                            if ci.call_status & CIST_HOOKED != 0 {
                                 info.fill_transfer(self.ftransfer, self.ntransfer);
                             } else {
                                 info.fill_transfer(0, 0);
@@ -2205,7 +2198,7 @@ impl LuaState {
 
     pub fn register_function_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
-        F: crate::lua_vm::LuaTypedCallback<Args, R>,
+        F: LuaTypedCallback<Args, R>,
     {
         self.vm_mut().register_function_typed(name, f)
     }
@@ -2215,7 +2208,7 @@ impl LuaState {
     /// See [`LuaVM::register_async_typed`] for details.
     pub fn register_async_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
-        F: crate::lua_vm::LuaTypedAsyncCallback<Args, R>,
+        F: LuaTypedAsyncCallback<Args, R>,
     {
         self.vm_mut().register_async_typed(name, f)
     }
@@ -2228,9 +2221,7 @@ impl LuaState {
     pub fn register_async<F, Fut>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: Fn(Vec<LuaValue>) -> Fut + 'static,
-        Fut: std::future::Future<
-                Output = LuaResult<Vec<crate::lua_vm::async_thread::AsyncReturnValue>>,
-            > + 'static,
+        Fut: std::future::Future<Output = LuaResult<Vec<AsyncReturnValue>>> + 'static,
     {
         self.vm_mut().register_async(name, f)
     }
@@ -2368,7 +2359,7 @@ impl LuaState {
         // Try __lt metamethod
         match execute::metamethod::try_comp_tm(self, *a, *b, execute::TmKind::Lt) {
             Ok(Some(result)) => Ok(result),
-            Ok(None) => Err(crate::stdlib::debug::ordererror(self, a, b)),
+            Ok(None) => Err(ordererror(self, a, b)),
             Err(e) => Err(e),
         }
     }
@@ -4209,7 +4200,7 @@ impl LuaState {
         // Clear hooked flag
         if ci_idx < self.call_depth() {
             let ci = self.get_call_info_mut(ci_idx);
-            ci.call_status &= !crate::lua_vm::call_info::call_status::CIST_HOOKED;
+            ci.call_status &= !CIST_HOOKED;
         }
 
         // Restore state
@@ -4276,7 +4267,7 @@ impl LuaState {
 
         // Fallback: generic representation
         // Check for __name in metatable (luaT_objtypename)
-        let type_prefix = crate::stdlib::debug::objtypename(self, value);
+        let type_prefix = objtypename(self, value);
         if type_prefix != value.type_name() {
             // Use __name as prefix instead of built-in type name
             Ok(format!(

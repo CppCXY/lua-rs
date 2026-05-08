@@ -1,3 +1,5 @@
+use crate::stdlib::basic::parse_number::parse_lua_number;
+use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
     LuaProto, LuaResult, LuaValue, OpCode,
     gc::TablePtr,
@@ -336,7 +338,7 @@ pub fn tonumber(v: &LuaValue, out: &mut f64) -> bool {
         return true;
     }
     if v.is_string() {
-        let result = crate::stdlib::basic::parse_number::parse_lua_number(v.as_str().unwrap_or(""));
+        let result = parse_lua_number(v.as_str().unwrap_or(""));
         if result.is_float() {
             *out = unsafe { result.value.n };
             return true;
@@ -406,7 +408,7 @@ fn tointeger_mode(v: &LuaValue, mode: i32) -> Option<i64> {
     let f = if v.tt() == LUA_VNUMFLT {
         unsafe { v.value.n }
     } else if v.is_string() {
-        let result = crate::stdlib::basic::parse_number::parse_lua_number(v.as_str().unwrap_or(""));
+        let result = parse_lua_number(v.as_str().unwrap_or(""));
         if result.is_float() {
             unsafe { result.value.n }
         } else if result.is_integer() {
@@ -480,7 +482,7 @@ fn finishget_inner(
                 if let Some(key_str) = key.as_str()
                     && let Some(udv) = ud.get_trait().get_field(key_str)
                 {
-                    let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                    let result = udvalue_to_lua_value(lua_state, udv)?;
                     return Ok(Some(result));
                 }
             }
@@ -490,7 +492,7 @@ fn finishget_inner(
                 None => {
                     // No __index metamethod on non-table value → error
                     // Use typeerror for enhanced error message with varinfo
-                    return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
+                    return Err(typeerror(lua_state, &t, "index"));
                 }
             }
         };
@@ -703,7 +705,7 @@ fn finishset_inner(
             }
 
             // No metamethod found for non-table
-            return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
+            return Err(typeerror(lua_state, &t, "index"));
         }
     }
 
@@ -1140,7 +1142,7 @@ pub fn objlen(l: &mut LuaState, result_reg: usize, value: LuaValue) -> LuaResult
     if let Some(tm) = tm {
         call_tm_res_into(l, tm, value, value, result_reg)?;
     } else {
-        return Err(crate::stdlib::debug::typeerror(l, &value, "get length of"));
+        return Err(typeerror(l, &value, "get length of"));
     }
     Ok(())
 }
@@ -1274,15 +1276,15 @@ pub fn forprep(lua_state: &mut LuaState, ra_pos: usize) -> LuaResult<bool> {
         let step_val = stack[step_pos];
 
         if !tonumber(&limit_val, &mut limit) {
-            let t = crate::stdlib::debug::objtypename(lua_state, &limit_val);
+            let t = objtypename(lua_state, &limit_val);
             return Err(lua_state.error(format!("bad 'for' limit (number expected, got {})", t)));
         }
         if !tonumber(&step_val, &mut step) {
-            let t = crate::stdlib::debug::objtypename(lua_state, &step_val);
+            let t = objtypename(lua_state, &step_val);
             return Err(lua_state.error(format!("bad 'for' step (number expected, got {})", t)));
         }
         if !tonumber(&init_val, &mut init) {
-            let t = crate::stdlib::debug::objtypename(lua_state, &init_val);
+            let t = objtypename(lua_state, &init_val);
             return Err(lua_state.error(format!(
                 "bad 'for' initial value (number expected, got {})",
                 t
@@ -1367,7 +1369,7 @@ pub fn float_for_loop(lua_state: &mut LuaState, ra_pos: usize) -> bool {
 #[cold]
 #[inline(never)]
 fn error_for_bad_limit(lua_state: &mut LuaState, limit_val: &LuaValue) -> LuaError {
-    let t = crate::stdlib::debug::objtypename(lua_state, limit_val);
+    let t = objtypename(lua_state, limit_val);
     lua_state.error(format!("bad 'for' limit (number expected, got {})", t))
 }
 
@@ -1405,7 +1407,7 @@ pub fn order_tm_fallback(
     use crate::lua_vm::execute::metamethod::try_comp_tm;
     match try_comp_tm(lua_state, va, vb, tm) {
         Ok(Some(result)) => Ok(result),
-        Ok(None) => Err(crate::stdlib::debug::ordererror(lua_state, &va, &vb)),
+        Ok(None) => Err(ordererror(lua_state, &va, &vb)),
         Err(LuaError::Yield) => {
             lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
@@ -1590,7 +1592,7 @@ fn finishget_to_reg_inner(
                 && let Some(key_str) = key.as_str()
                 && let Some(udv) = ud.get_trait().get_field(key_str)
             {
-                let result = crate::lua_value::udvalue_to_lua_value(lua_state, udv)?;
+                let result = udvalue_to_lua_value(lua_state, udv)?;
                 setobj2s(lua_state, dest_reg, &result);
                 return Ok(());
             }
@@ -1598,7 +1600,7 @@ fn finishget_to_reg_inner(
             match get_metamethod_event(lua_state, &t, TmKind::Index) {
                 Some(tm) => tm,
                 None => {
-                    return Err(crate::stdlib::debug::typeerror(lua_state, &t, "index"));
+                    return Err(typeerror(lua_state, &t, "index"));
                 }
             }
         };

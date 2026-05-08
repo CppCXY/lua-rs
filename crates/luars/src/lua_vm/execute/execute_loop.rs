@@ -22,7 +22,7 @@ use crate::{
     Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult, LuaState,
     LuaValue, OpCode,
     gc::TablePtr,
-    lua_value::LUA_VNUMINT,
+    lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMINT},
     lua_vm::{
         LuaError, TmKind,
         call_info::call_status::{CIST_C, CIST_CLSRET, CIST_PENDING_FINISH},
@@ -768,7 +768,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 let rc_tt = unsafe { (*rc_ptr).tt };
                                 let rc_value = unsafe { (*rc_ptr).value };
                                 if table.impl_table.fast_seti_parts(b, rc_value, rc_tt) {
-                                    if rc_tt & 0x40 != 0 {
+                                    if rc_tt & BIT_ISCOLLECTABLE != 0 {
                                         lua_state.gc_barrier_back(gc_ptr);
                                     }
                                     continue;
@@ -884,7 +884,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     delta,
                                 );
                             }
-                            if rc_tt & 0x40 != 0 {
+                            if rc_tt & BIT_ISCOLLECTABLE != 0 {
                                 lua_state.gc_barrier_back(unsafe {
                                     (*ra_ptr).as_gc_ptr_table_unchecked()
                                 });
