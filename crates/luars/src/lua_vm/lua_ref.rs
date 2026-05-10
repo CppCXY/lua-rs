@@ -4,6 +4,7 @@
 /// This is useful for keeping values alive across GC cycles and for passing values between Rust and Lua.
 use std::marker::PhantomData;
 
+use crate::LuaState;
 use crate::lua_value::LuaValue;
 use crate::lua_value::LuaValueKind;
 use crate::lua_value::lua_convert::collect_into_lua_values;
@@ -114,7 +115,7 @@ impl LuaRefValue {
     }
 
     /// Get the Lua value from this reference (requires VM access)
-    pub fn get(&self, vm: &super::LuaVM) -> LuaValue {
+    pub fn get(&self, vm: &LuaVM) -> LuaValue {
         match &self.inner {
             LuaRefInner::Direct(value) => *value,
             LuaRefInner::Registry { ref_id } => {
@@ -160,20 +161,6 @@ impl LuaRefValue {
     }
 }
 
-impl Clone for LuaRefValue {
-    fn clone(&self) -> Self {
-        match &self.inner {
-            LuaRefInner::Direct(value) => LuaRefValue::new_direct(*value),
-            LuaRefInner::Registry { ref_id } => {
-                // For registry references, we just copy the ID
-                // The caller is responsible for managing the lifecycle
-                // (this matches Lua's C API behavior where ref IDs can be copied)
-                LuaRefValue::new_registry(*ref_id)
-            }
-        }
-    }
-}
-
 impl std::fmt::Debug for LuaRefValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.inner {
@@ -199,14 +186,14 @@ impl std::fmt::Debug for LuaRefValue {
 /// `!Send + !Sync` by design — Lua VM is single-threaded.
 struct RefInner {
     ref_id: RefId,
-    vm: *mut super::LuaVM,
+    vm: *mut LuaVM,
     /// Makes RefInner !Send + !Sync
     _marker: PhantomData<*const ()>,
 }
 
 impl RefInner {
     /// Create a new RefInner. The value must already be stored in the registry.
-    fn new(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+    fn new(ref_id: RefId, vm: *mut LuaVM) -> Self {
         RefInner {
             ref_id,
             vm,
@@ -224,14 +211,14 @@ impl RefInner {
 
     /// Get a reference to the VM.
     #[inline]
-    fn vm(&self) -> &super::LuaVM {
+    fn vm(&self) -> &LuaVM {
         unsafe { &*self.vm }
     }
 
     /// Get a mutable reference to the VM.
     #[allow(clippy::mut_from_ref)]
     #[inline]
-    fn vm_mut(&self) -> &mut super::LuaVM {
+    fn vm_mut(&self) -> &mut LuaVM {
         unsafe { &mut *self.vm }
     }
 }
@@ -281,7 +268,7 @@ fn collect_single_value<T: IntoLua>(
 }
 
 /// Store a LuaValue in the VM registry and return its RefId.
-pub(crate) fn store_in_registry(vm: &mut super::LuaVM, value: LuaValue) -> RefId {
+pub(crate) fn store_in_registry(vm: &mut LuaVM, value: LuaValue) -> RefId {
     let ref_id = vm.ref_manager.alloc_ref_id();
     vm.registry_seti(ref_id as i64, value);
     ref_id
@@ -313,7 +300,7 @@ pub struct LuaTableRef {
 impl LuaTableRef {
     /// Create from an already-registered ref id. The caller guarantees the
     /// value at `ref_id` is a table.
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
         LuaTableRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -322,7 +309,7 @@ impl LuaTableRef {
     // ==================== Read ====================
 
     /// Get a value by string key (raw access, no metamethods).
-    pub fn get(&self, key: &str) -> super::LuaResult<LuaValue> {
+    pub fn get(&self, key: &str) -> LuaResult<LuaValue> {
         let vm = self.inner.vm_mut();
         let table = self.inner.to_value();
         let key_val = vm.create_string(key)?;
@@ -330,28 +317,28 @@ impl LuaTableRef {
     }
 
     /// Get a value by integer key.
-    pub fn geti(&self, key: i64) -> super::LuaResult<LuaValue> {
+    pub fn geti(&self, key: i64) -> LuaResult<LuaValue> {
         let vm = self.inner.vm();
         let table = self.inner.to_value();
         Ok(vm.raw_geti(&table, key).unwrap_or_default())
     }
 
     /// Get a value by arbitrary LuaValue key.
-    pub fn get_value(&self, key: &LuaValue) -> super::LuaResult<LuaValue> {
+    pub fn get_value(&self, key: &LuaValue) -> LuaResult<LuaValue> {
         let vm = self.inner.vm();
         let table = self.inner.to_value();
         Ok(vm.raw_get(&table, key).unwrap_or_default())
     }
 
     /// Get a value by string key and convert to a Rust type via `FromLua`.
-    pub fn get_as<T: crate::FromLua>(&self, key: &str) -> super::LuaResult<T> {
+    pub fn get_as<T: crate::FromLua>(&self, key: &str) -> LuaResult<T> {
         let val = self.get(key)?;
         let vm = self.inner.vm_mut();
         T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Get a value by arbitrary Rust-convertible key and convert it to `T`.
-    pub fn get_typed<K: IntoLua, T: crate::FromLua>(&self, key: K) -> super::LuaResult<T> {
+    pub fn get_typed<K: IntoLua, T: crate::FromLua>(&self, key: K) -> LuaResult<T> {
         let vm = self.inner.vm_mut();
         let key = collect_single_value(vm, key, "LuaTableRef::get_typed(key)")?;
         let table = self.inner.to_value();
@@ -360,7 +347,7 @@ impl LuaTableRef {
     }
 
     /// Returns true if the table contains a non-nil value for the given key.
-    pub fn contains_key<K: IntoLua>(&self, key: K) -> super::LuaResult<bool> {
+    pub fn contains_key<K: IntoLua>(&self, key: K) -> LuaResult<bool> {
         let value: LuaValue = self.get_typed(key)?;
         Ok(!value.is_nil())
     }
@@ -368,7 +355,7 @@ impl LuaTableRef {
     // ==================== Write ====================
 
     /// Set a string-keyed value.
-    pub fn set(&self, key: &str, value: LuaValue) -> super::LuaResult<()> {
+    pub fn set(&self, key: &str, value: LuaValue) -> LuaResult<()> {
         let vm = self.inner.vm_mut();
         let table = self.inner.to_value();
         let key_val = vm.create_string(key)?;
@@ -377,7 +364,7 @@ impl LuaTableRef {
     }
 
     /// Set an integer-keyed value.
-    pub fn seti(&self, key: i64, value: LuaValue) -> super::LuaResult<()> {
+    pub fn seti(&self, key: i64, value: LuaValue) -> LuaResult<()> {
         let vm = self.inner.vm_mut();
         let table = self.inner.to_value();
         vm.raw_seti(&table, key, value);
@@ -385,7 +372,7 @@ impl LuaTableRef {
     }
 
     /// Set an arbitrary key-value pair.
-    pub fn set_value(&self, key: LuaValue, value: LuaValue) -> super::LuaResult<()> {
+    pub fn set_value(&self, key: LuaValue, value: LuaValue) -> LuaResult<()> {
         let vm = self.inner.vm_mut();
         let table = self.inner.to_value();
         vm.raw_set(&table, key, value);
@@ -393,7 +380,7 @@ impl LuaTableRef {
     }
 
     /// Set an arbitrary key-value pair from Rust-convertible values.
-    pub fn set_typed<K: IntoLua, V: IntoLua>(&self, key: K, value: V) -> super::LuaResult<()> {
+    pub fn set_typed<K: IntoLua, V: IntoLua>(&self, key: K, value: V) -> LuaResult<()> {
         let vm = self.inner.vm_mut();
         let key = collect_single_value(vm, key, "LuaTableRef::set_typed(key)")?;
         let value = collect_single_value(vm, value, "LuaTableRef::set_typed(value)")?;
@@ -405,27 +392,27 @@ impl LuaTableRef {
     // ==================== Iteration ====================
 
     /// Get all key-value pairs (snapshot, no metamethods).
-    pub fn pairs(&self) -> super::LuaResult<Vec<(LuaValue, LuaValue)>> {
+    pub fn pairs(&self) -> LuaResult<Vec<(LuaValue, LuaValue)>> {
         let vm = self.inner.vm();
         let table = self.inner.to_value();
         vm.table_pairs(&table)
     }
 
     /// Get the array length (equivalent to Lua's `#t`).
-    pub fn len(&self) -> super::LuaResult<usize> {
+    pub fn len(&self) -> LuaResult<usize> {
         let vm = self.inner.vm();
         let table = self.inner.to_value();
         vm.table_length(&table)
     }
 
     /// Append a value to the array part (equivalent to `table.insert`).
-    pub fn push(&self, value: LuaValue) -> super::LuaResult<()> {
+    pub fn push(&self, value: LuaValue) -> LuaResult<()> {
         let current_len = self.len()?;
         self.seti((current_len + 1) as i64, value)
     }
 
     /// Append a Rust value to the array part of the table.
-    pub fn push_typed<V: IntoLua>(&self, value: V) -> super::LuaResult<()> {
+    pub fn push_typed<V: IntoLua>(&self, value: V) -> LuaResult<()> {
         let vm = self.inner.vm_mut();
         let value = collect_single_value(vm, value, "LuaTableRef::push_typed(value)")?;
         let current_len = self.len()?;
@@ -433,7 +420,7 @@ impl LuaTableRef {
     }
 
     /// Convert all table pairs to typed Rust key-value pairs.
-    pub fn pairs_typed<K: FromLua, V: FromLua>(&self) -> super::LuaResult<Vec<(K, V)>> {
+    pub fn pairs_typed<K: FromLua, V: FromLua>(&self) -> LuaResult<Vec<(K, V)>> {
         let pairs = self.pairs()?;
         let vm = self.inner.vm_mut();
         let mut converted = Vec::with_capacity(pairs.len());
@@ -446,7 +433,7 @@ impl LuaTableRef {
     }
 
     /// Read contiguous sequence values from `1..` until a nil is encountered.
-    pub fn sequence_values<V: FromLua>(&self) -> super::LuaResult<Vec<V>> {
+    pub fn sequence_values<V: FromLua>(&self) -> LuaResult<Vec<V>> {
         let vm = self.inner.vm_mut();
         let table = self.inner.to_value();
         let mut values = Vec::new();
@@ -596,7 +583,7 @@ pub struct LuaStringRef {
 }
 
 impl LuaStringRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
         LuaStringRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -687,7 +674,7 @@ pub struct UserDataRef<T: 'static> {
 }
 
 impl<T: 'static> UserDataRef<T> {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
         UserDataRef {
             inner: RefInner::new(ref_id, vm),
             _marker: PhantomData,
@@ -695,7 +682,7 @@ impl<T: 'static> UserDataRef<T> {
     }
 
     /// Get an immutable typed view of the underlying userdata.
-    pub fn get(&self) -> super::LuaResult<&T> {
+    pub fn get(&self) -> LuaResult<&T> {
         let value = self.inner.to_value();
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
@@ -717,7 +704,7 @@ impl<T: 'static> UserDataRef<T> {
     }
 
     /// Get a mutable typed view of the underlying userdata.
-    pub fn get_mut(&mut self) -> super::LuaResult<&mut T> {
+    pub fn get_mut(&mut self) -> LuaResult<&mut T> {
         let value = self.inner.to_value();
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
@@ -739,7 +726,7 @@ impl<T: 'static> UserDataRef<T> {
     }
 
     /// Get the wrapped type name reported by the userdata.
-    pub fn type_name(&self) -> super::LuaResult<&'static str> {
+    pub fn type_name(&self) -> LuaResult<&'static str> {
         let value = self.inner.to_value();
         let Some(userdata) = value.as_userdata_mut() else {
             let vm = self.inner.vm_mut();
@@ -764,7 +751,7 @@ impl<T: 'static> UserDataRef<T> {
 }
 
 impl<T: 'static> FromLua for UserDataRef<T> {
-    fn from_lua(value: LuaValue, state: &mut super::LuaState) -> Result<Self, String> {
+    fn from_lua(value: LuaValue, state: &mut LuaState) -> Result<Self, String> {
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
             return Err(format!(
@@ -784,12 +771,12 @@ impl<T: 'static> FromLua for UserDataRef<T> {
 
         let vm = state.vm_mut();
         let ref_id = store_in_registry(vm, value);
-        Ok(UserDataRef::from_raw(ref_id, vm as *mut super::LuaVM))
+        Ok(UserDataRef::from_raw(ref_id, vm as *mut LuaVM))
     }
 }
 
 impl<T: 'static> IntoLua for UserDataRef<T> {
-    fn into_lua(self, state: &mut super::LuaState) -> Result<usize, String> {
+    fn into_lua(self, state: &mut LuaState) -> Result<usize, String> {
         state
             .push_value(self.to_value())
             .map_err(|e| format!("{:?}", e))?;
@@ -841,7 +828,7 @@ pub struct LuaAnyRef {
 }
 
 impl LuaAnyRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut super::LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
         LuaAnyRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -902,7 +889,7 @@ impl LuaAnyRef {
     }
 
     /// Extract the value as a Rust type via `FromLua`.
-    pub fn get_as<T: crate::FromLua>(&self) -> super::LuaResult<T> {
+    pub fn get_as<T: crate::FromLua>(&self) -> LuaResult<T> {
         let val = self.inner.to_value();
         let vm = self.inner.vm_mut();
         T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
@@ -935,9 +922,7 @@ impl Clone for LuaAnyRef {
 
 #[cfg(test)]
 mod tests {
-    use crate::{LuaVM, lua_vm::SafeOption};
-
-    use super::*;
+    use crate::{LuaVM, LuaValue, lua_vm::SafeOption};
 
     #[test]
     fn test_lua_ref_mechanism() {
