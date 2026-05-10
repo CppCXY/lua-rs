@@ -970,14 +970,27 @@ impl NativeTable {
                 unsafe {
                     let old_n = old_node.add(i);
                     // Only rehash entries with live values (skip dead keys)
-                    if novariant((*old_n).key_tt) != LUA_TNIL && (*old_n).val_tt != LUA_VNIL {
-                        let key = (*old_n).key();
-                        let value = (*old_n).value();
-                        // Must use raw_set here, not set_node!
-                        // raw_set will put integer keys in [1..asize] into array part only
-                        let (_, rd) = self.raw_set(&key, value);
-                        extra_delta += rd;
+                    if novariant((*old_n).key_tt) == LUA_TNIL || (*old_n).val_tt == LUA_VNIL {
+                        continue;
                     }
+
+                    // Fresh hash rebuilds are a hot cost center for large short-string
+                    // insertion workloads. Reuse the specialized short-string insertion
+                    // path instead of routing every live short-string entry through raw_set.
+                    if (*old_n).key_tt == LUA_VSHRSTR {
+                        let key = LuaValue::from_raw((*old_n).key_data, (*old_n).key_tt);
+                        let value = LuaValue::from_raw((*old_n).val_data, (*old_n).val_tt);
+                        let inserted = self.insert_new_shortstr_no_rehash(&key, value);
+                        debug_assert!(inserted, "freshly resized hash must fit live short-string keys");
+                        continue;
+                    }
+
+                    let key = (*old_n).key();
+                    let value = (*old_n).value();
+                    // Must use raw_set here, not set_node!
+                    // raw_set will put integer keys in [1..asize] into array part only
+                    let (_, rd) = self.raw_set(&key, value);
+                    extra_delta += rd;
                 }
             }
 
