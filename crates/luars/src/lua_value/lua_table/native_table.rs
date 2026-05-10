@@ -981,7 +981,10 @@ impl NativeTable {
                         let key = LuaValue::from_raw((*old_n).key_data, (*old_n).key_tt);
                         let value = LuaValue::from_raw((*old_n).val_data, (*old_n).val_tt);
                         let inserted = self.insert_new_shortstr_no_rehash(&key, value);
-                        debug_assert!(inserted, "freshly resized hash must fit live short-string keys");
+                        debug_assert!(
+                            inserted,
+                            "freshly resized hash must fit live short-string keys"
+                        );
                         continue;
                     }
 

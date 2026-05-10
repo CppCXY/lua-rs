@@ -31,17 +31,17 @@ pub const MASKCOLORS: u8 = (1 << BLACKBIT) | WHITEBITS;
 /// GC object header - embedded in every GC-managed object
 /// Port of Lua 5.5's CommonHeader (lgc.h)
 ///
-/// Compressed to 8 bytes (was 16). Layout:
+/// Compact header layout. Layout:
 ///
-///   `packed: u32` — marked + index, bit layout:
-///     bits  0-7 : `marked` — color + age + finalized bit
+///   `marked: u8` — color + age + finalized/shared bits
 ///       - Bits 0-2: Age (G_NEW=0 .. G_TOUCHED2=6)
 ///       - Bit 3: WHITE0
 ///       - Bit 4: WHITE1
 ///       - Bit 5: BLACK
 ///       - Bit 6: FINALIZEDBIT
-///       - Bit 7: Reserved
-///     bits 8-31 : `index` — position in GcList (24-bit, max ~16.7M objects)
+///       - Bit 7: SHAREDBIT
+///   `_padding: [u8; 3]` — keeps `index` naturally aligned
+///   `index: u32` — position in GcList (32-bit, max ~4.29B objects)
 ///
 ///   `size: u32` — allocation-time memory size estimate (for GC pacing).
 ///     Set once at creation, never updated. This ensures consistent
@@ -51,7 +51,9 @@ pub const MASKCOLORS: u8 = (1 << BLACKBIT) | WHITEBITS;
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
-    packed: u32,
+    marked: u8,
+    _padding: [u8; 3],
+    index: u32,
     pub size: u32,
 }
 
@@ -66,35 +68,33 @@ impl std::fmt::Debug for GcHeader {
 }
 
 impl GcHeader {
-    const MARKED_MASK: u32 = 0xFF; // bits 0-7
-    const INDEX_SHIFT: u32 = 8;
-    const INDEX_MAX: u32 = (1 << 24) - 1; // 16,777,215
+    const INDEX_MAX: u32 = u32::MAX;
 
     // ============ Raw field access ============
 
     #[inline(always)]
     pub fn marked(&self) -> u8 {
-        self.packed as u8
+        self.marked
     }
 
     #[inline(always)]
     fn set_marked_bits(&mut self, m: u8) {
-        self.packed = (self.packed & !Self::MARKED_MASK) | (m as u32);
+        self.marked = m;
     }
 
     #[inline(always)]
     pub fn index(&self) -> usize {
-        (self.packed >> Self::INDEX_SHIFT) as usize
+        self.index as usize
     }
 
     #[inline(always)]
     pub fn set_index(&mut self, idx: usize) {
-        debug_assert!(
+        assert!(
             idx <= Self::INDEX_MAX as usize,
             "GcList index overflow: {idx} > {}",
             Self::INDEX_MAX
         );
-        self.packed = (self.packed & Self::MARKED_MASK) | ((idx as u32) << Self::INDEX_SHIFT);
+        self.index = idx as u32;
     }
 }
 
@@ -104,7 +104,9 @@ impl Default for GcHeader {
         // This is INCORRECT for new objects - they should be WHITE
         // Use GcHeader::with_white(current_white) instead when creating GC objects
         GcHeader {
-            packed: G_NEW as u32,
+            marked: G_NEW,
+            _padding: [0; 3],
+            index: 0,
             size: 0,
         }
     }
@@ -121,7 +123,9 @@ impl GcHeader {
             "current_white must be 0 or 1"
         );
         GcHeader {
-            packed: ((1 << (WHITE0BIT + current_white)) | G_NEW) as u32,
+            marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
+            _padding: [0; 3],
+            index: 0,
             size: 0,
         }
     }
@@ -1101,5 +1105,24 @@ impl GcList {
 impl Default for GcList {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gc_header_uses_u32_index() {
+        assert_eq!(std::mem::size_of::<GcHeader>(), 12);
+        assert_eq!(GcHeader::INDEX_MAX, u32::MAX);
+    }
+
+    #[test]
+    fn gc_header_large_index_round_trip() {
+        let mut header = GcHeader::with_white(0);
+        let idx = (1usize << 24) + 123;
+        header.set_index(idx);
+        assert_eq!(header.index(), idx);
     }
 }

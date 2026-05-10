@@ -699,9 +699,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                     let rc_value = unsafe { (*rc_ptr).value };
                                     let pset_result =
                                         table.impl_table.pset_shortstr_parts(key, rc_value, rc_tt);
-                                    let (new_key, delta) = table
-                                        .impl_table
-                                        .finish_shortstr_set_parts(key, rc_value, rc_tt, pset_result);
+                                    let (new_key, delta) =
+                                        table.impl_table.finish_shortstr_set_parts(
+                                            key,
+                                            rc_value,
+                                            rc_tt,
+                                            pset_result,
+                                        );
                                     (
                                         new_key,
                                         delta,
