@@ -1,0 +1,19 @@
+name: Code Review
+on:
+  pull_request_target:
+    types:
+      - opened      # Triggers when a PR is opened
+
+permissions:
+  pull-requests: write
+
+jobs:
+  setup-deepseek-review:
+    runs-on: ubuntu-latest
+    name: Code Review
+    steps:
+      - name: DeepSeek Code Review
+        uses: hustcer/deepseek-review@v1
+        with:
+          chat-token: ${{ secrets.DEEPSEEK_CHAT_TOKEN }}
+          model: deepseek-v4-flash
