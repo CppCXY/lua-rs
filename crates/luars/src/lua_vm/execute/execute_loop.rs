@@ -684,51 +684,51 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let table = unsafe { (*ra_ptr).hvalue_mut() };
                         let meta = table.meta_ptr();
                         if (meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()))
-                            && unsafe { (*rb_ptr).is_short_string() } {
-                                let key = unsafe { &*rb_ptr };
-                                let (new_key, delta, needs_barrier) = if instr.get_k() {
-                                    let rc = *k_val!(c);
-                                    let pset_result = table.impl_table.pset_shortstr(key, rc);
-                                    let (new_key, delta) =
-                                        table.impl_table.finish_shortstr_set(key, rc, pset_result);
-                                    (new_key, delta, rc.is_collectable() || key.is_collectable())
-                                } else {
-                                    let rc_ptr =
-                                        unsafe { lua_state.stack().as_ptr().add(stack_id!(c)) };
-                                    let rc_tt = unsafe { (*rc_ptr).tt };
-                                    let rc_value = unsafe { (*rc_ptr).value };
-                                    let pset_result =
-                                        table.impl_table.pset_shortstr_parts(key, rc_value, rc_tt);
-                                    let (new_key, delta) =
-                                        table.impl_table.finish_shortstr_set_parts(
-                                            key,
-                                            rc_value,
-                                            rc_tt,
-                                            pset_result,
-                                        );
-                                    (
-                                        new_key,
-                                        delta,
-                                        (rc_tt & BIT_ISCOLLECTABLE != 0)
-                                            || (unsafe { (*rb_ptr).tt } & BIT_ISCOLLECTABLE != 0),
-                                    )
-                                };
-                                if new_key {
-                                    table.invalidate_tm_cache();
-                                }
-                                if delta != 0 {
-                                    lua_state.gc_track_table_resize(
-                                        unsafe { (*ra_ptr).as_table_ptr_unchecked() },
-                                        delta,
-                                    );
-                                }
-                                if needs_barrier {
-                                    lua_state.gc_barrier_back(unsafe {
-                                        (*ra_ptr).as_gc_ptr_table_unchecked()
-                                    });
-                                }
-                                continue;
+                            && unsafe { (*rb_ptr).is_short_string() }
+                        {
+                            let key = unsafe { &*rb_ptr };
+                            let (new_key, delta, needs_barrier) = if instr.get_k() {
+                                let rc = *k_val!(c);
+                                let pset_result = table.impl_table.pset_shortstr(key, rc);
+                                let (new_key, delta) =
+                                    table.impl_table.finish_shortstr_set(key, rc, pset_result);
+                                (new_key, delta, rc.is_collectable() || key.is_collectable())
+                            } else {
+                                let rc_ptr =
+                                    unsafe { lua_state.stack().as_ptr().add(stack_id!(c)) };
+                                let rc_tt = unsafe { (*rc_ptr).tt };
+                                let rc_value = unsafe { (*rc_ptr).value };
+                                let pset_result =
+                                    table.impl_table.pset_shortstr_parts(key, rc_value, rc_tt);
+                                let (new_key, delta) = table.impl_table.finish_shortstr_set_parts(
+                                    key,
+                                    rc_value,
+                                    rc_tt,
+                                    pset_result,
+                                );
+                                (
+                                    new_key,
+                                    delta,
+                                    (rc_tt & BIT_ISCOLLECTABLE != 0)
+                                        || (unsafe { (*rb_ptr).tt } & BIT_ISCOLLECTABLE != 0),
+                                )
+                            };
+                            if new_key {
+                                table.invalidate_tm_cache();
                             }
+                            if delta != 0 {
+                                lua_state.gc_track_table_resize(
+                                    unsafe { (*ra_ptr).as_table_ptr_unchecked() },
+                                    delta,
+                                );
+                            }
+                            if needs_barrier {
+                                lua_state.gc_barrier_back(unsafe {
+                                    (*ra_ptr).as_gc_ptr_table_unchecked()
+                                });
+                            }
+                            continue;
+                        }
                     }
 
                     let ra = unsafe { *ra_ptr };
