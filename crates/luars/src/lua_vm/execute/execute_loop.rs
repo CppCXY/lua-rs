@@ -683,8 +683,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if unsafe { (*ra_ptr).is_table() } {
                         let table = unsafe { (*ra_ptr).hvalue_mut() };
                         let meta = table.meta_ptr();
-                        if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
-                            if unsafe { (*rb_ptr).is_short_string() } {
+                        if (meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()))
+                            && unsafe { (*rb_ptr).is_short_string() } {
                                 let key = unsafe { &*rb_ptr };
                                 let (new_key, delta, needs_barrier) = if instr.get_k() {
                                     let rc = *k_val!(c);
@@ -729,7 +729,6 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 }
                                 continue;
                             }
-                        }
                     }
 
                     let ra = unsafe { *ra_ptr };
