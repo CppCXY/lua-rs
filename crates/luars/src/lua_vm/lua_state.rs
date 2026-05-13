@@ -27,7 +27,7 @@ use crate::platform_time::unix_nanos;
 use crate::stdlib::debug::{objtypename, ordererror, pub_getfuncname};
 use crate::{
     AsyncReturnValue, DebugInfo, LuaAnyRef, LuaFunctionRef, LuaProto, LuaRegistrable, LuaTableRef,
-    LuaVM,
+    LuaVM, UserDataRef,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -4445,10 +4445,7 @@ impl LuaState {
         self.vm_mut().to_function_ref(value)
     }
 
-    pub fn to_userdata_ref<T: 'static>(
-        &mut self,
-        value: LuaValue,
-    ) -> Option<crate::UserDataRef<T>> {
+    pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<UserDataRef<T>> {
         self.vm_mut().to_userdata_ref(value)
     }
 }
