@@ -451,7 +451,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     savestate!();
                     let upval_value = *upval_value;
-                    finishget_fallback(lua_state, active_frame.frame_idx, &upval_value, key, stack_id!(a))?;
+                    finishget_fallback(
+                        lua_state,
+                        active_frame.frame_idx,
+                        &upval_value,
+                        key,
+                        stack_id!(a),
+                    )?;
                     updatetrap!();
                 }
                 OpCode::GetTable => {
@@ -494,7 +500,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         savestate!();
                         let rb = unsafe { *rb_ptr };
-                        finishget_fallback(lua_state, active_frame.frame_idx, &rb, &rc, stack_id!(a))?;
+                        finishget_fallback(
+                            lua_state,
+                            active_frame.frame_idx,
+                            &rb,
+                            &rc,
+                            stack_id!(a),
+                        )?;
                         updatetrap!();
                         continue;
                     }
@@ -529,7 +541,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     savestate!();
-                    finishget_fallback(lua_state, active_frame.frame_idx, &rb, &LuaValue::integer(rc), stack_id!(a))?;
+                    finishget_fallback(
+                        lua_state,
+                        active_frame.frame_idx,
+                        &rb,
+                        &LuaValue::integer(rc),
+                        stack_id!(a),
+                    )?;
                     updatetrap!();
                 }
                 OpCode::GetField => {
@@ -557,7 +575,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     savestate!();
                     let rb = unsafe { *rb_ptr };
-                    finishget_fallback(lua_state, active_frame.frame_idx, &rb, key, stack_id!(instr.get_a()))?;
+                    finishget_fallback(
+                        lua_state,
+                        active_frame.frame_idx,
+                        &rb,
+                        key,
+                        stack_id!(instr.get_a()),
+                    )?;
                     updatetrap!();
                 }
                 OpCode::SetTabUp => {
@@ -636,13 +660,32 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
                     savestate!();
                     if known_newindex_miss {
-                        if call_newindex_tm_fast(lua_state, active_frame.frame_idx, upval_value, meta, *key, rc)? {
+                        if call_newindex_tm_fast(
+                            lua_state,
+                            active_frame.frame_idx,
+                            upval_value,
+                            meta,
+                            *key,
+                            rc,
+                        )? {
                             updatetrap!();
                             continue;
                         }
-                        finishset_fallback_known_miss(lua_state, active_frame.frame_idx, &upval_value, key, rc)?;
+                        finishset_fallback_known_miss(
+                            lua_state,
+                            active_frame.frame_idx,
+                            &upval_value,
+                            key,
+                            rc,
+                        )?;
                     } else {
-                        finishset_fallback(lua_state, active_frame.frame_idx, &upval_value, key, rc)?;
+                        finishset_fallback(
+                            lua_state,
+                            active_frame.frame_idx,
+                            &upval_value,
+                            key,
+                            rc,
+                        )?;
                     }
                     updatetrap!();
                 }
@@ -737,11 +780,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 *stack_val!(c)
                             };
                             savestate!();
-                            if call_newindex_tm_fast(lua_state, active_frame.frame_idx, ra, meta, rb, rc)? {
+                            if call_newindex_tm_fast(
+                                lua_state,
+                                active_frame.frame_idx,
+                                ra,
+                                meta,
+                                rb,
+                                rc,
+                            )? {
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
+                            finishset_fallback_known_miss(
+                                lua_state,
+                                active_frame.frame_idx,
+                                &ra,
+                                &rb,
+                                rc,
+                            )?;
                             updatetrap!();
                             continue;
                         }
@@ -833,11 +889,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 continue;
                             }
                             savestate!();
-                            if call_newindex_tm_fast(lua_state, active_frame.frame_idx, ra, meta, rb, rc)? {
+                            if call_newindex_tm_fast(
+                                lua_state,
+                                active_frame.frame_idx,
+                                ra,
+                                meta,
+                                rb,
+                                rc,
+                            )? {
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
+                            finishset_fallback_known_miss(
+                                lua_state,
+                                active_frame.frame_idx,
+                                &ra,
+                                &rb,
+                                rc,
+                            )?;
                             updatetrap!();
                             continue;
                         }
@@ -916,11 +985,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let ra = *ra;
                             let rb = LuaValue::integer(b);
                             savestate!();
-                            if call_newindex_tm_fast(lua_state, active_frame.frame_idx, ra, meta, rb, rc)? {
+                            if call_newindex_tm_fast(
+                                lua_state,
+                                active_frame.frame_idx,
+                                ra,
+                                meta,
+                                rb,
+                                rc,
+                            )? {
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
+                            finishset_fallback_known_miss(
+                                lua_state,
+                                active_frame.frame_idx,
+                                &ra,
+                                &rb,
+                                rc,
+                            )?;
                             updatetrap!();
                             continue;
                         }
@@ -1015,11 +1097,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = *key;
                     savestate!();
                     if known_newindex_miss {
-                        if call_newindex_tm_fast(lua_state, active_frame.frame_idx, ra, meta, rb, rc)? {
+                        if call_newindex_tm_fast(
+                            lua_state,
+                            active_frame.frame_idx,
+                            ra,
+                            meta,
+                            rb,
+                            rc,
+                        )? {
                             updatetrap!();
                             continue;
                         }
-                        finishset_fallback_known_miss(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
+                        finishset_fallback_known_miss(
+                            lua_state,
+                            active_frame.frame_idx,
+                            &ra,
+                            &rb,
+                            rc,
+                        )?;
                     } else {
                         finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
                     }
@@ -1699,7 +1794,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
 
                     savestate!();
-                    bin_tm_fallback(lua_state, active_frame.frame_idx, ra, rb, result_reg, a as u32, b as u32, tm)?;
+                    bin_tm_fallback(
+                        lua_state,
+                        active_frame.frame_idx,
+                        ra,
+                        rb,
+                        result_reg,
+                        a as u32,
+                        b as u32,
+                        tm,
+                    )?;
                     updatetrap!();
                 }
                 OpCode::MmBinI => {
@@ -1715,7 +1819,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let rb = LuaValue::integer(imm as i64);
                     let r = if flip { (rb, *ra) } else { (*ra, rb) };
                     savestate!();
-                    bin_tm_fallback(lua_state, active_frame.frame_idx, r.0, r.1, result_reg, a as u32, a as u32, tm)?;
+                    bin_tm_fallback(
+                        lua_state,
+                        active_frame.frame_idx,
+                        r.0,
+                        r.1,
+                        result_reg,
+                        a as u32,
+                        a as u32,
+                        tm,
+                    )?;
                     updatetrap!();
                 }
                 OpCode::MmBinK => {
@@ -1729,7 +1842,16 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a_reg = instr.get_a();
                     savestate!();
                     let r = if flip { (imm, ra) } else { (ra, imm) };
-                    bin_tm_fallback(lua_state, active_frame.frame_idx, r.0, r.1, result_reg, a_reg, a_reg, tm)?;
+                    bin_tm_fallback(
+                        lua_state,
+                        active_frame.frame_idx,
+                        r.0,
+                        r.1,
+                        result_reg,
+                        a_reg,
+                        a_reg,
+                        tm,
+                    )?;
                     updatetrap!();
                 }
                 OpCode::Unm => {
@@ -1748,7 +1870,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         } else {
                             savestate!();
                             let result_reg = stack_id!(a);
-                            unary_tm_fallback(lua_state, active_frame.frame_idx, rb, result_reg, TmKind::Unm)?;
+                            unary_tm_fallback(
+                                lua_state,
+                                active_frame.frame_idx,
+                                rb,
+                                result_reg,
+                                TmKind::Unm,
+                            )?;
                             updatetrap!();
                         }
                     }
@@ -1765,7 +1893,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         savestate!();
                         let result_reg = stack_id!(a);
-                        unary_tm_fallback(lua_state, active_frame.frame_idx, rb, result_reg, TmKind::Bnot)?;
+                        unary_tm_fallback(
+                            lua_state,
+                            active_frame.frame_idx,
+                            rb,
+                            result_reg,
+                            TmKind::Bnot,
+                        )?;
                         updatetrap!();
                     }
                 }
@@ -1895,7 +2029,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let va = *ra;
                             let vb = *rb;
                             savestate!();
-                            let result = order_tm_fallback(lua_state, active_frame.frame_idx, va, vb, TmKind::Lt)?;
+                            let result = order_tm_fallback(
+                                lua_state,
+                                active_frame.frame_idx,
+                                va,
+                                vb,
+                                TmKind::Lt,
+                            )?;
                             updatetrap!();
                             result
                         }
@@ -1936,7 +2076,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let va = *ra;
                             let vb = *rb;
                             savestate!();
-                            let result = order_tm_fallback(lua_state, active_frame.frame_idx, va, vb, TmKind::Le)?;
+                            let result = order_tm_fallback(
+                                lua_state,
+                                active_frame.frame_idx,
+                                va,
+                                vb,
+                                TmKind::Le,
+                            )?;
                             updatetrap!();
                             result
                         }
@@ -2009,7 +2155,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 LuaValue::integer(im as i64)
                             };
                             savestate!();
-                            let result = order_tm_fallback(lua_state, active_frame.frame_idx, va, vb, TmKind::Lt)?;
+                            let result = order_tm_fallback(
+                                lua_state,
+                                active_frame.frame_idx,
+                                va,
+                                vb,
+                                TmKind::Lt,
+                            )?;
                             updatetrap!();
                             result
                         }
@@ -2044,7 +2196,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 LuaValue::integer(im as i64)
                             };
                             savestate!();
-                            let result = order_tm_fallback(lua_state, active_frame.frame_idx, va, vb, TmKind::Le)?;
+                            let result = order_tm_fallback(
+                                lua_state,
+                                active_frame.frame_idx,
+                                va,
+                                vb,
+                                TmKind::Le,
+                            )?;
                             updatetrap!();
                             result
                         }
@@ -2080,7 +2238,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             };
                             savestate!();
                             // GtI: a > b ≡ b < a → swap args, use Lt
-                            let result = order_tm_fallback(lua_state, active_frame.frame_idx, vb, va, TmKind::Lt)?;
+                            let result = order_tm_fallback(
+                                lua_state,
+                                active_frame.frame_idx,
+                                vb,
+                                va,
+                                TmKind::Lt,
+                            )?;
                             updatetrap!();
                             result
                         }
@@ -2116,7 +2280,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             };
                             savestate!();
                             // GeI: a >= b ≡ b <= a → swap args, use Le
-                            let result = order_tm_fallback(lua_state, active_frame.frame_idx, vb, va, TmKind::Le)?;
+                            let result = order_tm_fallback(
+                                lua_state,
+                                active_frame.frame_idx,
+                                vb,
+                                va,
+                                TmKind::Le,
+                            )?;
                             updatetrap!();
                             result
                         }

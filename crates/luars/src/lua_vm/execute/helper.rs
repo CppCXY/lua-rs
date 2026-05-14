@@ -1119,7 +1119,12 @@ pub fn handle_pending_ops(lua_state: &mut LuaState, ci_idx: usize) -> LuaResult<
     Ok(false) // continue to hot path
 }
 
-pub fn objlen(l: &mut LuaState, frame_idx: usize, result_reg: usize, value: LuaValue) -> LuaResult<()> {
+pub fn objlen(
+    l: &mut LuaState,
+    frame_idx: usize,
+    result_reg: usize,
+    value: LuaValue,
+) -> LuaResult<()> {
     if let Some(bytes) = value.as_bytes() {
         let len = bytes.len();
         setivalue(
