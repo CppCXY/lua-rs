@@ -7,6 +7,7 @@ use crate::{
 /// Number of tag methods (must match TmKind::N)
 const TM_N: usize = 26;
 
+#[derive(Clone, Copy)]
 pub struct ConstString {
     // Pre-cached metamethod name strings as array indexed by TmKind discriminant.
     // Layout: tmname[TmKind::Index as usize] = "__index", etc.
@@ -176,9 +177,48 @@ impl ConstString {
         gc.fixed(cs.str_hook_count.as_gc_ptr().unwrap());
         gc.fixed(cs.str_hook_tail_call.as_gc_ptr().unwrap());
 
-        gc.tm_gc = cs.tmname[TmKind::Gc as usize];
-        gc.tm_mode = cs.tmname[TmKind::Mode as usize];
+        cs.attach_to_gc(gc);
         cs
+    }
+
+    pub fn attach_to_gc(&self, gc: &mut GC) {
+        gc.tm_gc = self.tmname[TmKind::Gc as usize];
+        gc.tm_mode = self.tmname[TmKind::Mode as usize];
+    }
+
+    #[cfg(feature = "shared-proto")]
+    pub fn share_all(&mut self) {
+        use crate::gc::share_lua_value;
+
+        for value in &mut self.tmname {
+            share_lua_value(value);
+        }
+
+        share_lua_value(&mut self.tm_pairs);
+        share_lua_value(&mut self.tm_ipairs);
+        share_lua_value(&mut self.tm_name);
+        share_lua_value(&mut self.tm_metatable);
+        share_lua_value(&mut self.str_suspended);
+        share_lua_value(&mut self.str_running);
+        share_lua_value(&mut self.str_normal);
+        share_lua_value(&mut self.str_dead);
+        share_lua_value(&mut self.str_nil);
+        share_lua_value(&mut self.str_boolean);
+        share_lua_value(&mut self.str_number);
+        share_lua_value(&mut self.str_string);
+        share_lua_value(&mut self.str_table);
+        share_lua_value(&mut self.str_function);
+        share_lua_value(&mut self.str_userdata);
+        share_lua_value(&mut self.str_thread);
+        share_lua_value(&mut self.str_true);
+        share_lua_value(&mut self.str_false);
+        share_lua_value(&mut self.str_integer);
+        share_lua_value(&mut self.str_float);
+        share_lua_value(&mut self.str_hook_call);
+        share_lua_value(&mut self.str_hook_return);
+        share_lua_value(&mut self.str_hook_line);
+        share_lua_value(&mut self.str_hook_count);
+        share_lua_value(&mut self.str_hook_tail_call);
     }
 
     /// Get pre-cached metamethod name string by TmKind enum value — O(1) array index.

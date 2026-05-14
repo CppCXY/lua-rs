@@ -250,6 +250,9 @@ impl LuaVM {
         let mut gc = GC::new(option.clone());
         gc.set_temporary_memory_limit(isize::MAX / 2);
         let mut object_allocator = ObjectAllocator::new();
+        #[cfg(feature = "shared-proto")]
+        let cs = shared_proto::get_or_init_const_strings(&mut object_allocator, &mut gc);
+        #[cfg(not(feature = "shared-proto"))]
         let cs = ConstString::new(&mut object_allocator, &mut gc);
         let time = unix_nanos();
 
@@ -2258,5 +2261,26 @@ mod tests {
         assert_eq!(count.as_number(), Some(42.0));
 
         println!("✓ JSON roundtrip test passed");
+    }
+
+    #[cfg(feature = "shared-proto")]
+    #[test]
+    fn test_shared_const_strings_reused_across_vms() {
+        let vm1 = LuaVM::new(SafeOption::default());
+        let vm2 = LuaVM::new(SafeOption::default());
+
+        let gc_tm1 = vm1.const_strings.tmname[TmKind::Gc as usize]
+            .as_string_ptr()
+            .unwrap();
+        let gc_tm2 = vm2.const_strings.tmname[TmKind::Gc as usize]
+            .as_string_ptr()
+            .unwrap();
+        let type_name1 = vm1.const_strings.str_number.as_string_ptr().unwrap();
+        let type_name2 = vm2.const_strings.str_number.as_string_ptr().unwrap();
+
+        assert_eq!(gc_tm1, gc_tm2);
+        assert_eq!(type_name1, type_name2);
+        assert!(gc_tm1.as_ref().header.is_shared());
+        assert!(type_name1.as_ref().header.is_shared());
     }
 }
