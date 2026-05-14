@@ -11,11 +11,11 @@ BENCHMARKS=(
     "bench_functions.lua" 
     "bench_closures.lua"
     "bench_multiret.lua"
+    "bench_tailcall.lua"
 
     "bench_tables.lua"
     "bench_table_lib.lua"
     "bench_iterators.lua"
-    
 
     "bench_strings.lua"
     "bench_string_lib.lua"
