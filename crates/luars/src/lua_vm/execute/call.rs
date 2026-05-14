@@ -217,9 +217,7 @@ pub fn call_c_function(
 #[inline(never)]
 pub fn pretailcall_lua(
     lua_state: &mut LuaState,
-    frame_idx: usize,
     func_idx: usize,
-    base: usize,
     nargs: usize,
     numparams: usize,
     max_stack_size: usize,
@@ -229,7 +227,9 @@ pub fn pretailcall_lua(
     let new_chunk_ptr = chunk_ptr;
 
     // Get current frame's func position (handles vararg func_offset)
-    let func_offset = lua_state.get_call_info(frame_idx).func_offset;
+    let current_ci = lua_state.current_frame_unchecked();
+    let func_offset = current_ci.func_offset;
+    let base = current_ci.base;
     let func_pos = base - func_offset as usize;
 
     // Move function + arguments down (like C Lua's setobjs2s loop)
@@ -260,7 +260,7 @@ pub fn pretailcall_lua(
 
     // Batch update CI fields (reuse current frame, no push/pop)
     {
-        let ci = lua_state.get_call_info_mut(frame_idx);
+        let ci = lua_state.current_frame_mut_unchecked();
         ci.base = new_base;
         ci.func_offset = 1;
         ci.top = frame_top as u32;
@@ -480,12 +480,7 @@ fn precall_meta(
 /// Returns:
 ///   `Ok(true)`  — Lua tail call: CI reused in place, caller should `continue 'startfunc`
 ///   `Ok(false)` — C tail call: completed, caller continues (falls to next instruction)
-pub fn pretailcall(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    func_idx: usize,
-    narg1: usize,
-) -> LuaResult<bool> {
+pub fn pretailcall(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> LuaResult<bool> {
     let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
@@ -498,12 +493,9 @@ pub fn pretailcall(
                 lua_func.upvalues().as_ptr(),
             )
         };
-        let base = lua_state.get_call_info(frame_idx).base;
         pretailcall_lua(
             lua_state,
-            frame_idx,
             func_idx,
-            base,
             narg1 - 1,
             param_count,
             max_stack_size,
@@ -517,16 +509,11 @@ pub fn pretailcall(
     }
 
     // Cold: __call metamethod
-    pretailcall_meta(lua_state, frame_idx, func_idx, narg1)
+    pretailcall_meta(lua_state, func_idx, narg1)
 }
 
 /// Cold path for pretailcall: resolve __call chain then retry.
-fn pretailcall_meta(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    func_idx: usize,
-    narg1: usize,
-) -> LuaResult<bool> {
+fn pretailcall_meta(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> LuaResult<bool> {
     let nargs = narg1 - 1;
     let (actual_nargs, _) = resolve_call_chain(lua_state, func_idx, nargs)?;
 
@@ -543,12 +530,9 @@ fn pretailcall_meta(
                 lua_func.upvalues().as_ptr(),
             )
         };
-        let base = lua_state.get_call_info(frame_idx).base;
         pretailcall_lua(
             lua_state,
-            frame_idx,
             func_idx,
-            base,
             actual_nargs,
             param_count,
             max_stack_size,
@@ -574,21 +558,16 @@ fn pretailcall_meta(
 ///
 /// Caller must set `lua_state.top = ra + nres` before calling (results
 /// are at `top - nres .. top - 1`).
-pub fn poscall(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    nres: usize,
-    pc: usize,
-) -> LuaResult<()> {
-    let nresults = lua_state.get_call_info(frame_idx).nresults();
+pub fn poscall(lua_state: &mut LuaState, nres: usize, pc: usize) -> LuaResult<()> {
+    let nresults = lua_state.current_frame_unchecked().nresults();
 
     // Return hook (cold path — almost never fires)
     if lua_state.hook_mask & LUA_MASKRET != 0 && lua_state.allow_hook {
-        hook_on_return(lua_state, frame_idx, pc, nres as i32)?;
+        hook_on_return(lua_state, pc, nres as i32)?;
     }
 
     // res = ci->func.p  (destination for results)
-    let ci = lua_state.get_call_info(frame_idx);
+    let ci = lua_state.current_frame_unchecked();
     let res = ci.base - ci.func_offset as usize;
 
     // moveresults: move nres values from top-nres to res, adjusted for wanted count

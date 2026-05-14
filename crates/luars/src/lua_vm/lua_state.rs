@@ -219,6 +219,13 @@ impl LuaState {
         unsafe { self.call_stack.get_unchecked(self.call_depth - 1).top as usize }
     }
 
+    /// Get current call frame without Option wrapping (for hot paths where we know a frame exists)
+    #[inline(always)]
+    pub(crate) fn current_frame_unchecked(&self) -> &CallInfo {
+        debug_assert!(self.call_depth > 0);
+        unsafe { self.call_stack.get_unchecked(self.call_depth - 1) }
+    }
+
     /// Get mutable current call frame
     #[inline(always)]
     pub fn current_frame_mut(&mut self) -> Option<&mut CallInfo> {
@@ -227,6 +234,13 @@ impl LuaState {
         } else {
             None
         }
+    }
+
+    /// Get mutable current call frame without Option wrapping (for hot paths where we know a frame exists)
+    #[inline(always)]
+    pub(crate) fn current_frame_mut_unchecked(&mut self) -> &mut CallInfo {
+        debug_assert!(self.call_depth > 0);
+        unsafe { self.call_stack.get_unchecked_mut(self.call_depth - 1) }
     }
 
     /// Get call stack depth
@@ -1837,26 +1851,21 @@ impl LuaState {
 
     /// Get current CallInfo by index (unchecked — caller must ensure idx < call_depth)
     #[inline(always)]
-    pub fn get_call_info(&self, idx: usize) -> &CallInfo {
+    pub(crate) fn get_call_info(&self, idx: usize) -> &CallInfo {
         debug_assert!(idx < self.call_stack.len());
         unsafe { self.call_stack.get_unchecked(idx) }
     }
 
     /// Get mutable CallInfo by index (unchecked — caller must ensure idx < call_depth)
     #[inline(always)]
-    pub fn get_call_info_mut(&mut self, idx: usize) -> &mut CallInfo {
+    pub(crate) fn get_call_info_mut(&mut self, idx: usize) -> &mut CallInfo {
         debug_assert!(idx < self.call_stack.len());
         unsafe { self.call_stack.get_unchecked_mut(idx) }
     }
 
-    // pub(crate) unsafe fn get_call_info_ptr(&self, idx: usize) -> *const CallInfo {
-    //     debug_assert!(idx < self.call_stack.len());
-    //     unsafe { self.call_stack.get_unchecked(idx).as_ref() as *const CallInfo }
-    // }
-
     /// Pop the current call frame (Lua callers only — does NOT adjust VM n_ccalls)
     #[inline(always)]
-    pub fn pop_call_frame(&mut self) {
+    pub(crate) fn pop_call_frame(&mut self) {
         debug_assert!(self.call_depth > 0);
         self.call_depth -= 1;
     }
@@ -4032,19 +4041,13 @@ impl LuaState {
     }
 
     #[inline(always)]
-    pub(crate) fn check_gc_in_loop(
-        &mut self,
-        frame_idx: usize,
-        pc: usize,
-        c: usize,
-        trap: &mut bool,
-    ) {
+    pub(crate) fn check_gc_in_loop(&mut self, pc: usize, c: usize, trap: &mut bool) {
         let vm = unsafe { &mut *self.vm };
         if vm.gc.gc_debt > 0 {
             return;
         }
 
-        self.get_call_info_mut(frame_idx).save_pc(pc);
+        self.current_frame_mut_unchecked().save_pc(pc);
         self.set_top_raw(c);
         vm.check_gc(self);
         *trap = self.hook_mask != 0;
