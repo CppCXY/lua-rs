@@ -569,10 +569,9 @@ pub fn call_newindex_tm_fast(
     match call_tm(lua_state, tm, obj, key, value) {
         Ok(()) => Ok(true),
         Err(LuaError::Yield) => {
-            lua_state
-                .get_call_info_mut(frame_idx)
-                .set_pending_finish_get(-2);
-            lua_state.get_call_info_mut(frame_idx).call_status |= CIST_PENDING_FINISH;
+            let ci = lua_state.get_call_info_mut(frame_idx);
+            ci.set_pending_finish_get(-2);
+            ci.call_status |= CIST_PENDING_FINISH;
             Err(LuaError::Yield)
         }
         Err(e) => Err(e),
