@@ -5,6 +5,12 @@ use std::env;
 // Helper to get the test data directory path
 fn get_test_data_dir() -> String {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
     format!("{}/src/test/test_data", manifest_dir).replace("\\", "/")
 }
 
