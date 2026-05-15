@@ -6,9 +6,10 @@ mod pattern;
 mod string_format;
 
 use crate::lib_registry::LibraryModule;
-use crate::lua_value::LuaValue;
+use crate::lua_value::{LuaValue, chunk_serializer};
 use crate::lua_vm::lua_limits::MAX_STRING_SIZE;
 use crate::lua_vm::{LuaResult, LuaState};
+use crate::stdlib::debug;
 
 /// Mirrors luaL_checkinteger: convert a LuaValue to integer, producing
 /// appropriate error messages like C Lua.
@@ -155,8 +156,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
 
         let result = if all_ascii {
             // SAFETY: all bytes are 0-127, which is valid single-byte UTF-8
-            l.vm_mut()
-                .create_string(unsafe { std::str::from_utf8_unchecked(&buf[..nargs]) })?
+            l.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..nargs]) })?
         } else {
             l.create_bytes(&buf[..nargs])?
         };
@@ -190,8 +190,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
 
     let result = if all_ascii {
         // SAFETY: all bytes are 0-127, valid single-byte UTF-8
-        l.vm_mut()
-            .create_string_owned(unsafe { String::from_utf8_unchecked(bytes) })?
+        l.create_string_owned(unsafe { String::from_utf8_unchecked(bytes) })?
     } else {
         l.create_bytes(&bytes)?
     };
@@ -201,8 +200,6 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
 
 /// string.dump(function [, strip]) - Serialize a function to binary string
 fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
-    use crate::lua_value::chunk_serializer;
-
     let func_value = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'dump' (function expected)".to_string()))?;
@@ -213,16 +210,14 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'dump' (function expected)".to_string()));
     };
 
-    let vm = l.vm_mut();
-
     // Check if it's a Lua function (not a C function)
     let chunk = func_obj.chunk();
 
     // Serialize the chunk with pool access for string constants
-    match chunk_serializer::serialize_chunk_with_pool(chunk, strip, &vm.object_allocator) {
+    match chunk_serializer::serialize_chunk_with_pool(chunk, strip, &l.vm_mut().object_allocator) {
         Ok(bytes) => {
             // Create binary value directly - no encoding needed
-            let result = vm.create_binary(bytes)?;
+            let result = l.create_binary(bytes)?;
             l.push_value(result)?;
             Ok(1)
         }
@@ -261,19 +256,18 @@ fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
     // Lua's string.lower is byte-oriented (not Unicode-aware).
     let bytes = s.as_bytes();
     let len = bytes.len();
-    let vm = l.vm_mut();
     if len <= 256 {
         let mut buf = [0u8; 256];
         buf[..len].copy_from_slice(bytes);
         buf[..len].make_ascii_lowercase();
         let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-        let result = vm.create_string(result_str)?;
+        let result = l.create_string(result_str)?;
         l.push_value(result)?;
     } else {
         let mut buf = bytes.to_vec();
         buf.make_ascii_lowercase();
         let result_str = unsafe { String::from_utf8_unchecked(buf) };
-        let result = vm.create_string_owned(result_str)?;
+        let result = l.create_string_owned(result_str)?;
         l.push_value(result)?;
     }
     Ok(1)
@@ -291,19 +285,18 @@ fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
 
     let bytes = s.as_bytes();
     let len = bytes.len();
-    let vm = l.vm_mut();
     if len <= 256 {
         let mut buf = [0u8; 256];
         buf[..len].copy_from_slice(bytes);
         buf[..len].make_ascii_uppercase();
         let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
-        let result = vm.create_string(result_str)?;
+        let result = l.create_string(result_str)?;
         l.push_value(result)?;
     } else {
         let mut buf = bytes.to_vec();
         buf.make_ascii_uppercase();
         let result_str = unsafe { String::from_utf8_unchecked(buf) };
-        let result = vm.create_string_owned(result_str)?;
+        let result = l.create_string_owned(result_str)?;
         l.push_value(result)?;
     }
     Ok(1)
@@ -326,8 +319,6 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     let n_value = l.get_arg(2);
     let sep_value = l.get_arg(3);
 
-    let vm = l.vm_mut();
-
     let Some(n_value) = n_value else {
         return Err(l.error("bad argument #2 to 'string.rep' (number expected)".to_string()));
     };
@@ -337,7 +328,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     if n <= 0 {
-        let empty = vm.create_string("")?;
+        let empty = l.create_string("")?;
         l.push_value(empty)?;
         return Ok(1);
     }
@@ -386,7 +377,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
         // Input was valid UTF-8, repetition is also valid UTF-8
         // SAFETY: repeating valid UTF-8 produces valid UTF-8
         let s = unsafe { String::from_utf8_unchecked(result) };
-        vm.create_string_owned(s)?
+        l.create_string_owned(s)?
     } else {
         l.create_bytes(&result)?
     };
@@ -405,7 +396,6 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument #1 to 'string.reverse' (string expected)".to_string()));
     };
 
-    let vm = l.vm_mut();
     let len = s_bytes.len();
     let is_ascii = s_bytes.is_ascii();
 
@@ -416,7 +406,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         buf[..len].reverse();
         if is_ascii {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
-            vm.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..len]) })?
+            l.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..len]) })?
         } else {
             l.create_bytes(&buf[..len])?
         }
@@ -425,7 +415,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         reversed.reverse();
         if is_ascii {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
-            vm.create_string_owned(unsafe { String::from_utf8_unchecked(reversed) })?
+            l.create_string_owned(unsafe { String::from_utf8_unchecked(reversed) })?
         } else {
             l.create_bytes(&reversed)?
         }
@@ -436,37 +426,33 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// string.sub(s, i [, j]) - Extract substring
-/// ULTRA-OPTIMIZED: Uses create_substring to avoid allocations when possible
 fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     let s_value = l
         .get_arg(1)
-        .ok_or_else(|| crate::stdlib::debug::argerror(l, 1, "string expected"))?;
+        .ok_or_else(|| debug::argerror(l, 1, "string expected"))?;
 
     let Some(s_bytes) = s_value.as_bytes() else {
-        return Err(crate::stdlib::debug::arg_typeerror(
-            l, 1, "string", &s_value,
-        ));
+        return Err(debug::arg_typeerror(l, 1, "string", &s_value));
     };
 
     let i_value = l
         .get_arg(2)
-        .ok_or_else(|| crate::stdlib::debug::argerror(l, 2, "number expected"))?;
+        .ok_or_else(|| debug::argerror(l, 2, "number expected"))?;
     let i = match value_to_integer(&i_value) {
         Ok(i) => i,
-        Err(msg) => return Err(crate::stdlib::debug::argerror(l, 2, msg)),
+        Err(msg) => return Err(debug::argerror(l, 2, msg)),
     };
 
     let j = l
         .get_arg(3)
         .map(|v| match value_to_integer(&v) {
             Ok(i) => Ok(i),
-            Err(msg) => Err(crate::stdlib::debug::argerror(l, 3, msg)),
+            Err(msg) => Err(debug::argerror(l, 3, msg)),
         })
         .transpose()?
         .unwrap_or(-1);
 
     // Get string length and compute byte indices
-    let vm = l.vm_mut();
     let (start_byte, end_byte) = {
         let byte_len = s_bytes.len() as i64;
 
@@ -489,7 +475,7 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Use optimized create_substring
-    let result_value = vm.create_substring(s_value, start_byte, end_byte)?;
+    let result_value = l.vm_mut().create_substring(s_value, start_byte, end_byte)?;
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -873,8 +859,7 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
 
     // State upvalues: [source_string, pattern_string, search_pos (0-based), lastmatch (-1=none)]
     // Mirrors C Lua's gm->src and gm->lastmatch behavior
-    let vm = l.vm_mut();
-    let closure = vm.create_c_closure(
+    let closure = l.vm_mut().create_c_closure(
         gmatch_iterator_lazy,
         vec![
             s_value,
