@@ -461,15 +461,42 @@ mod tests {
         let mut lua = Lua::new(SafeOption::default());
         lua.open_stdlib(Stdlib::All).unwrap();
 
-        let module = crate::LibraryModule::new("hostlib").with_function("answer", |l| {
-            l.push_value(crate::LuaValue::integer(42))?;
-            Ok(1)
+        let module = crate::lua_module!("hostlib", {
+            "answer" => |l| {
+                l.push_value(crate::LuaValue::integer(42))?;
+                Ok(1)
+            },
+            value "name" => |vm| vm.create_string("hostlib"),
         });
 
         lua.install_library(module).unwrap();
 
         let answer: i64 = lua.load("return hostlib.answer()").eval().unwrap();
+        let name: String = lua.load("return hostlib.name").eval().unwrap();
         assert_eq!(answer, 42);
+        assert_eq!(name, "hostlib");
+    }
+
+    #[test]
+    fn high_level_lua_install_preload_library_works() {
+        let mut lua = Lua::new(SafeOption::default());
+        lua.open_stdlib(Stdlib::All).unwrap();
+
+        lua.install_library(crate::lua_preload_module!("test_install_module" => |l| {
+            let table = l.create_table(0, 1)?;
+            let key = l.create_string("value")?;
+            l.vm_mut().raw_set(&table, key, crate::LuaValue::integer(42));
+            l.push_value(table)?;
+            Ok(1)
+        }))
+        .unwrap();
+
+        let value: i64 = lua
+            .load("local mod = require('test_install_module'); return mod.value")
+            .eval()
+            .unwrap();
+
+        assert_eq!(value, 42);
     }
 
     #[cfg(feature = "serde")]

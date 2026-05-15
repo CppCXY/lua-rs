@@ -1,3 +1,4 @@
+use luars::Lua;
 use luars::LuaVM;
 use luars::LuaValue;
 use luars::SafeOption;
@@ -380,7 +381,9 @@ fn lua_main() -> i32 {
         }
     }
 
-    // Create VM
+    // Create the high-level runtime first so library installation stays on the
+    // public embedding API. The CLI then reuses the underlying VM for its
+    // low-level compile/execute workflow.
     let safe_option = SafeOption {
         max_stack_size: 1000000, // LUAI_MAXSTACK (Lua 5.5)
         max_call_depth: if cfg!(debug_assertions) { 25 } else { 1024 }, // Lua 5.5's MAX_CALL_DEPTH is 1024
@@ -388,12 +391,14 @@ fn lua_main() -> i32 {
         max_memory_limit: 4096 * 1024 * 1024,                           // 4 GB
     };
 
-    let mut vm = LuaVM::new(safe_option);
-    vm.open_stdlib(Stdlib::All).unwrap();
+    let mut lua = Lua::new(safe_option);
+    lua.open_stdlib(Stdlib::All).unwrap();
 
-    // Install the built-in debugger (require "emmy_core")
-    vm.install_library(luars_debugger::Library::default())
+    // Install the built-in debugger through the high-level embedding API.
+    lua.install_library(luars_debugger::Library::default())
         .unwrap();
+
+    let mut vm = unsafe { lua.vm_mut() };
 
     if cfg!(debug_assertions) {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));

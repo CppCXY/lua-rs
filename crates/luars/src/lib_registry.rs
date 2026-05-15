@@ -12,16 +12,10 @@ use crate::stdlib::{self, Stdlib};
 ///
 /// A library can expose itself either as a plain [`LibraryModule`], a preload-only
 /// module such as [`PreloadModule`], or a custom builder type that performs extra
-/// setup before registering itself into the VM.
+/// setup before registering itself into the high-level [`crate::Lua`] API.
 pub trait LuaLibrary {
-    /// Install this library into a low-level [`LuaVM`].
-    fn install_vm(&self, vm: &mut LuaVM) -> LuaResult<()>;
-
     /// Install this library into the high-level [`crate::Lua`] API.
-    fn install_lua(&self, lua: &mut lua_api::Lua) -> LuaResult<()> {
-        let vm = unsafe { lua.vm_mut() };
-        self.install_vm(vm)
-    }
+    fn install(&self, lua: &mut lua_api::Lua) -> LuaResult<()>;
 }
 
 /// Type for value initializers - functions that create values when the module loads
@@ -53,23 +47,24 @@ impl PreloadModule {
 }
 
 impl LuaLibrary for PreloadModule {
-    fn install_vm(&self, vm: &mut LuaVM) -> LuaResult<()> {
+    fn install(&self, lua: &mut lua_api::Lua) -> LuaResult<()> {
+        let vm = unsafe { lua.vm_mut() };
         vm.register_preload(&self.name, self.loader)
     }
 }
 
 /// A library module containing multiple functions and values
 pub struct LibraryModule {
-    pub name: &'static str,
+    pub name: String,
     pub entries: Vec<(&'static str, LibraryEntry)>,
     pub initializer: Option<ModuleInitializer>,
 }
 
 impl LibraryModule {
     /// Create a new library module
-    pub const fn new(name: &'static str) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name,
+            name: name.into(),
             entries: Vec::new(),
             initializer: None,
         }
@@ -95,12 +90,14 @@ impl LibraryModule {
 }
 
 impl LuaLibrary for LibraryModule {
-    fn install_vm(&self, vm: &mut LuaVM) -> LuaResult<()> {
+    fn install(&self, lua: &mut lua_api::Lua) -> LuaResult<()> {
+        let vm = unsafe { lua.vm_mut() };
         load_library_module(vm, self)
     }
 }
 
 /// Builder for creating library modules with functions and values
+#[doc(hidden)]
 #[macro_export]
 macro_rules! lib_module {
     ($name:expr, {
@@ -112,6 +109,44 @@ macro_rules! lib_module {
         )*
         module
     }};
+}
+
+/// Public builder macro for simple Lua module registration.
+///
+/// Supports function entries by default, optional `value` entries, and a final
+/// `init` hook for extra setup.
+#[macro_export]
+macro_rules! lua_module {
+    ($name:expr, { $($items:tt)* }) => {{
+        let mut module = $crate::LibraryModule::new($name);
+        $crate::__lua_module_items!(module, $($items)*);
+        module
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lua_module_items {
+    ($module:ident,) => {};
+    ($module:ident) => {};
+    ($module:ident, init => $init:expr $(, $($rest:tt)*)?) => {{
+        $module = $module.with_initializer($init);
+        $crate::__lua_module_items!($module $(, $($rest)*)?);
+    }};
+    ($module:ident, value $name:expr => $value:expr $(, $($rest:tt)*)?) => {{
+        $module = $module.with_value($name, $value);
+        $crate::__lua_module_items!($module $(, $($rest)*)?);
+    }};
+    ($module:ident, $name:expr => $func:expr $(, $($rest:tt)*)?) => {{
+        $module = $module.with_function($name, $func);
+        $crate::__lua_module_items!($module $(, $($rest)*)?);
+    }};
+}
+
+/// Public helper macro for simple preload-module registration.
+#[macro_export]
+macro_rules! lua_preload_module {
+    ($name:expr => $loader:expr) => {{ $crate::PreloadModule::new($name, $loader) }};
 }
 
 /// Registry for all Lua standard libraries
@@ -193,7 +228,7 @@ fn load_library_module(vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> 
         }
     } else {
         // For module libraries, set the table as global
-        vm.set_global(module.name, lib_table)?;
+        vm.set_global(&module.name, lib_table)?;
 
         // Special handling for string library: set string metatable
         if module.name == "string" {
@@ -201,9 +236,6 @@ fn load_library_module(vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> 
             // This allows using string methods with : syntax (e.g., str:upper())
             vm.set_string_metatable(lib_table)?;
         }
-
-        // Note: coroutine.wrap is now implemented in Rust (stdlib/coroutine.rs)
-        // No need for Lua override anymore
 
         // Also register in package.loaded and package.preload (if package exists)
         // This allows require() to find standard libraries
@@ -214,7 +246,7 @@ fn load_library_module(vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> 
             if let Some(loaded_table) = vm.raw_get(&package_table, &loaded_key)
                 && loaded_table.is_table()
             {
-                let mod_key = vm.create_string(module.name)?;
+                let mod_key = vm.create_string(&module.name)?;
                 vm.raw_set(&loaded_table, mod_key, lib_table);
             }
         }

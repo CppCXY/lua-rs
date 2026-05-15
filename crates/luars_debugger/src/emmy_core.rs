@@ -1,13 +1,13 @@
-//! `require "emmy_core"` module interface.
+//! Emmy debugger callbacks and macro-backed module descriptor.
 //!
-//! Provides Lua-facing functions: `tcpListen`, `tcpConnect`, `waitIDE`,
-//! `breakHere`, `tcpSharedListen`, `tcpSharedConnect`.
-//!
-//! The module returns a table with these functions.
+//! The callbacks remain low-level `CFunction`s because hook installation and
+//! stepping operate directly on `LuaState`. The module registration itself is
+//! described through `luars::lua_module!`, so embedders do not need a separate
+//! `luaopen_*` entry point or hand-written table construction.
 
 use std::sync::{Arc, OnceLock};
 
-use luars::{CFunction, LUA_MASKLINE, LuaResult, LuaState, LuaValue};
+use luars::{LUA_MASKLINE, LuaResult, LuaState, LuaValue};
 
 use crate::debugger::Debugger;
 use crate::debugger::hook::should_break;
@@ -28,8 +28,9 @@ pub(crate) fn set_debugger(dbg: Arc<Debugger>) {
 
 // ============ CFunction callbacks ============
 
-/// `emmy_core.tcpListen(host, port)` — start TCP listener.
-fn emmy_tcp_listen(l: &mut LuaState) -> LuaResult<usize> {
+/// `emmy_core.tcpListen(host, port)` starts the debugger listener and installs
+/// the line hook on the current state.
+pub fn emmy_tcp_listen(l: &mut LuaState) -> LuaResult<usize> {
     let host = l
         .get_arg(1)
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -53,8 +54,9 @@ fn emmy_tcp_listen(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
-/// `emmy_core.tcpConnect(host, port)` — connect to IDE.
-fn emmy_tcp_connect(l: &mut LuaState) -> LuaResult<usize> {
+/// `emmy_core.tcpConnect(host, port)` connects to an already-running IDE and
+/// installs the line hook on success.
+pub fn emmy_tcp_connect(l: &mut LuaState) -> LuaResult<usize> {
     let host = l
         .get_arg(1)
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -77,15 +79,15 @@ fn emmy_tcp_connect(l: &mut LuaState) -> LuaResult<usize> {
     }
 }
 
-/// `emmy_core.waitIDE()` — block until IDE sends ReadyReq.
-fn emmy_wait_ide(_l: &mut LuaState) -> LuaResult<usize> {
+/// `emmy_core.waitIDE()` blocks until the IDE finishes its handshake.
+pub fn emmy_wait_ide(_l: &mut LuaState) -> LuaResult<usize> {
     let dbg = get_debugger();
     dbg.wait_ide(false);
     Ok(0)
 }
 
-/// `emmy_core.breakHere()` — programmatic breakpoint.
-fn emmy_break_here(l: &mut LuaState) -> LuaResult<usize> {
+/// `emmy_core.breakHere()` forces a debugger break when the IDE is ready.
+pub fn emmy_break_here(l: &mut LuaState) -> LuaResult<usize> {
     let dbg = get_debugger();
     let is_ready = {
         let s = dbg.state.lock().unwrap();
@@ -98,8 +100,8 @@ fn emmy_break_here(l: &mut LuaState) -> LuaResult<usize> {
     Ok(0)
 }
 
-/// `emmy_core.stop()` — stop the debugger.
-fn emmy_stop(l: &mut LuaState) -> LuaResult<usize> {
+/// `emmy_core.stop()` disconnects and removes the installed hook.
+pub fn emmy_stop(l: &mut LuaState) -> LuaResult<usize> {
     let dbg = get_debugger();
     dbg.transporter.disconnect();
     // Remove hook
@@ -109,7 +111,7 @@ fn emmy_stop(l: &mut LuaState) -> LuaResult<usize> {
 
 // ============ Hook installation ============
 
-/// The line hook callback used by the debugger.
+/// The line hook callback used by the debugger runtime.
 fn debugger_hook(l: &mut LuaState) -> LuaResult<usize> {
     let dbg = get_debugger();
 
@@ -135,32 +137,7 @@ fn debugger_hook(l: &mut LuaState) -> LuaResult<usize> {
     Ok(0)
 }
 
-/// Install the debugger line hook on the LuaState.
+/// Install the debugger line hook on the active Lua state.
 fn install_hook(l: &mut LuaState) {
     l.set_hook(LuaValue::cfunction(debugger_hook), LUA_MASKLINE, 0);
-}
-
-// ============ Module loader ============
-
-/// The CFunction that serves as the `require "emmy_core"` loader.
-/// Returns a table with all debugger functions.
-pub fn luaopen_emmy_core(l: &mut LuaState) -> LuaResult<usize> {
-    let table = l.create_table(0, 8)?;
-
-    let set_field =
-        |l: &mut LuaState, t: &LuaValue, name: &str, func: CFunction| -> LuaResult<()> {
-            let key = l.create_string(name)?;
-            let val = LuaValue::cfunction(func);
-            l.raw_set(t, key, val);
-            Ok(())
-        };
-
-    set_field(l, &table, "tcpListen", emmy_tcp_listen)?;
-    set_field(l, &table, "tcpConnect", emmy_tcp_connect)?;
-    set_field(l, &table, "waitIDE", emmy_wait_ide)?;
-    set_field(l, &table, "breakHere", emmy_break_here)?;
-    set_field(l, &table, "stop", emmy_stop)?;
-
-    l.push_value(table)?;
-    Ok(1)
 }

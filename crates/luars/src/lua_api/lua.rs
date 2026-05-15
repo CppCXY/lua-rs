@@ -35,7 +35,7 @@ impl Lua {
     /// Install a library provided by luars or an external crate.
     #[inline]
     pub fn install_library<L: LuaLibrary>(&mut self, library: L) -> LuaResult<()> {
-        library.install_lua(self)
+        library.install(self)
     }
 
     /// Open standard libraries.

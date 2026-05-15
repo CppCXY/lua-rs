@@ -3,23 +3,27 @@
 //! # Quick start
 //!
 //! ```rust,ignore
-//! use luars::LuaVM;
+//! use luars::{Lua, SafeOption, Stdlib};
 //! use luars_debugger::Library;
 //!
-//! let mut vm = LuaVM::new();
-//! // Simple: install with defaults (module = "emmy_core")
-//! vm.install_library(Library::default()).unwrap();
-//! // Now Lua code can do: local dbg = require("emmy_core")
+//! let mut lua = Lua::new(SafeOption::default());
+//! lua.open_stdlib(Stdlib::All).unwrap();
+//! lua.install_library(Library::default()).unwrap();
+//!
+//! // The debugger table is available both globally and through require().
+//! lua.execute("local dbg = require('emmy_core'); assert(type(dbg.breakHere) == 'function')")
+//!     .unwrap();
 //! ```
 //!
 //! # Customization
 //!
 //! ```rust,ignore
-//! use luars::LuaVM;
+//! use luars::{Lua, SafeOption, Stdlib};
 //! use luars_debugger::Library;
 //!
-//! let mut vm = LuaVM::new();
-//! vm.install_library(
+//! let mut lua = Lua::new(SafeOption::default());
+//! lua.open_stdlib(Stdlib::All).unwrap();
+//! lua.install_library(
 //!     Library {
 //!         module_name: "debugger".to_string(),
 //!         ..Library::default()
@@ -28,15 +32,20 @@
 //! .unwrap();
 //! // Now Lua code can do: local dbg = require("debugger")
 //! ```
+//!
+//! The debugger itself still uses raw `LuaState` callbacks internally because
+//! hook installation and stepping must touch VM internals, but embedders only
+//! interact with the high-level `Lua` installation surface. Internally the
+//! exported module is described with `luars::lua_module!`, which is the intended
+//! user-facing registration pattern.
 
 pub mod debugger;
-pub mod emmy_core;
+mod emmy_core;
 pub mod hook_state;
 pub mod proto;
 pub mod transporter;
 
 use debugger::Debugger;
-use emmy_core::luaopen_emmy_core;
 
 /// Installable debugger library descriptor for luars.
 #[derive(Clone, Debug)]
@@ -55,14 +64,39 @@ impl Default for Library {
 }
 
 impl luars::LuaLibrary for Library {
-    fn install_vm(&self, vm: &mut luars::LuaVM) -> luars::LuaResult<()> {
+    fn install(&self, lua: &mut luars::Lua) -> luars::LuaResult<()> {
         let dbg = Debugger::new();
         {
             let mut s = dbg.state.lock().unwrap();
             s.file_extensions = self.file_extensions.clone();
         }
         emmy_core::set_debugger(dbg);
-        vm.register_preload(&self.module_name, luaopen_emmy_core)?;
-        Ok(())
+        lua.install_library(luars::lua_module!(self.module_name.clone(), {
+            "tcpListen" => emmy_core::emmy_tcp_listen,
+            "tcpConnect" => emmy_core::emmy_tcp_connect,
+            "waitIDE" => emmy_core::emmy_wait_ide,
+            "breakHere" => emmy_core::emmy_break_here,
+            "stop" => emmy_core::emmy_stop,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Library;
+
+    #[test]
+    fn installs_debugger_module_for_require() {
+        let mut lua = luars::Lua::new(luars::SafeOption::default());
+        lua.open_stdlib(luars::Stdlib::All).unwrap();
+        lua.install_library(Library::default()).unwrap();
+
+        let (tcp_listen_ty, wait_ide_ty): (String, String) = lua
+            .load("local dbg = require('emmy_core'); return type(dbg.tcpListen), type(dbg.waitIDE)")
+            .eval_multi()
+            .unwrap();
+
+        assert_eq!(tcp_listen_ty, "function");
+        assert_eq!(wait_ide_ty, "function");
     }
 }

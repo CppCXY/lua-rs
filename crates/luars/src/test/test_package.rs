@@ -230,17 +230,19 @@ fn test_require_return_value() {
 
 #[test]
 fn test_install_library_supports_library_module() {
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let mut lua = crate::Lua::new(SafeOption::default());
+    lua.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let module = LibraryModule::new("hostlib").with_function("answer", |l| {
-        l.push_value(LuaValue::integer(42))?;
-        Ok(1)
+    let module = crate::lua_module!("hostlib", {
+        "answer" => |l| {
+            l.push_value(LuaValue::integer(42))?;
+            Ok(1)
+        }
     });
 
-    vm.install_library(module).unwrap();
+    lua.install_library(module).unwrap();
 
-    let result = vm.execute(
+    let result = lua.execute(
         r#"
         assert(type(hostlib) == "table")
         assert(hostlib.answer() == 42)
@@ -252,16 +254,15 @@ fn test_install_library_supports_library_module() {
 
 #[test]
 fn test_install_library_supports_preload_modules() {
-    let mut vm = LuaVM::new(SafeOption::default());
-    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let mut lua = crate::Lua::new(SafeOption::default());
+    lua.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    vm.install_library(PreloadModule::new(
-        "test_install_module",
-        luaopen_test_install_module,
-    ))
+    lua.install_library(
+        crate::lua_preload_module!("test_install_module" => luaopen_test_install_module),
+    )
     .unwrap();
 
-    let result = vm.execute(
+    let result = lua.execute(
         r#"
         local mod = require('test_install_module')
         assert(type(mod) == "table")
