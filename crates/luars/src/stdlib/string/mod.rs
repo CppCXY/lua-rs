@@ -134,7 +134,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
         let mut buf = [0u8; 256];
         let mut all_ascii = true;
         for i in 0..nargs {
-            let arg = unsafe { l.get_arg_unchecked(i + 1) };
+            let arg = l.get_arg(i + 1).unwrap_or_default();
             let Some(byte) = arg.as_integer() else {
                 return Err(l.error(format!(
                     "bad argument #{} to 'string.char' (number expected)",
@@ -155,8 +155,9 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         let result = if all_ascii {
-            // SAFETY: all bytes are 0-127, which is valid single-byte UTF-8
-            l.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..nargs]) })?
+            // All bytes are 0-127, which is valid single-byte UTF-8
+            let s = std::str::from_utf8(&buf[..nargs]).unwrap();
+            l.create_string(s)?
         } else {
             l.create_bytes(&buf[..nargs])?
         };
@@ -168,7 +169,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
     let mut bytes = Vec::with_capacity(nargs);
     let mut all_ascii = true;
     for i in 0..nargs {
-        let arg = unsafe { l.get_arg_unchecked(i + 1) };
+        let arg = l.get_arg(i + 1).unwrap_or_default();
         let Some(byte) = arg.as_integer() else {
             return Err(l.error(format!(
                 "bad argument #{} to 'string.char' (number expected)",
@@ -189,8 +190,8 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     let result = if all_ascii {
-        // SAFETY: all bytes are 0-127, valid single-byte UTF-8
-        l.create_string_owned(unsafe { String::from_utf8_unchecked(bytes) })?
+        // All bytes are 0-127, valid single-byte UTF-8
+        l.create_string_owned(String::from_utf8(bytes).unwrap())?
     } else {
         l.create_bytes(&bytes)?
     };
@@ -260,13 +261,15 @@ fn string_lower(l: &mut LuaState) -> LuaResult<usize> {
         let mut buf = [0u8; 256];
         buf[..len].copy_from_slice(bytes);
         buf[..len].make_ascii_lowercase();
-        let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+        // SAFETY: ASCII bytes remain valid ASCII (valid UTF-8) after lowercase
+        let result_str = std::str::from_utf8(&buf[..len]).unwrap();
         let result = l.create_string(result_str)?;
         l.push_value(result)?;
     } else {
         let mut buf = bytes.to_vec();
         buf.make_ascii_lowercase();
-        let result_str = unsafe { String::from_utf8_unchecked(buf) };
+        // SAFETY: ASCII bytes remain valid UTF-8 after lowercase
+        let result_str = String::from_utf8(buf).unwrap();
         let result = l.create_string_owned(result_str)?;
         l.push_value(result)?;
     }
@@ -289,13 +292,15 @@ fn string_upper(l: &mut LuaState) -> LuaResult<usize> {
         let mut buf = [0u8; 256];
         buf[..len].copy_from_slice(bytes);
         buf[..len].make_ascii_uppercase();
-        let result_str = unsafe { std::str::from_utf8_unchecked(&buf[..len]) };
+        // SAFETY: ASCII bytes remain valid ASCII (valid UTF-8) after uppercase
+        let result_str = std::str::from_utf8(&buf[..len]).unwrap();
         let result = l.create_string(result_str)?;
         l.push_value(result)?;
     } else {
         let mut buf = bytes.to_vec();
         buf.make_ascii_uppercase();
-        let result_str = unsafe { String::from_utf8_unchecked(buf) };
+        // SAFETY: ASCII bytes remain valid UTF-8 after uppercase
+        let result_str = String::from_utf8(buf).unwrap();
         let result = l.create_string_owned(result_str)?;
         l.push_value(result)?;
     }
@@ -375,8 +380,7 @@ fn string_rep(l: &mut LuaState) -> LuaResult<usize> {
 
     let result_val = if input_is_text && sep_is_text {
         // Input was valid UTF-8, repetition is also valid UTF-8
-        // SAFETY: repeating valid UTF-8 produces valid UTF-8
-        let s = unsafe { String::from_utf8_unchecked(result) };
+        let s = String::from_utf8(result).unwrap();
         l.create_string_owned(s)?
     } else {
         l.create_bytes(&result)?
@@ -406,7 +410,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         buf[..len].reverse();
         if is_ascii {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
-            l.create_string(unsafe { std::str::from_utf8_unchecked(&buf[..len]) })?
+            l.create_string(std::str::from_utf8(&buf[..len]).unwrap())?
         } else {
             l.create_bytes(&buf[..len])?
         }
@@ -415,7 +419,7 @@ fn string_reverse(l: &mut LuaState) -> LuaResult<usize> {
         reversed.reverse();
         if is_ascii {
             // SAFETY: reversing ASCII bytes produces valid ASCII = valid UTF-8
-            l.create_string_owned(unsafe { String::from_utf8_unchecked(reversed) })?
+            l.create_string_owned(String::from_utf8(reversed).unwrap())?
         } else {
             l.create_bytes(&reversed)?
         }

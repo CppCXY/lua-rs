@@ -178,7 +178,7 @@ fn table_concat(l: &mut LuaState) -> LuaResult<usize> {
                     result.push_str(sep);
                 }
                 let value = table.raw_geti(idx).unwrap_or(LuaValue::nil());
-                result.push_str(unsafe { value.as_str().unwrap_unchecked() });
+                result.push_str(value.as_str().unwrap());
             }
             let result = l.create_string_owned(result)?;
             l.push_value(result)?;

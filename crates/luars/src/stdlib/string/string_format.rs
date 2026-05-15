@@ -22,17 +22,12 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'format' (string expected)".to_string()))?;
 
-    // Get format string as raw bytes — avoid cloning.
-    // SAFETY: format string is Lua arg 1, held on the Lua stack, won't be GC'd
-    // during this function. GC only runs at `create_string_owned` at the very end.
-    let (fmt_bytes, fmt_len) = {
-        let format_str = format_str_value
-            .as_str()
-            .ok_or_else(|| l.error("invalid format string".to_string()))?;
-        let ptr = format_str.as_ptr();
-        let len = format_str.len();
-        (unsafe { std::slice::from_raw_parts(ptr, len) }, len)
-    };
+    // Get format string as bytes — avoid cloning.
+    let fmt_bytes = format_str_value
+        .as_str()
+        .ok_or_else(|| l.error("invalid format string".to_string()))?
+        .as_bytes();
+    let fmt_len = fmt_bytes.len();
 
     let arg_count = l.arg_count();
     let mut arg_index = 2usize;
@@ -50,7 +45,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
         }
         if pos > start {
             // SAFETY: format string is valid UTF-8, non-% ASCII segments are valid UTF-8
-            result.push_str(unsafe { std::str::from_utf8_unchecked(&fmt_bytes[start..pos]) });
+            result.push_str(std::str::from_utf8(&fmt_bytes[start..pos]).unwrap());
         }
         if pos >= fmt_len {
             break;
@@ -101,7 +96,7 @@ pub fn string_format(l: &mut LuaState) -> LuaResult<usize> {
                 arg_index
             )));
         }
-        let arg = unsafe { l.get_arg_unchecked(arg_index) };
+        let arg = l.get_arg(arg_index).unwrap_or_default();
         arg_index += 1;
 
         // Format based on type

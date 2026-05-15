@@ -478,9 +478,7 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
         } else {
             LuaValue::nil()
         };
-        unsafe {
-            l.push_value_unchecked(val);
-        }
+        l.push_value(val)?;
     }
 
     Ok(result_count)
@@ -503,12 +501,10 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 /// Iterator function for ipairs — like C Lua's ipairsaux.
-/// Hot path: push_c_frame already guarantees EXTRA_STACK slots,
-/// so we use push_value_unchecked throughout.
 #[inline]
 fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
-    let table_val = unsafe { l.get_arg_unchecked(1) };
-    let index_val = unsafe { l.get_arg_unchecked(2) };
+    let table_val = l.get_arg(1).unwrap_or_default();
+    let index_val = l.get_arg(2).unwrap_or_default();
 
     let index = match index_val.as_integer() {
         Some(i) => i,
@@ -529,19 +525,13 @@ fn ipairs_next(l: &mut LuaState) -> LuaResult<usize> {
         l.table_geti(&table_val, next_index)?
     };
 
-    // push_value_unchecked is safe: push_c_frame guarantees EXTRA_STACK
-    // slots above frame_top.
     if !value.is_nil() {
-        unsafe {
-            l.push_value_unchecked(LuaValue::integer(next_index));
-            l.push_value_unchecked(value);
-        }
+        l.push_value(LuaValue::integer(next_index))?;
+        l.push_value(value)?;
         Ok(2)
     } else {
         // Return nil to signal end of iteration
-        unsafe {
-            l.push_value_unchecked(LuaValue::nil());
-        }
+        l.push_value(LuaValue::nil())?;
         Ok(1)
     }
 }
@@ -610,7 +600,7 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 /// Delegates to `UserDataTrait::lua_next(control)` — a stateless Rust iterator.
 /// Returns (next_control, value) or nil when exhausted.
 fn lua_userdata_next(l: &mut LuaState) -> LuaResult<usize> {
-    let ud_val = unsafe { l.get_arg_unchecked(1) };
+    let ud_val = l.get_arg(1).unwrap_or_default();
     let key_val = l.get_arg(2).unwrap_or_default();
 
     let ud = ud_val.as_userdata_mut().ok_or_else(|| {
@@ -630,9 +620,7 @@ fn lua_userdata_next(l: &mut LuaState) -> LuaResult<usize> {
         }
         None => {
             // Iteration exhausted
-            unsafe {
-                l.push_value_unchecked(LuaValue::nil());
-            }
+            l.push_value(LuaValue::nil())?;
             Ok(1)
         }
     }
@@ -642,7 +630,7 @@ fn lua_userdata_next(l: &mut LuaState) -> LuaResult<usize> {
 /// Port of Lua 5.5's luaB_next using luaH_next
 fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     // arg 1 is the table (required), arg 2 is the key (optional, defaults to nil)
-    let table_val = unsafe { l.get_arg_unchecked(1) };
+    let table_val = l.get_arg(1).unwrap_or_default();
     let index_val = l.get_arg(2).unwrap_or_default();
 
     let result = {
@@ -655,15 +643,11 @@ fn lua_next(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     if let Some((k, v)) = result {
-        unsafe {
-            l.push_value_unchecked(k);
-            l.push_value_unchecked(v);
-        }
+        l.push_value(k)?;
+        l.push_value(v)?;
         Ok(2)
     } else {
-        unsafe {
-            l.push_value_unchecked(LuaValue::nil());
-        }
+        l.push_value(LuaValue::nil())?;
         Ok(1)
     }
 }
@@ -1091,6 +1075,9 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 GcKind::GenMajor => "generational",
             };
 
+            // SAFETY: vm_ptr + change_mode need separate mutable access to
+            // both GcManager (through vm) and LuaState — borrow checker cannot
+            // express this dual-mut pattern through a single `vm_mut()` call.
             let vm_ptr = l.vm_ptr();
             let vm = unsafe { &mut *vm_ptr };
             vm.gc.change_mode(l, GcKind::GenMinor);
@@ -1107,6 +1094,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 GcKind::GenMajor => "generational",
             };
 
+            // SAFETY: see "generational" case above for dual-mut justification.
             let vm_ptr = l.vm_ptr();
             let vm = unsafe { &mut *vm_ptr };
             vm.gc.change_mode(l, GcKind::Inc);

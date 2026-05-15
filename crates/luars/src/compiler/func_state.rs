@@ -1,4 +1,4 @@
-use crate::compiler::{ExpDesc, ExpKind, ExpUnion};
+use crate::compiler::{ExpDesc, ExpKind, ExpUnion, statement};
 use crate::lua_vm::lua_limits::{MAX_SRC_LEN, MAXCCALLS, MAXUPVAL, MAXVARS};
 use crate::{LuaProto, LuaVM};
 use crate::{LuaValue, compiler::parser::LuaLexer};
@@ -520,7 +520,7 @@ impl<'a> FuncState<'a> {
                 // Mark the variable in parent function as needing upvalue closure
                 if !prev_ptr.is_null() {
                     let prev = &mut *prev_ptr;
-                    crate::compiler::statement::mark_upval(prev, vidx);
+                    statement::mark_upval(prev, vidx);
                 }
 
                 let prev = &*prev_ptr;

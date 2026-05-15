@@ -15,7 +15,7 @@ use crate::platform_time;
 /// so arg slot `n` (1-based) is always readable.
 #[inline(always)]
 fn checknumber(l: &mut LuaState, n: usize, fname: &str) -> Result<f64, LuaError> {
-    let v = unsafe { l.get_arg_unchecked(n) };
+    let v = l.get_arg(n).unwrap_or_default();
     if let Some(f) = v.as_number() {
         return Ok(f);
     }
@@ -65,17 +65,16 @@ pub fn create_math_lib() -> LibraryModule {
 }
 
 fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
-    // SAFETY: push_c_frame guarantees EXTRA_STACK slots; arg 1 always readable.
-    let value = unsafe { l.get_arg_unchecked(1) };
+    let value = l.get_arg(1).unwrap_or_default();
 
     // Fast path: preserve integer type
     if let Some(i) = value.as_integer() {
-        unsafe { l.push_value_unchecked(LuaValue::integer(i.wrapping_abs())) };
+        l.push_value(LuaValue::integer(i.wrapping_abs()))?;
         return Ok(1);
     }
 
     if let Some(f) = value.as_float() {
-        unsafe { l.push_value_unchecked(LuaValue::float(f.abs())) };
+        l.push_value(LuaValue::float(f.abs()))?;
         return Ok(1);
     }
 
@@ -84,13 +83,13 @@ fn math_abs(l: &mut LuaState) -> LuaResult<usize> {
 
 fn math_acos(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "acos")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.acos())) };
+    l.push_value(LuaValue::float(x.acos()))?;
     Ok(1)
 }
 
 fn math_asin(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "asin")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.asin())) };
+    l.push_value(LuaValue::float(x.asin()))?;
     Ok(1)
 }
 
@@ -106,11 +105,11 @@ fn math_atan(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
-    let value = unsafe { l.get_arg_unchecked(1) };
+    let value = l.get_arg(1).unwrap_or_default();
 
     // Fast path: integers are already ceil'd
     if let Some(i) = value.as_integer() {
-        unsafe { l.push_value_unchecked(LuaValue::integer(i)) };
+        l.push_value(LuaValue::integer(i))?;
         return Ok(1);
     }
 
@@ -118,9 +117,9 @@ fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
         let ceiled = f.ceil();
         // Return integer if result fits, otherwise keep as float
         if ceiled >= (i64::MIN as f64) && ceiled < -(i64::MIN as f64) {
-            unsafe { l.push_value_unchecked(LuaValue::integer(ceiled as i64)) };
+            l.push_value(LuaValue::integer(ceiled as i64))?;
         } else {
-            unsafe { l.push_value_unchecked(LuaValue::float(ceiled)) };
+            l.push_value(LuaValue::float(ceiled))?;
         }
         return Ok(1);
     }
@@ -130,28 +129,28 @@ fn math_ceil(l: &mut LuaState) -> LuaResult<usize> {
 
 fn math_cos(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "cos")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.cos())) };
+    l.push_value(LuaValue::float(x.cos()))?;
     Ok(1)
 }
 
 fn math_deg(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "deg")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.to_degrees())) };
+    l.push_value(LuaValue::float(x.to_degrees()))?;
     Ok(1)
 }
 
 fn math_exp(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "exp")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.exp())) };
+    l.push_value(LuaValue::float(x.exp()))?;
     Ok(1)
 }
 
 fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
-    let value = unsafe { l.get_arg_unchecked(1) };
+    let value = l.get_arg(1).unwrap_or_default();
 
     // Fast path: integers are already floor'd
     if let Some(i) = value.as_integer() {
-        unsafe { l.push_value_unchecked(LuaValue::integer(i)) };
+        l.push_value(LuaValue::integer(i))?;
         return Ok(1);
     }
 
@@ -159,9 +158,9 @@ fn math_floor(l: &mut LuaState) -> LuaResult<usize> {
         let floored = f.floor();
         // Return integer if result fits, otherwise keep as float
         if floored >= (i64::MIN as f64) && floored < -(i64::MIN as f64) {
-            unsafe { l.push_value_unchecked(LuaValue::integer(floored as i64)) };
+            l.push_value(LuaValue::integer(floored as i64))?;
         } else {
-            unsafe { l.push_value_unchecked(LuaValue::float(floored)) };
+            l.push_value(LuaValue::float(floored))?;
         }
         return Ok(1);
     }
@@ -290,24 +289,23 @@ fn math_max(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument to 'max' (value expected)".to_string()));
     }
 
-    // Fast path for common 2-arg case with unchecked access
+    // Fast path for common 2-arg case
     if argc == 2 {
-        let a = unsafe { l.get_arg_unchecked(1) };
-        let b = unsafe { l.get_arg_unchecked(2) };
-        let result = if lua_num_lt(&a, &b) { b } else { a };
-        // Validate both are numbers (error on bad input)
+        let a = l.get_arg(1).unwrap_or_default();
+        let b = l.get_arg(2).unwrap_or_default();
         if a.as_number().is_none() {
             return Err(l.error("bad argument #1 to 'max' (number expected)".to_string()));
         }
         if b.as_number().is_none() {
             return Err(l.error("bad argument #2 to 'max' (number expected)".to_string()));
         }
-        unsafe { l.push_value_unchecked(result) };
+        let result = if lua_num_lt(&a, &b) { b } else { a };
+        l.push_value(result)?;
         return Ok(1);
     }
 
     // General path
-    let first = unsafe { l.get_arg_unchecked(1) };
+    let first = l.get_arg(1).unwrap_or_default();
     let _ = first
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'max' (number expected)".to_string()))?;
@@ -325,7 +323,7 @@ fn math_max(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    unsafe { l.push_value_unchecked(max_arg) };
+    l.push_value(max_arg)?;
     Ok(1)
 }
 
@@ -336,23 +334,23 @@ fn math_min(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("bad argument to 'min' (value expected)".to_string()));
     }
 
-    // Fast path for common 2-arg case with unchecked access
+    // Fast path for common 2-arg case
     if argc == 2 {
-        let a = unsafe { l.get_arg_unchecked(1) };
-        let b = unsafe { l.get_arg_unchecked(2) };
-        let result = if lua_num_lt(&b, &a) { b } else { a };
+        let a = l.get_arg(1).unwrap_or_default();
+        let b = l.get_arg(2).unwrap_or_default();
         if a.as_number().is_none() {
             return Err(l.error("bad argument #1 to 'min' (number expected)".to_string()));
         }
         if b.as_number().is_none() {
             return Err(l.error("bad argument #2 to 'min' (number expected)".to_string()));
         }
-        unsafe { l.push_value_unchecked(result) };
+        let result = if lua_num_lt(&b, &a) { b } else { a };
+        l.push_value(result)?;
         return Ok(1);
     }
 
     // General path
-    let first = unsafe { l.get_arg_unchecked(1) };
+    let first = l.get_arg(1).unwrap_or_default();
     let _ = first
         .as_number()
         .ok_or_else(|| l.error("bad argument #1 to 'min' (number expected)".to_string()))?;
@@ -370,7 +368,7 @@ fn math_min(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    unsafe { l.push_value_unchecked(min_arg) };
+    l.push_value(min_arg)?;
     Ok(1)
 }
 
@@ -399,7 +397,7 @@ fn math_modf(l: &mut LuaState) -> LuaResult<usize> {
 
 fn math_rad(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "rad")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.to_radians())) };
+    l.push_value(LuaValue::float(x.to_radians()))?;
     Ok(1)
 }
 
@@ -510,19 +508,19 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
 
 fn math_sin(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "sin")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.sin())) };
+    l.push_value(LuaValue::float(x.sin()))?;
     Ok(1)
 }
 
 fn math_sqrt(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "sqrt")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.sqrt())) };
+    l.push_value(LuaValue::float(x.sqrt()))?;
     Ok(1)
 }
 
 fn math_tan(l: &mut LuaState) -> LuaResult<usize> {
     let x = checknumber(l, 1, "tan")?;
-    unsafe { l.push_value_unchecked(LuaValue::float(x.tan())) };
+    l.push_value(LuaValue::float(x.tan()))?;
     Ok(1)
 }
 
