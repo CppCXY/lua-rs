@@ -50,11 +50,11 @@ pub fn compile_code_with_name(
         }
     };
 
-    let mut parser = LuaLexer::new(source, tokens, level);
+    let mut lexer = LuaLexer::new(source, tokens, level);
     // Check for lexer errors before parsing
     let mut compiler_state = CompilerState::new();
     let mut fs = FuncState::new(
-        &mut parser,
+        &mut lexer,
         vm,
         &mut compiler_state,
         true,

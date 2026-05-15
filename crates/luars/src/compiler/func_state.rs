@@ -15,7 +15,12 @@ pub struct Upvaldesc {
 // Port of FuncState from lparser.h
 pub struct FuncState<'a> {
     pub chunk: LuaProto,
-    pub prev: Option<&'a mut FuncState<'a>>, // parent function state
+    /// Parent function state. Stored as raw pointer to break the self-referential
+    /// linked-list cycle: a child FuncState is created on the stack inside `body()`
+    /// while the parent is alive. Rust's borrow checker cannot express this pattern
+    /// with safe references. Access via `parent()` / `parent_mut()` — those methods
+    /// encapsulate the single unsafe dereference.
+    prev: Option<*mut FuncState<'a>>,
     pub lexer: &'a mut LuaLexer<'a>,
     pub vm: &'a mut LuaVM,
     pub compiler_state: &'a mut CompilerState,
@@ -307,16 +312,38 @@ impl<'a> FuncState<'a> {
         }
     }
 
+    /// Safe accessor: get an immutable reference to the parent FuncState.
+    pub fn parent(&self) -> Option<&FuncState<'a>> {
+        // SAFETY: `prev` is set once in `new_child` from a `&'a mut` reference
+        // that outlives the current FuncState. The function stack is torn down
+        // strictly bottom-up (children finished before parents continue), so
+        // this pointer is always valid when called.
+        self.prev.map(|p| unsafe { &*p })
+    }
+
+    /// Safe accessor: get a mutable reference to the parent FuncState.
+    pub fn parent_mut(&mut self) -> Option<&mut FuncState<'a>> {
+        // SAFETY: same invariant as `parent()`. The mutable alias is exclusive
+        // because no other code holds a `&mut` to the parent while we do.
+        self.prev.map(|p| unsafe { &mut *p })
+    }
+
     // Create child function state
-    pub fn new_child(parent: &'a mut FuncState<'a>, is_vararg: bool) -> Self {
-        // Create new kcache table for child function
-        let kcache = parent.vm.create_table(0, 0).unwrap();
+    // SAFETY: `parent` must be a valid `&mut FuncState` that outlives the child.
+    // The child stores `parent` as a raw pointer (to break the self-referential
+    // linked-list cycle) and borrows `lexer`/`vm`/`compiler_state` from it.
+    pub fn new_child(parent: *mut FuncState<'a>, is_vararg: bool) -> Self {
+        // SAFETY: caller guarantees `parent` is a valid &mut FuncState that
+        // outlives the child. The function body creates the child on its stack
+        // (strictly nested), so the parent lives until after the child is dropped.
+        let parent_ref = unsafe { &mut *parent };
+        let kcache = parent_ref.vm.create_table(0, 0).unwrap();
         FuncState {
             chunk: LuaProto::new(),
-            prev: Some(unsafe { &mut *(parent as *mut FuncState<'a>) }),
-            lexer: parent.lexer,
-            vm: parent.vm,
-            compiler_state: parent.compiler_state,
+            prev: Some(parent),
+            lexer: parent_ref.lexer,
+            vm: parent_ref.vm,
+            compiler_state: parent_ref.compiler_state,
             block_cnt_id: None,
             pc: 0,
             last_target: 0,
@@ -331,8 +358,8 @@ impl<'a> FuncState<'a> {
             needclose: false,
             is_vararg,
             numparams: 0,
-            first_local: parent.actvar.len(),
-            source_name: parent.source_name.clone(),
+            first_local: parent_ref.actvar.len(),
+            source_name: parent_ref.source_name.clone(),
             kcache,
             checklimit_error: None,
         }
@@ -506,31 +533,21 @@ impl<'a> FuncState<'a> {
             self.checklimit_error = Some(self.errorlimit(MAXUPVAL, "upvalues"));
         }
 
-        let prev_ptr = match &self.prev {
-            Some(p) => *p as *const _ as *mut FuncState,
-            None => std::ptr::null_mut(),
-        };
-
-        let (in_stack, idx, kind) = unsafe {
+        let (in_stack, idx, kind) = {
             if v.kind == ExpKind::VLOCAL || v.kind == ExpKind::VVARGVAR {
                 // lparser.c:366-370: local or vararg parameter upvalue
                 let vidx = v.u.var().vidx;
                 let ridx = v.u.var().ridx;
 
-                // Mark the variable in parent function as needing upvalue closure
-                if !prev_ptr.is_null() {
-                    let prev = &mut *prev_ptr;
-                    statement::mark_upval(prev, vidx);
-                }
-
-                let prev = &*prev_ptr;
-                let vd = &prev.actvar[vidx as usize];
+                let parent = self.parent_mut().expect("parent expected for upvalue");
+                statement::mark_upval(parent, vidx);
+                let vd = &parent.actvar[vidx as usize];
                 (true, ridx as u8, vd.kind)
             } else {
                 // lparser.c:371-375: upvalue from outer function
                 let info = v.u.info() as usize;
-                let prev = &*prev_ptr;
-                let up = &prev.upvalues[info];
+                let parent = self.parent().expect("parent expected for upvalue");
+                let up = &parent.upvalues[info];
                 (false, info as u8, up.kind)
             }
         };

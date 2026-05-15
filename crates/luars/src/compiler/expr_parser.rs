@@ -384,9 +384,8 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                 }
             } else {
                 // Walk up parent FuncStates to find the right one
-                let mut parent = fs.prev.as_ref().map(|p| *p as *const FuncState);
-                while let Some(p) = parent {
-                    let pfs = unsafe { &*p };
+                let mut parent = fs.parent();
+                while let Some(pfs) = parent {
                     if abs_idx >= pfs.first_local && abs_idx < pfs.first_local + pfs.actvar.len() {
                         let local_idx = abs_idx - pfs.first_local;
                         if let Some(vd) = pfs.actvar.get(local_idx)
@@ -396,7 +395,7 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                         }
                         break;
                     }
-                    parent = pfs.prev.as_ref().map(|p| *p as *const FuncState);
+                    parent = pfs.parent();
                 }
             }
 
@@ -474,46 +473,55 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
     } else {
         let vidx = fs.searchupvalue(name);
         if vidx < 0 {
-            if let Some(prev) = &mut fs.prev {
+            // Step 1: recurse into parent (needs &mut parent for mark_upval inside singlevaraux)
+            if let Some(prev) = fs.parent_mut() {
                 singlevaraux(prev, name, var, false);
+            } else {
+                // No parent — must be a global or const; preserve existing ExpKind
+                return;
+            }
+            // parent_mut borrow released here — fs is free for further access
 
-                // Port of lparser.c:451-453: don't create upvalue for compile-time constants
-                // If the variable is a compile-time constant (VCONST), create a shadow VarDesc
-                // in the current function so check_readonly can still detect it as const.
-                if var.kind == ExpKind::VCONST {
-                    let vidx = var.u.info() as usize;
-                    if let Some(prev_var) = prev.actvar.get(vidx) {
-                        // Create an active shadow const entry in the current
-                        // function so later local declarations still activate
-                        // the correct pending vars in the actvar prefix.
-                        let pidx = fs.chunk.locals.len();
-                        let shadow = VarDesc {
-                            name: prev_var.name.clone(),
-                            kind: VarKind::RDKCTC,
-                            ridx: -1,
-                            vidx: fs.actvar.len() as u16,
-                            pidx,
-                            const_value: prev_var.const_value,
-                        };
-                        fs.actvar.push(shadow);
-                        fs.chunk.locals.push(LocVar {
-                            name: prev_var.name.clone(),
-                            startpc: fs.chunk.code.len() as u32,
-                            endpc: 0,
-                        });
-                        fs.nactvar += 1;
-                        let new_idx = fs.actvar.len() - 1;
-                        var.u = ExpUnion::Info(new_idx as i32);
-                        // var.kind stays as VCONST
-                    }
-                } else if var.kind == ExpKind::VLOCAL
-                    || var.kind == ExpKind::VUPVAL
-                    || var.kind == ExpKind::VVARGVAR
-                {
-                    // lparser.c:460-462: create upvalue for local, upvalue, or vararg parameter
-                    let idx = fs.newupvalue(name, var) as u8;
-                    init_exp(var, ExpKind::VUPVAL, idx as i32);
+            // Step 2: act on the result
+            // Port of lparser.c:451-453: don't create upvalue for compile-time constants
+            if var.kind == ExpKind::VCONST {
+                let vidx = var.u.info() as usize;
+                // Extract data from parent BEFORE accessing fs (borrow splitting)
+                let prev_data = fs.parent().and_then(|prev| {
+                    prev.actvar
+                        .get(vidx)
+                        .map(|pv| (pv.name.clone(), pv.const_value))
+                });
+                // parent() immutable borrow released — fs is free for mutation
+                if let Some((name, const_value)) = prev_data {
+                    let pidx = fs.chunk.locals.len();
+                    let shadow = VarDesc {
+                        name: name.clone(),
+                        kind: VarKind::RDKCTC,
+                        ridx: -1,
+                        vidx: fs.actvar.len() as u16,
+                        pidx,
+                        const_value,
+                    };
+                    fs.actvar.push(shadow);
+                    fs.chunk.locals.push(LocVar {
+                        name: name.clone(),
+                        startpc: fs.chunk.code.len() as u32,
+                        endpc: 0,
+                    });
+                    fs.nactvar += 1;
+                    let new_idx = fs.actvar.len() - 1;
+                    var.u = ExpUnion::Info(new_idx as i32);
+                    // var.kind stays as VCONST
                 }
+            } else if var.kind == ExpKind::VLOCAL
+                || var.kind == ExpKind::VUPVAL
+                || var.kind == ExpKind::VVARGVAR
+            {
+                // lparser.c:460-462: create upvalue for local, upvalue, or vararg parameter
+                // newupvalue internally accesses parent_mut() — safe because fs is free
+                let idx = fs.newupvalue(name, var) as u8;
+                init_exp(var, ExpKind::VUPVAL, idx as i32);
             }
             // lparser.c:498-503: else it's a global or constant, don't change anything (return)
             // Don't set to VVOID - preserve VGLOBAL/VCONST from earlier initialization
@@ -862,8 +870,7 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
 
     // lparser.c:993: Create new FuncState for nested function
     // FuncState new_fs; new_fs.f = addprototype(ls); open_func(ls, &new_fs, &bl);
-    let fs_ptr = fs as *mut FuncState;
-    let mut child_fs = unsafe { FuncState::new_child(&mut *fs_ptr, is_vararg) };
+    let mut child_fs = FuncState::new_child(fs, is_vararg);
 
     // Set linedefined early (C Lua: new_fs.f->linedefined = line)
     // This must happen before parsing body so error messages reference the correct line
