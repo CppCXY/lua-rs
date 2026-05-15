@@ -487,7 +487,7 @@ fn lua_select(l: &mut LuaState) -> LuaResult<usize> {
 /// ipairs(t) - Return iterator for array part of table
 /// Like C Lua 5.5: accepts any value with metatable, uses lua_geti (triggers __index)
 fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
-    let _table_val = l
+    let table_val = l
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'ipairs' (value expected)".to_string()))?;
 
@@ -495,7 +495,7 @@ fn lua_ipairs(l: &mut LuaState) -> LuaResult<usize> {
     // Note: C Lua 5.5 does NOT require arg1 to be a table (luaL_checkany)
     let iter_func = LuaValue::cfunction(ipairs_next);
     l.push_value(iter_func)?;
-    l.push_value(_table_val)?;
+    l.push_value(table_val)?;
     l.push_value(LuaValue::integer(0))?;
     Ok(3)
 }

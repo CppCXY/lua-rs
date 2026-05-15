@@ -1,12 +1,12 @@
 // Debug library implementation
 // Implements: traceback, getinfo, getlocal, getmetatable, getupvalue, etc.
 
-use crate::Instruction;
 use crate::compiler::format_source;
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::{LuaProto, LuaValue};
 use crate::lua_vm::opcode::OpCode;
 use crate::lua_vm::{LuaError, LuaResult, LuaState, get_metatable};
+use crate::{Instruction, LUA_MASKCALL, LUA_MASKLINE, LUA_MASKRET};
 
 /// Get the type name of an object, checking __name in metatable first.
 /// Mirrors C Lua's luaT_objtypename.
@@ -1139,13 +1139,13 @@ fn debug_gethook(l: &mut LuaState) -> LuaResult<usize> {
 
     // Build mask string
     let mut mask_str = String::new();
-    if mask & crate::lua_vm::LUA_MASKCALL != 0 {
+    if mask & LUA_MASKCALL != 0 {
         mask_str.push('c');
     }
-    if mask & crate::lua_vm::LUA_MASKRET != 0 {
+    if mask & LUA_MASKRET != 0 {
         mask_str.push('r');
     }
-    if mask & crate::lua_vm::LUA_MASKLINE != 0 {
+    if mask & LUA_MASKLINE != 0 {
         mask_str.push('l');
     }
     let mask_val = l.create_string(&mask_str)?;

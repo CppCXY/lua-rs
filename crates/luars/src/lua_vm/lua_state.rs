@@ -758,6 +758,8 @@ impl LuaState {
         Ok(())
     }
 
+    #[cold]
+    #[inline(never)]
     fn resize(&mut self, new_size: usize) -> LuaResult<()> {
         if new_size > self.safe_state.max_stack_size {
             self.error(format!(
@@ -1814,6 +1816,7 @@ impl LuaState {
         unsafe { &mut *self.vm }
     }
 
+    #[inline(always)]
     pub(crate) fn vm_ptr(&self) -> *mut LuaVM {
         self.vm
     }
@@ -1922,6 +1925,7 @@ impl LuaState {
 
     /// Get a specific argument (1-based index, Lua convention)
     /// Returns None if index is out of bounds
+    #[inline(always)]
     pub fn get_arg(&self, index: usize) -> Option<LuaValue> {
         if index == 0 || self.call_depth == 0 {
             return None;
@@ -1945,18 +1949,8 @@ impl LuaState {
         }
     }
 
-    /// Get a specific argument without bounds checking (1-based index).
-    /// SAFETY: Caller MUST ensure index >= 1, call_depth > 0,
-    /// and `base + index - 1 < stack.len()`.
-    #[inline(always)]
-    pub unsafe fn get_arg_unchecked(&self, index: usize) -> LuaValue {
-        unsafe {
-            let frame = self.call_stack.get_unchecked(self.call_depth - 1);
-            *self.stack.get_unchecked(frame.base + index - 1)
-        }
-    }
-
     /// Get the number of arguments for the current function call
+    #[inline(always)]
     pub fn arg_count(&self) -> usize {
         if self.call_depth == 0 {
             return 0;
@@ -1970,6 +1964,7 @@ impl LuaState {
         top.saturating_sub(base)
     }
 
+    #[inline(always)]
     pub fn push_value(&mut self, value: LuaValue) -> LuaResult<()> {
         // Check stack limit (Lua's luaD_checkstack equivalent)
         if self.stack_top >= self.safe_state.max_stack_size {
@@ -2006,18 +2001,6 @@ impl LuaState {
         Ok(())
     }
 
-    /// Push a value to the stack without capacity/overflow checking.
-    /// SAFETY: Caller MUST ensure physical stack has room (guaranteed by EXTRA_STACK
-    /// after push_c_frame) and stack_top < max_stack_size.
-    #[inline(always)]
-    pub unsafe fn push_value_unchecked(&mut self, value: LuaValue) {
-        unsafe {
-            let top = self.stack_top;
-            *self.stack.get_unchecked_mut(top) = value;
-            self.stack_top = top + 1;
-        }
-    }
-
     // ===== Object Creation =====
 
     /// Create table
@@ -2032,10 +2015,12 @@ impl LuaState {
         self.vm_mut().create_function(chunk, upvalues)
     }
 
+    #[inline]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> LuaResult<UpvaluePtr> {
         self.vm_mut().create_upvalue_closed(value)
     }
 
+    #[inline]
     pub fn create_upvalue_open(
         &mut self,
         stack_index: usize,
@@ -2066,6 +2051,7 @@ impl LuaState {
     }
 
     /// Create userdata
+    #[inline]
     pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.vm_mut().create_userdata(data)
     }
@@ -2125,11 +2111,13 @@ impl LuaState {
     // ===== Global Access =====
 
     /// Get global variable
+    #[inline]
     pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
         self.vm_mut().get_global(name)
     }
 
     /// Set global variable
+    #[inline]
     pub fn set_global(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
         self.vm_mut().set_global(name, value)
     }
@@ -2177,6 +2165,7 @@ impl LuaState {
     ///
     /// Unlike the LuaVM version, this operates on the *current* coroutine state
     /// and is safe to call from within a CFunction.
+    #[inline]
     pub fn call_function(
         &mut self,
         func: LuaValue,
