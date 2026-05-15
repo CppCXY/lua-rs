@@ -425,3 +425,34 @@ fn test_function_reduce() {
     );
     assert!(result.is_ok());
 }
+
+#[test]
+fn test_local_after_nested_function_stays_local() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.execute(
+        r#"
+        local MAX_NESTING <const> = 32
+
+        local function render()
+            local result = {}
+
+            local function dump()
+                if MAX_NESTING > 0 then
+                    result[#result + 1] = "x,\n"
+                end
+            end
+
+            dump()
+
+            local last = result[#result]
+            result[#result] = string.sub(last, 1, #last - 2) .. "\n"
+
+            return table.concat(result)
+        end
+
+        assert(render() == "x\n")
+        "#,
+    );
+    assert!(result.is_ok(), "Error: {:?}", result.err());
+}

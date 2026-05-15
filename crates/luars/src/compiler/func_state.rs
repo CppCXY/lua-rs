@@ -366,8 +366,8 @@ impl<'a> FuncState<'a> {
 
     // Port of adjustlocalvars from lparser.c:329-338
     pub fn adjust_local_vars(&mut self, nvars: u16) -> Result<(), String> {
-        // Variables have already been added to actvar by new_localvar
-        // This function assigns register indices to them and marks them as active
+        // Variables have already been added to actvar by new_localvar.
+        // This function assigns register indices to them and marks them as active.
         let mut reglevel = self.reglevel(self.nactvar);
         let startpc = self.chunk.code.len() as u32;
         for _ in 0..nvars {

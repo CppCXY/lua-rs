@@ -9,6 +9,7 @@ use luars::{
 
 use crate::lua_api::util::{collect_values, from_value, into_single_value};
 use crate::lua_api::{Chunk, Function, LuaString, Scope, Table, Value};
+use crate::{LuaError, LuaFullError};
 
 /// Safe, embedding-oriented Lua runtime.
 ///
@@ -571,6 +572,10 @@ impl Lua {
     pub fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U> {
         let value = into_single_value(&mut self.vm, value, "convert")?;
         self.unpack_value(value, "convert")
+    }
+
+    pub fn get_error_message(&mut self, error: LuaError) -> LuaFullError {
+        self.vm.into_full_error(error)
     }
 
     /// Get a mutable reference to the underlying LuaVM for advanced use cases.

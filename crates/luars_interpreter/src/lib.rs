@@ -398,7 +398,7 @@ fn lua_main() -> i32 {
     lua.install_library(luars_debugger::Library::default())
         .unwrap();
 
-    let mut vm = unsafe { lua.vm_mut() };
+    let vm = unsafe { lua.vm_mut() };
 
     if cfg!(debug_assertions) {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));
@@ -448,7 +448,7 @@ fn lua_main() -> i32 {
     {
         if let Some(filename) = init.strip_prefix('@') {
             // Execute file
-            if let Err(e) = execute_file(&mut vm, filename) {
+            if let Err(e) = execute_file(vm, filename) {
                 eprintln!("lua: {}", e);
                 return 1;
             }
@@ -482,7 +482,7 @@ fn lua_main() -> i32 {
     // Setup arg table
     let exe_path = env::args().next().unwrap_or_else(|| "lua".to_string());
     setup_arg_table(
-        &mut vm,
+        vm,
         &exe_path,
         opts.script_file.as_deref(),
         &opts.script_args,
@@ -490,7 +490,7 @@ fn lua_main() -> i32 {
 
     // Require modules
     for module in &opts.require_modules {
-        if let Err(e) = require_module(&mut vm, module) {
+        if let Err(e) = require_module(vm, module) {
             eprintln!("lua: {}", e);
             return 1;
         }
@@ -534,12 +534,12 @@ fn lua_main() -> i32 {
                 let _ = vm.execute_chunk(proto);
             }
         }
-        if let Err(e) = execute_file(&mut vm, filename) {
+        if let Err(e) = execute_file(vm, filename) {
             eprintln!("lua: {}", e);
             return 1;
         }
     } else if opts.read_stdin
-        && let Err(e) = execute_stdin(&mut vm)
+        && let Err(e) = execute_stdin(vm)
     {
         eprintln!("lua: {}", e);
         return 1;
@@ -549,7 +549,7 @@ fn lua_main() -> i32 {
     if opts.interactive
         || (opts.execute_strings.is_empty() && opts.script_file.is_none() && !opts.read_stdin)
     {
-        run_repl(&mut vm);
+        run_repl(vm);
     }
 
     0

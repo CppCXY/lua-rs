@@ -350,7 +350,6 @@ fn getfuncname(l: &LuaState, ci_frame_idx: usize) -> Option<(&'static str, Strin
     // Look at the immediately previous frame (the caller)
     let prev_idx = ci_frame_idx - 1;
     let prev = l.get_frame(prev_idx)?;
-    // If the caller frame was interrupted by a hook, this function is the hook callback
     if prev.call_status & crate::lua_vm::call_info::call_status::CIST_HOOKED != 0 {
         return Some(("hook", "?".to_string()));
     }
@@ -815,6 +814,9 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
     const LEVELS1: usize = 10;
     const LEVELS2: usize = 11;
 
+    // call_depth counts all active frames, including the current C frame for
+    // debug.traceback itself. So the number of visible frames is the total
+    // depth minus the requested skip level.
     let top_frame = call_depth.saturating_sub(start_level);
     if top_frame > 0 {
         let frames: Vec<usize> = (0..top_frame).rev().collect();

@@ -64,3 +64,52 @@ fn test_xpcall_concat() {
     );
     assert!(result.is_ok(), "Test failed: {:?}", result);
 }
+
+#[test]
+fn test_debug_traceback_level_two_keeps_caller_frame() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local function caller()
+            local trace = debug.traceback("", 2)
+            assert(type(trace) == "string")
+            assert(string.find(trace, "stack traceback:", 1, true) ~= nil)
+            assert(string.find(trace, "in main chunk", 1, true) ~= nil)
+        end
+
+        caller()
+        "#,
+    );
+
+    assert!(result.is_ok(), "Test failed: {:?}", result);
+}
+
+#[test]
+fn test_debug_traceback_in_hook_reports_hook_frame() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local count = 0
+        local function f ()
+            assert(debug.getinfo(1).namewhat == "hook")
+            local sndline = string.match(debug.traceback(), "\n(.-)\n")
+            assert(string.find(sndline, "hook", 1, true) ~= nil)
+            count = count + 1
+        end
+
+        debug.sethook(f, "l")
+        local a = 0
+        _ENV.a = a
+        a = 1
+        debug.sethook()
+        assert(count == 4)
+        _ENV.a = nil
+        "#,
+    );
+
+    assert!(result.is_ok(), "Test failed: {:?}", result);
+}

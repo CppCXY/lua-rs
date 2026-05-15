@@ -11,7 +11,7 @@ use crate::compiler::parser::{
 };
 use crate::compiler::statement::{self, mark_upval};
 use crate::compiler::{VarDesc, VarKind, binary_k, code, string_k};
-use crate::lua_value::UpvalueDesc;
+use crate::lua_value::{LocVar, UpvalueDesc};
 use crate::lua_vm::OpCode;
 use crate::lua_vm::lua_limits::LFIELDS_PER_FLUSH;
 
@@ -267,8 +267,6 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
 // Port of funcargs from lparser.c (lines 1024-1065)
 fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
-    use crate::compiler::expression::ExpKind;
-
     let mut args = ExpDesc::new_void();
     let line = fs.lexer.line; // Save line number before processing arguments (lparser.c:1028)
 
@@ -279,7 +277,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
             if fs.lexer.current_token() == LuaTokenKind::TkRightParen {
                 args.kind = ExpKind::VVOID;
             } else {
-                crate::compiler::statement::explist(fs, &mut args)?;
+                statement::explist(fs, &mut args)?;
                 if matches!(args.kind, ExpKind::VCALL | ExpKind::VVARARG) {
                     code::setmultret(fs, &mut args);
                 }
@@ -485,16 +483,25 @@ fn singlevaraux(fs: &mut FuncState, name: &str, var: &mut ExpDesc, base: bool) {
                 if var.kind == ExpKind::VCONST {
                     let vidx = var.u.info() as usize;
                     if let Some(prev_var) = prev.actvar.get(vidx) {
-                        // Create shadow entry in current function's actvar
+                        // Create an active shadow const entry in the current
+                        // function so later local declarations still activate
+                        // the correct pending vars in the actvar prefix.
+                        let pidx = fs.chunk.locals.len();
                         let shadow = VarDesc {
                             name: prev_var.name.clone(),
                             kind: VarKind::RDKCTC,
                             ridx: -1,
-                            vidx: 0,
-                            pidx: 0,
+                            vidx: fs.actvar.len() as u16,
+                            pidx,
                             const_value: prev_var.const_value,
                         };
                         fs.actvar.push(shadow);
+                        fs.chunk.locals.push(LocVar {
+                            name: prev_var.name.clone(),
+                            startpc: fs.chunk.code.len() as u32,
+                            endpc: 0,
+                        });
+                        fs.nactvar += 1;
                         let new_idx = fs.actvar.len() - 1;
                         var.u = ExpUnion::Info(new_idx as i32);
                         // var.kind stays as VCONST
