@@ -210,11 +210,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         let mut active_frame = ActiveFrame::from_ctx(frame);
         let mut base = frame.base;
         let mut pc = frame.pc;
-        let chunk = frame.chunk();
+        let mut chunk = frame.chunk();
         debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
 
-        let code: &[Instruction] = frame.code();
-        let constants: &[LuaValue] = frame.constants();
+        let mut code: &[Instruction] = frame.code();
+        let mut constants: &[LuaValue] = frame.constants();
         frame.init_oldpc(lua_state);
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
@@ -229,6 +229,44 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             if hook_mask & LUA_MASKCOUNT != 0 {
                 lua_state.hook_count = lua_state.base_hook_count;
             }
+        }
+
+        /// Reload all cached frame state from the current top frame in call_stack.
+        /// Used instead of `break`-to-outer-loop for CALL/RETURN: reloads locals
+        /// so the inner dispatch loop can continue directly — mirrors C Lua's
+        /// `goto startfunc` / `goto returning` pattern.
+        macro_rules! reload_frame {
+            () => {
+                let current_depth = lua_state.call_depth();
+                if current_depth <= target_depth {
+                    return Ok(());
+                }
+                let frame_idx = current_depth - 1;
+                let ci = lua_state.get_call_info(frame_idx);
+                base = ci.base;
+                pc = ci.pc as usize;
+                chunk = unsafe { &*ci.chunk_ptr };
+                debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
+                code = &chunk.code;
+                constants = &chunk.constants;
+                active_frame.frame_idx = frame_idx;
+                active_frame.top = ci.top as usize;
+                active_frame.call_status = ci.call_status;
+                trap = current_trap(lua_state);
+                // CALL HOOK: fire when entering a new Lua function (pc == 0)
+                if pc == 0 && trap {
+                    let hook_mask = lua_state.hook_mask;
+                    if hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
+                        active_frame.flush(lua_state, pc);
+                        hook_on_call(lua_state, hook_mask, active_frame.call_status, chunk)?;
+                        active_frame.reload(lua_state);
+                    }
+                    if hook_mask & LUA_MASKCOUNT != 0 {
+                        lua_state.hook_count = lua_state.base_hook_count;
+                    }
+                }
+                init_oldpc(lua_state, pc, chunk);
+            };
         }
 
         macro_rules! stack_id {
@@ -2351,7 +2389,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     };
                     active_frame.flush(lua_state, pc);
                     if precall(lua_state, func_idx, nargs, nresults)? {
-                        break;
+                        // Lua call: reload callee frame, continue dispatch directly
+                        // Follows C Lua OP_CALL: ci = newci; goto startfunc
+                        reload_frame!();
+                        continue;
                     }
                     active_frame.reload(lua_state);
                     // C call completed
@@ -2375,7 +2416,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state.close_upvalues(base);
                     }
                     if pretailcall(lua_state, func_idx, b)? {
-                        break;
+                        // Lua tail call: reload callee frame, continue dispatch directly
+                        reload_frame!();
+                        continue;
                     }
                     active_frame.reload(lua_state);
                     // C tail call completed
@@ -2442,7 +2485,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     lua_state.set_top_raw(a_pos + n as usize);
                     active_frame.flush(lua_state, pc);
                     poscall(lua_state, n as usize, pc)?;
-                    break;
+                    // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
+                    reload_frame!();
+                    continue;
                 }
                 OpCode::Return0 => {
                     // return (no values)
@@ -2452,6 +2497,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     // Inlined fast path: no hook, no moveresults overhead
+                    // Follows C Lua OP_RETURN0: L->ci = ci->previous; then goto returning
                     let ci = active_frame.current_ci(lua_state);
                     let nresults = ci.nresults();
                     let res = ci.base - ci.func_offset as usize;
@@ -2467,7 +2513,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                         lua_state.set_top_raw(res + nresults as usize);
                     }
-                    break;
+                    // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
+                    reload_frame!();
+                    continue;
                 }
                 OpCode::Return1 => {
                     // return R[A]  (single value)
@@ -2477,6 +2525,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     // Inlined fast path — raw pointer for single copy
+                    // Follows C Lua OP_RETURN1: L->ci = ci->previous; setobjs2s; then goto returning
                     let ci = active_frame.current_ci(lua_state);
                     let nresults = ci.nresults();
                     let res = ci.base - ci.func_offset as usize;
@@ -2503,7 +2552,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             lua_state.set_top_raw(res + nresults as usize);
                         }
                     }
-                    break;
+                    // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
+                    reload_frame!();
+                    continue;
                 }
                 OpCode::ForLoop => {
                     let a = instr.get_a() as usize;
@@ -2581,7 +2632,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     lua_state.set_top_raw(func_idx + 3); // func + 2 args
                     active_frame.flush(lua_state, pc);
                     if precall(lua_state, func_idx, 2, c as i32)? {
-                        break;
+                        // Lua call in generic for: reload callee frame, continue dispatch directly
+                        reload_frame!();
+                        continue;
                     }
                     active_frame.reload(lua_state);
                     if lua_state.hook_mask & LUA_MASKLINE != 0 {
