@@ -343,18 +343,18 @@ pub type GcProto = Gc<LuaProto>;
 
 #[derive(Debug)]
 pub struct GcPtr<T: HasGcHeader> {
-    ptr: u64,
+    ptr: *const T,
     _marker: std::marker::PhantomData<*const T>,
 }
 
 impl<T: HasGcHeader> std::hash::Hash for GcPtr<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state);
+        (self.ptr as u64).hash(state);
     }
 }
 
 // Manual implementation of Clone and Copy to avoid trait bound requirements on T
-// GcPtr is always Copy regardless of T, since it only stores a u64 pointer
+// GcPtr is always Copy regardless of T, since it only stores a raw pointer
 impl<T: HasGcHeader> Clone for GcPtr<T> {
     fn clone(&self) -> Self {
         *self
@@ -367,30 +367,30 @@ impl<T: HasGcHeader> Eq for GcPtr<T> {}
 
 impl<T: HasGcHeader> PartialEq for GcPtr<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.ptr == other.ptr
+        (self.ptr as u64) == (other.ptr as u64)
     }
 }
 
 impl<T: HasGcHeader> GcPtr<T> {
     pub fn new(ptr: *const T) -> Self {
         Self {
-            ptr: ptr as u64,
+            ptr,
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// Construct from raw u64 (used by GcObjectPtr tagged-pointer unpacking)
+    /// Construct from raw u64 (used by GcObjectPtr tagged-pointer unpacking).
     #[inline(always)]
     pub fn from_raw(raw: u64) -> Self {
         Self {
-            ptr: raw,
+            ptr: raw as *const T,
             _marker: std::marker::PhantomData,
         }
     }
 
     pub fn null() -> Self {
         Self {
-            ptr: 0,
+            ptr: std::ptr::null(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -398,12 +398,12 @@ impl<T: HasGcHeader> GcPtr<T> {
     /// Get the raw u64 pointer value (used by GcObjectPtr tagged-pointer packing)
     #[inline(always)]
     pub fn as_u64(&self) -> u64 {
-        self.ptr
+        self.ptr as u64
     }
 
     #[inline(always)]
     pub fn as_ptr(&self) -> *const T {
-        self.ptr as *const T
+        self.ptr
     }
 
     #[inline(always)]
@@ -414,16 +414,16 @@ impl<T: HasGcHeader> GcPtr<T> {
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_mut_ref(&self) -> &mut T {
-        unsafe { &mut *(self.as_mut_ptr()) }
+        unsafe { &mut *(self.ptr as *mut T) }
     }
 
     #[inline(always)]
     pub fn as_ref(&self) -> &T {
-        unsafe { &*(self.as_ptr()) }
+        unsafe { &*self.ptr }
     }
 
     pub fn is_null(&self) -> bool {
-        self.ptr == 0
+        self.ptr.is_null()
     }
 }
 
@@ -796,100 +796,92 @@ impl GcObjectOwner {
         }) as _
     }
 
+    /// Read the heap pointer from a `&Box<T>` without going through `Deref`,
+    /// avoiding Miri's Stacked Borrows retag that would be invalidated when
+    /// the Box moves into GcList. Box<T> is layout-compatible with *const T
+    /// on the default allocator — this reads the internal raw pointer directly.
+    #[inline(always)]
+    #[allow(clippy::borrowed_box)]
+    fn box_raw_ptr<T>(b: &Box<T>) -> *const T {
+        unsafe { *(b as *const Box<T> as *const *const T) }
+    }
+
     /// Get type tag of this object
     #[inline(always)]
     pub fn as_str_ptr(&self) -> Option<StringPtr> {
         match self {
-            GcObjectOwner::String(s) => Some(StringPtr::new(s.as_ref() as *const GcString)),
+            GcObjectOwner::String(s) => Some(StringPtr::new(Self::box_raw_ptr(s))),
             _ => None,
         }
     }
 
     pub fn as_table_ptr(&self) -> Option<TablePtr> {
         match self {
-            GcObjectOwner::Table(t) => Some(TablePtr::new(t.as_ref() as *const GcTable)),
+            GcObjectOwner::Table(t) => Some(TablePtr::new(Self::box_raw_ptr(t))),
             _ => None,
         }
     }
 
     pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
         match self {
-            GcObjectOwner::Function(f) => Some(FunctionPtr::new(f.as_ref() as *const GcFunction)),
+            GcObjectOwner::Function(f) => Some(FunctionPtr::new(Self::box_raw_ptr(f))),
             _ => None,
         }
     }
 
     pub fn as_upvalue_ptr(&self) -> Option<UpvaluePtr> {
         match self {
-            GcObjectOwner::Upvalue(u) => Some(UpvaluePtr::new(u.as_ref() as *const GcUpvalue)),
+            GcObjectOwner::Upvalue(u) => Some(UpvaluePtr::new(Self::box_raw_ptr(u))),
             _ => None,
         }
     }
 
     pub fn as_thread_ptr(&self) -> Option<ThreadPtr> {
         match self {
-            GcObjectOwner::Thread(t) => Some(ThreadPtr::new(t.as_ref() as *const GcThread)),
+            GcObjectOwner::Thread(t) => Some(ThreadPtr::new(Self::box_raw_ptr(t))),
             _ => None,
         }
     }
 
     pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
         match self {
-            GcObjectOwner::Userdata(u) => Some(UserdataPtr::new(u.as_ref() as *const GcUserdata)),
+            GcObjectOwner::Userdata(u) => Some(UserdataPtr::new(Self::box_raw_ptr(u))),
             _ => None,
         }
     }
 
     pub fn as_closure_ptr(&self) -> Option<CClosurePtr> {
         match self {
-            GcObjectOwner::CClosure(c) => Some(CClosurePtr::new(c.as_ref() as *const GcCClosure)),
+            GcObjectOwner::CClosure(c) => Some(CClosurePtr::new(Self::box_raw_ptr(c))),
             _ => None,
         }
     }
 
     pub fn as_rclosure_ptr(&self) -> Option<RClosurePtr> {
         match self {
-            GcObjectOwner::RClosure(r) => Some(RClosurePtr::new(r.as_ref() as *const GcRClosure)),
+            GcObjectOwner::RClosure(r) => Some(RClosurePtr::new(Self::box_raw_ptr(r))),
             _ => None,
         }
     }
 
     pub fn as_proto_ptr(&self) -> Option<ProtoPtr> {
         match self {
-            GcObjectOwner::Proto(p) => Some(ProtoPtr::new(p.as_ref() as *const GcProto)),
+            GcObjectOwner::Proto(p) => Some(ProtoPtr::new(Self::box_raw_ptr(p))),
             _ => None,
         }
     }
 
     pub fn as_gc_ptr(&self) -> GcObjectPtr {
         match self {
-            GcObjectOwner::String(s) => {
-                GcObjectPtr::from(StringPtr::new(s.as_ref() as *const GcString))
-            }
-            GcObjectOwner::Table(t) => {
-                GcObjectPtr::from(TablePtr::new(t.as_ref() as *const GcTable))
-            }
-            GcObjectOwner::Function(f) => {
-                GcObjectPtr::from(FunctionPtr::new(f.as_ref() as *const GcFunction))
-            }
-            GcObjectOwner::Upvalue(u) => {
-                GcObjectPtr::from(UpvaluePtr::new(u.as_ref() as *const GcUpvalue))
-            }
-            GcObjectOwner::Thread(t) => {
-                GcObjectPtr::from(ThreadPtr::new(t.as_ref() as *const GcThread))
-            }
-            GcObjectOwner::Userdata(u) => {
-                GcObjectPtr::from(UserdataPtr::new(u.as_ref() as *const GcUserdata))
-            }
-            GcObjectOwner::CClosure(c) => {
-                GcObjectPtr::from(CClosurePtr::new(c.as_ref() as *const GcCClosure))
-            }
-            GcObjectOwner::RClosure(r) => {
-                GcObjectPtr::from(RClosurePtr::new(r.as_ref() as *const GcRClosure))
-            }
-            GcObjectOwner::Proto(p) => {
-                GcObjectPtr::from(ProtoPtr::new(p.as_ref() as *const GcProto))
-            }
+            GcObjectOwner::String(s) => GcObjectPtr::from(StringPtr::new(Self::box_raw_ptr(s))),
+            GcObjectOwner::Table(t) => GcObjectPtr::from(TablePtr::new(Self::box_raw_ptr(t))),
+            GcObjectOwner::Function(f) => GcObjectPtr::from(FunctionPtr::new(Self::box_raw_ptr(f))),
+            GcObjectOwner::Upvalue(u) => GcObjectPtr::from(UpvaluePtr::new(Self::box_raw_ptr(u))),
+            GcObjectOwner::Thread(t) => GcObjectPtr::from(ThreadPtr::new(Self::box_raw_ptr(t))),
+            GcObjectOwner::Userdata(u) => GcObjectPtr::from(UserdataPtr::new(Self::box_raw_ptr(u))),
+            GcObjectOwner::CClosure(c) => GcObjectPtr::from(CClosurePtr::new(Self::box_raw_ptr(c))),
+            GcObjectOwner::RClosure(r) => GcObjectPtr::from(RClosurePtr::new(Self::box_raw_ptr(r))),
+            GcObjectOwner::Proto(p) => GcObjectPtr::from(ProtoPtr::new(Self::box_raw_ptr(p))),
         }
     }
 
