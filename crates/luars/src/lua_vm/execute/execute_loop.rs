@@ -235,6 +235,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         /// Used instead of `break`-to-outer-loop for CALL/RETURN: reloads locals
         /// so the inner dispatch loop can continue directly — mirrors C Lua's
         /// `goto startfunc` / `goto returning` pattern.
+        /// NOTE: If target frame is a C function (CIST_C) or has pending finish
+        /// (CIST_PENDING_FINISH, e.g. after yield-in-__index resume), falls back
+        /// to break+outer-reload to avoid null chunk_ptr and handle pending ops.
         macro_rules! reload_frame {
             () => {
                 let current_depth = lua_state.call_depth();
@@ -243,6 +246,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 }
                 let frame_idx = current_depth - 1;
                 let ci = lua_state.get_call_info(frame_idx);
+                if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
+                    // C frame or pending finish: break to outer loop
+                    break;
+                }
                 base = ci.base;
                 pc = ci.pc as usize;
                 chunk = unsafe { &*ci.chunk_ptr };
