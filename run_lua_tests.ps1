@@ -9,6 +9,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $repoRoot
+
 if (-not $SkipBuild) {
 	if ($Profile -eq "debug") {
 		cargo build -p luars_interpreter
@@ -31,10 +34,10 @@ if ($Profile -eq "debug") {
 }
 
 $exe = if ($Profile -eq "debug") {
-	"../../target/debug/lua.exe"
+	Join-Path $repoRoot "target/debug/lua.exe"
 }
 else {
-	"../../target/release/lua.exe"
+	Join-Path $repoRoot "target/release/lua.exe"
 }
 
 Push-Location "lua_tests/testes"
