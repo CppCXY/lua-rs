@@ -1,0 +1,48 @@
+name: Miri
+
+on:
+  push:
+    branches: [ main, master, dev ]
+  pull_request:
+    branches: [ main, master, dev ]
+
+env:
+  CARGO_TERM_COLOR: always
+  MIRIFLAGS: -Zmiri-disable-stacked-borrows -Zmiri-permissive-provenance
+
+jobs:
+  miri:
+    name: Miri Smoke Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust nightly with Miri
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        toolchain: nightly
+        components: miri,rust-src
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-miri-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-miri-cargo-
+
+    - name: Cache target
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-miri-target-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-miri-target-
+
+    - name: Run Miri smoke tests
+      shell: pwsh
+      run: ./run_miri.ps1 -Toolchain nightly -SkipSetup -NoCapture

@@ -549,8 +549,8 @@ impl GC {
             self.gc_debt -= delta; // allocation grows debt, deallocation shrinks it
             // Update stored size in the GC header
             let header = &mut table_ptr.as_mut_ref().header;
-            let old_header_size = header.size as isize;
-            header.size = (old_header_size + delta).max(0) as u32;
+            let old_header_size = header.size() as isize;
+            header.set_size((old_header_size + delta).max(0) as u32);
         }
     }
 
@@ -3027,7 +3027,7 @@ impl GC {
             let objects = list.take_all();
             let mut survivors: Vec<GcObjectOwner> = Vec::new();
 
-            for mut gc_owner in objects {
+            for gc_owner in objects {
                 let gc_ptr = gc_owner.as_gc_ptr();
                 let Some(header) = gc_ptr.header() else {
                     continue;
@@ -3663,7 +3663,7 @@ impl GC {
         let mut new_survival: Vec<GcObjectOwner> = Vec::new();
         let mut new_old1: Vec<GcObjectOwner> = Vec::new();
 
-        for mut gc_owner in allgc_objects {
+        for gc_owner in allgc_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
 
             let Some(header) = gc_ptr.header() else {
@@ -3729,7 +3729,7 @@ impl GC {
         // Dead objects are freed, survivors are promoted to old1 (G_OLD1)
         let survival_objects = self.survival.take_all();
 
-        for mut gc_owner in survival_objects {
+        for gc_owner in survival_objects {
             let gc_ptr = gc_owner.as_gc_ptr();
 
             let Some(header) = gc_ptr.header() else {

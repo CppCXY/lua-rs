@@ -91,7 +91,10 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
 
             // Validate year range for 32-bit time_t compatibility
             // Lua checks if year fits in an int after subtracting 1900
-            let year_offset = year - 1900;
+            let year_offset = match year.checked_sub(1900) {
+                Some(value) => value,
+                None => return Err(l.error("field 'year' is out-of-bound".to_string())),
+            };
             if year_offset < i32::MIN as i64 || year_offset > i32::MAX as i64 {
                 return Err(l.error("field 'year' is out-of-bound".to_string()));
             }

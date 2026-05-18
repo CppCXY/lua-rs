@@ -43,6 +43,23 @@ fn test_os_time_with_table() {
 }
 
 #[test]
+fn test_os_time_out_of_bound_year_reports_lua_error() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local ok, err = pcall(os.time, {year = math.mininteger, month = 1, day = 1})
+        assert(ok == false)
+        assert(type(err) == "string")
+        assert(string.find(err, "field 'year' is out%-of%-bound") ~= nil)
+        "#,
+    );
+
+    assert!(result.is_ok(), "Error: {:?}", result);
+}
+
+#[test]
 fn test_os_date_default() {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();

@@ -41,6 +41,35 @@ struct Options {
     warnings_on: bool,
 }
 
+fn env_usize(name: &str) -> Option<usize> {
+    env::var(name).ok()?.parse().ok()
+}
+
+fn lua_main_stack_size() -> usize {
+    const MIB: usize = 1024 * 1024;
+
+    if let Some(stack_mb) = env_usize("LUARS_MAIN_STACK_SIZE_MB") {
+        return stack_mb.saturating_mul(MIB).max(8 * MIB);
+    }
+
+    if cfg!(debug_assertions) {
+        128 * MIB
+    } else {
+        16 * MIB
+    }
+}
+
+fn default_safe_option() -> SafeOption {
+    SafeOption {
+        max_stack_size: env_usize("LUARS_MAX_STACK_SIZE").unwrap_or(1_000_000),
+        max_call_depth: env_usize("LUARS_MAX_CALL_DEPTH").unwrap_or(1024),
+        max_c_stack_depth: env_usize("LUARS_MAX_C_STACK_DEPTH").unwrap_or(200),
+        max_memory_limit: env_usize("LUARS_MAX_MEMORY_LIMIT")
+            .map(|value| value.min(isize::MAX as usize) as isize)
+            .unwrap_or(4096 * 1024 * 1024),
+    }
+}
+
 fn parse_args() -> Result<Options, String> {
     let args: Vec<String> = env::args().collect();
     let mut opts = Options::default();
@@ -345,7 +374,7 @@ pub fn run_interpreter() {
 
     // Spawn a thread with a larger stack to handle deep pcall/lua_execute recursion.
     // Each pcall calls lua_execute recursively, and lua_execute has a large stack frame.
-    let stack_size = 16 * 1024 * 1024; // 16 MB
+    let stack_size = lua_main_stack_size();
     let builder = std::thread::Builder::new()
         .name("lua-main".into())
         .stack_size(stack_size);
@@ -384,12 +413,7 @@ fn lua_main() -> i32 {
     // Create the high-level runtime first so library installation stays on the
     // public embedding API. The CLI then reuses the underlying VM for its
     // low-level compile/execute workflow.
-    let safe_option = SafeOption {
-        max_stack_size: 1000000, // LUAI_MAXSTACK (Lua 5.5)
-        max_call_depth: if cfg!(debug_assertions) { 25 } else { 1024 }, // Lua 5.5's MAX_CALL_DEPTH is 1024
-        max_c_stack_depth: if cfg!(debug_assertions) { 25 } else { 200 }, // LUAI_MAXCSTACK is 200
-        max_memory_limit: 4096 * 1024 * 1024,                           // 4 GB
-    };
+    let safe_option = default_safe_option();
 
     let mut lua = Lua::new(safe_option);
     lua.open_stdlib(Stdlib::All).unwrap();

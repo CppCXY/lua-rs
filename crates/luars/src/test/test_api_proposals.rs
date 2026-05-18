@@ -1,6 +1,8 @@
 // Tests for API improvement proposals (P1–P11)
 use crate::*;
 
+use std::path::PathBuf;
+
 // ============================
 // P1: call / call_global
 // ============================
@@ -45,6 +47,24 @@ fn test_call_global_not_found() {
     let mut vm = LuaVM::new(SafeOption::default());
     let result: LuaResult<Vec<LuaValue>> = vm.call_global("nonexistent", ());
     assert!(result.is_err());
+}
+
+fn test_temp_dir() -> PathBuf {
+    #[cfg(miri)]
+    {
+        if let Some(path) = std::env::var_os("TEMP") {
+            return PathBuf::from(path);
+        }
+        if let Some(path) = std::env::var_os("TMP") {
+            return PathBuf::from(path);
+        }
+        panic!("Miri tests require TEMP or TMP to be set");
+    }
+
+    #[cfg(not(miri))]
+    {
+        std::env::temp_dir()
+    }
 }
 
 // ============================
@@ -219,7 +239,7 @@ fn test_shared_proto_survives_vm_drop() {
 fn test_shared_proto_reuses_same_file_across_vms() {
     use std::io::Write;
 
-    let path = std::env::temp_dir().join("lua_rs_shared_proto_cache.lua");
+    let path = test_temp_dir().join("lua_rs_shared_proto_cache.lua");
     {
         let mut file = std::fs::File::create(&path).unwrap();
         writeln!(file, "return 'shared-proto-cache'").unwrap();
@@ -247,7 +267,7 @@ fn test_shared_proto_reuses_same_file_across_vms() {
 fn test_shared_proto_reloads_when_file_changes() {
     use std::io::Write;
 
-    let path = std::env::temp_dir().join("lua_rs_shared_proto_reload.lua");
+    let path = test_temp_dir().join("lua_rs_shared_proto_reload.lua");
     {
         let mut file = std::fs::File::create(&path).unwrap();
         writeln!(file, "return 1").unwrap();
@@ -499,7 +519,7 @@ fn test_table_length() {
 fn test_dofile() {
     use std::io::Write;
 
-    let dir = std::env::temp_dir();
+    let dir = test_temp_dir();
     let path = dir.join("lua_rs_test_dofile.lua");
     {
         let mut f = std::fs::File::create(&path).unwrap();

@@ -6,7 +6,7 @@
 
 use crate::{
     LuaResult, LuaState, LuaValue,
-    lua_vm::{TmKind, execute},
+    lua_vm::{TmKind, execute, execute::helper::luai_numpow},
     stdlib::basic::parse_number::parse_lua_number,
 };
 
@@ -144,7 +144,7 @@ pub fn arith_mod(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
 pub fn arith_pow(a: LuaValue, b: LuaValue) -> Option<LuaValue> {
     let fa = a.as_number().or_else(|| a.as_integer().map(|i| i as f64))?;
     let fb = b.as_number().or_else(|| b.as_integer().map(|i| i as f64))?;
-    Some(LuaValue::float(fa.powf(fb)))
+    Some(LuaValue::float(luai_numpow(fa, fb)))
 }
 
 pub fn arith_div(a: LuaValue, b: LuaValue) -> Option<LuaValue> {

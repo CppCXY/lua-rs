@@ -1014,6 +1014,10 @@ impl LuaVM {
     pub(crate) fn load_proto_from_file(&mut self, path: &str) -> LuaResult<ProtoPtr> {
         use crate::lua_value::chunk_serializer;
 
+        #[cfg(miri)]
+        let resolved_path = std::path::PathBuf::from(path);
+
+        #[cfg(not(miri))]
         let resolved_path = std::fs::canonicalize(path)
             .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
 

@@ -110,7 +110,7 @@ pub const fn withvariant(tt: u8) -> u8 {
 pub union Value {
     pub ptr: *const u8,           // GC object pointer (stable via Box in Gc<T>)
     pub p: *mut std::ffi::c_void, // light userdata pointer
-    pub f: usize,                 // light C function pointer (converted from fn pointer)
+    pub f: CFunction,             // light C function pointer
     pub i: i64,                   // integer number
     pub n: f64,                   // float number
 }
@@ -138,7 +138,7 @@ impl Value {
 
     #[inline(always)]
     pub fn cfunction(f: CFunction) -> Self {
-        Value { f: f as usize }
+        Value { f }
     }
 }
 
@@ -497,7 +497,7 @@ impl LuaValue {
     #[inline(always)]
     pub(crate) fn fvalue(&self) -> CFunction {
         debug_assert!(self.ttiscfunction());
-        unsafe { std::mem::transmute(self.value.f) }
+        unsafe { self.value.f }
     }
 
     // ============ pub API ============
@@ -1281,7 +1281,11 @@ impl std::fmt::Display for LuaValue {
             LuaValueKind::Function => {
                 write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
             }
-            LuaValueKind::CFunction => write!(f, "function: 0x{:x}", unsafe { self.value.f }),
+            LuaValueKind::CFunction => {
+                write!(f, "function: 0x{:x}", unsafe {
+                    self.value.f as *const () as usize
+                })
+            }
             LuaValueKind::CClosure => {
                 write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
             }
