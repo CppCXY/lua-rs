@@ -175,7 +175,7 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 /// coroutine.running() - Get currently running coroutine
 fn coroutine_running(l: &mut LuaState) -> LuaResult<usize> {
     // In the main thread, return nil and true
-    let thread_ptr = unsafe { l.thread_ptr() };
+    let thread_ptr = l.thread_ptr();
     if l.is_main_thread() {
         l.push_value(LuaValue::thread(thread_ptr))?;
         l.push_value(LuaValue::boolean(true))?;
@@ -294,7 +294,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
         }
         _ => {
             // No argument or nil — close self
-            let thread_ptr = unsafe { l.thread_ptr() };
+            let thread_ptr = l.thread_ptr();
             LuaValue::thread(thread_ptr)
         }
     };

@@ -276,9 +276,7 @@ impl ObjectAllocator {
         let mut gc_thread =
             GcObjectOwner::Thread(Box::new(GcThread::new(thread, current_white, size as u32)));
         let ptr = gc_thread.as_thread_ptr().unwrap();
-        unsafe {
-            gc_thread.as_thread_mut().unwrap().set_thread_ptr(ptr);
-        }
+        gc_thread.as_thread_mut().unwrap().set_thread_ptr(ptr);
 
         gc.trace_object(gc_thread)?;
         Ok(LuaValue::thread(ptr))

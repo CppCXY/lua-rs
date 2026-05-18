@@ -4,7 +4,7 @@
 use crate::lua_api;
 use crate::lua_value::LuaValue;
 use crate::lua_vm::LuaState;
-use crate::lua_vm::{CFunction, LuaResult, LuaVM};
+use crate::lua_vm::{CFunction, GlobalState, LuaResult};
 use crate::stdlib::{self, Stdlib};
 // use crate::stdlib;
 
@@ -19,7 +19,7 @@ pub trait LuaLibrary {
 }
 
 /// Type for value initializers - functions that create values when the module loads
-pub type ValueInitializer = fn(&mut LuaVM) -> LuaResult<LuaValue>;
+pub type ValueInitializer = fn(&mut GlobalState) -> LuaResult<LuaValue>;
 
 /// Type for module initializers - functions that set up additional module fields
 pub type ModuleInitializer = fn(&mut LuaState) -> LuaResult<()>;
@@ -168,7 +168,7 @@ impl LibraryRegistry {
     }
 
     /// Load all registered libraries into a VM
-    pub fn load_all(&self, vm: &mut LuaVM) -> LuaResult<()> {
+    pub fn load_all(&self, vm: &mut GlobalState) -> LuaResult<()> {
         for module in &self.modules {
             self.load_module(vm, module)?;
         }
@@ -176,7 +176,7 @@ impl LibraryRegistry {
     }
 
     /// Load a specific module into the VM
-    pub fn load_module(&self, vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> {
+    pub fn load_module(&self, vm: &mut GlobalState, module: &LibraryModule) -> LuaResult<()> {
         load_library_module(vm, module)
     }
 
@@ -186,7 +186,7 @@ impl LibraryRegistry {
     }
 }
 
-fn load_library_module(vm: &mut LuaVM, module: &LibraryModule) -> LuaResult<()> {
+fn load_library_module(vm: &mut GlobalState, module: &LibraryModule) -> LuaResult<()> {
     // Create a table for the library
     let lib_table = vm.create_table(0, 0)?;
 

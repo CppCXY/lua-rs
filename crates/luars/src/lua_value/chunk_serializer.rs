@@ -4,7 +4,7 @@
 use super::{LocVar, LuaProto, LuaValue, UpvalueDesc};
 use crate::Instruction;
 use crate::gc::{GcProto, ObjectAllocator, ProtoPtr};
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::GlobalState;
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -95,7 +95,10 @@ pub fn deserialize_chunk(data: &[u8]) -> Result<LuaProto, String> {
 }
 
 /// Deserialize binary data to a Chunk, directly creating strings with VM
-pub fn deserialize_chunk_with_strings_vm(data: &[u8], vm: &mut LuaVM) -> Result<LuaProto, String> {
+pub fn deserialize_chunk_with_strings_vm(
+    data: &[u8],
+    vm: &mut GlobalState,
+) -> Result<LuaProto, String> {
     let mut cursor = Cursor::new(data);
 
     // Verify magic number
@@ -736,7 +739,10 @@ fn read_constant(cursor: &mut Cursor<&[u8]>) -> Result<LuaValue, String> {
 }
 
 #[allow(dead_code)]
-fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<LuaProto, String> {
+fn read_chunk_with_vm(
+    cursor: &mut Cursor<&[u8]>,
+    vm: &mut GlobalState,
+) -> Result<LuaProto, String> {
     // Read code
     let code_len = read_u32(cursor)? as usize;
     let mut code = Vec::with_capacity(code_len);
@@ -827,7 +833,10 @@ fn read_chunk_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<LuaP
 }
 
 #[allow(dead_code)]
-fn read_constant_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<LuaValue, String> {
+fn read_constant_with_vm(
+    cursor: &mut Cursor<&[u8]>,
+    vm: &mut GlobalState,
+) -> Result<LuaValue, String> {
     let tag = read_u8(cursor)?;
     match tag {
         TAG_NIL => Ok(LuaValue::nil()),
@@ -846,7 +855,7 @@ fn read_constant_with_vm(cursor: &mut Cursor<&[u8]>, vm: &mut LuaVM) -> Result<L
 
 fn read_chunk_with_vm_dedup(
     cursor: &mut Cursor<&[u8]>,
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     string_table: &mut Vec<String>,
 ) -> Result<LuaProto, String> {
     // Read code
@@ -940,7 +949,7 @@ fn read_chunk_with_vm_dedup(
 
 fn read_constant_with_vm_dedup(
     cursor: &mut Cursor<&[u8]>,
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     string_table: &mut Vec<String>,
 ) -> Result<LuaValue, String> {
     let tag = read_u8(cursor)?;

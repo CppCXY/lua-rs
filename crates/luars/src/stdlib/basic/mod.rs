@@ -43,7 +43,8 @@ pub fn create_basic_lib() -> LibraryModule {
         "warn" => lua_warn,
     })
     .with_value("_VERSION", |vm| {
-        vm.create_string_owned(format!("{}", vm.version))
+        let version = vm.version;
+        vm.create_string_owned(format!("{}", version))
     })
 }
 
@@ -1075,12 +1076,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 GcKind::GenMajor => "generational",
             };
 
-            // SAFETY: vm_ptr + change_mode need separate mutable access to
-            // both GcManager (through vm) and LuaState — borrow checker cannot
-            // express this dual-mut pattern through a single `vm_mut()` call.
-            let vm_ptr = l.vm_ptr();
-            let vm = unsafe { &mut *vm_ptr };
-            vm.gc.change_mode(l, GcKind::GenMinor);
+            l.change_gc_mode(GcKind::GenMinor);
 
             let mode_value = l.create_string(old_mode)?;
             l.push_value(mode_value)?;
@@ -1094,10 +1090,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
                 GcKind::GenMajor => "generational",
             };
 
-            // SAFETY: see "generational" case above for dual-mut justification.
-            let vm_ptr = l.vm_ptr();
-            let vm = unsafe { &mut *vm_ptr };
-            vm.gc.change_mode(l, GcKind::Inc);
+            l.change_gc_mode(GcKind::Inc);
 
             let mode_value = l.create_string(old_mode)?;
             l.push_value(mode_value)?;

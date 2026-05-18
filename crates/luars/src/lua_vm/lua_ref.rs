@@ -4,12 +4,13 @@
 /// This is useful for keeping values alive across GC cycles and for passing values between Rust and Lua.
 use std::marker::PhantomData;
 
+use crate::LuaResult;
 use crate::LuaState;
 use crate::lua_value::LuaValue;
 use crate::lua_value::LuaValueKind;
 use crate::lua_value::lua_convert::collect_into_lua_values;
 use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
-use crate::{LuaResult, LuaVM};
+use crate::lua_vm::{GlobalState, VmHandle};
 
 /// A reference ID in the registry.
 /// Similar to Lua's luaL_ref return value.
@@ -115,7 +116,7 @@ impl LuaRefValue {
     }
 
     /// Get the Lua value from this reference (requires VM access)
-    pub fn get(&self, vm: &LuaVM) -> LuaValue {
+    pub fn get(&self, vm: &GlobalState) -> LuaValue {
         match &self.inner {
             LuaRefInner::Direct(value) => *value,
             LuaRefInner::Registry { ref_id } => {
@@ -180,20 +181,20 @@ impl std::fmt::Debug for LuaRefValue {
 
 /// Internal core shared by all user-facing Ref types.
 ///
-/// Holds a registry reference ID and a raw pointer to the owning `LuaVM`.
+/// Holds a registry reference ID and a handle to the owning global state.
 /// Automatically releases the registry entry on `Drop` (RAII).
 ///
 /// `!Send + !Sync` by design — Lua VM is single-threaded.
 struct RefInner {
     ref_id: RefId,
-    vm: *mut LuaVM,
+    vm: VmHandle,
     /// Makes RefInner !Send + !Sync
     _marker: PhantomData<*const ()>,
 }
 
 impl RefInner {
     /// Create a new RefInner. The value must already be stored in the registry.
-    fn new(ref_id: RefId, vm: *mut LuaVM) -> Self {
+    fn new(ref_id: RefId, vm: VmHandle) -> Self {
         RefInner {
             ref_id,
             vm,
@@ -204,31 +205,28 @@ impl RefInner {
     /// Retrieve the LuaValue from the registry.
     #[inline]
     fn to_value(&self) -> LuaValue {
-        let vm = unsafe { &*self.vm };
-        vm.registry_geti(self.ref_id as i64)
-            .unwrap_or(LuaValue::nil())
+        let vm = self.vm.as_ref();
+        vm.registry_geti(self.ref_id as i64).unwrap_or_default()
     }
 
     /// Get a reference to the VM.
     #[inline]
-    fn vm(&self) -> &LuaVM {
-        unsafe { &*self.vm }
+    fn vm(&self) -> &GlobalState {
+        self.vm.as_ref()
     }
 
     /// Get a mutable reference to the VM.
     #[allow(clippy::mut_from_ref)]
     #[inline]
-    fn vm_mut(&self) -> &mut LuaVM {
-        unsafe { &mut *self.vm }
+    fn vm_mut(&self) -> &mut GlobalState {
+        self.vm.as_mut()
     }
 }
 
 impl Drop for RefInner {
     fn drop(&mut self) {
-        if self.ref_id > 0 && !self.vm.is_null() {
-            unsafe {
-                (*self.vm).release_ref_id(self.ref_id);
-            }
+        if self.ref_id > 0 {
+            self.vm.as_mut().release_ref_id(self.ref_id);
         }
     }
 }
@@ -251,7 +249,7 @@ impl Clone for RefInner {
 // ---- helper: create a registry ref for a LuaValue ---------------------------
 
 fn collect_single_value<T: IntoLua>(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: T,
     context: &str,
 ) -> LuaResult<LuaValue> {
@@ -268,7 +266,7 @@ fn collect_single_value<T: IntoLua>(
 }
 
 /// Store a LuaValue in the VM registry and return its RefId.
-pub(crate) fn store_in_registry(vm: &mut LuaVM, value: LuaValue) -> RefId {
+pub(crate) fn store_in_registry(vm: &mut GlobalState, value: LuaValue) -> RefId {
     let ref_id = vm.ref_manager.alloc_ref_id();
     vm.registry_seti(ref_id as i64, value);
     ref_id
@@ -300,7 +298,7 @@ pub struct LuaTableRef {
 impl LuaTableRef {
     /// Create from an already-registered ref id. The caller guarantees the
     /// value at `ref_id` is a table.
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
         LuaTableRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -498,7 +496,7 @@ pub struct LuaFunctionRef {
 }
 
 impl LuaFunctionRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
         LuaFunctionRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -583,7 +581,7 @@ pub struct LuaStringRef {
 }
 
 impl LuaStringRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
         LuaStringRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -674,7 +672,7 @@ pub struct UserDataRef<T: 'static> {
 }
 
 impl<T: 'static> UserDataRef<T> {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
         UserDataRef {
             inner: RefInner::new(ref_id, vm),
             _marker: PhantomData,
@@ -771,7 +769,7 @@ impl<T: 'static> FromLua for UserDataRef<T> {
 
         let vm = state.vm_mut();
         let ref_id = store_in_registry(vm, value);
-        Ok(UserDataRef::from_raw(ref_id, vm as *mut LuaVM))
+        Ok(UserDataRef::from_raw(ref_id, state.vm_handle()))
     }
 }
 
@@ -828,7 +826,7 @@ pub struct LuaAnyRef {
 }
 
 impl LuaAnyRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: *mut LuaVM) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
         LuaAnyRef {
             inner: RefInner::new(ref_id, vm),
         }

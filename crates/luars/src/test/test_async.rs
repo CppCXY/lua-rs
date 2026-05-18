@@ -9,7 +9,7 @@ use crate::*;
 use std::fmt;
 
 /// Helper: create a VM with stdlib loaded
-fn new_vm() -> Box<LuaVM> {
+fn new_vm() -> LuaVM {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm

@@ -11,7 +11,7 @@ pub fn init() {
 /// Lua 5.5 VM for WebAssembly.
 #[wasm_bindgen]
 pub struct LuaWasm {
-    vm: Box<LuaVM>,
+    vm: LuaVM,
 }
 
 #[wasm_bindgen]

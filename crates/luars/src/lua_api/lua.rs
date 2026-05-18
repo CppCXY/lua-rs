@@ -16,7 +16,7 @@ use crate::{LuaError, LuaFullError};
 /// This type sits on top of `luars::LuaVM` and exposes a narrower API that
 /// avoids raw `LuaValue` plumbing in the common host-facing surface.
 pub struct Lua {
-    vm: Box<LuaVM>,
+    vm: LuaVM,
 }
 
 impl Lua {

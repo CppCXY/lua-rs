@@ -50,6 +50,9 @@ pub use execute::{get_metamethod_event, get_metatable};
 pub use lua_rng::LuaRng;
 pub use opcode::{Instruction, OpCode};
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
+use std::ptr::NonNull;
 pub use string_arth::*;
 
 pub type LuaResult<T> = Result<T, LuaError>;
@@ -190,7 +193,7 @@ pub const LUA_MASKCOUNT: u8 = 1 << LUA_HOOKCOUNT as u8;
 
 /// Global VM state (equivalent to global_State in Lua C API)
 /// Manages global resources shared by all execution threads/coroutines
-pub struct LuaVM {
+pub struct GlobalState {
     /// Global environment table (_G and _ENV point to this)
     pub(crate) global: LuaValue,
 
@@ -244,8 +247,74 @@ pub struct LuaVM {
     pub(crate) io_default_input: Option<LuaValue>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct VmHandle(NonNull<GlobalState>);
+
+impl VmHandle {
+    pub(crate) fn from_global(state: &mut GlobalState) -> Self {
+        Self(NonNull::from(state))
+    }
+
+    pub(crate) fn dangling() -> Self {
+        Self(NonNull::dangling())
+    }
+
+    pub(crate) fn as_ref<'a>(self) -> &'a GlobalState {
+        unsafe { self.0.as_ref() }
+    }
+
+    pub(crate) fn as_mut<'a>(mut self) -> &'a mut GlobalState {
+        unsafe { self.0.as_mut() }
+    }
+
+    pub(crate) fn gc_debt(self) -> isize {
+        self.as_ref().gc.gc_debt
+    }
+
+    pub(crate) fn gc_barrier(
+        self,
+        state: *mut LuaState,
+        owner_ptr: crate::gc::GcObjectPtr,
+        value_gc_ptr: crate::gc::GcObjectPtr,
+    ) {
+        self.as_mut()
+            .gc
+            .barrier(unsafe { &mut *state }, owner_ptr, value_gc_ptr);
+    }
+
+    pub(crate) fn check_gc(self, state: *mut LuaState) -> bool {
+        self.as_mut().check_gc(unsafe { &mut *state })
+    }
+
+    pub(crate) fn full_gc(self, state: *mut LuaState, emergency: bool) {
+        self.as_mut().full_gc(unsafe { &mut *state }, emergency);
+    }
+
+    pub(crate) fn change_gc_mode(self, state: *mut LuaState, kind: GcKind) {
+        self.as_mut().gc.change_mode(unsafe { &mut *state }, kind);
+    }
+}
+
+pub struct LuaVM {
+    inner: Pin<Box<GlobalState>>,
+}
+
+impl Deref for LuaVM {
+    type Target = GlobalState;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.as_ref().get_ref()
+    }
+}
+
+impl DerefMut for LuaVM {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.inner.as_mut().get_unchecked_mut() }
+    }
+}
+
 impl LuaVM {
-    pub fn new(option: SafeOption) -> Box<Self> {
+    pub fn new(option: SafeOption) -> Self {
         let mut gc = GC::new(option.clone());
         gc.set_temporary_memory_limit(isize::MAX / 2);
         let mut object_allocator = ObjectAllocator::new();
@@ -255,7 +324,7 @@ impl LuaVM {
         let cs = ConstString::new(&mut object_allocator, &mut gc);
         let time = unix_nanos();
 
-        let mut vm = Box::new(LuaVM {
+        let mut inner = Box::pin(GlobalState {
             global: LuaValue::nil(),
             registry: LuaValue::nil(),
             ref_manager: RefManager::new(),
@@ -278,30 +347,38 @@ impl LuaVM {
             io_default_input: None,
         });
 
-        let ptr_vm = vm.as_mut() as *mut LuaVM;
-        // Set LuaVM pointer in main_state
-        let thread_value = vm
-            .object_allocator
-            .create_thread(&mut vm.gc, LuaState::new(6, ptr_vm, true, option.clone()))
-            .unwrap();
+        // Set GlobalState pointer in main_state
+        let thread_value = {
+            let state = unsafe { inner.as_mut().get_unchecked_mut() };
+            let vm_handle = VmHandle::from_global(state);
+            let allocator = &mut state.object_allocator as *mut ObjectAllocator;
+            let gc = &mut state.gc as *mut GC;
+            unsafe {
+                (*allocator)
+                    .create_thread(&mut *gc, LuaState::new(6, vm_handle, true, option.clone()))
+            }
+            .unwrap()
+        };
 
-        vm.main_state = thread_value.as_thread_ptr().unwrap();
+        inner.main_state = thread_value.as_thread_ptr().unwrap();
 
         // Initialize registry (like Lua's init_registry)
         // Registry is a GC root and protects all values stored in it
-        let registry = vm.create_table(2, 8).unwrap();
-        vm.registry = registry;
+        let registry = inner.create_table(2, 8).unwrap();
+        inner.registry = registry;
 
         // Set _G to point to the global table itself
-        let globals_value = vm.create_table(0, 20).unwrap();
-        vm.global = globals_value;
-        vm.set_global("_G", globals_value).unwrap();
-        vm.set_global("_ENV", globals_value).unwrap();
+        let globals_value = inner.create_table(0, 20).unwrap();
+        inner.global = globals_value;
+        inner.set_global("_G", globals_value).unwrap();
+        inner.set_global("_ENV", globals_value).unwrap();
 
-        vm.gc.clear_temporary_memory_limit();
-        vm
+        inner.gc.clear_temporary_memory_limit();
+        LuaVM { inner }
     }
+}
 
+impl GlobalState {
     pub fn main_state(&mut self) -> &mut LuaState {
         &mut self.main_state.as_mut_ref().data
     }
@@ -755,8 +832,7 @@ impl LuaVM {
     /// ```
     pub fn to_ref(&mut self, value: LuaValue) -> LuaAnyRef {
         let ref_id = lua_ref::store_in_registry(self, value);
-        let vm_ptr = self as *mut LuaVM;
-        LuaAnyRef::from_raw(ref_id, vm_ptr)
+        LuaAnyRef::from_raw(ref_id, VmHandle::from_global(self))
     }
 
     /// Wrap a table `LuaValue` into a `LuaTableRef`.
@@ -766,8 +842,7 @@ impl LuaVM {
             return None;
         }
         let ref_id = lua_ref::store_in_registry(self, value);
-        let vm_ptr = self as *mut LuaVM;
-        Some(LuaTableRef::from_raw(ref_id, vm_ptr))
+        Some(LuaTableRef::from_raw(ref_id, VmHandle::from_global(self)))
     }
 
     /// Wrap a function `LuaValue` into a `LuaFunctionRef`.
@@ -777,8 +852,10 @@ impl LuaVM {
             return None;
         }
         let ref_id = lua_ref::store_in_registry(self, value);
-        let vm_ptr = self as *mut LuaVM;
-        Some(LuaFunctionRef::from_raw(ref_id, vm_ptr))
+        Some(LuaFunctionRef::from_raw(
+            ref_id,
+            VmHandle::from_global(self),
+        ))
     }
 
     /// Wrap a string `LuaValue` into a `LuaStringRef`.
@@ -788,8 +865,7 @@ impl LuaVM {
             return None;
         }
         let ref_id = lua_ref::store_in_registry(self, value);
-        let vm_ptr = self as *mut LuaVM;
-        Some(LuaStringRef::from_raw(ref_id, vm_ptr))
+        Some(LuaStringRef::from_raw(ref_id, VmHandle::from_global(self)))
     }
 
     /// Wrap a userdata `LuaValue` into a typed `UserDataRef<T>`.
@@ -798,8 +874,7 @@ impl LuaVM {
         let userdata = value.as_userdata_mut()?;
         userdata.downcast_ref::<T>()?;
         let ref_id = lua_ref::store_in_registry(self, value);
-        let vm_ptr = self as *mut LuaVM;
-        Some(UserDataRef::from_raw(ref_id, vm_ptr))
+        Some(UserDataRef::from_raw(ref_id, VmHandle::from_global(self)))
     }
 
     /// Create a new empty table and return it as a `LuaTableRef`.
@@ -1236,7 +1311,12 @@ impl LuaVM {
     /// OPTIMIZED: Minimal initial allocations - grows on demand
     pub fn create_thread(&mut self, func: LuaValue) -> CreateResult {
         // Create a new LuaState for the coroutine
-        let mut thread = LuaState::new(1, self as *mut LuaVM, false, self.safe_option.clone());
+        let mut thread = LuaState::new(
+            1,
+            VmHandle::from_global(self),
+            false,
+            self.safe_option.clone(),
+        );
 
         // Push the function onto the thread's stack (updates stack_top)
         // It will be used when resume() is first called
@@ -1356,8 +1436,11 @@ impl LuaVM {
         let env_upval = self.create_upvalue_closed(self.global)?;
         let func_val = self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
         let thread_val = self.create_thread(func_val)?;
-        let vm_ptr = self as *mut LuaVM;
-        Ok(async_thread::AsyncThread::new(thread_val, vm_ptr, args))
+        Ok(async_thread::AsyncThread::new(
+            thread_val,
+            VmHandle::from_global(self),
+            args,
+        ))
     }
 
     /// Compile and execute Lua source code asynchronously.
@@ -1397,8 +1480,8 @@ impl LuaVM {
         args: Vec<LuaValue>,
     ) -> LuaResult<Vec<LuaValue>> {
         let thread_val = self.create_thread(func)?;
-        let vm_ptr = self as *mut LuaVM;
-        let async_thread = async_thread::AsyncThread::new(thread_val, vm_ptr, args);
+        let async_thread =
+            async_thread::AsyncThread::new(thread_val, VmHandle::from_global(self), args);
         async_thread.await
     }
 
@@ -1448,8 +1531,7 @@ impl LuaVM {
         let runner_func =
             self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
         let thread_val = self.create_thread(runner_func)?;
-        let vm_ptr = self as *mut LuaVM;
-        async_thread::AsyncCallHandle::new(thread_val, vm_ptr, func)
+        async_thread::AsyncCallHandle::new(thread_val, VmHandle::from_global(self), func)
     }
 
     /// Look up a global function and create a reusable

@@ -337,7 +337,7 @@ use crate::lua_vm::{LuaVM, SafeOption};
 use crate::stdlib;
 
 /// Helper: create a VM with basic stdlib and register a Point userdata as global "p"
-fn setup_point_vm() -> Box<LuaVM> {
+fn setup_point_vm() -> LuaVM {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();
@@ -614,7 +614,7 @@ fn test_vm_method_as_field_access() {
 // ==================== register_type / Constructor Tests ====================
 
 /// Helper: create a VM with Point registered as a class table
-fn setup_point_class_vm() -> Box<LuaVM> {
+fn setup_point_class_vm() -> LuaVM {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();
@@ -1170,7 +1170,7 @@ impl NumberList {
     }
 }
 
-fn setup_number_list_vm() -> Box<LuaVM> {
+fn setup_number_list_vm() -> LuaVM {
     let mut vm = LuaVM::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();

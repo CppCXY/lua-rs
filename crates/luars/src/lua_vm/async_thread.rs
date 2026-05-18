@@ -30,7 +30,7 @@ use std::task::{Context, Poll};
 use crate::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::lua_ref::RefId;
-use crate::lua_vm::{LuaResult, LuaVM};
+use crate::lua_vm::{GlobalState, LuaResult, VmHandle};
 
 // ============ AsyncReturnValue ============
 
@@ -339,7 +339,10 @@ enum ResumeResult {
 // ============ Helper: convert AsyncReturnValues to LuaValues ============
 
 /// Convert a vector of `AsyncReturnValue` to `LuaValue` using the VM for string interning.
-fn materialize_values(vm: &mut LuaVM, values: Vec<AsyncReturnValue>) -> LuaResult<Vec<LuaValue>> {
+fn materialize_values(
+    vm: &mut GlobalState,
+    values: Vec<AsyncReturnValue>,
+) -> LuaResult<Vec<LuaValue>> {
     let mut result = Vec::with_capacity(values.len());
     for v in values {
         result.push(materialize_single(vm, v)?);
@@ -348,7 +351,7 @@ fn materialize_values(vm: &mut LuaVM, values: Vec<AsyncReturnValue>) -> LuaResul
 }
 
 /// Recursively convert a single `AsyncReturnValue` to a `LuaValue`.
-fn materialize_single(vm: &mut LuaVM, value: AsyncReturnValue) -> LuaResult<LuaValue> {
+fn materialize_single(vm: &mut GlobalState, value: AsyncReturnValue) -> LuaResult<LuaValue> {
     match value {
         AsyncReturnValue::Value(lv) => Ok(lv),
         AsyncReturnValue::String(s) => vm.create_string(&s),
@@ -390,9 +393,9 @@ pub struct AsyncThread {
     /// This value is also rooted in the registry via `ref_id` to prevent GC.
     thread_val: LuaValue,
 
-    /// Raw pointer to the owning VM (for resume and registry access).
+    /// Handle to the owning global state (for resume and registry access).
     /// Not `Send`/`Sync` — this is intentional.
-    vm: *mut LuaVM,
+    vm: VmHandle,
 
     /// Registry reference ID that keeps the thread alive against GC.
     /// Released on drop.
@@ -414,12 +417,12 @@ impl AsyncThread {
     ///
     /// # Arguments
     /// - `thread_val` — A `LuaValue` of type Thread (from `create_thread`)
-    /// - `vm` — Raw pointer to the owning `LuaVM`
+    /// - `vm` — Handle to the owning global state
     /// - `args` — Arguments passed to the coroutine's first resume
-    pub(crate) fn new(thread_val: LuaValue, vm: *mut LuaVM, args: Vec<LuaValue>) -> Self {
+    pub(crate) fn new(thread_val: LuaValue, vm: VmHandle, args: Vec<LuaValue>) -> Self {
         // Root the thread in the registry so GC won't collect it
         let ref_id = {
-            let vm_ref = unsafe { &mut *vm };
+            let vm_ref = vm.as_mut();
             let lua_ref = vm_ref.create_ref(thread_val);
             // Extract the RefId; for threads (GC objects) this will be Registry variant
             lua_ref.ref_id().unwrap_or(0)
@@ -439,9 +442,10 @@ impl AsyncThread {
         let thread_state = match self.thread_val.as_thread_mut() {
             Some(state) => state,
             None => {
-                return ResumeResult::Finished(Err(
-                    unsafe { &mut *self.vm }.error("AsyncThread: invalid thread value".to_string())
-                ));
+                return ResumeResult::Finished(Err(self
+                    .vm
+                    .as_mut()
+                    .error("AsyncThread: invalid thread value".to_string())));
             }
         };
 
@@ -458,7 +462,9 @@ impl AsyncThread {
                         Some(fut) => ResumeResult::AsyncYield(fut),
                         None => {
                             // Bug: yielded with sentinel but no future stored
-                            ResumeResult::Finished(Err(unsafe { &mut *self.vm }
+                            ResumeResult::Finished(Err(self
+                                .vm
+                                .as_mut()
                                 .error("async yield without pending future".to_string())))
                         }
                     }
@@ -483,7 +489,7 @@ impl AsyncThread {
                         let resume_args = match result {
                             Ok(async_values) => {
                                 // Convert AsyncReturnValues to LuaValues using the VM
-                                let vm = unsafe { &mut *self.vm };
+                                let vm = self.vm.as_mut();
                                 match materialize_values(vm, async_values) {
                                     Ok(values) => values,
                                     Err(e) => return Poll::Ready(Err(e)),
@@ -512,7 +518,9 @@ impl AsyncThread {
                 }
             } else {
                 // No pending future — should not reach here
-                return Poll::Ready(Err(unsafe { &mut *self.vm }
+                return Poll::Ready(Err(self
+                    .vm
+                    .as_mut()
                     .error("AsyncThread: no pending future to poll".to_string())));
             }
         }
@@ -551,7 +559,7 @@ impl Drop for AsyncThread {
     fn drop(&mut self) {
         // Release the registry reference to allow the thread to be GC'd
         if self.ref_id > 0 {
-            let vm = unsafe { &mut *self.vm };
+            let vm = self.vm.as_mut();
             vm.release_ref_id(self.ref_id);
         }
     }
@@ -641,8 +649,8 @@ end";
 pub struct AsyncCallHandle {
     /// The runner coroutine thread value.
     thread_val: LuaValue,
-    /// Raw pointer to the owning VM.
-    vm: *mut LuaVM,
+    /// Handle to the owning global state.
+    vm: VmHandle,
     /// Registry reference that keeps the thread alive against GC.
     ref_id: RefId,
     /// Whether the handle is still usable.
@@ -654,9 +662,9 @@ impl AsyncCallHandle {
     ///
     /// The target function is passed to the runner coroutine on the first
     /// resume. After initialization, the handle is ready for [`call`](Self::call).
-    pub(crate) fn new(thread_val: LuaValue, vm: *mut LuaVM, func: LuaValue) -> LuaResult<Self> {
+    pub(crate) fn new(thread_val: LuaValue, vm: VmHandle, func: LuaValue) -> LuaResult<Self> {
         let ref_id = {
-            let vm_ref = unsafe { &mut *vm };
+            let vm_ref = vm.as_mut();
             let lua_ref = vm_ref.create_ref(thread_val);
             lua_ref.ref_id().unwrap_or(0)
         };
@@ -673,12 +681,12 @@ impl AsyncCallHandle {
         let thread_state = handle
             .thread_val
             .as_thread_mut()
-            .ok_or_else(|| unsafe { &mut *vm }.error("invalid thread value".to_string()))?;
+            .ok_or_else(|| vm.as_mut().error("invalid thread value".to_string()))?;
         let (finished, _) = thread_state.resume(vec![func])?;
         if finished {
-            return Err(
-                unsafe { &mut *vm }.error("runner coroutine finished during init".to_string())
-            );
+            return Err(vm
+                .as_mut()
+                .error("runner coroutine finished during init".to_string()));
         }
 
         Ok(handle)
@@ -698,9 +706,10 @@ impl AsyncCallHandle {
         let thread_state = match self.thread_val.as_thread_mut() {
             Some(state) => state,
             None => {
-                return ResumeResult::Finished(Err(
-                    unsafe { &mut *self.vm }.error("invalid thread value".to_string())
-                ));
+                return ResumeResult::Finished(Err(self
+                    .vm
+                    .as_mut()
+                    .error("invalid thread value".to_string())));
             }
         };
 
@@ -710,7 +719,9 @@ impl AsyncCallHandle {
                 if is_async_sentinel(&values) {
                     match thread_state.take_pending_future() {
                         Some(fut) => ResumeResult::AsyncYield(fut),
-                        None => ResumeResult::Finished(Err(unsafe { &mut *self.vm }
+                        None => ResumeResult::Finished(Err(self
+                            .vm
+                            .as_mut()
                             .error("async yield without pending future".to_string()))),
                     }
                 } else {
@@ -732,9 +743,10 @@ impl AsyncCallHandle {
     /// is marked as dead and subsequent calls return an error immediately.
     pub async fn call(&mut self, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         if !self.alive {
-            return Err(
-                unsafe { &mut *self.vm }.error("async call handle is no longer alive".to_string())
-            );
+            return Err(self
+                .vm
+                .as_mut()
+                .error("async call handle is no longer alive".to_string()));
         }
 
         let mut resume_args = args;
@@ -744,7 +756,9 @@ impl AsyncCallHandle {
                     self.alive = false;
                     match result {
                         Ok(_) => {
-                            return Err(unsafe { &mut *self.vm }
+                            return Err(self
+                                .vm
+                                .as_mut()
                                 .error("runner coroutine finished unexpectedly".to_string()));
                         }
                         Err(e) => return Err(e),
@@ -752,7 +766,7 @@ impl AsyncCallHandle {
                 }
                 ResumeResult::AsyncYield(fut) => match fut.await {
                     Ok(async_values) => {
-                        let vm = unsafe { &mut *self.vm };
+                        let vm = self.vm.as_mut();
                         resume_args = materialize_values(vm, async_values)?;
                     }
                     Err(e) => {
@@ -772,7 +786,7 @@ impl AsyncCallHandle {
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown error")
                             .to_string();
-                        return Err(unsafe { &mut *self.vm }.error(err_msg));
+                        return Err(self.vm.as_mut().error(err_msg));
                     }
                 }
             }
@@ -783,7 +797,7 @@ impl AsyncCallHandle {
 impl Drop for AsyncCallHandle {
     fn drop(&mut self) {
         if self.ref_id > 0 {
-            let vm = unsafe { &mut *self.vm };
+            let vm = self.vm.as_mut();
             vm.release_ref_id(self.ref_id);
         }
     }

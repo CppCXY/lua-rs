@@ -6,7 +6,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::compiler::format_source;
-use crate::gc::{CreateResult, GcObjectPtr, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr};
+use crate::gc::{
+    CreateResult, GcKind, GcObjectPtr, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
+};
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
 use crate::lua_vm::call_info::call_status::{
@@ -19,21 +21,21 @@ use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 #[cfg(feature = "sandbox")]
 use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, SandboxRuntimeLimits};
 use crate::lua_vm::{
-    CallInfo, LuaError, LuaResult, LuaTypedAsyncCallback, LuaTypedCallback, TmKind,
-    get_metamethod_event,
+    CallInfo, GlobalState, LuaError, LuaResult, LuaTypedAsyncCallback, LuaTypedCallback, TmKind,
+    VmHandle, get_metamethod_event,
 };
 #[cfg(feature = "sandbox")]
 use crate::platform_time::unix_nanos;
 use crate::stdlib::debug::{objtypename, ordererror, pub_getfuncname};
 use crate::{
     AsyncReturnValue, DebugInfo, LuaAnyRef, LuaFunctionRef, LuaProto, LuaRegistrable, LuaTableRef,
-    LuaVM, UserDataRef,
+    UserDataRef,
 };
 
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
 pub struct LuaState {
-    vm: *mut LuaVM,
+    vm: VmHandle,
 
     thread: ThreadPtr,
     /// Data stack - stores all values (registers, temporaries, function arguments)
@@ -148,9 +150,9 @@ pub struct LuaState {
 
 impl LuaState {
     /// Create a new execution state
-    pub fn new(
+    pub(crate) fn new(
         call_stack_size: usize,
-        vm: *mut LuaVM,
+        vm: VmHandle,
         is_main: bool,
         safe_option: SafeOption,
     ) -> Self {
@@ -187,19 +189,17 @@ impl LuaState {
     }
 
     // please donot use this function directly unless you are very sure of what you are doing
-    pub(crate) unsafe fn thread_ptr(&self) -> ThreadPtr {
+    pub(crate) fn thread_ptr(&self) -> ThreadPtr {
         self.thread
     }
 
-    pub(crate) unsafe fn set_thread_ptr(&mut self, thread: ThreadPtr) {
+    pub(crate) fn set_thread_ptr(&mut self, thread: ThreadPtr) {
         self.thread = thread;
     }
 
     /// Remove a dead string from the intern map (called by GC during sweep)
     pub(crate) fn remove_dead_string(&mut self, str_ptr: StringPtr) {
-        unsafe {
-            (*self.vm).object_allocator.remove_str(str_ptr);
-        }
+        self.vm_mut().object_allocator.remove_str(str_ptr);
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)
@@ -1812,12 +1812,17 @@ impl LuaState {
     }
 
     #[inline(always)]
-    pub(crate) fn vm_mut(&mut self) -> &mut LuaVM {
-        unsafe { &mut *self.vm }
+    pub(crate) fn vm(&self) -> &GlobalState {
+        self.vm.as_ref()
     }
 
     #[inline(always)]
-    pub(crate) fn vm_ptr(&self) -> *mut LuaVM {
+    pub(crate) fn vm_mut(&mut self) -> &mut GlobalState {
+        self.vm.as_mut()
+    }
+
+    #[inline(always)]
+    pub(crate) fn vm_handle(&self) -> VmHandle {
         self.vm
     }
 
@@ -1828,11 +1833,13 @@ impl LuaState {
     /// takes effect.
     #[inline(always)]
     pub(crate) fn inc_n_ccalls(&mut self) -> LuaResult<()> {
-        let vm = unsafe { &mut *self.vm };
+        let max_c_stack_depth = self.safe_state.max_c_stack_depth;
+        let base_c_stack_depth = self.safe_state.base_c_stack_depth;
+        let vm = self.vm_mut();
         vm.n_ccalls += 1;
-        if vm.n_ccalls >= self.safe_state.max_c_stack_depth {
+        if vm.n_ccalls >= max_c_stack_depth {
             vm.n_ccalls -= 1;
-            if self.safe_state.max_c_stack_depth > self.safe_state.base_c_stack_depth {
+            if max_c_stack_depth > base_c_stack_depth {
                 // In error handler extra zone — C Lua's stackerror behavior
                 return Err(LuaError::ErrorInErrorHandling);
             }
@@ -1845,9 +1852,7 @@ impl LuaState {
     /// Decrement shared n_ccalls after returning from a recursive `lua_execute`.
     #[inline(always)]
     pub(crate) fn dec_n_ccalls(&self) {
-        unsafe {
-            (*self.vm).n_ccalls -= 1;
-        }
+        self.vm.as_mut().n_ccalls -= 1;
     }
 
     // ===== Call Frame Management =====
@@ -3172,7 +3177,7 @@ impl LuaState {
                 // (the C Lua standard 200) for the budget simulation, NOT the
                 // runtime max_c_stack_depth which may be reduced (e.g. 25 in
                 // debug builds for Rust stack safety).
-                let current_n_ccalls = unsafe { (*self.vm).n_ccalls };
+                let current_n_ccalls = self.vm().n_ccalls;
                 let depth_budget = LUAI_MAXCSTACK.saturating_sub(current_n_ccalls);
                 let hard_limit = depth_budget + CSTACKERR; // extra room for error handling
                 let mut retry_count: usize = 0;
@@ -3985,9 +3990,9 @@ impl LuaState {
     /// Called when modifying an object to point to another object
     #[inline(always)]
     pub fn gc_barrier(&mut self, upvalue_ptr: UpvaluePtr, value_gc_ptr: GcObjectPtr) {
-        let vm = unsafe { &mut *self.vm };
         let owner_ptr = GcObjectPtr::from(upvalue_ptr);
-        vm.gc.barrier(self, owner_ptr, value_gc_ptr);
+        self.vm
+            .gc_barrier(self as *mut LuaState, owner_ptr, value_gc_ptr);
     }
 
     /// Backward GC barrier (luaC_barrierback in Lua 5.5)
@@ -3995,21 +4000,20 @@ impl LuaState {
     /// Instead of marking the value, re-gray the object for re-traversal
     #[inline(always)]
     pub fn gc_barrier_back(&mut self, gc_ptr: GcObjectPtr) {
-        let vm = unsafe { &mut *self.vm };
+        let vm = self.vm_mut();
         vm.gc.barrier_back(gc_ptr);
     }
 
     /// Track table memory change from a resize delta.
     #[inline]
     pub fn gc_track_table_resize(&mut self, table_ptr: TablePtr, delta: isize) {
-        let vm = unsafe { &mut *self.vm };
+        let vm = self.vm_mut();
         vm.gc.track_resize(table_ptr, delta);
     }
 
     #[inline]
     pub fn check_gc(&mut self) -> LuaResult<bool> {
-        let vm = unsafe { &mut *self.vm };
-        if vm.gc.gc_debt > 0 {
+        if self.vm.gc_debt() > 0 {
             return Ok(false);
         }
 
@@ -4024,28 +4028,30 @@ impl LuaState {
         //
         // traverse_thread in the atomic phase clears slots [top..stack_last]
         // to nil, which handles any stale references above top.
-        let work = vm.check_gc(self);
+        let work = self.vm.check_gc(self as *mut LuaState);
 
         Ok(work)
     }
 
     #[inline(always)]
     pub(crate) fn check_gc_in_loop(&mut self, pc: usize, c: usize, trap: &mut bool) {
-        let vm = unsafe { &mut *self.vm };
-        if vm.gc.gc_debt > 0 {
+        if self.vm.gc_debt() > 0 {
             return;
         }
 
         self.current_frame_mut_unchecked().save_pc(pc);
         self.set_top_raw(c);
-        vm.check_gc(self);
+        self.vm.check_gc(self as *mut LuaState);
         *trap = self.hook_mask != 0;
     }
 
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
-        let vm = unsafe { &mut *self.vm };
-        vm.full_gc(self, false);
+        self.vm.full_gc(self as *mut LuaState, false);
         Ok(())
+    }
+
+    pub(crate) fn change_gc_mode(&mut self, kind: GcKind) {
+        self.vm.change_gc_mode(self as *mut LuaState, kind);
     }
 
     #[cfg(feature = "sandbox")]
@@ -4092,12 +4098,12 @@ impl LuaState {
         F: FnOnce(&mut LuaState) -> LuaResult<T>,
     {
         let saved_limits = self.sandbox_limits;
-        let saved_memory_limit = unsafe { &mut *self.vm }.gc.temporary_memory_limit();
+        let saved_memory_limit = self.vm_mut().gc.temporary_memory_limit();
 
         self.sandbox_limits = limits;
 
         if let Some(memory_limit_bytes) = limits.and_then(|limit| limit.memory_limit_bytes) {
-            unsafe { &mut *self.vm }
+            self.vm_mut()
                 .gc
                 .set_temporary_memory_limit(memory_limit_bytes);
         }
@@ -4105,7 +4111,7 @@ impl LuaState {
         let result = f(self);
 
         self.sandbox_limits = saved_limits;
-        unsafe { &mut *self.vm }
+        self.vm_mut()
             .gc
             .restore_temporary_memory_limit(saved_memory_limit);
 
@@ -4138,7 +4144,7 @@ impl LuaState {
             return Ok(());
         }
 
-        let vm = unsafe { &mut *self.vm };
+        let vm = self.vm_mut();
 
         // Get the cached event name string from ConstString (no allocation)
         let event_name = match event {
@@ -4444,6 +4450,6 @@ impl LuaState {
 
 impl Default for LuaState {
     fn default() -> Self {
-        Self::new(1, std::ptr::null_mut(), false, SafeOption::default())
+        Self::new(1, VmHandle::dangling(), false, SafeOption::default())
     }
 }

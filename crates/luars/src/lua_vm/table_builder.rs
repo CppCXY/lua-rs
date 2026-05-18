@@ -16,7 +16,7 @@
 //! ```
 
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaResult, LuaVM};
+use crate::lua_vm::{GlobalState, LuaResult};
 
 /// Fluent builder for Lua tables.
 ///
@@ -95,7 +95,7 @@ impl TableBuilder {
     }
 
     /// Materialise the table via the VM.
-    pub fn build(self, vm: &mut LuaVM) -> LuaResult<LuaValue> {
+    pub fn build(self, vm: &mut GlobalState) -> LuaResult<LuaValue> {
         let table = vm.create_table(self.array.len(), self.entries.len())?;
 
         // Array part

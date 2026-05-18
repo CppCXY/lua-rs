@@ -1,6 +1,7 @@
+use crate::LuaProto;
 use crate::compiler::{ExpDesc, ExpKind, ExpUnion, statement};
+use crate::lua_vm::GlobalState;
 use crate::lua_vm::lua_limits::{MAX_SRC_LEN, MAXCCALLS, MAXUPVAL, MAXVARS};
-use crate::{LuaProto, LuaVM};
 use crate::{LuaValue, compiler::parser::LuaLexer};
 
 // Upvalue descriptor
@@ -22,7 +23,7 @@ pub struct FuncState<'a> {
     /// encapsulate the single unsafe dereference.
     prev: Option<*mut FuncState<'a>>,
     pub lexer: &'a mut LuaLexer<'a>,
-    pub vm: &'a mut LuaVM,
+    pub vm: &'a mut GlobalState,
     pub compiler_state: &'a mut CompilerState,
     pub block_cnt_id: Option<BlockCntId>,
     pub pc: usize,                     // next position to code (equivalent to pc)
@@ -188,7 +189,7 @@ pub struct VarDesc {
 impl<'a> FuncState<'a> {
     pub fn new(
         lexer: &'a mut LuaLexer<'a>,
-        vm: &'a mut LuaVM,
+        vm: &'a mut GlobalState,
         compiler_state: &'a mut CompilerState,
         is_vararg: bool,
         source_name: String,

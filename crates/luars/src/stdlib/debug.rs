@@ -528,7 +528,7 @@ pub fn current_func_name_with_kind(l: &LuaState) -> Option<(&'static str, String
 /// Returns e.g. "table.sort", "string.sub", "math.sin", etc.
 fn find_global_func_name(l: &LuaState, target: &LuaValue) -> Option<String> {
     // Get _LOADED from registry by iterating registry entries
-    let vm = unsafe { &*l.vm_ptr() };
+    let vm = l.vm();
     let registry_table = vm.registry.as_table()?;
     let mut loaded: Option<LuaValue> = None;
     for (key, val) in registry_table.iter_all() {
