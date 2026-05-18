@@ -44,4 +44,5 @@ jobs:
           ${{ runner.os }}-miri-target-
 
     - name: Run Miri smoke tests
-      run: cargo +nightly miri test -p luars --lib miri_ -- --nocapture
+      shell: pwsh
+      run: ./run_miri.ps1 -Toolchain nightly -SkipSetup -NoCapture
