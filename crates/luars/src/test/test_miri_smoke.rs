@@ -52,3 +52,46 @@ fn test_miri_debug_traceback_smoke() {
 
     assert!(result.is_ok(), "Error: {:?}", result.err());
 }
+
+#[test]
+fn test_miri_pow_basic_regression() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let results = vm.execute("return 2 ^ 3").unwrap();
+
+    assert_eq!(results[0].as_integer(), Some(8), "value: {:?}", results[0]);
+}
+
+#[test]
+fn test_miri_pow_precedence_regression() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let results = vm.execute("return 2 ^ 3 ^ 2, (2 ^ 3) ^ 2").unwrap();
+
+    assert_eq!(
+        results[0].as_integer(),
+        Some(512),
+        "value: {:?}",
+        results[0]
+    );
+    assert_eq!(results[1].as_integer(), Some(64), "value: {:?}", results[1]);
+}
+
+#[test]
+fn test_miri_pow_metamethod_regression() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local a = {val = 2}
+        setmetatable(a, {__pow = function(x, y) return {val = x.val ^ y} end})
+        local c = a ^ 4
+        assert(c.val == 16)
+        "#,
+    );
+
+    assert!(result.is_ok(), "Error: {:?}", result.err());
+}

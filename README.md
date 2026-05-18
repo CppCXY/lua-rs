@@ -86,6 +86,14 @@ see
 cargo test
 ```
 
+Miri smoke tests:
+
+```bash
+MIRIFLAGS="-Zmiri-disable-stacked-borrows -Zmiri-permissive-provenance" cargo +nightly miri test -p luars --lib miri_ -- --nocapture
+```
+
+The Miri profile disables stacked borrows and uses permissive provenance because luars currently relies on tagged-pointer GC/object representations that intentionally compress and reconstruct raw pointers.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
