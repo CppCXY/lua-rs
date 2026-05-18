@@ -33,11 +33,22 @@ if ($Profile -eq "debug") {
 	}
 }
 
-$exe = if ($Profile -eq "debug") {
-	Join-Path $repoRoot "target/debug/lua.exe"
+$exeName = if ($IsWindows) {
+	"lua.exe"
 }
 else {
-	Join-Path $repoRoot "target/release/lua.exe"
+	"lua"
+}
+
+$exe = if ($Profile -eq "debug") {
+	Join-Path $repoRoot "target/debug/$exeName"
+}
+else {
+	Join-Path $repoRoot "target/release/$exeName"
+}
+
+if (-not (Test-Path $exe)) {
+	throw "Lua interpreter not found at '$exe'. Build may have failed or produced the binary at a different path."
 }
 
 Push-Location "lua_tests/testes"

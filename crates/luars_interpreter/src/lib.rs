@@ -60,20 +60,10 @@ fn lua_main_stack_size() -> usize {
 }
 
 fn default_safe_option() -> SafeOption {
-    let debug_defaults = cfg!(debug_assertions);
-
     SafeOption {
         max_stack_size: env_usize("LUARS_MAX_STACK_SIZE").unwrap_or(1_000_000),
-        max_call_depth: env_usize("LUARS_MAX_CALL_DEPTH").unwrap_or(if debug_defaults {
-            1024
-        } else {
-            1024
-        }),
-        max_c_stack_depth: env_usize("LUARS_MAX_C_STACK_DEPTH").unwrap_or(if debug_defaults {
-            200
-        } else {
-            200
-        }),
+        max_call_depth: env_usize("LUARS_MAX_CALL_DEPTH").unwrap_or(1024),
+        max_c_stack_depth: env_usize("LUARS_MAX_C_STACK_DEPTH").unwrap_or(200),
         max_memory_limit: env_usize("LUARS_MAX_MEMORY_LIMIT")
             .map(|value| value.min(isize::MAX as usize) as isize)
             .unwrap_or(4096 * 1024 * 1024),
