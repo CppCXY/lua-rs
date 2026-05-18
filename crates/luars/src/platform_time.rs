@@ -42,7 +42,16 @@ impl PlatformInstant {
 
 #[inline]
 pub(crate) fn unix_nanos() -> u64 {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(miri)]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static MIRI_TIME: AtomicU64 = AtomicU64::new(1_700_000_000_000_000_000);
+
+        MIRI_TIME.fetch_add(1_000_000, Ordering::Relaxed)
+    }
+
+    #[cfg(all(not(miri), not(target_arch = "wasm32")))]
     {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -1238,7 +1238,7 @@ pub fn equalobj(lua_state: &mut LuaState, t1: LuaValue, t2: LuaValue) -> LuaResu
 
     if t1.ttiscfunction() {
         // C functions: compare function pointers
-        return Ok(unsafe { t1.value.f == t2.value.f });
+        return Ok(unsafe { std::ptr::fn_addr_eq(t1.value.f, t2.value.f) });
     }
 
     // Lua functions, threads, etc.: compare GC pointers

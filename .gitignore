@@ -1,4 +1,5 @@
 /target
+.miri-tmp/
 lua_src/lua-5.5.0/
 lua_src/lua-5.5.0/doc
 lua_src/lua-5.5.0/out

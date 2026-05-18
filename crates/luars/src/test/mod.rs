@@ -6,6 +6,7 @@ pub mod test_coroutine;
 pub mod test_io; // IO tests use test_data directory
 pub mod test_math;
 pub mod test_metamethods;
+pub mod test_miri_smoke;
 pub mod test_operators;
 pub mod test_os; // OS library tests
 pub mod test_package;

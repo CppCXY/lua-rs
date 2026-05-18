@@ -4,6 +4,7 @@ use crate::{
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
 };
+use std::cell::Cell;
 
 // ============ GC Constants (from Lua 5.5 lgc.h) ============
 // Object ages for generational GC
@@ -48,13 +49,12 @@ pub const MASKCOLORS: u8 = (1 << BLACKBIT) | WHITEBITS;
 ///     accounting between trace_object (allocation) and sweep (deallocation).
 ///
 /// **Tri-color invariant**: Gray is implicit - an object is gray iff it has no white bits AND no black bit.
-#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct GcHeader {
-    marked: u8,
+    marked: Cell<u8>,
     _padding: [u8; 3],
-    index: u32,
-    pub size: u32,
+    index: Cell<u32>,
+    size: Cell<u32>,
 }
 
 impl std::fmt::Debug for GcHeader {
@@ -62,7 +62,7 @@ impl std::fmt::Debug for GcHeader {
         f.debug_struct("GcHeader")
             .field("marked", &self.marked())
             .field("index", &self.index())
-            .field("size", &self.size)
+            .field("size", &self.size())
             .finish()
     }
 }
@@ -74,27 +74,37 @@ impl GcHeader {
 
     #[inline(always)]
     pub fn marked(&self) -> u8 {
-        self.marked
+        self.marked.get()
     }
 
     #[inline(always)]
-    fn set_marked_bits(&mut self, m: u8) {
-        self.marked = m;
+    fn set_marked_bits(&self, m: u8) {
+        self.marked.set(m);
     }
 
     #[inline(always)]
     pub fn index(&self) -> usize {
-        self.index as usize
+        self.index.get() as usize
     }
 
     #[inline(always)]
-    pub fn set_index(&mut self, idx: usize) {
+    pub fn set_index(&self, idx: usize) {
         assert!(
             idx <= Self::INDEX_MAX as usize,
             "GcList index overflow: {idx} > {}",
             Self::INDEX_MAX
         );
-        self.index = idx as u32;
+        self.index.set(idx as u32);
+    }
+
+    #[inline(always)]
+    pub fn size(&self) -> u32 {
+        self.size.get()
+    }
+
+    #[inline(always)]
+    pub fn set_size(&self, size: u32) {
+        self.size.set(size);
     }
 }
 
@@ -104,10 +114,10 @@ impl Default for GcHeader {
         // This is INCORRECT for new objects - they should be WHITE
         // Use GcHeader::with_white(current_white) instead when creating GC objects
         GcHeader {
-            marked: G_NEW,
+            marked: Cell::new(G_NEW),
             _padding: [0; 3],
-            index: 0,
-            size: 0,
+            index: Cell::new(0),
+            size: Cell::new(0),
         }
     }
 }
@@ -123,10 +133,10 @@ impl GcHeader {
             "current_white must be 0 or 1"
         );
         GcHeader {
-            marked: (1 << (WHITE0BIT + current_white)) | G_NEW,
+            marked: Cell::new((1 << (WHITE0BIT + current_white)) | G_NEW),
             _padding: [0; 3],
-            index: 0,
-            size: 0,
+            index: Cell::new(0),
+            size: Cell::new(0),
         }
     }
 
@@ -140,7 +150,7 @@ impl GcHeader {
 
     /// Set object age (preserves color bits and index)
     #[inline(always)]
-    pub fn set_age(&mut self, age: u8) {
+    pub fn set_age(&self, age: u8) {
         debug_assert!(age <= G_TOUCHED2, "Invalid age value");
         let m = (self.marked() & !AGEBITS) | (age & AGEBITS);
         self.set_marked_bits(m);
@@ -191,24 +201,24 @@ impl GcHeader {
     }
 
     #[inline(always)]
-    pub fn set_finalized(&mut self) {
+    pub fn set_finalized(&self) {
         self.set_marked_bits(self.marked() | (1 << FINALIZEDBIT));
     }
 
     #[inline(always)]
-    pub fn clear_finalized(&mut self) {
+    pub fn clear_finalized(&self) {
         self.set_marked_bits(self.marked() & !(1 << FINALIZEDBIT));
     }
 
     #[inline(always)]
-    pub fn make_shared(&mut self) {
+    pub fn make_shared(&self) {
         self.set_marked_bits(self.marked() | (1 << SHAREDBIT));
     }
 
     // ============ Color Transitions ============
 
     #[inline(always)]
-    pub fn make_white(&mut self, current_white: u8) {
+    pub fn make_white(&self, current_white: u8) {
         debug_assert!(
             current_white == 0 || current_white == 1,
             "current_white must be 0 or 1"
@@ -218,18 +228,18 @@ impl GcHeader {
     }
 
     #[inline(always)]
-    pub fn make_gray(&mut self) {
+    pub fn make_gray(&self) {
         self.set_marked_bits(self.marked() & !MASKCOLORS);
     }
 
     #[inline(always)]
-    pub fn make_black(&mut self) {
+    pub fn make_black(&self) {
         let m = (self.marked() & !WHITEBITS) | (1 << BLACKBIT);
         self.set_marked_bits(m);
     }
 
     #[inline(always)]
-    pub fn nw2black(&mut self) {
+    pub fn nw2black(&self) {
         debug_assert!(!self.is_white(), "nw2black called on white object");
         self.set_marked_bits(self.marked() | (1 << BLACKBIT));
     }
@@ -254,39 +264,39 @@ impl GcHeader {
     }
 
     #[inline(always)]
-    pub fn change_white(&mut self) {
+    pub fn change_white(&self) {
         self.set_marked_bits(self.marked() ^ WHITEBITS);
     }
 
     // ============ Generational GC Age Transitions ============
 
     #[inline(always)]
-    pub fn make_old0(&mut self) {
+    pub fn make_old0(&self) {
         self.set_age(G_OLD0);
     }
 
     #[inline(always)]
-    pub fn make_old1(&mut self) {
+    pub fn make_old1(&self) {
         self.set_age(G_OLD1);
     }
 
     #[inline(always)]
-    pub fn make_old(&mut self) {
+    pub fn make_old(&self) {
         self.set_age(G_OLD);
     }
 
     #[inline(always)]
-    pub fn make_touched1(&mut self) {
+    pub fn make_touched1(&self) {
         self.set_age(G_TOUCHED1);
     }
 
     #[inline(always)]
-    pub fn make_touched2(&mut self) {
+    pub fn make_touched2(&self) {
         self.set_age(G_TOUCHED2);
     }
 
     #[inline(always)]
-    pub fn make_survival(&mut self) {
+    pub fn make_survival(&self) {
         self.set_age(G_SURVIVAL);
     }
 
@@ -319,8 +329,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Gc<T> {
 
 impl<T> Gc<T> {
     pub fn new(data: T, current_white: u8, size: u32) -> Self {
-        let mut header = GcHeader::with_white(current_white);
-        header.size = size;
+        let header = GcHeader::with_white(current_white);
+        header.set_size(size);
         Gc { header, data }
     }
 }
@@ -517,12 +527,12 @@ impl GcObjectPtr {
 
     #[inline(always)]
     #[allow(clippy::mut_from_ref)]
-    pub fn header_mut(&self) -> Option<&mut GcHeader> {
+    pub fn header_mut(&self) -> Option<&GcHeader> {
         let p = self.raw_ptr();
         if p == 0 {
             None
         } else {
-            Some(unsafe { &mut *(p as *mut GcHeader) })
+            Some(unsafe { &*(p as *const GcHeader) })
         }
     }
 
@@ -765,35 +775,30 @@ impl GcObjectOwner {
     /// Return the stored allocation-time size (from header.size)
     #[inline]
     pub fn size(&self) -> usize {
-        self.header().size as usize
+        self.header().size() as usize
+    }
+
+    #[inline(always)]
+    fn raw_header_ptr(&self) -> *mut GcHeader {
+        match self {
+            GcObjectOwner::String(s) => Self::box_raw_ptr(s) as *mut GcHeader,
+            GcObjectOwner::Table(t) => Self::box_raw_ptr(t) as *mut GcHeader,
+            GcObjectOwner::Function(f) => Self::box_raw_ptr(f) as *mut GcHeader,
+            GcObjectOwner::CClosure(c) => Self::box_raw_ptr(c) as *mut GcHeader,
+            GcObjectOwner::RClosure(r) => Self::box_raw_ptr(r) as *mut GcHeader,
+            GcObjectOwner::Upvalue(u) => Self::box_raw_ptr(u) as *mut GcHeader,
+            GcObjectOwner::Thread(t) => Self::box_raw_ptr(t) as *mut GcHeader,
+            GcObjectOwner::Userdata(u) => Self::box_raw_ptr(u) as *mut GcHeader,
+            GcObjectOwner::Proto(p) => Self::box_raw_ptr(p) as *mut GcHeader,
+        }
     }
 
     pub fn header(&self) -> &GcHeader {
-        (match self {
-            GcObjectOwner::String(s) => &s.header,
-            GcObjectOwner::Table(t) => &t.header,
-            GcObjectOwner::Function(f) => &f.header,
-            GcObjectOwner::CClosure(c) => &c.header,
-            GcObjectOwner::RClosure(r) => &r.header,
-            GcObjectOwner::Upvalue(u) => &u.header,
-            GcObjectOwner::Thread(t) => &t.header,
-            GcObjectOwner::Userdata(u) => &u.header,
-            GcObjectOwner::Proto(p) => &p.header,
-        }) as _
+        unsafe { &*self.raw_header_ptr() }
     }
 
-    pub fn header_mut(&mut self) -> &mut GcHeader {
-        (match self {
-            GcObjectOwner::String(s) => &mut s.header,
-            GcObjectOwner::Table(t) => &mut t.header,
-            GcObjectOwner::Function(f) => &mut f.header,
-            GcObjectOwner::CClosure(c) => &mut c.header,
-            GcObjectOwner::RClosure(r) => &mut r.header,
-            GcObjectOwner::Upvalue(u) => &mut u.header,
-            GcObjectOwner::Thread(t) => &mut t.header,
-            GcObjectOwner::Userdata(u) => &mut u.header,
-            GcObjectOwner::Proto(p) => &mut p.header,
-        }) as _
+    pub fn header_mut(&self) -> &GcHeader {
+        unsafe { &*self.raw_header_ptr() }
     }
 
     /// Read the heap pointer from a `&Box<T>` without going through `Deref`,
@@ -942,7 +947,7 @@ impl GcObjectOwner {
     }
 
     pub fn size_of_data(&self) -> usize {
-        self.header().size as usize
+        self.header().size() as usize
     }
 }
 
@@ -989,8 +994,12 @@ impl GcList {
         let last_index = self.gc_list.len() - 1;
         if index != last_index {
             // Update moved object's index
-            let moved_obj = &mut self.gc_list[last_index];
-            moved_obj.header_mut().set_index(index);
+            let moved_obj = &self.gc_list[last_index];
+            moved_obj
+                .as_gc_ptr()
+                .header_mut()
+                .expect("moved object must have a valid GC header")
+                .set_index(index);
         }
 
         // swap_remove: O(1) removal by moving last element to this position
@@ -1086,10 +1095,8 @@ impl GcList {
     /// Add multiple objects (used when moving between generation lists)
     #[inline]
     pub fn add_all(&mut self, objects: Vec<GcObjectOwner>) {
-        for mut obj in objects {
-            let index = self.gc_list.len();
-            obj.header_mut().set_index(index);
-            self.gc_list.push(obj);
+        for obj in objects {
+            self.add(obj);
         }
     }
 }
@@ -1112,7 +1119,7 @@ mod tests {
 
     #[test]
     fn gc_header_large_index_round_trip() {
-        let mut header = GcHeader::with_white(0);
+        let header = GcHeader::with_white(0);
         let idx = (1usize << 24) + 123;
         header.set_index(idx);
         assert_eq!(header.index(), idx);
