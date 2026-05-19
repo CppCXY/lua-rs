@@ -38,6 +38,8 @@ pub use crate::lua_vm::lua_ref::{
     LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef, RefId,
     UserDataRef,
 };
+
+type ArithMetaFn = fn(&mut LuaState) -> LuaResult<usize>;
 pub use crate::lua_vm::lua_state::LuaState;
 pub use crate::lua_vm::safe_option::SafeOption;
 #[cfg(feature = "sandbox")]
@@ -838,6 +840,7 @@ impl GlobalState {
     /// println!("{:?}", any.kind());
     /// // registry entry freed automatically when `any` is dropped
     /// ```
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_ref(&mut self, value: LuaValue) -> LuaAnyRef {
         let ref_id = lua_ref::store_in_registry(self, value);
         LuaAnyRef::from_raw(ref_id, VmHandle::from_global(self))
@@ -845,6 +848,7 @@ impl GlobalState {
 
     /// Wrap a table `LuaValue` into a `LuaTableRef`.
     /// Returns `None` if the value is not a table.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_table_ref(&mut self, value: LuaValue) -> Option<LuaTableRef> {
         if !value.is_table() {
             return None;
@@ -855,6 +859,7 @@ impl GlobalState {
 
     /// Wrap a function `LuaValue` into a `LuaFunctionRef`.
     /// Returns `None` if the value is not a function.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_function_ref(&mut self, value: LuaValue) -> Option<LuaFunctionRef> {
         if !value.is_function() {
             return None;
@@ -868,6 +873,7 @@ impl GlobalState {
 
     /// Wrap a string `LuaValue` into a `LuaStringRef`.
     /// Returns `None` if the value is not a string.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_string_ref(&mut self, value: LuaValue) -> Option<LuaStringRef> {
         if !value.is_string() {
             return None;
@@ -878,6 +884,7 @@ impl GlobalState {
 
     /// Wrap a userdata `LuaValue` into a typed `UserDataRef<T>`.
     /// Returns `None` if the value is not userdata or the inner Rust type does not match `T`.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<UserDataRef<T>> {
         let userdata = value.as_userdata_mut()?;
         userdata.downcast_ref::<T>()?;
@@ -1292,7 +1299,7 @@ impl GlobalState {
         // Add arithmetic metamethods for string-to-number coercion
         // (Lua 5.5: strings auto-coerce to numbers for arithmetic)
         use crate::lua_vm::TmKind;
-        let arith_metas: &[(TmKind, fn(&mut LuaState) -> LuaResult<usize>)] = &[
+        let arith_metas: &[(TmKind, ArithMetaFn)] = &[
             (TmKind::Add, string_arith_add),
             (TmKind::Sub, string_arith_sub),
             (TmKind::Mul, string_arith_mul),
@@ -1902,6 +1909,7 @@ impl GlobalState {
     /// }
     /// ```
     #[inline]
+    #[allow(clippy::wrong_self_convention)]
     pub fn into_full_error(&mut self, e: LuaError) -> lua_error::LuaFullError {
         let message = self.get_error_message(e);
         lua_error::LuaFullError { kind: e, message }

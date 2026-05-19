@@ -1157,7 +1157,7 @@ impl NativeTable {
 
         let mut twotoi = 1u32; // 2^i candidate size
 
-        for i in 0..nums.len() {
+        for &count in nums {
             if twotoi == 0 {
                 break;
             } // overflow
@@ -1165,7 +1165,7 @@ impl NativeTable {
                 break;
             } // remaining keys can't fill half
 
-            a += nums[i];
+            a += count;
             if a > twotoi / 2 {
                 // More than half elements present → good size
                 optimal = twotoi;

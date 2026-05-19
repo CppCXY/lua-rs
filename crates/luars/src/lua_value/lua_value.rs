@@ -748,6 +748,10 @@ impl LuaValue {
 
     /// Unsafe version that skips the type tag check.
     /// Caller MUST ensure `self.is_lua_function()` is true.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that this value is a Lua function.
     #[inline(always)]
     pub unsafe fn as_lua_function_unchecked(&self) -> &LuaFunction {
         debug_assert!(self.ttisluafunction());
@@ -925,6 +929,11 @@ impl LuaValue {
 
     /// Unchecked version: caller guarantees this is a GC-collectable value (table, function, etc.).
     /// Skips the 8-arm kind() match. For use in hot paths where the type tag was already checked.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that this value is collectable and the type tag
+    /// matches the underlying GC allocation.
     #[inline(always)]
     pub unsafe fn as_gc_ptr_unchecked(&self) -> GcObjectPtr {
         unsafe {
@@ -952,12 +961,20 @@ impl LuaValue {
 
     /// Unchecked version: caller guarantees this is a table value (tt == LUA_VTABLE).
     /// Constructs GcObjectPtr tagged as table without any type checks.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that this value is a table.
     #[inline(always)]
     pub unsafe fn as_gc_ptr_table_unchecked(&self) -> GcObjectPtr {
         unsafe { GcObjectPtr::from(TablePtr::new(self.value.ptr as *mut GcTable)) }
     }
 
     /// Unchecked version: caller guarantees this is a table value (tt == LUA_VTABLE).
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that this value is a table.
     #[inline(always)]
     pub unsafe fn as_table_ptr_unchecked(&self) -> TablePtr {
         unsafe { TablePtr::new(self.value.ptr as *mut GcTable) }
@@ -1084,6 +1101,10 @@ impl LuaValue {
 
     /// Get hash value for a string value (avoids type check).
     /// SAFETY: caller must guarantee self is a string (short or long).
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that this value is a short or long string.
     #[inline(always)]
     pub unsafe fn hash_string_unchecked(&self) -> u64 {
         let gs = unsafe { &*(self.value.ptr as *const GcString) };

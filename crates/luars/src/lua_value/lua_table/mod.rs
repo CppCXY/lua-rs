@@ -83,6 +83,10 @@ impl LuaTable {
         self.impl_table.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn hash_size(&self) -> usize {
         self.impl_table.hash_size()
     }
@@ -129,6 +133,7 @@ impl LuaTable {
     /// Returns Ok(Some((key, value))) for next entry, Ok(None) for end of table,
     /// or Err(()) for invalid key.
     #[inline]
+    #[allow(clippy::result_unit_err)]
     pub fn next(&self, input_key: &LuaValue) -> Result<Option<(LuaValue, LuaValue)>, ()> {
         self.impl_table.next(input_key)
     }

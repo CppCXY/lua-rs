@@ -1811,7 +1811,7 @@ impl GC {
         let gc_table = table_ptr.as_ref();
         let table = &gc_table.data;
 
-        let mut has_clears = table.len() > 0;
+        let mut has_clears = !table.is_empty();
 
         // CRITICAL FIX: Use next() instead of iter_all() to avoid allocation
         let mut key = LuaValue::nil();
@@ -2068,8 +2068,8 @@ impl GC {
             // Live locals in suspended coroutines are guaranteed to be below top
             // because resume restores stack_top to ci.top (the Lua frame's
             // base + maxstacksize), covering all registers.
-            for i in 0..top {
-                self.mark_value(l, &stack[i]);
+            for value in stack.iter().take(top) {
+                self.mark_value(l, value);
                 count += 1;
             }
 
@@ -2143,8 +2143,8 @@ impl GC {
                 }
                 let stack_len = state.stack_len();
                 let stack = state.stack_mut();
-                for i in clear_start..stack_len {
-                    stack[i] = LuaValue::nil();
+                for value in stack.iter_mut().take(stack_len).skip(clear_start) {
+                    *value = LuaValue::nil();
                 }
             }
 
@@ -3321,9 +3321,9 @@ impl GC {
                         let state = &t.data;
                         let stack = state.stack();
                         // Check ALL stack slots (not just up to top)
-                        for i in 0..stack.len() {
+                        for (i, value) in stack.iter().enumerate() {
                             check_value(
-                                &stack[i],
+                                value,
                                 &container_kind,
                                 container_ptr,
                                 container_age,
@@ -3518,8 +3518,7 @@ impl GC {
                 // Scan ENTIRE stack (including above top) to detect stale references
                 // that atomic should have cleared but didn't.
                 let scan_end = stack.len();
-                for i in 0..scan_end {
-                    let v = &stack[i];
+                for (i, v) in stack.iter().enumerate().take(scan_end) {
                     if v.is_collectable() {
                         ptrs.insert(
                             unsafe { v.value.ptr as u64 },
@@ -3600,8 +3599,7 @@ impl GC {
                         let start = (*slot).saturating_sub(5);
                         let end = (*slot + 5).min(state.stack_len());
                         let stack = state.stack();
-                        for i in start..end {
-                            let v = &stack[i];
+                        for (i, v) in stack.iter().enumerate().take(end).skip(start) {
                             let marker = if i == *slot {
                                 " <== FREED"
                             } else if i == *top {

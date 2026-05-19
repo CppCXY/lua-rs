@@ -403,6 +403,10 @@ impl LuaTableRef {
         vm.table_length(&table)
     }
 
+    pub fn is_empty(&self) -> LuaResult<bool> {
+        self.len().map(|len| len == 0)
+    }
+
     /// Append a value to the array part (equivalent to `table.insert`).
     pub fn push(&self, value: LuaValue) -> LuaResult<()> {
         let current_len = self.len()?;

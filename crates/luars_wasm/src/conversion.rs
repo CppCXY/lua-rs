@@ -98,7 +98,7 @@ fn table_to_js(vm: &LuaVM, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
     if !ctx.enter_table(ptr) {
         return JsValue::from_str("[Circular]");
     }
-    let result = if table.is_array() && table.len() > 0 {
+    let result = if table.is_array() && !table.is_empty() {
         table_to_js_array(vm, table_value, ctx)
     } else {
         table_to_js_object(vm, table_value, ctx)

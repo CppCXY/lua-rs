@@ -133,7 +133,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
     if nargs <= 256 {
         let mut buf = [0u8; 256];
         let mut all_ascii = true;
-        for i in 0..nargs {
+        for (i, slot) in buf.iter_mut().enumerate().take(nargs) {
             let arg = l.get_arg(i + 1).unwrap_or_default();
             let Some(byte) = arg.as_integer() else {
                 return Err(l.error(format!(
@@ -148,7 +148,7 @@ fn string_char(l: &mut LuaState) -> LuaResult<usize> {
                 )));
             }
             let b = byte as u8;
-            buf[i] = b;
+            *slot = b;
             if b > 127 {
                 all_ascii = false;
             }
@@ -215,7 +215,7 @@ fn string_dump(l: &mut LuaState) -> LuaResult<usize> {
     let chunk = func_obj.chunk();
 
     // Serialize the chunk with pool access for string constants
-    match chunk_serializer::serialize_chunk_with_pool(chunk, strip, &l.vm_mut().object_allocator) {
+    match chunk_serializer::serialize_chunk_with_pool(chunk, strip) {
         Ok(bytes) => {
             // Create binary value directly - no encoding needed
             let result = l.create_binary(bytes)?;

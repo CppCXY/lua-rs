@@ -65,10 +65,8 @@ pub fn get_varargs(
     // Calculate how many to copy
     let touse = if wanted < 0 {
         nargs // Get all
-    } else if (wanted as usize) > nargs {
-        nargs
     } else {
-        wanted as usize
+        (wanted as usize).min(nargs)
     };
 
     // Always update stack_top to accommodate the results

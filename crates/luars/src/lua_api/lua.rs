@@ -579,6 +579,11 @@ impl Lua {
     }
 
     /// Get a mutable reference to the underlying LuaVM for advanced use cases.
+    ///
+    /// # Safety
+    ///
+    /// The caller must preserve Lua VM invariants while holding the returned
+    /// mutable reference and must not keep invalidated references across VM operations.
     pub unsafe fn vm_mut(&mut self) -> &mut LuaVM {
         &mut self.vm
     }

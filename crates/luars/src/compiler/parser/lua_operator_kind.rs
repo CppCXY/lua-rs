@@ -1,6 +1,7 @@
 use crate::compiler::parser::LuaTokenKind;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum UnaryOperator {
     OpNot,  // not
     OpLen,  // #
@@ -16,6 +17,7 @@ pub struct PriorityTable {
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum BinaryOperator {
     OpAdd,    // +
     OpSub,    // -

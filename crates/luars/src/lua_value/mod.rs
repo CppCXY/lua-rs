@@ -4,6 +4,7 @@ pub mod chunk_serializer;
 pub mod lua_convert;
 mod lua_string;
 mod lua_table;
+#[allow(clippy::module_inception)]
 mod lua_value;
 pub mod userdata_builder;
 pub mod userdata_trait;

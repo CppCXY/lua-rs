@@ -87,7 +87,7 @@ impl fmt::Display for LuaTokenKind {
 
 impl LuaTokenKind {
     /// Convert token kind to user-readable string (like Lua's luaX_token2str)
-    pub fn to_user_string(&self) -> &'static str {
+    pub fn to_user_string(self) -> &'static str {
         match self {
             // Keywords
             LuaTokenKind::TkAnd => "and",

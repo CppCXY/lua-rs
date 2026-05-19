@@ -37,7 +37,7 @@ impl Endianness {
     }
 
     /// Convert from bytes based on endianness
-    fn from_bytes<T: FromBytes>(self, bytes: &[u8]) -> T {
+    fn read_bytes<T: FromBytes>(self, bytes: &[u8]) -> T {
         match self {
             Endianness::Little => T::from_le_bytes(bytes),
             Endianness::Big => T::from_be_bytes(bytes),
@@ -599,9 +599,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
 
                 result.extend_from_slice(bytes);
                 // Pad with zeros if needed
-                for _ in bytes.len()..size {
-                    result.push(0);
-                }
+                result.extend(std::iter::repeat_n(0, size - bytes.len()));
                 value_idx += 1;
             }
 
@@ -737,8 +735,6 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                                 return Err(l.error(format!("({}) out of limits [1,16]", n)));
                             }
                             n
-                        } else if next_ch == 'f' {
-                            4
                         } else {
                             4 // default int size
                         }
@@ -762,9 +758,7 @@ pub fn string_pack(l: &mut LuaState) -> LuaResult<usize> {
                 // Add padding bytes to align to boundary
                 if align > 1 {
                     let padding = (align - (result.len() % align)) % align;
-                    for _ in 0..padding {
-                        result.push(0);
-                    }
+                    result.extend(std::iter::repeat_n(0, padding));
                 }
             }
 
@@ -939,8 +933,6 @@ pub fn string_packsize(l: &mut LuaState) -> LuaResult<usize> {
                                 return Err(l.error(format!("({}) out of limits [1,16]", n)));
                             }
                             n
-                        } else if next_ch == 'f' {
-                            4
                         } else {
                             4 // default int size
                         }
@@ -1111,7 +1103,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 2 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: i16 = endianness.from_bytes(&bytes[idx..idx + 2]);
+                let val: i16 = endianness.read_bytes(&bytes[idx..idx + 2]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 2;
             }
@@ -1121,7 +1113,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 2 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: u16 = endianness.from_bytes(&bytes[idx..idx + 2]);
+                let val: u16 = endianness.read_bytes(&bytes[idx..idx + 2]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 2;
             }
@@ -1383,7 +1375,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 4 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: f32 = endianness.from_bytes(&bytes[idx..idx + 4]);
+                let val: f32 = endianness.read_bytes(&bytes[idx..idx + 4]);
                 results.push(LuaValue::number(val as f64));
                 idx += 4;
             }
@@ -1393,7 +1385,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: f64 = endianness.from_bytes(&bytes[idx..idx + 8]);
+                let val: f64 = endianness.read_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::number(val));
                 idx += 8;
             }
@@ -1404,7 +1396,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: i64 = endianness.from_bytes(&bytes[idx..idx + 8]);
+                let val: i64 = endianness.read_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::integer(val));
                 idx += 8;
             }
@@ -1415,7 +1407,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: u64 = endianness.from_bytes(&bytes[idx..idx + 8]);
+                let val: u64 = endianness.read_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 8;
             }
@@ -1426,7 +1418,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: u64 = endianness.from_bytes(&bytes[idx..idx + 8]);
+                let val: u64 = endianness.read_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::integer(val as i64));
                 idx += 8;
             }
@@ -1437,7 +1429,7 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                 if idx + 8 > bytes.len() {
                     return Err(l.error("data string too short".to_string()));
                 }
-                let val: f64 = endianness.from_bytes(&bytes[idx..idx + 8]);
+                let val: f64 = endianness.read_bytes(&bytes[idx..idx + 8]);
                 results.push(LuaValue::number(val));
                 idx += 8;
             }
@@ -1609,8 +1601,6 @@ pub fn string_unpack(l: &mut LuaState) -> LuaResult<usize> {
                                 || next_ch == 'L')
                         {
                             size_str.parse::<usize>().unwrap_or(4)
-                        } else if next_ch == 'f' {
-                            4
                         } else {
                             4 // default int size
                         }

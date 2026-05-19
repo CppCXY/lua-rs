@@ -1473,6 +1473,7 @@ pub fn order_tm_fallback(
 /// Cold path: binary metamethod fallback for MmBin/MmBinI/MmBinK
 #[cold]
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub fn bin_tm_fallback(
     lua_state: &mut LuaState,
     frame_idx: usize,

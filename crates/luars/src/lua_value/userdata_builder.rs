@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```text
 //! use std::net::SocketAddr;
 //! use luars::UserDataBuilder;
 //!
@@ -26,6 +26,10 @@ use crate::{LuaResult, LuaVM, LuaValue};
 use super::LuaUserdata;
 use super::userdata_trait::{UdValue, UserDataTrait};
 
+type FieldGetter<T> = Box<dyn Fn(&T) -> UdValue>;
+type FieldSetter<T> = Box<dyn Fn(&mut T, UdValue) -> Result<(), String>>;
+type TostringFn<T> = Box<dyn Fn(&T) -> String>;
+
 /// Builder for creating userdata from arbitrary types.
 ///
 /// Collects field getters, field setters, and metamethods, then produces a
@@ -33,9 +37,9 @@ use super::userdata_trait::{UdValue, UserDataTrait};
 pub struct UserDataBuilder<T: 'static> {
     value: T,
     type_name: &'static str,
-    field_getters: HashMap<String, Box<dyn Fn(&T) -> UdValue>>,
-    field_setters: HashMap<String, Box<dyn Fn(&mut T, UdValue) -> Result<(), String>>>,
-    tostring_fn: Option<Box<dyn Fn(&T) -> String>>,
+    field_getters: HashMap<String, FieldGetter<T>>,
+    field_setters: HashMap<String, FieldSetter<T>>,
+    tostring_fn: Option<TostringFn<T>>,
 }
 
 impl<T: 'static> UserDataBuilder<T> {
@@ -60,7 +64,7 @@ impl<T: 'static> UserDataBuilder<T> {
 
     /// Register a read-only field.
     ///
-    /// ```ignore
+    /// ```text
     /// .add_field_getter("ip", |addr| UdValue::Str(addr.ip().to_string()))
     /// ```
     pub fn add_field_getter<F>(mut self, name: &str, f: F) -> Self
@@ -122,9 +126,9 @@ impl<T: 'static> UserDataBuilder<T> {
 struct ConfiguredUserData<T: 'static> {
     value: T,
     type_name: &'static str,
-    field_getters: HashMap<String, Box<dyn Fn(&T) -> UdValue>>,
-    field_setters: HashMap<String, Box<dyn Fn(&mut T, UdValue) -> Result<(), String>>>,
-    tostring_fn: Option<Box<dyn Fn(&T) -> String>>,
+    field_getters: HashMap<String, FieldGetter<T>>,
+    field_setters: HashMap<String, FieldSetter<T>>,
+    tostring_fn: Option<TostringFn<T>>,
 }
 
 impl<T: 'static> UserDataTrait for ConfiguredUserData<T> {

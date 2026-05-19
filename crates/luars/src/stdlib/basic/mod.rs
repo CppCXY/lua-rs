@@ -290,7 +290,7 @@ fn lua_tonumber(l: &mut LuaState) -> LuaResult<usize> {
 /// then %.17g if roundtrip fails, and append ".0" if result looks integer-like.
 pub(crate) fn lua_float_to_string(n: f64) -> String {
     if n.is_nan() {
-        return if n.is_sign_negative() { "-nan" } else { "-nan" }.to_string();
+        return "-nan".to_string();
     }
     if n.is_infinite() {
         return if n > 0.0 { "inf" } else { "-inf" }.to_string();

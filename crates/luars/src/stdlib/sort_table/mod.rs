@@ -340,7 +340,7 @@ fn sift_down(
 /// - n == 2: compare and swap
 /// - n == 3: sort3
 /// - n >= 4: sort3 + partition + recurse (invalid order detected here)
-/// Falls back to heapsort when recursion is too deep (O(n log n) guaranteed).
+///   Falls back to heapsort when recursion is too deep (O(n log n) guaranteed).
 fn introsort(
     l: &mut LuaState,
     buf: &mut [LuaValue],

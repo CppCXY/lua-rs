@@ -92,7 +92,7 @@ pub struct CallInfo {
     /// Offset from original base to func position (for vararg functions after buildhiddenargs)
     /// When nextraargs > 0 and buildhiddenargs was called:
     /// - func_offset = totalargs + 1 (the shift amount)
-    /// Otherwise: func_offset = 1 (base - 1 = func)
+    ///   Otherwise: func_offset = 1 (base - 1 = func)
     pub func_offset: u32,
 
     /// Top of stack for this frame (first free slot)

@@ -2,15 +2,13 @@
 // Represents a single thread/coroutine execution context
 // Multiple LuaStates can share the same LuaVM (global_State)
 
-use std::future::Future;
-use std::pin::Pin;
-
 use crate::compiler::format_source;
 use crate::gc::{
     CreateResult, GcKind, GcObjectPtr, ProtoPtr, StringPtr, TablePtr, ThreadPtr, UpvaluePtr,
 };
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
+use crate::lua_vm::async_thread::AsyncFuture;
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_HOOKED, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
 };
@@ -141,8 +139,7 @@ pub struct LuaState {
     /// it here, then yields with ASYNC_SENTINEL. The AsyncThread polls this future
     /// and resumes the coroutine when it completes.
     /// `Option<Pin<Box<...>>>` is null-pointer-optimized: zero overhead when None.
-    pub(crate) pending_future:
-        Option<Pin<Box<dyn Future<Output = LuaResult<Vec<AsyncReturnValue>>>>>>,
+    pub(crate) pending_future: Option<AsyncFuture>,
 
     #[cfg(feature = "sandbox")]
     pub(crate) sandbox_limits: Option<SandboxRuntimeLimits>,
@@ -438,6 +435,7 @@ impl LuaState {
     }
 
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_lua_frame(
         &mut self,
         base: usize,
@@ -517,6 +515,7 @@ impl LuaState {
     /// Slow path for push_lua_frame — handles nil filling, resize, new slot allocation
     #[cold]
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn push_lua_frame_slow(
         &mut self,
         base: usize,
@@ -1000,18 +999,13 @@ impl LuaState {
 
     /// Store a pending async future (called by async function wrappers before yielding)
     #[inline(always)]
-    pub fn set_pending_future(
-        &mut self,
-        future: Pin<Box<dyn Future<Output = LuaResult<Vec<AsyncReturnValue>>>>>,
-    ) {
+    pub fn set_pending_future(&mut self, future: AsyncFuture) {
         self.pending_future = Some(future);
     }
 
     /// Take the pending async future (called by AsyncThread after detecting async yield)
     #[inline(always)]
-    pub fn take_pending_future(
-        &mut self,
-    ) -> Option<Pin<Box<dyn Future<Output = LuaResult<Vec<AsyncReturnValue>>>>>> {
+    pub fn take_pending_future(&mut self) -> Option<AsyncFuture> {
         self.pending_future.take()
     }
 
@@ -2271,7 +2265,7 @@ impl LuaState {
     /// After registration, Lua code can call e.g. `Point.new(3, 4)`.
     ///
     /// # Usage
-    /// ```ignore
+    /// ```text
     /// // In Rust:
     /// state.register_type("Point", Point::__lua_static_methods())?;
     ///
@@ -2607,7 +2601,7 @@ impl LuaState {
     /// Returns (success, results) where:
     /// - success=true, results=return values
     /// - success=false, results=[error_message]
-    /// Note: Yields are NOT caught by pcall - they propagate through
+    ///   Note: Yields are NOT caught by pcall - they propagate through
     pub fn pcall(
         &mut self,
         func: LuaValue,

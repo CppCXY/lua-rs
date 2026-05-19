@@ -3,7 +3,7 @@
 
 use super::{LocVar, LuaProto, LuaValue, UpvalueDesc};
 use crate::Instruction;
-use crate::gc::{GcProto, ObjectAllocator, ProtoPtr};
+use crate::gc::{GcProto, ProtoPtr};
 use crate::lua_vm::GlobalState;
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use std::collections::HashMap;
@@ -20,11 +20,7 @@ const LUARS_MAGIC: &[u8] = b"\x1bLuaRS";
 const LUARS_VERSION: u8 = 1;
 
 /// Serialize a Chunk to binary format (requires ObjectPool for string access)
-pub fn serialize_chunk_with_pool(
-    chunk: &LuaProto,
-    strip: bool,
-    pool: &ObjectAllocator,
-) -> Result<Vec<u8>, String> {
+pub fn serialize_chunk_with_pool(chunk: &LuaProto, strip: bool) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
 
     // Write header
@@ -36,7 +32,7 @@ pub fn serialize_chunk_with_pool(
     let mut string_table = HashMap::new();
 
     // Write chunk data with string deduplication
-    write_chunk_with_dedup(&mut buf, chunk, strip, pool, &mut string_table)?;
+    write_chunk_with_dedup(&mut buf, chunk, strip, &mut string_table)?;
 
     Ok(buf)
 }
@@ -173,7 +169,6 @@ fn write_chunk_with_dedup(
     buf: &mut Vec<u8>,
     chunk: &LuaProto,
     strip: bool,
-    pool: &ObjectAllocator,
     string_table: &mut HashMap<String, u32>,
 ) -> Result<(), String> {
     // Write code
@@ -212,7 +207,7 @@ fn write_chunk_with_dedup(
     // Write child prototypes
     write_u32(buf, chunk.child_protos.len() as u32);
     for child in &chunk.child_protos {
-        write_chunk_with_dedup(buf, &child.as_ref().data, strip, pool, string_table)?;
+        write_chunk_with_dedup(buf, &child.as_ref().data, strip, string_table)?;
     }
 
     // Write debug info (if not stripped)

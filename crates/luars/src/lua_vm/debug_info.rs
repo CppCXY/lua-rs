@@ -148,8 +148,8 @@ impl DebugInfo {
     pub(crate) fn fill_activelines(&mut self, line_info: &[u32], is_vararg: bool) {
         let mut lines = Vec::new();
         let start = if is_vararg { 1 } else { 0 }; // skip VARARGPREP for vararg functions
-        for i in start..line_info.len() {
-            let line = line_info[i] as i32;
+        for &line in line_info.iter().skip(start) {
+            let line = line as i32;
             if !lines.contains(&line) {
                 lines.push(line);
             }
