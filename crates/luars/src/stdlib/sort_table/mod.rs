@@ -115,8 +115,8 @@ fn sort_buffer(
             // All integers — most common case
             if buf[0].is_integer() {
                 buf.sort_unstable_by(|a, b| {
-                    let ia = unsafe { a.value.i };
-                    let ib = unsafe { b.value.i };
+                    let ia = a.ivalue();
+                    let ib = b.ivalue();
                     ia.cmp(&ib)
                 });
                 return Ok(());
@@ -125,8 +125,8 @@ fn sort_buffer(
             // All floats
             if buf[0].is_float() {
                 buf.sort_unstable_by(|a, b| {
-                    let fa = unsafe { a.value.n };
-                    let fb = unsafe { b.value.n };
+                    let fa = a.fltvalue();
+                    let fb = b.fltvalue();
                     fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
                 });
                 return Ok(());

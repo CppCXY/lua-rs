@@ -167,12 +167,19 @@ pub enum OpCode {
 
     // Extra argument for previous instruction
     ExtraArg, // Ax       extra (larger) argument for previous opcode
+
+    None = 255, // Sentinel value for invalid opcode
 }
 
 impl OpCode {
     #[inline(always)]
     pub fn from_u8(byte: u8) -> Self {
-        unsafe { std::mem::transmute(byte) }
+        if byte <= OpCode::ExtraArg as u8 {
+            // SAFETY: We check that the byte is within the valid range of opcodes before transmuting
+            unsafe { std::mem::transmute(byte) }
+        } else {
+            OpCode::None
+        }
     }
 
     /// Check if instruction uses "top" (IT mode - In Top)

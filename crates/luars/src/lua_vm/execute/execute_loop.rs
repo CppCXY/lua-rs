@@ -2817,13 +2817,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
                 }
-                OpCode::ExtraArg => {
-                    // Extra argument for previous opcode
-                    // This instruction should never be executed directly
-                    // It's always consumed by the previous instruction (NEWTABLE, SETLIST, etc.)
-                    // If we reach here, it's a compiler error
-                    debug_assert!(false, "ExtraArg should never be executed directly");
-                }
+                _ => unreachable!(),
             }
         }
     }

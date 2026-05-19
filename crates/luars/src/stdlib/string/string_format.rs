@@ -994,7 +994,7 @@ fn format_pointer(buf: &mut String, arg: &LuaValue, spec: &FormatSpec) -> LuaRes
         | LuaValueKind::CFunction
         | LuaValueKind::Userdata
         | LuaValueKind::Thread => {
-            let ptr = unsafe { arg.value.ptr as usize };
+            let ptr = arg.raw_ptr_repr() as usize;
             format!("0x{:x}", ptr)
         }
         _ => "(null)".to_string(),
