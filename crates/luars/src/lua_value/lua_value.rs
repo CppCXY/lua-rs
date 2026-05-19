@@ -490,13 +490,6 @@ impl LuaValue {
         novariant(self.tt())
     }
 
-    #[allow(unused)]
-    /// ttypetag(o) - type tag with variants (bits 0-5)
-    #[inline(always)]
-    pub(crate) fn ttypetag(&self) -> u8 {
-        withvariant(self.tt())
-    }
-
     /// checktag(o, t) - exact tag match
     #[inline(always)]
     pub(crate) fn checktag(&self, t: u8) -> bool {
@@ -743,6 +736,11 @@ impl LuaValue {
     }
 
     #[inline(always)]
+    pub fn is_lightuserdata(&self) -> bool {
+        self.ttislightuserdata()
+    }
+
+    #[inline(always)]
     pub fn is_thread(&self) -> bool {
         self.ttisthread()
     }
@@ -962,6 +960,15 @@ impl LuaValue {
     pub fn as_userdata_mut(&self) -> Option<&mut LuaUserdata> {
         if self.ttisfulluserdata() {
             Some(&mut self.gc_userdata_mut().data)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_lightuserdata(&self) -> Option<*mut std::ffi::c_void> {
+        if self.ttislightuserdata() {
+            Some(self.pvalue())
         } else {
             None
         }
