@@ -1,7 +1,7 @@
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
-    LuaProto, LuaResult, LuaValue, OpCode,
+    Instruction, LuaProto, LuaResult, LuaValue, OpCode,
     gc::TablePtr,
     lua_value::{LUA_VNUMFLT, LUA_VNUMINT, lua_value_to_udvalue, udvalue_to_lua_value},
     lua_vm::{
@@ -1755,4 +1755,93 @@ pub fn return1_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> L
     lua_state.set_top_raw(a_pos + 1);
     lua_state.current_frame_mut_unchecked().save_pc(pc);
     poscall(lua_state, 1, pc)
+}
+
+pub trait VmIndex {
+    fn to_usize(self) -> usize;
+}
+
+impl VmIndex for usize {
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self
+    }
+}
+
+impl VmIndex for u8 {
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+}
+
+impl VmIndex for u16 {
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+}
+
+impl VmIndex for u32 {
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+}
+
+impl VmIndex for i32 {
+    #[inline(always)]
+    fn to_usize(self) -> usize {
+        self as usize
+    }
+}
+
+#[inline(always)]
+pub fn instr_at(code: &[Instruction], pc: usize) -> Instruction {
+    unsafe { *code.get_unchecked(pc) }
+}
+
+#[inline(always)]
+pub fn const_ref<I: VmIndex>(constants: &[LuaValue], index: I) -> &LuaValue {
+    unsafe { constants.get_unchecked(index.to_usize()) }
+}
+
+#[inline(always)]
+pub fn stack_ref(stack: &[LuaValue], index: usize) -> &LuaValue {
+    unsafe { stack.get_unchecked(index) }
+}
+
+#[inline(always)]
+pub fn stack_mut_ref(stack: &mut [LuaValue], index: usize) -> &mut LuaValue {
+    unsafe { stack.get_unchecked_mut(index) }
+}
+
+#[inline(always)]
+pub fn stack_copy(stack: &[LuaValue], index: usize) -> LuaValue {
+    *stack_ref(stack, index)
+}
+
+#[inline(always)]
+pub fn stack_ptr(stack: &[LuaValue], index: usize) -> *const LuaValue {
+    unsafe { stack.as_ptr().add(index) }
+}
+
+#[inline(always)]
+pub fn stack_mut_ptr(stack: &mut [LuaValue], index: usize) -> *mut LuaValue {
+    unsafe { stack.as_mut_ptr().add(index) }
+}
+
+#[inline(always)]
+pub fn stack_val<I: VmIndex>(stack: &[LuaValue], base: usize, reg: I) -> &LuaValue {
+    stack_ref(stack, base + reg.to_usize())
+}
+
+#[inline(always)]
+pub fn stack_val_mut<I: VmIndex>(stack: &mut [LuaValue], base: usize, reg: I) -> &mut LuaValue {
+    stack_mut_ref(stack, base + reg.to_usize())
+}
+
+#[inline(always)]
+pub fn k_val<I: VmIndex>(constants: &[LuaValue], index: I) -> &LuaValue {
+    const_ref(constants, index)
 }
