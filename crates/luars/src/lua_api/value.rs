@@ -1,3 +1,5 @@
+#[cfg(feature = "serde")]
+use crate::Lua;
 use crate::{FromLua, IntoLua, LuaAnyRef, LuaResult, LuaState, LuaValueKind, UserDataRef};
 
 use crate::lua_api::{Function, LuaString, Table};
@@ -101,8 +103,8 @@ impl Value {
 
     /// Construct a safe Lua value from a JSON value inside the provided Lua runtime.
     #[cfg(feature = "serde")]
-    pub fn from_json_value(lua: &mut crate::Lua, json: &serde_json::Value) -> LuaResult<Self> {
-        let vm = unsafe { lua.vm_mut() };
+    pub fn from_json_value(lua: &mut Lua, json: &serde_json::Value) -> LuaResult<Self> {
+        let vm = lua.vm_mut();
         let value = vm
             .deserialize_from_json(json)
             .map_err(|msg| vm.error(msg))?;
@@ -111,8 +113,8 @@ impl Value {
 
     /// Construct a safe Lua value from a JSON string inside the provided Lua runtime.
     #[cfg(feature = "serde")]
-    pub fn from_json_str(lua: &mut crate::Lua, json: &str) -> LuaResult<Self> {
-        let vm = unsafe { lua.vm_mut() };
+    pub fn from_json_str(lua: &mut Lua, json: &str) -> LuaResult<Self> {
+        let vm = lua.vm_mut();
         let value = vm
             .deserialize_from_json_string(json)
             .map_err(|msg| vm.error(msg))?;
@@ -121,11 +123,11 @@ impl Value {
 
     /// Construct a safe Lua value from any serde-serializable Rust value.
     #[cfg(feature = "serde")]
-    pub fn from_serde<T: serde::Serialize>(lua: &mut crate::Lua, value: &T) -> LuaResult<Self> {
+    pub fn from_serde<T: serde::Serialize>(lua: &mut Lua, value: &T) -> LuaResult<Self> {
         let json = match serde_json::to_value(value) {
             Ok(json) => json,
             Err(err) => {
-                let vm = unsafe { lua.vm_mut() };
+                let vm = lua.vm_mut();
                 return Err(vm.error(err.to_string()));
             }
         };
