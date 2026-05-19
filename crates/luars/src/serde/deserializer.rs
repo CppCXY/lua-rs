@@ -8,11 +8,11 @@
 /// - JSON array -> Lua table (array-like)
 /// - JSON object -> Lua table (map-like)
 use crate::lua_value::LuaValue;
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::GlobalState;
 use serde_json::Value as JsonValue;
 
 /// Convert a serde_json::Value to a Lua value
-pub fn from_value(json_value: &JsonValue, vm: &mut LuaVM) -> Result<LuaValue, String> {
+pub fn from_value(json_value: &JsonValue, gs: &mut GlobalState) -> Result<LuaValue, String> {
     match json_value {
         JsonValue::Null => Ok(LuaValue::nil()),
 
@@ -30,35 +30,35 @@ pub fn from_value(json_value: &JsonValue, vm: &mut LuaVM) -> Result<LuaValue, St
             }
         }
 
-        JsonValue::String(s) => vm
+        JsonValue::String(s) => gs
             .create_string(s)
             .map_err(|e| format!("Failed to create string: {}", e)),
 
-        JsonValue::Array(arr) => json_array_to_lua_table(arr, vm),
+        JsonValue::Array(arr) => json_array_to_lua_table(arr, gs),
 
-        JsonValue::Object(obj) => json_object_to_lua_table(obj, vm),
+        JsonValue::Object(obj) => json_object_to_lua_table(obj, gs),
     }
 }
 
 /// Convert a JSON string to a Lua value
-pub fn from_str(json_str: &str, vm: &mut LuaVM) -> Result<LuaValue, String> {
+pub fn from_str(json_str: &str, gs: &mut GlobalState) -> Result<LuaValue, String> {
     let json_value: JsonValue =
         serde_json::from_str(json_str).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
-    from_value(&json_value, vm)
+    from_value(&json_value, gs)
 }
 
-fn json_array_to_lua_table(arr: &[JsonValue], vm: &mut LuaVM) -> Result<LuaValue, String> {
+fn json_array_to_lua_table(arr: &[JsonValue], gs: &mut GlobalState) -> Result<LuaValue, String> {
     // Create table with array size hint
-    let table = vm
+    let table = gs
         .create_table(arr.len(), 0)
         .map_err(|e| format!("Failed to create table: {}", e))?;
 
     // Fill table with array elements (1-indexed)
     for (i, item) in arr.iter().enumerate() {
-        let value = from_value(item, vm)?;
+        let value = from_value(item, gs)?;
         let key = LuaValue::number((i + 1) as f64);
-        vm.raw_set(&table, key, value);
+        gs.raw_set(&table, key, value);
     }
 
     Ok(table)
@@ -66,20 +66,20 @@ fn json_array_to_lua_table(arr: &[JsonValue], vm: &mut LuaVM) -> Result<LuaValue
 
 fn json_object_to_lua_table(
     obj: &serde_json::Map<String, JsonValue>,
-    vm: &mut LuaVM,
+    gs: &mut GlobalState,
 ) -> Result<LuaValue, String> {
     // Create table with hash size hint
-    let table = vm
+    let table = gs
         .create_table(0, obj.len())
         .map_err(|e| format!("Failed to create table: {}", e))?;
 
     // Fill table with object entries
     for (key_str, value_json) in obj {
-        let key = vm
+        let key = gs
             .create_string(key_str)
             .map_err(|e| format!("Failed to create key string: {}", e))?;
-        let value = from_value(value_json, vm)?;
-        vm.raw_set(&table, key, value);
+        let value = from_value(value_json, gs)?;
+        gs.raw_set(&table, key, value);
     }
 
     Ok(table)

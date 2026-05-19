@@ -514,7 +514,9 @@ impl GlobalState {
     /// Serialize a Lua value to JSON (requires 'serde' feature)
     #[cfg(feature = "serde")]
     pub fn serialize_to_json(&self, value: &LuaValue) -> Result<serde_json::Value, String> {
-        crate::serde::lua_to_json(value)
+        use crate::serde::lua_to_json;
+
+        lua_to_json(value)
     }
 
     /// Serialize a Lua value to a JSON string (requires 'serde' feature)
@@ -524,19 +526,25 @@ impl GlobalState {
         value: &LuaValue,
         pretty: bool,
     ) -> Result<String, String> {
-        crate::serde::lua_to_json_string(value, pretty)
+        use crate::serde::lua_to_json_string;
+
+        lua_to_json_string(value, pretty)
     }
 
     /// Deserialize a JSON value to Lua (requires 'serde' feature)
     #[cfg(feature = "serde")]
     pub fn deserialize_from_json(&mut self, json: &serde_json::Value) -> Result<LuaValue, String> {
-        crate::serde::json_to_lua(json, self)
+        use crate::serde::json_to_lua;
+
+        json_to_lua(json, self)
     }
 
     /// Deserialize a JSON string to Lua (requires 'serde' feature)
     #[cfg(feature = "serde")]
     pub fn deserialize_from_json_string(&mut self, json_str: &str) -> Result<LuaValue, String> {
-        crate::serde::json_string_to_lua(json_str, self)
+        use crate::serde::json_string_to_lua;
+
+        json_string_to_lua(json_str, self)
     }
 
     /// Execute a chunk in the main thread
