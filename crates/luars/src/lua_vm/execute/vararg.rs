@@ -15,7 +15,7 @@ use super::helper::{buildhiddenargs, setnilvalue};
 fn get_vatab_len(lua_state: &mut LuaState, base: usize, vatab_reg: usize) -> LuaResult<usize> {
     let table_val = {
         let stack = lua_state.stack_mut();
-        unsafe { *stack.get_unchecked(base + vatab_reg) }
+        stack[base + vatab_reg]
     };
 
     if let Some(table) = table_val.as_table_mut() {
@@ -97,21 +97,18 @@ pub fn get_varargs(
         stack.copy_within(vararg_start..vararg_start + touse, ra_pos);
     } else {
         // Get from vararg table at R[B]
-        let table_val = { unsafe { *lua_state.stack().get_unchecked(base + b) } };
+        let table_val = { lua_state.stack()[base + b] };
 
         if let Some(table) = table_val.as_table_mut() {
             let stack = lua_state.stack_mut();
             for i in 0..touse {
-                unsafe {
-                    *stack.get_unchecked_mut(ra_pos + i) =
-                        table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil())
-                };
+                stack[ra_pos + i] = table.raw_geti((i + 1) as i64).unwrap_or(LuaValue::nil());
             }
         } else {
             // Not a table, fill with nil
             let stack = lua_state.stack_mut();
             for i in 0..touse {
-                setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos + i) });
+                setnilvalue(&mut stack[ra_pos + i]);
             }
         }
     }
@@ -120,7 +117,7 @@ pub fn get_varargs(
     if wanted >= 0 {
         let stack = lua_state.stack_mut();
         for i in touse..(wanted as usize) {
-            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos + i) });
+            setnilvalue(&mut stack[ra_pos + i]);
         }
     }
 
@@ -146,10 +143,10 @@ pub fn get_vararg(
     if let Some(s) = rc.as_str() {
         if s == "n" {
             let stack = lua_state.stack_mut();
-            setivalue(unsafe { stack.get_unchecked_mut(ra_pos) }, nextra as i64);
+            setivalue(&mut stack[ra_pos], nextra as i64);
         } else {
             let stack = lua_state.stack_mut();
-            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+            setnilvalue(&mut stack[ra_pos]);
         }
     } else if ttisinteger(&rc) {
         let n = ivalue(&rc);
@@ -158,7 +155,7 @@ pub fn get_vararg(
             let slot = (base - 1) - nextra + (n as usize) - 1;
             stack[ra_pos] = stack[slot];
         } else {
-            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+            setnilvalue(&mut stack[ra_pos]);
         }
     } else if rc.is_float() {
         // Lua 5.5: tointegerns - convert integer-valued float to integer
@@ -171,15 +168,15 @@ pub fn get_vararg(
                 let slot = (base - 1) - nextra + (n as usize) - 1;
                 stack[ra_pos] = stack[slot];
             } else {
-                setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+                setnilvalue(&mut stack[ra_pos]);
             }
         } else {
             let stack = lua_state.stack_mut();
-            setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+            setnilvalue(&mut stack[ra_pos]);
         }
     } else {
         let stack = lua_state.stack_mut();
-        setnilvalue(unsafe { stack.get_unchecked_mut(ra_pos) });
+        setnilvalue(&mut stack[ra_pos]);
     }
     Ok(())
 }
@@ -248,7 +245,7 @@ pub fn exec_varargprep(
         }
 
         let stack = lua_state.stack_mut();
-        unsafe { *stack.get_unchecked_mut(target_idx) = table_val };
+        stack[target_idx] = table_val;
 
         // In Lua 5.5 C implementation "luaT_adjustvarargs", the table is placed
         // at the slot after fixed parameters. L->top is adjusted to include the table.
@@ -272,14 +269,14 @@ pub fn exec_varargprep(
         // The named vararg param (e.g., 't' in '...t') is at register nfixparams
         // It should be nil when using hidden args mode (GETVARG accesses hidden area directly)
         let stack = lua_state.stack_mut();
-        setnilvalue(unsafe { stack.get_unchecked_mut(new_base + nfixparams) });
+        setnilvalue(&mut stack[new_base + nfixparams]);
     }
     // No vararg table needed and no extra args: still need to nil the vararg register
     // so it doesn't contain stale stack values
     else if chunk.is_vararg {
         let current_base = lua_state.current_frame_unchecked().base;
         let stack = lua_state.stack_mut();
-        setnilvalue(unsafe { stack.get_unchecked_mut(current_base + nfixparams) });
+        setnilvalue(&mut stack[current_base + nfixparams]);
     }
 
     Ok(())

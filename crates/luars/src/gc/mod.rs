@@ -3520,10 +3520,7 @@ impl GC {
                 let scan_end = stack.len();
                 for (i, v) in stack.iter().enumerate().take(scan_end) {
                     if v.is_collectable() {
-                        ptrs.insert(
-                            unsafe { v.value.ptr as u64 },
-                            (name.to_string(), i, top, marked),
-                        );
+                        ptrs.insert(v.raw_ptr_repr() as u64, (name.to_string(), i, top, marked));
                     }
                 }
             };
@@ -3612,7 +3609,7 @@ impl GC {
                                     "\n    stack[{}]: tt={}, ptr={:#x}{}",
                                     i,
                                     v.tt(),
-                                    unsafe { v.value.ptr as u64 },
+                                    v.raw_ptr_repr() as u64,
                                     marker
                                 ));
                             } else {

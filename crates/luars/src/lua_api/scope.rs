@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::{
-    Chunk, FromLua, FromLuaMulti, Function, IntoLua, LuaResult, LuaState, Table, UdValue,
+    Chunk, FromLua, FromLuaMulti, Function, IntoLua, LuaError, LuaResult, LuaState, Table, UdValue,
     UserDataTrait, Value,
 };
 
@@ -522,14 +522,14 @@ impl<'scope, T: UserDataTrait> ScopedUserData<'scope, T> {
 
     pub fn get(&self) -> LuaResult<&T> {
         if !self.active.get() {
-            return Err(crate::LuaError::RuntimeError);
+            return Err(LuaError::RuntimeError);
         }
         Ok(unsafe { &*self.ptr })
     }
 
     pub fn get_mut(&mut self) -> LuaResult<&mut T> {
         if !self.active.get() {
-            return Err(crate::LuaError::RuntimeError);
+            return Err(LuaError::RuntimeError);
         }
         Ok(unsafe { &mut *self.ptr })
     }

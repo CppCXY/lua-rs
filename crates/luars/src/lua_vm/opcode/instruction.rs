@@ -85,7 +85,7 @@ impl Instruction {
     // Create masks
     #[inline(always)]
     fn mask1(n: u32, p: u32) -> u32 {
-        unsafe { (!((!0u32).unchecked_shl(n))).unchecked_shl(p) }
+        (!((!0u32) << n)) << p
     }
 
     #[inline(always)]
@@ -102,26 +102,20 @@ impl Instruction {
 
     #[inline(always)]
     pub fn set_opcode(&mut self, op: OpCode) {
-        unsafe {
-            self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
-                | ((op as u32).unchecked_shl(Self::POS_OP)
-                    & Self::mask1(Self::SIZE_OP, Self::POS_OP));
-        }
+        self.0 = (self.0 & Self::mask0(Self::SIZE_OP, Self::POS_OP))
+            | (((op as u32) << Self::POS_OP) & Self::mask1(Self::SIZE_OP, Self::POS_OP));
     }
 
     // Generic argument getter
     #[inline(always)]
     fn get_arg(&self, pos: u32, size: u32) -> u32 {
-        unsafe { self.0.unchecked_shr(pos) & Self::mask1(size, 0) }
+        (self.0 >> pos) & Self::mask1(size, 0)
     }
 
     // Generic argument setter
     #[inline(always)]
     fn set_arg(&mut self, v: u32, pos: u32, size: u32) {
-        unsafe {
-            self.0 =
-                (self.0 & Self::mask0(size, pos)) | (v.unchecked_shl(pos) & Self::mask1(size, pos));
-        }
+        self.0 = (self.0 & Self::mask0(size, pos)) | ((v << pos) & Self::mask1(size, pos));
     }
 
     // Field accessors

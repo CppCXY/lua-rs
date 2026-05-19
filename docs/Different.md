@@ -70,33 +70,26 @@ Affected: `calls.lua` (~L484) — binary-chunk header tests skipped.
 
 ---
 
-## 7. `io.popen` not implemented
+## 7. GC implementation differences
 
-`io.popen` always raises `"io.popen not yet implemented"`. Tests in `files.lua` are guarded by `pcall(io.popen, ...)` and gracefully skipped.
-
----
-
-## 8. GC implementation differences
-
-- `__gc` finalizers do not save/restore `L->allowhook` or set `CIST_FIN`.
 - Stack shrinking during GC is not implemented.
 
 ---
 
-## 9. Coroutine limitations
+## 8. Coroutine limitations
 
 - Multi-value `..` (OP_CONCAT) across a yield does not resume correctly — missing `finishOp` continuation for CONCAT. Test in `coroutine.lua` (~L982) skipped.
 - Stack-overflow limit differs from C Lua's 1 MiB policy. Test in `coroutine.lua` (~L839) skipped.
 
 ---
 
-## 10. `os.date` DST flag
+## 9. `os.date` DST flag
 
 `os.date` does not compute the `isdst` (daylight saving time) field correctly; it defaults to `false`.
 
 ---
 
-## 11. Long-string address reuse
+## 10. Long-string address reuse
 
 C Lua may reuse the same address for identical long-string constants (useful with `const` tags). luars allocates separate objects.
 
