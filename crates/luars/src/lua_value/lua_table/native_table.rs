@@ -401,12 +401,17 @@ impl NativeTable {
         }
 
         let mp = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
+        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
 
         unsafe {
             let mut node = mp;
             loop {
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                if (*node).key_tt == LUA_VSHRSTR
+                    && short_string_ptr_eq(
+                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        key_ptr,
+                    )
+                {
                     if (*node).val_tt != LUA_VNIL {
                         (*node).set_value(value);
                         return ShortStrSetResult::Done {
@@ -521,12 +526,17 @@ impl NativeTable {
         }
 
         let mp = self.mainposition_string(key);
-        let key_ptr = unsafe { key.value.i };
+        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
 
         unsafe {
             let mut node = mp;
             loop {
-                if (*node).key_tt == LUA_VSHRSTR && (*node).key_data.i == key_ptr {
+                if (*node).key_tt == LUA_VSHRSTR
+                    && short_string_ptr_eq(
+                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        key_ptr,
+                    )
+                {
                     if (*node).val_tt != LUA_VNIL {
                         (*node).set_value_parts(value, tt);
                         return ShortStrSetResult::Done {
@@ -2321,5 +2331,30 @@ mod tests {
         table.raw_set(&shared_key, value);
 
         assert_eq!(table.raw_get(&local_key), Some(value));
+    }
+
+    #[cfg(feature = "shared-proto")]
+    #[test]
+    fn test_shared_short_string_update_with_local_query_uses_existing_slot() {
+        let key = "PTYPE";
+        let mut shared_interner = StringInterner::new();
+        let mut local_interner = StringInterner::new();
+        let mut shared_gc = GC::new(SafeOption::default());
+        let mut local_gc = GC::new(SafeOption::default());
+
+        let mut shared_key = shared_interner.intern(key, &mut shared_gc).unwrap();
+        let local_key = local_interner.intern(key, &mut local_gc).unwrap();
+
+        assert!(share_lua_value(&mut shared_key));
+
+        let mut table = NativeTable::new(0, 4);
+        table.raw_set(&shared_key, LuaValue::integer(1));
+
+        let result = table.pset_shortstr(&local_key, LuaValue::integer(3));
+        let (new_key, _) = table.finish_shortstr_set(&local_key, LuaValue::integer(3), result);
+
+        assert!(!new_key);
+        assert_eq!(table.raw_get(&shared_key), Some(LuaValue::integer(3)));
+        assert_eq!(table.raw_get(&local_key), Some(LuaValue::integer(3)));
     }
 }

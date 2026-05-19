@@ -579,6 +579,17 @@ impl Lua {
         self.vm.into_full_error(error)
     }
 
+    /// Stop the garbage collector. No GC steps will run until `gc_restart` is called.
+    pub fn gc_stop(&mut self) {
+        self.vm_mut().gc.gc_stopped = true;
+    }
+
+    /// Restart the garbage collector after it has been stopped.
+    pub fn gc_restart(&mut self) {
+        self.vm_mut().gc.gc_stopped = false;
+        self.vm_mut().gc.set_debt(0);
+    }
+
     /// Get a mutable reference to the underlying LuaVM for advanced use cases.
     ///
     /// # Safety
