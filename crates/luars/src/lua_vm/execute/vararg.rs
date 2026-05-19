@@ -59,7 +59,10 @@ pub fn get_varargs(
     let nargs: usize = if vatab >= 0 {
         get_vatab_len(lua_state, base, vatab as usize)?
     } else {
-        lua_state.current_frame_unchecked().nextraargs as usize
+        lua_state
+            .current_frame()
+            .expect("vararg access requires an active call frame")
+            .nextraargs as usize
     };
 
     // Calculate how many to copy
@@ -130,7 +133,10 @@ pub fn get_vararg(
     ra_pos: usize,
     rc_pos: usize,
 ) -> LuaResult<()> {
-    let nextra = lua_state.current_frame_unchecked().nextraargs as usize;
+    let nextra = lua_state
+        .current_frame()
+        .expect("vararg access requires an active call frame")
+        .nextraargs as usize;
 
     // Ensure stack is large enough for rc_pos access
     if rc_pos >= lua_state.stack_len() {
@@ -193,7 +199,9 @@ pub fn exec_varargprep(
     // stack_top to frame_top (base + maxstacksize) for GC safety,
     // which would give a wrong totalargs.
 
-    let ci = lua_state.current_frame_unchecked();
+    let ci = lua_state
+        .current_frame()
+        .expect("vararg access requires an active call frame");
     let nextra = ci.nextraargs as usize;
     let func_pos = ci.base - 1;
     let nfixparams = chunk.param_count;
@@ -274,7 +282,10 @@ pub fn exec_varargprep(
     // No vararg table needed and no extra args: still need to nil the vararg register
     // so it doesn't contain stale stack values
     else if chunk.is_vararg {
-        let current_base = lua_state.current_frame_unchecked().base;
+        let current_base = lua_state
+            .current_frame()
+            .expect("vararg setup requires an active call frame")
+            .base;
         let stack = lua_state.stack_mut();
         setnilvalue(&mut stack[current_base + nfixparams]);
     }

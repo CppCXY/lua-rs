@@ -40,8 +40,14 @@ pub fn hook_on_call(
 #[cold]
 #[inline(never)]
 pub fn hook_on_return(lua_state: &mut LuaState, pc: usize, nres: i32) -> LuaResult<()> {
-    lua_state.current_frame_mut_unchecked().save_pc(pc);
-    let base = lua_state.current_frame_unchecked().base;
+    lua_state
+        .current_frame_mut()
+        .expect("hook handling requires an active call frame")
+        .save_pc(pc);
+    let base = lua_state
+        .current_frame()
+        .expect("hook handling requires an active call frame")
+        .base;
     let first_res = if nres > 0 {
         lua_state.get_top() - nres as usize
     } else {
@@ -95,7 +101,10 @@ pub fn hook_check_instruction(
         lua_state.hook_count -= 1;
         if lua_state.hook_count == 0 {
             lua_state.hook_count = lua_state.base_hook_count;
-            lua_state.current_frame_mut_unchecked().save_pc(pc);
+            lua_state
+                .current_frame_mut()
+                .expect("hook handling requires an active call frame")
+                .save_pc(pc);
             lua_state.run_hook(LUA_HOOKCOUNT, -1, 0, 0)?;
         }
     }
@@ -137,7 +146,10 @@ pub fn hook_check_instruction(
                 } else {
                     line_info[line_info.len() - 1]
                 };
-                lua_state.current_frame_mut_unchecked().save_pc(pc);
+                lua_state
+                    .current_frame_mut()
+                    .expect("hook handling requires an active call frame")
+                    .save_pc(pc);
                 lua_state.run_hook(LUA_HOOKLINE, new_line as i32, 0, 0)?;
             }
             // Store current instruction index (like C Lua's L->oldpc = npci)
@@ -147,7 +159,10 @@ pub fn hook_check_instruction(
             let npci = pc.saturating_sub(1);
             let oldpc = lua_state.oldpc as usize;
             if oldpc == usize::MAX || npci < oldpc {
-                lua_state.current_frame_mut_unchecked().save_pc(pc);
+                lua_state
+                    .current_frame_mut()
+                    .expect("hook handling requires an active call frame")
+                    .save_pc(pc);
                 lua_state.run_hook(LUA_HOOKLINE, -1, 0, 0)?;
             }
             lua_state.oldpc = npci as u32;

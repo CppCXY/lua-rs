@@ -202,42 +202,17 @@ impl LuaState {
     /// Get current call frame (equivalent to Lua's L->ci)
     #[inline(always)]
     pub fn current_frame(&self) -> Option<&CallInfo> {
-        if self.call_depth > 0 {
-            unsafe { Some(self.call_stack.get_unchecked(self.call_depth - 1)) }
-        } else {
-            None
-        }
-    }
-
-    /// Get current frame's top without Option wrapping (for hot paths where we know a frame exists)
-    #[inline(always)]
-    pub(crate) fn current_frame_top_unchecked(&self) -> usize {
-        debug_assert!(self.call_depth > 0);
-        unsafe { self.call_stack.get_unchecked(self.call_depth - 1).top as usize }
-    }
-
-    /// Get current call frame without Option wrapping (for hot paths where we know a frame exists)
-    #[inline(always)]
-    pub(crate) fn current_frame_unchecked(&self) -> &CallInfo {
-        debug_assert!(self.call_depth > 0);
-        unsafe { self.call_stack.get_unchecked(self.call_depth - 1) }
+        self.call_depth
+            .checked_sub(1)
+            .and_then(|index| self.call_stack.get(index))
     }
 
     /// Get mutable current call frame
     #[inline(always)]
     pub fn current_frame_mut(&mut self) -> Option<&mut CallInfo> {
-        if self.call_depth > 0 {
-            unsafe { Some(self.call_stack.get_unchecked_mut(self.call_depth - 1)) }
-        } else {
-            None
-        }
-    }
-
-    /// Get mutable current call frame without Option wrapping (for hot paths where we know a frame exists)
-    #[inline(always)]
-    pub(crate) fn current_frame_mut_unchecked(&mut self) -> &mut CallInfo {
-        debug_assert!(self.call_depth > 0);
-        unsafe { self.call_stack.get_unchecked_mut(self.call_depth - 1) }
+        self.call_depth
+            .checked_sub(1)
+            .and_then(|index| self.call_stack.get_mut(index))
     }
 
     /// Get call stack depth
@@ -349,7 +324,7 @@ impl LuaState {
 
         // Fast path: reuse existing CallInfo slot (most common case)
         if self.call_depth < self.call_stack.len() {
-            let ci = unsafe { self.call_stack.get_unchecked_mut(self.call_depth) };
+            let ci = &mut self.call_stack[self.call_depth];
             *ci = CallInfo {
                 base,
                 func_offset: 1,
@@ -4040,7 +4015,9 @@ impl LuaState {
             return;
         }
 
-        self.current_frame_mut_unchecked().save_pc(pc);
+        self.current_frame_mut()
+            .expect("gc loop check requires an active call frame")
+            .save_pc(pc);
         self.set_top_raw(c);
         self.vm.check_gc(self as *mut LuaState);
         *trap = self.hook_mask != 0;

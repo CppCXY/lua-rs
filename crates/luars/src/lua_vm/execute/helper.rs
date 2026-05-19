@@ -32,7 +32,10 @@ pub fn buildhiddenargs(
     nfixparams: usize,
     _nextra: usize,
 ) -> LuaResult<usize> {
-    let old_base = lua_state.current_frame_unchecked().base;
+    let old_base = lua_state
+        .current_frame()
+        .expect("base lookup requires an active call frame")
+        .base;
     let func_pos = if old_base > 0 { old_base - 1 } else { 0 };
 
     // The new function position is right after all the original arguments.
@@ -60,7 +63,9 @@ pub fn buildhiddenargs(
     }
 
     {
-        let ci = lua_state.current_frame_mut_unchecked();
+        let ci = lua_state
+            .current_frame_mut()
+            .expect("stack frame update requires an active call frame");
         ci.base = new_base;
         ci.top = (new_base + chunk.max_stack_size) as u32;
         ci.func_offset = (new_base - func_pos) as u32; // Distance from new_base to original func
@@ -1728,7 +1733,10 @@ pub fn eq_fallback(
 #[inline(never)]
 pub fn return0_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> LuaResult<()> {
     lua_state.set_top_raw(a_pos);
-    lua_state.current_frame_mut_unchecked().save_pc(pc);
+    lua_state
+        .current_frame_mut()
+        .expect("saving pc requires an active call frame")
+        .save_pc(pc);
     poscall(lua_state, 0, pc)
 }
 
@@ -1736,7 +1744,10 @@ pub fn return0_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> L
 #[inline(never)]
 pub fn return1_with_hook(lua_state: &mut LuaState, a_pos: usize, pc: usize) -> LuaResult<()> {
     lua_state.set_top_raw(a_pos + 1);
-    lua_state.current_frame_mut_unchecked().save_pc(pc);
+    lua_state
+        .current_frame_mut()
+        .expect("saving pc requires an active call frame")
+        .save_pc(pc);
     poscall(lua_state, 1, pc)
 }
 

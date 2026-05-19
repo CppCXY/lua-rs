@@ -225,7 +225,10 @@ pub fn call_tm_res(
     // Sync top to ci_top — callers in the inline hot path already did set_top_raw(ci_top),
     // so the comparison is almost always true. We still check for safety in other callers.
     let func_pos = {
-        let ci_top = lua_state.current_frame_top_unchecked();
+        let ci_top = lua_state
+            .current_frame()
+            .expect("metamethod call requires an active call frame")
+            .top as usize;
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);
@@ -295,7 +298,10 @@ pub fn call_tm_res1(
     arg1: LuaValue,
 ) -> LuaResult<LuaValue> {
     let func_pos = {
-        let ci_top = lua_state.current_frame_top_unchecked();
+        let ci_top = lua_state
+            .current_frame()
+            .expect("metamethod call requires an active call frame")
+            .top as usize;
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);
@@ -363,7 +369,10 @@ pub fn call_tm_res_into(
     dest_reg: usize,
 ) -> LuaResult<()> {
     let func_pos = {
-        let ci_top = lua_state.current_frame_top_unchecked();
+        let ci_top = lua_state
+            .current_frame()
+            .expect("metamethod call requires an active call frame")
+            .top as usize;
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);
@@ -451,7 +460,10 @@ pub fn call_tm(
 ) -> LuaResult<()> {
     // Sync top to ci_top
     let func_pos = {
-        let ci_top = lua_state.current_frame_top_unchecked();
+        let ci_top = lua_state
+            .current_frame()
+            .expect("metamethod call requires an active call frame")
+            .top as usize;
         let top = lua_state.get_top();
         if top != ci_top {
             lua_state.set_top_raw(ci_top);

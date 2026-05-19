@@ -2489,8 +2489,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         active_frame.flush(lua_state, pc);
                         if instr.get_k() {
                             // May have open upvalues / TBC variables
-                            lua_state.current_frame_mut_unchecked().set_saved_nres(n);
-                            let ci_top = lua_state.current_frame_top_unchecked();
+                            active_frame.current_ci_mut(lua_state).set_saved_nres(n);
+                            let ci_top = active_frame.top;
                             if lua_state.get_top() < ci_top {
                                 lua_state.set_top_raw(ci_top);
                             }
@@ -2517,6 +2517,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Return0 => {
                     // return (no values)
                     if lua_state.hook_mask & (LUA_MASKRET | LUA_MASKLINE) != 0 {
+                        active_frame.flush(lua_state, pc);
                         return0_with_hook(lua_state, stack_id!(instr.get_a()), pc)?;
                         break;
                     }
@@ -2545,6 +2546,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Return1 => {
                     // return R[A]  (single value)
                     if lua_state.hook_mask & (LUA_MASKRET | LUA_MASKLINE) != 0 {
+                        active_frame.flush(lua_state, pc);
                         return1_with_hook(lua_state, stack_id!(instr.get_a()), pc)?;
                         break;
                     }
@@ -2733,7 +2735,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     savestate!();
                     let upvalue_ptrs = unsafe {
                         std::slice::from_raw_parts(
-                            lua_state.current_frame_unchecked().upvalue_ptrs,
+                            active_frame.upvalue_ptrs(lua_state),
                             chunk.upvalue_count,
                         )
                     };

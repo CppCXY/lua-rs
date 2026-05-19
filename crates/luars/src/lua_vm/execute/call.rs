@@ -225,7 +225,9 @@ pub fn pretailcall_lua(
     let new_chunk_ptr = chunk_ptr;
 
     // Get current frame's func position (handles vararg func_offset)
-    let current_ci = lua_state.current_frame_unchecked();
+    let current_ci = lua_state
+        .current_frame()
+        .expect("call setup requires an active call frame");
     let func_offset = current_ci.func_offset;
     let base = current_ci.base;
     let func_pos = base - func_offset as usize;
@@ -257,7 +259,9 @@ pub fn pretailcall_lua(
 
     // Batch update CI fields (reuse current frame, no push/pop)
     {
-        let ci = lua_state.current_frame_mut_unchecked();
+        let ci = lua_state
+            .current_frame_mut()
+            .expect("call update requires an active call frame");
         ci.base = new_base;
         ci.func_offset = 1;
         ci.top = frame_top as u32;
@@ -552,7 +556,10 @@ fn pretailcall_meta(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> 
 /// Caller must set `lua_state.top = ra + nres` before calling (results
 /// are at `top - nres .. top - 1`).
 pub fn poscall(lua_state: &mut LuaState, nres: usize, pc: usize) -> LuaResult<()> {
-    let nresults = lua_state.current_frame_unchecked().nresults();
+    let nresults = lua_state
+        .current_frame()
+        .expect("return handling requires an active call frame")
+        .nresults();
 
     // Return hook (cold path — almost never fires)
     if lua_state.hook_mask & LUA_MASKRET != 0 && lua_state.allow_hook {
@@ -560,7 +567,9 @@ pub fn poscall(lua_state: &mut LuaState, nres: usize, pc: usize) -> LuaResult<()
     }
 
     // res = ci->func.p  (destination for results)
-    let ci = lua_state.current_frame_unchecked();
+    let ci = lua_state
+        .current_frame()
+        .expect("return handling requires an active call frame");
     let res = ci.base - ci.func_offset as usize;
 
     // moveresults: move nres values from top-nres to res, adjusted for wanted count
