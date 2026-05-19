@@ -354,8 +354,10 @@ fn test_string_dump_load_binary_constant() {
 
 #[test]
 fn test_load_rejects_binary_when_bytecode_loading_disabled() {
-    let mut option = SafeOption::default();
-    option.allow_load_bytecode = false;
+    let option = SafeOption {
+        allow_load_bytecode: false,
+        ..Default::default()
+    };
 
     let mut vm = LuaVM::new(option);
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
@@ -391,9 +393,11 @@ fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
         unique
     ));
     std::fs::write(&path, bytes).unwrap();
+    let option = SafeOption {
+        allow_load_bytecode: false,
+        ..Default::default()
+    };
 
-    let mut option = SafeOption::default();
-    option.allow_load_bytecode = false;
     let mut vm = LuaVM::new(option);
 
     let err = vm.dofile(path.to_str().unwrap()).unwrap_err();
