@@ -154,6 +154,166 @@ pub struct LuaValue {
 impl LuaValue {
     // ============ Type Tag Access ============
 
+    #[inline(always)]
+    fn raw_ptr(&self) -> *const u8 {
+        unsafe { self.value.ptr }
+    }
+
+    #[inline(always)]
+    fn raw_i64(&self) -> i64 {
+        unsafe { self.value.i }
+    }
+
+    #[inline(always)]
+    fn raw_f64(&self) -> f64 {
+        unsafe { self.value.n }
+    }
+
+    #[inline(always)]
+    fn raw_lightuserdata(&self) -> *mut std::ffi::c_void {
+        unsafe { self.value.p }
+    }
+
+    #[inline(always)]
+    fn raw_cfunction(&self) -> CFunction {
+        unsafe { self.value.f }
+    }
+
+    #[inline(always)]
+    fn raw_gc_const<T>(&self) -> *const T {
+        self.raw_ptr() as *const T
+    }
+
+    #[inline(always)]
+    fn raw_gc_mut<T>(&self) -> *mut T {
+        self.raw_ptr() as *mut T
+    }
+
+    #[inline(always)]
+    fn gc_ref<T>(&self) -> &T {
+        unsafe { &*self.raw_gc_const::<T>() }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_mut<T>(&self) -> &mut T {
+        unsafe { &mut *self.raw_gc_mut::<T>() }
+    }
+
+    #[inline(always)]
+    fn gc_string(&self) -> &GcString {
+        debug_assert!(self.ttisstring());
+        self.gc_ref::<GcString>()
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_string_mut(&self) -> &mut GcString {
+        debug_assert!(self.ttisstring());
+        self.gc_mut::<GcString>()
+    }
+
+    #[inline(always)]
+    fn gc_table(&self) -> &GcTable {
+        debug_assert!(self.ttistable());
+        self.gc_ref::<GcTable>()
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_table_mut(&self) -> &mut GcTable {
+        debug_assert!(self.ttistable());
+        self.gc_mut::<GcTable>()
+    }
+
+    #[inline(always)]
+    fn gc_function(&self) -> &GcFunction {
+        debug_assert!(self.ttisluafunction() || self.ttisfunction());
+        self.gc_ref::<GcFunction>()
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_function_mut(&self) -> &mut GcFunction {
+        debug_assert!(self.ttisluafunction() || self.ttisfunction());
+        self.gc_mut::<GcFunction>()
+    }
+
+    #[inline(always)]
+    fn gc_cclosure(&self) -> &GcCClosure {
+        debug_assert!(self.is_cclosure());
+        self.gc_ref::<GcCClosure>()
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_cclosure_mut(&self) -> &mut GcCClosure {
+        debug_assert!(self.is_cclosure());
+        self.gc_mut::<GcCClosure>()
+    }
+
+    #[inline(always)]
+    fn gc_rclosure(&self) -> &GcRClosure {
+        debug_assert!(self.is_rclosure());
+        self.gc_ref::<GcRClosure>()
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_rclosure_mut(&self) -> &mut GcRClosure {
+        debug_assert!(self.is_rclosure());
+        self.gc_mut::<GcRClosure>()
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_userdata_mut(&self) -> &mut GcUserdata {
+        debug_assert!(self.ttisfulluserdata());
+        self.gc_mut::<GcUserdata>()
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    fn gc_thread_mut(&self) -> &mut GcThread {
+        debug_assert!(self.ttisthread());
+        self.gc_mut::<GcThread>()
+    }
+
+    #[inline(always)]
+    fn table_ptr_raw(&self) -> TablePtr {
+        TablePtr::new(self.raw_gc_mut::<GcTable>())
+    }
+
+    #[inline(always)]
+    fn string_ptr_raw(&self) -> StringPtr {
+        StringPtr::new(self.raw_gc_mut::<GcString>())
+    }
+
+    #[inline(always)]
+    fn function_ptr_raw(&self) -> FunctionPtr {
+        FunctionPtr::new(self.raw_gc_mut::<GcFunction>())
+    }
+
+    #[inline(always)]
+    fn cclosure_ptr_raw(&self) -> CClosurePtr {
+        CClosurePtr::new(self.raw_gc_mut::<GcCClosure>())
+    }
+
+    #[inline(always)]
+    fn rclosure_ptr_raw(&self) -> RClosurePtr {
+        RClosurePtr::new(self.raw_gc_mut::<GcRClosure>())
+    }
+
+    #[inline(always)]
+    fn userdata_ptr_raw(&self) -> UserdataPtr {
+        UserdataPtr::new(self.raw_gc_mut::<GcUserdata>())
+    }
+
+    #[inline(always)]
+    fn thread_ptr_raw(&self) -> ThreadPtr {
+        ThreadPtr::new(self.raw_gc_mut::<GcThread>())
+    }
+
     /// Get type tag (for compatibility)
     #[inline(always)]
     pub fn tt(&self) -> u8 {
@@ -467,13 +627,13 @@ impl LuaValue {
     #[inline(always)]
     pub(crate) fn ivalue(&self) -> i64 {
         debug_assert!(self.ttisinteger());
-        unsafe { self.value.i }
+        self.raw_i64()
     }
 
     #[inline(always)]
     pub(crate) fn fltvalue(&self) -> f64 {
         debug_assert!(self.ttisfloat());
-        unsafe { self.value.n }
+        self.raw_f64()
     }
 
     /// nvalue - convert any number to f64
@@ -481,9 +641,9 @@ impl LuaValue {
     pub(crate) fn nvalue(&self) -> f64 {
         debug_assert!(self.ttisnumber());
         if self.ttisinteger() {
-            unsafe { self.value.i as f64 }
+            self.raw_i64() as f64
         } else {
-            unsafe { self.value.n }
+            self.raw_f64()
         }
     }
 
@@ -491,13 +651,13 @@ impl LuaValue {
     #[inline(always)]
     pub(crate) fn pvalue(&self) -> *mut std::ffi::c_void {
         debug_assert!(self.ttislightuserdata());
-        unsafe { self.value.p }
+        self.raw_lightuserdata()
     }
 
     #[inline(always)]
     pub(crate) fn fvalue(&self) -> CFunction {
         debug_assert!(self.ttiscfunction());
-        unsafe { self.value.f }
+        self.raw_cfunction()
     }
 
     // ============ pub API ============
@@ -658,11 +818,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_str(&self) -> Option<&str> {
         if self.ttisstring() {
-            unsafe {
-                let ptr = self.value.ptr;
-                let s: &GcString = &*(ptr as *const GcString);
-                s.data.as_str()
-            }
+            self.gc_string().data.as_str()
         } else {
             None
         }
@@ -671,11 +827,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_binary(&self) -> Option<&[u8]> {
         if self.ttisstring() && self.as_str().is_none() {
-            Some(unsafe {
-                let ptr = self.value.ptr;
-                let v: &GcString = &*(ptr as *const GcString);
-                v.data.as_bytes()
-            })
+            Some(self.gc_string().data.as_bytes())
         } else {
             None
         }
@@ -689,11 +841,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         if self.ttisstring() {
-            Some(unsafe {
-                let ptr = self.value.ptr;
-                let s: &GcString = &*(ptr as *const GcString);
-                s.data.as_bytes()
-            })
+            Some(self.gc_string().data.as_bytes())
         } else {
             None
         }
@@ -707,8 +855,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_table(&self) -> Option<&LuaTable> {
         if self.ttistable() {
-            let v = unsafe { &*(self.value.ptr as *const GcTable) };
-            Some(&v.data)
+            Some(&self.gc_table().data)
         } else {
             None
         }
@@ -716,21 +863,20 @@ impl LuaValue {
 
     #[inline(always)]
     pub(crate) fn hvalue(&self) -> &LuaTable {
-        unsafe { &(*(self.value.ptr as *const GcTable)).data }
+        &self.gc_table().data
     }
 
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub(crate) fn hvalue_mut(&self) -> &mut LuaTable {
-        unsafe { &mut (*(self.value.ptr as *mut GcTable)).data }
+        &mut self.gc_table_mut().data
     }
 
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_table_mut(&self) -> Option<&mut LuaTable> {
         if self.ttistable() {
-            let v = unsafe { &mut *(self.value.ptr as *mut GcTable) };
-            Some(&mut v.data)
+            Some(&mut self.gc_table_mut().data)
         } else {
             None
         }
@@ -739,32 +885,17 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_lua_function(&self) -> Option<&LuaFunction> {
         if self.ttisluafunction() {
-            let func = unsafe { &*(self.value.ptr as *const GcFunction) };
-            Some(&func.data)
+            Some(&self.gc_function().data)
         } else {
             None
         }
-    }
-
-    /// Unsafe version that skips the type tag check.
-    /// Caller MUST ensure `self.is_lua_function()` is true.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that this value is a Lua function.
-    #[inline(always)]
-    pub unsafe fn as_lua_function_unchecked(&self) -> &LuaFunction {
-        debug_assert!(self.ttisluafunction());
-        let func = unsafe { &*(self.value.ptr as *const GcFunction) };
-        &func.data
     }
 
     #[allow(clippy::mut_from_ref)]
     #[inline(always)]
     pub fn as_lua_function_mut(&self) -> Option<&mut LuaFunction> {
         if self.ttisluafunction() {
-            let func = unsafe { &mut *(self.value.ptr as *mut GcFunction) };
-            Some(&mut func.data)
+            Some(&mut self.gc_function_mut().data)
         } else {
             None
         }
@@ -782,8 +913,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_cclosure(&self) -> Option<&CClosureFunction> {
         if self.is_cclosure() {
-            let gc = unsafe { &*(self.value.ptr as *const GcCClosure) };
-            Some(&gc.data)
+            Some(&self.gc_cclosure().data)
         } else {
             None
         }
@@ -793,8 +923,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_cclosure_mut(&self) -> Option<&mut CClosureFunction> {
         if self.is_cclosure() {
-            let gc = unsafe { &mut *(self.value.ptr as *mut GcCClosure) };
-            Some(&mut gc.data)
+            Some(&mut self.gc_cclosure_mut().data)
         } else {
             None
         }
@@ -803,8 +932,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_rclosure(&self) -> Option<&RClosureFunction> {
         if self.is_rclosure() {
-            let gc = unsafe { &*(self.value.ptr as *const GcRClosure) };
-            Some(&gc.data)
+            Some(&self.gc_rclosure().data)
         } else {
             None
         }
@@ -814,8 +942,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_rclosure_mut(&self) -> Option<&mut RClosureFunction> {
         if self.is_rclosure() {
-            let gc = unsafe { &mut *(self.value.ptr as *mut GcRClosure) };
-            Some(&mut gc.data)
+            Some(&mut self.gc_rclosure_mut().data)
         } else {
             None
         }
@@ -824,9 +951,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_rclosure_ptr(&self) -> Option<RClosurePtr> {
         if self.is_rclosure() {
-            Some(RClosurePtr::new(unsafe {
-                self.value.ptr as *mut GcRClosure
-            }))
+            Some(self.rclosure_ptr_raw())
         } else {
             None
         }
@@ -836,8 +961,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_userdata_mut(&self) -> Option<&mut LuaUserdata> {
         if self.ttisfulluserdata() {
-            let gc = unsafe { &mut *(self.value.ptr as *mut GcUserdata) };
-            Some(&mut gc.data)
+            Some(&mut self.gc_userdata_mut().data)
         } else {
             None
         }
@@ -847,8 +971,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_thread_mut(&self) -> Option<&mut LuaState> {
         if self.ttisthread() {
-            let v = unsafe { &mut *(self.value.ptr as *mut GcThread) };
-            Some(&mut v.data)
+            Some(&mut self.gc_thread_mut().data)
         } else {
             None
         }
@@ -856,7 +979,7 @@ impl LuaValue {
 
     pub fn as_table_ptr(&self) -> Option<TablePtr> {
         if self.ttistable() {
-            Some(TablePtr::new(unsafe { self.value.ptr as *mut GcTable }))
+            Some(self.table_ptr_raw())
         } else {
             None
         }
@@ -865,7 +988,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_string_ptr(&self) -> Option<StringPtr> {
         if self.ttisstring() {
-            Some(StringPtr::new(unsafe { self.value.ptr as *mut GcString }))
+            Some(self.string_ptr_raw())
         } else {
             None
         }
@@ -874,9 +997,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_function_ptr(&self) -> Option<FunctionPtr> {
         if self.ttisfunction() {
-            Some(FunctionPtr::new(unsafe {
-                self.value.ptr as *mut GcFunction
-            }))
+            Some(self.function_ptr_raw())
         } else {
             None
         }
@@ -885,9 +1006,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_cclosure_ptr(&self) -> Option<CClosurePtr> {
         if self.is_cclosure() {
-            Some(CClosurePtr::new(unsafe {
-                self.value.ptr as *mut GcCClosure
-            }))
+            Some(self.cclosure_ptr_raw())
         } else {
             None
         }
@@ -896,9 +1015,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_userdata_ptr(&self) -> Option<UserdataPtr> {
         if self.ttisfulluserdata() {
-            Some(UserdataPtr::new(unsafe {
-                self.value.ptr as *mut GcUserdata
-            }))
+            Some(self.userdata_ptr_raw())
         } else {
             None
         }
@@ -907,7 +1024,7 @@ impl LuaValue {
     #[inline(always)]
     pub fn as_thread_ptr(&self) -> Option<ThreadPtr> {
         if self.ttisthread() {
-            Some(ThreadPtr::new(unsafe { self.value.ptr as *mut GcThread }))
+            Some(self.thread_ptr_raw())
         } else {
             None
         }
@@ -925,59 +1042,6 @@ impl LuaValue {
             LuaValueKind::Userdata => self.as_userdata_ptr().map(GcObjectPtr::from),
             _ => None,
         }
-    }
-
-    /// Unchecked version: caller guarantees this is a GC-collectable value (table, function, etc.).
-    /// Skips the 8-arm kind() match. For use in hot paths where the type tag was already checked.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that this value is collectable and the type tag
-    /// matches the underlying GC allocation.
-    #[inline(always)]
-    pub unsafe fn as_gc_ptr_unchecked(&self) -> GcObjectPtr {
-        unsafe {
-            let ptr = self.value.ptr as u64;
-            match self.kind() {
-                LuaValueKind::Table => GcObjectPtr::from(TablePtr::new(ptr as *mut GcTable)),
-                LuaValueKind::Function => {
-                    GcObjectPtr::from(FunctionPtr::new(ptr as *mut GcFunction))
-                }
-                LuaValueKind::CClosure => {
-                    GcObjectPtr::from(CClosurePtr::new(ptr as *mut GcCClosure))
-                }
-                LuaValueKind::RClosure => {
-                    GcObjectPtr::from(RClosurePtr::new(ptr as *mut GcRClosure))
-                }
-                LuaValueKind::String => GcObjectPtr::from(StringPtr::new(ptr as *mut GcString)),
-                LuaValueKind::Thread => GcObjectPtr::from(ThreadPtr::new(ptr as *mut GcThread)),
-                LuaValueKind::Userdata => {
-                    GcObjectPtr::from(UserdataPtr::new(ptr as *mut GcUserdata))
-                }
-                _ => core::hint::unreachable_unchecked(),
-            }
-        }
-    }
-
-    /// Unchecked version: caller guarantees this is a table value (tt == LUA_VTABLE).
-    /// Constructs GcObjectPtr tagged as table without any type checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that this value is a table.
-    #[inline(always)]
-    pub unsafe fn as_gc_ptr_table_unchecked(&self) -> GcObjectPtr {
-        unsafe { GcObjectPtr::from(TablePtr::new(self.value.ptr as *mut GcTable)) }
-    }
-
-    /// Unchecked version: caller guarantees this is a table value (tt == LUA_VTABLE).
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that this value is a table.
-    #[inline(always)]
-    pub unsafe fn as_table_ptr_unchecked(&self) -> TablePtr {
-        unsafe { TablePtr::new(self.value.ptr as *mut GcTable) }
     }
 
     // ============ Truthiness (Lua semantics) ============
@@ -1043,7 +1107,7 @@ impl LuaValue {
     }
 
     pub fn raw_ptr_repr(&self) -> *const u8 {
-        unsafe { self.value.ptr }
+        self.raw_ptr()
     }
 
     /// Get hash value for this LuaValue (for native table implementation)
@@ -1053,12 +1117,12 @@ impl LuaValue {
 
         // Fast path for short strings: always have precomputed hash
         if tt == LUA_VSHRSTR {
-            return unsafe { (*(self.value.ptr as *const GcString)).data.hash };
+            return self.gc_string().data.hash;
         }
 
         // Long strings: lazy hash (computed on demand, cached for reuse)
         if tt == LUA_VLNGSTR {
-            let gs = unsafe { &*(self.value.ptr as *const GcString) };
+            let gs = self.gc_string();
             let hash = gs.data.hash;
             if hash != 0 {
                 return hash;
@@ -1066,15 +1130,13 @@ impl LuaValue {
             // Compute hash lazily (like C Lua's luaS_hashlongstr)
             let computed = compute_long_string_hash(gs.data.str.as_bytes());
             // Cache the computed hash (safe: single-threaded, Box won't move)
-            unsafe {
-                (*(self.value.ptr as *mut GcString)).data.hash = computed;
-            }
+            self.gc_string_mut().data.hash = computed;
             return computed;
         }
 
         // For integers, use direct value
         if tt == LUA_VNUMINT {
-            return unsafe { self.value.i as u64 };
+            return self.raw_i64() as u64;
         }
 
         // For floats, use proper bit mixing to avoid catastrophic hash collisions.
@@ -1085,7 +1147,7 @@ impl LuaValue {
         // We apply a splitmix64 finalizer to the raw bits to ensure
         // all output bits depend on all input bits.
         if tt == LUA_VNUMFLT {
-            let mut h = unsafe { self.value.i as u64 };
+            let mut h = self.raw_f64().to_bits();
             // splitmix64 finalizer — bijective, excellent avalanche
             h ^= h >> 30;
             h = h.wrapping_mul(0xbf58476d1ce4e5b9);
@@ -1096,28 +1158,7 @@ impl LuaValue {
         }
 
         // For other types, use pointer or value bits
-        unsafe { self.value.i as u64 }
-    }
-
-    /// Get hash value for a string value (avoids type check).
-    /// SAFETY: caller must guarantee self is a string (short or long).
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that this value is a short or long string.
-    #[inline(always)]
-    pub unsafe fn hash_string_unchecked(&self) -> u64 {
-        let gs = unsafe { &*(self.value.ptr as *const GcString) };
-        let hash = gs.data.hash;
-        if hash != 0 {
-            return hash;
-        }
-        // Lazy hash for long string (short strings always have non-zero hash)
-        let computed = compute_long_string_hash(gs.data.str.as_bytes());
-        unsafe {
-            (*(self.value.ptr as *mut GcString)).data.hash = computed;
-        }
-        computed
+        self.raw_i64() as u64
     }
 }
 
@@ -1153,20 +1194,20 @@ impl PartialEq for LuaValue {
             // - string/table/function/etc: pointer compare (interned strings have same pointer)
             // Float must use f64 compare so that NaN != NaN (IEEE 754)
             if tt == LUA_VNUMFLT {
-                return unsafe { self.value.n == other.value.n };
+                return self.raw_f64() == other.raw_f64();
             }
-            if unsafe { self.value.i == other.value.i } {
+            if self.raw_i64() == other.raw_i64() {
                 return true;
             }
             return match tt {
                 LUA_VSHRSTR => {
-                    let left = StringPtr::new(unsafe { self.value.ptr as *mut GcString });
-                    let right = StringPtr::new(unsafe { other.value.ptr as *mut GcString });
+                    let left = self.string_ptr_raw();
+                    let right = other.string_ptr_raw();
                     short_string_ptr_eq(left, right)
                 }
                 LUA_VLNGSTR => {
-                    let s1 = unsafe { &*(self.value.ptr as *const GcString) };
-                    let s2 = unsafe { &*(other.value.ptr as *const GcString) };
+                    let s1 = self.gc_string();
+                    let s2 = other.gc_string();
                     // Skip hash comparison for long strings (hash may be 0 = lazy)
                     s1.data.str == s2.data.str
                 }
@@ -1298,26 +1339,28 @@ impl std::fmt::Display for LuaValue {
                     fmt_binary_bytes(f, self.as_bytes().unwrap_or(&[]), "string")
                 }
             }
-            LuaValueKind::Table => write!(f, "table: 0x{:x}", unsafe { self.value.ptr as usize }),
+            LuaValueKind::Table => write!(f, "table: 0x{:x}", self.raw_ptr() as usize),
             LuaValueKind::Function => {
-                write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
+                write!(f, "function: 0x{:x}", self.raw_ptr() as usize)
             }
             LuaValueKind::CFunction => {
-                write!(f, "function: 0x{:x}", unsafe {
-                    self.value.f as *const () as usize
-                })
+                write!(
+                    f,
+                    "function: 0x{:x}",
+                    self.raw_cfunction() as *const () as usize
+                )
             }
             LuaValueKind::CClosure => {
-                write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
+                write!(f, "function: 0x{:x}", self.raw_ptr() as usize)
             }
             LuaValueKind::RClosure => {
-                write!(f, "function: 0x{:x}", unsafe { self.value.ptr as usize })
+                write!(f, "function: 0x{:x}", self.raw_ptr() as usize)
             }
             LuaValueKind::Userdata => {
-                write!(f, "userdata: 0x{:x}", unsafe { self.value.ptr as usize })
+                write!(f, "userdata: 0x{:x}", self.raw_ptr() as usize)
             }
             LuaValueKind::Thread => {
-                write!(f, "thread: 0x{:x}", unsafe { self.value.ptr as usize })
+                write!(f, "thread: 0x{:x}", self.raw_ptr() as usize)
             }
         }
     }
@@ -1333,14 +1376,12 @@ impl std::hash::Hash for LuaValue {
         // Short strings (LUA_VSHRSTR = 0x44) always have hash set.
         // Long strings (LUA_VLNGSTR = 0x54) use lazy hash (compute on demand).
         if tt == LUA_VSHRSTR || tt == LUA_VLNGSTR {
-            let gs = unsafe { &*(self.value.ptr as *const GcString) };
+            let gs = self.gc_string();
             let mut hash = gs.data.hash;
             if hash == 0 {
                 // Lazy hash for long strings — compute and cache
                 hash = compute_long_string_hash(gs.data.str.as_bytes());
-                unsafe {
-                    (*(self.value.ptr as *mut GcString)).data.hash = hash;
-                }
+                self.gc_string_mut().data.hash = hash;
             }
             hash.hash(state);
             return;
@@ -1351,16 +1392,14 @@ impl std::hash::Hash for LuaValue {
         if tt == LUA_VNUMINT || tt == LUA_VNUMFLT {
             // Always hash numbers as floats to maintain hash consistency
             // when integer equals float
-            unsafe {
-                let n = if tt == LUA_VNUMINT {
-                    self.value.i as f64
-                } else {
-                    self.value.n
-                };
-                // Use a stable representation for hashing
-                LUA_TNUMBER.hash(state);
-                n.to_bits().hash(state);
-            }
+            let n = if tt == LUA_VNUMINT {
+                self.raw_i64() as f64
+            } else {
+                self.raw_f64()
+            };
+            // Use a stable representation for hashing
+            LUA_TNUMBER.hash(state);
+            n.to_bits().hash(state);
         } else if tt <= LUA_VFALSE {
             // nil or boolean - hash type tag only
             tt.hash(state);

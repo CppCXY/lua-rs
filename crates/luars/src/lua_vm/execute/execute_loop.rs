@@ -646,8 +646,12 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut meta = TablePtr::null();
                     if upval_value.is_table() {
                         let table = upval_value.hvalue_mut();
-                        let table_ptr = unsafe { upval_value.as_table_ptr_unchecked() };
-                        let gc_ptr = unsafe { upval_value.as_gc_ptr_table_unchecked() };
+                        let table_ptr = upval_value
+                            .as_table_ptr()
+                            .expect("SetTabUp fast path requires table");
+                        let gc_ptr = upval_value
+                            .as_gc_ptr()
+                            .expect("SetTabUp fast path requires collectable table");
                         meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
                             let (new_key, delta, rc_tt) = if instr.get_k() {
@@ -756,9 +760,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 let rc_value = unsafe { (*rc_ptr).value };
                                 if table.impl_table.fast_seti_parts(key, rc_value, rc_tt) {
                                     if rc_tt & BIT_ISCOLLECTABLE != 0 {
-                                        lua_state.gc_barrier_back(unsafe {
-                                            (*ra_ptr).as_gc_ptr_table_unchecked()
-                                        });
+                                        lua_state.gc_barrier_back(
+                                            unsafe { *ra_ptr }
+                                                .as_gc_ptr()
+                                                .expect("SetTable fast path requires table"),
+                                        );
                                     }
                                     continue;
                                 }
@@ -767,14 +773,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 let delta = table.impl_table.set_int_slow(key, rc);
                                 if delta != 0 {
                                     lua_state.gc_track_table_resize(
-                                        unsafe { (*ra_ptr).as_table_ptr_unchecked() },
+                                        unsafe { *ra_ptr }
+                                            .as_table_ptr()
+                                            .expect("SetTable fast path requires table"),
                                         delta,
                                     );
                                 }
                                 if rc_tt & BIT_ISCOLLECTABLE != 0 {
-                                    lua_state.gc_barrier_back(unsafe {
-                                        (*ra_ptr).as_gc_ptr_table_unchecked()
-                                    });
+                                    lua_state.gc_barrier_back(
+                                        unsafe { *ra_ptr }
+                                            .as_gc_ptr()
+                                            .expect("SetTable fast path requires table"),
+                                    );
                                 }
                                 continue;
                             }
@@ -782,9 +792,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let rc = *k_val!(c);
                             if table.impl_table.fast_seti(key, rc) {
                                 if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(unsafe {
-                                        (*ra_ptr).as_gc_ptr_table_unchecked()
-                                    });
+                                    lua_state.gc_barrier_back(
+                                        unsafe { *ra_ptr }
+                                            .as_gc_ptr()
+                                            .expect("SetTable fast path requires table"),
+                                    );
                                 }
                                 continue;
                             }
@@ -792,14 +804,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let delta = table.impl_table.set_int_slow(key, rc);
                             if delta != 0 {
                                 lua_state.gc_track_table_resize(
-                                    unsafe { (*ra_ptr).as_table_ptr_unchecked() },
+                                    unsafe { *ra_ptr }
+                                        .as_table_ptr()
+                                        .expect("SetTable fast path requires table"),
                                     delta,
                                 );
                             }
                             if rc.is_collectable() {
-                                lua_state.gc_barrier_back(unsafe {
-                                    (*ra_ptr).as_gc_ptr_table_unchecked()
-                                });
+                                lua_state.gc_barrier_back(
+                                    unsafe { *ra_ptr }
+                                        .as_gc_ptr()
+                                        .expect("SetTable fast path requires table"),
+                                );
                             }
                             continue;
                         } else {
@@ -810,9 +826,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             };
                             if table.impl_table.set_existing_int(key, rc) {
                                 if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(unsafe {
-                                        (*ra_ptr).as_gc_ptr_table_unchecked()
-                                    });
+                                    lua_state.gc_barrier_back(
+                                        unsafe { *ra_ptr }
+                                            .as_gc_ptr()
+                                            .expect("SetTable fast path requires table"),
+                                    );
                                 }
                                 continue;
                             }
@@ -887,14 +905,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             if delta != 0 {
                                 lua_state.gc_track_table_resize(
-                                    unsafe { (*ra_ptr).as_table_ptr_unchecked() },
+                                    unsafe { *ra_ptr }
+                                        .as_table_ptr()
+                                        .expect("SetTable fast path requires table"),
                                     delta,
                                 );
                             }
                             if needs_barrier {
-                                lua_state.gc_barrier_back(unsafe {
-                                    (*ra_ptr).as_gc_ptr_table_unchecked()
-                                });
+                                lua_state.gc_barrier_back(
+                                    unsafe { *ra_ptr }
+                                        .as_gc_ptr()
+                                        .expect("SetTable fast path requires table"),
+                                );
                             }
                             continue;
                         }
@@ -915,21 +937,24 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 let (_new_key, delta) = table.impl_table.raw_set(&rb, rc);
                                 if delta != 0 {
                                     lua_state.gc_track_table_resize(
-                                        unsafe { ra.as_table_ptr_unchecked() },
+                                        ra.as_table_ptr()
+                                            .expect("SetTable fallback requires table"),
                                         delta,
                                     );
                                 }
                                 if rc.is_collectable() || rb.is_collectable() {
-                                    lua_state
-                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                    lua_state.gc_barrier_back(
+                                        ra.as_gc_ptr().expect("SetTable fallback requires table"),
+                                    );
                                 }
                                 continue;
                             }
                         } else if rb.is_short_string() {
                             if table.impl_table.set_existing_shortstr(&rb, rc) {
                                 if rc.is_collectable() || rb.is_collectable() {
-                                    lua_state
-                                        .gc_barrier_back(unsafe { ra.as_gc_ptr_table_unchecked() });
+                                    lua_state.gc_barrier_back(
+                                        ra.as_gc_ptr().expect("SetTable fallback requires table"),
+                                    );
                                 }
                                 continue;
                             }
@@ -971,8 +996,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let table = ra.hvalue_mut();
                         // Pre-extract table/gc pointers as Copy values to break borrow chain
                         // (ra is a reference into the stack which borrows lua_state)
-                        let table_ptr = unsafe { ra.as_table_ptr_unchecked() };
-                        let gc_ptr = unsafe { ra.as_gc_ptr_table_unchecked() };
+                        let table_ptr = ra.as_table_ptr().expect("SetI fast path requires table");
+                        let gc_ptr = ra
+                            .as_gc_ptr()
+                            .expect("SetI fast path requires collectable table");
                         let meta = table.meta_ptr();
                         if meta.is_null() || meta.as_mut_ref().data.no_tm(TmKind::NewIndex.into()) {
                             if !instr.get_k() {
@@ -1106,14 +1133,18 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             }
                             if delta != 0 {
                                 lua_state.gc_track_table_resize(
-                                    unsafe { (*ra_ptr).as_table_ptr_unchecked() },
+                                    unsafe { *ra_ptr }
+                                        .as_table_ptr()
+                                        .expect("SetField fast path requires table"),
                                     delta,
                                 );
                             }
                             if rc_tt & BIT_ISCOLLECTABLE != 0 {
-                                lua_state.gc_barrier_back(unsafe {
-                                    (*ra_ptr).as_gc_ptr_table_unchecked()
-                                });
+                                lua_state.gc_barrier_back(
+                                    unsafe { *ra_ptr }
+                                        .as_gc_ptr()
+                                        .expect("SetField fast path requires table"),
+                                );
                             }
                             continue;
                         } else {
@@ -1124,9 +1155,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             };
                             if table.impl_table.set_existing_shortstr(key, rc) {
                                 if rc.is_collectable() {
-                                    lua_state.gc_barrier_back(unsafe {
-                                        (*ra_ptr).as_gc_ptr_table_unchecked()
-                                    });
+                                    lua_state.gc_barrier_back(
+                                        unsafe { *ra_ptr }
+                                            .as_gc_ptr()
+                                            .expect("SetField fast path requires table"),
+                                    );
                                 }
                                 continue;
                             }
@@ -1836,7 +1869,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let pi = unsafe { *code.get_unchecked(pc - 2) };
                     let result_reg = (base + pi.get_a() as usize) as u32;
 
-                    let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
+                    let tm = TmKind::from_u8(instr.get_c() as u8);
 
                     savestate!();
                     bin_tm_fallback(
@@ -1860,7 +1893,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let pi = unsafe { *code.get_unchecked(pc - 2) };
                     let result_reg = (base + pi.get_a() as usize) as u32;
 
-                    let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
+                    let tm = TmKind::from_u8(instr.get_c() as u8);
                     let rb = LuaValue::integer(imm as i64);
                     let r = if flip { (rb, *ra) } else { (*ra, rb) };
                     savestate!();
@@ -1880,7 +1913,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = *stack_val!(instr.get_a());
                     let pi = unsafe { *code.get_unchecked(pc - 2) };
                     let imm = *k_val!(instr.get_b());
-                    let tm = unsafe { TmKind::from_u8_unchecked(instr.get_c() as u8) };
+                    let tm = TmKind::from_u8(instr.get_c() as u8);
                     let flip = instr.get_k();
                     let result_reg = (base + pi.get_a() as usize) as u32;
 
@@ -2705,7 +2738,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
 
                     if is_collectable {
-                        lua_state.gc_barrier_back(unsafe { ra.as_gc_ptr_unchecked() });
+                        lua_state.gc_barrier_back(
+                            ra.as_gc_ptr()
+                                .expect("SetList fast path requires collectable table"),
+                        );
                     }
                 }
                 OpCode::Closure => {

@@ -459,7 +459,8 @@ impl Lua {
         &mut self,
         reference: &mut T,
     ) -> LuaResult<UserDataRef<T>> {
-        let value = unsafe { self.vm.main_state().create_userdata_ref(reference) }?;
+        let ud = unsafe { LuaUserdata::from_ref(reference) };
+        let value = self.vm.create_userdata(ud)?;
         self.value_to_userdata(value)
     }
 
@@ -584,7 +585,7 @@ impl Lua {
     ///
     /// The caller must preserve Lua VM invariants while holding the returned
     /// mutable reference and must not keep invalidated references across VM operations.
-    pub unsafe fn vm_mut(&mut self) -> &mut LuaVM {
+    pub fn vm_mut(&mut self) -> &mut LuaVM {
         &mut self.vm
     }
 }

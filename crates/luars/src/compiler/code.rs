@@ -2126,7 +2126,7 @@ pub fn posfix(
                     BinaryOperator::OpBAnd => TmKind::Band, // TM_BAND
                     BinaryOperator::OpBOr => TmKind::Bor,   // TM_BOR
                     BinaryOperator::OpBXor => TmKind::Bxor, // TM_BXOR
-                    _ => TmKind::N,                         // Invalid for other ops
+                    _ => TmKind::None,                      // Invalid for other ops
                 };
                 // Use code_abck to include flip bit (k-flag) like in MMBINI
                 code_abck(
@@ -2193,7 +2193,7 @@ pub fn posfix(
                     BinaryOperator::OpBXor => TmKind::Bxor,
                     BinaryOperator::OpShl => TmKind::Shl,
                     BinaryOperator::OpShr => TmKind::Shr,
-                    _ => TmKind::N,
+                    _ => TmKind::None,
                 };
                 code_abc(fs, OpCode::MmBin, o1 as u32, o2 as u32, tm_event as u32);
                 fixline(fs, line);

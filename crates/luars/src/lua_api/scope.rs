@@ -220,6 +220,15 @@ impl<T: UserDataTrait> ScopedBorrowedUserData<T> {
     fn alive(&self) -> bool {
         self.active.get()
     }
+
+    #[allow(clippy::mut_from_ref)]
+    fn mutate(&self) -> Option<&mut T> {
+        if self.alive() {
+            Some(unsafe { &mut *self.ptr })
+        } else {
+            None
+        }
+    }
 }
 
 impl<T: UserDataTrait> UserDataTrait for ScopedBorrowedUserData<T> {
@@ -232,129 +241,83 @@ impl<T: UserDataTrait> UserDataTrait for ScopedBorrowedUserData<T> {
     }
 
     fn get_field(&self, key: &str) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.get_field(key)
+        self.mutate()?.get_field(key)
     }
 
     fn set_field(&mut self, key: &str, value: UdValue) -> Option<Result<(), String>> {
         if !self.alive() {
             return Some(Err(scoped_expired_error().to_owned()));
         }
-        unsafe { &mut *self.ptr }.set_field(key, value)
+        self.mutate()?.set_field(key, value)
     }
 
     fn lua_tostring(&self) -> Option<String> {
-        if !self.alive() {
-            return Some(scoped_expired_error().to_owned());
-        }
-        unsafe { &*self.ptr }.lua_tostring()
+        self.mutate()?.lua_tostring()
     }
 
     fn lua_eq(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        if !self.alive() {
-            return Some(false);
-        }
-        unsafe { &*self.ptr }.lua_eq(other)
+        self.mutate()?.lua_eq(other)
     }
 
     fn lua_lt(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_lt(other)
+        self.mutate()?.lua_lt(other)
     }
 
     fn lua_le(&self, other: &dyn UserDataTrait) -> Option<bool> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_le(other)
+        self.mutate()?.lua_le(other)
     }
 
     fn lua_len(&self) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_len()
+        self.mutate()?.lua_len()
     }
 
     fn lua_unm(&self) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_unm()
+        self.mutate()?.lua_unm()
     }
 
     fn lua_add(&self, other: &UdValue) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_add(other)
+        self.mutate()?.lua_add(other)
     }
 
     fn lua_sub(&self, other: &UdValue) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_sub(other)
+        self.mutate()?.lua_sub(other)
     }
 
     fn lua_mul(&self, other: &UdValue) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_mul(other)
+        self.mutate()?.lua_mul(other)
     }
 
     fn lua_div(&self, other: &UdValue) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_div(other)
+        self.mutate()?.lua_div(other)
     }
 
     fn lua_mod(&self, other: &UdValue) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_mod(other)
+        self.mutate()?.lua_mod(other)
     }
 
     fn lua_concat(&self, other: &UdValue) -> Option<UdValue> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_concat(other)
+        self.mutate()?.lua_concat(other)
     }
 
     fn lua_call(&self) -> Option<crate::CFunction> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_call()
+        self.mutate()?.lua_call()
     }
 
     fn lua_next(&self, control: &UdValue) -> Option<(UdValue, UdValue)> {
-        if !self.alive() {
-            return None;
-        }
-        unsafe { &*self.ptr }.lua_next(control)
+        self.mutate()?.lua_next(control)
     }
 
     fn field_names(&self) -> &'static [&'static str] {
-        if !self.alive() {
-            return &[];
+        match self.mutate() {
+            Some(m) => m.field_names(),
+            None => &[],
         }
-        unsafe { &*self.ptr }.field_names()
     }
 
     fn as_any(&self) -> &dyn Any {
-        if self.alive() {
-            unsafe { &*self.ptr }.as_any()
-        } else {
-            self
+        match self.mutate() {
+            Some(m) => m.as_any(),
+            None => self,
         }
     }
 

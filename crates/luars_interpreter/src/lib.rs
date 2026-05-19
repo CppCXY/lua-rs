@@ -423,7 +423,7 @@ fn lua_main() -> i32 {
     lua.install_library(luars_debugger::Library::default())
         .unwrap();
 
-    let vm = unsafe { lua.vm_mut() };
+    let vm = lua.vm_mut();
 
     if cfg!(debug_assertions) {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));

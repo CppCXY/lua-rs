@@ -226,6 +226,6 @@ impl ConstString {
     /// Equivalent to C Lua's `G(L)->tmname[event]`.
     #[inline(always)]
     pub fn get_tm_value(&self, tm: TmKind) -> LuaValue {
-        unsafe { *self.tmname.get_unchecked(tm as usize) }
+        self.tmname[tm as usize]
     }
 }

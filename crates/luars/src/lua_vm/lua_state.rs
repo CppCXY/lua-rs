@@ -1586,7 +1586,7 @@ impl LuaState {
     /// Get frame base by index
     #[inline(always)]
     pub fn get_frame_base(&self, frame_idx: usize) -> usize {
-        unsafe { self.call_stack.get_unchecked(frame_idx).base }
+        self.call_stack.get(frame_idx).map(|f| f.base).unwrap_or(0)
     }
 
     /// Get frame PC by index
@@ -2554,7 +2554,9 @@ impl LuaState {
 
         if func.is_lua_function() {
             // Lua function fast path — skip resolve_call_chain, skip Vec alloc
-            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let lua_func = func
+                .as_lua_function()
+                .expect("protected call checked lua function type before access");
             let chunk = lua_func.chunk();
             let base = func_idx + 1;
 

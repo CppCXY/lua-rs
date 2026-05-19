@@ -539,7 +539,10 @@ impl GcObjectPtr {
     #[inline(always)]
     pub fn kind(&self) -> GcObjectKind {
         // Safety: tag values 0-8 match repr(u8) of GcObjectKind
-        unsafe { std::mem::transmute(self.tag()) }
+        match GcObjectKind::from_u8(self.tag()) {
+            Some(k) => k,
+            None => unreachable!(),
+        }
     }
 
     #[inline(always)]

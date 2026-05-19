@@ -253,7 +253,9 @@ pub fn call_tm_res(
 
     // Call the metamethod with nresults=1
     if metamethod.is_lua_function() {
-        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
+        let lua_func = metamethod
+            .as_lua_function()
+            .expect("call_tmres checked lua function type before access");
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
@@ -317,7 +319,9 @@ pub fn call_tm_res1(
     lua_state.set_top_raw(func_pos + 2);
 
     if metamethod.is_lua_function() {
-        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
+        let lua_func = metamethod
+            .as_lua_function()
+            .expect("call_tm_res1 checked lua function type before access");
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
@@ -384,7 +388,9 @@ pub fn call_tm_res_into(
     lua_state.set_top_raw(func_pos + 3);
 
     if metamethod.is_lua_function() {
-        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
+        let lua_func = metamethod
+            .as_lua_function()
+            .expect("call_tm_res checked lua function type before access");
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
@@ -475,7 +481,9 @@ pub fn call_tm(
 
     // Call with 0 results (nresults=0)
     if metamethod.is_lua_function() {
-        let lua_func = unsafe { metamethod.as_lua_function_unchecked() };
+        let lua_func = metamethod
+            .as_lua_function()
+            .expect("call_tm checked lua function type before access");
         let chunk = lua_func.chunk();
         let upvalue_ptrs = lua_func.upvalues().as_ptr();
 
@@ -608,24 +616,41 @@ pub enum TmKind {
     Call = 23,
     Close = 24,
     ToString = 25,
-    N = 26, // number of tag methods
+    None = 26, // Not a real metamethod, used to indicate no metamethod found
 }
 
 impl TmKind {
     /// Convert u8 to TmKind
-    pub fn from_u8(value: u8) -> Option<Self> {
-        if value <= TmKind::ToString as u8 {
-            Some(unsafe { Self::from_u8_unchecked(value) })
-        } else {
-            None
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Index,
+            1 => Self::NewIndex,
+            2 => Self::Gc,
+            3 => Self::Mode,
+            4 => Self::Len,
+            5 => Self::Eq,
+            6 => Self::Add,
+            7 => Self::Sub,
+            8 => Self::Mul,
+            9 => Self::Mod,
+            10 => Self::Pow,
+            11 => Self::Div,
+            12 => Self::IDiv,
+            13 => Self::Band,
+            14 => Self::Bor,
+            15 => Self::Bxor,
+            16 => Self::Shl,
+            17 => Self::Shr,
+            18 => Self::Unm,
+            19 => Self::Bnot,
+            20 => Self::Lt,
+            21 => Self::Le,
+            22 => Self::Concat,
+            23 => Self::Call,
+            24 => Self::Close,
+            25 => Self::ToString,
+            _ => Self::None,
         }
-    }
-
-    /// Convert u8 to TmKind without bounds checking.
-    /// SAFETY: caller must ensure value <= TmKind::ToString (25)
-    #[inline(always)]
-    pub unsafe fn from_u8_unchecked(value: u8) -> Self {
-        unsafe { std::mem::transmute(value) }
     }
 
     /// Get the metamethod name
@@ -657,7 +682,7 @@ impl TmKind {
             TmKind::Call => "__call",
             TmKind::Close => "__close",
             TmKind::ToString => "__tostring",
-            TmKind::N => "__n", // Not a real metamethod
+            TmKind::None => "__none", // Not a real metamethod
         }
     }
 }

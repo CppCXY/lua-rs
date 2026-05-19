@@ -368,7 +368,9 @@ pub fn precall(
     let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
-            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let lua_func = func
+                .as_lua_function()
+                .expect("precall checked lua function type before access");
             let chunk = lua_func.chunk();
             (
                 chunk.param_count,
@@ -421,7 +423,9 @@ fn precall_meta(
 
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
-            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let lua_func = func
+                .as_lua_function()
+                .expect("precall_meta checked lua function type before access");
             let chunk = lua_func.chunk();
             (
                 chunk.param_count,
@@ -484,7 +488,9 @@ pub fn pretailcall(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> L
     let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
-            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let lua_func = func
+                .as_lua_function()
+                .expect("pretailcall checked lua function type before access");
             let chunk = lua_func.chunk();
             (
                 chunk.param_count,
@@ -521,7 +527,9 @@ fn pretailcall_meta(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> 
 
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
-            let lua_func = unsafe { func.as_lua_function_unchecked() };
+            let lua_func = func
+                .as_lua_function()
+                .expect("pretailcall_meta checked lua function type before access");
             let chunk = lua_func.chunk();
             (
                 chunk.param_count,

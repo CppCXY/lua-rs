@@ -71,6 +71,7 @@ impl ObjectAllocator {
         start: usize,
         end: usize,
     ) -> CreateResult {
+        // TODO: performance optimizations:
         let source_is_ascii = s_value.as_str().is_some_and(str::is_ascii);
         let Some(bytes) = s_value.as_bytes() else {
             return self.create_string(gc, "");

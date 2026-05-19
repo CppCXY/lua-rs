@@ -316,12 +316,9 @@ fn funcnamefromcode(chunk: &LuaProto, pc: usize) -> Option<(&'static str, String
         }
         OpCode::MmBin | OpCode::MmBinI | OpCode::MmBinK => {
             use crate::lua_vm::TmKind;
-            if let Some(tm) = TmKind::from_u8(i.get_c() as u8) {
-                let name: &str = tm.name();
-                Some(("metamethod", name[2..].to_string()))
-            } else {
-                None
-            }
+            let tm = TmKind::from_u8(i.get_c() as u8);
+            let name: &str = tm.name();
+            Some(("metamethod", name[2..].to_string()))
         }
         OpCode::Unm => Some(("metamethod", "unm".to_string())),
         OpCode::BNot => Some(("metamethod", "bnot".to_string())),
