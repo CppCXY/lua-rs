@@ -176,7 +176,7 @@ impl OpCode {
     pub fn from_u8(byte: u8) -> Self {
         if byte <= OpCode::ExtraArg as u8 {
             // SAFETY: We check that the byte is within the valid range of opcodes before transmuting
-            unsafe { std::mem::transmute(byte) }
+            unsafe { std::mem::transmute::<u8, OpCode>(byte) }
         } else {
             OpCode::None
         }

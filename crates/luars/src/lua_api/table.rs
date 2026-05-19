@@ -137,7 +137,7 @@ impl Table {
     /// Construct a Lua table from a JSON value inside the provided Lua runtime.
     #[cfg(feature = "serde")]
     pub fn from_json_value(lua: &mut crate::Lua, json: &serde_json::Value) -> LuaResult<Self> {
-        let vm = unsafe { lua.vm_mut() };
+        let vm = lua.vm_mut();
         let value = vm
             .deserialize_from_json(json)
             .map_err(|msg| vm.error(msg))?;
@@ -147,7 +147,7 @@ impl Table {
     /// Construct a Lua table from a JSON string inside the provided Lua runtime.
     #[cfg(feature = "serde")]
     pub fn from_json_str(lua: &mut crate::Lua, json: &str) -> LuaResult<Self> {
-        let vm = unsafe { lua.vm_mut() };
+        let vm = lua.vm_mut();
         let value = vm
             .deserialize_from_json_string(json)
             .map_err(|msg| vm.error(msg))?;
@@ -160,7 +160,7 @@ impl Table {
         let json = match serde_json::to_value(value) {
             Ok(json) => json,
             Err(err) => {
-                let vm = unsafe { lua.vm_mut() };
+                let vm = lua.vm_mut();
                 return Err(vm.error(err.to_string()));
             }
         };

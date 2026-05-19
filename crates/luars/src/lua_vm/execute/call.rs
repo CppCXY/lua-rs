@@ -25,12 +25,10 @@ fn insert_callable_before_args(
         lua_state.grow_stack(new_top)?;
     }
 
-    unsafe {
-        let stack = lua_state.stack_mut().as_mut_ptr();
-        std::ptr::copy(stack.add(first_arg), stack.add(first_arg + 1), arg_count);
-        *stack.add(first_arg) = original_func;
-        *stack.add(func_idx) = callable;
-    }
+    let stack = lua_state.stack_mut();
+    stack.copy_within(first_arg..first_arg + arg_count, first_arg + 1);
+    stack[first_arg] = original_func;
+    stack[func_idx] = callable;
 
     lua_state.set_top_raw(new_top);
     Ok(arg_count + 1)
@@ -52,7 +50,7 @@ pub fn resolve_call_chain(
         if func_idx >= lua_state.stack_len() {
             return Err(lua_state.error("resolve_call_chain: function not found".to_string()));
         }
-        let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+        let func = lua_state.stack()[func_idx];
 
         // Check if we have a callable function
         if func.is_c_callable() || func.is_lua_function() {
@@ -163,13 +161,13 @@ pub fn call_c_function(
     // within a Lua frame (precall / dispatch), so popping the C frame
     // leaves at least the caller Lua frame.
     debug_assert!(lua_state.call_depth() > 0);
-    unsafe {
+    {
         let stack = lua_state.stack_mut();
         match nresults {
             0 => { /* nothing to move */ }
             1 => {
-                *stack.get_unchecked_mut(func_idx) = if n > 0 {
-                    *stack.get_unchecked(first_result)
+                stack[func_idx] = if n > 0 {
+                    stack[first_result]
                 } else {
                     LuaValue::nil()
                 };
@@ -177,17 +175,17 @@ pub fn call_c_function(
             _ if nresults > 0 => {
                 let wanted = nresults as usize;
                 let copy_count = n.min(wanted);
-                for i in 0..copy_count {
-                    *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
+                if copy_count != 0 && func_idx != first_result {
+                    stack.copy_within(first_result..first_result + copy_count, func_idx);
                 }
                 for i in copy_count..wanted {
-                    *stack.get_unchecked_mut(func_idx + i) = LuaValue::nil();
+                    stack[func_idx + i] = LuaValue::nil();
                 }
             }
             _ => {
                 // MULTRET (-1)
-                for i in 0..n {
-                    *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
+                if n != 0 && func_idx != first_result {
+                    stack.copy_within(first_result..first_result + n, func_idx);
                 }
             }
         }
@@ -234,10 +232,9 @@ pub fn pretailcall_lua(
 
     // Move function + arguments down (like C Lua's setobjs2s loop)
     let narg1 = nargs + 1;
-    unsafe {
-        let stack_ptr = lua_state.stack_mut().as_mut_ptr();
-        std::ptr::copy(stack_ptr.add(func_idx), stack_ptr.add(func_pos), narg1);
-    }
+    lua_state
+        .stack_mut()
+        .copy_within(func_idx..func_idx + narg1, func_pos);
 
     let new_base = func_pos + 1;
 
@@ -245,7 +242,7 @@ pub fn pretailcall_lua(
     if nargs < numparams {
         let stack = lua_state.stack_mut();
         for i in nargs..numparams {
-            unsafe { *stack.get_unchecked_mut(new_base + i) = LuaValue::nil() };
+            stack[new_base + i] = LuaValue::nil();
         }
     }
 
@@ -326,22 +323,10 @@ fn call_c_function_tailcall(
     lua_state.pop_c_frame();
 
     // For tail call, move results to func_idx
-    unsafe {
+    {
         let stack = lua_state.stack_mut();
-        match n {
-            0 => {}
-            1 => {
-                *stack.get_unchecked_mut(func_idx) = *stack.get_unchecked(first_result);
-            }
-            2 => {
-                *stack.get_unchecked_mut(func_idx) = *stack.get_unchecked(first_result);
-                *stack.get_unchecked_mut(func_idx + 1) = *stack.get_unchecked(first_result + 1);
-            }
-            _ => {
-                for i in 0..n {
-                    *stack.get_unchecked_mut(func_idx + i) = *stack.get_unchecked(first_result + i);
-                }
-            }
+        if n != 0 && func_idx != first_result {
+            stack.copy_within(first_result..first_result + n, func_idx);
         }
     }
 
@@ -365,7 +350,7 @@ pub fn precall(
     nargs: usize,
     nresults: i32,
 ) -> LuaResult<bool> {
-    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
+    let func = &lua_state.stack()[func_idx];
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
             let lua_func = func
@@ -419,7 +404,7 @@ fn precall_meta(
     let (nargs, ccmt_depth) = resolve_call_chain(lua_state, func_idx, nargs)?;
 
     // After resolution, func_idx has the real callable
-    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
+    let func = &lua_state.stack()[func_idx];
 
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
@@ -472,7 +457,7 @@ fn precall_meta(
         return Ok(false);
     }
 
-    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let func = lua_state.stack()[func_idx];
     Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
 }
 
@@ -485,7 +470,7 @@ fn precall_meta(
 ///   `Ok(true)`  — Lua tail call: CI reused in place, caller should `continue 'startfunc`
 ///   `Ok(false)` — C tail call: completed, caller continues (falls to next instruction)
 pub fn pretailcall(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> LuaResult<bool> {
-    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
+    let func = &lua_state.stack()[func_idx];
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
             let lua_func = func
@@ -523,7 +508,7 @@ fn pretailcall_meta(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> 
     let nargs = narg1 - 1;
     let (actual_nargs, _) = resolve_call_chain(lua_state, func_idx, nargs)?;
 
-    let func = unsafe { lua_state.stack().get_unchecked(func_idx) };
+    let func = &lua_state.stack()[func_idx];
 
     if func.is_lua_function() {
         let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
@@ -555,7 +540,7 @@ fn pretailcall_meta(lua_state: &mut LuaState, func_idx: usize, narg1: usize) -> 
         return Ok(false);
     }
 
-    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+    let func = lua_state.stack()[func_idx];
     Err(crate::stdlib::debug::typeerror(lua_state, &func, "call"))
 }
 
@@ -604,14 +589,11 @@ fn moveresults(lua_state: &mut LuaState, res: usize, nres: usize, wanted: i32) {
         1 => {
             // One value needed (most common case)
             let first_result = top - nres;
-            unsafe {
-                let sp = lua_state.stack_mut().as_mut_ptr();
-                *sp.add(res) = if nres == 0 {
-                    LuaValue::nil()
-                } else {
-                    *sp.add(first_result)
-                };
-            }
+            lua_state.stack_mut()[res] = if nres == 0 {
+                LuaValue::nil()
+            } else {
+                lua_state.stack()[first_result]
+            };
             lua_state.set_top_raw(res + 1);
         }
         -1 => {
@@ -638,14 +620,12 @@ fn genmoveresults(
     wanted: usize,
 ) {
     let copy_count = nres.min(wanted);
-    unsafe {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        if copy_count != 0 && res != first_result {
-            std::ptr::copy(sp.add(first_result), sp.add(res), copy_count);
-        }
-        for i in copy_count..wanted {
-            *sp.add(res + i) = LuaValue::nil();
-        }
+    let stack = lua_state.stack_mut();
+    if copy_count != 0 && res != first_result {
+        stack.copy_within(first_result..first_result + copy_count, res);
+    }
+    for i in copy_count..wanted {
+        stack[res + i] = LuaValue::nil();
     }
     lua_state.set_top_raw(res + wanted);
 }

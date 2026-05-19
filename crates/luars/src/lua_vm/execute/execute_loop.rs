@@ -33,14 +33,14 @@ use crate::{
             helper::{
                 bin_tm_fallback, eq_fallback, error_div_by_zero, error_global, error_mod_by_zero,
                 finishget_fallback, finishset_fallback, finishset_fallback_known_miss,
-                float_for_loop, fltvalue, forprep, handle_pending_ops, ivalue, lua_fmod, lua_idiv,
-                instr_at, k_val, lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen,
+                float_for_loop, fltvalue, forprep, handle_pending_ops, instr_at, ivalue, k_val,
+                lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen,
                 order_tm_fallback, pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns,
                 pttisfloat, pttisinteger, return0_with_hook, return1_with_hook,
                 self_shortstr_index_chain_fast, setbfvalue, setbtvalue, setfltvalue, setivalue,
                 setnilvalue, setobj2s, setobjs2s, stack_copy, stack_mut_ptr, stack_mut_ref,
-                stack_ptr, stack_ref, stack_val, stack_val_mut, tointeger, tointegerns,
-                tonumberns, ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
+                stack_ptr, stack_ref, stack_val, stack_val_mut, tointeger, tointegerns, tonumberns,
+                ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
             metamethod::call_newindex_tm_fast,
@@ -1777,7 +1777,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
                         pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), lua_shiftl(i1, i2));
+                        setivalue(
+                            stack_val_mut(lua_state.stack_mut(), base, a),
+                            lua_shiftl(i1, i2),
+                        );
                     }
                 }
                 OpCode::Shr => {
@@ -1793,7 +1796,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let mut i2 = 0i64;
                     if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
                         pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), lua_shiftr(i1, i2));
+                        setivalue(
+                            stack_val_mut(lua_state.stack_mut(), base, a),
+                            lua_shiftr(i1, i2),
+                        );
                     }
                 }
                 OpCode::ShlI => {
@@ -1809,7 +1815,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if tointegerns(rb, &mut ib) {
                         pc += 1;
                         // luaV_shiftl(ic, ib): shift ic left by ib
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), lua_shiftl(ic as i64, ib));
+                        setivalue(
+                            stack_val_mut(lua_state.stack_mut(), base, a),
+                            lua_shiftl(ic as i64, ib),
+                        );
                     }
                     // else: metamethod
                 }
@@ -1826,7 +1835,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     if tointegerns(rb, &mut ib) {
                         pc += 1;
                         // luaV_shiftr(ib, ic) = luaV_shiftl(ib, -ic)
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), lua_shiftr(ib, ic as i64));
+                        setivalue(
+                            stack_val_mut(lua_state.stack_mut(), base, a),
+                            lua_shiftr(ib, ic as i64),
+                        );
                     }
                     // else: metamethod
                 }
@@ -1910,7 +1922,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                     if ttisinteger(&rb) {
                         let ib = ivalue(&rb);
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), ib.wrapping_neg());
+                        setivalue(
+                            stack_val_mut(lua_state.stack_mut(), base, a),
+                            ib.wrapping_neg(),
+                        );
                     } else {
                         let mut nb = 0.0;
                         if tonumberns(&rb, &mut nb) {
@@ -2790,4 +2805,3 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
         }
     }
 }
-

@@ -128,10 +128,7 @@ pub fn try_bin_tm(
             None
         };
         if let Some(Some(udv)) = trait_result {
-            unsafe {
-                *lua_state.stack_mut().get_unchecked_mut(res as usize) =
-                    udvalue_to_lua_value(lua_state, udv)?;
-            }
+            lua_state.stack_mut()[res as usize] = udvalue_to_lua_value(lua_state, udv)?;
             return Ok(());
         }
         let trait_result2 = if let Some(ud) = p2.as_userdata_mut() {
@@ -155,10 +152,7 @@ pub fn try_bin_tm(
             None
         };
         if let Some(Some(udv)) = trait_result2 {
-            unsafe {
-                *lua_state.stack_mut().get_unchecked_mut(res as usize) =
-                    udvalue_to_lua_value(lua_state, udv)?;
-            }
+            lua_state.stack_mut()[res as usize] = udvalue_to_lua_value(lua_state, udv)?;
             return Ok(());
         }
     }
@@ -168,9 +162,7 @@ pub fn try_bin_tm(
     if let Some(mm) = metamethod {
         // Call metamethod with (p1, p2) as arguments
         let r = call_tm_res(lua_state, mm, p1, p2)?;
-        unsafe {
-            *lua_state.stack_mut().get_unchecked_mut(res as usize) = r;
-        }
+        lua_state.stack_mut()[res as usize] = r;
         Ok(())
     } else {
         // No metamethod found, return error
@@ -243,11 +235,11 @@ pub fn call_tm_res(
 
     // Direct stack write using raw pointers — like Lua 5.5's setobj2s.
     // EXTRA_STACK (5 slots) guarantees space above ci->top.
-    unsafe {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        *sp.add(func_pos) = metamethod;
-        *sp.add(func_pos + 1) = arg1;
-        *sp.add(func_pos + 2) = arg2;
+    {
+        let stack = lua_state.stack_mut();
+        stack[func_pos] = metamethod;
+        stack[func_pos + 1] = arg1;
+        stack[func_pos + 2] = arg2;
     }
     lua_state.set_top_raw(func_pos + 3);
 
@@ -291,7 +283,7 @@ pub fn call_tm_res(
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
 
-    let result_val = unsafe { *lua_state.stack_mut().as_ptr().add(func_pos) };
+    let result_val = lua_state.stack()[func_pos];
     lua_state.set_top_raw(func_pos);
 
     Ok(result_val)
@@ -311,10 +303,10 @@ pub fn call_tm_res1(
         ci_top
     };
 
-    unsafe {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        *sp.add(func_pos) = metamethod;
-        *sp.add(func_pos + 1) = arg1;
+    {
+        let stack = lua_state.stack_mut();
+        stack[func_pos] = metamethod;
+        stack[func_pos + 1] = arg1;
     }
     lua_state.set_top_raw(func_pos + 2);
 
@@ -357,7 +349,7 @@ pub fn call_tm_res1(
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
 
-    let result_val = *unsafe { lua_state.stack().get_unchecked(func_pos) };
+    let result_val = lua_state.stack()[func_pos];
     lua_state.set_top_raw(func_pos);
 
     Ok(result_val)
@@ -379,11 +371,11 @@ pub fn call_tm_res_into(
         ci_top
     };
 
-    unsafe {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        *sp.add(func_pos) = metamethod;
-        *sp.add(func_pos + 1) = arg1;
-        *sp.add(func_pos + 2) = arg2;
+    {
+        let stack = lua_state.stack_mut();
+        stack[func_pos] = metamethod;
+        stack[func_pos + 1] = arg1;
+        stack[func_pos + 2] = arg2;
     }
     lua_state.set_top_raw(func_pos + 3);
 
@@ -426,10 +418,8 @@ pub fn call_tm_res_into(
         return Err(crate::stdlib::debug::callerror(lua_state, &metamethod));
     }
 
-    unsafe {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        *sp.add(dest_reg) = *sp.add(func_pos);
-    }
+    let result = lua_state.stack()[func_pos];
+    lua_state.stack_mut()[dest_reg] = result;
     lua_state.set_top_raw(func_pos);
     Ok(())
 }
@@ -470,12 +460,12 @@ pub fn call_tm(
     };
 
     // Direct stack write using raw pointers
-    unsafe {
-        let sp = lua_state.stack_mut().as_mut_ptr();
-        *sp.add(func_pos) = metamethod;
-        *sp.add(func_pos + 1) = arg1;
-        *sp.add(func_pos + 2) = arg2;
-        *sp.add(func_pos + 3) = arg3;
+    {
+        let stack = lua_state.stack_mut();
+        stack[func_pos] = metamethod;
+        stack[func_pos + 1] = arg1;
+        stack[func_pos + 2] = arg2;
+        stack[func_pos + 3] = arg3;
     }
     lua_state.set_top_raw(func_pos + 4);
 

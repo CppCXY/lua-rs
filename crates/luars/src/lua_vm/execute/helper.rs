@@ -3,7 +3,7 @@ use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
     Instruction, LuaProto, LuaResult, LuaValue, OpCode,
     gc::TablePtr,
-    lua_value::{LUA_VNUMFLT, LUA_VNUMINT, lua_value_to_udvalue, udvalue_to_lua_value},
+    lua_value::{lua_value_to_udvalue, udvalue_to_lua_value},
     lua_vm::{
         LuaError, LuaState, TmKind,
         call_info::call_status::{
@@ -56,9 +56,7 @@ pub fn buildhiddenargs(
     for i in 0..nfixparams {
         unsafe { *stack.get_unchecked_mut(new_base + i) = *stack.get_unchecked(func_pos + 1 + i) };
         // Erase original parameter with nil (for GC)
-        unsafe {
-            psetnilvalue(&mut stack[func_pos + 1 + i] as *mut LuaValue);
-        }
+        setnilvalue(&mut stack[func_pos + 1 + i]);
     }
 
     {
@@ -211,14 +209,6 @@ pub fn setbtvalue(v: &mut LuaValue) {
     *v = LuaValue::boolean(true);
 }
 
-/// setnilvalue - 设置nil
-#[inline(always)]
-pub unsafe fn psetnilvalue(v: *mut LuaValue) {
-    unsafe {
-        *v = LuaValue::nil();
-    }
-}
-
 /// setnilvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setnilvalue(v: &mut LuaValue) {
@@ -317,37 +307,28 @@ pub fn lua_fmod(a: f64, b: f64) -> f64 {
 
 // ============ 类型转换辅助函数 ============
 
-/// tointegerns - 尝试转换为整数 (不抛出错误)
-/// 对应 Lua 的 tointegerns 宏
-#[inline(always)]
-pub unsafe fn ptointegerns(v: *const LuaValue, out: *mut i64) -> bool {
-    unsafe {
-        if pttisinteger(v) {
-            *out = pivalue(v);
-            true
-        } else if pttisfloat(v) {
-            // Try converting integral-valued floats (e.g. 5.0 -> 5)
-            // Range check matches C Lua's lua_numbertointeger:
-            //   f >= (i64::MIN as f64) && f < -(i64::MIN as f64)
-            // Note: i64::MAX as f64 rounds UP to 2^63, so we must use strict <
-            // with -(i64::MIN as f64) = 2^63 (exactly representable).
-            let f = pfltvalue(v);
-            if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
-                *out = f as i64;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-}
-
 /// tointegerns_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn tointegerns(v: &LuaValue, out: &mut i64) -> bool {
-    unsafe { ptointegerns(v as *const LuaValue, out as *mut i64) }
+    if v.ttisinteger() {
+        *out = v.ivalue();
+        true
+    } else if v.ttisfloat() {
+        // Try converting integral-valued floats (e.g. 5.0 -> 5)
+        // Range check matches C Lua's lua_numbertointeger:
+        //   f >= (i64::MIN as f64) && f < -(i64::MIN as f64)
+        // Note: i64::MAX as f64 rounds UP to 2^63, so we must use strict <
+        // with -(i64::MIN as f64) = 2^63 (exactly representable).
+        let f = v.fltvalue();
+        if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
+            *out = f as i64;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
 }
 
 /// tonumber - convert LuaValue to f64, including string coercion.
@@ -389,21 +370,27 @@ pub unsafe fn ptonumberns(v: *const LuaValue, out: *mut f64) -> bool {
 /// tonumberns - 引用版本
 #[inline(always)]
 pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
-    unsafe { ptonumberns(v as *const LuaValue, out as *mut f64) }
+    if v.ttisfloat() {
+        *out = v.fltvalue();
+        true
+    } else if v.ttisinteger() {
+        *out = v.ivalue() as f64;
+        true
+    } else {
+        false
+    }
 }
 
 /// tointeger - 从LuaValue引用获取整数 (用于常量)
 #[inline(always)]
 pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
-    if v.tt() == LUA_VNUMINT {
-        unsafe {
-            *out = v.value.i;
-        }
+    if v.ttisinteger() {
+        *out = v.ivalue();
         true
-    } else if v.tt() == LUA_VNUMFLT {
+    } else if v.ttisfloat() {
         // Try converting integral-valued floats (e.g. 5.0 -> 5)
-        // Range check: f must be in [i64::MIN, 2^63) — see ptointegerns for details.
-        let f = unsafe { v.value.n };
+        // Range check: f must be in [i64::MIN, 2^63) — see tointegerns for details.
+        let f = v.fltvalue();
         if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
             *out = f as i64;
             true
@@ -420,12 +407,12 @@ pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
 /// mode: 0 = exact only, 1 = floor, 2 = ceil
 /// Handles integers, floats, and strings.
 fn tointeger_mode(v: &LuaValue, mode: i32) -> Option<i64> {
-    if v.tt() == LUA_VNUMINT {
-        return Some(unsafe { v.value.i });
+    if v.ttisinteger() {
+        return Some(v.ivalue());
     }
     // Get as float (including string conversion)
-    let f = if v.tt() == LUA_VNUMFLT {
-        unsafe { v.value.n }
+    let f = if v.ttisfloat() {
+        v.fltvalue()
     } else if v.is_string() {
         let result = parse_lua_number(v.as_str().unwrap_or(""));
         if result.is_float() {
