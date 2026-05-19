@@ -1,5 +1,6 @@
 // Tests for basic library functions
 use crate::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn test_print() {
@@ -349,6 +350,57 @@ fn test_string_dump_load_binary_constant() {
     );
 
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_load_rejects_binary_when_bytecode_loading_disabled() {
+    let mut option = SafeOption::default();
+    option.allow_load_bytecode = false;
+
+    let mut vm = LuaVM::new(option);
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let result = vm.execute(
+        r#"
+        local src = function() return 42 end
+        local dumped = string.dump(src)
+        local restored, err = load(dumped)
+
+        assert(restored == nil)
+        assert(type(err) == "string")
+        assert(string.find(err, "bytecode loading is disabled", 1, true) ~= nil)
+    "#,
+    );
+
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
+    let mut builder_vm = LuaVM::new(SafeOption::default());
+    let chunk = builder_vm.compile("return 42").unwrap();
+    let bytes = serialize_chunk(&chunk, false).unwrap();
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "luars-bytecode-disabled-{}-{}.luac",
+        std::process::id(),
+        unique
+    ));
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut option = SafeOption::default();
+    option.allow_load_bytecode = false;
+    let mut vm = LuaVM::new(option);
+
+    let err = vm.dofile(path.to_str().unwrap()).unwrap_err();
+    let message = vm.get_error_message(err);
+    assert!(message.contains("bytecode loading is disabled"));
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

@@ -1111,6 +1111,14 @@ impl GlobalState {
         let resolved_path = std::fs::canonicalize(path)
             .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
 
+        let file_bytes = std::fs::read(&resolved_path)
+            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+        let layout = inspect_file_chunk_layout(&file_bytes);
+
+        if layout.is_binary && !self.safe_option.allow_load_bytecode {
+            return Err(self.error("attempt to load a binary chunk (bytecode loading is disabled)"));
+        }
+
         #[cfg(feature = "shared-proto")]
         {
             use crate::lua_vm::shared_proto::SHARED_FILE_PROTO_CACHE;
@@ -1131,9 +1139,6 @@ impl GlobalState {
             }
         }
 
-        let file_bytes = std::fs::read(&resolved_path)
-            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
-        let layout = inspect_file_chunk_layout(&file_bytes);
         let chunk_name = format!("@{}", resolved_path.display());
 
         let chunk = if layout.is_binary {

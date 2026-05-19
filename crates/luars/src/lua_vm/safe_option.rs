@@ -11,6 +11,9 @@ pub struct SafeOption {
     pub max_c_stack_depth: usize,
     /// Maximum memory limit in bytes
     pub max_memory_limit: isize,
+    /// Whether to allow loading bytecode (default: true).  If false, attempts to load
+    /// bytecode will be rejected.
+    pub allow_load_bytecode: bool,
 }
 
 impl Default for SafeOption {
@@ -20,6 +23,7 @@ impl Default for SafeOption {
             max_call_depth: MAX_CALL_DEPTH,
             max_c_stack_depth: LUAI_MAXCSTACK,
             max_memory_limit: isize::MAX,
+            allow_load_bytecode: true,
         }
     }
 }
@@ -40,9 +44,8 @@ pub(crate) struct LuaSafeState {
     /// When a Lua call-stack overflow occurs above this limit, it means
     /// we're in the extra zone for error handlers → produce "error in error handling".
     pub base_call_depth: usize,
-    #[allow(dead_code)]
-    /// Maximum memory limit in bytes
-    pub max_memory_limit: isize,
+    /// Whether binary bytecode loading is allowed for this state.
+    pub allow_load_bytecode: bool,
 }
 
 impl From<SafeOption> for LuaSafeState {
@@ -53,7 +56,7 @@ impl From<SafeOption> for LuaSafeState {
             max_c_stack_depth: option.max_c_stack_depth,
             base_c_stack_depth: option.max_c_stack_depth,
             base_call_depth: option.max_call_depth,
-            max_memory_limit: option.max_memory_limit,
+            allow_load_bytecode: option.allow_load_bytecode,
         }
     }
 }

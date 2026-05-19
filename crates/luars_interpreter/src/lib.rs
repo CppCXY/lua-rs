@@ -67,6 +67,7 @@ fn default_safe_option() -> SafeOption {
         max_memory_limit: env_usize("LUARS_MAX_MEMORY_LIMIT")
             .map(|value| value.min(isize::MAX as usize) as isize)
             .unwrap_or(4096 * 1024 * 1024),
+        allow_load_bytecode: true,
     }
 }
 

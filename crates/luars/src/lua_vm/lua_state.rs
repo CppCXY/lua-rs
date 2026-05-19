@@ -1820,6 +1820,11 @@ impl LuaState {
         self.vm
     }
 
+    #[inline(always)]
+    pub(crate) fn allow_load_bytecode(&self) -> bool {
+        self.safe_state.allow_load_bytecode
+    }
+
     /// Lua 5.5-style ccall depth tracking: increment shared n_ccalls before
     /// a recursive `lua_execute` call.  Returns `Err("C stack overflow")` if
     /// the limit is reached.  The limit is checked against this thread's

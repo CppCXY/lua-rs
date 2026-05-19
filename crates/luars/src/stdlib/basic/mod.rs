@@ -1294,6 +1294,13 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(err_msg)?;
             return Ok(2);
         }
+        if !l.allow_load_bytecode() {
+            l.push_value(LuaValue::nil())?;
+            let err_msg =
+                l.create_string("attempt to load a binary chunk (bytecode loading is disabled)")?;
+            l.push_value(err_msg)?;
+            return Ok(2);
+        }
     } else {
         // Text chunk - mode must allow text ("t" or "bt")
         if !mode.contains('t') {
@@ -1438,6 +1445,14 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             l.push_value(err_msg)?;
             return Ok(2);
         }
+    }
+
+    if is_binary && !l.allow_load_bytecode() {
+        let err_msg =
+            l.create_string("attempt to load a binary chunk (bytecode loading is disabled)")?;
+        l.push_value(LuaValue::nil())?;
+        l.push_value(err_msg)?;
+        return Ok(2);
     }
 
     match l.vm_mut().load_proto_from_file(&filename_str) {
