@@ -1,4 +1,4 @@
-use luars::{GlobalState, Lua, LuaValue, SafeOption, Stdlib};
+use luars::{Lua, LuaApi, LuaValue, SafeOption, Stdlib};
 use wasm_bindgen::prelude::*;
 
 mod conversion;
@@ -30,9 +30,7 @@ impl LuaWasm {
     #[wasm_bindgen]
     pub fn execute(&mut self, code: &str) -> Result<String, JsValue> {
         match self.lua.load(code).eval::<LuaValue>() {
-            Ok(results) => {
-                Ok(format!("{}", results))
-            }
+            Ok(result) => Ok(format!("{}", result)),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
                 Err(JsValue::from_str(&msg.message()))
@@ -44,17 +42,11 @@ impl LuaWasm {
     /// Each Lua value is converted to its JS equivalent (tables → objects/arrays, etc.).
     #[wasm_bindgen(js_name = executeMulti)]
     pub fn execute_multi(&mut self, code: &str) -> Result<JsValue, JsValue> {
-        match self.lua.load(code).eval_multi::<LuaValue>() {
-            Ok(results) => {
-                let arr = js_sys::Array::new();
-                for v in &results {
-                    arr.push(&conversion::lua_to_js(&self.lua, v));
-                }
-                Ok(arr.into())
-            }
+        match self.lua.vm_mut().execute(code) {
+            Ok(results) => Ok(self.lua_results_to_js_array(&results)),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -64,13 +56,10 @@ impl LuaWasm {
     #[wasm_bindgen(js_name = doString)]
     pub fn do_string(&mut self, code: &str) -> Result<JsValue, JsValue> {
         match self.lua.load(code).eval::<LuaValue>() {
-            Ok(results) => {
-                let first = results.into_iter().next().unwrap_or(LuaValue::nil());
-                Ok(conversion::lua_to_js(&self.lua, &first))
-            }
+            Ok(first) => Ok(conversion::lua_to_js(self.lua.vm_mut(), &first)),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -81,13 +70,10 @@ impl LuaWasm {
     pub fn eval(&mut self, expr: &str) -> Result<JsValue, JsValue> {
         let code = format!("return {}", expr);
         match self.lua.load(&code).eval::<LuaValue>() {
-            Ok(results) => {
-                let first = results.into_iter().next().unwrap_or(LuaValue::nil());
-                Ok(conversion::lua_to_js(&self.lua, &first))
-            }
+            Ok(first) => Ok(conversion::lua_to_js(self.lua.vm_mut(), &first)),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -96,11 +82,11 @@ impl LuaWasm {
     /// Useful to syntax-check code before running it.
     #[wasm_bindgen]
     pub fn check(&mut self, code: &str) -> Result<bool, JsValue> {
-        match self.lua.compile(code) {
+        match self.lua.load(code).into_function() {
             Ok(_) => Ok(true),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -116,7 +102,7 @@ impl LuaWasm {
     /// - `Object` → hash table `{key=…}`
     #[wasm_bindgen(js_name = setGlobal)]
     pub fn set_global(&mut self, name: &str, value: JsValue) -> Result<(), JsValue> {
-        let lua_value = conversion::js_to_lua(&mut self.lua, &value)
+        let lua_value = conversion::js_to_lua(self.lua.vm_mut(), &value)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         self.lua
             .set_global(name, lua_value)
@@ -128,8 +114,8 @@ impl LuaWasm {
     /// Returns `null` if the global does not exist or is `nil`.
     #[wasm_bindgen(js_name = getGlobal)]
     pub fn get_global(&mut self, name: &str) -> Result<JsValue, JsValue> {
-        match self.lua.get_global(name) {
-            Ok(Some(v)) => Ok(conversion::lua_to_js(&self.lua, &v)),
+        match self.lua.get_global::<LuaValue>(name) {
+            Ok(Some(v)) => Ok(conversion::lua_to_js(self.lua.vm_mut(), &v)),
             Ok(None) => Ok(JsValue::NULL),
             Err(e) => Err(JsValue::from_str(&format!("{:?}", e))),
         }
@@ -152,8 +138,10 @@ impl LuaWasm {
         name: &str,
         callback: js_sys::Function,
     ) -> Result<(), JsValue> {
-        self.lua
-            .register_function(name, move |state| {
+        let closure = self
+            .lua
+            .vm_mut()
+            .create_closure(move |state: &mut luars::LuaState| {
                 // Collect Lua arguments → JS Array
                 let args = js_sys::Array::new();
                 for i in 1..=state.arg_count() {
@@ -176,6 +164,10 @@ impl LuaWasm {
                 }
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        self.lua
+            .vm_mut()
+            .set_global(name, closure)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         Ok(())
     }
 
@@ -195,11 +187,11 @@ impl LuaWasm {
         args: Option<js_sys::Array>,
     ) -> Result<JsValue, JsValue> {
         let lua_args = self.js_array_to_lua_args(args)?;
-        match self.lua.call_global_raw(name, lua_args) {
+        match self.lua.vm_mut().call_global_raw(name, lua_args) {
             Ok(results) => Ok(self.lua_results_to_js_array(&results)),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -216,15 +208,16 @@ impl LuaWasm {
         // Lookup the function by name, then call it
         let func = self
             .lua
+            .vm_mut()
             .get_global(func_name)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?
             .ok_or_else(|| JsValue::from_str(&format!("global '{}' not found", func_name)))?;
         let lua_args = self.js_array_to_lua_args(args)?;
-        match self.lua.call_raw(func, lua_args) {
+        match self.lua.vm_mut().call_raw(func, lua_args) {
             Ok(results) => Ok(self.lua_results_to_js_array(&results)),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -239,7 +232,7 @@ impl LuaWasm {
             Some(arr) => {
                 let mut lua_args = Vec::with_capacity(arr.length() as usize);
                 for i in 0..arr.length() {
-                    let v = conversion::js_to_lua(&mut self.lua, &arr.get(i))
+                    let v = conversion::js_to_lua(self.lua.vm_mut(), &arr.get(i))
                         .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
                     lua_args.push(v);
                 }
@@ -249,10 +242,10 @@ impl LuaWasm {
         }
     }
 
-    fn lua_results_to_js_array(&self, results: &[LuaValue]) -> JsValue {
+    fn lua_results_to_js_array(&mut self, results: &[LuaValue]) -> JsValue {
         let arr = js_sys::Array::new();
         for v in results {
-            arr.push(&conversion::lua_to_js(&self.lua, v));
+            arr.push(&conversion::lua_to_js(self.lua.vm_mut(), v));
         }
         arr.into()
     }
@@ -269,8 +262,10 @@ impl LuaWasm {
     /// ```
     #[wasm_bindgen(js_name = onPrint)]
     pub fn on_print(&mut self, callback: js_sys::Function) -> Result<(), JsValue> {
-        self.lua
-            .register_function("print", move |state| {
+        let closure = self
+            .lua
+            .vm_mut()
+            .create_closure(move |state: &mut luars::LuaState| {
                 let mut parts = Vec::new();
                 for i in 1..=state.arg_count() {
                     if let Some(v) = state.get_arg(i) {
@@ -282,6 +277,10 @@ impl LuaWasm {
                 Ok(0)
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        self.lua
+            .vm_mut()
+            .set_global("print", closure)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         Ok(())
     }
 
@@ -292,8 +291,10 @@ impl LuaWasm {
     #[wasm_bindgen(js_name = onWrite)]
     pub fn on_write(&mut self, callback: js_sys::Function) -> Result<(), JsValue> {
         // Override io.write via Lua code that calls our registered function
-        self.lua
-            .register_function("__wasm_io_write", move |state| {
+        let closure = self
+            .lua
+            .vm_mut()
+            .create_closure(move |state: &mut luars::LuaState| {
                 let mut out = String::new();
                 for i in 1..=state.arg_count() {
                     if let Some(v) = state.get_arg(i) {
@@ -304,10 +305,14 @@ impl LuaWasm {
                 Ok(0)
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        self.lua
+            .vm_mut()
+            .set_global("__wasm_io_write", closure)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         // Wire it into io.write
         self.lua.execute("io.write = __wasm_io_write").map_err(|e| {
             let msg = self.lua.get_error_message(e);
-            JsValue::from_str(&msg)
+            JsValue::from_str(msg.message())
         })?;
         Ok(())
     }
@@ -323,7 +328,7 @@ impl LuaWasm {
     /// ```
     #[wasm_bindgen(js_name = createTable)]
     pub fn create_table(&mut self, name: &str, data: JsValue) -> Result<(), JsValue> {
-        let lua_val = conversion::js_to_lua(&mut self.lua, &data)
+        let lua_val = conversion::js_to_lua(self.lua.vm_mut(), &data)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         self.lua
             .set_global(name, lua_val)
@@ -336,14 +341,11 @@ impl LuaWasm {
     #[wasm_bindgen(js_name = getField)]
     pub fn get_field(&mut self, path: &str) -> Result<JsValue, JsValue> {
         let code = format!("return {}", path);
-        match self.lua.execute(&code) {
-            Ok(results) => {
-                let first = results.into_iter().next().unwrap_or(LuaValue::nil());
-                Ok(conversion::lua_to_js(&self.lua, &first))
-            }
+        match self.lua.load(&code).eval::<LuaValue>() {
+            Ok(first) => Ok(conversion::lua_to_js(self.lua.vm_mut(), &first)),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -353,7 +355,7 @@ impl LuaWasm {
     #[wasm_bindgen(js_name = setField)]
     pub fn set_field(&mut self, path: &str, value: JsValue) -> Result<(), JsValue> {
         // We set a temporary global, then assign via Lua
-        let lua_val = conversion::js_to_lua(&mut self.lua, &value)
+        let lua_val = conversion::js_to_lua(self.lua.vm_mut(), &value)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         self.lua
             .set_global("__wasm_tmp", lua_val)
@@ -361,7 +363,7 @@ impl LuaWasm {
         let code = format!("{} = __wasm_tmp; __wasm_tmp = nil", path);
         self.lua.execute(&code).map_err(|e| {
             let msg = self.lua.get_error_message(e);
-            JsValue::from_str(&msg)
+            JsValue::from_str(msg.message())
         })?;
         Ok(())
     }
@@ -371,34 +373,27 @@ impl LuaWasm {
     /// Run a full garbage collection cycle.
     #[wasm_bindgen(js_name = collectGarbage)]
     pub fn collect_garbage(&mut self) -> Result<(), JsValue> {
-        self.lua.execute("collectgarbage('collect')").map_err(|e| {
+        self.lua.collect_garbage().map_err(|e| {
             let msg = self.lua.get_error_message(e);
-            JsValue::from_str(&msg)
+            JsValue::from_str(msg.message())
         })?;
         Ok(())
     }
 
     /// Get GC statistics as a string.
     #[wasm_bindgen(js_name = gcStats)]
-    pub fn gc_stats(&self) -> String {
-        self.lua.gc_stats()
+    pub fn gc_stats(&mut self) -> String {
+        self.lua.vm_mut().gc_stats()
     }
 
     /// Get the approximate memory usage in bytes.
     #[wasm_bindgen(js_name = memoryUsed)]
     pub fn memory_used(&mut self) -> Result<f64, JsValue> {
-        match self.lua.execute("return collectgarbage('count')") {
-            Ok(results) => {
-                let kb = results
-                    .into_iter()
-                    .next()
-                    .and_then(|v| v.as_number())
-                    .unwrap_or(0.0);
-                Ok(kb * 1024.0)
-            }
+        match self.lua.load("return collectgarbage('count')").eval::<f64>() {
+            Ok(kb) => Ok(kb * 1024.0),
             Err(e) => {
                 let msg = self.lua.get_error_message(e);
-                Err(JsValue::from_str(&msg))
+                Err(JsValue::from_str(msg.message()))
             }
         }
     }
@@ -407,7 +402,7 @@ impl LuaWasm {
     /// All previous state (globals, functions, tables) is discarded.
     #[wasm_bindgen]
     pub fn reset(&mut self) -> Result<(), JsValue> {
-        let mut lua = GlobalState::new(SafeOption::default());
+        let mut lua = Lua::new(SafeOption::default());
         lua.open_stdlib(Stdlib::All)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         self.lua = lua;
@@ -425,9 +420,9 @@ impl LuaWasm {
     /// ```
     #[wasm_bindgen]
     pub fn load(&mut self, name: &str, code: &str) -> Result<(), JsValue> {
-        let func = self.lua.load(code).map_err(|e| {
+        let func = self.lua.load(code).into_function().map_err(|e| {
             let msg = self.lua.get_error_message(e);
-            JsValue::from_str(&msg)
+            JsValue::from_str(msg.message())
         })?;
         self.lua
             .set_global(name, func)

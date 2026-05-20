@@ -3,13 +3,11 @@ mod tests {
     use std::cell::Cell;
 
     #[cfg(feature = "sandbox")]
-    use crate::SandboxConfig;
+    use crate::{LuaSandboxApi, SandboxConfig};
     #[cfg(feature = "serde")]
     use crate::lua_api::Value;
     use crate::{
-        LuaUserData, SafeOption, Stdlib,
-        lua_api::{Function, Lua, Table},
-        lua_methods,
+        LuaApi, LuaAsyncApi, LuaUserData, SafeOption, Stdlib, lua_api::{Function, Lua, Table}, lua_methods
     };
     #[cfg(feature = "serde")]
     use serde::{Deserialize, Serialize};

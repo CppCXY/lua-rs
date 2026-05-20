@@ -1,5 +1,6 @@
 use luars::Lua;
 use luars::GlobalState;
+use luars::LuaApi;
 use luars::LuaValue;
 use luars::SafeOption;
 use luars::Stdlib;

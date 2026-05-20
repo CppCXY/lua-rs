@@ -8,7 +8,7 @@ use crate::{
     UserDataTrait, Value,
 };
 
-use crate::lua_api::Lua;
+use crate::lua_api::{Lua, LuaApi};
 
 fn typed_scope_arg<T: FromLua>(state: &mut LuaState, index: usize) -> LuaResult<T> {
     let value = state.get_arg(index).unwrap_or_default();
