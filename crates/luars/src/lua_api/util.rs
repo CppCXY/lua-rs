@@ -1,7 +1,7 @@
-use crate::{FromLua, IntoLua, LuaResult, LuaVM};
+use crate::{FromLua, IntoLua, LuaResult, GlobalState};
 
 pub(crate) fn into_single_value<T: IntoLua>(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: T,
     api_name: &str,
 ) -> LuaResult<luars::LuaValue> {
@@ -17,7 +17,7 @@ pub(crate) fn into_single_value<T: IntoLua>(
 }
 
 pub(crate) fn collect_values<T: IntoLua>(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: T,
 ) -> LuaResult<Vec<luars::LuaValue>> {
     let base_top = vm.main_state().get_top();
@@ -51,7 +51,7 @@ pub(crate) fn collect_values<T: IntoLua>(
 }
 
 pub(crate) fn from_value<T: FromLua>(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: luars::LuaValue,
     api_name: &str,
 ) -> LuaResult<T> {

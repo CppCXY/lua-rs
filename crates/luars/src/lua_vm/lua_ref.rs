@@ -924,11 +924,11 @@ impl Clone for LuaAnyRef {
 
 #[cfg(test)]
 mod tests {
-    use crate::{LuaVM, LuaValue, lua_vm::SafeOption};
+    use crate::{GlobalState, LuaValue, lua_vm::SafeOption};
 
     #[test]
     fn test_lua_ref_mechanism() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Create some test values
         let table = vm.create_table(0, 2).unwrap();
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_ref_id_reuse() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Create and release multiple refs to test ID reuse
         let t1 = vm.create_table(0, 0).unwrap();
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn test_multiple_refs() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Create multiple refs and verify they don't interfere
         let mut refs = Vec::new();

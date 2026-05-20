@@ -12,7 +12,7 @@ fn get_test_data_dir() -> String {
 
 #[test]
 fn test_io_open_read() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -32,7 +32,7 @@ fn test_io_open_read() {
 
 #[test]
 fn test_io_open_nonexistent() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -48,7 +48,7 @@ fn test_io_open_nonexistent() {
 
 #[test]
 fn test_io_lines_file() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -70,7 +70,7 @@ fn test_io_lines_file() {
 
 #[test]
 fn test_io_read_line() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -91,7 +91,7 @@ fn test_io_read_line() {
 
 #[test]
 fn test_io_read_number() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -111,7 +111,7 @@ fn test_io_read_number() {
 
 #[test]
 fn test_io_read_bytes() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -130,7 +130,7 @@ fn test_io_read_bytes() {
 
 #[test]
 fn test_io_write_temp() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -157,7 +157,7 @@ fn test_io_write_temp() {
 
 #[test]
 fn test_io_seek_operations() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -192,7 +192,7 @@ fn test_io_seek_operations() {
 
 #[test]
 fn test_io_type_function() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -213,7 +213,7 @@ fn test_io_type_function() {
 
 #[test]
 fn test_io_flush() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -234,7 +234,7 @@ fn test_io_flush() {
 
 #[test]
 fn test_io_tmpfile() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -255,7 +255,7 @@ fn test_io_tmpfile() {
 
 #[test]
 fn test_io_read_all() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -275,7 +275,7 @@ fn test_io_read_all() {
 
 #[test]
 fn test_io_file_setvbuf() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -297,7 +297,7 @@ fn test_io_file_setvbuf() {
 
 #[test]
 fn test_io_multiple_reads() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -320,7 +320,7 @@ fn test_io_multiple_reads() {
 
 #[test]
 fn test_io_append_mode() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -354,7 +354,7 @@ fn test_io_append_mode() {
 
 #[test]
 fn test_io_read_eof() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -377,7 +377,7 @@ fn test_io_read_eof() {
 
 #[test]
 fn test_io_read_stops_after_first_failure() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -409,7 +409,7 @@ fn test_io_read_stops_after_first_failure() {
 
 #[test]
 fn test_file_read_stops_after_first_failure() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
@@ -437,7 +437,7 @@ fn test_file_read_stops_after_first_failure() {
 
 #[test]
 fn test_io_lines_uses_initialized_default_input() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -454,7 +454,7 @@ fn test_io_lines_uses_initialized_default_input() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_io_popen_read_mode() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -475,7 +475,7 @@ fn test_io_popen_read_mode() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_io_popen_invalid_mode_raises() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -493,7 +493,7 @@ fn test_io_popen_invalid_mode_raises() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_io_popen_write_mode() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let path = PathBuf::from("popen_write_output.txt");

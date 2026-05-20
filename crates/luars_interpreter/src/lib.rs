@@ -1,5 +1,5 @@
 use luars::Lua;
-use luars::LuaVM;
+use luars::GlobalState;
 use luars::LuaValue;
 use luars::SafeOption;
 use luars::Stdlib;
@@ -136,7 +136,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(opts)
 }
 
-fn setup_arg_table(vm: &mut LuaVM, exe_path: &str, script_name: Option<&str>, args: &[String]) {
+fn setup_arg_table(vm: &mut GlobalState, exe_path: &str, script_name: Option<&str>, args: &[String]) {
     // Create arg table: arg[negative] = interpreter opts, arg[0] = script, arg[1..] = script args
     let arg_table = vm.create_table(args.len(), 2).unwrap();
 
@@ -159,7 +159,7 @@ fn setup_arg_table(vm: &mut LuaVM, exe_path: &str, script_name: Option<&str>, ar
     let _ = vm.set_global("arg", arg_table);
 }
 
-fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
+fn require_module(vm: &mut GlobalState, module: &str) -> Result<(), String> {
     let code = format!("{} = require('{}')", module, module);
     match vm.compile(&code) {
         Ok(chunk) => {
@@ -171,7 +171,7 @@ fn require_module(vm: &mut LuaVM, module: &str) -> Result<(), String> {
     }
 }
 
-fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
+fn execute_file(vm: &mut GlobalState, filename: &str) -> Result<(), String> {
     let code =
         fs::read_to_string(filename).map_err(|e| format!("cannot open {}: {}", filename, e))?;
 
@@ -192,7 +192,7 @@ fn execute_file(vm: &mut LuaVM, filename: &str) -> Result<(), String> {
     }
 }
 
-fn execute_stdin(vm: &mut LuaVM) -> Result<(), String> {
+fn execute_stdin(vm: &mut GlobalState) -> Result<(), String> {
     let mut code = String::new();
     io::stdin()
         .read_to_string(&mut code)
@@ -208,7 +208,7 @@ fn execute_stdin(vm: &mut LuaVM) -> Result<(), String> {
     }
 }
 
-fn run_repl(vm: &mut LuaVM) {
+fn run_repl(vm: &mut GlobalState) {
     println!("{}", VERSION);
     println!("{}", COPYRIGHT);
     println!("Type Ctrl+C or Ctrl+Z to exit\n");

@@ -3,7 +3,7 @@ use crate::*;
 
 #[test]
 fn test_table_insert() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -23,7 +23,7 @@ fn test_table_insert() {
 
 #[test]
 fn test_table_remove() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -44,7 +44,7 @@ fn test_table_remove() {
 
 #[test]
 fn test_table_concat() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -64,7 +64,7 @@ fn test_table_concat() {
 
 #[test]
 fn test_table_concat_binary_separator() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -86,7 +86,7 @@ fn test_table_concat_binary_separator() {
 
 #[test]
 fn test_table_sort() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -106,7 +106,7 @@ fn test_table_sort() {
 
 #[test]
 fn test_table_sort_with_comparator() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -124,7 +124,7 @@ fn test_table_sort_with_comparator() {
 
 #[test]
 fn test_table_sort_byte_strings() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -146,7 +146,7 @@ fn test_table_sort_byte_strings() {
 
 #[test]
 fn test_table_pack() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -164,7 +164,7 @@ fn test_table_pack() {
 
 #[test]
 fn test_table_unpack() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -182,7 +182,7 @@ fn test_table_unpack() {
 
 #[test]
 fn test_table_move() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -201,7 +201,7 @@ fn test_table_move() {
 
 #[test]
 fn test_table_operations() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -229,7 +229,7 @@ fn test_table_operations() {
 
 #[test]
 fn test_table_insert_with_metamethods() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -262,7 +262,7 @@ fn test_table_insert_with_metamethods() {
 
 #[test]
 fn test_table_remove_with_metamethods() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -291,7 +291,7 @@ fn test_table_remove_with_metamethods() {
 
 #[test]
 fn test_table_sort_with_metamethods() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -319,7 +319,7 @@ fn test_table_sort_with_metamethods() {
 
 #[test]
 fn test_table_concat_with_metamethods() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -344,7 +344,7 @@ fn test_table_concat_with_metamethods() {
 
 #[test]
 fn test_table_unpack_with_metamethods() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -370,7 +370,7 @@ fn test_table_unpack_with_metamethods() {
 
 #[test]
 fn test_table_move_with_metamethods() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -395,7 +395,7 @@ fn test_table_move_with_metamethods() {
 
 #[test]
 fn test_table_insert_overflow_with_len_metamethod() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -418,7 +418,7 @@ fn test_table_insert_overflow_with_len_metamethod() {
 
 #[test]
 fn test_table_full_proxy_workflow() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Full workflow matching the C Lua test: insert, sort, concat, remove, unpack
@@ -458,7 +458,7 @@ fn test_table_full_proxy_workflow() {
 
 #[test]
 fn test_table_newindex_counting() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test that __newindex is actually triggered (counting calls)

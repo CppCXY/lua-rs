@@ -7,10 +7,11 @@ use crate::lua_value::LuaUserdata;
 use crate::lua_vm::async_thread::AsyncReturnValue;
 use crate::*;
 use std::fmt;
+use std::pin::Pin;
 
 /// Helper: create a VM with stdlib loaded
-fn new_vm() -> LuaVM {
-    let mut vm = LuaVM::new(SafeOption::default());
+fn new_vm() -> Pin<Box<GlobalState>> {
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm
 }

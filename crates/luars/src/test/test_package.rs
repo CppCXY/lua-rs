@@ -13,7 +13,7 @@ fn luaopen_test_install_module(l: &mut LuaState) -> LuaResult<usize> {
 
 #[test]
 fn test_package_loaded() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -30,7 +30,7 @@ fn test_package_loaded() {
 
 #[test]
 fn test_package_preload() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -55,7 +55,7 @@ fn test_package_preload() {
 
 #[test]
 fn test_package_path() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -70,7 +70,7 @@ fn test_package_path() {
 
 #[test]
 fn test_package_cpath() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -85,7 +85,7 @@ fn test_package_cpath() {
 
 #[test]
 fn test_package_config() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -104,7 +104,7 @@ fn test_package_config() {
 
 #[test]
 fn test_package_searchers() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -123,7 +123,7 @@ fn test_package_searchers() {
 
 #[test]
 fn test_package_searchpath() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -139,7 +139,7 @@ fn test_package_searchpath() {
 
 #[test]
 fn test_require_preload() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -170,7 +170,7 @@ fn test_require_preload() {
 
 #[test]
 fn test_require_cache() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -195,7 +195,7 @@ fn test_require_cache() {
 
 #[test]
 fn test_require_error() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -211,7 +211,7 @@ fn test_require_error() {
 
 #[test]
 fn test_require_missing_module_reports_call_site_file_and_line() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let unique = SystemTime::now()
@@ -237,7 +237,7 @@ fn test_require_missing_module_reports_call_site_file_and_line() {
 
 #[test]
 fn test_require_return_value() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(

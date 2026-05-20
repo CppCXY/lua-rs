@@ -54,7 +54,6 @@ pub use execute::{get_metamethod_event, get_metatable};
 pub use lua_rng::LuaRng;
 pub use opcode::{Instruction, OpCode};
 use std::future::Future;
-use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::ptr::NonNull;
 pub use string_arth::*;
@@ -251,74 +250,8 @@ pub struct GlobalState {
     pub(crate) io_default_input: Option<LuaValue>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct GlobalStateHandle(NonNull<GlobalState>);
-
-impl GlobalStateHandle {
-    pub(crate) fn from_global(state: &mut GlobalState) -> Self {
-        Self(NonNull::from(state))
-    }
-
-    pub(crate) fn dangling() -> Self {
-        Self(NonNull::dangling())
-    }
-
-    pub(crate) fn as_ref<'a>(self) -> &'a GlobalState {
-        unsafe { self.0.as_ref() }
-    }
-
-    pub(crate) fn as_mut<'a>(mut self) -> &'a mut GlobalState {
-        unsafe { self.0.as_mut() }
-    }
-
-    pub(crate) fn gc_debt(self) -> isize {
-        self.as_ref().gc.gc_debt
-    }
-
-    pub(crate) fn gc_barrier(
-        self,
-        state: *mut LuaState,
-        owner_ptr: GcObjectPtr,
-        value_gc_ptr: GcObjectPtr,
-    ) {
-        self.as_mut()
-            .gc
-            .barrier(unsafe { &mut *state }, owner_ptr, value_gc_ptr);
-    }
-
-    pub(crate) fn check_gc(self, state: *mut LuaState) -> bool {
-        self.as_mut().check_gc(unsafe { &mut *state })
-    }
-
-    pub(crate) fn full_gc(self, state: *mut LuaState, emergency: bool) {
-        self.as_mut().full_gc(unsafe { &mut *state }, emergency);
-    }
-
-    pub(crate) fn change_gc_mode(self, state: *mut LuaState, kind: GcKind) {
-        self.as_mut().gc.change_mode(unsafe { &mut *state }, kind);
-    }
-}
-
-pub struct LuaVM {
-    inner: Pin<Box<GlobalState>>,
-}
-
-impl Deref for LuaVM {
-    type Target = GlobalState;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.as_ref().get_ref()
-    }
-}
-
-impl DerefMut for LuaVM {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.inner.as_mut().get_unchecked_mut() }
-    }
-}
-
-impl LuaVM {
-    pub fn new(option: SafeOption) -> Self {
+impl GlobalState {
+    pub fn new(option: SafeOption) -> Pin<Box<Self>> {
         let mut gc = GC::new(option.clone());
         gc.set_temporary_memory_limit(isize::MAX / 2);
         let mut object_allocator = ObjectAllocator::new();
@@ -378,11 +311,9 @@ impl LuaVM {
         inner.set_global("_ENV", globals_value).unwrap();
 
         inner.gc.clear_temporary_memory_limit();
-        LuaVM { inner }
+        inner
     }
-}
 
-impl GlobalState {
     pub fn main_state(&mut self) -> &mut LuaState {
         &mut self.main_state.as_mut_ref().data
     }
@@ -2088,7 +2019,7 @@ mod tests {
 
     #[test]
     fn test_count_hook_preserves_multret_unpack_results() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
 
         let results = vm
@@ -2116,7 +2047,7 @@ mod tests {
 
     #[test]
     fn test_lua_ref_mechanism() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Create some test values
         let table = vm.create_table(0, 2).unwrap();
@@ -2184,7 +2115,7 @@ mod tests {
 
     #[test]
     fn test_ref_id_reuse() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Create and release multiple refs to test ID reuse
         let t1 = vm.create_table(0, 0).unwrap();
@@ -2207,7 +2138,7 @@ mod tests {
 
     #[test]
     fn test_multiple_refs() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Create multiple refs and verify they don't interfere
         let mut refs = Vec::new();
@@ -2243,7 +2174,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_json_serialization() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Test 1: Simple values
         let num = LuaValue::number(42.5);
@@ -2305,7 +2236,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_json_deserialization() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Test 1: Simple values
         let json = serde_json::json!(42);
@@ -2348,7 +2279,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_json_roundtrip() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
 
         // Create a complex Lua structure
         let root = vm.create_table(0, 3).unwrap();
@@ -2390,8 +2321,8 @@ mod tests {
     #[cfg(feature = "shared-proto")]
     #[test]
     fn test_shared_const_strings_reused_across_vms() {
-        let vm1 = LuaVM::new(SafeOption::default());
-        let vm2 = LuaVM::new(SafeOption::default());
+        let vm1 = GlobalState::new(SafeOption::default());
+        let vm2 = GlobalState::new(SafeOption::default());
 
         let gc_tm1 = vm1.const_strings.tmname[TmKind::Gc as usize]
             .as_string_ptr()
@@ -2406,5 +2337,53 @@ mod tests {
         assert_eq!(type_name1, type_name2);
         assert!(gc_tm1.as_ref().header.is_shared());
         assert!(type_name1.as_ref().header.is_shared());
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GlobalStateHandle(NonNull<GlobalState>);
+
+impl GlobalStateHandle {
+    pub(crate) fn from_global(state: &mut GlobalState) -> Self {
+        Self(NonNull::from(state))
+    }
+
+    pub(crate) fn dangling() -> Self {
+        Self(NonNull::dangling())
+    }
+
+    pub(crate) fn as_ref<'a>(self) -> &'a GlobalState {
+        unsafe { self.0.as_ref() }
+    }
+
+    pub(crate) fn as_mut<'a>(mut self) -> &'a mut GlobalState {
+        unsafe { self.0.as_mut() }
+    }
+
+    pub(crate) fn gc_debt(self) -> isize {
+        self.as_ref().gc.gc_debt
+    }
+
+    pub(crate) fn gc_barrier(
+        self,
+        state: *mut LuaState,
+        owner_ptr: GcObjectPtr,
+        value_gc_ptr: GcObjectPtr,
+    ) {
+        self.as_mut()
+            .gc
+            .barrier(unsafe { &mut *state }, owner_ptr, value_gc_ptr);
+    }
+
+    pub(crate) fn check_gc(self, state: *mut LuaState) -> bool {
+        self.as_mut().check_gc(unsafe { &mut *state })
+    }
+
+    pub(crate) fn full_gc(self, state: *mut LuaState, emergency: bool) {
+        self.as_mut().full_gc(unsafe { &mut *state }, emergency);
+    }
+
+    pub(crate) fn change_gc_mode(self, state: *mut LuaState, kind: GcKind) {
+        self.as_mut().gc.change_mode(unsafe { &mut *state }, kind);
     }
 }

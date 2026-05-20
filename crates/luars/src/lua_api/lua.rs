@@ -1,10 +1,12 @@
+use std::pin::Pin;
+
 #[cfg(feature = "sandbox")]
 use luars::SandboxConfig;
 use luars::lua_vm::SafeOption;
 use luars::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
 use luars::{
     FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaLibrary, LuaRegistrable, LuaResult, LuaUserdata,
-    LuaVM, Stdlib, UserDataRef, UserDataTrait,
+    GlobalState, Stdlib, UserDataRef, UserDataTrait,
 };
 
 use crate::lua_api::util::{collect_values, from_value, into_single_value};
@@ -16,21 +18,21 @@ use crate::{LuaError, LuaFullError};
 /// This type sits on top of `luars::LuaVM` and exposes a narrower API that
 /// avoids raw `LuaValue` plumbing in the common host-facing surface.
 pub struct Lua {
-    vm: LuaVM,
+    global_state_owner: Pin<Box<GlobalState>>,
 }
 
 impl Lua {
     /// Create a new Lua runtime.
     pub fn new(option: SafeOption) -> Self {
         Lua {
-            vm: LuaVM::new(option),
+            global_state_owner: GlobalState::new(option),
         }
     }
 
     /// Open standard libraries.
     #[inline]
     pub fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
-        self.vm.open_stdlib(lib)
+        self.global_state_owner.open_stdlib(lib)
     }
 
     /// Install a library provided by luars or an external crate.
@@ -48,17 +50,17 @@ impl Lua {
     /// Run a full garbage-collection cycle immediately.
     #[inline]
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
-        self.vm.main_state().collect_garbage()
+        self.global_state_owner.main_state().collect_garbage()
     }
 
     /// Execute source code and discard raw return values.
     #[inline]
     pub fn execute(&mut self, source: &str) -> LuaResult<()> {
-        self.vm.execute(source).map(|_| ())
+        self.global_state_owner.execute(source).map(|_| ())
     }
 
     pub(crate) fn load_value(&mut self, source: &str) -> LuaResult<luars::LuaValue> {
-        self.vm.load(source)
+        self.global_state_owner.load(source)
     }
 
     pub(crate) fn load_value_with_name(
@@ -66,22 +68,22 @@ impl Lua {
         source: &str,
         chunk_name: &str,
     ) -> LuaResult<luars::LuaValue> {
-        self.vm.load_with_name(source, chunk_name)
+        self.global_state_owner.load_with_name(source, chunk_name)
     }
 
     pub(crate) fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function> {
         let function = self
-            .vm
+            .global_state_owner
             .to_function_ref(value)
-            .ok_or_else(|| self.vm.error("compiled chunk is not a function"))?;
+            .ok_or_else(|| self.global_state_owner.error("compiled chunk is not a function"))?;
         Ok(Function::new(function))
     }
 
     pub(crate) fn value_to_string(&mut self, value: luars::LuaValue) -> LuaResult<LuaString> {
         let string = self
-            .vm
+            .global_state_owner
             .to_string_ref(value)
-            .ok_or_else(|| self.vm.error("value is not a string"))?;
+            .ok_or_else(|| self.global_state_owner.error("value is not a string"))?;
         Ok(LuaString::new(string))
     }
 
@@ -89,16 +91,16 @@ impl Lua {
         &mut self,
         value: luars::LuaValue,
     ) -> LuaResult<UserDataRef<T>> {
-        self.vm
+        self.global_state_owner
             .to_userdata_ref(value)
-            .ok_or_else(|| self.vm.error("value is not the expected userdata type"))
+            .ok_or_else(|| self.global_state_owner.error("value is not the expected userdata type"))
     }
 
     pub(crate) fn call_function_value(
         &mut self,
         func: luars::LuaValue,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        self.vm.call_raw(func, vec![])
+        self.global_state_owner.call_raw(func, vec![])
     }
 
     pub(crate) async fn call_function_value_async(
@@ -106,7 +108,7 @@ impl Lua {
         func: luars::LuaValue,
         args: Vec<luars::LuaValue>,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        self.vm.call_async(func, args).await
+        self.global_state_owner.call_async(func, args).await
     }
 
     pub(crate) fn pack_multi<T: IntoLua>(
@@ -114,7 +116,7 @@ impl Lua {
         value: T,
         _api_name: &str,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        collect_values(&mut self.vm, value)
+        collect_values(&mut self.global_state_owner, value)
     }
 
     #[cfg(feature = "sandbox")]
@@ -123,7 +125,7 @@ impl Lua {
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<luars::LuaValue> {
-        self.vm.load_sandboxed(source, config)
+        self.global_state_owner.load_sandboxed(source, config)
     }
 
     #[cfg(feature = "sandbox")]
@@ -133,7 +135,7 @@ impl Lua {
         chunk_name: &str,
         config: &SandboxConfig,
     ) -> LuaResult<luars::LuaValue> {
-        self.vm.load_with_name_sandboxed(source, chunk_name, config)
+        self.global_state_owner.load_with_name_sandboxed(source, chunk_name, config)
     }
 
     pub(crate) fn unpack_multi_values<R: FromLuaMulti>(
@@ -141,8 +143,8 @@ impl Lua {
         values: Vec<luars::LuaValue>,
         api_name: &str,
     ) -> LuaResult<R> {
-        R::from_lua_multi(values, self.vm.main_state())
-            .map_err(|msg| self.vm.error(format!("{}: {}", api_name, msg)))
+        R::from_lua_multi(values, self.global_state_owner.main_state())
+            .map_err(|msg| self.global_state_owner.error(format!("{}: {}", api_name, msg)))
     }
 
     pub(crate) fn unpack_value<T: FromLua>(
@@ -150,23 +152,23 @@ impl Lua {
         value: luars::LuaValue,
         api_name: &str,
     ) -> LuaResult<T> {
-        from_value(&mut self.vm, value, api_name)
+        from_value(&mut self.global_state_owner, value, api_name)
     }
 
     /// Execute source code and convert the first returned value.
     pub fn eval<R: FromLua>(&mut self, source: &str) -> LuaResult<R> {
-        let values = self.vm.execute(source)?;
+        let values = self.global_state_owner.execute(source)?;
         let value = values
             .into_iter()
             .next()
             .unwrap_or_else(luars::LuaValue::nil);
-        from_value(&mut self.vm, value, "eval")
+        from_value(&mut self.global_state_owner, value, "eval")
     }
 
     /// Execute source code and convert all returned values.
     pub fn eval_multi<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R> {
-        let values = self.vm.execute(source)?;
-        R::from_lua_multi(values, self.vm.main_state()).map_err(|msg| self.vm.error(msg))
+        let values = self.global_state_owner.execute(source)?;
+        R::from_lua_multi(values, self.global_state_owner.main_state()).map_err(|msg| self.global_state_owner.error(msg))
     }
 
     /// Execute source code asynchronously and discard raw return values.
@@ -186,20 +188,20 @@ impl Lua {
 
     /// Set a global from a Rust value that converts to a single Lua value.
     pub fn set_global<T: IntoLua>(&mut self, name: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.vm, value, "set_global")?;
-        self.vm.set_global(name, value)
+        let value = into_single_value(&mut self.global_state_owner, value, "set_global")?;
+        self.global_state_owner.set_global(name, value)
     }
 
     /// Return a handle to the global environment table.
     #[inline]
     pub fn globals(&mut self) -> Table {
-        Table::new(self.vm.globals_table())
+        Table::new(self.global_state_owner.globals_table())
     }
 
     /// Get and convert a global variable.
     #[inline]
     pub fn get_global<T: FromLua>(&mut self, name: &str) -> LuaResult<Option<T>> {
-        self.vm.get_global_as(name)
+        self.global_state_owner.get_global_as(name)
     }
 
     /// Call a global function and convert all results.
@@ -209,13 +211,13 @@ impl Lua {
         name: &str,
         args: A,
     ) -> LuaResult<R> {
-        self.vm.call_global(name, args)
+        self.global_state_owner.call_global(name, args)
     }
 
     /// Call a global function and convert the first result.
     #[inline]
     pub fn call_global1<A: IntoLua, R: FromLua>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        self.vm.call1_global(name, args)
+        self.global_state_owner.call1_global(name, args)
     }
 
     /// Call a function handle asynchronously and convert all results.
@@ -255,7 +257,7 @@ impl Lua {
     ) -> LuaResult<R> {
         let function = self
             .get_function(name)?
-            .ok_or_else(|| self.vm.error(format!("global '{}' not found", name)))?;
+            .ok_or_else(|| self.global_state_owner.error(format!("global '{}' not found", name)))?;
         self.call_async(&function, args).await
     }
 
@@ -267,7 +269,7 @@ impl Lua {
     ) -> LuaResult<R> {
         let function = self
             .get_function(name)?
-            .ok_or_else(|| self.vm.error(format!("global '{}' not found", name)))?;
+            .ok_or_else(|| self.global_state_owner.error(format!("global '{}' not found", name)))?;
         self.call_async1(&function, args).await
     }
 
@@ -277,7 +279,7 @@ impl Lua {
     where
         F: LuaTypedCallback<Args, R>,
     {
-        self.vm.register_function_typed(name, f)
+        self.global_state_owner.register_function_typed(name, f)
     }
 
     /// Create a typed Rust callback as a standalone Lua function handle.
@@ -286,7 +288,7 @@ impl Lua {
     where
         F: LuaTypedCallback<Args, R>,
     {
-        self.vm.create_function_typed(f).map(Function::new)
+        self.global_state_owner.create_function_typed(f).map(Function::new)
     }
 
     /// Register a typed async Rust callback as a Lua global.
@@ -295,20 +297,20 @@ impl Lua {
     where
         F: LuaTypedAsyncCallback<Args, R>,
     {
-        self.vm.register_async_typed(name, f)
+        self.global_state_owner.register_async_typed(name, f)
     }
 
     /// Register a userdata type in the global environment.
     #[inline]
     pub fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()> {
-        self.vm.register_type_of::<T>(name)
+        self.global_state_owner.register_type_of::<T>(name)
     }
 
     /// Register a userdata type and return the exported global type table.
     pub fn register_type<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table> {
-        self.vm.register_type_of::<T>(name)?;
+        self.global_state_owner.register_type_of::<T>(name)?;
         self.get_table(name)?.ok_or_else(|| {
-            self.vm.error(format!(
+            self.global_state_owner.error(format!(
                 "registered type '{}' did not produce a table",
                 name
             ))
@@ -317,7 +319,7 @@ impl Lua {
 
     #[inline]
     pub fn register_enum_of<T: LuaEnum>(&mut self, name: &str) -> LuaResult<()> {
-        self.vm.register_enum_of::<T>(name)
+        self.global_state_owner.register_enum_of::<T>(name)
     }
 
     /// Return a chunk builder that can be executed, evaluated, or compiled.
@@ -338,7 +340,7 @@ impl Lua {
     /// Execute source code inside a sandbox and discard returned values.
     #[cfg(feature = "sandbox")]
     pub fn execute_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<()> {
-        self.vm.execute_sandboxed(source, config).map(|_| ())
+        self.global_state_owner.execute_sandboxed(source, config).map(|_| ())
     }
 
     /// Execute source code inside a sandbox and convert the first returned value.
@@ -349,7 +351,7 @@ impl Lua {
         config: &SandboxConfig,
     ) -> LuaResult<R> {
         let value = self
-            .vm
+            .global_state_owner
             .execute_sandboxed(source, config)?
             .into_iter()
             .next()
@@ -364,7 +366,7 @@ impl Lua {
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<R> {
-        let values = self.vm.execute_sandboxed(source, config)?;
+        let values = self.global_state_owner.execute_sandboxed(source, config)?;
         self.unpack_multi_values(values, "eval_multi_sandboxed")
     }
 
@@ -376,9 +378,9 @@ impl Lua {
         name: &str,
     ) -> LuaResult<()> {
         let value = self
-            .vm
+            .global_state_owner
             .get_global(name)?
-            .ok_or_else(|| self.vm.error(format!("global '{}' not found", name)))?;
+            .ok_or_else(|| self.global_state_owner.error(format!("global '{}' not found", name)))?;
         config.insert_global(name, value);
         Ok(())
     }
@@ -391,7 +393,7 @@ impl Lua {
         name: &str,
         value: T,
     ) -> LuaResult<()> {
-        let value = into_single_value(&mut self.vm, value, "sandbox_insert_global")?;
+        let value = into_single_value(&mut self.global_state_owner, value, "sandbox_insert_global")?;
         config.insert_global(name, value);
         Ok(())
     }
@@ -412,7 +414,7 @@ impl Lua {
 
     /// Create a safe Lua string handle.
     pub fn create_string(&mut self, value: &str) -> LuaResult<LuaString> {
-        let value = self.vm.create_string(value)?;
+        let value = self.global_state_owner.create_string(value)?;
         self.value_to_string(value)
     }
 
@@ -420,7 +422,7 @@ impl Lua {
     where
         F: Fn(&mut luars::LuaState) -> LuaResult<usize> + 'static,
     {
-        let value = self.vm.create_closure(f)?;
+        let value = self.global_state_owner.create_closure(f)?;
         self.value_to_function(value)
     }
 
@@ -428,8 +430,8 @@ impl Lua {
         &mut self,
         data: T,
     ) -> LuaResult<Value> {
-        let value = self.vm.create_userdata(LuaUserdata::new(data))?;
-        Ok(Value::new(self.vm.to_ref(value)))
+        let value = self.global_state_owner.create_userdata(LuaUserdata::new(data))?;
+        Ok(Value::new(self.global_state_owner.to_ref(value)))
     }
 
     /// Create a new empty table handle.
@@ -439,7 +441,7 @@ impl Lua {
 
     /// Create a new table handle with explicit capacities.
     pub fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<Table> {
-        self.vm.create_table_ref(narr, nrec).map(Table::new)
+        self.global_state_owner.create_table_ref(narr, nrec).map(Table::new)
     }
 
     /// Create a GC-managed userdata and return a typed handle to it.
@@ -447,7 +449,7 @@ impl Lua {
         &mut self,
         data: T,
     ) -> LuaResult<UserDataRef<T>> {
-        let value = self.vm.create_userdata(LuaUserdata::new(data))?;
+        let value = self.global_state_owner.create_userdata(LuaUserdata::new(data))?;
         self.value_to_userdata(value)
     }
 
@@ -460,7 +462,7 @@ impl Lua {
         reference: &mut T,
     ) -> LuaResult<UserDataRef<T>> {
         let ud = unsafe { LuaUserdata::from_ref(reference) };
-        let value = self.vm.create_userdata(ud)?;
+        let value = self.global_state_owner.create_userdata(ud)?;
         self.value_to_userdata(value)
     }
 
@@ -493,55 +495,55 @@ impl Lua {
 
     /// Get a global function handle.
     pub fn get_function(&mut self, name: &str) -> LuaResult<Option<Function>> {
-        self.vm
+        self.global_state_owner
             .get_global_function(name)
             .map(|opt| opt.map(Function::new))
     }
 
     /// Get a global table handle.
     pub fn get_table(&mut self, name: &str) -> LuaResult<Option<Table>> {
-        self.vm
+        self.global_state_owner
             .get_global_table(name)
             .map(|opt| opt.map(Table::new))
     }
 
     /// Bind a safe table handle into the global environment.
     pub fn set_global_table(&mut self, name: &str, table: &Table) -> LuaResult<()> {
-        self.vm.set_global(name, table.value())
+        self.global_state_owner.set_global(name, table.value())
     }
 
     /// Bind a safe function handle into the global environment.
     pub fn set_global_function(&mut self, name: &str, function: &Function) -> LuaResult<()> {
-        self.vm.set_global(name, function.inner.to_value())
+        self.global_state_owner.set_global(name, function.inner.to_value())
     }
 
     /// Set a string-keyed table field from a Rust value.
     pub fn table_set<T: IntoLua>(&mut self, table: &Table, key: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.vm, value, "table_set")?;
+        let value = into_single_value(&mut self.global_state_owner, value, "table_set")?;
         table.inner.set(key, value)
     }
 
     /// Set an integer-keyed table field from a Rust value.
     pub fn table_seti<T: IntoLua>(&mut self, table: &Table, key: i64, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.vm, value, "table_seti")?;
+        let value = into_single_value(&mut self.global_state_owner, value, "table_seti")?;
         table.inner.seti(key, value)
     }
 
     /// Get and convert a string-keyed table field.
     pub fn table_get<T: FromLua>(&mut self, table: &Table, key: &str) -> LuaResult<T> {
         let value = table.inner.get(key)?;
-        from_value(&mut self.vm, value, "table_get")
+        from_value(&mut self.global_state_owner, value, "table_get")
     }
 
     /// Get and convert an integer-keyed table field.
     pub fn table_geti<T: FromLua>(&mut self, table: &Table, key: i64) -> LuaResult<T> {
         let value = table.inner.geti(key)?;
-        from_value(&mut self.vm, value, "table_geti")
+        from_value(&mut self.global_state_owner, value, "table_geti")
     }
 
     /// Append a Rust value to the array part of a table.
     pub fn table_push<T: IntoLua>(&mut self, table: &Table, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.vm, value, "table_push")?;
+        let value = into_single_value(&mut self.global_state_owner, value, "table_push")?;
         table.inner.push(value)
     }
 
@@ -558,8 +560,8 @@ impl Lua {
     /// Pack a Rust value into a safe registry-backed Lua value handle.
     #[inline]
     pub fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value> {
-        let value = into_single_value(&mut self.vm, value, "pack")?;
-        Ok(Value::new(self.vm.to_ref(value)))
+        let value = into_single_value(&mut self.global_state_owner, value, "pack")?;
+        Ok(Value::new(self.global_state_owner.to_ref(value)))
     }
 
     /// Unpack a safe Lua value handle into a Rust value.
@@ -571,12 +573,12 @@ impl Lua {
     /// Convert one Rust/Lua-convertible value into another.
     #[inline]
     pub fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U> {
-        let value = into_single_value(&mut self.vm, value, "convert")?;
+        let value = into_single_value(&mut self.global_state_owner, value, "convert")?;
         self.unpack_value(value, "convert")
     }
 
     pub fn get_error_message(&mut self, error: LuaError) -> LuaFullError {
-        self.vm.get_full_error(error)
+        self.global_state_owner.get_full_error(error)
     }
 
     /// Stop the garbage collector. No GC steps will run until `gc_restart` is called.
@@ -596,8 +598,8 @@ impl Lua {
     ///
     /// The caller must preserve Lua VM invariants while holding the returned
     /// mutable reference and must not keep invalidated references across VM operations.
-    pub fn vm_mut(&mut self) -> &mut LuaVM {
-        &mut self.vm
+    pub fn vm_mut(&mut self) -> &mut GlobalState {
+        &mut self.global_state_owner
     }
 }
 

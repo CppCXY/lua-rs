@@ -2,7 +2,7 @@ use crate::*;
 
 #[test]
 fn test_miri_gc_fixed_objects_smoke() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -35,7 +35,7 @@ fn test_miri_gc_fixed_objects_smoke() {
 
 #[test]
 fn test_miri_debug_traceback_smoke() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -55,7 +55,7 @@ fn test_miri_debug_traceback_smoke() {
 
 #[test]
 fn test_miri_pow_basic_regression() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let results = vm.execute("return 2 ^ 3").unwrap();
@@ -65,7 +65,7 @@ fn test_miri_pow_basic_regression() {
 
 #[test]
 fn test_miri_pow_precedence_regression() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let results = vm.execute("return 2 ^ 3 ^ 2, (2 ^ 3) ^ 2").unwrap();
@@ -81,7 +81,7 @@ fn test_miri_pow_precedence_regression() {
 
 #[test]
 fn test_miri_pow_metamethod_regression() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(

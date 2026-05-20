@@ -1,10 +1,10 @@
 /// Tests for RClosure (Rust closures registered as Lua functions)
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaResult, LuaState, LuaVM, SafeOption};
+use crate::lua_vm::{LuaResult, LuaState, GlobalState, SafeOption};
 
 #[test]
 fn test_rclosure_basic_no_return() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -20,7 +20,7 @@ fn test_rclosure_basic_no_return() {
 
 #[test]
 fn test_rclosure_returns_value() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -39,7 +39,7 @@ fn test_rclosure_returns_value() {
 
 #[test]
 fn test_rclosure_reads_args() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -63,7 +63,7 @@ fn test_rclosure_captures_state() {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let counter = Rc::new(Cell::new(0i64));
@@ -97,7 +97,7 @@ fn test_rclosure_captures_state() {
 
 #[test]
 fn test_rclosure_with_upvalues() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let upvalues = vec![LuaValue::integer(100)];
@@ -128,7 +128,7 @@ fn test_rclosure_with_upvalues() {
 
 #[test]
 fn test_rclosure_multiple_returns() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -152,7 +152,7 @@ fn test_rclosure_multiple_returns() {
 
 #[test]
 fn test_rclosure_called_from_lua_closure() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -178,7 +178,7 @@ fn test_rclosure_called_from_lua_closure() {
 
 #[test]
 fn test_rclosure_in_table() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -201,7 +201,7 @@ fn test_rclosure_in_table() {
 
 #[test]
 fn test_rclosure_tail_call() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -228,7 +228,7 @@ fn test_rclosure_tail_call() {
 
 #[test]
 fn test_rclosure_error_propagation() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -251,7 +251,7 @@ fn test_rclosure_error_propagation() {
 
 #[test]
 fn test_rclosure_gc_survives() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm
@@ -276,7 +276,7 @@ fn test_rclosure_gc_survives() {
 
 #[test]
 fn test_rclosure_type_function() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let func = vm

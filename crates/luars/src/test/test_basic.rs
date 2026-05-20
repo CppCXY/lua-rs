@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn test_print() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let result = vm.execute(
         r#"
@@ -19,7 +19,7 @@ fn test_print() {
 
 #[test]
 fn test_type() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -39,7 +39,7 @@ fn test_type() {
 
 #[test]
 fn test_tonumber() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -57,7 +57,7 @@ fn test_tonumber() {
 
 #[test]
 fn test_tostring() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -75,7 +75,7 @@ fn test_tostring() {
 
 #[test]
 fn test_assert() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Successful assertion
@@ -100,7 +100,7 @@ fn test_assert() {
 
 #[test]
 fn test_error() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -114,7 +114,7 @@ fn test_error() {
 
 #[test]
 fn test_pcall() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -136,7 +136,7 @@ fn test_pcall() {
 
 #[test]
 fn test_xpcall() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -161,7 +161,7 @@ fn test_xpcall() {
 
 #[test]
 fn test_select() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -178,7 +178,7 @@ fn test_select() {
 
 #[test]
 fn test_ipairs() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -200,7 +200,7 @@ fn test_ipairs() {
 
 #[test]
 fn test_pairs() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -219,7 +219,7 @@ fn test_pairs() {
 
 #[test]
 fn test_next() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -236,7 +236,7 @@ fn test_next() {
 
 #[test]
 fn test_rawget_rawset() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -255,7 +255,7 @@ fn test_rawget_rawset() {
 
 #[test]
 fn test_rawlen() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -273,7 +273,7 @@ fn test_rawlen() {
 
 #[test]
 fn test_rawequal() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -292,7 +292,7 @@ fn test_rawequal() {
 
 #[test]
 fn test_getmetatable_setmetatable() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -312,7 +312,7 @@ fn test_getmetatable_setmetatable() {
 
 #[test]
 fn test_load() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -328,7 +328,7 @@ fn test_load() {
 
 #[test]
 fn test_string_dump_load_binary_constant() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -359,7 +359,7 @@ fn test_load_rejects_binary_when_bytecode_loading_disabled() {
         ..Default::default()
     };
 
-    let mut vm = LuaVM::new(option);
+    let mut vm = GlobalState::new(option);
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -379,7 +379,7 @@ fn test_load_rejects_binary_when_bytecode_loading_disabled() {
 
 #[test]
 fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
-    let mut builder_vm = LuaVM::new(SafeOption::default());
+    let mut builder_vm = GlobalState::new(SafeOption::default());
     let chunk = builder_vm.compile("return 42").unwrap();
     let bytes = serialize_chunk(&chunk, false).unwrap();
 
@@ -398,7 +398,7 @@ fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
         ..Default::default()
     };
 
-    let mut vm = LuaVM::new(option);
+    let mut vm = GlobalState::new(option);
 
     let err = vm.dofile(path.to_str().unwrap()).unwrap_err();
     let message = vm.get_error_message(err);
@@ -409,7 +409,7 @@ fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
 
 #[test]
 fn test_warn() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -424,7 +424,7 @@ fn test_warn() {
 
 #[test]
 fn test_collectgarbage() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(

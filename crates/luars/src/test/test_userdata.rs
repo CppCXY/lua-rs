@@ -3,6 +3,7 @@ use crate::lua_value::LuaUserdata;
 use crate::lua_value::userdata_trait::{UdValue, UserDataTrait};
 use crate::*;
 use std::fmt;
+use std::pin::Pin;
 
 // ==================== Test structs ====================
 
@@ -333,12 +334,12 @@ fn test_simple_userdata_macro() {
 // These tests verify that userdata is properly wired to the VM,
 // so Lua scripts can access fields, set fields, and trigger metamethods.
 
-use crate::lua_vm::{LuaVM, SafeOption};
+use crate::lua_vm::{GlobalState, SafeOption};
 use crate::stdlib;
 
 /// Helper: create a VM with basic stdlib and register a Point userdata as global "p"
-fn setup_point_vm() -> LuaVM {
-    let mut vm = LuaVM::new(SafeOption::default());
+fn setup_point_vm() -> Pin<Box<GlobalState>> {
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();
 
@@ -390,7 +391,7 @@ fn test_vm_tostring() {
 
 #[test]
 fn test_vm_eq() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let p1 = Point {
@@ -425,7 +426,7 @@ fn test_vm_eq() {
 
 #[test]
 fn test_vm_lt_le() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let p1 = Point {
@@ -479,7 +480,7 @@ fn test_vm_pass_userdata_to_function() {
 
 #[test]
 fn test_vm_config_readonly() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let cfg = Config {
@@ -614,8 +615,8 @@ fn test_vm_method_as_field_access() {
 // ==================== register_type / Constructor Tests ====================
 
 /// Helper: create a VM with Point registered as a class table
-fn setup_point_class_vm() -> LuaVM {
-    let mut vm = LuaVM::new(SafeOption::default());
+fn setup_point_class_vm() -> Pin<Box<GlobalState>> {
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();
 
@@ -827,7 +828,7 @@ impl Shape {
 
 #[test]
 fn test_enum_basic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_enum_of::<Color>("Color").unwrap();
 
@@ -842,7 +843,7 @@ fn test_enum_basic() {
 
 #[test]
 fn test_enum_explicit_discriminants() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_enum_of::<HttpStatus>("HttpStatus").unwrap();
 
@@ -857,7 +858,7 @@ fn test_enum_explicit_discriminants() {
 
 #[test]
 fn test_enum_mixed_discriminants() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_enum_of::<MixedDisc>("MD").unwrap();
 
@@ -872,7 +873,7 @@ fn test_enum_mixed_discriminants() {
 
 #[test]
 fn test_enum_in_lua_comparison() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_enum_of::<HttpStatus>("Status").unwrap();
 
@@ -894,7 +895,7 @@ fn test_enum_in_lua_comparison() {
 
 #[test]
 fn test_enum_iteration_in_lua() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_enum_of::<Color>("Color").unwrap();
 
@@ -914,7 +915,7 @@ fn test_enum_iteration_in_lua() {
 
 #[test]
 fn test_data_enum_userdata_methods() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Shape>("Shape").unwrap();
 
@@ -941,7 +942,7 @@ fn test_data_enum_userdata_methods() {
 
 #[test]
 fn test_data_enum_userdata_instance_method_lookup() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let shape = LuaUserdata::new(Shape::Rect {
@@ -1022,7 +1023,7 @@ impl Vec2 {
 
 #[test]
 fn test_userdata_add() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
@@ -1042,7 +1043,7 @@ fn test_userdata_add() {
 
 #[test]
 fn test_userdata_sub() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
@@ -1062,7 +1063,7 @@ fn test_userdata_sub() {
 
 #[test]
 fn test_userdata_mul() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
@@ -1082,7 +1083,7 @@ fn test_userdata_mul() {
 
 #[test]
 fn test_userdata_neg() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
@@ -1101,7 +1102,7 @@ fn test_userdata_neg() {
 
 #[test]
 fn test_userdata_chained_arithmetic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
@@ -1122,7 +1123,7 @@ fn test_userdata_chained_arithmetic() {
 
 #[test]
 fn test_userdata_arithmetic_preserves_type() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
@@ -1170,8 +1171,8 @@ impl NumberList {
     }
 }
 
-fn setup_number_list_vm() -> LuaVM {
-    let mut vm = LuaVM::new(SafeOption::default());
+fn setup_number_list_vm() -> Pin<Box<GlobalState>> {
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();
 
@@ -1213,7 +1214,7 @@ fn test_userdata_pairs_iteration() {
 
 #[test]
 fn test_userdata_pairs_empty() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let list = NumberList {
@@ -1275,7 +1276,7 @@ struct StringList {
 
 #[test]
 fn test_userdata_pairs_string_vec() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
     vm.open_stdlib(stdlib::Stdlib::String).unwrap();
 
@@ -1349,7 +1350,7 @@ impl UserDataTrait for Adder {
 
 #[test]
 fn test_userdata_call_basic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let adder = Adder { base: 100 };
@@ -1364,7 +1365,7 @@ fn test_userdata_call_basic() {
 
 #[test]
 fn test_userdata_call_multiple_args() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let adder = Adder { base: 10 };
@@ -1389,7 +1390,7 @@ fn test_userdata_call_multiple_args() {
 
 #[test]
 fn test_userdata_call_in_expression() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let adder = Adder { base: 1 };
@@ -1435,7 +1436,7 @@ impl UserDataTrait for Splitter {
 
 #[test]
 fn test_userdata_call_multi_return() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(stdlib::Stdlib::Basic).unwrap();
 
     let splitter = Splitter;
@@ -1525,7 +1526,7 @@ impl Bits {
 
 #[test]
 fn test_userdata_bitand_via_trait() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
@@ -1536,7 +1537,7 @@ fn test_userdata_bitand_via_trait() {
 
 #[test]
 fn test_userdata_bitor_via_trait() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
@@ -1547,7 +1548,7 @@ fn test_userdata_bitor_via_trait() {
 
 #[test]
 fn test_userdata_bitxor_via_trait() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
@@ -1558,7 +1559,7 @@ fn test_userdata_bitxor_via_trait() {
 
 #[test]
 fn test_userdata_bnot_via_trait() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
@@ -1569,7 +1570,7 @@ fn test_userdata_bnot_via_trait() {
 
 #[test]
 fn test_userdata_shl_via_trait() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
@@ -1580,7 +1581,7 @@ fn test_userdata_shl_via_trait() {
 
 #[test]
 fn test_userdata_shr_via_trait() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
@@ -1626,7 +1627,7 @@ fn test_delegated_close_via_direct_call() {
 
 #[test]
 fn test_delegated_close_via_lua_tbc() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Connection>("Connection").unwrap();
     // Verify basic access works first
@@ -1681,7 +1682,7 @@ fn test_manual_lua_close_direct() {
 
 #[test]
 fn test_manual_lua_close_via_lua_tbc() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     let mc = ManualClose { closed: false };
     {

@@ -2,11 +2,11 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::lua_vm::{LuaVM, SafeOption};
+    use crate::lua_vm::{GlobalState, SafeOption};
 
     #[test]
     fn test_gc_metamethod() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_weak_keys_mode() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn test_weak_values_mode() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_weak_keys_and_values_mode() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_gc_resurrection_prevention() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_finalizer_ordering() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"

@@ -1,5 +1,5 @@
 use luars::{Instruction, OpCode, SafeOption};
-use luars::{LuaProto, LuaVM};
+use luars::{LuaProto, GlobalState};
 use std::env;
 use std::fs;
 
@@ -20,7 +20,7 @@ fn main() {
         std::process::exit(0);
     };
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
 
     // Create chunk name with @ prefix like Lua
     let chunk_name = if filename.starts_with('@') {
@@ -49,7 +49,7 @@ fn main() {
 }
 
 /// 格式化常量值为luac格式的字符串（对齐luac的PrintConstant）
-fn format_constant(chunk: &LuaProto, idx: u32, _vm: &LuaVM) -> String {
+fn format_constant(chunk: &LuaProto, idx: u32, _vm: &GlobalState) -> String {
     if let Some(val) = chunk.constants.get(idx as usize) {
         // 根据值类型格式化
         if val.is_nil() {
@@ -114,7 +114,7 @@ fn dump_chunk(
     linedefined: usize,
     lastlinedefined: usize,
     is_main: bool,
-    vm: &LuaVM,
+    vm: &GlobalState,
 ) {
     // Format: main <file:line,line> or function <file:line,line>
     let func_name = if is_main {

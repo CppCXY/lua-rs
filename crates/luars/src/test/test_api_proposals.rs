@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 #[test]
 fn test_call_lua_function() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.execute("function add(a, b) return a + b end").unwrap();
@@ -20,7 +20,7 @@ fn test_call_lua_function() {
 
 #[test]
 fn test_call_lua_function_raw() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.execute("function add(a, b) return a + b end").unwrap();
@@ -33,7 +33,7 @@ fn test_call_lua_function_raw() {
 
 #[test]
 fn test_call_global() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.execute("function greet(name) return 'Hello, ' .. name end")
@@ -44,7 +44,7 @@ fn test_call_global() {
 
 #[test]
 fn test_call_global_not_found() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let result: LuaResult<Vec<LuaValue>> = vm.call_global("nonexistent", ());
     assert!(result.is_err());
 }
@@ -73,7 +73,7 @@ fn test_temp_dir() -> PathBuf {
 
 #[test]
 fn test_register_function() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.register_function("rust_add", |state| {
@@ -90,7 +90,7 @@ fn test_register_function() {
 
 #[test]
 fn test_register_function_typed() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.register_function_typed("rust_add_typed", |a: i64, b: i64| a + b)
@@ -107,7 +107,7 @@ fn test_register_function_typed_userdata_ref() {
         count: i64,
     }
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let counter = vm.push_any(Counter { count: 1 }).unwrap();
@@ -132,7 +132,7 @@ fn test_register_function_typed_userdata_ref() {
 
 #[test]
 fn test_register_function_typed_high_arity() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.register_function_typed(
@@ -153,7 +153,7 @@ fn test_register_function_typed_high_arity() {
 
 #[test]
 fn test_load_and_call() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let func = vm.load("return 42").unwrap();
@@ -163,7 +163,7 @@ fn test_load_and_call() {
 
 #[test]
 fn test_load_with_name() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let func = vm.load_with_name("return 'hello'", "@my_script").unwrap();
@@ -173,7 +173,7 @@ fn test_load_with_name() {
 
 #[test]
 fn test_load_does_not_execute() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     // Load but don't execute — global should not be set
@@ -185,7 +185,7 @@ fn test_load_does_not_execute() {
 #[cfg(feature = "shared-proto")]
 #[test]
 fn test_load_marks_chunk_short_strings_shared() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let func = vm
@@ -210,7 +210,7 @@ fn test_load_marks_chunk_short_strings_shared() {
 #[test]
 fn test_shared_proto_survives_vm_drop() {
     let proto = {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
 
         let func = vm
@@ -246,13 +246,13 @@ fn test_shared_proto_reuses_same_file_across_vms() {
     }
 
     let proto1 = {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
         vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
     };
 
     let proto2 = {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
         vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
     };
@@ -274,7 +274,7 @@ fn test_shared_proto_reloads_when_file_changes() {
     }
 
     let proto1 = {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
         vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
     };
@@ -285,7 +285,7 @@ fn test_shared_proto_reloads_when_file_changes() {
     }
 
     let proto2 = {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
         vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
     };
@@ -305,7 +305,7 @@ fn test_shared_proto_reloads_when_file_changes() {
 
 #[test]
 fn test_table_builder_named_keys() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let host = vm.create_string("localhost").unwrap();
@@ -329,7 +329,7 @@ fn test_table_builder_named_keys() {
 
 #[test]
 fn test_table_builder_array() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let table = TableBuilder::new()
@@ -349,7 +349,7 @@ fn test_table_builder_array() {
 
 #[test]
 fn test_table_builder_mixed() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let name = vm.create_string("test").unwrap();
@@ -386,7 +386,7 @@ fn test_lua_error_is_std_error() {
 
 #[test]
 fn test_lua_full_error() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     match vm.execute("error('boom')") {
@@ -422,7 +422,7 @@ fn test_lua_full_error_is_std_error() {
 
 #[test]
 fn test_get_global_as_integer() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute("x = 42").unwrap();
     let x: i64 = vm.get_global_as::<i64>("x").unwrap().unwrap();
     assert_eq!(x, 42);
@@ -430,7 +430,7 @@ fn test_get_global_as_integer() {
 
 #[test]
 fn test_get_global_as_string() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.execute("name = 'Alice'").unwrap();
     let name: String = vm.get_global_as::<String>("name").unwrap().unwrap();
@@ -439,7 +439,7 @@ fn test_get_global_as_string() {
 
 #[test]
 fn test_get_global_as_bool() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute("flag = true").unwrap();
     let flag: bool = vm.get_global_as::<bool>("flag").unwrap().unwrap();
     assert!(flag);
@@ -447,7 +447,7 @@ fn test_get_global_as_bool() {
 
 #[test]
 fn test_get_global_as_none() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let result = vm.get_global_as::<i64>("nonexistent").unwrap();
     assert!(result.is_none());
 }
@@ -458,7 +458,7 @@ fn test_get_global_as_none() {
 
 #[test]
 fn test_open_stdlibs() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlibs(&[Stdlib::Math, Stdlib::String, Stdlib::Table])
         .unwrap();
 
@@ -477,7 +477,7 @@ fn test_open_stdlibs() {
 
 #[test]
 fn test_table_pairs() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let table = TableBuilder::new()
@@ -497,7 +497,7 @@ fn test_table_pairs() {
 
 #[test]
 fn test_table_length() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let table = TableBuilder::new()
@@ -526,7 +526,7 @@ fn test_dofile() {
         writeln!(f, "return 1 + 2").unwrap();
     }
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     let results = vm.dofile(path.to_str().unwrap()).unwrap();
     assert_eq!(results[0].as_integer(), Some(3));
@@ -536,7 +536,7 @@ fn test_dofile() {
 
 #[test]
 fn test_dofile_not_found() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let result = vm.dofile("nonexistent_file_12345.lua");
     assert!(result.is_err());
 }
@@ -547,7 +547,7 @@ fn test_dofile_not_found() {
 
 #[test]
 fn test_lua_state_load_proxy() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     // register_function that uses LuaState's load proxy
@@ -564,7 +564,7 @@ fn test_lua_state_load_proxy() {
 
 #[test]
 fn test_lua_state_call_global_proxy() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.execute("function double(x) return x * 2 end").unwrap();
@@ -585,7 +585,7 @@ fn test_lua_state_call_global_proxy() {
 #[test]
 fn test_execute_error_recovery() {
     // After a runtime error in execute(), the VM should remain usable.
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     // Cause a runtime error
@@ -600,7 +600,7 @@ fn test_execute_error_recovery() {
 #[test]
 fn test_execute_error_preserves_globals() {
     // Globals set before an error should still be accessible after recovery.
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.execute("x = 42").unwrap();
@@ -615,7 +615,7 @@ fn test_execute_error_preserves_globals() {
 #[test]
 fn test_call_global_error_recovery() {
     // call_global error should not corrupt the VM state.
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.execute("function bad() error('nope') end").unwrap();
@@ -632,7 +632,7 @@ fn test_call_global_error_recovery() {
 #[test]
 fn test_multiple_errors_recovery() {
     // Multiple consecutive errors should all recover cleanly.
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     for i in 0..5 {
@@ -648,7 +648,7 @@ fn test_multiple_errors_recovery() {
 #[test]
 fn test_error_message_available_after_recovery() {
     // get_error_message should return the correct message after recovery.
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let err = vm.execute("error('specific error message')").unwrap_err();
@@ -667,7 +667,7 @@ fn test_error_message_available_after_recovery() {
 #[test]
 fn test_deep_call_error_recovery() {
     // Error in deeply nested calls should clean up all frames.
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     vm.execute(

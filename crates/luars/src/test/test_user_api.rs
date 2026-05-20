@@ -1,7 +1,7 @@
 // Tests for the user-facing Ref API and related features
 use crate::lua_value::userdata_trait::LuaMethodProvider;
 use crate::lua_vm::SafeOption;
-use crate::{LuaUserData, LuaVM, LuaValue, Stdlib, UserDataRef};
+use crate::{LuaUserData, GlobalState, LuaValue, Stdlib, UserDataRef};
 
 #[derive(LuaUserData)]
 struct ApiCounter {
@@ -14,7 +14,7 @@ struct ApiCounter {
 
 #[test]
 fn test_table_ref_basic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let tbl = vm.create_table_ref(0, 4).unwrap();
 
     // Set and get string keys
@@ -37,7 +37,7 @@ fn test_table_ref_basic() {
 
 #[test]
 fn test_table_ref_get_as() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let tbl = vm.create_table_ref(0, 4).unwrap();
 
     tbl.set("count", LuaValue::integer(99)).unwrap();
@@ -51,7 +51,7 @@ fn test_table_ref_get_as() {
 
 #[test]
 fn test_table_ref_pairs_and_len() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let tbl = vm.create_table_ref(4, 0).unwrap();
 
     tbl.seti(1, LuaValue::integer(10)).unwrap();
@@ -66,7 +66,7 @@ fn test_table_ref_pairs_and_len() {
 
 #[test]
 fn test_table_ref_push() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let tbl = vm.create_table_ref(4, 0).unwrap();
 
     tbl.push(LuaValue::integer(100)).unwrap();
@@ -79,7 +79,7 @@ fn test_table_ref_push() {
 
 #[test]
 fn test_table_ref_from_global() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute(
         r#"
         config = { host = "localhost", port = 8080 }
@@ -101,7 +101,7 @@ fn test_table_ref_from_global() {
 
 #[test]
 fn test_table_ref_auto_drop() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
 
     // Create and drop a table ref — should not leak registry entries
     let ref_id;
@@ -121,7 +121,7 @@ fn test_table_ref_auto_drop() {
 
 #[test]
 fn test_function_ref_call() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute(
         r#"
         function add(a, b)
@@ -140,7 +140,7 @@ fn test_function_ref_call() {
 
 #[test]
 fn test_function_ref_call1() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute(
         r#"
         function greet(name)
@@ -158,7 +158,7 @@ fn test_function_ref_call1() {
 
 #[test]
 fn test_function_ref_call1_typed() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute(
         r#"
         function greet(name)
@@ -175,7 +175,7 @@ fn test_function_ref_call1_typed() {
 
 #[test]
 fn test_function_ref_call_typed_multi_return() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute(
         r#"
         function stats(a, b)
@@ -192,7 +192,7 @@ fn test_function_ref_call_typed_multi_return() {
 
 #[test]
 fn test_function_ref_call_typed_no_args() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute(
         r#"
         function ping()
@@ -209,7 +209,7 @@ fn test_function_ref_call_typed_no_args() {
 
 #[test]
 fn test_function_ref_multiple_calls() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute(
         r#"
         counter = 0
@@ -229,7 +229,7 @@ fn test_function_ref_multiple_calls() {
 
 #[test]
 fn test_function_ref_auto_drop() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute("function noop() end").unwrap();
 
     let ref_id;
@@ -247,7 +247,7 @@ fn test_function_ref_auto_drop() {
 
 #[test]
 fn test_string_ref_basic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let s = vm.create_string("hello world").unwrap();
     let sref = vm.to_string_ref(s).unwrap();
 
@@ -259,7 +259,7 @@ fn test_string_ref_basic() {
 
 #[test]
 fn test_string_ref_auto_drop() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let s = vm.create_string("test_drop").unwrap();
     let ref_id;
     {
@@ -276,7 +276,7 @@ fn test_string_ref_auto_drop() {
 
 #[test]
 fn test_any_ref_table() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let table = vm.create_table(0, 2).unwrap();
     let any = vm.to_ref(table);
 
@@ -288,7 +288,7 @@ fn test_any_ref_table() {
 
 #[test]
 fn test_any_ref_function() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.execute("function f() return 99 end").unwrap();
 
     let val = vm.get_global("f").unwrap().unwrap();
@@ -300,7 +300,7 @@ fn test_any_ref_function() {
 
 #[test]
 fn test_any_ref_string() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let s = vm.create_string("any_string").unwrap();
     let any = vm.to_ref(s);
     let sref = any.as_string().unwrap();
@@ -309,7 +309,7 @@ fn test_any_ref_string() {
 
 #[test]
 fn test_any_ref_wrong_type() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let table = vm.create_table(0, 0).unwrap();
     let any = vm.to_ref(table);
 
@@ -320,7 +320,7 @@ fn test_any_ref_wrong_type() {
 
 #[test]
 fn test_any_ref_userdata_typed() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let userdata = vm
         .create_userdata(crate::lua_value::LuaUserdata::new(ApiCounter { count: 5 }))
         .unwrap();
@@ -333,7 +333,7 @@ fn test_any_ref_userdata_typed() {
 
 #[test]
 fn test_userdata_ref_from_lua_and_mutate() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let userdata = vm
         .create_userdata(crate::lua_value::LuaUserdata::new(ApiCounter { count: 11 }))
         .unwrap();
@@ -354,7 +354,7 @@ fn test_userdata_ref_from_lua_and_mutate() {
 
 #[test]
 fn test_push_any_basic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     #[allow(dead_code)]
     // Push an arbitrary Rust struct as opaque userdata
     struct MyConfig {
@@ -379,7 +379,7 @@ fn test_push_any_basic() {
 
 #[test]
 fn test_push_any_downcast() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
 
     #[derive(Debug, PartialEq)]
     struct Point {
@@ -401,7 +401,7 @@ fn test_push_any_downcast() {
 
 #[test]
 fn test_push_any_in_callback() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
 
     struct Counter {
         count: i32,
@@ -437,7 +437,7 @@ fn test_push_any_in_callback() {
 fn test_userdata_builder_fields() {
     use crate::lua_value::UserDataBuilder;
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::Basic).unwrap();
 
     struct Address {
@@ -470,7 +470,7 @@ fn test_userdata_builder_fields() {
 fn test_userdata_builder_tostring() {
     use crate::lua_value::UserDataBuilder;
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::Basic).unwrap();
 
     struct Version {
@@ -501,7 +501,7 @@ fn test_userdata_builder_tostring() {
 fn test_userdata_builder_setter() {
     use crate::lua_value::UserDataBuilder;
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
 
     struct Config {
         debug: bool,
@@ -538,7 +538,7 @@ fn test_userdata_builder_setter() {
 fn test_build_table_ref() {
     use crate::TableBuilder;
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
 
     let name_str = vm.create_string("Alice").unwrap();
     let tbl = vm
@@ -561,7 +561,7 @@ fn test_build_table_ref() {
 
 #[test]
 fn test_to_ref_type_mismatch() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     let table = vm.create_table(0, 0).unwrap();
 
     // Table → to_function_ref should return None
@@ -573,7 +573,7 @@ fn test_to_ref_type_mismatch() {
 
 #[test]
 fn test_get_global_nonexistent() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     assert!(vm.get_global_table("nonexistent").unwrap().is_none());
     assert!(vm.get_global_function("nonexistent").unwrap().is_none());
 }

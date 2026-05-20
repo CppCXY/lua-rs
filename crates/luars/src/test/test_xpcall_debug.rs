@@ -1,10 +1,10 @@
 #[cfg(test)]
-use crate::lua_vm::LuaVM;
+use crate::lua_vm::GlobalState;
 use crate::lua_vm::SafeOption;
 
 #[test]
 fn test_xpcall_simple() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test 1: Basic xpcall without upvalues
@@ -43,7 +43,7 @@ fn test_xpcall_simple() {
 
 #[test]
 fn test_xpcall_concat() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test: Handler with string concatenation
@@ -67,7 +67,7 @@ fn test_xpcall_concat() {
 
 #[test]
 fn test_debug_traceback_level_two_keeps_caller_frame() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(
@@ -88,7 +88,7 @@ fn test_debug_traceback_level_two_keeps_caller_frame() {
 
 #[test]
 fn test_debug_traceback_in_hook_reports_hook_frame() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let result = vm.execute(

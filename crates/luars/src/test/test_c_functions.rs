@@ -1,6 +1,6 @@
 use crate::lua_value::LuaValue;
 /// Tests for C function calling
-use crate::lua_vm::{LuaResult, LuaState, LuaVM, SafeOption};
+use crate::lua_vm::{LuaResult, LuaState, GlobalState, SafeOption};
 
 /// C function with no return value
 fn test_no_return(_state: &mut LuaState) -> LuaResult<usize> {
@@ -9,7 +9,7 @@ fn test_no_return(_state: &mut LuaState) -> LuaResult<usize> {
 
 #[test]
 fn test_call_c_function_basic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Register a simple C function
@@ -30,7 +30,7 @@ fn test_call_c_function_basic() {
 
 #[test]
 fn test_call_c_function_in_expression() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Register C function
@@ -54,7 +54,7 @@ fn test_call_c_function_in_expression() {
 
 #[test]
 fn test_call_c_function_multiple_times() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Register C function
@@ -79,7 +79,7 @@ fn test_call_c_function_multiple_times() {
 
 #[test]
 fn test_c_function_in_tail_call() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Register C function

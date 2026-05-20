@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use crate::{LuaVM, LuaValue, SafeOption, SandboxConfig, Stdlib};
+use crate::{GlobalState, LuaValue, SafeOption, SandboxConfig, Stdlib};
 
 #[test]
 fn test_execute_sandboxed_isolates_globals() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let results = vm
@@ -21,7 +21,7 @@ fn test_execute_sandboxed_isolates_globals() {
 
 #[test]
 fn test_sandbox_blocks_dangerous_basic_functions_by_default() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let results = vm
@@ -36,7 +36,7 @@ fn test_sandbox_blocks_dangerous_basic_functions_by_default() {
 
 #[test]
 fn test_load_sandboxed_uses_own_env() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.set_global("shared_value", crate::LuaValue::integer(7))
         .unwrap();
@@ -56,7 +56,7 @@ fn test_load_sandboxed_uses_own_env() {
 
 #[test]
 fn test_sandbox_can_enable_package_require_explicitly() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let config = SandboxConfig::default()
@@ -75,7 +75,7 @@ fn test_sandbox_can_enable_package_require_explicitly() {
 
 #[test]
 fn test_sandbox_can_inject_custom_globals() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let config = SandboxConfig::default().with_global("answer", LuaValue::integer(99));
@@ -90,7 +90,7 @@ fn test_sandbox_can_inject_custom_globals() {
 
 #[test]
 fn test_sandbox_instruction_limit_stops_infinite_loops() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let config = SandboxConfig::default().with_instruction_limit(1_000);
@@ -104,7 +104,7 @@ fn test_sandbox_instruction_limit_stops_infinite_loops() {
 
 #[test]
 fn test_sandbox_memory_limit_blocks_runtime_allocations() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let config = SandboxConfig::default().with_memory_limit(0);
@@ -118,7 +118,7 @@ fn test_sandbox_memory_limit_blocks_runtime_allocations() {
 
 #[test]
 fn test_sandbox_timeout_stops_infinite_loops() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let config = SandboxConfig::default().with_timeout(Duration::ZERO);
