@@ -1,5 +1,5 @@
 use crate::{
-    LuaFunction, LuaProto, LuaTable, LuaValue,
+    LuaFunction, LuaProto, LuaTable,
     gc::GcObjectKind,
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,
@@ -739,42 +739,6 @@ pub enum GcObjectOwner {
 }
 
 impl GcObjectOwner {
-    /// Compute the approximate memory size of this object (replaces the old
-    /// `header.size` field). Called at allocation/deallocation for GC pacing —
-    /// NOT on hot paths, so the match + dynamic calculation is fine.
-    pub fn compute_size(&self) -> usize {
-        match self {
-            GcObjectOwner::String(s) => std::mem::size_of::<GcString>() + s.data.str.len(),
-            GcObjectOwner::Table(t) => {
-                let base = std::mem::size_of::<GcTable>();
-                let asize = t.data.impl_table.asize as usize;
-                let array_bytes = if asize > 0 { asize * 17 + 4 } else { 0 };
-                let hash_bytes = {
-                    let hs = t.data.hash_size();
-                    if hs > 0 { hs * 24 + 8 } else { 0 }
-                };
-                base + array_bytes + hash_bytes
-            }
-            GcObjectOwner::Function(f) => {
-                std::mem::size_of::<GcFunction>() + std::mem::size_of_val(f.data.upvalues())
-            }
-            GcObjectOwner::CClosure(c) => {
-                std::mem::size_of::<GcCClosure>()
-                    + c.data.upvalues().len() * std::mem::size_of::<LuaValue>()
-            }
-            GcObjectOwner::RClosure(r) => {
-                std::mem::size_of::<GcRClosure>()
-                    + r.data.upvalues().len() * std::mem::size_of::<LuaValue>()
-            }
-            GcObjectOwner::Upvalue(_) => 64, // fixed estimate
-            GcObjectOwner::Thread(t) => std::mem::size_of::<GcThread>() + t.data.stack.len() * 16,
-            GcObjectOwner::Userdata(_) => std::mem::size_of::<GcUserdata>(),
-            GcObjectOwner::Proto(p) => {
-                std::mem::size_of::<GcProto>() + p.data.proto_data_size as usize
-            }
-        }
-    }
-
     /// Return the stored allocation-time size (from header.size)
     #[inline]
     pub fn size(&self) -> usize {
@@ -893,58 +857,9 @@ impl GcObjectOwner {
         }
     }
 
-    pub fn as_table_mut(&mut self) -> Option<&mut LuaTable> {
-        match self {
-            GcObjectOwner::Table(t) => Some(&mut t.data),
-            _ => None,
-        }
-    }
-
-    pub fn as_function_mut(&mut self) -> Option<&mut LuaFunction> {
-        match self {
-            GcObjectOwner::Function(f) => Some(&mut f.data),
-            _ => None,
-        }
-    }
-
-    pub fn as_upvalue_mut(&mut self) -> Option<&mut LuaUpvalue> {
-        match self {
-            GcObjectOwner::Upvalue(u) => Some(&mut u.data),
-            _ => None,
-        }
-    }
-
     pub fn as_thread_mut(&mut self) -> Option<&mut LuaState> {
         match self {
             GcObjectOwner::Thread(t) => Some(&mut t.data),
-            _ => None,
-        }
-    }
-
-    pub fn as_userdata_mut(&mut self) -> Option<&mut LuaUserdata> {
-        match self {
-            GcObjectOwner::Userdata(u) => Some(&mut u.data),
-            _ => None,
-        }
-    }
-
-    pub fn as_cclosure_mut(&mut self) -> Option<&mut CClosureFunction> {
-        match self {
-            GcObjectOwner::CClosure(c) => Some(&mut c.data),
-            _ => None,
-        }
-    }
-
-    pub fn as_rclosure_mut(&mut self) -> Option<&mut RClosureFunction> {
-        match self {
-            GcObjectOwner::RClosure(r) => Some(&mut r.data),
-            _ => None,
-        }
-    }
-
-    pub fn as_proto_mut(&mut self) -> Option<&mut LuaProto> {
-        match self {
-            GcObjectOwner::Proto(p) => Some(&mut p.data),
             _ => None,
         }
     }

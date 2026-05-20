@@ -332,6 +332,7 @@ pub struct GcStats {
     pub major_collections: usize,
     pub objects_collected: usize,
     pub bytes_allocated: usize,
+    #[allow(unused)]
     pub bytes_freed: usize,
     pub threshold: usize,
     pub young_gen_size: usize,
@@ -584,6 +585,7 @@ impl GC {
         }
     }
 
+    #[allow(unused)]
     /// Check if GC should run (debt > 0)
     #[inline]
     /// Check if GC should run (like Lua 5.5: G(L)->GCdebt <= 0)
@@ -630,18 +632,19 @@ impl GC {
     }
 
     // Debug accessors for list lengths
+    #[allow(unused)]
     pub fn allgc_len(&self) -> usize {
         self.allgc.len()
     }
-
+    #[allow(unused)]
     pub fn survival_len(&self) -> usize {
         self.survival.len()
     }
-
+    #[allow(unused)]
     pub fn old_len(&self) -> usize {
         self.old.len()
     }
-
+    #[allow(unused)]
     pub fn fixed_len(&self) -> usize {
         self.fixed_list.len()
     }
@@ -659,11 +662,11 @@ impl GC {
         let current_total_bytes = self.get_total_bytes();
         self.tmp_max_memory_limit = Some(current_total_bytes.saturating_add(limit));
     }
-
+    #[allow(unused)]
     pub fn temporary_memory_limit(&self) -> Option<isize> {
         self.tmp_max_memory_limit
     }
-
+    #[allow(unused)]
     pub fn restore_temporary_memory_limit(&mut self, limit: Option<isize>) {
         self.tmp_max_memory_limit = limit;
     }
@@ -726,17 +729,20 @@ impl GC {
 
     /// Enter finalizer execution mode - temporarily stop GC to prevent
     /// objects from being collected while their finalizers are running
+    #[allow(unused)]
     pub fn enter_finalizer_mode(&mut self) {
         self.gc_stopem = true;
     }
 
     /// Exit finalizer execution mode - resume normal GC operation
+    #[allow(unused)]
     pub fn exit_finalizer_mode(&mut self) {
         self.gc_stopem = false;
     }
 
     /// Check if a GcPtr represents a dead object (will be collected)
     /// Used by weak table cleanup to identify dead keys/values
+    #[allow(unused)]
     pub fn is_object_dead(&self, gc_ptr: GcObjectPtr) -> bool {
         if let Some(header) = gc_ptr.header() {
             // Fixed objects are never dead
@@ -2970,6 +2976,7 @@ impl GC {
     ///   ...
     /// }
     /// ```
+    #[allow(unused)]
     pub fn full_generation(&mut self, l: &mut LuaState) {
         // If we're in Pause state, we need to do the state transition ourselves
         if self.gc_state == GcState::Pause {

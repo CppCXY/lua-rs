@@ -806,32 +806,10 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     pub fn error(&mut self, msg: String) -> LuaError {
-        // Try to get current source location for the error
-        let mut location = String::new();
-        if let Some(ci) = self.current_frame()
-            && ci.is_lua()
-            && !ci.chunk_ptr.is_null()
-        {
-            let chunk = unsafe { &*ci.chunk_ptr };
-            let source = match chunk.source_name.as_deref() {
-                Some(raw) => format_source(raw),
-                None => "?".to_string(), // stripped debug info
-            };
-            let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                chunk.line_info[ci.pc as usize - 1] as usize
-            } else {
-                0
-            };
-            location = if line > 0 {
-                format!("{}:{}: ", source, line)
-            } else if chunk.line_info.is_empty() {
-                // No line info at all (stripped) — use ?
-                format!("{}:?: ", source)
-            } else {
-                format!("{}: ", source)
-            };
-        };
-
+        let location = self
+            .current_frame()
+            .and_then(Self::frame_error_location)
+            .unwrap_or_default();
         self.error_msg = format!("{}{}", location, msg);
         LuaError::RuntimeError
     }
@@ -842,38 +820,47 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     pub fn error_from_c(&mut self, msg: String) -> LuaError {
-        // Find the nearest Lua frame by traversing up from current frame
-        let depth = self.call_depth;
-        for level in 0..depth {
-            let idx = depth - 1 - level;
-            if let Some(ci) = self.get_frame(idx)
-                && ci.is_lua()
-                && !ci.chunk_ptr.is_null()
+        let location = self.nearest_lua_error_location().unwrap_or_default();
+        self.error_msg = format!("{}{}", location, msg);
+        LuaError::RuntimeError
+    }
+
+    #[inline(always)]
+    pub(crate) fn nearest_lua_error_location(&self) -> Option<String> {
+        for frame_idx in (0..self.call_depth).rev() {
+            if let Some(ci) = self.get_frame(frame_idx)
+                && let Some(location) = Self::frame_error_location(ci)
             {
-                let chunk = unsafe { &*ci.chunk_ptr };
-                let source = match chunk.source_name.as_deref() {
-                    Some(raw) => format_source(raw),
-                    None => "?".to_string(),
-                };
-                let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
-                    chunk.line_info[ci.pc as usize - 1] as usize
-                } else {
-                    0
-                };
-                let location = if line > 0 {
-                    format!("{}:{}: ", source, line)
-                } else if chunk.line_info.is_empty() {
-                    format!("{}:?: ", source)
-                } else {
-                    format!("{}: ", source)
-                };
-                self.error_msg = format!("{}{}", location, msg);
-                return LuaError::RuntimeError;
+                return Some(location);
             }
         }
-        // Fallback: no Lua frame found
-        self.error_msg = msg;
-        LuaError::RuntimeError
+        None
+    }
+
+    #[inline(always)]
+    fn frame_error_location(ci: &CallInfo) -> Option<String> {
+        if !ci.is_lua() || ci.chunk_ptr.is_null() {
+            return None;
+        }
+
+        let chunk = unsafe { &*ci.chunk_ptr };
+        let source = match chunk.source_name.as_deref() {
+            Some(raw) => format_source(raw),
+            None => "?".to_string(),
+        };
+        let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
+            chunk.line_info[ci.pc as usize - 1] as usize
+        } else {
+            0
+        };
+
+        Some(if line > 0 {
+            format!("{}:{}: ", source, line)
+        } else if chunk.line_info.is_empty() {
+            format!("{}:?: ", source)
+        } else {
+            format!("{}: ", source)
+        })
     }
 
     /// Set error message with preserved error object (for pcall to return)

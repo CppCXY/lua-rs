@@ -576,7 +576,7 @@ impl Lua {
     }
 
     pub fn get_error_message(&mut self, error: LuaError) -> LuaFullError {
-        self.vm.into_full_error(error)
+        self.vm.get_full_error(error)
     }
 
     /// Stop the garbage collector. No GC steps will run until `gc_restart` is called.

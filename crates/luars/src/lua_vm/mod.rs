@@ -242,7 +242,7 @@ pub struct GlobalState {
     /// Start time for os.clock() measurements
     pub(crate) start_time: PlatformInstant,
 
-    pub const_strings: ConstString,
+    pub(crate) const_strings: ConstString,
 
     /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
     pub(crate) io_default_output: Option<LuaValue>,
@@ -1328,7 +1328,6 @@ impl GlobalState {
     // ============ Coroutine Support ============
 
     /// Create a new thread (coroutine) - returns ThreadId-based LuaValue
-    /// OPTIMIZED: Minimal initial allocations - grows on demand
     pub fn create_thread(&mut self, func: LuaValue) -> CreateResult {
         // Create a new LuaState for the coroutine
         let mut thread = LuaState::new(
@@ -1907,7 +1906,7 @@ impl GlobalState {
     /// ```ignore
     /// match vm.execute("bad code") {
     ///     Err(e) => {
-    ///         let full = vm.into_full_error(e);
+    ///         let full = vm.get_full_error(e);
     ///         eprintln!("{}", full); // prints full message with source location
     ///     }
     ///     Ok(_) => {}
@@ -1915,13 +1914,26 @@ impl GlobalState {
     /// ```
     #[inline]
     #[allow(clippy::wrong_self_convention)]
-    pub fn into_full_error(&mut self, e: LuaError) -> lua_error::LuaFullError {
+    pub fn get_full_error(&mut self, e: LuaError) -> lua_error::LuaFullError {
         let message = self.get_error_message(e);
         lua_error::LuaFullError { kind: e, message }
     }
 
     /// Generate a stack traceback string
     pub fn generate_traceback(&mut self, error_msg: &str) -> String {
+        let formatted_error_msg = {
+            let state = self.main_state_ref();
+            if let Some(location) = state.nearest_lua_error_location() {
+                if error_msg.starts_with(&location) {
+                    error_msg.to_string()
+                } else {
+                    format!("{}{}", location, error_msg)
+                }
+            } else {
+                error_msg.to_string()
+            }
+        };
+
         // Try to use debug.traceback if available
         // We attempt to call debug.traceback(message, 1)
         let result = (|| -> LuaResult<String> {
@@ -1945,7 +1957,7 @@ impl GlobalState {
             // Use level=1 to skip the debug.traceback call itself,
             // matching C Lua's msghandler which uses luaL_traceback(L,L,msg,1)
             let state = self.main_state();
-            let msg_val = state.create_string(error_msg)?;
+            let msg_val = state.create_string(&formatted_error_msg)?;
             let level_val = LuaValue::integer(1);
 
             // Call debug.traceback using protected_call
@@ -1964,7 +1976,7 @@ impl GlobalState {
 
         match result {
             Ok(s) if !s.is_empty() => s,
-            _ => self.fallback_traceback(error_msg),
+            _ => self.fallback_traceback(&formatted_error_msg),
         }
     }
 

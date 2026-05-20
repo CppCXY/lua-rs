@@ -391,7 +391,7 @@ fn test_lua_full_error() {
 
     match vm.execute("error('boom')") {
         Err(e) => {
-            let full = vm.into_full_error(e);
+            let full = vm.get_full_error(e);
             assert_eq!(full.kind(), lua_vm::LuaError::RuntimeError);
             assert!(
                 full.message().contains("boom"),

@@ -1,5 +1,6 @@
 // Tests for package library and module system
 use crate::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn luaopen_test_install_module(l: &mut LuaState) -> LuaResult<usize> {
     let table = l.create_table(0, 1)?;
@@ -205,6 +206,32 @@ fn test_require_error() {
     );
 
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_require_missing_module_reports_call_site_file_and_line() {
+    let mut vm = LuaVM::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "luars-require-missing-{}-{}.lua",
+        std::process::id(),
+        unique
+    ));
+    std::fs::write(&path, "require \"definitely_missing_module_xyz\"\n").unwrap();
+
+    let err = vm.dofile(path.to_str().unwrap()).unwrap_err();
+    let message = vm.get_error_message(err);
+    let filename = path.file_name().unwrap().to_string_lossy();
+
+    assert!(message.contains(&format!("{}:1:", filename)), "{message}");
+    assert!(message.contains("module 'definitely_missing_module_xyz' not found"));
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
