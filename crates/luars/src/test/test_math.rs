@@ -3,10 +3,10 @@ use crate::*;
 
 #[test]
 fn test_math_constants() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.pi > 3.14 and math.pi < 3.15)
         assert(math.huge > 0)
@@ -21,10 +21,10 @@ fn test_math_constants() {
 
 #[test]
 fn test_math_abs() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.abs(-5) == 5)
         assert(math.abs(5) == 5)
@@ -40,10 +40,10 @@ fn test_math_abs() {
 
 #[test]
 fn test_math_ceil_floor() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.ceil(3.2) == 4)
         assert(math.ceil(3.8) == 4)
@@ -57,10 +57,10 @@ fn test_math_ceil_floor() {
 
 #[test]
 fn test_math_max_min() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.max(1, 2, 3) == 3)
         assert(math.min(1, 2, 3) == 1)
@@ -76,10 +76,10 @@ fn test_math_max_min() {
 
 #[test]
 fn test_math_sqrt() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.sqrt(4) == 2)
         assert(math.sqrt(9) == 3)
@@ -92,10 +92,10 @@ fn test_math_sqrt() {
 
 #[test]
 fn test_math_exp_log() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local e = math.exp(1)
         assert(e > 2.71 and e < 2.72)
@@ -108,10 +108,10 @@ fn test_math_exp_log() {
 
 #[test]
 fn test_math_sin_cos_tan() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.sin(0) == 0)
         assert(math.cos(0) == 1)
@@ -128,10 +128,10 @@ fn test_math_sin_cos_tan() {
 
 #[test]
 fn test_math_deg_rad() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local rad = math.rad(180)
         assert(rad > 3.14 and rad < 3.15)
@@ -144,10 +144,10 @@ fn test_math_deg_rad() {
 
 #[test]
 fn test_math_random() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         math.randomseed(12345)
         local r1 = math.random()
@@ -166,10 +166,10 @@ fn test_math_random() {
 
 #[test]
 fn test_math_modf() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local i, f = math.modf(3.14)
         assert(i == 3)
@@ -182,10 +182,10 @@ fn test_math_modf() {
 
 #[test]
 fn test_math_fmod() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.fmod(10, 3) == 1)
         assert(math.fmod(10.5, 2) == 0.5)
@@ -197,10 +197,10 @@ fn test_math_fmod() {
 
 #[test]
 fn test_math_tointeger() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.tointeger(3.0) == 3)
         assert(math.tointeger(3.5) == nil)
@@ -216,10 +216,10 @@ fn test_math_tointeger() {
 
 #[test]
 fn test_math_type() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.type(3) == "integer")
         assert(math.type(3.14) == "float")
@@ -232,10 +232,10 @@ fn test_math_type() {
 
 #[test]
 fn test_math_ult() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(math.ult(2, 3) == true)
         assert(math.ult(3, 2) == false)

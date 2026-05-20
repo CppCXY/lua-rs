@@ -1251,14 +1251,14 @@ impl GC {
         // In generational mode, objects are distributed across allgc/survival/old
 
         // Mark objects
-        let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
+        let main_thread_ptr = l.global_state_mut().get_main_thread_ptr();
         self.mark_object(l, main_thread_ptr.into());
 
-        let registry = l.vm_mut().registry;
+        let registry = l.global_state_mut().registry;
         // markvalue(g, &g->l_registry);
         self.mark_value(l, &registry);
 
-        let global = l.vm_mut().global;
+        let global = l.global_state_mut().global;
         self.mark_value(l, &global);
 
         // Mark debug hook function (per-thread, on main thread)
@@ -1285,7 +1285,7 @@ impl GC {
     }
 
     fn mark_mt(&mut self, l: &mut LuaState) {
-        for mt in l.vm_mut().get_basic_metatables() {
+        for mt in l.global_state_mut().get_basic_metatables() {
             if let Some(mt_ptr) = mt.as_gc_ptr() {
                 self.mark_object(l, mt_ptr);
             }
@@ -2249,14 +2249,14 @@ impl GC {
         self.gc_state = GcState::Atomic;
 
         // Mark main thread (running thread)
-        let main_thread_ptr = l.vm_mut().get_main_thread_ptr();
+        let main_thread_ptr = l.global_state_mut().get_main_thread_ptr();
         self.mark_object(l, main_thread_ptr.into());
 
         // Mark registry (global state)
-        let registry = l.vm_mut().registry;
+        let registry = l.global_state_mut().registry;
         self.mark_value(l, &registry);
 
-        let global = l.vm_mut().global;
+        let global = l.global_state_mut().global;
         self.mark_value(l, &global);
 
         // Mark debug hook function (per-thread, stored on LuaState)

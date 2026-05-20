@@ -1,5 +1,5 @@
 use luars::{Instruction, OpCode, SafeOption};
-use luars::{LuaProto, LuaVM};
+use luars::{Lua, LuaProto};
 use std::env;
 use std::fs;
 
@@ -20,7 +20,7 @@ fn main() {
         std::process::exit(0);
     };
 
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut lua = Lua::new(SafeOption::default());
 
     // Create chunk name with @ prefix like Lua
     let chunk_name = if filename.starts_with('@') {
@@ -29,7 +29,10 @@ fn main() {
         format!("@{}", filename)
     };
 
-    match vm.compile_with_name(&source, &chunk_name) {
+    match lua
+        .global_state_mut()
+        .compile_with_name(&source, &chunk_name)
+    {
         Ok(chunk) => {
             dump_chunk(
                 &chunk,
@@ -37,19 +40,17 @@ fn main() {
                 chunk.linedefined,
                 chunk.lastlinedefined,
                 true,
-                &vm,
             );
         }
         Err(e) => {
-            let err_msg = vm.get_error_message(e);
-            eprintln!("{}", err_msg);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     }
 }
 
 /// 格式化常量值为luac格式的字符串（对齐luac的PrintConstant）
-fn format_constant(chunk: &LuaProto, idx: u32, _vm: &LuaVM) -> String {
+fn format_constant(chunk: &LuaProto, idx: u32) -> String {
     if let Some(val) = chunk.constants.get(idx as usize) {
         // 根据值类型格式化
         if val.is_nil() {
@@ -114,7 +115,6 @@ fn dump_chunk(
     linedefined: usize,
     lastlinedefined: usize,
     is_main: bool,
-    vm: &LuaVM,
 ) {
     // Format: main <file:line,line> or function <file:line,line>
     let func_name = if is_main {
@@ -394,7 +394,7 @@ fn dump_chunk(
             OpCode::GetTabUp => {
                 // GETTABUP: Show upvalue name and constant name
                 if b < chunk.upvalue_count as u32 && c < chunk.constants.len() as u32 {
-                    format!(" ; _ENV {}", format_constant(chunk, c, vm))
+                    format!(" ; _ENV {}", format_constant(chunk, c))
                 } else {
                     String::new()
                 }
@@ -405,11 +405,11 @@ fn dump_chunk(
                 if b < chunk.upvalue_count as u32 {
                     comment.push_str(" ; _ENV");
                     if b < chunk.constants.len() as u32 {
-                        comment.push_str(&format!(" {}", format_constant(chunk, b, vm)));
+                        comment.push_str(&format!(" {}", format_constant(chunk, b)));
                     }
                     // If k flag is set, show value constant
                     if k && c < chunk.constants.len() as u32 {
-                        comment.push_str(&format!(" {}", format_constant(chunk, c, vm)));
+                        comment.push_str(&format!(" {}", format_constant(chunk, c)));
                     }
                 }
                 comment
@@ -417,7 +417,7 @@ fn dump_chunk(
             OpCode::GetField => {
                 // GETFIELD A B C: table in B, field name in C
                 if c < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, c, vm))
+                    format!(" ; {}", format_constant(chunk, c))
                 } else {
                     String::new()
                 }
@@ -427,10 +427,10 @@ fn dump_chunk(
                 // Show field name constant and value constant (if k=1)
                 let mut comment = String::new();
                 if b < chunk.constants.len() as u32 {
-                    comment.push_str(&format!(" ; {}", format_constant(chunk, b, vm)));
+                    comment.push_str(&format!(" ; {}", format_constant(chunk, b)));
                     // If k flag is set, show value constant
                     if k && c < chunk.constants.len() as u32 {
-                        comment.push_str(&format!(" {}", format_constant(chunk, c, vm)));
+                        comment.push_str(&format!(" {}", format_constant(chunk, c)));
                     }
                 }
                 comment
@@ -439,7 +439,7 @@ fn dump_chunk(
                 // SETTABLE A B C: table in A, key in B, value in C
                 // If k flag is set, show value constant
                 if k && c < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, c, vm))
+                    format!(" ; {}", format_constant(chunk, c))
                 } else {
                     String::new()
                 }
@@ -448,7 +448,7 @@ fn dump_chunk(
                 // SETI A B C: table in A, index in B, value in C
                 // If k flag is set, show value constant
                 if k && c < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, c, vm))
+                    format!(" ; {}", format_constant(chunk, c))
                 } else {
                     String::new()
                 }
@@ -457,7 +457,7 @@ fn dump_chunk(
                 // SELF A B C: R[A+1]=R[B], R[A]=R[B][RK(C)]
                 // If k flag is set, show method name constant
                 if k && c < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, c, vm))
+                    format!(" ; {}", format_constant(chunk, c))
                 } else {
                     String::new()
                 }
@@ -476,7 +476,7 @@ fn dump_chunk(
             | OpCode::DivK
             | OpCode::IDivK => {
                 if c < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, c, vm))
+                    format!(" ; {}", format_constant(chunk, c))
                 } else {
                     String::new()
                 }
@@ -484,7 +484,7 @@ fn dump_chunk(
             // All K-suffix bitwise operations show constant value
             OpCode::BAndK | OpCode::BOrK | OpCode::BXorK => {
                 if c < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, c, vm))
+                    format!(" ; {}", format_constant(chunk, c))
                 } else {
                     String::new()
                 }
@@ -492,7 +492,7 @@ fn dump_chunk(
             OpCode::EqK => {
                 // EQK A B k: show constant value
                 if b < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, b, vm))
+                    format!(" ; {}", format_constant(chunk, b))
                 } else {
                     String::new()
                 }
@@ -516,7 +516,7 @@ fn dump_chunk(
                 };
                 let mut comment = format!(" ; {}", event_name);
                 if b < chunk.constants.len() as u32 {
-                    comment.push_str(&format!(" {}", format_constant(chunk, b, vm)));
+                    comment.push_str(&format!(" {}", format_constant(chunk, b)));
                 }
                 if k {
                     comment.push_str(" flip");
@@ -583,7 +583,7 @@ fn dump_chunk(
             OpCode::LoadK => {
                 // Show constant value（对齐luac）
                 if bx < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, bx, vm))
+                    format!(" ; {}", format_constant(chunk, bx))
                 } else {
                     String::new()
                 }
@@ -592,7 +592,7 @@ fn dump_chunk(
                 // ERRNNIL A Bx: check R[A] ~= nil, Bx-1 is index of global name
                 // Bx = k + 1, so k = Bx - 1
                 if bx > 0 && (bx - 1) < chunk.constants.len() as u32 {
-                    format!(" ; {}", format_constant(chunk, bx - 1, vm))
+                    format!(" ; {}", format_constant(chunk, bx - 1))
                 } else {
                     String::new()
                 }
@@ -696,7 +696,7 @@ fn dump_chunk(
     if !chunk.constants.is_empty() {
         println!("constants ({}) for {}:", chunk.constants.len(), func_name);
         for (idx, _val) in chunk.constants.iter().enumerate() {
-            println!("\t{}\t{}", idx, format_constant(chunk, idx as u32, vm));
+            println!("\t{}\t{}", idx, format_constant(chunk, idx as u32));
         }
     }
 
@@ -714,7 +714,6 @@ fn dump_chunk(
                 child_chunk.linedefined,
                 child_chunk.lastlinedefined,
                 false,
-                vm,
             );
         }
     }

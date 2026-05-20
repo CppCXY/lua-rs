@@ -3,10 +3,10 @@ use crate::*;
 
 #[test]
 fn test_arithmetic_operators() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(5 + 3 == 8)
         assert(5 - 3 == 2)
@@ -27,10 +27,10 @@ fn test_arithmetic_operators() {
 
 #[test]
 fn test_comparison_operators() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert((5 == 5) == true)
         assert((5 ~= 3) == true)
@@ -46,10 +46,10 @@ fn test_comparison_operators() {
 
 #[test]
 fn test_logical_operators() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert((true and true) == true)
         assert((true and false) == false)
@@ -65,10 +65,10 @@ fn test_logical_operators() {
 
 #[test]
 fn test_logical_short_circuit() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local x = false or 10
         assert(x == 10)
@@ -86,10 +86,10 @@ fn test_logical_short_circuit() {
 
 #[test]
 fn test_concat_operator() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert("hello" .. " " .. "world" == "hello world")
         assert("num: " .. 42 == "num: 42")
@@ -101,10 +101,10 @@ fn test_concat_operator() {
 
 #[test]
 fn test_length_operator() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(#"hello" == 5)
         assert(#{1, 2, 3, 4, 5} == 5)
@@ -117,10 +117,10 @@ fn test_length_operator() {
 
 #[test]
 fn test_bitwise_operators() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert((5 & 3) == 1)
         assert((5 | 3) == 7)
@@ -136,10 +136,10 @@ fn test_bitwise_operators() {
 
 #[test]
 fn test_operator_precedence() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(2 + 3 * 4 == 14)
         assert((2 + 3) * 4 == 20)
@@ -153,10 +153,10 @@ fn test_operator_precedence() {
 
 #[test]
 fn test_table_constructor() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t1 = {1, 2, 3}
         assert(t1[1] == 1)
@@ -174,10 +174,10 @@ fn test_table_constructor() {
 
 #[test]
 fn test_function_expressions() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local f = function(x) return x * 2 end
         assert(f(5) == 10)
@@ -196,10 +196,10 @@ fn test_function_expressions() {
 
 #[test]
 fn test_vararg() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function sum(...)
             local total = 0
@@ -221,10 +221,10 @@ fn test_vararg() {
 
 #[test]
 fn test_multiple_assignment() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local a, b, c = 1, 2, 3
         assert(a == 1 and b == 2 and c == 3)
@@ -246,10 +246,10 @@ fn test_multiple_assignment() {
 
 #[test]
 fn test_table_access() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {x = 10}
         assert(t.x == 10)

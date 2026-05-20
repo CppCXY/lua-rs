@@ -1991,12 +1991,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let n = instr.get_b();
 
                     if n == 2 {
+                        let concat_top = base + (a + n) as usize;
+                        lua_state.set_top_raw(concat_top);
                         let left = *stack_val(lua_state.stack(), base, a);
                         let right = *stack_val(lua_state.stack(), base, a + 1);
                         active_frame.current_ci_mut(lua_state).save_pc(pc);
 
                         if let Some(result) = try_concat_pair_utf8(lua_state, left, right)? {
                             *stack_val_mut(lua_state.stack_mut(), base, a) = result;
+                            lua_state.set_top_raw(concat_top - 1);
                             updatetrap!();
 
                             let top = lua_state.get_top();

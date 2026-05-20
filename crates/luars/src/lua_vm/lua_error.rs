@@ -47,7 +47,7 @@ impl std::error::Error for LuaError {}
 
 /// Rich error type combining [`LuaError`] kind with the actual Lua error message.
 ///
-/// Created via [`LuaVM::into_full_error`](super::LuaVM::into_full_error)
+/// Created via [`GlobalState::get_full_error`](super::GlobalState::get_full_error)
 /// after catching a `LuaError`.
 ///
 /// Implements `Display` and `std::error::Error`, so it integrates with

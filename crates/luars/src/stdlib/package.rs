@@ -69,7 +69,7 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
 
     // Store loaded table and package table in registry for use by require
     // This matches standard Lua's LUA_LOADED_TABLE ("_LOADED") and upvalue approach
-    let vm = l.vm_mut();
+    let vm = l.global_state_mut();
     vm.registry_set("_LOADED", loaded_table)?;
     vm.registry_set("_PRELOAD", preload_table)?;
     // Store the original package table so require can find searchers
@@ -81,7 +81,7 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
 
 // Helper to get the original package table from registry
 fn get_package_from_registry(l: &mut LuaState) -> LuaResult<LuaValue> {
-    let vm = l.vm_mut();
+    let vm = l.global_state_mut();
     vm.registry_get("_PACKAGE")?
         .ok_or_else(|| vm.main_state().error("package table not found".to_string()))
 }
@@ -93,7 +93,7 @@ fn searcher_preload(l: &mut LuaState) -> LuaResult<usize> {
         .ok_or_else(|| l.error("module name expected".to_string()))?;
 
     // Get preload table from registry
-    let vm = l.vm_mut();
+    let vm = l.global_state_mut();
     let preload_val = vm.registry_get("_PRELOAD")?.unwrap_or(LuaValue::nil());
 
     let Some(preload_table) = preload_val.as_table_mut() else {
@@ -187,10 +187,10 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("file path must be a string".to_string()));
     };
 
-    let vm = l.vm_mut();
-    let proto = vm.load_proto_from_file(filepath_str)?;
+    let proto = l.load_proto_from_file(filepath_str)?;
 
     // Create a function from the chunk with _ENV upvalue
+    let vm = l.global_state_mut();
     let env_upvalue = vm.create_upvalue_closed(vm.global)?;
     let func = vm.create_function(proto, UpvalueStore::from_single(env_upvalue))?;
 

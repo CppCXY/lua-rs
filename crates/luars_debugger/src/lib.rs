@@ -83,6 +83,8 @@ impl luars::LuaLibrary for Library {
 
 #[cfg(test)]
 mod tests {
+    use luars::LuaApi;
+
     use super::Library;
 
     #[test]

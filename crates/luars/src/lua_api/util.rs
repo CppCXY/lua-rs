@@ -1,13 +1,13 @@
-use crate::{FromLua, IntoLua, LuaResult, LuaVM};
+use crate::{FromLua, GlobalState, IntoLua, LuaResult};
 
 pub(crate) fn into_single_value<T: IntoLua>(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: T,
     api_name: &str,
 ) -> LuaResult<luars::LuaValue> {
     let mut values = collect_values(vm, value)?;
     if values.len() != 1 {
-        return Err(vm.error(format!(
+        return Err(vm.main_state().error(format!(
             "{} expects exactly one Lua value, got {}",
             api_name,
             values.len()
@@ -17,7 +17,7 @@ pub(crate) fn into_single_value<T: IntoLua>(
 }
 
 pub(crate) fn collect_values<T: IntoLua>(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: T,
 ) -> LuaResult<Vec<luars::LuaValue>> {
     let base_top = vm.main_state().get_top();
@@ -51,9 +51,10 @@ pub(crate) fn collect_values<T: IntoLua>(
 }
 
 pub(crate) fn from_value<T: FromLua>(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: luars::LuaValue,
     api_name: &str,
 ) -> LuaResult<T> {
-    T::from_lua(value, vm.main_state()).map_err(|msg| vm.error(format!("{}: {}", api_name, msg)))
+    T::from_lua(value, vm.main_state())
+        .map_err(|msg| vm.main_state().error(format!("{}: {}", api_name, msg)))
 }

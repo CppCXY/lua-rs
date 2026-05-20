@@ -1,4 +1,14 @@
-// Lua Runtime
+//! Lua Runtime.
+//!
+//! # Example
+//! ```rust
+//! use luars::{Lua, LuaApi, SafeOption};
+//!
+//! let mut lua = Lua::new(SafeOption::default());
+//! let value: i64 = lua.load("return 40 + 2").eval()?;
+//! assert_eq!(value, 42);
+//! # Ok::<(), luars::LuaError>(())
+//! ```
 
 // Allow the derive macro to use `luars::...` paths even inside this crate
 extern crate self as luars;
@@ -44,8 +54,8 @@ pub use lua_vm::async_thread::{
 pub use lua_vm::lua_error::{LuaError, LuaFullError};
 pub use lua_vm::table_builder::TableBuilder;
 pub use lua_vm::{
-    CFunction, CallInfo, DebugInfo, Instruction, LuaAnyRef, LuaFunctionRef, LuaResult, LuaState,
-    LuaStringRef, LuaTableRef, LuaVM, OpCode, UserDataRef,
+    CFunction, CallInfo, DebugInfo, GlobalState, Instruction, LuaAnyRef, LuaFunctionRef, LuaResult,
+    LuaState, LuaStringRef, LuaTableRef, OpCode, UserDataRef,
 };
 pub use lua_vm::{LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET};
 pub use stdlib::Stdlib;

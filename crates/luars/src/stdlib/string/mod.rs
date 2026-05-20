@@ -479,7 +479,9 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Use optimized create_substring
-    let result_value = l.vm_mut().create_substring(s_value, start_byte, end_byte)?;
+    let result_value = l
+        .global_state_mut()
+        .create_substring(s_value, start_byte, end_byte)?;
     l.push_value(result_value)?;
     Ok(1)
 }
@@ -863,7 +865,7 @@ fn string_gmatch(l: &mut LuaState) -> LuaResult<usize> {
 
     // State upvalues: [source_string, pattern_string, search_pos (0-based), lastmatch (-1=none)]
     // Mirrors C Lua's gm->src and gm->lastmatch behavior
-    let closure = l.vm_mut().create_c_closure(
+    let closure = l.global_state_mut().create_c_closure(
         gmatch_iterator_lazy,
         vec![
             s_value,

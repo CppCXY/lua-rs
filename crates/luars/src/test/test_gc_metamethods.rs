@@ -2,11 +2,11 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::lua_vm::{LuaVM, SafeOption};
+    use crate::lua_vm::{GlobalState, SafeOption};
 
     #[test]
     fn test_gc_metamethod() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -34,7 +34,7 @@ mod tests {
             return #finalized
         "#;
 
-        match vm.execute(code) {
+        match vm.main_state().execute(code) {
             Ok(result) => {
                 println!("Finalized count: {:?}", result);
                 for value in result {
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_weak_keys_mode() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -82,7 +82,7 @@ mod tests {
             return count_before, count_after
         "#;
 
-        match vm.execute(code) {
+        match vm.main_state().execute(code) {
             Ok(result) => {
                 println!("Weak keys test result: {:?}", result);
                 // count_before should be > 0, count_after should be 0 (keys collected)
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn test_weak_values_mode() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -125,7 +125,7 @@ mod tests {
             return count_before, count_after
         "#;
 
-        match vm.execute(code) {
+        match vm.main_state().execute(code) {
             Ok(result) => {
                 println!("Weak values test result: {:?}", result);
                 // count_before should be > 0, count_after should be 0 (values collected)
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_weak_keys_and_values_mode() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -161,7 +161,7 @@ mod tests {
             return count
         "#;
 
-        match vm.execute(code) {
+        match vm.main_state().execute(code) {
             Ok(result) => {
                 println!("Weak keys+values test result: {:?}", result);
                 // Note: Full weak table support requires more complex mark phase handling
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_gc_resurrection_prevention() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -204,7 +204,7 @@ mod tests {
             return resurrected ~= nil
         "#;
 
-        match vm.execute(code) {
+        match vm.main_state().execute(code) {
             Ok(result) => {
                 println!("Resurrection test result: {:?}", result);
             }
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_finalizer_ordering() {
-        let mut vm = LuaVM::new(SafeOption::default());
+        let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
         let code = r#"
@@ -247,7 +247,7 @@ mod tests {
             return #order
         "#;
 
-        match vm.execute(code) {
+        match vm.main_state().execute(code) {
             Ok(result) => {
                 println!("Finalizer ordering test result: {:?}", result);
             }

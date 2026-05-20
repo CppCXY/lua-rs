@@ -48,7 +48,7 @@ impl PreloadModule {
 
 impl LuaLibrary for PreloadModule {
     fn install(&self, lua: &mut lua_api::Lua) -> LuaResult<()> {
-        let vm = lua.vm_mut();
+        let vm = lua.global_state_mut();
         vm.register_preload(&self.name, self.loader)
     }
 }
@@ -91,7 +91,7 @@ impl LibraryModule {
 
 impl LuaLibrary for LibraryModule {
     fn install(&self, lua: &mut lua_api::Lua) -> LuaResult<()> {
-        let vm = lua.vm_mut();
+        let vm = lua.global_state_mut();
         load_library_module(vm, self)
     }
 }

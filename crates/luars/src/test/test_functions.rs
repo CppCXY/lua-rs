@@ -1,11 +1,11 @@
 /// Advanced function definition and call tests
-use crate::lua_vm::{LuaVM, SafeOption};
+use crate::lua_vm::{GlobalState, SafeOption};
 
 #[test]
 fn test_function_with_default_return() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function no_return() end
         local result = no_return()
@@ -17,9 +17,9 @@ fn test_function_with_default_return() {
 
 #[test]
 fn test_function_multiple_returns() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function multi()
             return 1, 2, 3, 4, 5
@@ -33,9 +33,9 @@ fn test_function_multiple_returns() {
 
 #[test]
 fn test_function_variable_returns() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function ret_n(n)
             if n == 1 then return "one"
@@ -56,9 +56,9 @@ fn test_function_variable_returns() {
 
 #[test]
 fn test_function_tail_call() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function countdown(n)
             if n == 0 then
@@ -75,9 +75,9 @@ fn test_function_tail_call() {
 
 #[test]
 fn test_function_vararg_basic() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function sum(...)
             local total = 0
@@ -117,9 +117,9 @@ fn test_function_vararg_basic() {
 
 #[test]
 fn test_function_vararg_count() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function count_args(...)
             return select('#', ...)
@@ -137,9 +137,9 @@ fn test_function_vararg_count() {
 
 #[test]
 fn test_function_vararg_select() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function get_nth(n, ...)
             return select(n, ...)
@@ -156,9 +156,9 @@ fn test_function_vararg_select() {
 
 #[test]
 fn test_function_nested_calls() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function add(a, b) return a + b end
         local function mul(a, b) return a * b end
@@ -174,9 +174,9 @@ fn test_function_nested_calls() {
 
 #[test]
 fn test_function_as_parameter() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function apply(f, x, y)
             return f(x, y)
@@ -192,9 +192,9 @@ fn test_function_as_parameter() {
 
 #[test]
 fn test_function_returning_function() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function get_operation(op)
             if op == "add" then
@@ -214,9 +214,9 @@ fn test_function_returning_function() {
 
 #[test]
 fn test_function_table_of_functions() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local ops = {
             add = function(a, b) return a + b end,
@@ -235,9 +235,9 @@ fn test_function_table_of_functions() {
 
 #[test]
 fn test_function_anonymous_immediate_call() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local result = (function(x, y)
             return x * x + y * y
@@ -250,9 +250,9 @@ fn test_function_anonymous_immediate_call() {
 
 #[test]
 fn test_function_method_call_chain() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local obj = {value = 10}
         function obj:add(n)
@@ -275,9 +275,9 @@ fn test_function_method_call_chain() {
 
 #[test]
 fn test_function_local_function_scope() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function outer()
             local value = 10
@@ -294,9 +294,9 @@ fn test_function_local_function_scope() {
 
 #[test]
 fn test_function_early_return() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function check(x)
             if x < 0 then return "negative" end
@@ -313,9 +313,9 @@ fn test_function_early_return() {
 
 #[test]
 fn test_function_multiple_definitions() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function foo() return "first" end
         local x = foo()
@@ -329,9 +329,9 @@ fn test_function_multiple_definitions() {
 
 #[test]
 fn test_function_pcall_wrapper() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function safe_divide(a, b)
             if b == 0 then
@@ -350,9 +350,9 @@ fn test_function_pcall_wrapper() {
 
 #[test]
 fn test_function_ipairs_wrapper() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function map(t, f)
             local result = {}
@@ -370,9 +370,9 @@ fn test_function_ipairs_wrapper() {
 
 #[test]
 fn test_function_returns_in_table_constructor() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function triple()
             return 1, 2, 3
@@ -388,9 +388,9 @@ fn test_function_returns_in_table_constructor() {
 
 #[test]
 fn test_function_returns_as_function_arguments() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function triple()
             return 1, 2, 3
@@ -408,9 +408,9 @@ fn test_function_returns_as_function_arguments() {
 
 #[test]
 fn test_function_reduce() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function reduce(t, f, init)
             local acc = init
@@ -428,9 +428,9 @@ fn test_function_reduce() {
 
 #[test]
 fn test_local_after_nested_function_stays_local() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local MAX_NESTING <const> = 32
 

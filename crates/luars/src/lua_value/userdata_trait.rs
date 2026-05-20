@@ -656,7 +656,7 @@ pub trait LuaEnum {
 /// No fields, methods, or metamethods are exposed — the value is a "black box"
 /// in Lua. From Rust you can recover the original type via `downcast_ref::<T>()`.
 ///
-/// Use [`LuaVM::push_any`] to create one conveniently.
+/// Use [`GlobalState::create_any`](crate::GlobalState::create_any) to create one conveniently.
 ///
 /// # Example
 ///

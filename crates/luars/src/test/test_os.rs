@@ -10,10 +10,10 @@ fn get_test_data_dir() -> String {
 
 #[test]
 fn test_os_time() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = os.time()
         assert(type(t) == "number")
@@ -26,12 +26,12 @@ fn test_os_time() {
 
 #[test]
 fn test_os_time_with_table() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Note: os.time with table argument not fully implemented
     // Just verify it doesn't crash
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = os.time()
         assert(type(t) == "number")
@@ -44,10 +44,10 @@ fn test_os_time_with_table() {
 
 #[test]
 fn test_os_time_out_of_bound_year_reports_lua_error() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local ok, err = pcall(os.time, {year = math.mininteger, month = 1, day = 1})
         assert(ok == false)
@@ -61,10 +61,10 @@ fn test_os_time_out_of_bound_year_reports_lua_error() {
 
 #[test]
 fn test_os_date_default() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local d = os.date()
         assert(type(d) == "string")
@@ -77,12 +77,12 @@ fn test_os_date_default() {
 
 #[test]
 fn test_os_date_table() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Note: os.date("*t") not fully implemented
     // Just verify os.date() returns a string
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local d = os.date()
         assert(type(d) == "string")
@@ -94,12 +94,12 @@ fn test_os_date_table() {
 
 #[test]
 fn test_os_date_format() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Note: os.date format strings not fully implemented
     // Just verify basic functionality
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local d = os.date()
         assert(type(d) == "string")
@@ -112,10 +112,10 @@ fn test_os_date_format() {
 
 #[test]
 fn test_os_difftime() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t1 = os.time()
         local t2 = t1 + 100
@@ -129,10 +129,10 @@ fn test_os_difftime() {
 
 #[test]
 fn test_os_clock() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local c1 = os.clock()
         assert(type(c1) == "number")
@@ -152,10 +152,10 @@ fn test_os_clock() {
 
 #[test]
 fn test_os_getenv() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- PATH should exist on most systems
         local path = os.getenv("PATH")
@@ -172,11 +172,11 @@ fn test_os_getenv() {
 
 #[test]
 fn test_os_remove() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local path = "{}/temp_remove.txt"
         
@@ -201,10 +201,10 @@ fn test_os_remove() {
 
 #[test]
 fn test_os_remove_nonexistent() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local ok, err = os.remove("nonexistent_file_99999.txt")
         assert(ok == nil)
@@ -217,11 +217,11 @@ fn test_os_remove_nonexistent() {
 
 #[test]
 fn test_os_rename() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local path1 = "{}/temp_rename1.txt"
         local path2 = "{}/temp_rename2.txt"
@@ -257,10 +257,10 @@ fn test_os_rename() {
 
 #[test]
 fn test_os_tmpname() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local name = os.tmpname()
         assert(type(name) == "string")
@@ -275,10 +275,10 @@ fn test_os_tmpname() {
 fn test_os_exit() {
     // Note: We don't actually test os.exit() as it would terminate the process
     // Just verify the function exists
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(os.exit) == "function")
         "#,
@@ -290,7 +290,7 @@ fn test_os_exit() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_os_execute_nonzero_exit_returns_nil() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     let command = if cfg!(target_os = "windows") {
@@ -299,7 +299,7 @@ fn test_os_execute_nonzero_exit_returns_nil() {
         "exit 3"
     };
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local ok, how, code = os.execute("{}")
         assert(ok == nil)
@@ -314,10 +314,10 @@ fn test_os_execute_nonzero_exit_returns_nil() {
 
 #[test]
 fn test_os_setlocale() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- Query current locale
         local loc = os.setlocale(nil)

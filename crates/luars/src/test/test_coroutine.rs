@@ -3,9 +3,9 @@ use crate::*;
 
 #[test]
 fn test_coroutine_create_resume() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local co = coroutine.create(function()
             return 42
@@ -26,9 +26,9 @@ fn test_coroutine_create_resume() {
 
 #[test]
 fn test_coroutine_yield() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local co = coroutine.create(function()
             coroutine.yield(1)
@@ -49,16 +49,16 @@ fn test_coroutine_yield() {
 
     if let Err(e) = &result {
         eprintln!("test_coroutine_yield Error: {}", e);
-        eprintln!("Error message: {}", vm.get_error_message(*e));
+        eprintln!("Error message: {}", vm.main_state().get_error_message(*e));
     }
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_coroutine_status() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local co = coroutine.create(function()
             coroutine.yield()
@@ -77,9 +77,9 @@ fn test_coroutine_status() {
 
 #[test]
 fn test_coroutine_running() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local main_co = coroutine.running()
         assert(main_co ~= nil)
@@ -95,16 +95,16 @@ fn test_coroutine_running() {
 
     if let Err(e) = &result {
         eprintln!("test_coroutine_running Error: {}", e);
-        eprintln!("Error message: {}", vm.get_error_message(*e));
+        eprintln!("Error message: {}", vm.main_state().get_error_message(*e));
     }
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_coroutine_wrap() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local f = coroutine.wrap(function()
             coroutine.yield(1)
@@ -120,16 +120,16 @@ fn test_coroutine_wrap() {
 
     if let Err(e) = &result {
         eprintln!("test_coroutine_wrap Error: {}", e);
-        eprintln!("Error message: {}", vm.get_error_message(*e));
+        eprintln!("Error message: {}", vm.main_state().get_error_message(*e));
     }
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_coroutine_isyieldable() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local co = coroutine.create(function()
             assert(coroutine.isyieldable() == true)
@@ -144,9 +144,9 @@ fn test_coroutine_isyieldable() {
 
 #[test]
 fn test_coroutine_close() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local co = coroutine.create(function()
             coroutine.yield(1)
@@ -166,10 +166,10 @@ fn test_coroutine_close() {
 
 #[test]
 fn test_coroutine_with_loop() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     // Test that coroutine with for loop can be created and resumed
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local co = coroutine.create(function()
             local count = 0
@@ -202,9 +202,9 @@ fn test_coroutine_with_loop() {
 
 #[test]
 fn test_coroutine_error_handling() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local co = coroutine.create(function()
             error("test error")

@@ -6,7 +6,7 @@
 /// - Tables ↔ Array / Object (with cycle detection & depth guard)
 /// - Functions → metadata objects
 /// - UserData / Thread → metadata objects
-use luars::{LuaVM, LuaValue};
+use luars::{GlobalState, LuaValue};
 use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
 
@@ -42,12 +42,12 @@ impl Ctx {
 //  Lua → JS
 // ════════════════════════════════════════════════════════════════════════
 
-pub fn lua_to_js(vm: &LuaVM, value: &LuaValue) -> JsValue {
+pub fn lua_to_js(vm: &GlobalState, value: &LuaValue) -> JsValue {
     let mut ctx = Ctx::new();
     lua_to_js_inner(vm, value, &mut ctx)
 }
 
-fn lua_to_js_inner(vm: &LuaVM, value: &LuaValue, ctx: &mut Ctx) -> JsValue {
+fn lua_to_js_inner(vm: &GlobalState, value: &LuaValue, ctx: &mut Ctx) -> JsValue {
     if value.is_nil() {
         return JsValue::NULL;
     }
@@ -87,7 +87,7 @@ fn lua_to_js_inner(vm: &LuaVM, value: &LuaValue, ctx: &mut Ctx) -> JsValue {
     JsValue::NULL
 }
 
-fn table_to_js(vm: &LuaVM, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
+fn table_to_js(vm: &GlobalState, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
     let Some(table) = table_value.as_table() else {
         return JsValue::NULL;
     };
@@ -107,7 +107,7 @@ fn table_to_js(vm: &LuaVM, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
     result
 }
 
-fn table_to_js_array(vm: &LuaVM, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
+fn table_to_js_array(vm: &GlobalState, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
     let Some(table) = table_value.as_table() else {
         return JsValue::NULL;
     };
@@ -124,7 +124,7 @@ fn table_to_js_array(vm: &LuaVM, table_value: &LuaValue, ctx: &mut Ctx) -> JsVal
     arr.into()
 }
 
-fn table_to_js_object(vm: &LuaVM, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
+fn table_to_js_object(vm: &GlobalState, table_value: &LuaValue, ctx: &mut Ctx) -> JsValue {
     let Some(table) = table_value.as_table() else {
         return JsValue::NULL;
     };
@@ -163,13 +163,13 @@ fn function_to_js_meta(value: &LuaValue) -> JsValue {
 //  JS → Lua
 // ════════════════════════════════════════════════════════════════════════
 
-pub fn js_to_lua(vm: &mut LuaVM, value: &JsValue) -> Result<LuaValue, luars::LuaError> {
+pub fn js_to_lua(vm: &mut GlobalState, value: &JsValue) -> Result<LuaValue, luars::LuaError> {
     let mut ctx = Ctx::new();
     js_to_lua_inner(vm, value, &mut ctx)
 }
 
 fn js_to_lua_inner(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: &JsValue,
     ctx: &mut Ctx,
 ) -> Result<LuaValue, luars::LuaError> {
@@ -213,7 +213,7 @@ pub fn js_number_to_lua(n: f64) -> LuaValue {
 }
 
 fn js_array_to_lua(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: &JsValue,
     ctx: &mut Ctx,
 ) -> Result<LuaValue, luars::LuaError> {
@@ -231,7 +231,7 @@ fn js_array_to_lua(
 }
 
 fn js_object_to_lua(
-    vm: &mut LuaVM,
+    vm: &mut GlobalState,
     value: &JsValue,
     ctx: &mut Ctx,
 ) -> Result<LuaValue, luars::LuaError> {

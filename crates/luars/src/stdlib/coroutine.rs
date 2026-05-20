@@ -32,7 +32,7 @@ fn coroutine_create(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Use VM's create_thread which properly sets up the thread with the function
-    let vm = l.vm_mut();
+    let vm = l.global_state_mut();
     let thread_val = vm.create_thread(func)?;
 
     l.push_value(thread_val)?;
@@ -61,7 +61,7 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Resume the thread
-    let vm = l.vm_mut();
+    let vm = l.global_state_mut();
     match vm.resume_thread(thread_val, args) {
         Ok((_finished, results)) => {
             // Success - either yielded (finished=false) or completed (finished=true)
@@ -135,7 +135,7 @@ fn coroutine_status(l: &mut LuaState) -> LuaResult<usize> {
 
     // Check if thread exists and get status
     // Pre-read const strings before mutable borrow of thread
-    let cs = &l.vm_mut().const_strings;
+    let cs = &l.global_state_mut().const_strings;
     let str_running = cs.str_running;
     let str_suspended = cs.str_suspended;
     let str_normal = cs.str_normal;
@@ -202,7 +202,7 @@ fn coroutine_wrap(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Create the coroutine
-    let vm = l.vm_mut();
+    let vm = l.global_state_mut();
     let thread_val = vm.create_thread(func)?;
 
     // Create a C closure with the thread as upvalue
@@ -236,7 +236,7 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.get_args();
 
     // Resume the coroutine
-    let vm = l.vm_mut();
+    let vm = l.global_state_mut();
     match vm.resume_thread(thread_val, args) {
         Ok((_finished, results)) => {
             // Success - push all results

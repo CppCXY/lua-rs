@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+
 #[cfg(feature = "serde")]
 use crate::Lua;
 use crate::{FromLua, IntoLua, LuaAnyRef, LuaResult, LuaState, LuaValueKind, UserDataRef};
@@ -71,6 +73,52 @@ impl Value {
         self.to_value().as_str().map(str::to_owned)
     }
 
+    #[inline]
+    pub fn is_lightuserdata(&self) -> bool {
+        self.to_value().is_lightuserdata()
+    }
+
+    #[inline]
+    pub fn as_lightuserdata(&self) -> Option<*mut c_void> {
+        self.to_value().as_lightuserdata()
+    }
+
+    /// Get the value's metatable, if present.
+    #[inline]
+    pub fn get_metatable(&self) -> Option<Table> {
+        self.inner.get_metatable().map(Table::new)
+    }
+
+    /// Set or clear the value's metatable.
+    #[inline]
+    pub fn set_metatable(&self, metatable: Option<&Table>) -> LuaResult<()> {
+        self.inner
+            .set_metatable(metatable.map(|table| &table.inner))
+    }
+
+    #[inline]
+    pub fn to_pointer(&self) -> Option<*const c_void> {
+        let value = self.to_value();
+        if let Some(pointer) = value.as_lightuserdata() {
+            return Some(pointer.cast_const());
+        }
+
+        match value.kind() {
+            LuaValueKind::String
+            | LuaValueKind::Table
+            | LuaValueKind::Function
+            | LuaValueKind::CFunction
+            | LuaValueKind::CClosure
+            | LuaValueKind::RClosure
+            | LuaValueKind::Userdata
+            | LuaValueKind::Thread => Some(value.raw_ptr_repr().cast()),
+            LuaValueKind::Nil
+            | LuaValueKind::Boolean
+            | LuaValueKind::Integer
+            | LuaValueKind::Float => None,
+        }
+    }
+
     /// Convert the wrapped value to a best-effort owned string.
     #[inline]
     pub fn to_string_lossy(&self) -> String {
@@ -104,20 +152,20 @@ impl Value {
     /// Construct a safe Lua value from a JSON value inside the provided Lua runtime.
     #[cfg(feature = "serde")]
     pub fn from_json_value(lua: &mut Lua, json: &serde_json::Value) -> LuaResult<Self> {
-        let vm = lua.vm_mut();
+        let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json(json)
-            .map_err(|msg| vm.error(msg))?;
+            .map_err(|msg| vm.main_state().error(msg))?;
         Ok(Value::new(vm.to_ref(value)))
     }
 
     /// Construct a safe Lua value from a JSON string inside the provided Lua runtime.
     #[cfg(feature = "serde")]
     pub fn from_json_str(lua: &mut Lua, json: &str) -> LuaResult<Self> {
-        let vm = lua.vm_mut();
+        let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json_string(json)
-            .map_err(|msg| vm.error(msg))?;
+            .map_err(|msg| vm.main_state().error(msg))?;
         Ok(Value::new(vm.to_ref(value)))
     }
 
@@ -127,8 +175,8 @@ impl Value {
         let json = match serde_json::to_value(value) {
             Ok(json) => json,
             Err(err) => {
-                let vm = lua.vm_mut();
-                return Err(vm.error(err.to_string()));
+                let vm = lua.global_state_mut();
+                return Err(vm.main_state().error(err.to_string()));
             }
         };
         Self::from_json_value(lua, &json)

@@ -7,10 +7,11 @@ use crate::lua_value::LuaUserdata;
 use crate::lua_vm::async_thread::AsyncReturnValue;
 use crate::*;
 use std::fmt;
+use std::pin::Pin;
 
 /// Helper: create a VM with stdlib loaded
-fn new_vm() -> LuaVM {
-    let mut vm = LuaVM::new(SafeOption::default());
+fn new_vm() -> Pin<Box<GlobalState>> {
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(Stdlib::All).unwrap();
     vm
 }
@@ -22,14 +23,19 @@ async fn test_async_basic_return() {
     let mut vm = new_vm();
 
     // Register an async function that returns a single value
-    vm.register_async("async_add", |args| async move {
-        let a = args[0].as_integer().unwrap_or(0);
-        let b = args[1].as_integer().unwrap_or(0);
-        Ok(vec![AsyncReturnValue::integer(a + b)])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_add", |args| async move {
+            let a = args[0].as_integer().unwrap_or(0);
+            let b = args[1].as_integer().unwrap_or(0);
+            Ok(vec![AsyncReturnValue::integer(a + b)])
+        })
+        .unwrap();
 
-    let results = vm.execute_async("return async_add(10, 20)").await.unwrap();
+    let results = vm
+        .main_state()
+        .execute_async("return async_add(10, 20)")
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_integer(), Some(30));
@@ -39,12 +45,17 @@ async fn test_async_basic_return() {
 async fn test_async_no_args() {
     let mut vm = new_vm();
 
-    vm.register_async("async_hello", |_args| async move {
-        Ok(vec![AsyncReturnValue::string("hello")])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_hello", |_args| async move {
+            Ok(vec![AsyncReturnValue::string("hello")])
+        })
+        .unwrap();
 
-    let results = vm.execute_async("return async_hello()").await.unwrap();
+    let results = vm
+        .main_state()
+        .execute_async("return async_hello()")
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("hello"));
@@ -54,10 +65,12 @@ async fn test_async_no_args() {
 async fn test_async_typed_no_args() {
     let mut vm = new_vm();
 
-    vm.register_async_typed("async_hello_typed", || async move { Ok("hello") })
+    vm.main_state()
+        .register_async_typed("async_hello_typed", || async move { Ok("hello") })
         .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async("return async_hello_typed()")
         .await
         .unwrap();
@@ -69,16 +82,21 @@ async fn test_async_typed_no_args() {
 async fn test_async_multiple_returns() {
     let mut vm = new_vm();
 
-    vm.register_async("async_multi", |_args| async move {
-        Ok(vec![
-            AsyncReturnValue::integer(1),
-            AsyncReturnValue::integer(2),
-            AsyncReturnValue::integer(3),
-        ])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_multi", |_args| async move {
+            Ok(vec![
+                AsyncReturnValue::integer(1),
+                AsyncReturnValue::integer(2),
+                AsyncReturnValue::integer(3),
+            ])
+        })
+        .unwrap();
 
-    let results = vm.execute_async("return async_multi()").await.unwrap();
+    let results = vm
+        .main_state()
+        .execute_async("return async_multi()")
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_integer(), Some(1));
@@ -90,13 +108,15 @@ async fn test_async_multiple_returns() {
 async fn test_async_typed_multiple_returns() {
     let mut vm = new_vm();
 
-    vm.register_async_typed(
-        "async_multi_typed",
-        || async move { Ok((1_i64, 2_i64, 3_i64)) },
-    )
-    .unwrap();
+    vm.main_state()
+        .register_async_typed(
+            "async_multi_typed",
+            || async move { Ok((1_i64, 2_i64, 3_i64)) },
+        )
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async("return async_multi_typed()")
         .await
         .unwrap();
@@ -112,12 +132,14 @@ async fn test_async_nil_return() {
     let mut vm = new_vm();
 
     // Async function that returns exactly one nil value
-    vm.register_async("async_nil", |_args| async move {
-        Ok(vec![AsyncReturnValue::nil()])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_nil", |_args| async move {
+            Ok(vec![AsyncReturnValue::nil()])
+        })
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async(
             r#"
         local x = async_nil()
@@ -137,13 +159,15 @@ async fn test_async_nil_return() {
 async fn test_async_sequential_calls() {
     let mut vm = new_vm();
 
-    vm.register_async("async_double", |args| async move {
-        let n = args[0].as_integer().unwrap_or(0);
-        Ok(vec![AsyncReturnValue::integer(n * 2)])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_double", |args| async move {
+            let n = args[0].as_integer().unwrap_or(0);
+            Ok(vec![AsyncReturnValue::integer(n * 2)])
+        })
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async(
             r#"
         local a = async_double(5)
@@ -163,15 +187,17 @@ async fn test_async_sequential_calls() {
 async fn test_async_typed_high_arity() {
     let mut vm = new_vm();
 
-    vm.register_async_typed(
-        "async_sum8",
-        |a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64| async move {
-            Ok(a + b + c + d + e + f + g + h)
-        },
-    )
-    .unwrap();
+    vm.main_state()
+        .register_async_typed(
+            "async_sum8",
+            |a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64| async move {
+                Ok(a + b + c + d + e + f + g + h)
+            },
+        )
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async("return async_sum8(1, 2, 3, 4, 5, 6, 7, 8)")
         .await
         .unwrap();
@@ -185,15 +211,17 @@ async fn test_async_typed_high_arity() {
 async fn test_async_with_sleep() {
     let mut vm = new_vm();
 
-    vm.register_async("async_sleep_and_return", |args| async move {
-        let val = args[0].as_integer().unwrap_or(0);
-        // Actually await something
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        Ok(vec![AsyncReturnValue::integer(val + 100)])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_sleep_and_return", |args| async move {
+            let val = args[0].as_integer().unwrap_or(0);
+            // Actually await something
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            Ok(vec![AsyncReturnValue::integer(val + 100)])
+        })
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async("return async_sleep_and_return(42)")
         .await
         .unwrap();
@@ -208,12 +236,13 @@ async fn test_async_with_sleep() {
 async fn test_async_error_propagation() {
     let mut vm = new_vm();
 
-    vm.register_async("async_fail", |_args| async move {
-        Err(lua_vm::LuaError::RuntimeError)
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_fail", |_args| async move {
+            Err(lua_vm::LuaError::RuntimeError)
+        })
+        .unwrap();
 
-    let result = vm.execute_async("return async_fail()").await;
+    let result = vm.main_state().execute_async("return async_fail()").await;
 
     assert!(result.is_err());
 }
@@ -224,13 +253,15 @@ async fn test_async_error_propagation() {
 async fn test_async_mixed_with_sync() {
     let mut vm = new_vm();
 
-    vm.register_async("async_get", |args| async move {
-        let key = args[0].as_str().unwrap_or("?").to_string();
-        Ok(vec![AsyncReturnValue::string(format!("value_{}", key))])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_get", |args| async move {
+            let key = args[0].as_str().unwrap_or("?").to_string();
+            Ok(vec![AsyncReturnValue::string(format!("value_{}", key))])
+        })
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async(
             r#"
         local function sync_process(s)
@@ -251,13 +282,15 @@ async fn test_async_mixed_with_sync() {
 async fn test_async_in_loop() {
     let mut vm = new_vm();
 
-    vm.register_async("async_inc", |args| async move {
-        let n = args[0].as_integer().unwrap_or(0);
-        Ok(vec![AsyncReturnValue::integer(n + 1)])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_inc", |args| async move {
+            let n = args[0].as_integer().unwrap_or(0);
+            Ok(vec![AsyncReturnValue::integer(n + 1)])
+        })
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async(
             r#"
         local sum = 0
@@ -281,14 +314,18 @@ async fn test_async_in_loop() {
 async fn test_create_async_thread_directly() {
     let mut vm = new_vm();
 
-    vm.register_async("async_square", |args| async move {
-        let n = args[0].as_integer().unwrap_or(0);
-        Ok(vec![AsyncReturnValue::integer(n * n)])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_square", |args| async move {
+            let n = args[0].as_integer().unwrap_or(0);
+            Ok(vec![AsyncReturnValue::integer(n * n)])
+        })
+        .unwrap();
 
-    let chunk = vm.compile("return async_square(7)").unwrap();
-    let thread = vm.create_async_thread(chunk, vec![]).unwrap();
+    let chunk = vm
+        .main_state()
+        .compile_chunk("return async_square(7)")
+        .unwrap();
+    let thread = vm.main_state().create_async_thread(chunk, vec![]).unwrap();
     let results = thread.await.unwrap();
 
     assert_eq!(results.len(), 1);
@@ -328,15 +365,17 @@ async fn test_async_return_userdata() {
     let mut vm = new_vm();
 
     // Register an async function that returns a UserData
-    vm.register_async("make_point", |args| async move {
-        let x = args[0].as_number().unwrap_or(0.0);
-        let y = args[1].as_number().unwrap_or(0.0);
-        Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("make_point", |args| async move {
+            let x = args[0].as_number().unwrap_or(0.0);
+            let y = args[1].as_number().unwrap_or(0.0);
+            Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
+        })
+        .unwrap();
 
     // Test field access on the returned userdata
     let results = vm
+        .main_state()
         .execute_async("local p = make_point(3.0, 4.0); return p.x, p.y")
         .await
         .unwrap();
@@ -350,15 +389,17 @@ async fn test_async_return_userdata() {
 async fn test_async_return_userdata_method() {
     let mut vm = new_vm();
 
-    vm.register_async("make_point", |args| async move {
-        let x = args[0].as_number().unwrap_or(0.0);
-        let y = args[1].as_number().unwrap_or(0.0);
-        Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("make_point", |args| async move {
+            let x = args[0].as_number().unwrap_or(0.0);
+            let y = args[1].as_number().unwrap_or(0.0);
+            Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
+        })
+        .unwrap();
 
     // Test method call on the returned userdata
     let results = vm
+        .main_state()
         .execute_async("local p = make_point(10, 20); return p:sum()")
         .await
         .unwrap();
@@ -371,15 +412,17 @@ async fn test_async_return_userdata_method() {
 async fn test_async_return_userdata_tostring() {
     let mut vm = new_vm();
 
-    vm.register_async("make_point", |args| async move {
-        let x = args[0].as_number().unwrap_or(0.0);
-        let y = args[1].as_number().unwrap_or(0.0);
-        Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("make_point", |args| async move {
+            let x = args[0].as_number().unwrap_or(0.0);
+            let y = args[1].as_number().unwrap_or(0.0);
+            Ok(vec![AsyncReturnValue::userdata(AsyncPoint { x, y })])
+        })
+        .unwrap();
 
     // Test __tostring metamethod
     let results = vm
+        .main_state()
         .execute_async("local p = make_point(1, 2); return tostring(p)")
         .await
         .unwrap();
@@ -393,13 +436,15 @@ async fn test_async_return_userdata_via_from() {
     let mut vm = new_vm();
 
     // Test using From<LuaUserdata> conversion
-    vm.register_async("make_point", |_args| async move {
-        let ud = LuaUserdata::new(AsyncPoint { x: 5.0, y: 6.0 });
-        Ok(vec![AsyncReturnValue::from(ud)])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("make_point", |_args| async move {
+            let ud = LuaUserdata::new(AsyncPoint { x: 5.0, y: 6.0 });
+            Ok(vec![AsyncReturnValue::from(ud)])
+        })
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async("local p = make_point(); return p.x + p.y")
         .await
         .unwrap();
@@ -413,16 +458,18 @@ async fn test_async_return_mixed_userdata_and_values() {
     let mut vm = new_vm();
 
     // Return userdata alongside other types
-    vm.register_async("make_result", |_args| async move {
-        Ok(vec![
-            AsyncReturnValue::userdata(AsyncPoint { x: 1.0, y: 2.0 }),
-            AsyncReturnValue::string("ok"),
-            AsyncReturnValue::integer(42),
-        ])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("make_result", |_args| async move {
+            Ok(vec![
+                AsyncReturnValue::userdata(AsyncPoint { x: 1.0, y: 2.0 }),
+                AsyncReturnValue::string("ok"),
+                AsyncReturnValue::integer(42),
+            ])
+        })
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async("local p, s, n = make_result(); return p.x, s, n")
         .await
         .unwrap();
@@ -437,21 +484,23 @@ async fn test_async_return_mixed_userdata_and_values() {
 async fn test_async_typed_userdata_ref_arg() {
     let mut vm = new_vm();
 
-    let counter = vm.push_any(AsyncCounter { count: 5 }).unwrap();
+    let counter = vm.create_any(AsyncCounter { count: 5 }).unwrap();
     vm.set_global("counter", counter).unwrap();
 
-    vm.register_async_typed(
-        "async_increment_counter",
-        |mut counter: UserDataRef<AsyncCounter>, delta: i64| async move {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            let counter_ref = counter.get_mut().unwrap();
-            counter_ref.count += delta;
-            Ok(counter_ref.count)
-        },
-    )
-    .unwrap();
+    vm.main_state()
+        .register_async_typed(
+            "async_increment_counter",
+            |mut counter: UserDataRef<AsyncCounter>, delta: i64| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                let counter_ref = counter.get_mut().unwrap();
+                counter_ref.count += delta;
+                Ok(counter_ref.count)
+            },
+        )
+        .unwrap();
 
     let results = vm
+        .main_state()
         .execute_async("return async_increment_counter(counter, 7)")
         .await
         .unwrap();
@@ -459,7 +508,8 @@ async fn test_async_typed_userdata_ref_arg() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_integer(), Some(12));
 
-    let counter: UserDataRef<AsyncCounter> = vm.get_global_as("counter").unwrap().unwrap();
+    let counter: UserDataRef<AsyncCounter> =
+        vm.main_state().get_global_as("counter").unwrap().unwrap();
     assert_eq!(counter.get().unwrap().count, 12);
 }
 
@@ -469,10 +519,13 @@ async fn test_async_typed_userdata_ref_arg() {
 async fn test_call_async_basic() {
     let mut vm = new_vm();
 
-    vm.execute("function add(a, b) return a + b end").unwrap();
+    vm.main_state()
+        .execute("function add(a, b) return a + b end")
+        .unwrap();
 
     let func = vm.get_global("add").unwrap().unwrap();
     let results = vm
+        .main_state()
         .call_async(func, vec![LuaValue::integer(10), LuaValue::integer(20)])
         .await
         .unwrap();
@@ -485,17 +538,20 @@ async fn test_call_async_basic() {
 async fn test_call_async_with_async_function() {
     let mut vm = new_vm();
 
-    vm.register_async("async_double", |args| async move {
-        let n = args[0].as_integer().unwrap_or(0);
-        Ok(vec![AsyncReturnValue::integer(n * 2)])
-    })
-    .unwrap();
+    vm.main_state()
+        .register_async("async_double", |args| async move {
+            let n = args[0].as_integer().unwrap_or(0);
+            Ok(vec![AsyncReturnValue::integer(n * 2)])
+        })
+        .unwrap();
 
-    vm.execute("function process(x) return async_double(x) end")
+    vm.main_state()
+        .execute("function process(x) return async_double(x) end")
         .unwrap();
 
     let func = vm.get_global("process").unwrap().unwrap();
     let results = vm
+        .main_state()
         .call_async(func, vec![LuaValue::integer(21)])
         .await
         .unwrap();
@@ -508,11 +564,16 @@ async fn test_call_async_with_async_function() {
 async fn test_call_async_global() {
     let mut vm = new_vm();
 
-    vm.execute("function greet(name) return 'Hello, ' .. name end")
+    vm.main_state()
+        .execute("function greet(name) return 'Hello, ' .. name end")
         .unwrap();
 
     let name = vm.create_string("World").unwrap();
-    let results = vm.call_async_global("greet", vec![name]).await.unwrap();
+    let results = vm
+        .main_state()
+        .call_async_global("greet", vec![name])
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Hello, World"));
@@ -522,7 +583,10 @@ async fn test_call_async_global() {
 async fn test_call_async_global_not_found() {
     let mut vm = new_vm();
 
-    let result = vm.call_async_global("nonexistent", vec![]).await;
+    let result = vm
+        .main_state()
+        .call_async_global("nonexistent", vec![])
+        .await;
     assert!(result.is_err());
 }
 
@@ -532,9 +596,14 @@ async fn test_call_async_global_not_found() {
 async fn test_async_call_handle_basic() {
     let mut vm = new_vm();
 
-    vm.execute("function add(a, b) return a + b end").unwrap();
+    vm.main_state()
+        .execute("function add(a, b) return a + b end")
+        .unwrap();
 
-    let mut handle = vm.create_async_call_handle_global("add").unwrap();
+    let mut handle = vm
+        .main_state()
+        .create_async_call_handle_global("add")
+        .unwrap();
 
     // First call
     let r1 = handle
@@ -564,8 +633,9 @@ async fn test_async_call_handle_basic() {
 async fn test_async_call_handle_error_recovery() {
     let mut vm = new_vm();
 
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         function maybe_fail(x)
             if x < 0 then
                 error("negative!")
@@ -573,10 +643,13 @@ async fn test_async_call_handle_error_recovery() {
             return x * 2
         end
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
-    let mut handle = vm.create_async_call_handle_global("maybe_fail").unwrap();
+    let mut handle = vm
+        .main_state()
+        .create_async_call_handle_global("maybe_fail")
+        .unwrap();
 
     // Successful call
     let r1 = handle.call(vec![LuaValue::integer(5)]).await.unwrap();
@@ -596,17 +669,22 @@ async fn test_async_call_handle_error_recovery() {
 async fn test_async_call_handle_with_async() {
     let mut vm = new_vm();
 
-    vm.register_async("async_add", |args| async move {
-        let a = args[0].as_integer().unwrap_or(0);
-        let b = args[1].as_integer().unwrap_or(0);
-        Ok(vec![AsyncReturnValue::integer(a + b)])
-    })
-    .unwrap();
-
-    vm.execute("function process(a, b) return async_add(a, b) end")
+    vm.main_state()
+        .register_async("async_add", |args| async move {
+            let a = args[0].as_integer().unwrap_or(0);
+            let b = args[1].as_integer().unwrap_or(0);
+            Ok(vec![AsyncReturnValue::integer(a + b)])
+        })
         .unwrap();
 
-    let mut handle = vm.create_async_call_handle_global("process").unwrap();
+    vm.main_state()
+        .execute("function process(a, b) return async_add(a, b) end")
+        .unwrap();
+
+    let mut handle = vm
+        .main_state()
+        .create_async_call_handle_global("process")
+        .unwrap();
 
     let r1 = handle
         .call(vec![LuaValue::integer(3), LuaValue::integer(4)])
@@ -625,10 +703,14 @@ async fn test_async_call_handle_with_async() {
 async fn test_async_call_handle_multiple_returns() {
     let mut vm = new_vm();
 
-    vm.execute("function multi(x) return x, x*2, x*3 end")
+    vm.main_state()
+        .execute("function multi(x) return x, x*2, x*3 end")
         .unwrap();
 
-    let mut handle = vm.create_async_call_handle_global("multi").unwrap();
+    let mut handle = vm
+        .main_state()
+        .create_async_call_handle_global("multi")
+        .unwrap();
 
     let results = handle.call(vec![LuaValue::integer(5)]).await.unwrap();
     assert_eq!(results.len(), 3);
@@ -641,9 +723,14 @@ async fn test_async_call_handle_multiple_returns() {
 async fn test_async_call_handle_no_args_no_returns() {
     let mut vm = new_vm();
 
-    vm.execute("x = 0; function inc() x = x + 1 end").unwrap();
+    vm.main_state()
+        .execute("x = 0; function inc() x = x + 1 end")
+        .unwrap();
 
-    let mut handle = vm.create_async_call_handle_global("inc").unwrap();
+    let mut handle = vm
+        .main_state()
+        .create_async_call_handle_global("inc")
+        .unwrap();
 
     let r = handle.call(vec![]).await.unwrap();
     assert!(r.is_empty());
@@ -651,6 +738,6 @@ async fn test_async_call_handle_no_args_no_returns() {
     handle.call(vec![]).await.unwrap();
     handle.call(vec![]).await.unwrap();
 
-    let results = vm.execute("return x").unwrap();
+    let results = vm.main_state().execute("return x").unwrap();
     assert_eq!(results[0].as_integer(), Some(3));
 }

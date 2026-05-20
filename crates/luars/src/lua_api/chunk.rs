@@ -1,18 +1,60 @@
-use crate::{FromLua, FromLuaMulti, Function, IntoLua, Lua, LuaResult};
+use crate::{FromLua, FromLuaMulti, Function, IntoLua, Lua, LuaResult, LuaState};
 #[cfg(feature = "sandbox")]
 use luars::SandboxConfig;
 
-/// Builder returned by `Lua::load`, similar to `mlua::Chunk`.
-pub struct Chunk<'lua> {
-    lua: &'lua mut Lua,
+#[doc(hidden)]
+#[allow(async_fn_in_trait)]
+pub trait ChunkHost: Sized {
+    fn load_value(&mut self, source: &str) -> LuaResult<luars::LuaValue>;
+    fn load_value_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+    ) -> LuaResult<luars::LuaValue>;
+    #[cfg(feature = "sandbox")]
+    fn load_sandboxed_value(
+        &mut self,
+        source: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<luars::LuaValue>;
+    #[cfg(feature = "sandbox")]
+    fn load_sandboxed_value_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<luars::LuaValue>;
+    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function>;
+    fn call_function_value(&mut self, func: luars::LuaValue) -> LuaResult<Vec<luars::LuaValue>>;
+    async fn call_function_value_async(
+        &mut self,
+        func: luars::LuaValue,
+        args: Vec<luars::LuaValue>,
+    ) -> LuaResult<Vec<luars::LuaValue>>;
+    fn pack_multi<T: IntoLua>(
+        &mut self,
+        value: T,
+        api_name: &str,
+    ) -> LuaResult<Vec<luars::LuaValue>>;
+    fn unpack_multi_values<R: FromLuaMulti>(
+        &mut self,
+        values: Vec<luars::LuaValue>,
+        api_name: &str,
+    ) -> LuaResult<R>;
+    fn unpack_value<T: FromLua>(&mut self, value: luars::LuaValue, api_name: &str) -> LuaResult<T>;
+}
+
+/// Builder returned by `LuaApi::load`, similar to `mlua::Chunk`.
+pub struct Chunk<'lua, H: ChunkHost = Lua> {
+    lua: &'lua mut H,
     source: String,
     name: Option<String>,
     #[cfg(feature = "sandbox")]
     sandbox: Option<SandboxConfig>,
 }
 
-impl<'lua> Chunk<'lua> {
-    pub(crate) fn new(lua: &'lua mut Lua, source: &str) -> Self {
+impl<'lua, H: ChunkHost> Chunk<'lua, H> {
+    pub(crate) fn new(lua: &'lua mut H, source: &str) -> Self {
         Chunk {
             lua,
             source: source.to_owned(),
@@ -143,5 +185,167 @@ impl<'lua> Chunk<'lua> {
             .next()
             .unwrap_or_else(luars::LuaValue::nil);
         self.lua.unpack_value(value, "chunk.call1_async")
+    }
+}
+
+impl ChunkHost for Lua {
+    fn load_value(&mut self, source: &str) -> LuaResult<luars::LuaValue> {
+        Lua::load_value(self, source)
+    }
+
+    fn load_value_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+    ) -> LuaResult<luars::LuaValue> {
+        Lua::load_value_with_name(self, source, chunk_name)
+    }
+
+    #[cfg(feature = "sandbox")]
+    fn load_sandboxed_value(
+        &mut self,
+        source: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<luars::LuaValue> {
+        Lua::load_sandboxed_value(self, source, config)
+    }
+
+    #[cfg(feature = "sandbox")]
+    fn load_sandboxed_value_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<luars::LuaValue> {
+        Lua::load_sandboxed_value_with_name(self, source, chunk_name, config)
+    }
+
+    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function> {
+        Lua::value_to_function(self, value)
+    }
+
+    fn call_function_value(&mut self, func: luars::LuaValue) -> LuaResult<Vec<luars::LuaValue>> {
+        Lua::call_function_value(self, func)
+    }
+
+    async fn call_function_value_async(
+        &mut self,
+        func: luars::LuaValue,
+        args: Vec<luars::LuaValue>,
+    ) -> LuaResult<Vec<luars::LuaValue>> {
+        Lua::call_function_value_async(self, func, args).await
+    }
+
+    fn pack_multi<T: IntoLua>(
+        &mut self,
+        value: T,
+        api_name: &str,
+    ) -> LuaResult<Vec<luars::LuaValue>> {
+        Lua::pack_multi(self, value, api_name)
+    }
+
+    fn unpack_multi_values<R: FromLuaMulti>(
+        &mut self,
+        values: Vec<luars::LuaValue>,
+        api_name: &str,
+    ) -> LuaResult<R> {
+        Lua::unpack_multi_values(self, values, api_name)
+    }
+
+    fn unpack_value<T: FromLua>(&mut self, value: luars::LuaValue, api_name: &str) -> LuaResult<T> {
+        Lua::unpack_value(self, value, api_name)
+    }
+}
+
+impl ChunkHost for LuaState {
+    fn load_value(&mut self, source: &str) -> LuaResult<luars::LuaValue> {
+        LuaState::load(self, source)
+    }
+
+    fn load_value_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+    ) -> LuaResult<luars::LuaValue> {
+        LuaState::load_with_name(self, source, chunk_name)
+    }
+
+    #[cfg(feature = "sandbox")]
+    fn load_sandboxed_value(
+        &mut self,
+        source: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<luars::LuaValue> {
+        LuaState::load_sandboxed(self, source, config)
+    }
+
+    #[cfg(feature = "sandbox")]
+    fn load_sandboxed_value_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+        config: &SandboxConfig,
+    ) -> LuaResult<luars::LuaValue> {
+        LuaState::load_with_name_sandboxed(self, source, chunk_name, config)
+    }
+
+    fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function> {
+        let function = self
+            .to_function_ref(value)
+            .ok_or_else(|| self.error("compiled chunk is not a function".to_string()))?;
+        Ok(Function::new(function))
+    }
+
+    fn call_function_value(&mut self, func: luars::LuaValue) -> LuaResult<Vec<luars::LuaValue>> {
+        LuaState::call(self, func, vec![])
+    }
+
+    async fn call_function_value_async(
+        &mut self,
+        func: luars::LuaValue,
+        args: Vec<luars::LuaValue>,
+    ) -> LuaResult<Vec<luars::LuaValue>> {
+        LuaState::call_async(self, func, args).await
+    }
+
+    fn pack_multi<T: IntoLua>(
+        &mut self,
+        value: T,
+        api_name: &str,
+    ) -> LuaResult<Vec<luars::LuaValue>> {
+        let base_top = self.get_top();
+        let pushed = match value.into_lua(self) {
+            Ok(pushed) => pushed,
+            Err(err) => {
+                self.set_top_raw(base_top);
+                return Err(self.error(format!("{}: {}", api_name, err)));
+            }
+        };
+
+        let mut values = Vec::with_capacity(pushed);
+        for index in base_top..base_top + pushed {
+            let Some(value) = self.stack_get(index) else {
+                self.set_top_raw(base_top);
+                return Err(self.error(format!(
+                    "{}: internal error: failed to collect Lua values from stack",
+                    api_name
+                )));
+            };
+            values.push(value);
+        }
+        self.set_top_raw(base_top);
+        Ok(values)
+    }
+
+    fn unpack_multi_values<R: FromLuaMulti>(
+        &mut self,
+        values: Vec<luars::LuaValue>,
+        api_name: &str,
+    ) -> LuaResult<R> {
+        R::from_lua_multi(values, self).map_err(|msg| self.error(format!("{}: {}", api_name, msg)))
+    }
+
+    fn unpack_value<T: FromLua>(&mut self, value: luars::LuaValue, api_name: &str) -> LuaResult<T> {
+        T::from_lua(value, self).map_err(|msg| self.error(format!("{}: {}", api_name, msg)))
     }
 }

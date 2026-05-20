@@ -4,9 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn test_print() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         print("Hello, World!")
         print(1, 2, 3)
@@ -19,10 +19,10 @@ fn test_print() {
 
 #[test]
 fn test_type() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(nil) == "nil")
         assert(type(true) == "boolean")
@@ -39,10 +39,10 @@ fn test_type() {
 
 #[test]
 fn test_tonumber() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(tonumber("123") == 123)
         assert(tonumber("3.14") == 3.14)
@@ -57,10 +57,10 @@ fn test_tonumber() {
 
 #[test]
 fn test_tostring() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(tostring(123) == "123")
         assert(tostring(true) == "true")
@@ -75,11 +75,11 @@ fn test_tostring() {
 
 #[test]
 fn test_assert() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Successful assertion
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local a, b, c = assert(true, "test", 123)
         assert(a == true)
@@ -90,7 +90,7 @@ fn test_assert() {
     assert!(result.is_ok());
 
     // Failed assertion
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(false, "This should fail")
     "#,
@@ -100,10 +100,10 @@ fn test_assert() {
 
 #[test]
 fn test_error() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         error("Custom error message")
     "#,
@@ -114,10 +114,10 @@ fn test_error() {
 
 #[test]
 fn test_pcall() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- Successful call
         local ok, result = pcall(function() return 42 end)
@@ -136,10 +136,10 @@ fn test_pcall() {
 
 #[test]
 fn test_xpcall() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local handler_called = false
         local function handler(err)
@@ -161,10 +161,10 @@ fn test_xpcall() {
 
 #[test]
 fn test_select() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r##"
         assert(select("#", 1, 2, 3) == 3)
         local a, b = select(2, "a", "b", "c")
@@ -178,10 +178,10 @@ fn test_select() {
 
 #[test]
 fn test_ipairs() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {10, 20, 30}
         local sum = 0
@@ -200,10 +200,10 @@ fn test_ipairs() {
 
 #[test]
 fn test_pairs() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {a = 1, b = 2, c = 3}
         local count = 0
@@ -219,10 +219,10 @@ fn test_pairs() {
 
 #[test]
 fn test_next() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {a = 1, b = 2}
         local k1, v1 = next(t, nil)
@@ -236,10 +236,10 @@ fn test_next() {
 
 #[test]
 fn test_rawget_rawset() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {}
         rawset(t, "key", "value")
@@ -255,10 +255,10 @@ fn test_rawget_rawset() {
 
 #[test]
 fn test_rawlen() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(rawlen("hello") == 5)
         assert(rawlen({1,2,3}) == 3)
@@ -273,10 +273,10 @@ fn test_rawlen() {
 
 #[test]
 fn test_rawequal() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(rawequal(1, 1) == true)
         assert(rawequal(1, 2) == false)
@@ -292,10 +292,10 @@ fn test_rawequal() {
 
 #[test]
 fn test_getmetatable_setmetatable() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {}
         local mt = {__index = function() return 42 end}
@@ -312,10 +312,10 @@ fn test_getmetatable_setmetatable() {
 
 #[test]
 fn test_load() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local f = load("return 10 + 20")
         assert(type(f) == "function")
@@ -328,10 +328,10 @@ fn test_load() {
 
 #[test]
 fn test_string_dump_load_binary_constant() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local src = function()
             return string.char(255, 0, 65), 42
@@ -359,10 +359,10 @@ fn test_load_rejects_binary_when_bytecode_loading_disabled() {
         ..Default::default()
     };
 
-    let mut vm = LuaVM::new(option);
+    let mut vm = GlobalState::new(option);
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local src = function() return 42 end
         local dumped = string.dump(src)
@@ -379,8 +379,8 @@ fn test_load_rejects_binary_when_bytecode_loading_disabled() {
 
 #[test]
 fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
-    let mut builder_vm = LuaVM::new(SafeOption::default());
-    let chunk = builder_vm.compile("return 42").unwrap();
+    let mut builder_vm = GlobalState::new(SafeOption::default());
+    let chunk = builder_vm.main_state().compile_chunk("return 42").unwrap();
     let bytes = serialize_chunk(&chunk, false).unwrap();
 
     let unique = SystemTime::now()
@@ -398,10 +398,10 @@ fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
         ..Default::default()
     };
 
-    let mut vm = LuaVM::new(option);
+    let mut vm = GlobalState::new(option);
 
-    let err = vm.dofile(path.to_str().unwrap()).unwrap_err();
-    let message = vm.get_error_message(err);
+    let err = vm.main_state().dofile(path.to_str().unwrap()).unwrap_err();
+    let message = vm.main_state().get_error_message(err);
     assert!(message.contains("bytecode loading is disabled"));
 
     let _ = std::fs::remove_file(path);
@@ -409,10 +409,10 @@ fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
 
 #[test]
 fn test_warn() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         warn("This is a warning")
         warn("Multiple", " ", "parts")
@@ -424,10 +424,10 @@ fn test_warn() {
 
 #[test]
 fn test_collectgarbage() {
-    let mut vm = LuaVM::new(SafeOption::default());
+    let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         collectgarbage("collect")
         collectgarbage("count")

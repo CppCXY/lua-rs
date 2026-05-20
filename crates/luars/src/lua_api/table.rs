@@ -37,6 +37,25 @@ impl Table {
         self.inner.contains_key(key)
     }
 
+    /// Returns true if this table currently has a metatable.
+    #[inline]
+    pub fn has_metatable(&self) -> bool {
+        self.inner.has_metatable()
+    }
+
+    /// Get the table's metatable, if present.
+    #[inline]
+    pub fn get_metatable(&self) -> Option<Table> {
+        self.inner.get_metatable().map(Table::new)
+    }
+
+    /// Set or clear the table's metatable.
+    #[inline]
+    pub fn set_metatable(&self, metatable: Option<&Table>) -> LuaResult<()> {
+        self.inner
+            .set_metatable(metatable.map(|table| &table.inner))
+    }
+
     /// Set a field.
     #[inline]
     pub fn set(&self, key: impl IntoLua, value: impl IntoLua) -> LuaResult<()> {
@@ -137,21 +156,21 @@ impl Table {
     /// Construct a Lua table from a JSON value inside the provided Lua runtime.
     #[cfg(feature = "serde")]
     pub fn from_json_value(lua: &mut crate::Lua, json: &serde_json::Value) -> LuaResult<Self> {
-        let vm = lua.vm_mut();
+        let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json(json)
-            .map_err(|msg| vm.error(msg))?;
-        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
+            .map_err(|msg| vm.main_state().error(msg))?;
+        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
     }
 
     /// Construct a Lua table from a JSON string inside the provided Lua runtime.
     #[cfg(feature = "serde")]
     pub fn from_json_str(lua: &mut crate::Lua, json: &str) -> LuaResult<Self> {
-        let vm = lua.vm_mut();
+        let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json_string(json)
-            .map_err(|msg| vm.error(msg))?;
-        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
+            .map_err(|msg| vm.main_state().error(msg))?;
+        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
     }
 
     /// Construct a Lua table from any serde-serializable Rust value.
@@ -160,8 +179,8 @@ impl Table {
         let json = match serde_json::to_value(value) {
             Ok(json) => json,
             Err(err) => {
-                let vm = lua.vm_mut();
-                return Err(vm.error(err.to_string()));
+                let vm = lua.global_state_mut();
+                return Err(vm.main_state().error(err.to_string()));
             }
         };
         Self::from_json_value(lua, &json)

@@ -2,15 +2,15 @@
 mod tests {
     use std::cell::Cell;
 
-    #[cfg(feature = "sandbox")]
-    use crate::SandboxConfig;
     #[cfg(feature = "serde")]
     use crate::lua_api::Value;
     use crate::{
-        LuaUserData, SafeOption, Stdlib,
+        GlobalState, LuaApi, LuaAsyncApi, LuaUserData, LuaValueKind, SafeOption, Stdlib,
         lua_api::{Function, Lua, Table},
         lua_methods,
     };
+    #[cfg(feature = "sandbox")]
+    use crate::{LuaSandboxApi, SandboxConfig};
     #[cfg(feature = "serde")]
     use serde::{Deserialize, Serialize};
 
@@ -183,6 +183,93 @@ mod tests {
     }
 
     #[test]
+    fn high_level_metatable_helpers_work() {
+        let mut lua = Lua::new(SafeOption::default());
+
+        let defaults = lua.create_table_from([("answer", 42_i64)]).unwrap();
+        let metatable = lua.create_table().unwrap();
+        metatable.set("__index", defaults).unwrap();
+
+        let table = lua.create_table().unwrap();
+        assert!(!table.has_metatable());
+        lua.set_metatable(table.clone(), Some(&metatable)).unwrap();
+        assert!(table.has_metatable());
+        assert!(table.get_metatable().is_some());
+
+        lua.set_global_table("t", &table).unwrap();
+        let answer: i64 = lua.eval("return t.answer").unwrap();
+        assert_eq!(answer, 42);
+
+        let value = lua.pack(table.clone()).unwrap();
+        assert!(value.get_metatable().is_some());
+    }
+
+    #[test]
+    fn high_level_type_metatable_helpers_work() {
+        let mut lua = Lua::new(SafeOption::default());
+
+        let index = lua.create_table_from([("tag", "custom-string")]).unwrap();
+        let metatable = lua.create_table().unwrap();
+        metatable.set("__index", index).unwrap();
+
+        lua.set_type_metatable(LuaValueKind::String, Some(&metatable))
+            .unwrap();
+
+        let string_mt = lua.get_type_metatable(LuaValueKind::String).unwrap();
+        let index: Table = string_mt.get("__index").unwrap();
+        assert_eq!(index.get::<String>("tag").unwrap(), "custom-string");
+
+        let tag: String = lua.eval("return ('hello').tag").unwrap();
+        assert_eq!(tag, "custom-string");
+    }
+
+    #[test]
+    fn lua_api_registry_and_pointer_helpers_work() {
+        let mut lua = Lua::new(SafeOption::default());
+
+        lua.registry_set("answer", 42_i64).unwrap();
+        assert_eq!(lua.registry_get::<i64>("answer").unwrap(), Some(42));
+
+        lua.registry_seti(7, "slot-seven").unwrap();
+        assert_eq!(
+            lua.registry_geti::<String>(7).unwrap().as_deref(),
+            Some("slot-seven")
+        );
+
+        let registry = lua.registry();
+        assert_eq!(registry.get::<i64>("answer").unwrap(), 42);
+
+        let raw = 0x1234usize as *mut std::ffi::c_void;
+        let pointer = lua.create_lightuserdata(raw);
+        assert!(pointer.is_lightuserdata());
+        assert_eq!(pointer.as_lightuserdata(), Some(raw));
+        assert_eq!(pointer.to_pointer(), Some(raw.cast_const()));
+
+        let table = lua.create_table().unwrap();
+        let table_pointer = lua.to_pointer(table.clone()).unwrap();
+        assert!(table_pointer.is_some());
+        assert_ne!(table_pointer, Some(raw.cast_const()));
+    }
+
+    #[test]
+    fn lua_api_metatable_helpers_work() {
+        let mut lua = Lua::new(SafeOption::default());
+
+        let defaults = lua.create_table_from([("answer", 42_i64)]).unwrap();
+        let metatable = lua.create_table().unwrap();
+        metatable.set("__index", defaults).unwrap();
+
+        let table = lua.create_table().unwrap();
+        assert!(lua.get_metatable(table.clone()).unwrap().is_none());
+        lua.set_metatable(table.clone(), Some(&metatable)).unwrap();
+        assert!(lua.get_metatable(table.clone()).unwrap().is_some());
+
+        lua.set_global_table("t", &table).unwrap();
+        let answer: i64 = lua.eval("return t.answer").unwrap();
+        assert_eq!(answer, 42);
+    }
+
+    #[test]
     fn safe_value_handle_supports_string_and_downcasts() {
         let mut lua = Lua::new(SafeOption::default());
 
@@ -224,6 +311,21 @@ mod tests {
 
         assert_eq!(counter.get().unwrap().count, 42);
         assert_eq!(lua.load("return counter:get()").eval::<i64>().unwrap(), 42);
+    }
+
+    #[test]
+    fn lua_state_now_implements_lua_api() {
+        let mut vm = GlobalState::new(SafeOption::default());
+        let state = vm.main_state();
+
+        state.open_stdlib(Stdlib::All).unwrap();
+        LuaApi::set_global(state, "base", 40_i64).unwrap();
+
+        let answer: i64 = state.eval("return base + 2").unwrap();
+        assert_eq!(answer, 42);
+
+        let doubled: i64 = LuaApi::load(state, "return 21 * 2").eval().unwrap();
+        assert_eq!(doubled, 42);
     }
 
     #[test]
@@ -485,7 +587,7 @@ mod tests {
         lua.install_library(crate::lua_preload_module!("test_install_module" => |l| {
             let table = l.create_table(0, 1)?;
             let key = l.create_string("value")?;
-            l.vm_mut().raw_set(&table, key, crate::LuaValue::integer(42));
+            l.global_state_mut().raw_set(&table, key, crate::LuaValue::integer(42));
             l.push_value(table)?;
             Ok(1)
         }))
