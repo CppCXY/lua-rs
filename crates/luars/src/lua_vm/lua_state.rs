@@ -2306,7 +2306,10 @@ impl LuaState {
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<Vec<LuaValue>> {
-        let chunk = self.global_state_mut().compile(source)?;
+        let chunk = self
+            .global_state_mut()
+            .compile(source)
+            .map_err(|msg| self.compile_error(msg))?;
         let env = self.global_state_mut().create_sandbox_env(config)?;
         let limits = config.runtime_limits();
         self.with_sandbox_runtime_limits(limits, |state| {

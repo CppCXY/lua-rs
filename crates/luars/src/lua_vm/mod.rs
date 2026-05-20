@@ -482,6 +482,8 @@ impl GlobalState {
     pub(crate) fn prepare_loaded_chunk(&mut self, chunk: LuaProto) -> LuaResult<ProtoPtr> {
         #[cfg(feature = "shared-proto")]
         {
+            use crate::gc::share_proto;
+
             let proto = self.create_proto(chunk)?;
             share_proto(proto);
             Ok(proto)

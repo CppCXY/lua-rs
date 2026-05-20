@@ -245,6 +245,7 @@ fn test_load_marks_chunk_short_strings_shared() {
     vm.open_stdlib(Stdlib::All).unwrap();
 
     let func = vm
+        .main_state()
         .load("local key = '0123456789abcdefghijklmnopqr'; return key")
         .unwrap();
 
@@ -270,6 +271,7 @@ fn test_shared_proto_survives_vm_drop() {
         vm.open_stdlib(Stdlib::All).unwrap();
 
         let func = vm
+            .main_state()
             .load("local key = '0123456789abcdefghijklmnopqr'; return key")
             .unwrap();
 
