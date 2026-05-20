@@ -211,6 +211,33 @@ fn test_load_does_not_execute() {
     assert!(x.is_none());
 }
 
+#[test]
+fn test_explicit_close_of_default_output_restores_stdout() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let temp_path = test_temp_dir().join(format!(
+        "luars_io_close_restore_{}_{}.tmp",
+        std::process::id(),
+        crate::platform_time::unix_nanos()
+    ));
+    let temp_path = temp_path.to_string_lossy().replace('\\', "\\\\");
+
+    vm.main_state()
+        .execute(&format!(
+            "assert(io.output(\"{temp_path}\")); assert(io.close(io.output()))"
+        ))
+        .unwrap();
+
+    let func = vm.main_state().load("return io.write({})").unwrap();
+    let (ok, results) = vm.main_state().pcall(func, vec![]).unwrap();
+    assert!(!ok);
+    let err = results[0].as_str().unwrap();
+    assert!(err.contains("bad argument #1 to 'write'"), "{err}");
+
+    let _ = std::fs::remove_file(temp_path.replace("\\\\", "\\"));
+}
+
 #[cfg(feature = "shared-proto")]
 #[test]
 fn test_load_marks_chunk_short_strings_shared() {

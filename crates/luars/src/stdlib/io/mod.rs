@@ -173,6 +173,27 @@ fn get_default_output(l: &mut LuaState) -> LuaResult<LuaValue> {
     }
 }
 
+fn reset_default_output_to_stdout(l: &mut LuaState) -> LuaResult<()> {
+    let io_table = l
+        .get_global("io")?
+        .ok_or_else(|| l.error("io not found".to_string()))?;
+    let stdout_key = l.create_string("stdout")?;
+
+    let stdout_handle = if let Some(io_tbl) = io_table.as_table() {
+        io_tbl
+            .raw_get(&stdout_key)
+            .ok_or_else(|| l.error("stdout not found".to_string()))?
+    } else {
+        return Err(l.error("io table is not a table".to_string()));
+    };
+
+    let registry = l.global_state_mut().registry;
+    let output_key = l.create_string("_IO_output")?;
+    l.raw_set(&registry, output_key, stdout_handle);
+    l.global_state_mut().io_default_output = Some(stdout_handle);
+    Ok(())
+}
+
 /// Helper: get the default input file handle (fast path via VM cache, fallback to registry/io.stdin)
 #[inline]
 fn get_default_input(l: &mut LuaState) -> LuaResult<LuaValue> {
@@ -972,6 +993,11 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
     let file_arg = l.get_arg(1);
 
     let is_default_output = file_arg.is_none();
+    let restore_default_output = if let Some(file) = file_arg {
+        get_default_output(l).is_ok_and(|current| current == file)
+    } else {
+        false
+    };
     let file_val = if let Some(file) = file_arg {
         file
     } else {
@@ -979,7 +1005,7 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
         get_default_output(l)?
     };
 
-    if let Some(ud) = file_val.as_userdata_mut() {
+    let close_result = if let Some(ud) = file_val.as_userdata_mut() {
         let data = ud.get_data_mut();
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             // Cannot close already-closed files
@@ -993,35 +1019,42 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
                 l.push_value(msg)?;
                 return Ok(2);
             }
-            match lua_file.close_with_result() {
-                Ok(file::LuaFileCloseResult::Closed) => {
-                    // Invalidate cached handle if we closed the default output
-                    if is_default_output {
-                        l.global_state_mut().io_default_output = None;
-                    }
-                    l.push_value(LuaValue::boolean(true))?;
-                    return Ok(1);
-                }
-                Ok(file::LuaFileCloseResult::Process(status)) => {
-                    if is_default_output {
-                        l.global_state_mut().io_default_output = None;
-                    }
-                    if status.success {
-                        l.push_value(LuaValue::boolean(true))?;
-                    } else {
-                        l.push_value(LuaValue::nil())?;
-                    }
-                    let kind = l.create_string(status.kind)?;
-                    l.push_value(kind)?;
-                    l.push_value(LuaValue::integer(status.code as i64))?;
-                    return Ok(3);
-                }
-                Err(e) => return Err(l.error(format!("close error: {}", e))),
-            }
+            lua_file.close_with_result()
+        } else {
+            return Err(l.error("expected file handle".to_string()));
         }
-    }
+    } else {
+        return Err(l.error("expected file handle".to_string()));
+    };
 
-    Err(l.error("expected file handle".to_string()))
+    match close_result {
+        Ok(file::LuaFileCloseResult::Closed) => {
+            if is_default_output {
+                l.global_state_mut().io_default_output = None;
+            } else if restore_default_output {
+                reset_default_output_to_stdout(l)?;
+            }
+            l.push_value(LuaValue::boolean(true))?;
+            Ok(1)
+        }
+        Ok(file::LuaFileCloseResult::Process(status)) => {
+            if is_default_output {
+                l.global_state_mut().io_default_output = None;
+            } else if restore_default_output {
+                reset_default_output_to_stdout(l)?;
+            }
+            if status.success {
+                l.push_value(LuaValue::boolean(true))?;
+            } else {
+                l.push_value(LuaValue::nil())?;
+            }
+            let kind = l.create_string(status.kind)?;
+            l.push_value(kind)?;
+            l.push_value(LuaValue::integer(status.code as i64))?;
+            Ok(3)
+        }
+        Err(e) => Err(l.error(format!("close error: {}", e))),
+    }
 }
 
 /// io.popen(prog [, mode]) - Execute program and return file handle
