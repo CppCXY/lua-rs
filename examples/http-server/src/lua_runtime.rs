@@ -1,6 +1,8 @@
 //! High-level Lua runtime setup for the HTTP example.
 
-use luars::{Function, Lua, LuaResult, SafeOption, SandboxConfig, Stdlib};
+use luars::{
+    Function, Lua, LuaApi, LuaAsyncApi, LuaResult, LuaSandboxApi, SafeOption, SandboxConfig, Stdlib,
+};
 
 use crate::async_io;
 

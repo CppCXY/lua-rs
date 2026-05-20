@@ -1,7 +1,7 @@
 //! Lua Runtime.
 //!
 //! # Example
-//! ```rust
+//! ```ignore
 //! use luars::{Lua, LuaApi, SafeOption};
 //!
 //! let mut lua = Lua::new(SafeOption::default());

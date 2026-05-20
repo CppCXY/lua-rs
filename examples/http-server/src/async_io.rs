@@ -1,6 +1,6 @@
 //! Async host functions registered into the high-level Lua runtime.
 
-use luars::{Lua, LuaResult};
+use luars::{Lua, LuaApi, LuaResult};
 use std::time::Duration;
 
 /// Register all host functions needed by the HTTP example.

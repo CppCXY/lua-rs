@@ -1,4 +1,4 @@
-use luars::{Lua, LuaResult, LuaUserData, SafeOption, Stdlib, lua_methods};
+use luars::{Lua, LuaApi, LuaResult, LuaUserData, SafeOption, Stdlib, lua_methods};
 
 #[derive(LuaUserData)]
 struct Counter {
