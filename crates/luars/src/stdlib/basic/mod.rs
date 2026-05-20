@@ -154,7 +154,11 @@ fn lua_where(l: &LuaState, level: usize) -> String {
                 // Only extract info from Lua frames
                 if ci.is_lua() && !ci.chunk_ptr.is_null() {
                     let chunk = unsafe { &*ci.chunk_ptr };
-                    let source = chunk.source_name.as_deref().unwrap_or("[string]");
+                    let source = chunk
+                        .source_name
+                        .as_deref()
+                        .map(|name| name.strip_prefix('@').unwrap_or(name))
+                        .unwrap_or("[string]");
                     let line = if ci.pc > 0 && (ci.pc as usize - 1) < chunk.line_info.len() {
                         chunk.line_info[ci.pc as usize - 1] as usize
                     } else if !chunk.line_info.is_empty() {

@@ -727,10 +727,66 @@ fn test_error_message_available_after_recovery() {
         "expected message to contain 'specific error message', got: {}",
         msg
     );
+    assert!(
+        !msg.contains("stack traceback"),
+        "raw error message should not include traceback: {}",
+        msg
+    );
 
     // VM should be usable after getting the message
     let results = vm.main_state().execute("return true").unwrap();
     assert_eq!(results[0].as_boolean(), Some(true));
+}
+
+#[test]
+fn test_pcall_require_returns_raw_message_without_traceback() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let results = vm
+        .main_state()
+        .execute(
+            r#"
+        package.path = "?.lua;?/?"
+        package.cpath = "?.so;?/init"
+        local st, msg = pcall(require, "XXX")
+        return st, msg
+    "#,
+        )
+        .unwrap();
+
+    assert_eq!(results[0].as_boolean(), Some(false));
+    let msg = results[1].as_str().unwrap_or_default();
+    let expected = "module 'XXX' not found:\n\tno field package.preload['XXX']\n\tno file 'XXX.lua'\n\tno file 'XXX/XXX'\n\tno file 'XXX.so'\n\tno file 'XXX/init'";
+    assert_eq!(msg, expected);
+    assert!(!msg.contains("stack traceback"));
+}
+
+#[test]
+fn test_pcall_stripped_debug_info_uses_unknown_location_without_traceback() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let results = vm
+        .main_state()
+        .execute(
+            r#"
+        local f = function (a) return a + 1 end
+        f = assert(load(string.dump(f, true)))
+        local st, msg = pcall(f, {})
+        return st, msg
+    "#,
+        )
+        .unwrap();
+
+    assert_eq!(results[0].as_boolean(), Some(false));
+    let msg = results[1].as_str().unwrap_or_default();
+    assert!(
+        msg.starts_with("?:?: attempt to perform arithmetic on a table value"),
+        "expected stripped-debug-info message to start with '?:?:', got: {}",
+        msg
+    );
+    assert!(!msg.contains("stack traceback"));
 }
 
 #[test]

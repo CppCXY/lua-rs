@@ -803,27 +803,33 @@ impl LuaState {
         &mut self.open_upvalues_list
     }
 
-    /// Set the raw error message.
+    /// Set a runtime error message.
     ///
-    /// Source/line prefixes are composed later when a traceback or full error
-    /// string is generated so pcall-style error values keep the original message.
+    /// Mirrors Lua 5.5's luaG_runerror boundary: VM/runtime errors raised from
+    /// an active Lua frame carry source information immediately, while errors
+    /// raised from C/host frames keep their raw message.
     #[cold]
     #[inline(never)]
     pub fn error(&mut self, msg: String) -> LuaError {
-        self.error_msg = msg;
+        self.error_msg = self.add_runtime_error_info(msg);
         LuaError::RuntimeError
     }
 
     #[inline(always)]
-    pub(crate) fn nearest_lua_error_location(&self) -> Option<String> {
-        for frame_idx in (0..self.call_depth).rev() {
-            if let Some(ci) = self.get_frame(frame_idx)
-                && let Some(location) = Self::frame_error_location(ci)
-            {
-                return Some(location);
-            }
+    fn add_runtime_error_info(&self, msg: String) -> String {
+        let Some(ci) = self.current_frame() else {
+            return msg;
+        };
+
+        let Some(location) = Self::frame_error_location(ci) else {
+            return msg;
+        };
+
+        if msg.starts_with(&location) {
+            msg
+        } else {
+            format!("{}{}", location, msg)
         }
-        None
     }
 
     #[inline(always)]
@@ -2364,29 +2370,19 @@ impl LuaState {
     }
 
     pub fn get_error_message(&mut self, e: LuaError) -> String {
-        let message = self.get_error_msg(e);
-        match e {
-            LuaError::CompileError => message,
-            _ => self.render_error_message(&message),
-        }
+        self.get_error_msg(e)
     }
 
     pub fn get_full_error(&mut self, e: LuaError) -> LuaFullError {
-        let message = self.get_error_message(e);
+        let message = self.get_error_msg(e);
+        let message = match e {
+            LuaError::CompileError => message,
+            _ => self.render_error_message(&message),
+        };
         LuaFullError { kind: e, message }
     }
 
     fn render_error_message(&mut self, error_msg: &str) -> String {
-        let formatted_error_msg = if let Some(location) = self.nearest_lua_error_location() {
-            if error_msg.starts_with(&location) {
-                error_msg.to_string()
-            } else {
-                format!("{}{}", location, error_msg)
-            }
-        } else {
-            error_msg.to_string()
-        };
-
         let result = (|| -> LuaResult<String> {
             let debug_table = match self.get_global("debug")? {
                 Some(v) if v.is_table() => v,
@@ -2401,7 +2397,7 @@ impl LuaState {
                 }
             };
 
-            let msg_val = self.create_string(&formatted_error_msg)?;
+            let msg_val = self.create_string(error_msg)?;
             let level_val = LuaValue::integer(1);
             let (success, results) = self.pcall(traceback_func, vec![msg_val, level_val])?;
 
@@ -2417,7 +2413,7 @@ impl LuaState {
 
         match result {
             Ok(s) if !s.is_empty() => s,
-            _ => self.fallback_error_message(&formatted_error_msg),
+            _ => self.fallback_error_message(error_msg),
         }
     }
 
