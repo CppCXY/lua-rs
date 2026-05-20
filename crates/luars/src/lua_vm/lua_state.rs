@@ -27,8 +27,8 @@ use crate::lua_vm::{
 use crate::platform_time::unix_nanos;
 use crate::stdlib::debug::{objtypename, ordererror, pub_getfuncname};
 use crate::{
-    AsyncReturnValue, DebugInfo, FromLua, LuaAnyRef, LuaFullError, LuaFunctionRef, LuaProto,
-    LuaRegistrable, LuaTableRef, UserDataRef,
+    AsyncReturnValue, DebugInfo, FromLua, IntoLua, LuaAnyRef, LuaFullError, LuaFunctionRef,
+    LuaProto, LuaRegistrable, LuaTableRef, UserDataRef,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -1904,6 +1904,18 @@ impl LuaState {
         }
     }
 
+    /// Get and convert a specific argument using the regular `FromLua` bridge.
+    #[inline]
+    pub fn get_arg_as<T: FromLua>(&mut self, index: usize) -> LuaResult<Option<T>> {
+        let Some(value) = self.get_arg(index) else {
+            return Ok(None);
+        };
+
+        T::from_lua(value, self)
+            .map(Some)
+            .map_err(|msg| self.error(msg))
+    }
+
     /// Get the number of arguments for the current function call
     #[inline(always)]
     pub fn arg_count(&self) -> usize {
@@ -1917,6 +1929,40 @@ impl LuaState {
 
         // Arguments are from base to top-1
         top.saturating_sub(base)
+    }
+
+    /// Read a stack slot and convert it using the regular `FromLua` bridge.
+    #[inline]
+    pub fn stack_get_as<T: FromLua>(&mut self, index: usize) -> LuaResult<Option<T>> {
+        let Some(value) = self.stack_get(index) else {
+            return Ok(None);
+        };
+
+        T::from_lua(value, self)
+            .map(Some)
+            .map_err(|msg| self.error(msg))
+    }
+
+    /// Push one Rust value through the `IntoLua` bridge.
+    ///
+    /// This keeps the low-level stack API interoperable with high-level handle
+    /// types like `Table`, `LuaString`, `Function`, and `Value`.
+    #[inline]
+    pub fn push_into_value<T: IntoLua>(&mut self, value: T) -> LuaResult<()> {
+        let pushed = value.into_lua(self).map_err(|msg| self.error(msg))?;
+        if pushed != 1 {
+            return Err(self.error(format!(
+                "push_value expects exactly one Lua value, got {}",
+                pushed
+            )));
+        }
+        Ok(())
+    }
+
+    /// Push one or more Rust values through the `IntoLua` bridge.
+    #[inline]
+    pub fn push_multi<T: IntoLua>(&mut self, value: T) -> LuaResult<usize> {
+        value.into_lua(self).map_err(|msg| self.error(msg))
     }
 
     #[inline(always)]
@@ -2319,7 +2365,10 @@ impl LuaState {
 
     pub fn get_error_message(&mut self, e: LuaError) -> String {
         let message = self.get_error_msg(e);
-        self.render_error_message(&message)
+        match e {
+            LuaError::CompileError => message,
+            _ => self.render_error_message(&message),
+        }
     }
 
     pub fn get_full_error(&mut self, e: LuaError) -> LuaFullError {
@@ -2842,7 +2891,7 @@ impl LuaState {
         let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 self.stack_top = saved_stack_top;
                 return Ok((false, vec![err_str]));
@@ -2861,7 +2910,7 @@ impl LuaState {
             let base = func_idx + 1;
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack_top = saved_stack_top;
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
@@ -2919,7 +2968,7 @@ impl LuaState {
                     let result_err = if !err_obj.is_nil() {
                         err_obj
                     } else {
-                        let error_msg = self.get_error_msg(e);
+                        let error_msg = self.get_error_message(e);
                         self.create_string(&error_msg)?
                     };
                     self.stack_top = saved_stack_top;
@@ -2932,7 +2981,7 @@ impl LuaState {
             // pcall expects all return values
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack_top = saved_stack_top;
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
@@ -2974,7 +3023,7 @@ impl LuaState {
 
                     // Get error object BEFORE closing TBC (close may modify it)
                     let err_obj = std::mem::take(&mut self.error_object);
-                    let error_msg_str = self.get_error_msg(e);
+                    let error_msg_str = self.get_error_message(e);
 
                     // Get frame_base before popping frames
                     let frame_base = if self.call_depth() > initial_depth {
@@ -3079,7 +3128,7 @@ impl LuaState {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
                 // __call resolution failed - return error
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 self.stack_set(func_idx, err_str)?;
                 self.set_top(func_idx + 1)?;
@@ -3172,7 +3221,7 @@ impl LuaState {
 
                 // Get error object BEFORE closing TBC
                 let err_obj = std::mem::take(&mut self.error_object);
-                let error_msg_str = self.get_error_msg(e);
+                let error_msg_str = self.get_error_message(e);
 
                 // Get frame_base before popping frames
                 let frame_base = if self.call_depth() > initial_depth {
@@ -3251,7 +3300,7 @@ impl LuaState {
         let (actual_arg_count, ccmt_depth) = match resolve_call_chain(self, func_idx, arg_count) {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 self.stack_set(func_idx, err_str)?;
                 self.set_top(func_idx + 1)?;
@@ -3319,7 +3368,7 @@ impl LuaState {
             Err(e) => {
                 // Get error object BEFORE any cleanup
                 let err_obj = std::mem::take(&mut self.error_object);
-                let error_msg_str = self.get_error_msg(e);
+                let error_msg_str = self.get_error_message(e);
 
                 let mut err_value = if !err_obj.is_nil() {
                     err_obj
@@ -3516,7 +3565,7 @@ impl LuaState {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
                 self.set_top(handler_idx)?;
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
@@ -3535,7 +3584,7 @@ impl LuaState {
             let base = func_idx + 1;
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.set_top(handler_idx)?;
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
@@ -3585,7 +3634,7 @@ impl LuaState {
             let base = func_idx + 1;
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.set_top(handler_idx)?;
-                let error_msg = self.get_error_msg(e);
+                let error_msg = self.get_error_message(e);
                 let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
@@ -3655,7 +3704,7 @@ impl LuaState {
 
                 // Get error object BEFORE any cleanup
                 let err_obj = std::mem::take(&mut self.error_object);
-                let error_msg_str = self.get_error_msg(e);
+                let error_msg_str = self.get_error_message(e);
 
                 // Prepare error value for the handler
                 let mut err_value = if !err_obj.is_nil() {
