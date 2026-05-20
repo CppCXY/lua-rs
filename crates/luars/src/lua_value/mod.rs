@@ -568,7 +568,7 @@ impl CClosureFunction {
     }
 }
 
-/// Rust closure callback — can capture arbitrary Rust state via Box<dyn Fn>
+/// Rust closure callback — can capture arbitrary Rust state via `Box<dyn Fn>`
 pub type RustCallback = Box<dyn Fn(&mut crate::lua_vm::LuaState) -> crate::LuaResult<usize>>;
 
 /// RClosure: Rust closure function with optional LuaValue upvalues.

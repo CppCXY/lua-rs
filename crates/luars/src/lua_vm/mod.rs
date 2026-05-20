@@ -322,7 +322,7 @@ impl GlobalState {
         &self.main_state.as_ref().data
     }
 
-    /// Register a CFunction in package.preload[name].
+    /// Register a CFunction in package.preload\[name\].
     /// When Lua code calls `require("name")`, the preload searcher will
     /// find this function and call it as the module loader.
     pub fn register_preload(&mut self, name: &str, loader: CFunction) -> LuaResult<()> {
@@ -507,7 +507,7 @@ impl GlobalState {
 
     /// Register a synchronous Rust closure as a Lua global function.
     ///
-    /// This is the synchronous counterpart to [`register_async`](Self::register_async).
+    /// This is the synchronous counterpart to [`crate::LuaState::register_async`].
     ///
     /// # Example
     ///
@@ -1158,7 +1158,7 @@ impl GlobalState {
             .create_c_closure(&mut self.gc, func, upvalues)
     }
 
-    /// Create an RClosure from a Rust closure (Box<dyn Fn>).
+    /// Create an RClosure from a Rust closure (`Box<dyn Fn>`).
     /// Unlike CFunction (bare fn pointer), this can capture arbitrary Rust state.
     #[inline]
     pub fn create_rclosure(&mut self, func: RustCallback, upvalues: Vec<LuaValue>) -> CreateResult {
@@ -1325,10 +1325,11 @@ impl GlobalState {
 
     #[inline]
     pub fn get_error_message(&mut self, e: LuaError) -> String {
-        self.main_state().get_error_msg(e)
+        let message = self.main_state().get_error_msg(e);
+        self.generate_traceback(&message)
     }
 
-    /// Convert a [`LuaError`] into a [`LuaFullError`] that carries the error message.
+    /// Convert a [`LuaError`] into a [`crate::LuaFullError`] that carries the error message.
     ///
     /// This consumes the stored error message from the VM, so it should only be
     /// called once per error.

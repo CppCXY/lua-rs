@@ -1332,7 +1332,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
         vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
             // Get the actual error message from VM
 
-            vm.get_error_message(e)
+            l.get_error_msg(e)
         })
     };
 

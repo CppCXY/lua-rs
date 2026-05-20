@@ -1,4 +1,14 @@
-// Lua Runtime
+//! Lua Runtime.
+//!
+//! # Example
+//! ```rust
+//! use luars::{Lua, LuaApi, SafeOption};
+//!
+//! let mut lua = Lua::new(SafeOption::default());
+//! let value: i64 = lua.load("return 40 + 2").eval()?;
+//! assert_eq!(value, 42);
+//! # Ok::<(), luars::LuaError>(())
+//! ```
 
 // Allow the derive macro to use `luars::...` paths even inside this crate
 extern crate self as luars;

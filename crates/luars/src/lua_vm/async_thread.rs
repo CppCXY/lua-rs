@@ -625,10 +625,10 @@ end";
 /// A reusable async call handle that keeps a runner coroutine alive
 /// across multiple calls to the same Lua function.
 ///
-/// Created via [`LuaVM::create_async_call_handle`] or
-/// [`LuaVM::create_async_call_handle_global`].
+/// Created via [`crate::LuaState::create_async_call_handle`] or
+/// [`crate::LuaState::create_async_call_handle_global`].
 ///
-/// Unlike [`LuaVM::call_async`] which creates a new coroutine for each
+/// Unlike [`crate::LuaState::call_async`] which creates a new coroutine for each
 /// invocation, `AsyncCallHandle` reuses a single coroutine, reducing GC
 /// pressure and allocation overhead for repeated calls.
 ///

@@ -585,7 +585,7 @@ pub fn argerror(l: &mut LuaState, narg: usize, extramsg: &str) -> LuaError {
             let func_val = l.get_frame_func(ci_idx);
             let global_name = func_val.as_ref().and_then(|f| find_global_func_name(l, f));
             if let Some(name) = global_name {
-                return l.error_from_c(format!(
+                return l.error(format!(
                     "bad argument #{} to '{}' ({})",
                     narg, name, extramsg
                 ));
@@ -597,14 +597,14 @@ pub fn argerror(l: &mut LuaState, narg: usize, extramsg: &str) -> LuaError {
     if kind == "method" {
         let adjusted_narg = narg.wrapping_sub(1);
         if adjusted_narg == 0 {
-            return l.error_from_c(format!("calling '{}' on bad self ({})", fname, extramsg));
+            return l.error(format!("calling '{}' on bad self ({})", fname, extramsg));
         }
-        return l.error_from_c(format!(
+        return l.error(format!(
             "bad argument #{} to '{}' ({})",
             adjusted_narg, fname, extramsg
         ));
     }
-    l.error_from_c(format!(
+    l.error(format!(
         "bad argument #{} to '{}' ({})",
         narg, fname, extramsg
     ))

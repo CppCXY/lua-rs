@@ -106,7 +106,7 @@ pub struct LuaState {
 
     is_main: bool,
 
-    /// To-be-closed variable list - stack indices of variables marked with <close>
+    /// To-be-closed variable list - stack indices of variables marked with `<close>`
     /// Maintained in order: most recently added TBC variable is last
     /// When leaving a block (OpCode::Close), we iterate from the end and call __close
     /// on each TBC variable whose stack index >= the close level
@@ -676,7 +676,7 @@ impl LuaState {
     }
 
     /// Get a raw slice view of current frame arguments on the stack.
-    /// Returns args[0..n] where arg(1) = slice[0], arg(2) = slice[1], etc.
+    /// Returns args[0..n] where arg(1) = slice\[0\], arg(2) = slice\[1\], etc.
     #[inline]
     pub fn arg_slice(&self) -> &[LuaValue] {
         if self.call_depth == 0 {
@@ -803,26 +803,14 @@ impl LuaState {
         &mut self.open_upvalues_list
     }
 
-    /// Set error message (without traceback - will be added later by top-level handler)
+    /// Set the raw error message.
+    ///
+    /// Source/line prefixes are composed later when a traceback or full error
+    /// string is generated so pcall-style error values keep the original message.
     #[cold]
     #[inline(never)]
     pub fn error(&mut self, msg: String) -> LuaError {
-        let location = self
-            .current_frame()
-            .and_then(Self::frame_error_location)
-            .unwrap_or_default();
-        self.error_msg = format!("{}{}", location, msg);
-        LuaError::RuntimeError
-    }
-
-    /// Raise an error from a C function, finding the calling Lua frame for location.
-    /// Mirrors C Lua's luaL_error behavior: uses luaL_where(L,1) to get
-    /// location from the Lua frame that called the current C function.
-    #[cold]
-    #[inline(never)]
-    pub fn error_from_c(&mut self, msg: String) -> LuaError {
-        let location = self.nearest_lua_error_location().unwrap_or_default();
-        self.error_msg = format!("{}{}", location, msg);
+        self.error_msg = msg;
         LuaError::RuntimeError
     }
 
@@ -2095,7 +2083,7 @@ impl LuaState {
 
     /// Compile source code and return a callable function value with _ENV wired.
     ///
-    /// See [`LuaVM::load`] for details.
+    /// See [`LuaState::load`] for details.
     pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
         let global = self.global_state().global;
         let chunk = self.global_state_mut().compile(source)?;
@@ -2115,7 +2103,7 @@ impl LuaState {
 
     /// Compile source code with a chunk name and return a callable function value.
     ///
-    /// See [`LuaVM::load_with_name`] for details.
+    /// See [`LuaState::load_with_name`] for details.
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
         let global = self.global_state().global;
         let chunk = self
@@ -2144,7 +2132,7 @@ impl LuaState {
 
     /// Read a file, compile it, and execute it.
     ///
-    /// See [`LuaVM::dofile`] for details.
+    /// See [`LuaState::dofile`] for details.
     pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
         let proto = self.global_state_mut().load_proto_from_file(path)?;
         self.execute_chunk(proto)
@@ -2175,7 +2163,7 @@ impl LuaState {
 
     /// Register a synchronous Rust closure as a Lua global function.
     ///
-    /// See [`LuaVM::register_function`] for details.
+    /// See [`LuaState::register_function`] for details.
     pub fn register_function<F>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
@@ -2193,7 +2181,7 @@ impl LuaState {
 
     /// Register a typed async Rust closure as a Lua global function.
     ///
-    /// See [`LuaVM::register_async_typed`] for details.
+    /// See [`LuaState::register_async_typed`] for details.
     pub fn register_async_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: LuaTypedAsyncCallback<Args, R>,
@@ -2213,7 +2201,7 @@ impl LuaState {
 
     /// Register an async function as a Lua global (convenience proxy for `LuaVM::register_async`).
     ///
-    /// See [`LuaVM::register_async`] for details.
+    /// See [`LuaState::register_async`] for details.
     pub fn register_async<F, Fut>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: Fn(Vec<LuaValue>) -> Fut + 'static,
@@ -2724,7 +2712,7 @@ impl LuaState {
     /// Protected call - execute function with error handling (pcall semantics)
     /// Returns (success, results) where:
     /// - success=true, results=return values
-    /// - success=false, results=[error_message]
+    /// - success=false, results=\[error_message\]
     ///   Note: Yields are NOT caught by pcall - they propagate through
     pub fn pcall(
         &mut self,

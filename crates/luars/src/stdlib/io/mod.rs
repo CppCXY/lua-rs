@@ -221,7 +221,7 @@ fn io_write(l: &mut LuaState) -> LuaResult<usize> {
         let data = ud.get_data_mut();
         if let Some(lua_file) = data.downcast_mut::<LuaFile>() {
             if lua_file.is_closed() {
-                return Err(l.error_from_c("default output file is closed".to_string()));
+                return Err(l.error("default output file is closed".to_string()));
             }
             // Write all arguments
             let mut i = 1;
