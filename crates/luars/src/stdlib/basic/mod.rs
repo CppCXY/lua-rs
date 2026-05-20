@@ -72,7 +72,7 @@ fn lua_type(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    let cs = &l.vm_mut().const_strings;
+    let cs = &l.global_state_mut().const_strings;
     let result = match value.kind() {
         LuaValueKind::Nil => cs.str_nil,
         LuaValueKind::Boolean => cs.str_boolean,
@@ -396,12 +396,12 @@ fn lua_tostring(l: &mut LuaState) -> LuaResult<usize> {
 
     // Fast path: nil / bool — pre-interned strings
     if value.is_nil() {
-        let result_value = l.vm_mut().const_strings.str_nil;
+        let result_value = l.global_state_mut().const_strings.str_nil;
         l.push_value(result_value)?;
         return Ok(1);
     }
     if let Some(b) = value.as_boolean() {
-        let cs = &l.vm_mut().const_strings;
+        let cs = &l.global_state_mut().const_strings;
         let result_value = if b { cs.str_true } else { cs.str_false };
         l.push_value(result_value)?;
         return Ok(1);
@@ -547,7 +547,7 @@ fn lua_pairs(l: &mut LuaState) -> LuaResult<usize> {
 
     // Check for __pairs metamethod first (like C Lua 5.5)
     if val.is_table() || val.is_userdata() {
-        let pairs_key = l.vm_mut().const_strings.tm_pairs;
+        let pairs_key = l.global_state_mut().const_strings.tm_pairs;
         if let Some(mt) = get_metatable(l, &val)
             && let Some(mt_table) = mt.as_table()
             && let Some(mm) = mt_table.raw_get(&pairs_key)
@@ -848,7 +848,7 @@ fn lua_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Lua 5.5: luaC_checkfinalizer - register object if __gc is present
-    l.vm_mut().gc.check_finalizer(&table);
+    l.global_state_mut().gc.check_finalizer(&table);
     // Return the original table
     l.push_value(table)?;
     Ok(1)
@@ -953,7 +953,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
     // Check if GC is internally stopped (like Lua 5.5's gcstp & (GCSTPGC | GCSTPCLS))
     // GCSTPGC means GC is currently running (prevents reentrancy)
     // From lapi.c line 1174: if (g->gcstp & (GCSTPGC | GCSTPCLS)) return -1;
-    if l.vm_mut().gc.gc_stopem {
+    if l.global_state_mut().gc.gc_stopem {
         // Return nil (false) to indicate GC is currently running
         // In Lua 5.5, lua_gc returns -1, which is not returned to Lua code
         // The Lua manual says collectgarbage returns false if it cannot run
@@ -979,7 +979,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         "count" => {
-            let gc = &l.vm_mut().gc;
+            let gc = &l.global_state_mut().gc;
             let real_bytes = gc.total_bytes - gc.gc_debt; // gettotalbytes
             let kb = real_bytes.max(0) as f64 / 1024.0;
             l.push_value(LuaValue::number(kb))?;
@@ -987,7 +987,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         }
         "stop" => {
             // LUA_GCSTOP: Stop collector (like Lua's gcstp = GCSTPUSR)
-            l.vm_mut().gc.gc_stopped = true;
+            l.global_state_mut().gc.gc_stopped = true;
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
@@ -995,8 +995,8 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             // LUA_GCRESTART: Restart collector
             // From lapi.c: luaE_setdebt(g, 0); g->gcstp = 0;
             // Exactly like Lua 5.5: debt=0 will trigger GC on next check
-            l.vm_mut().gc.gc_stopped = false;
-            l.vm_mut().gc.set_debt(0);
+            l.global_state_mut().gc.gc_stopped = false;
+            l.global_state_mut().gc.set_debt(0);
             l.push_value(LuaValue::integer(0))?;
             Ok(1)
         }
@@ -1024,11 +1024,11 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let n_arg = arg2.and_then(|v| v.as_integer()).unwrap_or(0);
 
             // lu_byte oldstp = g->gcstp;
-            let old_stopped = l.vm_mut().gc.gc_stopped;
+            let old_stopped = l.global_state_mut().gc.gc_stopped;
 
             // l_mem n = cast(l_mem, va_arg(argp, size_t));
             // if (n <= 0) n = g->GCdebt;
-            let gc = &l.vm_mut().gc;
+            let gc = &l.global_state_mut().gc;
             let n = if n_arg <= 0 {
                 gc.gc_debt
             } else {
@@ -1039,12 +1039,12 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             let mut work = false;
 
             // g->gcstp = 0;
-            l.vm_mut().gc.gc_stopped = false;
+            l.global_state_mut().gc.gc_stopped = false;
 
             // luaE_setdebt(g, g->GCdebt - n);
             // Use saturating subtraction to avoid overflow
-            let old_debt = l.vm_mut().gc.gc_debt;
-            l.vm_mut().gc.set_debt(old_debt.saturating_sub(n));
+            let old_debt = l.global_state_mut().gc.gc_debt;
+            l.global_state_mut().gc.set_debt(old_debt.saturating_sub(n));
 
             // luaC_condGC(L, (void)0, work = 1);
             // Expands to: if (G(L)->GCdebt <= 0) { luaC_step(L); work = 1; }
@@ -1053,10 +1053,10 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             // g->gcstp = oldstp;
-            l.vm_mut().gc.gc_stopped = old_stopped;
+            l.global_state_mut().gc.gc_stopped = old_stopped;
 
             // if (work && g->gcstate == GCSpause) res = 1;
-            let completed = work && matches!(l.vm_mut().gc.gc_state, GcState::Pause);
+            let completed = work && matches!(l.global_state_mut().gc.gc_state, GcState::Pause);
             l.push_value(LuaValue::boolean(completed))?;
 
             Ok(1)
@@ -1064,13 +1064,13 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         "isrunning" => {
             // LUA_GCISRUNNING: Check if collector is running
             // GC is running if not stopped by user
-            let is_running = !l.vm_mut().gc.gc_stopped;
+            let is_running = !l.global_state_mut().gc.gc_stopped;
             l.push_value(LuaValue::boolean(is_running))?;
             Ok(1)
         }
         "generational" => {
             // LUA_GCGEN: Switch to generational mode (like luaC_changemode)
-            let old_mode = match l.vm_mut().gc.gc_kind {
+            let old_mode = match l.global_state_mut().gc.gc_kind {
                 GcKind::Inc => "incremental",
                 GcKind::GenMinor => "generational",
                 GcKind::GenMajor => "generational",
@@ -1084,7 +1084,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
         }
         "incremental" => {
             // LUA_GCINC: Switch to incremental mode (like luaC_changemode)
-            let old_mode = match l.vm_mut().gc.gc_kind {
+            let old_mode = match l.global_state_mut().gc.gc_kind {
                 GcKind::Inc => "incremental",
                 GcKind::GenMinor => "generational",
                 GcKind::GenMajor => "generational",
@@ -1136,7 +1136,7 @@ fn lua_collectgarbage(l: &mut LuaState) -> LuaResult<usize> {
 
             // Get old value and potentially set new value
             let old_value = {
-                let vm = l.vm_mut();
+                let vm = l.global_state_mut();
                 // Decode the compressed parameter to get actual percentage
                 let old = decode_param(vm.gc.gc_params[param_idx]);
 
@@ -1316,7 +1316,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
 
     let chunk_result = if is_binary {
         // Deserialize binary bytecode with VM to directly create strings
-        let vm = l.vm_mut();
+        let vm = l.global_state_mut();
         match chunk_serializer::deserialize_chunk_with_strings_vm(&code_bytes, vm) {
             Ok(chunk) => Ok(chunk),
             Err(e) => Err(format!("binary load error: {}", e)),
@@ -1328,7 +1328,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             Ok(s) => s,
             Err(_) => return Err(l.error("source is not valid UTF-8".to_string())),
         };
-        let vm = l.vm_mut();
+        let vm = l.global_state_mut();
         vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
             // Get the actual error message from VM
 
@@ -1351,7 +1351,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
                     let env_upvalue_id = if let Some(env) = env {
                         l.create_upvalue_closed(env)?
                     } else {
-                        let global = l.vm_mut().global;
+                        let global = l.global_state_mut().global;
                         l.create_upvalue_closed(global)?
                     };
                     upvalues.push(env_upvalue_id);
@@ -1363,7 +1363,7 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             let func = l
-                .vm_mut()
+                .global_state_mut()
                 .create_loaded_function(chunk, UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
@@ -1455,7 +1455,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(2);
     }
 
-    match l.vm_mut().load_proto_from_file(&filename_str) {
+    match l.global_state_mut().load_proto_from_file(&filename_str) {
         Ok(proto) => {
             let upvalue_count = proto.as_ref().data.upvalue_count;
             let mut upvalues = Vec::with_capacity(upvalue_count);
@@ -1465,7 +1465,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
                     let env_upvalue_id = if let Some(env) = env_arg {
                         l.create_upvalue_closed(env)?
                     } else {
-                        let global = l.vm_mut().global;
+                        let global = l.global_state_mut().global;
                         l.create_upvalue_closed(global)?
                     };
                     upvalues.push(env_upvalue_id);
@@ -1476,7 +1476,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             let func = l
-                .vm_mut()
+                .global_state_mut()
                 .create_function(proto, UpvalueStore::from_vec(upvalues))?;
             l.push_value(func)?;
             Ok(1)
@@ -1508,12 +1508,12 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
     };
 
-    let proto = l.vm_mut().load_proto_from_file(&filename_str)?;
-    let global = l.vm_mut().global;
+    let proto = l.global_state_mut().load_proto_from_file(&filename_str)?;
+    let global = l.global_state_mut().global;
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;
     let func = l
-        .vm_mut()
+        .global_state_mut()
         .create_function(proto, UpvalueStore::from_single(env_upvalue))?;
 
     // Use call_stack_based which supports yields (equivalent to lua_callk in C Lua).
@@ -1568,7 +1568,7 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Get current warn mode from registry ("off", "on", "store")
-    let registry = l.vm_mut().registry;
+    let registry = l.global_state_mut().registry;
     let mode_key = l.create_string("_WARN_MODE")?;
     let current_mode = l
         .raw_get(&registry, &mode_key)
@@ -1612,7 +1612,7 @@ fn lua_warn(l: &mut LuaState) -> LuaResult<usize> {
         "store" => {
             // Store in _WARN global
             let warn_val = l.create_string(&message)?;
-            l.vm_mut().set_global("_WARN", warn_val)?;
+            l.global_state_mut().set_global("_WARN", warn_val)?;
         }
         _ => {
             // "off" - do nothing

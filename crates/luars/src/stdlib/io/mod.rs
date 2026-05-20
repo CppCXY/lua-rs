@@ -61,10 +61,10 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
     let stdin_val = create_stdin(l)?;
     let stdin_key = l.create_string("stdin")?;
     l.raw_set(&io_table, stdin_key, stdin_val);
-    let registry = l.vm_mut().registry;
+    let registry = l.global_state_mut().registry;
     let input_key = l.create_string("_IO_input")?;
     l.raw_set(&registry, input_key, stdin_val);
-    l.vm_mut().io_default_input = Some(stdin_val);
+    l.global_state_mut().io_default_input = Some(stdin_val);
 
     // Create stdout
     let stdout_val = create_stdout(l)?;
@@ -72,7 +72,7 @@ pub fn init_io_streams(l: &mut LuaState) -> LuaResult<()> {
     l.raw_set(&io_table, stdout_key, stdout_val);
     let output_key = l.create_string("_IO_output")?;
     l.raw_set(&registry, output_key, stdout_val);
-    l.vm_mut().io_default_output = Some(stdout_val);
+    l.global_state_mut().io_default_output = Some(stdout_val);
 
     // Create stderr
     let stderr_val = create_stderr(l)?;
@@ -93,7 +93,7 @@ fn create_stdin(l: &mut LuaState) -> LuaResult<LuaValue> {
     }
 
     // Register userdata for __gc finalization if present
-    l.vm_mut().gc.check_finalizer(&userdata);
+    l.global_state_mut().gc.check_finalizer(&userdata);
 
     Ok(userdata)
 }
@@ -109,7 +109,7 @@ fn create_stdout(l: &mut LuaState) -> LuaResult<LuaValue> {
     }
 
     // Register userdata for __gc finalization if present
-    l.vm_mut().gc.check_finalizer(&userdata);
+    l.global_state_mut().gc.check_finalizer(&userdata);
 
     Ok(userdata)
 }
@@ -125,7 +125,7 @@ fn create_stderr(l: &mut LuaState) -> LuaResult<LuaValue> {
     }
 
     // Register userdata for __gc finalization if present
-    l.vm_mut().gc.check_finalizer(&userdata);
+    l.global_state_mut().gc.check_finalizer(&userdata);
 
     Ok(userdata)
 }
@@ -135,12 +135,12 @@ fn create_stderr(l: &mut LuaState) -> LuaResult<LuaValue> {
 #[inline]
 fn get_default_output(l: &mut LuaState) -> LuaResult<LuaValue> {
     // Fast path: use cached handle from VM
-    if let Some(handle) = l.vm_mut().io_default_output {
+    if let Some(handle) = l.global_state_mut().io_default_output {
         return Ok(handle);
     }
 
     // Slow path: look up from registry
-    let registry = l.vm_mut().registry;
+    let registry = l.global_state_mut().registry;
     let key = l.create_string("_IO_output")?;
 
     let output_file = if let Some(registry_table) = registry.as_table() {
@@ -151,7 +151,7 @@ fn get_default_output(l: &mut LuaState) -> LuaResult<LuaValue> {
 
     if let Some(output) = output_file {
         // Cache it for next time
-        l.vm_mut().io_default_output = Some(output);
+        l.global_state_mut().io_default_output = Some(output);
         return Ok(output);
     }
 
@@ -166,7 +166,7 @@ fn get_default_output(l: &mut LuaState) -> LuaResult<LuaValue> {
             .raw_get(&stdout_key)
             .ok_or_else(|| l.error("stdout not found".to_string()))?;
         // Cache it
-        l.vm_mut().io_default_output = Some(handle);
+        l.global_state_mut().io_default_output = Some(handle);
         Ok(handle)
     } else {
         Err(l.error("io table is not a table".to_string()))
@@ -177,12 +177,12 @@ fn get_default_output(l: &mut LuaState) -> LuaResult<LuaValue> {
 #[inline]
 fn get_default_input(l: &mut LuaState) -> LuaResult<LuaValue> {
     // Fast path: use cached handle from VM
-    if let Some(handle) = l.vm_mut().io_default_input {
+    if let Some(handle) = l.global_state_mut().io_default_input {
         return Ok(handle);
     }
 
     // Slow path: look up from registry
-    let registry = l.vm_mut().registry;
+    let registry = l.global_state_mut().registry;
     let key = l.create_string("_IO_input")?;
 
     let input_file = if let Some(registry_table) = registry.as_table() {
@@ -192,7 +192,7 @@ fn get_default_input(l: &mut LuaState) -> LuaResult<LuaValue> {
     };
 
     if let Some(input) = input_file {
-        l.vm_mut().io_default_input = Some(input);
+        l.global_state_mut().io_default_input = Some(input);
         return Ok(input);
     }
 
@@ -206,7 +206,7 @@ fn get_default_input(l: &mut LuaState) -> LuaResult<LuaValue> {
         let handle = io_tbl
             .raw_get(&stdin_key)
             .ok_or_else(|| l.error("stdin not found".to_string()))?;
-        l.vm_mut().io_default_input = Some(handle);
+        l.global_state_mut().io_default_input = Some(handle);
         Ok(handle)
     } else {
         Err(l.error("io table is not a table".to_string()))
@@ -469,7 +469,7 @@ fn io_open(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             // Register userdata for __gc finalization if present
-            l.vm_mut().gc.check_finalizer(&userdata);
+            l.global_state_mut().gc.check_finalizer(&userdata);
 
             l.push_value(userdata)?;
             Ok(1)
@@ -523,7 +523,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
                 if let Some(ud) = userdata.as_userdata_mut() {
                     ud.set_metatable(file_mt);
                 }
-                l.vm_mut().gc.check_finalizer(&userdata);
+                l.global_state_mut().gc.check_finalizer(&userdata);
 
                 let state_table = l.create_table(0, 4)?;
                 let file_key = l.create_string("file")?;
@@ -555,7 +555,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
 
                 // Create C closure for the iterator (captures state table as upvalue)
                 // This allows both `for l in io.lines(file)` and `local f = io.lines(file); f()` to work
-                let vm = l.vm_mut();
+                let vm = l.global_state_mut();
                 let iterator_closure = vm.create_c_closure(io_lines_next, vec![state_table])?;
 
                 // Return 4 values for generic for: iterator, state, nil, to-be-closed
@@ -569,7 +569,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
         }
     } else {
         // io.lines() or io.lines(nil, ...) - read from default input
-        let registry = l.vm_mut().registry;
+        let registry = l.global_state_mut().registry;
         let key = l.create_string("_IO_input")?;
         let input_file = if let Some(registry_table) = registry.as_table() {
             registry_table
@@ -609,7 +609,7 @@ fn io_lines(l: &mut LuaState) -> LuaResult<usize> {
         }
 
         // Create C closure for the iterator
-        let vm = l.vm_mut();
+        let vm = l.global_state_mut();
         let iterator_closure = vm.create_c_closure(io_lines_next, vec![state_table])?;
 
         // Return 4 values for generic for: iterator, state, nil, nil
@@ -793,13 +793,13 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
                 ud.set_metatable(file_mt);
             }
 
-            l.vm_mut().gc.check_finalizer(&userdata);
+            l.global_state_mut().gc.check_finalizer(&userdata);
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry;
+            let registry = l.global_state_mut().registry;
             let key = l.create_string("_IO_input")?;
             l.raw_set(&registry, key, userdata);
-            l.vm_mut().io_default_input = Some(userdata);
+            l.global_state_mut().io_default_input = Some(userdata);
         } else if arg_val.is_userdata() {
             // Verify it's a valid file handle
             if let Some(ud) = arg_val.as_userdata_mut() {
@@ -810,10 +810,10 @@ fn io_input(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry;
+            let registry = l.global_state_mut().registry;
             let key = l.create_string("_IO_input")?;
             l.raw_set(&registry, key, arg_val);
-            l.vm_mut().io_default_input = Some(arg_val);
+            l.global_state_mut().io_default_input = Some(arg_val);
         } else {
             return Err(crate::stdlib::debug::arg_typeerror(l, 1, "FILE*", &arg_val));
         }
@@ -855,13 +855,13 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
                 ud.set_metatable(file_mt);
             }
 
-            l.vm_mut().gc.check_finalizer(&userdata);
+            l.global_state_mut().gc.check_finalizer(&userdata);
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry;
+            let registry = l.global_state_mut().registry;
             let key = l.create_string("_IO_output")?;
             l.raw_set(&registry, key, userdata);
-            l.vm_mut().io_default_output = Some(userdata);
+            l.global_state_mut().io_default_output = Some(userdata);
         } else if arg_val.is_userdata() {
             // Verify it's a valid file handle
             if let Some(ud) = arg_val.as_userdata_mut() {
@@ -872,10 +872,10 @@ fn io_output(l: &mut LuaState) -> LuaResult<usize> {
             }
 
             // Store in registry and update cache
-            let registry = l.vm_mut().registry;
+            let registry = l.global_state_mut().registry;
             let key = l.create_string("_IO_output")?;
             l.raw_set(&registry, key, arg_val);
-            l.vm_mut().io_default_output = Some(arg_val);
+            l.global_state_mut().io_default_output = Some(arg_val);
         } else {
             return Err(
                 l.error("bad argument #1 to 'output' (string or file expected)".to_string())
@@ -997,14 +997,14 @@ fn io_close(l: &mut LuaState) -> LuaResult<usize> {
                 Ok(file::LuaFileCloseResult::Closed) => {
                     // Invalidate cached handle if we closed the default output
                     if is_default_output {
-                        l.vm_mut().io_default_output = None;
+                        l.global_state_mut().io_default_output = None;
                     }
                     l.push_value(LuaValue::boolean(true))?;
                     return Ok(1);
                 }
                 Ok(file::LuaFileCloseResult::Process(status)) => {
                     if is_default_output {
-                        l.vm_mut().io_default_output = None;
+                        l.global_state_mut().io_default_output = None;
                     }
                     if status.success {
                         l.push_value(LuaValue::boolean(true))?;
@@ -1048,7 +1048,7 @@ fn io_popen(l: &mut LuaState) -> LuaResult<usize> {
                 ud.set_metatable(file_mt);
             }
 
-            l.vm_mut().gc.check_finalizer(&userdata);
+            l.global_state_mut().gc.check_finalizer(&userdata);
             l.push_value(userdata)?;
             Ok(1)
         }

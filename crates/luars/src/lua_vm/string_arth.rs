@@ -62,7 +62,7 @@ pub fn string_arith_bin(
     if !v2.is_string()
         && let Some(mt) = execute::get_metatable(l, &v2)
     {
-        let tm_key = l.vm_mut().const_strings.get_tm_value(tm_kind);
+        let tm_key = l.global_state_mut().const_strings.get_tm_value(tm_kind);
         if let Some(mm) = mt.as_table().and_then(|t| t.raw_get(&tm_key)) {
             // Call the other operand's metamethod with original args
             let results = l.call_function(mm, vec![v1, v2])?;

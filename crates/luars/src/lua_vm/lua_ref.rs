@@ -10,7 +10,7 @@ use crate::lua_value::LuaValue;
 use crate::lua_value::LuaValueKind;
 use crate::lua_value::lua_convert::collect_into_lua_values;
 use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
-use crate::lua_vm::{GlobalState, VmHandle};
+use crate::lua_vm::{GlobalState, GlobalStateHandle};
 
 /// A reference ID in the registry.
 /// Similar to Lua's luaL_ref return value.
@@ -187,14 +187,14 @@ impl std::fmt::Debug for LuaRefValue {
 /// `!Send + !Sync` by design — Lua VM is single-threaded.
 struct RefInner {
     ref_id: RefId,
-    vm: VmHandle,
+    vm: GlobalStateHandle,
     /// Makes RefInner !Send + !Sync
     _marker: PhantomData<*const ()>,
 }
 
 impl RefInner {
     /// Create a new RefInner. The value must already be stored in the registry.
-    fn new(ref_id: RefId, vm: VmHandle) -> Self {
+    fn new(ref_id: RefId, vm: GlobalStateHandle) -> Self {
         RefInner {
             ref_id,
             vm,
@@ -298,7 +298,7 @@ pub struct LuaTableRef {
 impl LuaTableRef {
     /// Create from an already-registered ref id. The caller guarantees the
     /// value at `ref_id` is a table.
-    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: GlobalStateHandle) -> Self {
         LuaTableRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -500,7 +500,7 @@ pub struct LuaFunctionRef {
 }
 
 impl LuaFunctionRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: GlobalStateHandle) -> Self {
         LuaFunctionRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -585,7 +585,7 @@ pub struct LuaStringRef {
 }
 
 impl LuaStringRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: GlobalStateHandle) -> Self {
         LuaStringRef {
             inner: RefInner::new(ref_id, vm),
         }
@@ -676,7 +676,7 @@ pub struct UserDataRef<T: 'static> {
 }
 
 impl<T: 'static> UserDataRef<T> {
-    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: GlobalStateHandle) -> Self {
         UserDataRef {
             inner: RefInner::new(ref_id, vm),
             _marker: PhantomData,
@@ -771,9 +771,9 @@ impl<T: 'static> FromLua for UserDataRef<T> {
             ));
         }
 
-        let vm = state.vm_mut();
+        let vm = state.global_state_mut();
         let ref_id = store_in_registry(vm, value);
-        Ok(UserDataRef::from_raw(ref_id, state.vm_handle()))
+        Ok(UserDataRef::from_raw(ref_id, state.global_state_handle()))
     }
 }
 
@@ -830,7 +830,7 @@ pub struct LuaAnyRef {
 }
 
 impl LuaAnyRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: VmHandle) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, vm: GlobalStateHandle) -> Self {
         LuaAnyRef {
             inner: RefInner::new(ref_id, vm),
         }

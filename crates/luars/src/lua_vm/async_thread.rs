@@ -30,7 +30,7 @@ use std::task::{Context, Poll};
 use crate::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue};
 use crate::lua_vm::lua_ref::RefId;
-use crate::lua_vm::{GlobalState, LuaResult, VmHandle};
+use crate::lua_vm::{GlobalState, GlobalStateHandle, LuaResult};
 
 // ============ AsyncReturnValue ============
 
@@ -395,7 +395,7 @@ pub struct AsyncThread {
 
     /// Handle to the owning global state (for resume and registry access).
     /// Not `Send`/`Sync` — this is intentional.
-    vm: VmHandle,
+    vm: GlobalStateHandle,
 
     /// Registry reference ID that keeps the thread alive against GC.
     /// Released on drop.
@@ -419,7 +419,7 @@ impl AsyncThread {
     /// - `thread_val` — A `LuaValue` of type Thread (from `create_thread`)
     /// - `vm` — Handle to the owning global state
     /// - `args` — Arguments passed to the coroutine's first resume
-    pub(crate) fn new(thread_val: LuaValue, vm: VmHandle, args: Vec<LuaValue>) -> Self {
+    pub(crate) fn new(thread_val: LuaValue, vm: GlobalStateHandle, args: Vec<LuaValue>) -> Self {
         // Root the thread in the registry so GC won't collect it
         let ref_id = {
             let vm_ref = vm.as_mut();
@@ -650,7 +650,7 @@ pub struct AsyncCallHandle {
     /// The runner coroutine thread value.
     thread_val: LuaValue,
     /// Handle to the owning global state.
-    vm: VmHandle,
+    vm: GlobalStateHandle,
     /// Registry reference that keeps the thread alive against GC.
     ref_id: RefId,
     /// Whether the handle is still usable.
@@ -662,7 +662,11 @@ impl AsyncCallHandle {
     ///
     /// The target function is passed to the runner coroutine on the first
     /// resume. After initialization, the handle is ready for [`call`](Self::call).
-    pub(crate) fn new(thread_val: LuaValue, vm: VmHandle, func: LuaValue) -> LuaResult<Self> {
+    pub(crate) fn new(
+        thread_val: LuaValue,
+        vm: GlobalStateHandle,
+        func: LuaValue,
+    ) -> LuaResult<Self> {
         let ref_id = {
             let vm_ref = vm.as_mut();
             let lua_ref = vm_ref.create_ref(thread_val);

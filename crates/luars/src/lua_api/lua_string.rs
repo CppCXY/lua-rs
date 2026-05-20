@@ -54,7 +54,7 @@ impl FromLua for LuaString {
     fn from_lua(value: LuaValue, state: &mut LuaState) -> Result<Self, String> {
         let actual = value.type_name();
         let string = state
-            .vm_mut()
+            .global_state_mut()
             .to_string_ref(value)
             .ok_or_else(|| format!("expected string, got {}", actual))?;
         Ok(LuaString::new(string))

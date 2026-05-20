@@ -525,7 +525,7 @@ pub fn current_func_name_with_kind(l: &LuaState) -> Option<(&'static str, String
 /// Returns e.g. "table.sort", "string.sub", "math.sin", etc.
 fn find_global_func_name(l: &LuaState, target: &LuaValue) -> Option<String> {
     // Get _LOADED from registry by iterating registry entries
-    let vm = l.vm();
+    let vm = l.global_state();
     let registry_table = vm.registry.as_table()?;
     let mut loaded: Option<LuaValue> = None;
     for (key, val) in registry_table.iter_all() {
@@ -749,7 +749,7 @@ fn debug_lib_init(l: &mut LuaState) -> LuaResult<()> {
         hook_tbl.set_metatable(Some(meta));
     }
     // Store in registry as _HOOKKEY
-    let reg = l.vm_mut().registry;
+    let reg = l.global_state_mut().registry;
     let hook_key = l.create_string("_HOOKKEY")?;
     l.raw_set(&reg, hook_key, hook_table);
     Ok(())
@@ -1105,11 +1105,11 @@ fn debug_setmetatable(l: &mut LuaState) -> LuaResult<usize> {
     } else {
         // For basic types (number, string, boolean), set the global type metatable
         let kind = value.kind();
-        l.vm_mut().set_basic_metatable(kind, mt_val);
+        l.global_state_mut().set_basic_metatable(kind, mt_val);
     }
 
     // Register for finalization if __gc is present
-    l.vm_mut().gc.check_finalizer(&value);
+    l.global_state_mut().gc.check_finalizer(&value);
 
     l.push_value(value)?;
     Ok(1)
@@ -1235,7 +1235,7 @@ fn debug_sethook(l: &mut LuaState) -> LuaResult<usize> {
 
 /// debug.getregistry() - Return the registry table
 fn debug_getregistry(l: &mut LuaState) -> LuaResult<usize> {
-    let registry = l.vm_mut().registry;
+    let registry = l.global_state_mut().registry;
     l.push_value(registry)?;
     Ok(1)
 }

@@ -411,12 +411,12 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
     match argc {
         0 => {
             // No arguments: return float in [0, 1)
-            let r = l.vm_mut().rng.next_float();
+            let r = l.global_state_mut().rng.next_float();
             l.push_value(LuaValue::float(r))?;
             Ok(1)
         }
         1 => {
-            let rv = l.vm_mut().rng.next_rand();
+            let rv = l.global_state_mut().rng.next_rand();
             let up = l
                 .get_arg(1)
                 .ok_or_else(|| {
@@ -440,7 +440,7 @@ fn math_random(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         _ => {
-            let rv = l.vm_mut().rng.next_rand();
+            let rv = l.global_state_mut().rng.next_rand();
             let low = l
                 .get_arg(1)
                 .ok_or_else(|| {
@@ -498,7 +498,7 @@ fn math_randomseed(l: &mut LuaState) -> LuaResult<usize> {
         (seed1, seed2)
     };
 
-    l.vm_mut().rng = LuaRng::from_seed(n1, n2);
+    l.global_state_mut().rng = LuaRng::from_seed(n1, n2);
 
     // Return two seed values
     l.push_value(LuaValue::integer(n1))?;
@@ -595,7 +595,7 @@ fn math_type(l: &mut LuaState) -> LuaResult<usize> {
         .get_arg(1)
         .ok_or_else(|| l.error("bad argument #1 to 'type' (value expected)".to_string()))?;
 
-    let cs = &l.vm_mut().const_strings;
+    let cs = &l.global_state_mut().const_strings;
     let result = match val.kind() {
         LuaValueKind::Integer => cs.str_integer,
         LuaValueKind::Float => cs.str_float,

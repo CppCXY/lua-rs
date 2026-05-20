@@ -26,7 +26,7 @@ pub fn create_os_lib() -> LibraryModule {
 
 fn os_clock(l: &mut LuaState) -> LuaResult<usize> {
     // Use VM's start_time for consistent measurements
-    let elapsed = l.vm_mut().start_time.elapsed_secs_f64();
+    let elapsed = l.global_state_mut().start_time.elapsed_secs_f64();
     l.push_value(LuaValue::float(elapsed))?;
     Ok(1)
 }

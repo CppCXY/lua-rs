@@ -573,7 +573,7 @@ pub(crate) fn get_metamethod_from_meta_ptr(
         return None;
     }
 
-    let vm = lua_state.vm_mut();
+    let vm = lua_state.global_state_mut();
     let event_key = vm.const_strings.get_tm_value(tm_kind);
     let result = mt.impl_table.get_shortstr_fast(&event_key);
 
@@ -780,7 +780,9 @@ pub fn get_metatable(lua_state: &mut LuaState, value: &LuaValue) -> Option<LuaVa
         return ud.get_metatable();
     }
     // Basic types: use global type metatable
-    lua_state.vm_mut().get_basic_metatable(value.kind())
+    lua_state
+        .global_state_mut()
+        .get_basic_metatable(value.kind())
 }
 
 /// Finish a C frame left on the call stack after yield-resume.
@@ -1539,7 +1541,10 @@ pub fn self_shortstr_index_chain_fast(
 
     debug_assert!(key.is_short_string());
 
-    let event_key = lua_state.vm_mut().const_strings.get_tm_value(TmKind::Index);
+    let event_key = lua_state
+        .global_state_mut()
+        .const_strings
+        .get_tm_value(TmKind::Index);
     let mut current = *obj;
 
     for _ in 0..MAXTAGLOOP {
@@ -1610,7 +1615,7 @@ fn finishget_to_reg_inner(
                 setobj2s(lua_state, dest_reg, &LuaValue::nil());
                 return Ok(());
             }
-            let vm = lua_state.vm_mut();
+            let vm = lua_state.global_state_mut();
             let event_key = vm.const_strings.get_tm_value(TmKind::Index);
             match mt.impl_table.get_shortstr_fast(&event_key) {
                 Some(v) => v,

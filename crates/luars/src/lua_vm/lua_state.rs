@@ -19,8 +19,8 @@ use crate::lua_vm::safe_option::{LuaSafeState, SafeOption};
 #[cfg(feature = "sandbox")]
 use crate::lua_vm::sandbox::{SANDBOX_TIMEOUT_CHECK_INTERVAL, SandboxConfig, SandboxRuntimeLimits};
 use crate::lua_vm::{
-    CallInfo, GlobalState, LuaError, LuaResult, LuaTypedAsyncCallback, LuaTypedCallback, TmKind,
-    VmHandle, get_metamethod_event,
+    CallInfo, GlobalState, GlobalStateHandle, LuaError, LuaResult, LuaTypedAsyncCallback,
+    LuaTypedCallback, TmKind, get_metamethod_event,
 };
 #[cfg(feature = "sandbox")]
 use crate::platform_time::unix_nanos;
@@ -33,7 +33,7 @@ use crate::{
 /// Execution state for a Lua thread/coroutine
 /// This is separate from LuaVM (global_State) to support multiple execution contexts
 pub struct LuaState {
-    vm: VmHandle,
+    global_state: GlobalStateHandle,
 
     thread: ThreadPtr,
     /// Data stack - stores all values (registers, temporaries, function arguments)
@@ -149,12 +149,12 @@ impl LuaState {
     /// Create a new execution state
     pub(crate) fn new(
         call_stack_size: usize,
-        vm: VmHandle,
+        global_state: GlobalStateHandle,
         is_main: bool,
         safe_option: SafeOption,
     ) -> Self {
         Self {
-            vm,
+            global_state,
             stack: Vec::with_capacity(BASIC_STACK_SIZE),
             thread: ThreadPtr::null(),
             stack_top: 0, // Start with empty stack (Lua's L->top.p = L->stack)
@@ -196,7 +196,7 @@ impl LuaState {
 
     /// Remove a dead string from the intern map (called by GC during sweep)
     pub(crate) fn remove_dead_string(&mut self, str_ptr: StringPtr) {
-        self.vm_mut().object_allocator.remove_str(str_ptr);
+        self.global_state_mut().object_allocator.remove_str(str_ptr);
     }
 
     /// Get current call frame (equivalent to Lua's L->ci)
@@ -1475,7 +1475,7 @@ impl LuaState {
             let ptr = LuaValuePtr {
                 ptr: unsafe { self.stack.as_mut_ptr().add(stack_index) },
             };
-            let vm = self.vm_mut();
+            let vm = self.global_state_mut();
             vm.create_upvalue_open(stack_index, ptr)?
         };
 
@@ -1768,18 +1768,18 @@ impl LuaState {
     }
 
     #[inline(always)]
-    pub(crate) fn vm(&self) -> &GlobalState {
-        self.vm.as_ref()
+    pub(crate) fn global_state(&self) -> &GlobalState {
+        self.global_state.as_ref()
     }
 
     #[inline(always)]
-    pub(crate) fn vm_mut(&mut self) -> &mut GlobalState {
-        self.vm.as_mut()
+    pub(crate) fn global_state_mut(&mut self) -> &mut GlobalState {
+        self.global_state.as_mut()
     }
 
     #[inline(always)]
-    pub(crate) fn vm_handle(&self) -> VmHandle {
-        self.vm
+    pub(crate) fn global_state_handle(&self) -> GlobalStateHandle {
+        self.global_state
     }
 
     #[inline(always)]
@@ -1796,7 +1796,7 @@ impl LuaState {
     pub(crate) fn inc_n_ccalls(&mut self) -> LuaResult<()> {
         let max_c_stack_depth = self.safe_state.max_c_stack_depth;
         let base_c_stack_depth = self.safe_state.base_c_stack_depth;
-        let vm = self.vm_mut();
+        let vm = self.global_state_mut();
         vm.n_ccalls += 1;
         if vm.n_ccalls >= max_c_stack_depth {
             vm.n_ccalls -= 1;
@@ -1813,7 +1813,7 @@ impl LuaState {
     /// Decrement shared n_ccalls after returning from a recursive `lua_execute`.
     #[inline(always)]
     pub(crate) fn dec_n_ccalls(&self) {
-        self.vm.as_mut().n_ccalls -= 1;
+        self.global_state.as_mut().n_ccalls -= 1;
     }
 
     // ===== Call Frame Management =====
@@ -1972,18 +1972,18 @@ impl LuaState {
     /// Create table
     #[inline(always)]
     pub fn create_table(&mut self, narr: usize, nrec: usize) -> CreateResult {
-        self.vm_mut().create_table(narr, nrec)
+        self.global_state_mut().create_table(narr, nrec)
     }
 
     /// Create function closure
     #[inline]
     pub fn create_function(&mut self, chunk: ProtoPtr, upvalues: UpvalueStore) -> CreateResult {
-        self.vm_mut().create_function(chunk, upvalues)
+        self.global_state_mut().create_function(chunk, upvalues)
     }
 
     #[inline]
     pub fn create_upvalue_closed(&mut self, value: LuaValue) -> LuaResult<UpvaluePtr> {
-        self.vm_mut().create_upvalue_closed(value)
+        self.global_state_mut().create_upvalue_closed(value)
     }
 
     #[inline]
@@ -1992,34 +1992,35 @@ impl LuaState {
         stack_index: usize,
         stack_ptr: LuaValuePtr,
     ) -> LuaResult<UpvaluePtr> {
-        self.vm_mut().create_upvalue_open(stack_index, stack_ptr)
+        self.global_state_mut()
+            .create_upvalue_open(stack_index, stack_ptr)
     }
 
     /// Create/intern string (automatically handles short string interning)
     #[inline]
     pub fn create_string(&mut self, s: &str) -> CreateResult {
-        self.vm_mut().create_string(s)
+        self.global_state_mut().create_string(s)
     }
 
     #[inline]
     pub fn create_string_owned(&mut self, s: String) -> CreateResult {
-        self.vm_mut().create_string_owned(s)
+        self.global_state_mut().create_string_owned(s)
     }
 
     #[inline]
     pub fn create_binary(&mut self, data: Vec<u8>) -> CreateResult {
-        self.vm_mut().create_binary(data)
+        self.global_state_mut().create_binary(data)
     }
 
     #[inline]
     pub fn create_bytes(&mut self, bytes: &[u8]) -> CreateResult {
-        self.vm_mut().create_bytes(bytes)
+        self.global_state_mut().create_bytes(bytes)
     }
 
     /// Create userdata
     #[inline]
     pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
-        self.vm_mut().create_userdata(data)
+        self.global_state_mut().create_userdata(data)
     }
 
     /// Create a GC-managed userdata that **borrows** an external Rust object.
@@ -2048,7 +2049,7 @@ impl LuaState {
         reference: &mut T,
     ) -> CreateResult {
         let ud = unsafe { LuaUserdata::from_ref(reference) };
-        self.vm_mut().create_userdata(ud)
+        self.global_state_mut().create_userdata(ud)
     }
 
     /// Create an RClosure from any `Fn(&mut LuaState) -> LuaResult<usize> + 'static`.
@@ -2058,7 +2059,7 @@ impl LuaState {
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
-        self.vm_mut().create_closure(func)
+        self.global_state_mut().create_closure(func)
     }
 
     /// Create an RClosure with upvalues.
@@ -2071,7 +2072,8 @@ impl LuaState {
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
-        self.vm_mut().create_closure_with_upvalues(func, upvalues)
+        self.global_state_mut()
+            .create_closure_with_upvalues(func, upvalues)
     }
 
     // ===== Global Access =====
@@ -2079,13 +2081,13 @@ impl LuaState {
     /// Get global variable
     #[inline]
     pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
-        self.vm_mut().get_global(name)
+        self.global_state_mut().get_global(name)
     }
 
     /// Set global variable
     #[inline]
     pub fn set_global(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
-        self.vm_mut().set_global(name, value)
+        self.global_state_mut().set_global(name, value)
     }
 
     // ===== Convenience API =====
@@ -2094,19 +2096,19 @@ impl LuaState {
     ///
     /// See [`LuaVM::load`] for details.
     pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
-        self.vm_mut().load(source)
+        self.global_state_mut().load(source)
     }
 
     #[cfg(feature = "sandbox")]
     pub fn load_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<LuaValue> {
-        self.vm_mut().load_sandboxed(source, config)
+        self.global_state_mut().load_sandboxed(source, config)
     }
 
     /// Compile source code with a chunk name and return a callable function value.
     ///
     /// See [`LuaVM::load_with_name`] for details.
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
-        self.vm_mut().load_with_name(source, chunk_name)
+        self.global_state_mut().load_with_name(source, chunk_name)
     }
 
     #[cfg(feature = "sandbox")]
@@ -2116,7 +2118,7 @@ impl LuaState {
         chunk_name: &str,
         config: &SandboxConfig,
     ) -> LuaResult<LuaValue> {
-        self.vm_mut()
+        self.global_state_mut()
             .load_with_name_sandboxed(source, chunk_name, config)
     }
 
@@ -2124,7 +2126,7 @@ impl LuaState {
     ///
     /// See [`LuaVM::dofile`] for details.
     pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
-        self.vm_mut().dofile(path)
+        self.global_state_mut().dofile(path)
     }
 
     /// Call a function value with arguments.
@@ -2157,14 +2159,14 @@ impl LuaState {
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
-        self.vm_mut().register_function(name, f)
+        self.global_state_mut().register_function(name, f)
     }
 
     pub fn register_function_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: LuaTypedCallback<Args, R>,
     {
-        self.vm_mut().register_function_typed(name, f)
+        self.global_state_mut().register_function_typed(name, f)
     }
 
     /// Register a typed async Rust closure as a Lua global function.
@@ -2174,7 +2176,7 @@ impl LuaState {
     where
         F: LuaTypedAsyncCallback<Args, R>,
     {
-        self.vm_mut().register_async_typed(name, f)
+        self.global_state_mut().register_async_typed(name, f)
     }
 
     // ===== Async Support =====
@@ -2187,7 +2189,7 @@ impl LuaState {
         F: Fn(Vec<LuaValue>) -> Fut + 'static,
         Fut: std::future::Future<Output = LuaResult<Vec<AsyncReturnValue>>> + 'static,
     {
-        self.vm_mut().register_async(name, f)
+        self.global_state_mut().register_async(name, f)
     }
 
     // ===== Execute =====
@@ -2202,7 +2204,7 @@ impl LuaState {
     /// assert_eq!(results[0].as_integer(), Some(3));
     /// ```
     pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
-        self.vm_mut().execute(source)
+        self.global_state_mut().execute(source)
     }
 
     #[cfg(feature = "sandbox")]
@@ -2211,14 +2213,14 @@ impl LuaState {
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<Vec<LuaValue>> {
-        self.vm_mut().execute_sandboxed(source, config)
+        self.global_state_mut().execute_sandboxed(source, config)
     }
 
     /// Execute a pre-compiled chunk, returning results.
     ///
     /// This is a convenience proxy for `LuaVM::execute`.
     pub fn execute_chunk(&mut self, chunk: ProtoPtr) -> LuaResult<Vec<LuaValue>> {
-        self.vm_mut().execute_chunk(chunk)
+        self.global_state_mut().execute_chunk(chunk)
     }
 
     // ===== Type Registration =====
@@ -2279,13 +2281,13 @@ impl LuaState {
 
     /// Get value from table (raw, no metamethods)
     pub fn raw_get(&mut self, table: &LuaValue, key: &LuaValue) -> Option<LuaValue> {
-        self.vm_mut().raw_get(table, key)
+        self.global_state_mut().raw_get(table, key)
     }
 
     /// Get value from table with __index metamethod support
     pub fn table_get(&mut self, table: &LuaValue, key: &LuaValue) -> LuaResult<Option<LuaValue>> {
         // First try raw access
-        if let Some(val) = self.vm_mut().raw_get(table, key) {
+        if let Some(val) = self.global_state_mut().raw_get(table, key) {
             return Ok(Some(val));
         }
         // If not found, try __index metamethod
@@ -2358,15 +2360,15 @@ impl LuaState {
 
     /// Set value in table
     pub fn raw_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> bool {
-        self.vm_mut().raw_set(table, key, value)
+        self.global_state_mut().raw_set(table, key, value)
     }
 
     pub fn raw_geti(&mut self, table: &LuaValue, index: i64) -> Option<LuaValue> {
-        self.vm_mut().raw_geti(table, index)
+        self.global_state_mut().raw_geti(table, index)
     }
 
     pub fn raw_seti(&mut self, table: &LuaValue, index: i64, value: LuaValue) -> bool {
-        self.vm_mut().raw_seti(table, index, value)
+        self.global_state_mut().raw_seti(table, index, value)
     }
 
     /// Get element from table by integer key with __index metamethod support.
@@ -2386,7 +2388,10 @@ impl LuaState {
     pub fn get_error_msg(&mut self, e: LuaError) -> String {
         match e {
             LuaError::OutOfMemory => {
-                format!("out of memory: {}", self.vm_mut().gc.get_error_message())
+                format!(
+                    "out of memory: {}",
+                    self.global_state_mut().gc.get_error_message()
+                )
             }
             _ => {
                 // Return just the error message without "Runtime Error: " prefix
@@ -3140,7 +3145,7 @@ impl LuaState {
                 // (the C Lua standard 200) for the budget simulation, NOT the
                 // runtime max_c_stack_depth which may be reduced (e.g. 25 in
                 // debug builds for Rust stack safety).
-                let current_n_ccalls = self.vm().n_ccalls;
+                let current_n_ccalls = self.global_state().n_ccalls;
                 let depth_budget = LUAI_MAXCSTACK.saturating_sub(current_n_ccalls);
                 let hard_limit = depth_budget + CSTACKERR; // extra room for error handling
                 let mut retry_count: usize = 0;
@@ -3954,7 +3959,7 @@ impl LuaState {
     #[inline(always)]
     pub fn gc_barrier(&mut self, upvalue_ptr: UpvaluePtr, value_gc_ptr: GcObjectPtr) {
         let owner_ptr = GcObjectPtr::from(upvalue_ptr);
-        self.vm
+        self.global_state
             .gc_barrier(self as *mut LuaState, owner_ptr, value_gc_ptr);
     }
 
@@ -3963,20 +3968,20 @@ impl LuaState {
     /// Instead of marking the value, re-gray the object for re-traversal
     #[inline(always)]
     pub fn gc_barrier_back(&mut self, gc_ptr: GcObjectPtr) {
-        let vm = self.vm_mut();
+        let vm = self.global_state_mut();
         vm.gc.barrier_back(gc_ptr);
     }
 
     /// Track table memory change from a resize delta.
     #[inline]
     pub fn gc_track_table_resize(&mut self, table_ptr: TablePtr, delta: isize) {
-        let vm = self.vm_mut();
+        let vm = self.global_state_mut();
         vm.gc.track_resize(table_ptr, delta);
     }
 
     #[inline]
     pub fn check_gc(&mut self) -> LuaResult<bool> {
-        if self.vm.gc_debt() > 0 {
+        if self.global_state.gc_debt() > 0 {
             return Ok(false);
         }
 
@@ -3991,14 +3996,14 @@ impl LuaState {
         //
         // traverse_thread in the atomic phase clears slots [top..stack_last]
         // to nil, which handles any stale references above top.
-        let work = self.vm.check_gc(self as *mut LuaState);
+        let work = self.global_state.check_gc(self as *mut LuaState);
 
         Ok(work)
     }
 
     #[inline(always)]
     pub(crate) fn check_gc_in_loop(&mut self, pc: usize, c: usize, trap: &mut bool) {
-        if self.vm.gc_debt() > 0 {
+        if self.global_state.gc_debt() > 0 {
             return;
         }
 
@@ -4006,17 +4011,18 @@ impl LuaState {
             .expect("gc loop check requires an active call frame")
             .save_pc(pc);
         self.set_top_raw(c);
-        self.vm.check_gc(self as *mut LuaState);
+        self.global_state.check_gc(self as *mut LuaState);
         *trap = self.hook_mask != 0;
     }
 
     pub fn collect_garbage(&mut self) -> LuaResult<()> {
-        self.vm.full_gc(self as *mut LuaState, false);
+        self.global_state.full_gc(self as *mut LuaState, false);
         Ok(())
     }
 
     pub(crate) fn change_gc_mode(&mut self, kind: GcKind) {
-        self.vm.change_gc_mode(self as *mut LuaState, kind);
+        self.global_state
+            .change_gc_mode(self as *mut LuaState, kind);
     }
 
     #[cfg(feature = "sandbox")]
@@ -4063,12 +4069,12 @@ impl LuaState {
         F: FnOnce(&mut LuaState) -> LuaResult<T>,
     {
         let saved_limits = self.sandbox_limits;
-        let saved_memory_limit = self.vm_mut().gc.temporary_memory_limit();
+        let saved_memory_limit = self.global_state_mut().gc.temporary_memory_limit();
 
         self.sandbox_limits = limits;
 
         if let Some(memory_limit_bytes) = limits.and_then(|limit| limit.memory_limit_bytes) {
-            self.vm_mut()
+            self.global_state_mut()
                 .gc
                 .set_temporary_memory_limit(memory_limit_bytes);
         }
@@ -4076,7 +4082,7 @@ impl LuaState {
         let result = f(self);
 
         self.sandbox_limits = saved_limits;
-        self.vm_mut()
+        self.global_state_mut()
             .gc
             .restore_temporary_memory_limit(saved_memory_limit);
 
@@ -4109,7 +4115,7 @@ impl LuaState {
             return Ok(());
         }
 
-        let vm = self.vm_mut();
+        let vm = self.global_state_mut();
 
         // Get the cached event name string from ConstString (no allocation)
         let event_name = match event {
@@ -4397,24 +4403,29 @@ impl LuaState {
     }
 
     pub fn to_any_ref(&mut self, value: LuaValue) -> LuaAnyRef {
-        self.vm_mut().to_ref(value)
+        self.global_state_mut().to_ref(value)
     }
 
     pub fn to_table_ref(&mut self, value: LuaValue) -> Option<LuaTableRef> {
-        self.vm_mut().to_table_ref(value)
+        self.global_state_mut().to_table_ref(value)
     }
 
     pub fn to_function_ref(&mut self, value: LuaValue) -> Option<LuaFunctionRef> {
-        self.vm_mut().to_function_ref(value)
+        self.global_state_mut().to_function_ref(value)
     }
 
     pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<UserDataRef<T>> {
-        self.vm_mut().to_userdata_ref(value)
+        self.global_state_mut().to_userdata_ref(value)
     }
 }
 
 impl Default for LuaState {
     fn default() -> Self {
-        Self::new(1, VmHandle::dangling(), false, SafeOption::default())
+        Self::new(
+            1,
+            GlobalStateHandle::dangling(),
+            false,
+            SafeOption::default(),
+        )
     }
 }

@@ -21,7 +21,9 @@ mod string_arth;
 pub mod table_builder;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
-use crate::gc::{CreateResult, GcKind, ObjectAllocator, ThreadPtr, UpvaluePtr};
+use crate::gc::{
+    CreateResult, GcKind, GcObjectPtr, GcState, ObjectAllocator, ThreadPtr, UpvaluePtr,
+};
 use crate::gc::{GC, ProtoPtr};
 use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua, collect_into_lua_values};
 use crate::lua_value::{
@@ -250,9 +252,9 @@ pub struct GlobalState {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct VmHandle(NonNull<GlobalState>);
+pub(crate) struct GlobalStateHandle(NonNull<GlobalState>);
 
-impl VmHandle {
+impl GlobalStateHandle {
     pub(crate) fn from_global(state: &mut GlobalState) -> Self {
         Self(NonNull::from(state))
     }
@@ -276,8 +278,8 @@ impl VmHandle {
     pub(crate) fn gc_barrier(
         self,
         state: *mut LuaState,
-        owner_ptr: crate::gc::GcObjectPtr,
-        value_gc_ptr: crate::gc::GcObjectPtr,
+        owner_ptr: GcObjectPtr,
+        value_gc_ptr: GcObjectPtr,
     ) {
         self.as_mut()
             .gc
@@ -352,7 +354,7 @@ impl LuaVM {
         // Set GlobalState pointer in main_state
         let thread_value = {
             let state = unsafe { inner.as_mut().get_unchecked_mut() };
-            let vm_handle = VmHandle::from_global(state);
+            let vm_handle = GlobalStateHandle::from_global(state);
             let allocator = &mut state.object_allocator as *mut ObjectAllocator;
             let gc = &mut state.gc as *mut GC;
             unsafe {
@@ -563,7 +565,7 @@ impl GlobalState {
         #[cfg(feature = "shared-proto")]
         {
             let proto = self.create_proto(chunk)?;
-            crate::gc::share_proto(proto);
+            share_proto(proto);
             Ok(proto)
         }
 
@@ -614,8 +616,8 @@ impl GlobalState {
         let limits = config.runtime_limits();
         self.main_state()
             .with_sandbox_runtime_limits(limits, |state| {
-                let chunk = state.vm_mut().prepare_loaded_chunk(chunk)?;
-                state.vm_mut().execute_chunk_with_env(chunk, env)
+                let chunk = state.global_state_mut().prepare_loaded_chunk(chunk)?;
+                state.global_state_mut().execute_chunk_with_env(chunk, env)
             })
     }
 
@@ -843,7 +845,7 @@ impl GlobalState {
     #[allow(clippy::wrong_self_convention)]
     pub fn to_ref(&mut self, value: LuaValue) -> LuaAnyRef {
         let ref_id = lua_ref::store_in_registry(self, value);
-        LuaAnyRef::from_raw(ref_id, VmHandle::from_global(self))
+        LuaAnyRef::from_raw(ref_id, GlobalStateHandle::from_global(self))
     }
 
     /// Wrap a table `LuaValue` into a `LuaTableRef`.
@@ -854,7 +856,10 @@ impl GlobalState {
             return None;
         }
         let ref_id = lua_ref::store_in_registry(self, value);
-        Some(LuaTableRef::from_raw(ref_id, VmHandle::from_global(self)))
+        Some(LuaTableRef::from_raw(
+            ref_id,
+            GlobalStateHandle::from_global(self),
+        ))
     }
 
     /// Wrap a function `LuaValue` into a `LuaFunctionRef`.
@@ -867,7 +872,7 @@ impl GlobalState {
         let ref_id = lua_ref::store_in_registry(self, value);
         Some(LuaFunctionRef::from_raw(
             ref_id,
-            VmHandle::from_global(self),
+            GlobalStateHandle::from_global(self),
         ))
     }
 
@@ -879,7 +884,10 @@ impl GlobalState {
             return None;
         }
         let ref_id = lua_ref::store_in_registry(self, value);
-        Some(LuaStringRef::from_raw(ref_id, VmHandle::from_global(self)))
+        Some(LuaStringRef::from_raw(
+            ref_id,
+            GlobalStateHandle::from_global(self),
+        ))
     }
 
     /// Wrap a userdata `LuaValue` into a typed `UserDataRef<T>`.
@@ -889,7 +897,10 @@ impl GlobalState {
         let userdata = value.as_userdata_mut()?;
         userdata.downcast_ref::<T>()?;
         let ref_id = lua_ref::store_in_registry(self, value);
-        Some(UserDataRef::from_raw(ref_id, VmHandle::from_global(self)))
+        Some(UserDataRef::from_raw(
+            ref_id,
+            GlobalStateHandle::from_global(self),
+        ))
     }
 
     /// Create a new empty table and return it as a `LuaTableRef`.
@@ -1332,7 +1343,7 @@ impl GlobalState {
         // Create a new LuaState for the coroutine
         let mut thread = LuaState::new(
             1,
-            VmHandle::from_global(self),
+            GlobalStateHandle::from_global(self),
             false,
             self.safe_option.clone(),
         );
@@ -1457,7 +1468,7 @@ impl GlobalState {
         let thread_val = self.create_thread(func_val)?;
         Ok(async_thread::AsyncThread::new(
             thread_val,
-            VmHandle::from_global(self),
+            GlobalStateHandle::from_global(self),
             args,
         ))
     }
@@ -1500,7 +1511,7 @@ impl GlobalState {
     ) -> LuaResult<Vec<LuaValue>> {
         let thread_val = self.create_thread(func)?;
         let async_thread =
-            async_thread::AsyncThread::new(thread_val, VmHandle::from_global(self), args);
+            async_thread::AsyncThread::new(thread_val, GlobalStateHandle::from_global(self), args);
         async_thread.await
     }
 
@@ -1550,7 +1561,7 @@ impl GlobalState {
         let runner_func =
             self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
         let thread_val = self.create_thread(runner_func)?;
-        async_thread::AsyncCallHandle::new(thread_val, VmHandle::from_global(self), func)
+        async_thread::AsyncCallHandle::new(thread_val, GlobalStateHandle::from_global(self), func)
     }
 
     /// Look up a global function and create a reusable
@@ -1828,11 +1839,11 @@ impl GlobalState {
         }
 
         // Run until pause state
-        self.gc.run_until_state(l, crate::gc::GcState::Pause);
+        self.gc.run_until_state(l, GcState::Pause);
         // Run finalizers
-        self.gc.run_until_state(l, crate::gc::GcState::CallFin);
+        self.gc.run_until_state(l, GcState::CallFin);
         // Complete the cycle
-        self.gc.run_until_state(l, crate::gc::GcState::Pause);
+        self.gc.run_until_state(l, GcState::Pause);
 
         // Set pause for next cycle
         self.gc.set_pause();
