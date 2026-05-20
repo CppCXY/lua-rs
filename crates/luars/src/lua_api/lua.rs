@@ -170,12 +170,7 @@ impl Lua {
     }
 
     /// Get a mutable reference to the underlying GlobalState for advanced use cases.
-    ///
-    /// # Safety
-    ///
-    /// The caller must preserve Lua VM invariants while holding the returned
-    /// mutable reference and must not keep invalidated references across VM operations.
-    pub fn vm_mut(&mut self) -> &mut GlobalState {
+    pub fn global_state(&mut self) -> &mut GlobalState {
         &mut self.global_state_owner
     }
 }
@@ -459,13 +454,13 @@ impl LuaApi for Lua {
 
     #[inline]
     fn gc_stop(&mut self) {
-        self.vm_mut().gc.gc_stopped = true;
+        self.global_state().gc.gc_stopped = true;
     }
 
     #[inline]
     fn gc_restart(&mut self) {
-        self.vm_mut().gc.gc_stopped = false;
-        self.vm_mut().gc.set_debt(0);
+        self.global_state().gc.gc_stopped = false;
+        self.global_state().gc.set_debt(0);
     }
 }
 
