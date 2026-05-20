@@ -380,7 +380,7 @@ fn test_load_rejects_binary_when_bytecode_loading_disabled() {
 #[test]
 fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
     let mut builder_vm = GlobalState::new(SafeOption::default());
-    let chunk = builder_vm.compile("return 42").unwrap();
+    let chunk = builder_vm.main_state().compile_chunk("return 42").unwrap();
     let bytes = serialize_chunk(&chunk, false).unwrap();
 
     let unique = SystemTime::now()
@@ -401,7 +401,7 @@ fn test_dofile_rejects_binary_when_bytecode_loading_disabled() {
     let mut vm = GlobalState::new(option);
 
     let err = vm.main_state().dofile(path.to_str().unwrap()).unwrap_err();
-    let message = vm.get_error_message(err);
+    let message = vm.main_state().get_error_message(err);
     assert!(message.contains("bytecode loading is disabled"));
 
     let _ = std::fs::remove_file(path);

@@ -58,7 +58,8 @@ impl Lua {
             .to_function_ref(value)
             .ok_or_else(|| {
                 self.global_state_owner
-                    .error("compiled chunk is not a function")
+                    .main_state()
+                    .error("compiled chunk is not a function".to_string())
             })?;
         Ok(Function::new(function))
     }
@@ -67,7 +68,11 @@ impl Lua {
         let string = self
             .global_state_owner
             .to_string_ref(value)
-            .ok_or_else(|| self.global_state_owner.error("value is not a string"))?;
+            .ok_or_else(|| {
+                self.global_state_owner
+                    .main_state()
+                    .error("value is not a string".to_string())
+            })?;
         Ok(LuaString::new(string))
     }
 
@@ -79,7 +84,8 @@ impl Lua {
             .to_userdata_ref(value)
             .ok_or_else(|| {
                 self.global_state_owner
-                    .error("value is not the expected userdata type")
+                    .main_state()
+                    .error("value is not the expected userdata type".to_string())
             })
     }
 
@@ -139,6 +145,7 @@ impl Lua {
     ) -> LuaResult<R> {
         R::from_lua_multi(values, self.global_state_owner.main_state()).map_err(|msg| {
             self.global_state_owner
+                .main_state()
                 .error(format!("{}: {}", api_name, msg))
         })
     }
@@ -228,7 +235,7 @@ impl LuaApi for Lua {
     fn eval_multi<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R> {
         let values = self.global_state_owner.main_state().execute(source)?;
         R::from_lua_multi(values, self.global_state_owner.main_state())
-            .map_err(|msg| self.global_state_owner.error(msg))
+            .map_err(|msg| self.global_state_owner.main_state().error(msg))
     }
 
     #[inline]
@@ -305,7 +312,7 @@ impl LuaApi for Lua {
     fn register_type<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table> {
         self.global_state_owner.register_type_of::<T>(name)?;
         self.get_table(name)?.ok_or_else(|| {
-            self.global_state_owner.error(format!(
+            self.global_state_owner.main_state().error(format!(
                 "registered type '{}' did not produce a table",
                 name
             ))
@@ -624,6 +631,7 @@ impl LuaAsyncApi for Lua {
     ) -> LuaResult<R> {
         let function = self.get_function(name)?.ok_or_else(|| {
             self.global_state_owner
+                .main_state()
                 .error(format!("global '{}' not found", name))
         })?;
         self.call_async(&function, args).await
@@ -636,6 +644,7 @@ impl LuaAsyncApi for Lua {
     ) -> LuaResult<R> {
         let function = self.get_function(name)?.ok_or_else(|| {
             self.global_state_owner
+                .main_state()
                 .error(format!("global '{}' not found", name))
         })?;
         self.call_async1(&function, args).await
@@ -685,6 +694,7 @@ impl LuaSandboxApi for Lua {
     fn sandbox_capture_global(&mut self, config: &mut SandboxConfig, name: &str) -> LuaResult<()> {
         let value = self.global_state_owner.get_global(name)?.ok_or_else(|| {
             self.global_state_owner
+                .main_state()
                 .error(format!("global '{}' not found", name))
         })?;
         config.insert_global(name, value);

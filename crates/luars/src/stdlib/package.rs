@@ -187,10 +187,10 @@ fn lua_file_loader(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("file path must be a string".to_string()));
     };
 
-    let vm = l.global_state_mut();
-    let proto = vm.load_proto_from_file(filepath_str)?;
+    let proto = l.load_proto_from_file(filepath_str)?;
 
     // Create a function from the chunk with _ENV upvalue
+    let vm = l.global_state_mut();
     let env_upvalue = vm.create_upvalue_closed(vm.global)?;
     let func = vm.create_function(proto, UpvalueStore::from_single(env_upvalue))?;
 

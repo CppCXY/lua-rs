@@ -277,13 +277,17 @@ fn test_shared_proto_reuses_same_file_across_vms() {
     let proto1 = {
         let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
-        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+        vm.main_state()
+            .load_proto_from_file(path.to_str().unwrap())
+            .unwrap()
     };
 
     let proto2 = {
         let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
-        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+        vm.main_state()
+            .load_proto_from_file(path.to_str().unwrap())
+            .unwrap()
     };
 
     assert_eq!(proto1, proto2);
@@ -305,7 +309,9 @@ fn test_shared_proto_reloads_when_file_changes() {
     let proto1 = {
         let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
-        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+        vm.main_state()
+            .load_proto_from_file(path.to_str().unwrap())
+            .unwrap()
     };
 
     {
@@ -316,7 +322,9 @@ fn test_shared_proto_reloads_when_file_changes() {
     let proto2 = {
         let mut vm = GlobalState::new(SafeOption::default());
         vm.open_stdlib(Stdlib::All).unwrap();
-        vm.load_proto_from_file(path.to_str().unwrap()).unwrap()
+        vm.main_state()
+            .load_proto_from_file(path.to_str().unwrap())
+            .unwrap()
     };
 
     assert_ne!(proto1, proto2);
@@ -426,7 +434,7 @@ fn test_lua_full_error() {
 
     match vm.main_state().execute("error('boom')") {
         Err(e) => {
-            let full = vm.get_full_error(e);
+            let full = vm.main_state().get_full_error(e);
             assert_eq!(full.kind(), lua_vm::LuaError::RuntimeError);
             assert!(
                 full.message().contains("boom"),
@@ -713,7 +721,7 @@ fn test_error_message_available_after_recovery() {
         .main_state()
         .execute("error('specific error message')")
         .unwrap_err();
-    let msg = vm.get_error_message(err);
+    let msg = vm.main_state().get_error_message(err);
     assert!(
         msg.contains("specific error message"),
         "expected message to contain 'specific error message', got: {}",

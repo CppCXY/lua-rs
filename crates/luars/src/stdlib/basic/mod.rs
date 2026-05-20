@@ -1328,12 +1328,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             Ok(s) => s,
             Err(_) => return Err(l.error("source is not valid UTF-8".to_string())),
         };
-        let vm = l.global_state_mut();
-        vm.compile_with_name(&code_str, &chunkname).map_err(|e| {
-            // Get the actual error message from VM
-
-            l.get_error_msg(e)
-        })
+        l.compile_chunk_with_name(&code_str, &chunkname)
+            .map_err(|e| l.get_error_msg(e))
     };
 
     match chunk_result {
@@ -1455,7 +1451,7 @@ fn lua_loadfile(l: &mut LuaState) -> LuaResult<usize> {
         return Ok(2);
     }
 
-    match l.global_state_mut().load_proto_from_file(&filename_str) {
+    match l.load_proto_from_file(&filename_str) {
         Ok(proto) => {
             let upvalue_count = proto.as_ref().data.upvalue_count;
             let mut upvalues = Vec::with_capacity(upvalue_count);
@@ -1508,7 +1504,7 @@ fn lua_dofile(l: &mut LuaState) -> LuaResult<usize> {
         return Err(l.error("dofile: reading from stdin not yet implemented".to_string()));
     };
 
-    let proto = l.global_state_mut().load_proto_from_file(&filename_str)?;
+    let proto = l.load_proto_from_file(&filename_str)?;
     let global = l.global_state_mut().global;
     // Create function with _ENV upvalue (global table)
     let env_upvalue = l.create_upvalue_closed(global)?;

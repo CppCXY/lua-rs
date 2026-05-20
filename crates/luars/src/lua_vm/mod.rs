@@ -318,10 +318,6 @@ impl GlobalState {
         &mut self.main_state.as_mut_ref().data
     }
 
-    pub(crate) fn main_state_ref(&self) -> &LuaState {
-        &self.main_state.as_ref().data
-    }
-
     /// Register a CFunction in package.preload\[name\].
     /// When Lua code calls `require("name")`, the preload searcher will
     /// find this function and call it as the module loader.
@@ -569,7 +565,15 @@ impl GlobalState {
 
     /// Register a UserData type as a Lua global with its static methods.
     pub fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()> {
-        self.main_state().register_type_of::<T>(name)
+        let static_methods = T::lua_static_methods();
+        let class_table = self.create_table(0, static_methods.len())?;
+
+        for &(method_name, func) in static_methods {
+            let key = self.create_string(method_name)?;
+            self.raw_set(&class_table, key, LuaValue::cfunction(func));
+        }
+
+        self.set_global(name, class_table)
     }
 
     /// Create a table and immediately wrap it in a managed `LuaTableRef`.
@@ -677,53 +681,65 @@ impl GlobalState {
         ))
     }
 
-    /// Compile source code using VM's string pool
-    pub fn compile(&mut self, source: &str) -> LuaResult<LuaProto> {
+    /// Compile source code using VM's string pool.
+    ///
+    /// This owner-level helper does not choose an error target state.
+    pub fn compile(&mut self, source: &str) -> Result<LuaProto, String> {
         self.gc.disable_memory_check();
         let chunk = match compile_code(source, self) {
             Ok(c) => c,
             Err(e) => {
                 self.gc.enable_memory_check();
-                return Err(self.compile_error(e));
+                return Err(e);
             }
         };
 
         self.gc.enable_memory_check();
-        self.gc.check_memory()?;
+        self.gc
+            .check_memory()
+            .map_err(|_| self.gc.get_error_message())?;
         Ok(chunk)
     }
 
-    pub fn compile_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaProto> {
+    pub fn compile_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+    ) -> Result<LuaProto, String> {
         self.gc.disable_memory_check();
         let chunk = match compile_code_with_name(source, self, chunk_name) {
             Ok(c) => c,
             Err(e) => {
                 self.gc.enable_memory_check();
-                return Err(self.compile_error(e));
+                return Err(e);
             }
         };
 
         self.gc.enable_memory_check();
-        self.gc.check_memory()?;
+        self.gc
+            .check_memory()
+            .map_err(|_| self.gc.get_error_message())?;
         Ok(chunk)
     }
 
-    pub(crate) fn load_proto_from_file(&mut self, path: &str) -> LuaResult<ProtoPtr> {
+    pub(crate) fn load_proto_from_file(&mut self, path: &str) -> Result<ProtoPtr, String> {
         use crate::lua_value::chunk_serializer;
 
         #[cfg(miri)]
         let resolved_path = std::path::PathBuf::from(path);
 
         #[cfg(not(miri))]
-        let resolved_path = std::fs::canonicalize(path)
-            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+        let resolved_path =
+            std::fs::canonicalize(path).map_err(|e| format!("cannot open {}: {}", path, e))?;
 
-        let file_bytes = std::fs::read(&resolved_path)
-            .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+        let file_bytes =
+            std::fs::read(&resolved_path).map_err(|e| format!("cannot open {}: {}", path, e))?;
         let layout = inspect_file_chunk_layout(&file_bytes);
 
         if layout.is_binary && !self.safe_option.allow_load_bytecode {
-            return Err(self.error("attempt to load a binary chunk (bytecode loading is disabled)"));
+            return Err(
+                "attempt to load a binary chunk (bytecode loading is disabled)".to_string(),
+            );
         }
 
         #[cfg(feature = "shared-proto")]
@@ -731,7 +747,7 @@ impl GlobalState {
             use crate::lua_vm::shared_proto::SHARED_FILE_PROTO_CACHE;
 
             let metadata = std::fs::metadata(&resolved_path)
-                .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+                .map_err(|e| format!("cannot open {}: {}", path, e))?;
             let len = metadata.len();
             let modified = metadata.modified().ok();
             let version = self.version;
@@ -753,21 +769,23 @@ impl GlobalState {
                 &file_bytes[layout.skip_offset..],
                 self,
             )
-            .map_err(|e| self.error(format!("binary load error: {}", e)))?
+            .map_err(|e| format!("binary load error: {}", e))?
         } else {
             let code_str = String::from_utf8(file_bytes[layout.text_start..].to_vec())
-                .map_err(|_| self.error("source file is not valid UTF-8".to_string()))?;
+                .map_err(|_| "source file is not valid UTF-8".to_string())?;
             self.compile_with_name(&code_str, &chunk_name)?
         };
 
-        let proto = self.prepare_loaded_chunk(chunk)?;
+        let proto = self
+            .prepare_loaded_chunk(chunk)
+            .map_err(|_| self.gc.get_error_message())?;
 
         #[cfg(feature = "shared-proto")]
         {
             use crate::lua_vm::shared_proto::SHARED_FILE_PROTO_CACHE;
 
             let metadata = std::fs::metadata(&resolved_path)
-                .map_err(|e| self.error(format!("cannot open {}: {}", path, e)))?;
+                .map_err(|e| format!("cannot open {}: {}", path, e))?;
             SHARED_FILE_PROTO_CACHE.with(|cache| {
                 use crate::lua_vm::shared_proto::SharedFileProtoEntry;
 
@@ -941,11 +959,13 @@ impl GlobalState {
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Get ThreadId from LuaValue
         let Some(l) = thread_val.as_thread_mut() else {
-            return Err(self.error("invalid thread".to_string()));
+            return Err(self.main_state().error("invalid thread".to_string()));
         };
 
         if l.is_main_thread() {
-            return Err(self.error("cannot resume main thread".to_string()));
+            return Err(self
+                .main_state()
+                .error("cannot resume main thread".to_string()));
         }
 
         // Borrow mutably and delegate to LuaState::resume
@@ -1308,131 +1328,6 @@ impl GlobalState {
             stats.old_gen_size,
             stats.promoted_objects
         )
-    }
-
-    // ===== Error Handling =====
-
-    pub fn error(&mut self, message: impl Into<String>) -> LuaError {
-        self.main_state().error(message.into());
-        LuaError::RuntimeError
-    }
-
-    #[inline]
-    pub fn compile_error(&mut self, message: impl Into<String>) -> LuaError {
-        self.main_state().error(message.into());
-        LuaError::CompileError
-    }
-
-    #[inline]
-    pub fn get_error_message(&mut self, e: LuaError) -> String {
-        let message = self.main_state().get_error_msg(e);
-        self.generate_traceback(&message)
-    }
-
-    /// Convert a [`LuaError`] into a [`crate::LuaFullError`] that carries the error message.
-    ///
-    /// This consumes the stored error message from the VM, so it should only be
-    /// called once per error.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// match vm.execute("bad code") {
-    ///     Err(e) => {
-    ///         let full = vm.get_full_error(e);
-    ///         eprintln!("{}", full); // prints full message with source location
-    ///     }
-    ///     Ok(_) => {}
-    /// }
-    /// ```
-    #[inline]
-    pub fn get_full_error(&mut self, e: LuaError) -> lua_error::LuaFullError {
-        let message = self.get_error_message(e);
-        lua_error::LuaFullError { kind: e, message }
-    }
-
-    /// Generate a stack traceback string
-    pub fn generate_traceback(&mut self, error_msg: &str) -> String {
-        let formatted_error_msg = {
-            let state = self.main_state_ref();
-            if let Some(location) = state.nearest_lua_error_location() {
-                if error_msg.starts_with(&location) {
-                    error_msg.to_string()
-                } else {
-                    format!("{}{}", location, error_msg)
-                }
-            } else {
-                error_msg.to_string()
-            }
-        };
-
-        // Try to use debug.traceback if available
-        // We attempt to call debug.traceback(message, 1)
-        let result = (|| -> LuaResult<String> {
-            // Get debug table
-            let debug_table = match self.get_global("debug")? {
-                Some(v) if v.is_table() => v,
-                _ => return Ok(String::new()), // debug not available
-            };
-
-            // Get debug.traceback function
-            let traceback_func = {
-                let state = self.main_state();
-                let traceback_key = state.create_string("traceback")?;
-                match state.raw_get(&debug_table, &traceback_key) {
-                    Some(v) if v.is_function() => v,
-                    _ => return Ok(String::new()), // debug.traceback not available
-                }
-            };
-
-            // Create arguments: message and level
-            // Use level=1 to skip the debug.traceback call itself,
-            // matching C Lua's msghandler which uses luaL_traceback(L,L,msg,1)
-            let state = self.main_state();
-            let msg_val = state.create_string(&formatted_error_msg)?;
-            let level_val = LuaValue::integer(1);
-
-            // Call debug.traceback using protected_call
-            let (success, results) =
-                self.protected_call(traceback_func, vec![msg_val, level_val])?;
-
-            if success
-                && let Some(result) = results.first()
-                && let Some(s) = result.as_str()
-            {
-                return Ok(s.to_string());
-            }
-
-            Ok(String::new())
-        })();
-
-        match result {
-            Ok(s) if !s.is_empty() => s,
-            _ => self.fallback_traceback(&formatted_error_msg),
-        }
-    }
-
-    /// Fallback traceback using Rust implementation
-    fn fallback_traceback(&self, error_msg: &str) -> String {
-        let traceback = self.main_state_ref().generate_traceback();
-        if !traceback.is_empty() {
-            format!("{}\nstack traceback:\n{}", error_msg, traceback)
-        } else {
-            error_msg.to_string()
-        }
-    }
-
-    // ============ Protected Call (pcall/xpcall) ============
-
-    /// Execute a function with protected call (pcall semantics)
-    /// Note: Yields are NOT caught by pcall - they propagate through
-    pub fn protected_call(
-        &mut self,
-        func: LuaValue,
-        args: Vec<LuaValue>,
-    ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Delegate to main_state
-        self.main_state().pcall(func, args)
     }
 
     pub(crate) fn get_main_thread_ptr(&self) -> ThreadPtr {

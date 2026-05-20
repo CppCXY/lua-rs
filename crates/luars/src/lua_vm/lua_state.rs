@@ -2086,7 +2086,7 @@ impl LuaState {
     /// See [`LuaState::load`] for details.
     pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
         let global = self.global_state().global;
-        let chunk = self.global_state_mut().compile(source)?;
+        let chunk = self.compile_chunk(source)?;
         let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
         self.global_state_mut()
             .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
@@ -2094,7 +2094,7 @@ impl LuaState {
 
     #[cfg(feature = "sandbox")]
     pub fn load_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<LuaValue> {
-        let chunk = self.global_state_mut().compile(source)?;
+        let chunk = self.compile_chunk(source)?;
         let env = self.global_state_mut().create_sandbox_env(config)?;
         let env_upval = self.global_state_mut().create_upvalue_closed(env)?;
         self.global_state_mut()
@@ -2106,9 +2106,7 @@ impl LuaState {
     /// See [`LuaState::load_with_name`] for details.
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
         let global = self.global_state().global;
-        let chunk = self
-            .global_state_mut()
-            .compile_with_name(source, chunk_name)?;
+        let chunk = self.compile_chunk_with_name(source, chunk_name)?;
         let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
         self.global_state_mut()
             .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
@@ -2121,9 +2119,7 @@ impl LuaState {
         chunk_name: &str,
         config: &SandboxConfig,
     ) -> LuaResult<LuaValue> {
-        let chunk = self
-            .global_state_mut()
-            .compile_with_name(source, chunk_name)?;
+        let chunk = self.compile_chunk_with_name(source, chunk_name)?;
         let env = self.global_state_mut().create_sandbox_env(config)?;
         let env_upval = self.global_state_mut().create_upvalue_closed(env)?;
         self.global_state_mut()
@@ -2134,7 +2130,7 @@ impl LuaState {
     ///
     /// See [`LuaState::dofile`] for details.
     pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
-        let proto = self.global_state_mut().load_proto_from_file(path)?;
+        let proto = self.load_proto_from_file(path)?;
         self.execute_chunk(proto)
     }
 
@@ -2231,7 +2227,7 @@ impl LuaState {
     }
 
     pub async fn execute_async(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
-        let chunk = self.global_state_mut().compile(source)?;
+        let chunk = self.compile_chunk(source)?;
         let async_thread = self.create_async_thread(chunk, vec![])?;
         async_thread.await
     }
@@ -2293,9 +2289,96 @@ impl LuaState {
         }
     }
 
-    pub fn get_full_error(&mut self, e: LuaError) -> LuaFullError {
+    #[inline]
+    pub fn compile_error(&mut self, message: impl Into<String>) -> LuaError {
+        self.error(message.into());
+        LuaError::CompileError
+    }
+
+    pub fn compile_chunk(&mut self, source: &str) -> LuaResult<LuaProto> {
+        self.global_state_mut()
+            .compile(source)
+            .map_err(|msg| self.compile_error(msg))
+    }
+
+    pub fn compile_chunk_with_name(
+        &mut self,
+        source: &str,
+        chunk_name: &str,
+    ) -> LuaResult<LuaProto> {
+        self.global_state_mut()
+            .compile_with_name(source, chunk_name)
+            .map_err(|msg| self.compile_error(msg))
+    }
+
+    pub fn load_proto_from_file(&mut self, path: &str) -> LuaResult<ProtoPtr> {
+        self.global_state_mut()
+            .load_proto_from_file(path)
+            .map_err(|msg| self.error(msg))
+    }
+
+    pub fn get_error_message(&mut self, e: LuaError) -> String {
         let message = self.get_error_msg(e);
+        self.render_error_message(&message)
+    }
+
+    pub fn get_full_error(&mut self, e: LuaError) -> LuaFullError {
+        let message = self.get_error_message(e);
         LuaFullError { kind: e, message }
+    }
+
+    fn render_error_message(&mut self, error_msg: &str) -> String {
+        let formatted_error_msg = if let Some(location) = self.nearest_lua_error_location() {
+            if error_msg.starts_with(&location) {
+                error_msg.to_string()
+            } else {
+                format!("{}{}", location, error_msg)
+            }
+        } else {
+            error_msg.to_string()
+        };
+
+        let result = (|| -> LuaResult<String> {
+            let debug_table = match self.get_global("debug")? {
+                Some(v) if v.is_table() => v,
+                _ => return Ok(String::new()),
+            };
+
+            let traceback_func = {
+                let traceback_key = self.create_string("traceback")?;
+                match self.raw_get(&debug_table, &traceback_key) {
+                    Some(v) if v.is_function() => v,
+                    _ => return Ok(String::new()),
+                }
+            };
+
+            let msg_val = self.create_string(&formatted_error_msg)?;
+            let level_val = LuaValue::integer(1);
+            let (success, results) = self.pcall(traceback_func, vec![msg_val, level_val])?;
+
+            if success
+                && let Some(result) = results.first()
+                && let Some(s) = result.as_str()
+            {
+                return Ok(s.to_string());
+            }
+
+            Ok(String::new())
+        })();
+
+        match result {
+            Ok(s) if !s.is_empty() => s,
+            _ => self.fallback_error_message(&formatted_error_msg),
+        }
+    }
+
+    fn fallback_error_message(&self, error_msg: &str) -> String {
+        let traceback = self.generate_traceback();
+        if !traceback.is_empty() {
+            format!("{}\nstack traceback:\n{}", error_msg, traceback)
+        } else {
+            error_msg.to_string()
+        }
     }
 
     pub fn protected_call(
@@ -2336,9 +2419,7 @@ impl LuaState {
         func: LuaValue,
     ) -> LuaResult<async_thread::AsyncCallHandle> {
         let global = self.global_state().global;
-        let chunk = self
-            .global_state_mut()
-            .compile(async_thread::ASYNC_CALL_RUNNER)?;
+        let chunk = self.compile_chunk(async_thread::ASYNC_CALL_RUNNER)?;
         let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
         let runner_func = self
             .global_state_mut()

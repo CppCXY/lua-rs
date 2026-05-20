@@ -103,7 +103,7 @@ fn test_sandbox_instruction_limit_stops_infinite_loops() {
         .main_state()
         .execute_sandboxed("while true do end", &config)
         .unwrap_err();
-    let full = vm.get_full_error(err);
+    let full = vm.main_state().get_full_error(err);
 
     assert!(full.message.contains("sandbox instruction limit exceeded"));
 }
@@ -118,7 +118,7 @@ fn test_sandbox_memory_limit_blocks_runtime_allocations() {
         .main_state()
         .execute_sandboxed("local t = {}; return t", &config)
         .unwrap_err();
-    let full = vm.get_full_error(err);
+    let full = vm.main_state().get_full_error(err);
 
     assert!(matches!(full.kind, crate::lua_vm::LuaError::OutOfMemory));
 }
@@ -133,7 +133,7 @@ fn test_sandbox_timeout_stops_infinite_loops() {
         .main_state()
         .execute_sandboxed("while true do end", &config)
         .unwrap_err();
-    let full = vm.get_full_error(err);
+    let full = vm.main_state().get_full_error(err);
 
     assert!(full.message.contains("sandbox timeout exceeded"));
 }

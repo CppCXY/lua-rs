@@ -445,6 +445,7 @@ impl AsyncThread {
                 return ResumeResult::Finished(Err(self
                     .vm
                     .as_mut()
+                    .main_state()
                     .error("AsyncThread: invalid thread value".to_string())));
             }
         };
@@ -462,9 +463,7 @@ impl AsyncThread {
                         Some(fut) => ResumeResult::AsyncYield(fut),
                         None => {
                             // Bug: yielded with sentinel but no future stored
-                            ResumeResult::Finished(Err(self
-                                .vm
-                                .as_mut()
+                            ResumeResult::Finished(Err(thread_state
                                 .error("async yield without pending future".to_string())))
                         }
                     }
@@ -521,6 +520,7 @@ impl AsyncThread {
                 return Poll::Ready(Err(self
                     .vm
                     .as_mut()
+                    .main_state()
                     .error("AsyncThread: no pending future to poll".to_string())));
             }
         }
@@ -682,15 +682,14 @@ impl AsyncCallHandle {
 
         // First resume: pass the target function to the runner.
         // The runner captures it via `...` and yields, waiting for call args.
-        let thread_state = handle
-            .thread_val
-            .as_thread_mut()
-            .ok_or_else(|| vm.as_mut().error("invalid thread value".to_string()))?;
+        let thread_state = handle.thread_val.as_thread_mut().ok_or_else(|| {
+            vm.as_mut()
+                .main_state()
+                .error("invalid thread value".to_string())
+        })?;
         let (finished, _) = thread_state.resume(vec![func])?;
         if finished {
-            return Err(vm
-                .as_mut()
-                .error("runner coroutine finished during init".to_string()));
+            return Err(thread_state.error("runner coroutine finished during init".to_string()));
         }
 
         Ok(handle)
@@ -713,6 +712,7 @@ impl AsyncCallHandle {
                 return ResumeResult::Finished(Err(self
                     .vm
                     .as_mut()
+                    .main_state()
                     .error("invalid thread value".to_string())));
             }
         };
@@ -723,10 +723,10 @@ impl AsyncCallHandle {
                 if is_async_sentinel(&values) {
                     match thread_state.take_pending_future() {
                         Some(fut) => ResumeResult::AsyncYield(fut),
-                        None => ResumeResult::Finished(Err(self
-                            .vm
-                            .as_mut()
-                            .error("async yield without pending future".to_string()))),
+                        None => {
+                            ResumeResult::Finished(Err(thread_state
+                                .error("async yield without pending future".to_string())))
+                        }
                     }
                 } else {
                     ResumeResult::NormalYield(values)
@@ -750,6 +750,7 @@ impl AsyncCallHandle {
             return Err(self
                 .vm
                 .as_mut()
+                .main_state()
                 .error("async call handle is no longer alive".to_string()));
         }
 
@@ -763,6 +764,7 @@ impl AsyncCallHandle {
                             return Err(self
                                 .vm
                                 .as_mut()
+                                .main_state()
                                 .error("runner coroutine finished unexpectedly".to_string()));
                         }
                         Err(e) => return Err(e),
@@ -790,7 +792,11 @@ impl AsyncCallHandle {
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown error")
                             .to_string();
-                        return Err(self.vm.as_mut().error(err_msg));
+                        let thread_state = self
+                            .thread_val
+                            .as_thread_mut()
+                            .expect("async call handle thread must stay valid while alive");
+                        return Err(thread_state.error(err_msg));
                     }
                 }
             }

@@ -47,7 +47,7 @@ fn test_package_preload() {
     );
 
     if let Err(e) = &result {
-        let error_msg = vm.get_error_message(*e);
+        let error_msg = vm.main_state().get_error_message(*e);
         eprintln!("Error: {:?}, Message: {}", e, error_msg);
     }
     assert!(result.is_ok());
@@ -162,7 +162,7 @@ fn test_require_preload() {
     );
 
     if let Err(e) = &result {
-        let error_msg = vm.get_error_message(*e);
+        let error_msg = vm.main_state().get_error_message(*e);
         panic!("Error: {:?}, Message: {}", e, error_msg);
     }
     assert!(result.is_ok());
@@ -226,7 +226,7 @@ fn test_require_missing_module_reports_call_site_file_and_line() {
     std::fs::write(&path, "require \"definitely_missing_module_xyz\"\n").unwrap();
 
     let err = vm.main_state().dofile(path.to_str().unwrap()).unwrap_err();
-    let message = vm.get_error_message(err);
+    let message = vm.main_state().get_error_message(err);
     let filename = path.file_name().unwrap().to_string_lossy();
 
     assert!(message.contains(&format!("{}:1:", filename)), "{message}");

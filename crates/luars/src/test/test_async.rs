@@ -321,7 +321,10 @@ async fn test_create_async_thread_directly() {
         })
         .unwrap();
 
-    let chunk = vm.compile("return async_square(7)").unwrap();
+    let chunk = vm
+        .main_state()
+        .compile_chunk("return async_square(7)")
+        .unwrap();
     let thread = vm.main_state().create_async_thread(chunk, vec![]).unwrap();
     let results = thread.await.unwrap();
 
