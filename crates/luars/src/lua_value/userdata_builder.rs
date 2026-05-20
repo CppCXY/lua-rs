@@ -21,7 +21,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 
-use crate::{LuaResult, GlobalState, LuaValue};
+use crate::{GlobalState, LuaResult, LuaValue};
 
 use super::LuaUserdata;
 use super::userdata_trait::{UdValue, UserDataTrait};

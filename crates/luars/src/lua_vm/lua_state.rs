@@ -8,6 +8,7 @@ use crate::gc::{
 };
 use crate::lua_value::userdata_trait::UserDataTrait;
 use crate::lua_value::{LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore};
+use crate::lua_vm::async_thread;
 use crate::lua_vm::async_thread::AsyncFuture;
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_HOOKED, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
@@ -26,8 +27,8 @@ use crate::lua_vm::{
 use crate::platform_time::unix_nanos;
 use crate::stdlib::debug::{objtypename, ordererror, pub_getfuncname};
 use crate::{
-    AsyncReturnValue, DebugInfo, LuaAnyRef, LuaFunctionRef, LuaProto, LuaRegistrable, LuaTableRef,
-    UserDataRef,
+    AsyncReturnValue, DebugInfo, FromLua, LuaAnyRef, LuaFullError, LuaFunctionRef, LuaProto,
+    LuaRegistrable, LuaTableRef, UserDataRef,
 };
 
 /// Execution state for a Lua thread/coroutine
@@ -2096,19 +2097,33 @@ impl LuaState {
     ///
     /// See [`LuaVM::load`] for details.
     pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
-        self.global_state_mut().load(source)
+        let global = self.global_state().global;
+        let chunk = self.global_state_mut().compile(source)?;
+        let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
+        self.global_state_mut()
+            .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     #[cfg(feature = "sandbox")]
     pub fn load_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<LuaValue> {
-        self.global_state_mut().load_sandboxed(source, config)
+        let chunk = self.global_state_mut().compile(source)?;
+        let env = self.global_state_mut().create_sandbox_env(config)?;
+        let env_upval = self.global_state_mut().create_upvalue_closed(env)?;
+        self.global_state_mut()
+            .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     /// Compile source code with a chunk name and return a callable function value.
     ///
     /// See [`LuaVM::load_with_name`] for details.
     pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
-        self.global_state_mut().load_with_name(source, chunk_name)
+        let global = self.global_state().global;
+        let chunk = self
+            .global_state_mut()
+            .compile_with_name(source, chunk_name)?;
+        let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
+        self.global_state_mut()
+            .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     #[cfg(feature = "sandbox")]
@@ -2118,15 +2133,21 @@ impl LuaState {
         chunk_name: &str,
         config: &SandboxConfig,
     ) -> LuaResult<LuaValue> {
+        let chunk = self
+            .global_state_mut()
+            .compile_with_name(source, chunk_name)?;
+        let env = self.global_state_mut().create_sandbox_env(config)?;
+        let env_upval = self.global_state_mut().create_upvalue_closed(env)?;
         self.global_state_mut()
-            .load_with_name_sandboxed(source, chunk_name, config)
+            .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
     }
 
     /// Read a file, compile it, and execute it.
     ///
     /// See [`LuaVM::dofile`] for details.
     pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
-        self.global_state_mut().dofile(path)
+        let proto = self.global_state_mut().load_proto_from_file(path)?;
+        self.execute_chunk(proto)
     }
 
     /// Call a function value with arguments.
@@ -2159,14 +2180,15 @@ impl LuaState {
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
-        self.global_state_mut().register_function(name, f)
+        let closure_val = self.create_closure(f)?;
+        self.set_global(name, closure_val)
     }
 
     pub fn register_function_typed<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
     where
         F: LuaTypedCallback<Args, R>,
     {
-        self.global_state_mut().register_function_typed(name, f)
+        self.register_function(name, move |state| f.invoke_typed(state))
     }
 
     /// Register a typed async Rust closure as a Lua global function.
@@ -2176,7 +2198,15 @@ impl LuaState {
     where
         F: LuaTypedAsyncCallback<Args, R>,
     {
-        self.global_state_mut().register_async_typed(name, f)
+        let wrapper = move |state: &mut LuaState| {
+            let future = f.invoke_typed_async(state)?;
+            state.set_pending_future(future);
+            state.do_yield(vec![async_thread::async_sentinel_value()])?;
+            Ok(0)
+        };
+
+        let closure_val = self.create_closure(wrapper)?;
+        self.set_global(name, closure_val)
     }
 
     // ===== Async Support =====
@@ -2189,7 +2219,33 @@ impl LuaState {
         F: Fn(Vec<LuaValue>) -> Fut + 'static,
         Fut: std::future::Future<Output = LuaResult<Vec<AsyncReturnValue>>> + 'static,
     {
-        self.global_state_mut().register_async(name, f)
+        let wrapper = async_thread::wrap_async_function(f);
+        let closure_val = self.create_closure(wrapper)?;
+        self.set_global(name, closure_val)
+    }
+
+    pub fn create_async_thread(
+        &mut self,
+        chunk: LuaProto,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<async_thread::AsyncThread> {
+        let global = self.global_state().global;
+        let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
+        let func_val = self
+            .global_state_mut()
+            .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
+        let thread_val = self.global_state_mut().create_thread(func_val)?;
+        Ok(async_thread::AsyncThread::new(
+            thread_val,
+            GlobalStateHandle::from_global(self.global_state_mut()),
+            args,
+        ))
+    }
+
+    pub async fn execute_async(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
+        let chunk = self.global_state_mut().compile(source)?;
+        let async_thread = self.create_async_thread(chunk, vec![])?;
+        async_thread.await
     }
 
     // ===== Execute =====
@@ -2204,7 +2260,8 @@ impl LuaState {
     /// assert_eq!(results[0].as_integer(), Some(3));
     /// ```
     pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
-        self.global_state_mut().execute(source)
+        let func = self.load(source)?;
+        self.call(func, vec![])
     }
 
     #[cfg(feature = "sandbox")]
@@ -2213,14 +2270,107 @@ impl LuaState {
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<Vec<LuaValue>> {
-        self.global_state_mut().execute_sandboxed(source, config)
+        let chunk = self.global_state_mut().compile(source)?;
+        let env = self.global_state_mut().create_sandbox_env(config)?;
+        let limits = config.runtime_limits();
+        self.with_sandbox_runtime_limits(limits, |state| {
+            let chunk = state.global_state_mut().prepare_loaded_chunk(chunk)?;
+            let env_upval = state.global_state_mut().create_upvalue_closed(env)?;
+            let func = state
+                .global_state_mut()
+                .create_function(chunk, UpvalueStore::from_single(env_upval))?;
+            state.call(func, vec![])
+        })
     }
 
     /// Execute a pre-compiled chunk, returning results.
     ///
     /// This is a convenience proxy for `LuaVM::execute`.
     pub fn execute_chunk(&mut self, chunk: ProtoPtr) -> LuaResult<Vec<LuaValue>> {
-        self.global_state_mut().execute_chunk(chunk)
+        let global = self.global_state().global;
+        let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
+        let func = self
+            .global_state_mut()
+            .create_function(chunk, UpvalueStore::from_single(env_upval))?;
+        self.call(func, vec![])
+    }
+
+    pub fn get_global_as<T: FromLua>(&mut self, name: &str) -> LuaResult<Option<T>> {
+        match self.get_global(name)? {
+            None => Ok(None),
+            Some(val) => {
+                let converted = T::from_lua(val, self).map_err(|msg| self.error(msg))?;
+                Ok(Some(converted))
+            }
+        }
+    }
+
+    pub fn get_full_error(&mut self, e: LuaError) -> LuaFullError {
+        let message = self.get_error_msg(e);
+        LuaFullError { kind: e, message }
+    }
+
+    pub fn protected_call(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<(bool, Vec<LuaValue>)> {
+        self.pcall(func, args)
+    }
+
+    pub async fn call_async(
+        &mut self,
+        func: LuaValue,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<Vec<LuaValue>> {
+        let thread_val = self.global_state_mut().create_thread(func)?;
+        let async_thread = async_thread::AsyncThread::new(
+            thread_val,
+            GlobalStateHandle::from_global(self.global_state_mut()),
+            args,
+        );
+        async_thread.await
+    }
+
+    pub async fn call_async_global(
+        &mut self,
+        name: &str,
+        args: Vec<LuaValue>,
+    ) -> LuaResult<Vec<LuaValue>> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.call_async(func, args).await
+    }
+
+    pub fn create_async_call_handle(
+        &mut self,
+        func: LuaValue,
+    ) -> LuaResult<async_thread::AsyncCallHandle> {
+        let global = self.global_state().global;
+        let chunk = self
+            .global_state_mut()
+            .compile(async_thread::ASYNC_CALL_RUNNER)?;
+        let env_upval = self.global_state_mut().create_upvalue_closed(global)?;
+        let runner_func = self
+            .global_state_mut()
+            .create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
+        let thread_val = self.global_state_mut().create_thread(runner_func)?;
+        async_thread::AsyncCallHandle::new(
+            thread_val,
+            GlobalStateHandle::from_global(self.global_state_mut()),
+            func,
+        )
+    }
+
+    pub fn create_async_call_handle_global(
+        &mut self,
+        name: &str,
+    ) -> LuaResult<async_thread::AsyncCallHandle> {
+        let func = self
+            .get_global(name)?
+            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
+        self.create_async_call_handle(func)
     }
 
     // ===== Type Registration =====

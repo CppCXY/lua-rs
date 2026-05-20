@@ -1,211 +1,146 @@
 # Executing Code
 
-This guide covers the different ways to compile and execute Lua code.
+This guide describes the current execution model.
 
-## execute
+## High-Level Host API: `Lua`
 
-The simplest approach — compile and run a Lua source string in one call:
+For embedding code, prefer `Lua` plus the `LuaApi` trait.
+
+### Load Then Execute
 
 ```rust
-let results = vm.execute(r#"
-    return 1 + 2, "hello"
-"#)?;
+use luars::{Lua, LuaApi, SafeOption};
+
+let mut lua = Lua::new(SafeOption::default());
+lua.load("answer = 40 + 2").exec()?;
+# Ok::<(), luars::LuaError>(())
 ```
 
-Also available on `LuaState`:
+### Typed Evaluation
 
 ```rust
-let state = vm.main_state();
-let results = state.execute(r#"
-    return "from state"
-"#)?;
+use luars::{Lua, LuaApi, SafeOption};
+
+let mut lua = Lua::new(SafeOption::default());
+let answer: i64 = lua.load("return 21 * 2").eval()?;
+assert_eq!(answer, 42);
+# Ok::<(), luars::LuaError>(())
 ```
 
-Returns `LuaResult<Vec<LuaValue>>` — the values returned by the Lua chunk.
-
-## load / load_with_name
-
-Compile source code into a callable function value **without executing it**:
+### Multiple Return Values
 
 ```rust
-let func = vm.load("return 1 + 1")?;
-// func is a LuaValue (function) — call it later
-let results = vm.call(func, vec![])?;
+use luars::{Lua, LuaApi, SafeOption};
+
+let mut lua = Lua::new(SafeOption::default());
+let values: (i64, String, bool) = lua.load("return 1, 'two', true").eval_multi()?;
+assert_eq!(values, (1, "two".to_string(), true));
+# Ok::<(), luars::LuaError>(())
 ```
 
-Give the chunk a name for better error messages:
+### Naming a Chunk
 
 ```rust
-let func = vm.load_with_name("return 42", "my_script.lua")?;
+let value: i64 = lua
+    .load("return 42")
+    .set_name("init.lua")
+    .eval()?;
+# Ok::<(), luars::LuaError>(())
 ```
 
-Also available on `LuaState`:
+Use chunk names when you want better error messages and tracebacks.
+
+## Low-Level Execution API: `LuaState`
+
+`LuaState` is the lower-level execution context. Use it when you need direct `LuaValue` control, low-level calling, `pcall`, coroutine operations, or file-based loading.
 
 ```rust
-let func = state.load("return 1 + 1")?;
-```
+use luars::{GlobalState, LuaValue, SafeOption, Stdlib};
 
-## dofile
+let mut global = GlobalState::new(SafeOption::default());
+global.open_stdlib(Stdlib::All)?;
 
-Read, compile, and execute a Lua file from disk:
+let state = global.main_state();
+state.execute("function add(a, b) return a + b end")?;
 
-```rust
-let results = vm.dofile("scripts/init.lua")?;
-```
-
-Also available on `LuaState`:
-
-```rust
-let results = state.dofile("scripts/config.lua")?;
-```
-
-## call / call_global
-
-Call a Lua function from Rust:
-
-```rust
-// Prepare a function value
-vm.execute("function add(a, b) return a + b end")?;
-
-// Look up a global by name and call it
-let results = vm.call_global("add", vec![
-    LuaValue::integer(3),
-    LuaValue::integer(4),
-])?;
+let func = state.get_global("add")?.unwrap();
+let results = state.call(func, vec![LuaValue::integer(3), LuaValue::integer(4)])?;
 assert_eq!(results[0].as_integer(), Some(7));
-
-// Or call an arbitrary function value
-let func = vm.get_global("add")?.unwrap();
-let results = vm.call(func, vec![
-    LuaValue::integer(10),
-    LuaValue::integer(20),
-])?;
+# Ok::<(), luars::LuaError>(())
 ```
 
-Also available on `LuaState` (as `call_function` / `call_global`):
+### Available Low-Level Entry Points
+
+- `state.load(source)` compiles to a callable `LuaValue`
+- `state.load_with_name(source, chunk_name)` does the same with a custom chunk name
+- `state.execute(source)` is a convenience wrapper for `load + call`
+- `state.dofile(path)` reads, compiles, and executes a file
+- `state.call(func, args)` calls an arbitrary Lua function value
+- `state.call_global(name, args)` looks up a global and calls it
+- `state.pcall(func, args)` performs a protected call
+
+## Compiling Without Immediate Execution
+
+If you need a compiled chunk for repeated use, call `load` on `LuaState` or use `Lua::load` and keep the returned `Chunk`.
 
 ```rust
-let results = state.call_global("add", vec![LuaValue::integer(1), LuaValue::integer(2)])?;
+let func = global.main_state().load("return 40 + 2")?;
+let values = global.main_state().call(func, vec![])?;
+assert_eq!(values[0].as_integer(), Some(42));
+# Ok::<(), luars::LuaError>(())
 ```
 
-## Compilation (Two Steps)
-
-For repeated execution of the same code, compile once and execute multiple times:
-
-```rust
-use std::rc::Rc;
-
-// Step 1: Compile to a Chunk
-let chunk = vm.compile(r#"
-    local x = ...    -- varargs become chunk arguments
-    return x * x
-"#)?;
-
-let chunk = Rc::new(chunk);
-
-// Step 2: Execute the compiled chunk
-let results = vm.execute_chunk(chunk.clone())?;
-```
-
-### compile_with_name
-
-Give the chunk a name for better error messages:
-
-```rust
-let chunk = vm.compile_with_name(
-    "return 42",
-    "my_script.lua"  // appears in error tracebacks
-)?;
-```
+For advanced tooling or caching, `GlobalState` still exposes raw compilation helpers such as `compile`, `compile_with_name`, and `load_proto_from_file`.
 
 ## Return Values
 
-Lua chunks can return multiple values. The result is always `Vec<LuaValue>`:
+At the low level, Lua execution returns `Vec<LuaValue>`.
 
 ```rust
-let results = vm.execute("return 1, 'two', true, nil")?;
+let results = global.main_state().execute("return 1, 'two', true, nil")?;
 
-assert_eq!(results.len(), 4);
 assert_eq!(results[0].as_integer(), Some(1));
 assert_eq!(results[1].as_str(), Some("two"));
 assert_eq!(results[2].as_boolean(), Some(true));
 assert!(results[3].is_nil());
+# Ok::<(), luars::LuaError>(())
 ```
 
-If the chunk doesn't return anything, the result is an empty vector:
-
-```rust
-let results = vm.execute("print('hello')")?;
-assert!(results.is_empty());
-```
-
-## LuaValue Inspection
-
-`LuaValue` represents any Lua value. Use these methods to inspect and extract:
-
-### Type Checking
-
-```rust
-value.is_nil()
-value.is_boolean()
-value.is_integer()
-value.is_number()       // float
-value.is_string()
-value.is_table()
-value.is_function()     // any function type
-value.is_userdata()
-```
-
-### Value Extraction
-
-```rust
-value.as_boolean()  -> Option<bool>
-value.as_integer()  -> Option<i64>
-value.as_number()   -> Option<f64>    // also converts integers to f64
-value.as_str()      -> Option<&str>
-```
-
-### Constructing LuaValue
-
-```rust
-LuaValue::nil()
-LuaValue::boolean(true)
-LuaValue::integer(42)
-LuaValue::float(3.14)
-LuaValue::cfunction(my_fn)  // from a fn(&mut LuaState) -> LuaResult<usize>
-```
-
-> **Note:** Strings, tables, and userdata are GC-managed and must be created through `vm.create_string("hello")`, `vm.create_table(0, 0)`, etc. See [Working with Values](03-WorkingWithValues.md).
+At the high level, prefer `eval`, `eval_multi`, `call_global`, and typed wrappers so conversion happens at the API boundary.
 
 ## Error Handling
 
-`execute` returns `LuaResult<Vec<LuaValue>>`. Errors include compilation errors and runtime errors:
+High-level API:
 
 ```rust
-match vm.execute("invalid lua {{{{") {
-    Ok(results) => println!("Success: {} values", results.len()),
-    Err(e) => {
-        let msg = vm.get_error_message(e);
-        eprintln!("Error: {}", msg);
+match lua.load("error('boom')").exec() {
+    Ok(()) => {}
+    Err(err) => {
+        let full = lua.get_error_message(err);
+        eprintln!("{}", full);
     }
 }
 ```
 
-For richer errors, use `into_full_error`:
+Low-level API:
 
 ```rust
-match vm.execute("error('boom')") {
+match global.main_state().execute("error('boom')") {
     Ok(_) => {}
-    Err(e) => {
-        let full = vm.into_full_error(e);
-        eprintln!("{}", full);  // includes source location
+    Err(err) => {
+        let full = global.get_full_error(err);
+        eprintln!("{}", full);
     }
 }
 ```
 
-See [Error Handling](06-ErrorHandling.md) for more details.
+## Async and Sandbox Execution
+
+- For high-level async embedding, use `LuaAsyncApi` on `Lua`.
+- For low-level async execution, use `LuaState::execute_async`, `LuaState::call_async`, and `LuaState::create_async_call_handle_global`.
+- For sandboxed execution, use `LuaSandboxApi` on `Lua` or `LuaState::load_sandboxed` / `LuaState::execute_sandboxed`.
 
 ## Next
 
-- [Working with Values](03-WorkingWithValues.md) — globals, tables, strings
-- [Rust Functions in Lua](04-RustFunctions.md) — register Rust functions callable from Lua
+- [Working with Values](03-WorkingWithValues.md) covers globals, tables, strings, and userdata.
+- [Rust Functions in Lua](04-RustFunctions.md) covers function registration and callbacks.

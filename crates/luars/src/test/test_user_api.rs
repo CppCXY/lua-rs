@@ -1,7 +1,7 @@
 // Tests for the user-facing Ref API and related features
 use crate::lua_value::userdata_trait::LuaMethodProvider;
 use crate::lua_vm::SafeOption;
-use crate::{LuaUserData, GlobalState, LuaValue, Stdlib, UserDataRef};
+use crate::{GlobalState, LuaUserData, LuaValue, Stdlib, UserDataRef};
 
 #[derive(LuaUserData)]
 struct ApiCounter {
@@ -80,12 +80,13 @@ fn test_table_ref_push() {
 #[test]
 fn test_table_ref_from_global() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         config = { host = "localhost", port = 8080 }
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let config = vm.get_global_table("config").unwrap().unwrap();
     let host: String = config.get_as("host").unwrap();
@@ -95,7 +96,7 @@ fn test_table_ref_from_global() {
 
     // Modify through ref and verify from Lua
     config.set("port", LuaValue::integer(9090)).unwrap();
-    let results = vm.execute("return config.port").unwrap();
+    let results = vm.main_state().execute("return config.port").unwrap();
     assert_eq!(results[0].as_integer(), Some(9090));
 }
 
@@ -122,14 +123,15 @@ fn test_table_ref_auto_drop() {
 #[test]
 fn test_function_ref_call() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         function add(a, b)
             return a + b
         end
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let add = vm.get_global_function("add").unwrap().unwrap();
     let results = add
@@ -141,14 +143,15 @@ fn test_function_ref_call() {
 #[test]
 fn test_function_ref_call1() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         function greet(name)
             return "Hello, " .. name
         end
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let greet = vm.get_global_function("greet").unwrap().unwrap();
     let name = vm.create_string("World").unwrap();
@@ -159,14 +162,15 @@ fn test_function_ref_call1() {
 #[test]
 fn test_function_ref_call1_typed() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         function greet(name)
             return "Hello, " .. name
         end
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let greet = vm.get_global_function("greet").unwrap().unwrap();
     let result: String = greet.call1("World").unwrap();
@@ -176,14 +180,15 @@ fn test_function_ref_call1_typed() {
 #[test]
 fn test_function_ref_call_typed_multi_return() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         function stats(a, b)
             return a + b, a * b, a - b
         end
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let stats = vm.get_global_function("stats").unwrap().unwrap();
     let result: (i64, i64, i64) = stats.call((7, 3)).unwrap();
@@ -193,14 +198,15 @@ fn test_function_ref_call_typed_multi_return() {
 #[test]
 fn test_function_ref_call_typed_no_args() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         function ping()
             return 42
         end
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let ping = vm.get_global_function("ping").unwrap().unwrap();
     let result: i64 = ping.call1(()).unwrap();
@@ -210,16 +216,17 @@ fn test_function_ref_call_typed_no_args() {
 #[test]
 fn test_function_ref_multiple_calls() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute(
-        r#"
+    vm.main_state()
+        .execute(
+            r#"
         counter = 0
         function inc()
             counter = counter + 1
             return counter
         end
     "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let inc = vm.get_global_function("inc").unwrap().unwrap();
     assert_eq!(inc.call1_raw(vec![]).unwrap().as_integer(), Some(1));
@@ -230,7 +237,7 @@ fn test_function_ref_multiple_calls() {
 #[test]
 fn test_function_ref_auto_drop() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute("function noop() end").unwrap();
+    vm.main_state().execute("function noop() end").unwrap();
 
     let ref_id;
     {
@@ -289,7 +296,9 @@ fn test_any_ref_table() {
 #[test]
 fn test_any_ref_function() {
     let mut vm = GlobalState::new(SafeOption::default());
-    vm.execute("function f() return 99 end").unwrap();
+    vm.main_state()
+        .execute("function f() return 99 end")
+        .unwrap();
 
     let val = vm.get_global("f").unwrap().unwrap();
     let any = vm.to_ref(val);
@@ -339,12 +348,13 @@ fn test_userdata_ref_from_lua_and_mutate() {
         .unwrap();
     vm.set_global("counter", userdata).unwrap();
 
-    let mut counter: UserDataRef<ApiCounter> = vm.get_global_as("counter").unwrap().unwrap();
+    let mut counter: UserDataRef<ApiCounter> =
+        vm.main_state().get_global_as("counter").unwrap().unwrap();
     assert_eq!(counter.get().unwrap().count, 11);
 
     counter.get_mut().unwrap().count += 9;
 
-    let results = vm.execute("return counter.count").unwrap();
+    let results = vm.main_state().execute("return counter.count").unwrap();
     assert_eq!(results[0].as_integer(), Some(20));
 }
 
@@ -367,13 +377,13 @@ fn test_push_any_basic() {
         value: 42,
     };
 
-    let ud = vm.push_any(config).unwrap();
+    let ud = vm.create_any(config).unwrap();
     assert!(ud.is_userdata());
     vm.set_global("my_config", ud).unwrap();
 
     // Verify type() in Lua shows the Rust type name
     vm.open_stdlib(Stdlib::Basic).unwrap();
-    let results = vm.execute("return type(my_config)").unwrap();
+    let results = vm.main_state().execute("return type(my_config)").unwrap();
     assert_eq!(results[0].as_str(), Some("userdata"));
 }
 
@@ -388,7 +398,7 @@ fn test_push_any_downcast() {
     }
 
     let point = Point { x: 3.0, y: 4.0 };
-    let ud = vm.push_any(point).unwrap();
+    let ud = vm.create_any(point).unwrap();
     vm.set_global("pt", ud).unwrap();
 
     // Retrieve via Rust and downcast
@@ -408,7 +418,7 @@ fn test_push_any_in_callback() {
     }
 
     let counter = Counter { count: 0 };
-    let ud = vm.push_any(counter).unwrap();
+    let ud = vm.create_any(counter).unwrap();
     vm.set_global("counter", ud).unwrap();
 
     // Register a function that mutates the opaque userdata
@@ -422,10 +432,16 @@ fn test_push_any_in_callback() {
     })
     .unwrap();
 
-    let results = vm.execute("return increment(counter)").unwrap();
+    let results = vm
+        .main_state()
+        .execute("return increment(counter)")
+        .unwrap();
     assert_eq!(results[0].as_integer(), Some(1));
 
-    let results = vm.execute("return increment(counter)").unwrap();
+    let results = vm
+        .main_state()
+        .execute("return increment(counter)")
+        .unwrap();
     assert_eq!(results[0].as_integer(), Some(2));
 }
 
@@ -459,10 +475,10 @@ fn test_userdata_builder_fields() {
 
     vm.set_global("addr", ud).unwrap();
 
-    let results = vm.execute("return addr.ip").unwrap();
+    let results = vm.main_state().execute("return addr.ip").unwrap();
     assert_eq!(results[0].as_str(), Some("127.0.0.1"));
 
-    let results = vm.execute("return addr.port").unwrap();
+    let results = vm.main_state().execute("return addr.port").unwrap();
     assert_eq!(results[0].as_integer(), Some(8080));
 }
 
@@ -493,7 +509,7 @@ fn test_userdata_builder_tostring() {
 
     vm.set_global("ver", ud).unwrap();
 
-    let results = vm.execute("return tostring(ver)").unwrap();
+    let results = vm.main_state().execute("return tostring(ver)").unwrap();
     assert_eq!(results[0].as_str(), Some("1.2.3"));
 }
 
@@ -521,12 +537,12 @@ fn test_userdata_builder_setter() {
     vm.set_global("cfg", ud).unwrap();
 
     // Read default
-    let results = vm.execute("return cfg.debug").unwrap();
+    let results = vm.main_state().execute("return cfg.debug").unwrap();
     assert_eq!(results[0].as_boolean(), Some(false));
 
     // Set and read back
-    vm.execute("cfg.debug = true").unwrap();
-    let results = vm.execute("return cfg.debug").unwrap();
+    vm.main_state().execute("cfg.debug = true").unwrap();
+    let results = vm.main_state().execute("return cfg.debug").unwrap();
     assert_eq!(results[0].as_boolean(), Some(true));
 }
 

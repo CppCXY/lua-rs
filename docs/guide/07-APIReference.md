@@ -1,362 +1,291 @@
 # API Reference
 
-Quick reference of all commonly used public methods on `LuaVM`, `LuaState`, and supporting types.
+This reference reflects the current public design.
 
-## LuaVM
+## Recommended Entry Point: `Lua`
 
-### Lifecycle
-
-```rust
-LuaVM::new(option: SafeOption) -> Box<Self>
-vm.main_state() -> &mut LuaState
-vm.open_stdlib(lib: Stdlib) -> LuaResult<()>
-vm.open_stdlibs(libs: &[Stdlib]) -> LuaResult<()>
-```
-
-### Executing Code
+`Lua` is the high-level host-facing runtime.
 
 ```rust
-vm.execute(source: &str) -> LuaResult<Vec<LuaValue>>
-vm.execute_chunk(chunk: Rc<Chunk>) -> LuaResult<Vec<LuaValue>>
-vm.load(source: &str) -> LuaResult<LuaValue>
-vm.load_with_name(source: &str, chunk_name: &str) -> LuaResult<LuaValue>
-vm.dofile(path: &str) -> LuaResult<Vec<LuaValue>>
-vm.compile(source: &str) -> LuaResult<Chunk>
-vm.compile_with_name(source: &str, chunk_name: &str) -> LuaResult<Chunk>
+use luars::{Lua, LuaApi, SafeOption};
+
+let mut lua = Lua::new(SafeOption::default());
 ```
 
-### Calling Functions
+### Common `LuaApi` Methods
 
 ```rust
-vm.call(func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>>
-vm.call_global(name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>>
+lua.open_stdlib(Stdlib::All) -> LuaResult<()>
+lua.collect_garbage() -> LuaResult<()>
+
+lua.load(source) -> Chunk<'_, Lua>
+lua.execute(source) -> LuaResult<()>
+lua.eval::<T>(source) -> LuaResult<T>
+lua.eval_multi::<T>(source) -> LuaResult<T>
+
+lua.set_global(name, value) -> LuaResult<()>
+lua.get_global::<T>(name) -> LuaResult<Option<T>>
+lua.globals() -> Table
+
+lua.call_global::<Args, Ret>(name, args) -> LuaResult<Ret>
+lua.call_global1::<Args, Ret>(name, args) -> LuaResult<Ret>
+
+lua.register_function(name, callback) -> LuaResult<()>
+lua.create_function(callback) -> LuaResult<Function>
+lua.register_async_function(name, callback) -> LuaResult<()>
+
+lua.register_type_of::<T>(name) -> LuaResult<()>
+lua.register_type::<T>(name) -> LuaResult<Table>
+lua.register_enum_of::<T>(name) -> LuaResult<()>
 ```
 
-### Globals
+### Value Helpers
 
 ```rust
-vm.set_global(name: &str, value: LuaValue) -> LuaResult<()>
-vm.get_global(name: &str) -> LuaResult<Option<LuaValue>>
-vm.get_global_as<T: FromLua>(name: &str) -> LuaResult<Option<T>>
+lua.create_string(value) -> LuaResult<LuaString>
+lua.create_table() -> LuaResult<Table>
+lua.create_table_with_capacity(narr, nrec) -> LuaResult<Table>
+lua.create_userdata(data) -> LuaResult<UserDataRef<T>>
+
+lua.pack(value) -> LuaResult<Value>
+lua.unpack::<T>(value) -> LuaResult<T>
+lua.convert::<T, U>(value) -> LuaResult<U>
+
+lua.get_metatable(value) -> LuaResult<Option<Table>>
+lua.set_metatable(value, metatable) -> LuaResult<()>
+
+lua.registry() -> Table
+lua.registry_get::<T>(key) -> LuaResult<Option<T>>
+lua.registry_set(key, value) -> LuaResult<()>
+lua.registry_geti::<T>(key) -> LuaResult<Option<T>>
+lua.registry_seti(key, value) -> LuaResult<()>
 ```
 
-### Registration
+## Async Host API: `LuaAsyncApi`
+
+Implemented by `Lua`.
 
 ```rust
-vm.register_function(name: &str, f: F) -> LuaResult<()>   // F: Fn(&mut LuaState) -> LuaResult<usize> + 'static
-vm.register_type_of<T: LuaRegistrable>(name: &str) -> LuaResult<()>
-vm.register_enum<T: LuaEnum>(name: &str) -> LuaResult<()>
+lua.exec_async(source).await -> LuaResult<()>
+lua.eval_async::<T>(source).await -> LuaResult<T>
+lua.eval_multi_async::<T>(source).await -> LuaResult<T>
+
+lua.call_async(function, args).await -> LuaResult<T>
+lua.call_async1(function, args).await -> LuaResult<T>
+lua.call_async_global(name, args).await -> LuaResult<T>
+lua.call_async_global1(name, args).await -> LuaResult<T>
 ```
 
-### Creating Values
+## Sandbox Host API: `LuaSandboxApi`
+
+Implemented by `Lua` when the `sandbox` feature is enabled.
 
 ```rust
-vm.create_string(s: &str) -> CreateResult
-vm.create_table(array_size: usize, hash_size: usize) -> CreateResult
-vm.create_userdata(data: LuaUserdata) -> CreateResult
-vm.create_closure(func: F) -> CreateResult      // F: Fn(&mut LuaState) -> LuaResult<usize> + 'static
-vm.create_closure_with_upvalues(func: F, upvalues: Vec<LuaValue>) -> CreateResult
-vm.create_c_closure(func: CFunction, upvalues: Vec<LuaValue>) -> CreateResult
+lua.load_sandboxed(source, config) -> Chunk<'_, Lua>
+lua.execute_sandboxed(source, config) -> LuaResult<()>
+lua.eval_sandboxed::<T>(source, config) -> LuaResult<T>
+lua.eval_multi_sandboxed::<T>(source, config) -> LuaResult<T>
 ```
 
-### Table Operations (raw, no metamethods)
+## Execution Context: `LuaState`
+
+`LuaState` is the low-level per-thread execution context. You usually obtain it from callbacks or from `GlobalState::main_state()`.
+
+### Core Execution
 
 ```rust
-vm.raw_get(table: &LuaValue, key: &LuaValue) -> Option<LuaValue>
-vm.raw_set(table: &LuaValue, key: LuaValue, value: LuaValue) -> bool
-vm.raw_geti(table: &LuaValue, key: i64) -> Option<LuaValue>
-vm.raw_seti(table: &LuaValue, key: i64, value: LuaValue) -> bool
-vm.table_pairs(table: &LuaValue) -> LuaResult<Vec<(LuaValue, LuaValue)>>
-vm.table_length(table: &LuaValue) -> LuaResult<usize>
+state.load(source) -> LuaResult<LuaValue>
+state.load_with_name(source, chunk_name) -> LuaResult<LuaValue>
+state.dofile(path) -> LuaResult<Vec<LuaValue>>
+state.execute(source) -> LuaResult<Vec<LuaValue>>
+state.execute_chunk(chunk) -> LuaResult<Vec<LuaValue>>
+
+state.call(func, args) -> LuaResult<Vec<LuaValue>>
+state.call_global(name, args) -> LuaResult<Vec<LuaValue>>
+state.pcall(func, args) -> LuaResult<(bool, Vec<LuaValue>)>
+state.xpcall(func, args, handler) -> LuaResult<(bool, Vec<LuaValue>)>
+state.get_global_as::<T>(name) -> LuaResult<Option<T>>
 ```
 
-### Protected Calls
+### Async Execution
 
 ```rust
-vm.protected_call(func: LuaValue, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)>
-vm.protected_call_with_handler(func: LuaValue, args: Vec<LuaValue>, handler: LuaValue) -> LuaResult<(bool, Vec<LuaValue>)>
+state.register_async(name, callback) -> LuaResult<()>
+state.register_async_typed(name, callback) -> LuaResult<()>
+state.execute_async(source).await -> LuaResult<Vec<LuaValue>>
+state.call_async(func, args).await -> LuaResult<Vec<LuaValue>>
+state.call_async_global(name, args).await -> LuaResult<Vec<LuaValue>>
+state.create_async_thread(chunk, args) -> LuaResult<AsyncThread>
+state.create_async_call_handle(func) -> LuaResult<AsyncCallHandle>
+state.create_async_call_handle_global(name) -> LuaResult<AsyncCallHandle>
 ```
 
-### Coroutines
+### Sandbox Execution
 
 ```rust
-vm.create_thread(func: LuaValue) -> CreateResult
-vm.resume_thread(thread: LuaValue, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)>
+state.load_sandboxed(source, config) -> LuaResult<LuaValue>
+state.load_with_name_sandboxed(source, chunk_name, config) -> LuaResult<LuaValue>
+state.execute_sandboxed(source, config) -> LuaResult<Vec<LuaValue>>
 ```
 
-### Registry
+### Registration and Values
 
 ```rust
-vm.registry_seti(key: i64, value: LuaValue)
-vm.registry_geti(key: i64) -> Option<LuaValue>
-vm.registry_set(key: &str, value: LuaValue) -> LuaResult<()>
-vm.registry_get(key: &str) -> LuaResult<Option<LuaValue>>
+state.register_function(name, callback) -> LuaResult<()>
+state.register_function_typed(name, callback) -> LuaResult<()>
+state.register_type_of::<T>(name) -> LuaResult<()>
+
+state.create_string(value) -> CreateResult
+state.create_table(narr, nrec) -> CreateResult
+state.create_userdata(data) -> CreateResult
+state.create_closure(callback) -> CreateResult
 ```
 
-### References
+## Low-Level Owner: `GlobalState`
+
+`GlobalState` owns the runtime. It is not the recommended top-level host API anymore, but it still exposes low-level operations that `Lua` and `LuaState` build on.
+
+### Runtime Ownership and Low-Level Services
 
 ```rust
-vm.create_ref(value: LuaValue) -> LuaRefValue
-vm.get_ref_value(lua_ref: &LuaRefValue) -> LuaValue
-vm.release_ref(lua_ref: LuaRefValue)
+GlobalState::new(option) -> Pin<Box<GlobalState>>
+global.main_state() -> &mut LuaState
+
+global.open_stdlib(lib) -> LuaResult<()>
+global.open_stdlibs(libs) -> LuaResult<()>
+
+global.compile(source) -> LuaResult<LuaProto>
+global.compile_with_name(source, chunk_name) -> LuaResult<LuaProto>
+global.load_proto_from_file(path) -> LuaResult<ProtoPtr>
 ```
 
-### Errors
+### Globals, Registry, and Refs
 
 ```rust
-vm.error(message: impl Into<String>) -> LuaError
-vm.get_error_message(e: LuaError) -> String
-vm.into_full_error(e: LuaError) -> LuaFullError
-vm.generate_traceback(error_msg: &str) -> String
+global.set_global(name, value) -> LuaResult<()>
+global.get_global(name) -> LuaResult<Option<LuaValue>>
+
+global.registry_set(key, value) -> LuaResult<()>
+global.registry_get(key) -> LuaResult<Option<LuaValue>>
+global.registry_seti(key, value)
+global.registry_geti(key) -> Option<LuaValue>
+
+global.create_ref(value) -> LuaRefValue
+global.get_ref_value(ref_value) -> LuaValue
+global.release_ref(ref_value)
+global.release_ref_id(ref_id)
 ```
 
-### Serde (feature = "serde")
+### Low-Level Value Construction
 
 ```rust
-vm.serialize_to_json(value: &LuaValue) -> Result<serde_json::Value, String>
-vm.serialize_to_json_string(value: &LuaValue, pretty: bool) -> Result<String, String>
-vm.deserialize_from_json(json: &serde_json::Value) -> Result<LuaValue, String>
-vm.deserialize_from_json_string(json_str: &str) -> Result<LuaValue, String>
+global.create_string(value) -> CreateResult
+global.create_table(narr, nrec) -> CreateResult
+global.create_userdata(data) -> CreateResult
+global.create_function(chunk, upvalues) -> CreateResult
+global.create_closure(callback) -> CreateResult
+global.create_thread(func) -> CreateResult
 ```
 
-### Async
+### Managed Ref Helpers
 
 ```rust
-vm.register_async(name: &str, f: F) -> LuaResult<()>
-vm.execute_async(source: &str) -> impl Future<Output = LuaResult<Vec<LuaValue>>>
-vm.call_async(func: LuaValue, args: Vec<LuaValue>) -> impl Future<Output = LuaResult<Vec<LuaValue>>>
-vm.call_async_global(name: &str, args: Vec<LuaValue>) -> impl Future<Output = LuaResult<Vec<LuaValue>>>
-vm.create_async_thread(func: LuaValue) -> LuaResult<AsyncThread>
-vm.create_async_call_handle(name: &str) -> LuaResult<AsyncCallHandle>
+global.create_table_ref(narr, nrec) -> LuaResult<LuaTableRef>
+global.build_table_ref(builder) -> LuaResult<LuaTableRef>
+
+global.to_ref(value) -> LuaAnyRef
+global.to_table_ref(value) -> Option<LuaTableRef>
+global.to_function_ref(value) -> Option<LuaFunctionRef>
+global.to_string_ref(value) -> Option<LuaStringRef>
+global.to_userdata_ref::<T>(value) -> Option<UserDataRef<T>>
 ```
-
----
-
-## LuaState
-
-> `LuaState` is the per-coroutine execution context. Inside a `CFunction`, it is the `&mut LuaState` parameter. From the host, access it via `vm.main_state()`.
-
-### Executing Code
-
-```rust
-state.execute(source: &str) -> LuaResult<Vec<LuaValue>>
-state.load(source: &str) -> LuaResult<LuaValue>
-state.load_with_name(source: &str, chunk_name: &str) -> LuaResult<LuaValue>
-state.dofile(path: &str) -> LuaResult<Vec<LuaValue>>
-```
-
-### Calling Functions
-
-```rust
-state.call(func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>>
-state.call_function(func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>>
-state.call_global(name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>>
-state.pcall(func: LuaValue, args: Vec<LuaValue>) -> LuaResult<(bool, Vec<LuaValue>)>
-state.xpcall(func: LuaValue, args: Vec<LuaValue>, handler: LuaValue) -> LuaResult<(bool, Vec<LuaValue>)>
-```
-
-### Globals
-
-```rust
-state.set_global(name: &str, value: LuaValue) -> LuaResult<()>
-state.get_global(name: &str) -> LuaResult<Option<LuaValue>>
-```
-
-### Registration
-
-```rust
-state.register_function(name: &str, f: F) -> LuaResult<()>
-state.register_type(name: &str, static_methods: &[(&str, CFunction)]) -> LuaResult<()>
-state.register_type_of<T: LuaRegistrable>(name: &str) -> LuaResult<()>
-```
-
-### Creating Values
-
-```rust
-state.create_table(narr: usize, nrec: usize) -> CreateResult
-state.create_string(s: &str) -> CreateResult
-state.create_userdata(data: LuaUserdata) -> CreateResult
-state.create_closure(func: F) -> CreateResult
-state.create_closure_with_upvalues(func: F, upvalues: Vec<LuaValue>) -> CreateResult
-```
-
-### Arguments (inside CFunction / RClosure)
-
-```rust
-state.arg_count() -> usize
-state.get_arg(index: usize) -> Option<LuaValue>   // 1-based
-state.get_args() -> Vec<LuaValue>
-```
-
-### Stack Operations
-
-```rust
-state.push_value(value: LuaValue) -> LuaResult<()>
-state.get_top() -> usize
-```
-
-### Table Operations
-
-```rust
-// Raw (no metamethods)
-state.raw_get(table: &LuaValue, key: &LuaValue) -> Option<LuaValue>
-state.raw_set(table: &LuaValue, key: LuaValue, value: LuaValue) -> bool
-state.raw_geti(table: &LuaValue, index: i64) -> Option<LuaValue>
-state.raw_seti(table: &LuaValue, index: i64, value: LuaValue) -> bool
-
-// With metamethods
-state.table_get(table: &LuaValue, key: &LuaValue) -> LuaResult<Option<LuaValue>>
-state.table_set(table: &LuaValue, key: LuaValue, value: LuaValue) -> LuaResult<()>
-```
-
-### Errors
-
-```rust
-state.error(msg: String) -> LuaError
-state.last_error_msg() -> &str
-state.get_error_msg(e: LuaError) -> String
-```
-
-### Misc
-
-```rust
-state.to_string(value: &LuaValue) -> LuaResult<String>
-state.collect_garbage() -> LuaResult<()>
-state.is_main_thread() -> bool
-```
-
----
 
 ## TableBuilder
 
-Fluent builder for constructing Lua tables from Rust.
+`TableBuilder` is a fluent helper for constructing Lua tables before materializing them.
 
 ```rust
-use luars::TableBuilder;
+use luars::{LuaValue, TableBuilder};
 
-let table = TableBuilder::new()
-    .set("key", vm.create_string("value")?)     // hash part: t["key"] = "value"
-    .set_int(1, LuaValue::integer(100))          // array part: t[1] = 100
-    .set_value(LuaValue::boolean(true), LuaValue::integer(1))  // arbitrary key
-    .push(LuaValue::integer(42))                 // auto-increment array index
-    .build(&mut vm)?;
+let builder = TableBuilder::new()
+    .set("host", LuaValue::integer(1))
+    .push(LuaValue::integer(42));
 ```
 
-### Methods
-
-```rust
-TableBuilder::new() -> Self
-builder.set(key: &str, value: LuaValue) -> Self       // string key
-builder.set_int(key: i64, value: LuaValue) -> Self     // integer key
-builder.set_value(key: LuaValue, value: LuaValue) -> Self  // any LuaValue key
-builder.push(value: LuaValue) -> Self                  // auto-incrementing array push
-builder.build(vm: &mut LuaVM) -> CreateResult          // materializes the table
-```
-
----
+Build with either `GlobalState` or a compatible low-level context.
 
 ## Key Types
 
-### LuaValue
+### `LuaValue`
+
+Represents any raw Lua value.
 
 ```rust
-// Construction
 LuaValue::nil()
-LuaValue::boolean(v: bool)
-LuaValue::integer(v: i64)
-LuaValue::float(v: f64)
-LuaValue::cfunction(f: CFunction)
-
-// Type checking
-value.is_nil() -> bool
-value.is_boolean() -> bool
-value.is_integer() -> bool
-value.is_number() -> bool
-value.is_string() -> bool
-value.is_table() -> bool
-value.is_function() -> bool
-value.is_userdata() -> bool
-
-// Extraction
-value.as_boolean() -> Option<bool>
-value.as_integer() -> Option<i64>
-value.as_number() -> Option<f64>
-value.as_str() -> Option<&str>
+LuaValue::boolean(true)
+LuaValue::integer(42)
+LuaValue::float(3.14)
 ```
 
-### LuaError
-
-A 1-byte enum. The actual error message is stored inside the VM.
+Common inspection methods:
 
 ```rust
-pub enum LuaError {
-    RuntimeError,           // general runtime error
-    CompileError,           // syntax / compilation error
-    Yield,                  // coroutine yield (internal)
-    StackOverflow,          // call stack overflow
-    OutOfMemory,            // memory allocation failure
-    IndexOutOfBounds,       // stack index out of range
-    Exit,                   // top-level return (internal)
-    CloseThread,            // coroutine self-close (internal)
-    ErrorInErrorHandling,   // error inside error handler
-}
+value.is_nil()
+value.is_boolean()
+value.is_integer()
+value.is_number()
+value.is_string()
+value.is_table()
+value.is_function()
+value.is_userdata()
+
+value.as_boolean()
+value.as_integer()
+value.as_number()
+value.as_str()
 ```
 
-Implements `Display` and `std::error::Error`.
+### `LuaError` and `LuaFullError`
 
-### LuaFullError
+`LuaError` is the lightweight error kind. `LuaFullError` combines that kind with the human-readable message stored in the runtime.
 
-Rich error combining the `LuaError` variant with the error message. Created via `vm.into_full_error(e)`.
+Use:
 
 ```rust
-pub struct LuaFullError {
-    pub kind: LuaError,     // the error variant
-    pub message: String,    // human-readable message with source location
-}
+let full = global.get_full_error(err);
 ```
 
-Implements `Display` and `std::error::Error`. Works with `anyhow`, `thiserror`, and `?`.
+or, on the high-level API:
 
 ```rust
-let result = vm.execute("bad code")
-    .map_err(|e| vm.into_full_error(e))?;
+let full = lua.get_error_message(err);
 ```
 
-### SafeOption
+### `SafeOption`
+
+Controls runtime limits such as:
+
+- maximum call depth
+- maximum stack size
+- maximum GC memory
+- optional instruction limit
+
+### `Stdlib`
+
+The standard library selector enum:
 
 ```rust
-SafeOption {
-    max_call_depth: usize,        // default: 200
-    max_stack_size: usize,        // default: 1_000_000
-    max_gc_memory: usize,         // default: 512 MB
-    max_instruction_count: usize, // default: 0 (unlimited)
-}
-```
-
-### Stdlib
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stdlib {
-    Basic, String, Table, Math, IO, OS,
-    Coroutine, Utf8, Package, Debug, All,
-}
-```
-
-### AsyncReturnValue
-
-Return type for async Rust functions registered with `register_async`.
-
-```rust
-pub enum AsyncReturnValue {
-    Nil,
-    Boolean(bool),
-    Integer(i64),
-    Float(f64),
-    Str(String),
-    UserData(Box<dyn Any + Send + Sync>),
-    Table(Vec<(AsyncReturnValue, AsyncReturnValue)>),
-}
+Stdlib::Basic
+Stdlib::String
+Stdlib::Table
+Stdlib::Math
+Stdlib::IO
+Stdlib::OS
+Stdlib::Coroutine
+Stdlib::Utf8
+Stdlib::Package
+Stdlib::Debug
+Stdlib::All
 ```
 
 Convenience constructors: `string(s)`, `integer(n)`, `float(n)`, `boolean(b)`, `nil()`, `table(pairs)`.

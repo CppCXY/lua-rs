@@ -16,7 +16,7 @@ fn test_package_loaded() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(package.loaded) == "table")
         assert(package.loaded.string ~= nil)
@@ -33,7 +33,7 @@ fn test_package_preload() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(package.preload) == "table")
         
@@ -58,7 +58,7 @@ fn test_package_path() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(package.path) == "string")
         assert(#package.path > 0)
@@ -73,7 +73,7 @@ fn test_package_cpath() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(package.cpath) == "string")
         assert(#package.cpath > 0)
@@ -88,7 +88,7 @@ fn test_package_config() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(package.config) == "string")
         local lines = 0
@@ -107,7 +107,7 @@ fn test_package_searchers() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(type(package.searchers) == "table")
         assert(type(package.searchers[1]) == "function")  -- preload searcher
@@ -126,7 +126,7 @@ fn test_package_searchpath() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local path, err = package.searchpath("string", package.path)
         -- Either finds a file or returns error message
@@ -142,7 +142,7 @@ fn test_require_preload() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         package.preload['mymodule'] = function()
             local M = {}
@@ -173,7 +173,7 @@ fn test_require_cache() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local load_count = 0
         package.preload['cached'] = function()
@@ -198,7 +198,7 @@ fn test_require_error() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local ok, err = pcall(require, 'nonexistent_module_xyz')
         assert(ok == false)
@@ -225,7 +225,7 @@ fn test_require_missing_module_reports_call_site_file_and_line() {
     ));
     std::fs::write(&path, "require \"definitely_missing_module_xyz\"\n").unwrap();
 
-    let err = vm.dofile(path.to_str().unwrap()).unwrap_err();
+    let err = vm.main_state().dofile(path.to_str().unwrap()).unwrap_err();
     let message = vm.get_error_message(err);
     let filename = path.file_name().unwrap().to_string_lossy();
 
@@ -240,7 +240,7 @@ fn test_require_return_value() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- Module returning nil should store true
         package.preload['nilmod'] = function()

@@ -6,7 +6,7 @@ fn test_string_gsub_function() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- Test 1: Simple function replacement
         local s1, n1 = string.gsub("hello world", "%w+", function(w)
@@ -52,7 +52,7 @@ fn test_string_len() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.len("hello") == 5)
         assert(string.len("") == 0)
@@ -68,7 +68,7 @@ fn test_string_sub() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.sub("hello", 2, 4) == "ell")
         assert(string.sub("hello", 2) == "ello")
@@ -84,7 +84,7 @@ fn test_string_upper_lower() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.upper("hello") == "HELLO")
         assert(string.lower("WORLD") == "world")
@@ -99,7 +99,7 @@ fn test_string_rep() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.rep("ab", 3) == "ababab")
         assert(string.rep("x", 0) == "")
@@ -114,7 +114,7 @@ fn test_string_reverse() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.reverse("hello") == "olleh")
     "#,
@@ -128,7 +128,7 @@ fn test_string_byte_char() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.byte("A") == 65)
         assert(string.char(65) == "A")
@@ -144,7 +144,7 @@ fn test_string_format() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.format("%d", 42) == "42")
         assert(string.format("%s", "hello") == "hello")
@@ -166,7 +166,7 @@ fn test_string_find() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local i, j = string.find("hello world", "world")
         assert(i == 7)
@@ -182,7 +182,7 @@ fn test_string_match() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local m = string.match("hello 123", "%d+")
         assert(m == "123")
@@ -197,7 +197,7 @@ fn test_string_gmatch() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local words = {}
         for w in string.gmatch("one two three", "%w+") do
@@ -217,7 +217,7 @@ fn test_string_gsub() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local s, n = string.gsub("hello world", "l", "L")
         assert(s == "heLLo worLd")
@@ -237,7 +237,7 @@ fn test_string_pack_unpack() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local packed = string.pack("bhi", 127, 32767, 2147483647)
         assert(type(packed) == "string")
@@ -260,7 +260,7 @@ fn test_string_packsize() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         assert(string.packsize("b") == 1)
         assert(string.packsize("h") == 2)
@@ -277,7 +277,7 @@ fn test_string_pack_short_byte_string_equality() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local lstr = "\1\2\3\4\5\6\7\8"
         local lnum = 0x0807060504030201

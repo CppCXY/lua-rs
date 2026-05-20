@@ -8,7 +8,7 @@ fn test_xpcall_simple() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test 1: Basic xpcall without upvalues
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function handler(err)
             return "handled"
@@ -25,7 +25,7 @@ fn test_xpcall_simple() {
     assert!(result.is_ok(), "Test 1 failed: {:?}", result);
 
     // Test 2: Handler with upvalue capture
-    let result2 = vm.execute(
+    let result2 = vm.main_state().execute(
         r#"
         local called = false
         local function handler2(err)
@@ -47,7 +47,7 @@ fn test_xpcall_concat() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test: Handler with string concatenation
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local flag = false
         local function handler(err)
@@ -70,7 +70,7 @@ fn test_debug_traceback_level_two_keeps_caller_frame() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local function caller()
             local trace = debug.traceback("", 2)
@@ -91,7 +91,7 @@ fn test_debug_traceback_in_hook_reports_hook_frame() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local count = 0
         local function f ()

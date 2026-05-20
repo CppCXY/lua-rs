@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::pin::Pin;
 
 #[cfg(feature = "sandbox")]
@@ -6,14 +7,14 @@ use luars::lua_vm::SafeOption;
 use luars::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
 use luars::{
     FromLua, FromLuaMulti, GlobalState, IntoLua, LuaEnum, LuaLibrary, LuaRegistrable, LuaResult,
-    LuaUserdata, Stdlib, UserDataRef, UserDataTrait,
+    LuaUserdata, LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
 };
 
+#[cfg(feature = "sandbox")]
+use crate::LuaSandboxApi;
 use crate::lua_api::util::{collect_values, from_value, into_single_value};
 use crate::lua_api::{Chunk, Function, LuaString, Scope, Table, Value};
 use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError};
-#[cfg(feature = "sandbox")]
-use crate::LuaSandboxApi;
 
 /// Safe, embedding-oriented Lua runtime.
 ///
@@ -38,7 +39,7 @@ impl Lua {
     }
 
     pub(crate) fn load_value(&mut self, source: &str) -> LuaResult<luars::LuaValue> {
-        self.global_state_owner.load(source)
+        self.global_state_owner.main_state().load(source)
     }
 
     pub(crate) fn load_value_with_name(
@@ -46,7 +47,9 @@ impl Lua {
         source: &str,
         chunk_name: &str,
     ) -> LuaResult<luars::LuaValue> {
-        self.global_state_owner.load_with_name(source, chunk_name)
+        self.global_state_owner
+            .main_state()
+            .load_with_name(source, chunk_name)
     }
 
     pub(crate) fn value_to_function(&mut self, value: luars::LuaValue) -> LuaResult<Function> {
@@ -84,7 +87,7 @@ impl Lua {
         &mut self,
         func: luars::LuaValue,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        self.global_state_owner.call_raw(func, vec![])
+        self.global_state_owner.main_state().call(func, vec![])
     }
 
     pub(crate) async fn call_function_value_async(
@@ -92,7 +95,10 @@ impl Lua {
         func: luars::LuaValue,
         args: Vec<luars::LuaValue>,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        self.global_state_owner.call_async(func, args).await
+        self.global_state_owner
+            .main_state()
+            .call_async(func, args)
+            .await
     }
 
     pub(crate) fn pack_multi<T: IntoLua>(
@@ -109,7 +115,9 @@ impl Lua {
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<luars::LuaValue> {
-        self.global_state_owner.load_sandboxed(source, config)
+        self.global_state_owner
+            .main_state()
+            .load_sandboxed(source, config)
     }
 
     #[cfg(feature = "sandbox")]
@@ -120,6 +128,7 @@ impl Lua {
         config: &SandboxConfig,
     ) -> LuaResult<luars::LuaValue> {
         self.global_state_owner
+            .main_state()
             .load_with_name_sandboxed(source, chunk_name, config)
     }
 
@@ -170,7 +179,7 @@ impl Lua {
     }
 
     /// Get a mutable reference to the underlying GlobalState for advanced use cases.
-    pub fn global_state(&mut self) -> &mut GlobalState {
+    pub fn global_state_mut(&mut self) -> &mut GlobalState {
         &mut self.global_state_owner
     }
 }
@@ -199,12 +208,15 @@ impl LuaApi for Lua {
 
     #[inline]
     fn execute(&mut self, source: &str) -> LuaResult<()> {
-        self.global_state_owner.execute(source).map(|_| ())
+        self.global_state_owner
+            .main_state()
+            .execute(source)
+            .map(|_| ())
     }
 
     #[inline]
     fn eval<R: FromLua>(&mut self, source: &str) -> LuaResult<R> {
-        let values = self.global_state_owner.execute(source)?;
+        let values = self.global_state_owner.main_state().execute(source)?;
         let value = values
             .into_iter()
             .next()
@@ -214,7 +226,7 @@ impl LuaApi for Lua {
 
     #[inline]
     fn eval_multi<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R> {
-        let values = self.global_state_owner.execute(source)?;
+        let values = self.global_state_owner.main_state().execute(source)?;
         R::from_lua_multi(values, self.global_state_owner.main_state())
             .map_err(|msg| self.global_state_owner.error(msg))
     }
@@ -232,17 +244,30 @@ impl LuaApi for Lua {
 
     #[inline]
     fn get_global<T: FromLua>(&mut self, name: &str) -> LuaResult<Option<T>> {
-        self.global_state_owner.get_global_as(name)
+        self.global_state_owner.main_state().get_global_as(name)
     }
 
     #[inline]
     fn call_global<A: IntoLua, R: FromLuaMulti>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        self.global_state_owner.call_global(name, args)
+        let values = collect_values(&mut self.global_state_owner, args)?;
+        self.global_state_owner
+            .main_state()
+            .call_global(name, values)
+            .and_then(|values| self.unpack_multi_values(values, "call_global"))
     }
 
     #[inline]
     fn call_global1<A: IntoLua, R: FromLua>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        self.global_state_owner.call1_global(name, args)
+        let args = collect_values(&mut self.global_state_owner, args)?;
+        let values = self
+            .global_state_owner
+            .main_state()
+            .call_global(name, args)?;
+        let value = values
+            .into_iter()
+            .next()
+            .unwrap_or_else(luars::LuaValue::nil);
+        self.unpack_value(value, "call_global1")
     }
 
     #[inline]
@@ -258,7 +283,9 @@ impl LuaApi for Lua {
     where
         F: LuaTypedCallback<Args, R>,
     {
-        self.global_state_owner.create_function_typed(f).map(Function::new)
+        self.global_state_owner
+            .create_function_typed(f)
+            .map(Function::new)
     }
 
     #[inline]
@@ -291,7 +318,7 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn load<'lua>(&'lua mut self, source: &str) -> Chunk<'lua> {
+    fn load<'lua>(&'lua mut self, source: &str) -> Chunk<'lua, Self> {
         Chunk::new(self, source)
     }
 
@@ -387,7 +414,8 @@ impl LuaApi for Lua {
 
     #[inline]
     fn set_global_function(&mut self, name: &str, function: &Function) -> LuaResult<()> {
-        self.global_state_owner.set_global(name, function.inner.to_value())
+        self.global_state_owner
+            .set_global(name, function.inner.to_value())
     }
 
     #[inline]
@@ -431,6 +459,20 @@ impl LuaApi for Lua {
     }
 
     #[inline]
+    fn get_metatable<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<Table>> {
+        Ok(self.pack(value)?.get_metatable())
+    }
+
+    #[inline]
+    fn set_metatable<T: IntoLua>(&mut self, value: T, metatable: Option<&Table>) -> LuaResult<()> {
+        let value = self.pack(value)?;
+        if let Some(table) = value.as_table() {
+            return table.set_metatable(metatable);
+        }
+        value.set_metatable(metatable)
+    }
+
+    #[inline]
     fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value> {
         let value = into_single_value(&mut self.global_state_owner, value, "pack")?;
         Ok(Value::new(self.global_state_owner.to_ref(value)))
@@ -448,19 +490,90 @@ impl LuaApi for Lua {
     }
 
     #[inline]
+    fn create_lightuserdata(&mut self, pointer: *mut c_void) -> Value {
+        Value::new(
+            self.global_state_owner
+                .to_ref(luars::LuaValue::lightuserdata(pointer)),
+        )
+    }
+
+    #[inline]
+    fn to_pointer<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<*const c_void>> {
+        Ok(self.pack(value)?.to_pointer())
+    }
+
+    #[inline]
+    fn registry(&mut self) -> Table {
+        let registry = self.global_state_owner.registry;
+        Table::new(
+            self.global_state_owner
+                .to_table_ref(registry)
+                .expect("registry must be a table"),
+        )
+    }
+
+    #[inline]
+    fn registry_get<T: FromLua>(&mut self, key: &str) -> LuaResult<Option<T>> {
+        let Some(value) = self.global_state_owner.registry_get(key)? else {
+            return Ok(None);
+        };
+        self.unpack_value(value, "registry_get").map(Some)
+    }
+
+    #[inline]
+    fn registry_set<T: IntoLua>(&mut self, key: &str, value: T) -> LuaResult<()> {
+        let value = into_single_value(&mut self.global_state_owner, value, "registry_set")?;
+        self.global_state_owner.registry_set(key, value)
+    }
+
+    #[inline]
+    fn registry_geti<T: FromLua>(&mut self, key: i64) -> LuaResult<Option<T>> {
+        let Some(value) = self.global_state_owner.registry_geti(key) else {
+            return Ok(None);
+        };
+        self.unpack_value(value, "registry_geti").map(Some)
+    }
+
+    #[inline]
+    fn registry_seti<T: IntoLua>(&mut self, key: i64, value: T) -> LuaResult<()> {
+        let value = into_single_value(&mut self.global_state_owner, value, "registry_seti")?;
+        self.global_state_owner.registry_seti(key, value);
+        Ok(())
+    }
+
+    #[inline]
+    fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<Table> {
+        let metatable = self.global_state_owner.get_basic_metatable(kind)?;
+        self.global_state_owner
+            .to_table_ref(metatable)
+            .map(Table::new)
+    }
+
+    #[inline]
+    fn set_type_metatable(
+        &mut self,
+        kind: LuaValueKind,
+        metatable: Option<&Table>,
+    ) -> LuaResult<()> {
+        self.global_state_owner
+            .set_basic_metatable(kind, metatable.map(Table::value));
+        Ok(())
+    }
+
+    #[inline]
     fn get_error_message(&mut self, error: LuaError) -> LuaFullError {
-        self.global_state_owner.get_full_error(error)
+        self.global_state_owner.main_state().get_full_error(error)
     }
 
     #[inline]
     fn gc_stop(&mut self) {
-        self.global_state().gc.gc_stopped = true;
+        self.global_state_mut().gc.gc_stopped = true;
     }
 
     #[inline]
     fn gc_restart(&mut self) {
-        self.global_state().gc.gc_stopped = false;
-        self.global_state().gc.set_debt(0);
+        self.global_state_mut().gc.gc_stopped = false;
+        self.global_state_mut().gc.set_debt(0);
     }
 }
 
@@ -531,23 +644,25 @@ impl LuaAsyncApi for Lua {
 
 #[cfg(feature = "sandbox")]
 impl LuaSandboxApi for Lua {
-    fn load_sandboxed<'lua>(&'lua mut self, source: &str, config: &SandboxConfig) -> Chunk<'lua> {
+    fn load_sandboxed<'lua>(
+        &'lua mut self,
+        source: &str,
+        config: &SandboxConfig,
+    ) -> Chunk<'lua, Self> {
         self.load(source).with_sandbox(config)
     }
 
     fn execute_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<()> {
         self.global_state_owner
+            .main_state()
             .execute_sandboxed(source, config)
             .map(|_| ())
     }
 
-    fn eval_sandboxed<R: FromLua>(
-        &mut self,
-        source: &str,
-        config: &SandboxConfig,
-    ) -> LuaResult<R> {
+    fn eval_sandboxed<R: FromLua>(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<R> {
         let value = self
             .global_state_owner
+            .main_state()
             .execute_sandboxed(source, config)?
             .into_iter()
             .next()
@@ -560,15 +675,14 @@ impl LuaSandboxApi for Lua {
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<R> {
-        let values = self.global_state_owner.execute_sandboxed(source, config)?;
+        let values = self
+            .global_state_owner
+            .main_state()
+            .execute_sandboxed(source, config)?;
         self.unpack_multi_values(values, "eval_multi_sandboxed")
     }
 
-    fn sandbox_capture_global(
-        &mut self,
-        config: &mut SandboxConfig,
-        name: &str,
-    ) -> LuaResult<()> {
+    fn sandbox_capture_global(&mut self, config: &mut SandboxConfig, name: &str) -> LuaResult<()> {
         let value = self.global_state_owner.get_global(name)?.ok_or_else(|| {
             self.global_state_owner
                 .error(format!("global '{}' not found", name))

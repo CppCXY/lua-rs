@@ -358,7 +358,7 @@ fn setup_point_vm() -> Pin<Box<GlobalState>> {
 #[test]
 fn test_vm_get_field() {
     let mut vm = setup_point_vm();
-    let results = vm.execute("return p.x, p.y").unwrap();
+    let results = vm.main_state().execute("return p.x, p.y").unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].as_number(), Some(3.0));
     assert_eq!(results[1].as_number(), Some(4.0));
@@ -368,6 +368,7 @@ fn test_vm_get_field() {
 fn test_vm_set_field() {
     let mut vm = setup_point_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         p.x = 10.0
@@ -384,7 +385,7 @@ fn test_vm_set_field() {
 #[test]
 fn test_vm_tostring() {
     let mut vm = setup_point_vm();
-    let results = vm.execute("return tostring(p)").unwrap();
+    let results = vm.main_state().execute("return tostring(p)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Point(3, 4)"));
 }
@@ -418,7 +419,10 @@ fn test_vm_eq() {
     state.set_global("p2", v2).unwrap();
     state.set_global("p3", v3).unwrap();
 
-    let results = vm.execute("return p1 == p2, p1 == p3").unwrap();
+    let results = vm
+        .main_state()
+        .execute("return p1 == p2, p1 == p3")
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].as_boolean(), Some(true));
     assert_eq!(results[1].as_boolean(), Some(false));
@@ -446,7 +450,10 @@ fn test_vm_lt_le() {
     state.set_global("p1", v1).unwrap();
     state.set_global("p2", v2).unwrap();
 
-    let results = vm.execute("return p1 < p2, p1 <= p2, p2 < p1").unwrap();
+    let results = vm
+        .main_state()
+        .execute("return p1 < p2, p1 <= p2, p2 < p1")
+        .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_boolean(), Some(true));
     assert_eq!(results[1].as_boolean(), Some(true));
@@ -456,7 +463,10 @@ fn test_vm_lt_le() {
 #[test]
 fn test_vm_concat() {
     let mut vm = setup_point_vm();
-    let results = vm.execute(r#"return "pos=" .. tostring(p)"#).unwrap();
+    let results = vm
+        .main_state()
+        .execute(r#"return "pos=" .. tostring(p)"#)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("pos=Point(3, 4)"));
 }
@@ -465,6 +475,7 @@ fn test_vm_concat() {
 fn test_vm_pass_userdata_to_function() {
     let mut vm = setup_point_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         local function get_x(obj)
@@ -495,6 +506,7 @@ fn test_vm_config_readonly() {
 
     // Can read name and version
     let results = vm
+        .main_state()
         .execute("return cfg.name, cfg.version, cfg.count")
         .unwrap();
     assert_eq!(results.len(), 3);
@@ -503,11 +515,14 @@ fn test_vm_config_readonly() {
     assert_eq!(results[2].as_integer(), Some(10));
 
     // Can set name (writable)
-    let results = vm.execute(r#"cfg.name = "new"; return cfg.name"#).unwrap();
+    let results = vm
+        .main_state()
+        .execute(r#"cfg.name = "new"; return cfg.name"#)
+        .unwrap();
     assert_eq!(results[0].as_str(), Some("new"));
 
     // Cannot set version (readonly) — should error
-    let result = vm.execute("cfg.version = 99");
+    let result = vm.main_state().execute("cfg.version = 99");
     assert!(result.is_err());
 }
 
@@ -518,7 +533,7 @@ fn test_vm_unknown_field_is_nil() {
     // and since there's no metatable, should error (attempt to index userdata)
     // Actually, looking at the code: if get_field returns None AND there's no __index,
     // it produces an error. Let's verify the error case:
-    let result = vm.execute("return p.nonexistent");
+    let result = vm.main_state().execute("return p.nonexistent");
     // With no metatable set, this should error since no __index metamethod exists
     assert!(result.is_err());
 }
@@ -526,7 +541,7 @@ fn test_vm_unknown_field_is_nil() {
 #[test]
 fn test_vm_type_of_userdata() {
     let mut vm = setup_point_vm();
-    let results = vm.execute("return type(p)").unwrap();
+    let results = vm.main_state().execute("return type(p)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("userdata"));
 }
@@ -536,7 +551,7 @@ fn test_vm_type_of_userdata() {
 #[test]
 fn test_vm_method_distance() {
     let mut vm = setup_point_vm();
-    let results = vm.execute("return p:distance()").unwrap();
+    let results = vm.main_state().execute("return p:distance()").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_float(), Some(5.0)); // 3-4-5 triangle
 }
@@ -545,6 +560,7 @@ fn test_vm_method_distance() {
 fn test_vm_method_translate() {
     let mut vm = setup_point_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         p:translate(10, 20)
@@ -561,6 +577,7 @@ fn test_vm_method_translate() {
 fn test_vm_method_scale() {
     let mut vm = setup_point_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         p:scale(2)
@@ -578,12 +595,15 @@ fn test_vm_method_optional_param() {
     let mut vm = setup_point_vm();
 
     // With parameter
-    let results = vm.execute(r#"return p:greet("Alice")"#).unwrap();
+    let results = vm
+        .main_state()
+        .execute(r#"return p:greet("Alice")"#)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Hello Alice from Point(3, 4)"));
 
     // Without parameter (nil/missing → None)
-    let results = vm.execute("return p:greet()").unwrap();
+    let results = vm.main_state().execute("return p:greet()").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("Hello from Point(3, 4)"));
 }
@@ -591,7 +611,7 @@ fn test_vm_method_optional_param() {
 #[test]
 fn test_vm_method_result_ok() {
     let mut vm = setup_point_vm();
-    let results = vm.execute("return p:checked_div(2)").unwrap();
+    let results = vm.main_state().execute("return p:checked_div(2)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_number(), Some(1.5)); // 3.0 / 2
 }
@@ -599,7 +619,7 @@ fn test_vm_method_result_ok() {
 #[test]
 fn test_vm_method_result_err() {
     let mut vm = setup_point_vm();
-    let result = vm.execute("return p:checked_div(0)");
+    let result = vm.main_state().execute("return p:checked_div(0)");
     assert!(result.is_err()); // Should raise Lua error
 }
 
@@ -607,7 +627,7 @@ fn test_vm_method_result_err() {
 fn test_vm_method_as_field_access() {
     let mut vm = setup_point_vm();
     // Methods are accessed as fields that return CFunction values
-    let results = vm.execute("return type(p.distance)").unwrap();
+    let results = vm.main_state().execute("return type(p.distance)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("function"));
 }
@@ -630,7 +650,7 @@ fn setup_point_class_vm() -> Pin<Box<GlobalState>> {
 #[test]
 fn test_register_type_creates_global_table() {
     let mut vm = setup_point_class_vm();
-    let results = vm.execute("return type(Point)").unwrap();
+    let results = vm.main_state().execute("return type(Point)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("table"));
 }
@@ -638,7 +658,7 @@ fn test_register_type_creates_global_table() {
 #[test]
 fn test_register_type_new_is_function() {
     let mut vm = setup_point_class_vm();
-    let results = vm.execute("return type(Point.new)").unwrap();
+    let results = vm.main_state().execute("return type(Point.new)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].as_str(), Some("function"));
 }
@@ -647,6 +667,7 @@ fn test_register_type_new_is_function() {
 fn test_register_type_constructor() {
     let mut vm = setup_point_class_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         local p = Point.new(3, 4)
@@ -663,6 +684,7 @@ fn test_register_type_constructor() {
 fn test_register_type_constructor_with_methods() {
     let mut vm = setup_point_class_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         local p = Point.new(3, 4)
@@ -678,6 +700,7 @@ fn test_register_type_constructor_with_methods() {
 fn test_register_type_constructor_with_mutation() {
     let mut vm = setup_point_class_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         local p = Point.new(1, 2)
@@ -695,6 +718,7 @@ fn test_register_type_constructor_with_mutation() {
 fn test_register_type_constructor_tostring() {
     let mut vm = setup_point_class_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         local p = Point.new(5, 10)
@@ -710,6 +734,7 @@ fn test_register_type_constructor_tostring() {
 fn test_register_type_multiple_instances() {
     let mut vm = setup_point_class_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Point.new(1, 0)
@@ -729,6 +754,7 @@ fn test_register_type_multiple_instances() {
 fn test_register_type_equality() {
     let mut vm = setup_point_class_vm();
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Point.new(3, 4)
@@ -746,7 +772,8 @@ fn test_register_type_equality() {
 #[test]
 fn test_userdata_derive_into_lua_for_typed_call() {
     let mut vm = setup_point_class_vm();
-    vm.execute("function sum_point(p) return p.x + p.y end")
+    vm.main_state()
+        .execute("function sum_point(p) return p.x + p.y end")
         .unwrap();
 
     let func = vm.get_global("sum_point").unwrap().unwrap();
@@ -756,8 +783,12 @@ fn test_userdata_derive_into_lua_for_typed_call() {
         _id: 7,
     };
 
-    let result: f64 = vm.call1(func, point).unwrap();
-    assert_eq!(result, 7.0);
+    let point = vm
+        .main_state()
+        .create_userdata(LuaUserdata::new(point))
+        .unwrap();
+    let result = vm.main_state().call(func, vec![point]).unwrap();
+    assert_eq!(result[0].as_number(), Some(7.0));
 }
 
 // ==================== Enum export tests ====================
@@ -833,6 +864,7 @@ fn test_enum_basic() {
     vm.register_enum_of::<Color>("Color").unwrap();
 
     let results = vm
+        .main_state()
         .execute("return Color.Red, Color.Green, Color.Blue")
         .unwrap();
     assert_eq!(results.len(), 3);
@@ -848,6 +880,7 @@ fn test_enum_explicit_discriminants() {
     vm.register_enum_of::<HttpStatus>("HttpStatus").unwrap();
 
     let results = vm
+        .main_state()
         .execute("return HttpStatus.Ok, HttpStatus.NotFound, HttpStatus.ServerError")
         .unwrap();
     assert_eq!(results.len(), 3);
@@ -862,7 +895,10 @@ fn test_enum_mixed_discriminants() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_enum_of::<MixedDisc>("MD").unwrap();
 
-    let results = vm.execute("return MD.A, MD.B, MD.C, MD.D, MD.E").unwrap();
+    let results = vm
+        .main_state()
+        .execute("return MD.A, MD.B, MD.C, MD.D, MD.E")
+        .unwrap();
     assert_eq!(results.len(), 5);
     assert_eq!(results[0].as_integer(), Some(0));
     assert_eq!(results[1].as_integer(), Some(10));
@@ -878,6 +914,7 @@ fn test_enum_in_lua_comparison() {
     vm.register_enum_of::<HttpStatus>("Status").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local code = 404
@@ -900,6 +937,7 @@ fn test_enum_iteration_in_lua() {
     vm.register_enum_of::<Color>("Color").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local count = 0
@@ -920,6 +958,7 @@ fn test_data_enum_userdata_methods() {
     vm.register_type_of::<Shape>("Shape").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Shape.circle(2)
@@ -953,7 +992,10 @@ fn test_data_enum_userdata_instance_method_lookup() {
     let shape_val = state.create_userdata(shape).unwrap();
     state.set_global("shape", shape_val).unwrap();
 
-    let results = vm.execute("return shape:kind(), shape:area()").unwrap();
+    let results = vm
+        .main_state()
+        .execute("return shape:kind(), shape:area()")
+        .unwrap();
     assert_eq!(results[0].as_str(), Some("rect"));
     assert_eq!(results[1].as_number(), Some(30.0));
 }
@@ -1028,6 +1070,7 @@ fn test_userdata_add() {
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Vec2.new(1, 2)
@@ -1048,6 +1091,7 @@ fn test_userdata_sub() {
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Vec2.new(5, 7)
@@ -1068,6 +1112,7 @@ fn test_userdata_mul() {
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Vec2.new(2, 3)
@@ -1088,6 +1133,7 @@ fn test_userdata_neg() {
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Vec2.new(3, -4)
@@ -1107,6 +1153,7 @@ fn test_userdata_chained_arithmetic() {
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Vec2.new(1, 2)
@@ -1128,6 +1175,7 @@ fn test_userdata_arithmetic_preserves_type() {
     vm.register_type_of::<Vec2>("Vec2").unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local a = Vec2.new(1, 2)
@@ -1192,6 +1240,7 @@ fn test_userdata_pairs_iteration() {
     let mut vm = setup_number_list_vm();
     // pairs(mylist) should iterate over the Vec elements
     let results = vm
+        .main_state()
         .execute(
             r#"
         local keys = {}
@@ -1227,6 +1276,7 @@ fn test_userdata_pairs_empty() {
     state.set_global("mylist", ud_val).unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local count = 0
@@ -1244,7 +1294,7 @@ fn test_userdata_pairs_empty() {
 fn test_userdata_len_from_iter() {
     let mut vm = setup_number_list_vm();
     // #[lua(iter)] generates lua_len automatically
-    let results = vm.execute("return #mylist").unwrap();
+    let results = vm.main_state().execute("return #mylist").unwrap();
     assert_eq!(results[0].as_integer(), Some(5));
 }
 
@@ -1253,6 +1303,7 @@ fn test_userdata_iter_with_field_access() {
     let mut vm = setup_number_list_vm();
     // Field access (name) should still work alongside iteration
     let results = vm
+        .main_state()
         .execute(
             r#"
         local sum = 0
@@ -1289,6 +1340,7 @@ fn test_userdata_pairs_string_vec() {
     state.set_global("slist", ud_val).unwrap();
 
     let results = vm
+        .main_state()
         .execute(
             r#"
         local result = ""
@@ -1359,7 +1411,7 @@ fn test_userdata_call_basic() {
     let ud_val = state.create_userdata(ud).unwrap();
     state.set_global("add100", ud_val).unwrap();
 
-    let results = vm.execute("return add100(42)").unwrap();
+    let results = vm.main_state().execute("return add100(42)").unwrap();
     assert_eq!(results[0].as_integer(), Some(142));
 }
 
@@ -1376,6 +1428,7 @@ fn test_userdata_call_multiple_args() {
 
     // Can use field access and call on the same userdata
     let results = vm
+        .main_state()
         .execute(
             r#"
         local base = add10.base
@@ -1400,7 +1453,7 @@ fn test_userdata_call_in_expression() {
     state.set_global("inc", ud_val).unwrap();
 
     // Use callable userdata in expressions
-    let results = vm.execute("return inc(10) + inc(20)").unwrap();
+    let results = vm.main_state().execute("return inc(10) + inc(20)").unwrap();
     assert_eq!(results[0].as_integer(), Some(32)); // (1+10) + (1+20)
 }
 
@@ -1445,7 +1498,7 @@ fn test_userdata_call_multi_return() {
     let ud_val = state.create_userdata(ud).unwrap();
     state.set_global("split10", ud_val).unwrap();
 
-    let results = vm.execute("return split10(47)").unwrap();
+    let results = vm.main_state().execute("return split10(47)").unwrap();
     assert_eq!(results[0].as_integer(), Some(4)); // 47 / 10
     assert_eq!(results[1].as_integer(), Some(7)); // 47 % 10
 }
@@ -1530,6 +1583,7 @@ fn test_userdata_bitand_via_trait() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
+        .main_state()
         .execute(r#"local a=Bits.new(0xFF);local b=Bits.new(0x0F);local c=a&b;return c.val"#)
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(0x0F));
@@ -1541,6 +1595,7 @@ fn test_userdata_bitor_via_trait() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
+        .main_state()
         .execute(r#"local a=Bits.new(0xF0);local b=Bits.new(0x0F);local c=a|b;return c.val"#)
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(0xFF));
@@ -1552,6 +1607,7 @@ fn test_userdata_bitxor_via_trait() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
+        .main_state()
         .execute(r#"local a=Bits.new(0xFF);local b=Bits.new(0x0F);local c=a~b;return c.val"#)
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(0xF0));
@@ -1563,6 +1619,7 @@ fn test_userdata_bnot_via_trait() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
+        .main_state()
         .execute(r#"local a=Bits.new(0xFFFF0000);local b=~a;return b.val"#)
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(0x0000FFFF));
@@ -1574,6 +1631,7 @@ fn test_userdata_shl_via_trait() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
+        .main_state()
         .execute(r#"local a=Bits.new(1);local b=a<<3;return b.val"#)
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(8));
@@ -1585,6 +1643,7 @@ fn test_userdata_shr_via_trait() {
     vm.open_stdlib(Stdlib::All).unwrap();
     vm.register_type_of::<Bits>("Bits").unwrap();
     let results = vm
+        .main_state()
         .execute(r#"local a=Bits.new(16);local b=a>>2;return b.val"#)
         .unwrap();
     assert_eq!(results[0].as_integer(), Some(4));
@@ -1632,12 +1691,14 @@ fn test_delegated_close_via_lua_tbc() {
     vm.register_type_of::<Connection>("Connection").unwrap();
     // Verify basic access works first
     let r = vm
+        .main_state()
         .execute(r#"local c = Connection.new("x"); return c.host, c:is_closed()"#)
         .unwrap();
     assert_eq!(r[0].as_str(), Some("x"));
     assert_eq!(r[1].as_boolean(), Some(false));
     // Now test <close> — x goes out of scope after do-end block
     let results = vm
+        .main_state()
         .execute(
             r#"
         local c = Connection.new("localhost")
@@ -1691,7 +1752,9 @@ fn test_manual_lua_close_via_lua_tbc() {
         state.set_global("r", ud_val).unwrap();
     }
     // <close> fires lua_close() when r goes out of scope
-    vm.execute(r#"do local x <close> = r end"#).unwrap();
+    vm.main_state()
+        .execute(r#"do local x <close> = r end"#)
+        .unwrap();
     // Verify lua_close was called via downcasting
     let state = vm.main_state();
     let r_val = state.get_global("r").unwrap().unwrap();

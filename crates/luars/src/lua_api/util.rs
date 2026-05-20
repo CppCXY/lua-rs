@@ -1,4 +1,4 @@
-use crate::{FromLua, IntoLua, LuaResult, GlobalState};
+use crate::{FromLua, GlobalState, IntoLua, LuaResult};
 
 pub(crate) fn into_single_value<T: IntoLua>(
     vm: &mut GlobalState,

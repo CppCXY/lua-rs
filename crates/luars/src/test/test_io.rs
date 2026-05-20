@@ -16,7 +16,7 @@ fn test_io_open_read() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/sample.txt", "r")
         assert(f ~= nil, "Failed to open file")
@@ -35,7 +35,7 @@ fn test_io_open_nonexistent() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local f, err = io.open("nonexistent_file_12345.txt", "r")
         assert(f == nil)
@@ -52,7 +52,7 @@ fn test_io_lines_file() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local lines = {{}}
         for line in io.lines("{}/lines.txt") do
@@ -74,7 +74,7 @@ fn test_io_read_line() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/sample.txt", "r")
         local line1 = f:read("*l")
@@ -95,7 +95,7 @@ fn test_io_read_number() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/binary.dat", "r")
         local n = f:read("*n")
@@ -115,7 +115,7 @@ fn test_io_read_bytes() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/binary.dat", "r")
         local bytes = f:read(4)
@@ -134,7 +134,7 @@ fn test_io_write_temp() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local path = "{}/temp_write.txt"
         local f = io.open(path, "w")
@@ -161,7 +161,7 @@ fn test_io_seek_operations() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/binary.dat", "r")
         
@@ -196,7 +196,7 @@ fn test_io_type_function() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/sample.txt", "r")
         assert(io.type(f) == "file")
@@ -217,7 +217,7 @@ fn test_io_flush() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local path = "{}/temp_flush.txt"
         local f = io.open(path, "w")
@@ -237,7 +237,7 @@ fn test_io_tmpfile() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local f = io.tmpfile()
         if f then
@@ -259,7 +259,7 @@ fn test_io_read_all() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/sample.txt", "r")
         local all = f:read("*a")
@@ -279,7 +279,7 @@ fn test_io_file_setvbuf() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local path = "{}/temp_buf.txt"
         local f = io.open(path, "w")
@@ -301,7 +301,7 @@ fn test_io_multiple_reads() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/binary.dat", "r")
         local a = f:read(2)
@@ -324,7 +324,7 @@ fn test_io_append_mode() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local path = "{}/temp_append.txt"
         
@@ -358,7 +358,7 @@ fn test_io_read_eof() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = io.open("{}/binary.dat", "r")
         -- Read all content
@@ -381,7 +381,7 @@ fn test_io_read_stops_after_first_failure() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         io.input("{}/lines.txt")
         local t = table.pack(io.read("*l", "*l", "*l", "*l", "*l", "*l"))
@@ -413,7 +413,7 @@ fn test_file_read_stops_after_first_failure() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
     let test_dir = get_test_data_dir();
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local path = "{}/one_line_file_read.txt"
         local wf = io.open(path, "w")
@@ -440,7 +440,7 @@ fn test_io_lines_uses_initialized_default_input() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local iter = io.lines(nil)
         assert(iter ~= nil)
@@ -457,7 +457,7 @@ fn test_io_popen_read_mode() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local f = assert(io.popen("echo hello", "r"))
         local line = f:read("*l")
@@ -478,7 +478,7 @@ fn test_io_popen_invalid_mode_raises() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local ok, err = pcall(io.popen, "cat", "r+")
         assert(ok == false)
@@ -505,7 +505,7 @@ fn test_io_popen_write_mode() {
         format!("cat > {}", path_str)
     };
 
-    let result = vm.execute(&format!(
+    let result = vm.main_state().execute(&format!(
         r#"
         local f = assert(io.popen("{command}", "w"))
         f:write("pipe-data\n")

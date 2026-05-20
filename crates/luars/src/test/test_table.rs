@@ -6,7 +6,7 @@ fn test_table_insert() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {1, 2, 3}
         table.insert(t, 4)
@@ -26,7 +26,7 @@ fn test_table_remove() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {10, 20, 30, 40}
         local v = table.remove(t, 2)
@@ -47,7 +47,7 @@ fn test_table_concat() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {"a", "b", "c"}
         assert(table.concat(t) == "abc")
@@ -67,7 +67,7 @@ fn test_table_concat_binary_separator() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local sep = string.char(255)
         local t = {"A", "B", "C"}
@@ -89,7 +89,7 @@ fn test_table_sort() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {3, 1, 4, 1, 5}
         table.sort(t)
@@ -109,7 +109,7 @@ fn test_table_sort_with_comparator() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {3, 1, 4, 1, 5}
         table.sort(t, function(a, b) return a > b end)
@@ -127,7 +127,7 @@ fn test_table_sort_byte_strings() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {"\xE1lo", "\0first :-)", "alo", "then this one", "45", "and a new"}
         table.sort(t)
@@ -149,7 +149,7 @@ fn test_table_pack() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = table.pack(1, 2, 3)
         assert(t[1] == 1)
@@ -167,7 +167,7 @@ fn test_table_unpack() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {10, 20, 30}
         local a, b, c = table.unpack(t)
@@ -185,7 +185,7 @@ fn test_table_move() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t1 = {1, 2, 3, 4, 5}
         local t2 = {}
@@ -204,7 +204,7 @@ fn test_table_operations() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- Test table creation and access
         local t = {}
@@ -232,7 +232,7 @@ fn test_table_insert_with_metamethods() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- Proxy table: all reads/writes go to backing table via __index/__newindex
         local backing = {}
@@ -265,7 +265,7 @@ fn test_table_remove_with_metamethods() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local backing = {10, 20, 30, 40}
         local proxy = setmetatable({}, {
@@ -294,7 +294,7 @@ fn test_table_sort_with_metamethods() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local backing = {5, 3, 1, 4, 2}
         local proxy = setmetatable({}, {
@@ -322,7 +322,7 @@ fn test_table_concat_with_metamethods() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         -- __index function that returns computed values
         local t = setmetatable({}, {
@@ -347,7 +347,7 @@ fn test_table_unpack_with_metamethods() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local backing = {100, 200, 300}
         local proxy = setmetatable({}, {
@@ -373,7 +373,7 @@ fn test_table_move_with_metamethods() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local src = setmetatable({}, {
             __index = {10, 20, 30, 40, 50},
@@ -398,7 +398,7 @@ fn test_table_insert_overflow_with_len_metamethod() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = setmetatable({},
                     {__len = function() return math.maxinteger end})
@@ -422,7 +422,7 @@ fn test_table_full_proxy_workflow() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Full workflow matching the C Lua test: insert, sort, concat, remove, unpack
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local t = {}
         local proxy = setmetatable({}, {
@@ -462,7 +462,7 @@ fn test_table_newindex_counting() {
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
 
     // Test that __newindex is actually triggered (counting calls)
-    let result = vm.execute(
+    let result = vm.main_state().execute(
         r#"
         local count = 0
         local t = setmetatable({}, {

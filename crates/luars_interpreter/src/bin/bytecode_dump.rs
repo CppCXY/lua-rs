@@ -1,5 +1,5 @@
+use luars::{GlobalState, LuaProto};
 use luars::{Instruction, OpCode, SafeOption};
-use luars::{LuaProto, GlobalState};
 use std::env;
 use std::fs;
 

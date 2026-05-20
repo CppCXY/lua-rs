@@ -25,17 +25,17 @@ use crate::gc::{
     CreateResult, GcKind, GcObjectPtr, GcState, ObjectAllocator, ThreadPtr, UpvaluePtr,
 };
 use crate::gc::{GC, ProtoPtr};
-use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua, collect_into_lua_values};
+use crate::lua_value::lua_convert::{FromLua, IntoLua};
 use crate::lua_value::{
     LuaProto, LuaUpvalue, LuaUserdata, LuaValue, LuaValueKind, LuaValuePtr, UpvalueStore,
 };
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
-use crate::lua_vm::execute::lua_execute;
 use crate::lua_vm::file_layout::inspect_file_chunk_layout;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
+use crate::lua_vm::lua_ref::store_in_registry;
 pub use crate::lua_vm::lua_ref::{
     LUA_REFNIL, LuaAnyRef, LuaFunctionRef, LuaRefValue, LuaStringRef, LuaTableRef, RefId,
     UserDataRef,
@@ -314,11 +314,11 @@ impl GlobalState {
         inner
     }
 
-    pub fn main_state(&mut self) -> &mut LuaState {
+    pub(crate) fn main_state(&mut self) -> &mut LuaState {
         &mut self.main_state.as_mut_ref().data
     }
 
-    pub fn main_state_ref(&self) -> &LuaState {
+    pub(crate) fn main_state_ref(&self) -> &LuaState {
         &self.main_state.as_ref().data
     }
 
@@ -482,15 +482,6 @@ impl GlobalState {
         json_string_to_lua(json_str, self)
     }
 
-    /// Execute a chunk in the main thread
-    pub fn execute_chunk(&mut self, chunk: ProtoPtr) -> LuaResult<Vec<LuaValue>> {
-        // Main chunk needs _ENV upvalue pointing to global table
-        // This matches Lua 5.5+ behavior where all chunks have _ENV as upvalue[0]
-        let env_upval = self.create_upvalue_closed(self.global)?;
-        let func = self.create_function(chunk, UpvalueStore::from_single(env_upval))?;
-        self.execute_function(func, vec![])
-    }
-
     #[inline]
     pub(crate) fn prepare_loaded_chunk(&mut self, chunk: LuaProto) -> LuaResult<ProtoPtr> {
         #[cfg(feature = "shared-proto")]
@@ -512,178 +503,6 @@ impl GlobalState {
     ) -> LuaResult<LuaValue> {
         let chunk = self.prepare_loaded_chunk(chunk)?;
         self.create_function(chunk, upvalues)
-    }
-
-    #[inline]
-    pub(crate) fn execute_loaded_chunk(&mut self, chunk: LuaProto) -> LuaResult<Vec<LuaValue>> {
-        let chunk = self.prepare_loaded_chunk(chunk)?;
-        self.execute_chunk(chunk)
-    }
-
-    #[cfg(feature = "sandbox")]
-    fn execute_chunk_with_env(
-        &mut self,
-        chunk: ProtoPtr,
-        env: LuaValue,
-    ) -> LuaResult<Vec<LuaValue>> {
-        let env_upval = self.create_upvalue_closed(env)?;
-        let func = self.create_function(chunk, UpvalueStore::from_single(env_upval))?;
-        self.execute_function(func, vec![])
-    }
-
-    pub fn execute(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
-        let chunk = self.compile(source)?;
-        self.execute_loaded_chunk(chunk)
-    }
-
-    #[cfg(feature = "sandbox")]
-    pub fn execute_sandboxed(
-        &mut self,
-        source: &str,
-        config: &SandboxConfig,
-    ) -> LuaResult<Vec<LuaValue>> {
-        let chunk = self.compile(source)?;
-        let env = self.create_sandbox_env(config)?;
-        let limits = config.runtime_limits();
-        self.main_state()
-            .with_sandbox_runtime_limits(limits, |state| {
-                let chunk = state.global_state_mut().prepare_loaded_chunk(chunk)?;
-                state.global_state_mut().execute_chunk_with_env(chunk, env)
-            })
-    }
-
-    /// Compile source code and return a callable function value with _ENV wired.
-    ///
-    /// Unlike [`execute`](Self::execute), this does **not** run the code — it
-    /// returns a `LuaValue` that can be stored, passed to Lua, or called later
-    /// via [`call`](Self::call) or [`call_async`](Self::call_async).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let func = vm.load("return 42")?;
-    /// let results = vm.call(func, vec![])?;
-    /// assert_eq!(results[0].as_integer(), Some(42));
-    /// ```
-    pub fn load(&mut self, source: &str) -> LuaResult<LuaValue> {
-        let chunk = self.compile(source)?;
-        let env_upval = self.create_upvalue_closed(self.global)?;
-        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
-    }
-
-    #[cfg(feature = "sandbox")]
-    pub fn load_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<LuaValue> {
-        let chunk = self.compile(source)?;
-        let env = self.create_sandbox_env(config)?;
-        let env_upval = self.create_upvalue_closed(env)?;
-        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
-    }
-
-    /// Compile source code with a chunk name and return a callable function value.
-    ///
-    /// The chunk name is used in error messages (e.g. `@script.lua`).
-    pub fn load_with_name(&mut self, source: &str, chunk_name: &str) -> LuaResult<LuaValue> {
-        let chunk = self.compile_with_name(source, chunk_name)?;
-        let env_upval = self.create_upvalue_closed(self.global)?;
-        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
-    }
-
-    #[cfg(feature = "sandbox")]
-    pub fn load_with_name_sandboxed(
-        &mut self,
-        source: &str,
-        chunk_name: &str,
-        config: &SandboxConfig,
-    ) -> LuaResult<LuaValue> {
-        let chunk = self.compile_with_name(source, chunk_name)?;
-        let env = self.create_sandbox_env(config)?;
-        let env_upval = self.create_upvalue_closed(env)?;
-        self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))
-    }
-
-    /// Read a file, compile it, and execute it.
-    ///
-    /// Sets the chunk name to `@path` for proper error messages.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let results = vm.dofile("scripts/init.lua")?;
-    /// ```
-    pub fn dofile(&mut self, path: &str) -> LuaResult<Vec<LuaValue>> {
-        let proto = self.load_proto_from_file(path)?;
-        self.execute_chunk(proto)
-    }
-
-    /// Call a function value with arguments (synchronous).
-    ///
-    /// This is the primary way to invoke Lua functions from Rust without
-    /// string construction overhead.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let func = vm.get_global("process")?.unwrap();
-    /// let result: i64 = vm.call1(func, 42)?;
-    /// ```
-    pub fn call<A: IntoLua, R: FromLuaMulti>(&mut self, func: LuaValue, args: A) -> LuaResult<R> {
-        let args =
-            collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
-        let results = self.call_raw(func, args)?;
-        R::from_lua_multi(results, self.main_state()).map_err(|msg| self.error(msg))
-    }
-
-    /// Call a function value with arguments and return the first result.
-    pub fn call1<A: IntoLua, R: FromLua>(&mut self, func: LuaValue, args: A) -> LuaResult<R> {
-        let args =
-            collect_into_lua_values(self.main_state(), args).map_err(|msg| self.error(msg))?;
-        let result = self
-            .call_raw(func, args)?
-            .into_iter()
-            .next()
-            .unwrap_or(LuaValue::nil());
-        R::from_lua(result, self.main_state()).map_err(|msg| self.error(msg))
-    }
-
-    /// Call a function value with pre-built Lua arguments (raw API).
-    pub fn call_raw(&mut self, func: LuaValue, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
-        self.execute_function(func, args)
-    }
-
-    /// Look up a global function by name and call it (synchronous).
-    ///
-    /// Convenience wrapper: [`get_global`](Self::get_global) + [`call`](Self::call).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let result: String = vm.call1_global("greet", "World")?;
-    /// ```
-    pub fn call_global<A: IntoLua, R: FromLuaMulti>(
-        &mut self,
-        name: &str,
-        args: A,
-    ) -> LuaResult<R> {
-        let func = self
-            .get_global(name)?
-            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
-        self.call(func, args)
-    }
-
-    /// Look up a global function by name, call it, and return the first result.
-    pub fn call1_global<A: IntoLua, R: FromLua>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        let func = self
-            .get_global(name)?
-            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
-        self.call1(func, args)
-    }
-
-    /// Look up a global function by name and call it with pre-built Lua arguments.
-    pub fn call_global_raw(&mut self, name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
-        let func = self
-            .get_global(name)?
-            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
-        self.call_raw(func, args)
     }
 
     /// Register a synchronous Rust closure as a Lua global function.
@@ -749,92 +568,11 @@ impl GlobalState {
     }
 
     /// Register a UserData type as a Lua global with its static methods.
-    ///
-    /// Convenience wrapper so you don't need to access `main_state()`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// vm.register_type_of::<Point>("Point")?;
-    /// // Lua: local p = Point.new(3, 4)
-    /// ```
     pub fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()> {
         self.main_state().register_type_of::<T>(name)
     }
 
-    // ============ User-Facing Ref API ============
-
-    /// Wrap any `LuaValue` into a `LuaAnyRef` (stored in registry, auto-released on drop).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let any = vm.to_ref(some_value);
-    /// println!("{:?}", any.kind());
-    /// // registry entry freed automatically when `any` is dropped
-    /// ```
-    #[allow(clippy::wrong_self_convention)]
-    pub fn to_ref(&mut self, value: LuaValue) -> LuaAnyRef {
-        let ref_id = lua_ref::store_in_registry(self, value);
-        LuaAnyRef::from_raw(ref_id, GlobalStateHandle::from_global(self))
-    }
-
-    /// Wrap a table `LuaValue` into a `LuaTableRef`.
-    /// Returns `None` if the value is not a table.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn to_table_ref(&mut self, value: LuaValue) -> Option<LuaTableRef> {
-        if !value.is_table() {
-            return None;
-        }
-        let ref_id = lua_ref::store_in_registry(self, value);
-        Some(LuaTableRef::from_raw(
-            ref_id,
-            GlobalStateHandle::from_global(self),
-        ))
-    }
-
-    /// Wrap a function `LuaValue` into a `LuaFunctionRef`.
-    /// Returns `None` if the value is not a function.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn to_function_ref(&mut self, value: LuaValue) -> Option<LuaFunctionRef> {
-        if !value.is_function() {
-            return None;
-        }
-        let ref_id = lua_ref::store_in_registry(self, value);
-        Some(LuaFunctionRef::from_raw(
-            ref_id,
-            GlobalStateHandle::from_global(self),
-        ))
-    }
-
-    /// Wrap a string `LuaValue` into a `LuaStringRef`.
-    /// Returns `None` if the value is not a string.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn to_string_ref(&mut self, value: LuaValue) -> Option<LuaStringRef> {
-        if !value.is_string() {
-            return None;
-        }
-        let ref_id = lua_ref::store_in_registry(self, value);
-        Some(LuaStringRef::from_raw(
-            ref_id,
-            GlobalStateHandle::from_global(self),
-        ))
-    }
-
-    /// Wrap a userdata `LuaValue` into a typed `UserDataRef<T>`.
-    /// Returns `None` if the value is not userdata or the inner Rust type does not match `T`.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<UserDataRef<T>> {
-        let userdata = value.as_userdata_mut()?;
-        userdata.downcast_ref::<T>()?;
-        let ref_id = lua_ref::store_in_registry(self, value);
-        Some(UserDataRef::from_raw(
-            ref_id,
-            GlobalStateHandle::from_global(self),
-        ))
-    }
-
-    /// Create a new empty table and return it as a `LuaTableRef`.
+    /// Create a table and immediately wrap it in a managed `LuaTableRef`.
     pub fn create_table_ref(
         &mut self,
         array_size: usize,
@@ -874,7 +612,7 @@ impl GlobalState {
         }
     }
 
-    /// Push any `T: 'static` into Lua as opaque userdata.
+    /// Create any `T: 'static` into Lua as opaque userdata.
     ///
     /// The value cannot be accessed from Lua code directly; it is an opaque
     /// handle. From Rust callbacks, use `downcast_ref::<T>()` to retrieve it.
@@ -883,133 +621,60 @@ impl GlobalState {
     ///
     /// ```ignore
     /// let client = reqwest::Client::new();
-    /// let ud = vm.push_any(client)?;
+    /// let ud = vm.create_any(client)?;
     /// vm.set_global("http_client", ud)?;
     /// ```
-    pub fn push_any<T: 'static>(&mut self, value: T) -> LuaResult<LuaValue> {
+    pub fn create_any<T: 'static>(&mut self, value: T) -> LuaResult<LuaValue> {
         let ud = LuaUserdata::new(OpaqueUserData::new(value));
         self.create_userdata(ud)
     }
 
-    /// Push any `T: 'static` with a custom metatable.
-    pub fn push_any_with_metatable<T: 'static>(
-        &mut self,
-        value: T,
-        metatable: LuaValue,
-    ) -> LuaResult<LuaValue> {
-        let mt_ptr = metatable
-            .as_table_ptr()
-            .ok_or_else(|| self.error("metatable must be a table".to_string()))?;
-        let ud = LuaUserdata::with_metatable(OpaqueUserData::new(value), mt_ptr);
-        self.create_userdata(ud)
+    pub fn to_ref(&mut self, value: LuaValue) -> LuaAnyRef {
+        let ref_id = store_in_registry(self, value);
+        LuaAnyRef::from_raw(ref_id, GlobalStateHandle::from_global(self))
     }
 
-    /// Execute a function with arguments
-    pub(crate) fn execute_function(
-        &mut self,
-        func: LuaValue,
-        args: Vec<LuaValue>,
-    ) -> LuaResult<Vec<LuaValue>> {
-        // Save state for recovery on error (like C Lua's lua_pcallk at top level)
-        let main_state = self.main_state();
-        let initial_depth = main_state.call_depth();
-        let saved_stack_top = main_state.get_top();
-        let func_idx = saved_stack_top;
-        let nargs = args.len();
-
-        // Push function onto stack (updates stack_top)
-        main_state.push_value(func)?;
-
-        // Push arguments (each updates stack_top)
-        for arg in args {
-            main_state.push_value(arg)?;
+    pub fn to_table_ref(&mut self, value: LuaValue) -> Option<LuaTableRef> {
+        if !value.is_table() {
+            return None;
         }
-
-        // Create initial call frame
-        // base points to first argument (func_idx + 1), following Lua convention
-        let base = func_idx + 1;
-        // Top-level call expects multiple return values
-        main_state.push_frame(&func, base, nargs, -1)?;
-
-        // Run the VM execution loop
-        match self.run() {
-            Ok(results) => {
-                // Reset logical stack top for next execution
-                self.main_state().set_top(0)?;
-                Ok(results)
-            }
-            Err(e) => {
-                // Error — clean up call stack, upvalues, and TBC variables
-                // This mirrors pcall's error recovery so the VM stays usable.
-
-                // Generate traceback BEFORE unwinding call frames (like C Lua's
-                // msghandler which runs before lua_pcall unwinds).
-                let error_msg = self.main_state().get_error_msg(e);
-                let traceback = self.generate_traceback(&error_msg);
-                if !traceback.is_empty() {
-                    self.main_state().error_msg = traceback;
-                }
-
-                let main_state = self.main_state();
-
-                // Save error message before TBC __close handlers could overwrite it
-                let saved_error_msg = main_state.error_msg.clone();
-
-                // Collect error object before closing TBC (close may modify it)
-                let err_obj = std::mem::take(&mut main_state.error_object);
-
-                // Get frame_base before popping frames
-                let frame_base = if main_state.call_depth() > initial_depth {
-                    main_state.call_stack.get(initial_depth).map(|f| f.base)
-                } else {
-                    None
-                };
-
-                // Pop frames back to the initial depth (like Lua 5.5: L->ci = old_ci)
-                while main_state.call_depth() > initial_depth {
-                    main_state.pop_frame();
-                }
-
-                // Close upvalues and TBC variables up to the frame base
-                if let Some(base) = frame_base {
-                    main_state.close_upvalues(base);
-                    let _ = main_state.close_tbc_with_error(base, err_obj);
-                }
-
-                // Restore stack to a clean state
-                let _ = main_state.set_top(0);
-
-                // Restore original error message in case TBC __close overwrote it
-                self.main_state().error_msg = saved_error_msg;
-
-                Err(e)
-            }
-        }
+        let ref_id = store_in_registry(self, value);
+        Some(LuaTableRef::from_raw(
+            ref_id,
+            GlobalStateHandle::from_global(self),
+        ))
     }
 
-    /// Main VM execution loop (equivalent to luaV_execute)
-    fn run(&mut self) -> LuaResult<Vec<LuaValue>> {
-        // Initial entry: track n_ccalls like all other call sites
-        self.main_state().inc_n_ccalls()?;
-        let exec_result = lua_execute(self.main_state(), 0);
-        self.main_state().dec_n_ccalls();
-        exec_result?;
-
-        let main_state = self.main_state();
-        // Collect all values from logical stack (0 to stack_top) as return values
-        let mut results = Vec::new();
-        let top = main_state.get_top();
-        for i in 0..top {
-            if let Some(val) = main_state.stack_get(i) {
-                results.push(val);
-            }
+    pub fn to_function_ref(&mut self, value: LuaValue) -> Option<LuaFunctionRef> {
+        if !value.is_function() {
+            return None;
         }
+        let ref_id = store_in_registry(self, value);
+        Some(LuaFunctionRef::from_raw(
+            ref_id,
+            GlobalStateHandle::from_global(self),
+        ))
+    }
 
-        // Check GC after VM execution completes (like Lua's luaC_checkGC after returning to caller)
-        // At this point, all return values are collected and safe from collection
-        main_state.check_gc()?;
+    pub fn to_string_ref(&mut self, value: LuaValue) -> Option<LuaStringRef> {
+        if !value.is_string() {
+            return None;
+        }
+        let ref_id = store_in_registry(self, value);
+        Some(LuaStringRef::from_raw(
+            ref_id,
+            GlobalStateHandle::from_global(self),
+        ))
+    }
 
-        Ok(results)
+    pub fn to_userdata_ref<T: 'static>(&mut self, value: LuaValue) -> Option<UserDataRef<T>> {
+        let userdata = value.as_userdata_mut()?;
+        userdata.downcast_ref::<T>()?;
+        let ref_id = store_in_registry(self, value);
+        Some(UserDataRef::from_raw(
+            ref_id,
+            GlobalStateHandle::from_global(self),
+        ))
     }
 
     /// Compile source code using VM's string pool
@@ -1208,28 +873,6 @@ impl GlobalState {
         Ok(())
     }
 
-    /// Get a global variable and convert it to a Rust type via [`FromLua`](crate::FromLua).
-    ///
-    /// Returns `Ok(None)` if the global does not exist, `Err` if type conversion fails.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// vm.execute("count = 42")?;
-    /// let count: i64 = vm.get_global_as::<i64>("count")?.unwrap();
-    /// assert_eq!(count, 42);
-    /// ```
-    pub fn get_global_as<T: crate::FromLua>(&mut self, name: &str) -> LuaResult<Option<T>> {
-        match self.get_global(name)? {
-            None => Ok(None),
-            Some(val) => {
-                let converted =
-                    T::from_lua(val, self.main_state()).map_err(|msg| self.error(msg))?;
-                Ok(Some(converted))
-            }
-        }
-    }
-
     /// Set the metatable for all strings
     /// This allows string methods to be called with : syntax (e.g., str:upper())
     pub fn set_string_metatable(&mut self, string_lib_table: LuaValue) -> LuaResult<()> {
@@ -1365,159 +1008,6 @@ impl GlobalState {
     ///     Ok(vec![LuaValue::boolean(true)])
     /// })?;
     /// ```
-    pub fn register_async<F, Fut>(&mut self, name: &str, f: F) -> LuaResult<()>
-    where
-        F: Fn(Vec<LuaValue>) -> Fut + 'static,
-        Fut: Future<Output = LuaResult<Vec<async_thread::AsyncReturnValue>>> + 'static,
-    {
-        let wrapper = async_thread::wrap_async_function(f);
-        let closure_val = self.create_closure(wrapper)?;
-        self.set_global(name, closure_val)?;
-        Ok(())
-    }
-
-    /// Create an `AsyncThread` from a pre-compiled chunk.
-    ///
-    /// The chunk is loaded into a new coroutine, and the returned `AsyncThread`
-    /// can be `.await`ed to drive execution.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let chunk = vm.compile("return async_fn()")?;
-    /// let thread = vm.create_async_thread(chunk, vec![])?;
-    /// let results = thread.await?;
-    /// ```
-    pub fn create_async_thread(
-        &mut self,
-        chunk: LuaProto,
-        args: Vec<LuaValue>,
-    ) -> LuaResult<async_thread::AsyncThread> {
-        // Main chunk needs _ENV upvalue pointing to global table
-        let env_upval = self.create_upvalue_closed(self.global)?;
-        let func_val = self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
-        let thread_val = self.create_thread(func_val)?;
-        Ok(async_thread::AsyncThread::new(
-            thread_val,
-            GlobalStateHandle::from_global(self),
-            args,
-        ))
-    }
-
-    /// Compile and execute Lua source code asynchronously.
-    ///
-    /// This is the simplest way to run Lua code that may call async functions.
-    /// Internally creates a coroutine and drives it with `AsyncThread`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// vm.register_async("fetch", |args| async move { ... })?;
-    /// let results = vm.execute_async("return fetch('https://...')").await?;
-    /// ```
-    pub async fn execute_async(&mut self, source: &str) -> LuaResult<Vec<LuaValue>> {
-        let chunk = self.compile(source)?;
-        let async_thread = self.create_async_thread(chunk, vec![])?;
-        async_thread.await
-    }
-
-    /// Call a Lua function value asynchronously.
-    ///
-    /// Creates a fresh coroutine, runs the function with the given arguments,
-    /// and drives any async yields to completion. This avoids the overhead of
-    /// string construction and recompilation that [`execute_async`](Self::execute_async)
-    /// requires.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let func = vm.get_global("process")?.unwrap();
-    /// let arg = vm.create_string("hello")?;
-    /// let results = vm.call_async(func, vec![arg]).await?;
-    /// ```
-    pub async fn call_async(
-        &mut self,
-        func: LuaValue,
-        args: Vec<LuaValue>,
-    ) -> LuaResult<Vec<LuaValue>> {
-        let thread_val = self.create_thread(func)?;
-        let async_thread =
-            async_thread::AsyncThread::new(thread_val, GlobalStateHandle::from_global(self), args);
-        async_thread.await
-    }
-
-    /// Look up a global function by name and call it asynchronously.
-    ///
-    /// Convenience wrapper: [`get_global`](Self::get_global) + [`call_async`](Self::call_async).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let arg = vm.create_string("world")?;
-    /// let results = vm.call_async_global("greet", vec![arg]).await?;
-    /// ```
-    pub async fn call_async_global(
-        &mut self,
-        name: &str,
-        args: Vec<LuaValue>,
-    ) -> LuaResult<Vec<LuaValue>> {
-        let func = self
-            .get_global(name)?
-            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
-        self.call_async(func, args).await
-    }
-
-    /// Create a reusable [`AsyncCallHandle`](async_thread::AsyncCallHandle) for
-    /// a function value.
-    ///
-    /// The handle keeps a runner coroutine alive across multiple calls,
-    /// reducing allocation and GC overhead compared to [`call_async`](Self::call_async).
-    ///
-    /// **Requires** the table standard library (`table.pack` / `table.unpack`).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let func = vm.get_global("process")?.unwrap();
-    /// let mut handle = vm.create_async_call_handle(func)?;
-    /// let r1 = handle.call(vec![vm.create_string("a")?]).await?;
-    /// let r2 = handle.call(vec![vm.create_string("b")?]).await?;
-    /// ```
-    pub fn create_async_call_handle(
-        &mut self,
-        func: LuaValue,
-    ) -> LuaResult<async_thread::AsyncCallHandle> {
-        let chunk = self.compile(async_thread::ASYNC_CALL_RUNNER)?;
-        let env_upval = self.create_upvalue_closed(self.global)?;
-        let runner_func =
-            self.create_loaded_function(chunk, UpvalueStore::from_single(env_upval))?;
-        let thread_val = self.create_thread(runner_func)?;
-        async_thread::AsyncCallHandle::new(thread_val, GlobalStateHandle::from_global(self), func)
-    }
-
-    /// Look up a global function and create a reusable
-    /// [`AsyncCallHandle`](async_thread::AsyncCallHandle) for it.
-    ///
-    /// Convenience wrapper: [`get_global`](Self::get_global) +
-    /// [`create_async_call_handle`](Self::create_async_call_handle).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut handle = vm.create_async_call_handle_global("handle_request")?;
-    /// let args = vec![vm.create_string("GET")?, vm.create_string("/")?];
-    /// let result = handle.call(args).await?;
-    /// ```
-    pub fn create_async_call_handle_global(
-        &mut self,
-        name: &str,
-    ) -> LuaResult<async_thread::AsyncCallHandle> {
-        let func = self
-            .get_global(name)?
-            .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
-        self.create_async_call_handle(func)
-    }
-
     /// Register a Rust enum as a Lua global table of integer constants.
     ///
     /// Each variant becomes a key in the table with its discriminant as value.
@@ -1855,7 +1345,6 @@ impl GlobalState {
     /// }
     /// ```
     #[inline]
-    #[allow(clippy::wrong_self_convention)]
     pub fn get_full_error(&mut self, e: LuaError) -> lua_error::LuaFullError {
         let message = self.get_error_message(e);
         lua_error::LuaFullError { kind: e, message }
@@ -1945,33 +1434,7 @@ impl GlobalState {
         self.main_state().pcall(func, args)
     }
 
-    /// ULTRA-OPTIMIZED pcall for CFunction calls
-    /// Works directly on the stack without any Vec allocations
-    /// Returns: (success, result_count) where results are on stack
-    #[inline]
-    pub fn protected_call_stack_based(
-        &mut self,
-        func_idx: usize,
-        arg_count: usize,
-    ) -> LuaResult<(bool, usize)> {
-        // Delegate to main_state
-        self.main_state().pcall_stack_based(func_idx, arg_count)
-    }
-
-    /// Protected call with error handler (xpcall semantics)
-    /// The error handler is called if an error occurs
-    /// Note: Yields are NOT caught by xpcall - they propagate through
-    pub fn protected_call_with_handler(
-        &mut self,
-        func: LuaValue,
-        args: Vec<LuaValue>,
-        err_handler: LuaValue,
-    ) -> LuaResult<(bool, Vec<LuaValue>)> {
-        // Delegate to main_state
-        self.main_state().xpcall(func, args, err_handler)
-    }
-
-    pub fn get_main_thread_ptr(&self) -> ThreadPtr {
+    pub(crate) fn get_main_thread_ptr(&self) -> ThreadPtr {
         self.main_state
     }
 
@@ -2023,6 +1486,7 @@ mod tests {
         vm.open_stdlib(Stdlib::All).unwrap();
 
         let results = vm
+            .main_state()
             .execute(
                 r#"
                 local count = 0

@@ -1,5 +1,4 @@
 use luars::Lua;
-use luars::GlobalState;
 use luars::LuaApi;
 use luars::LuaValue;
 use luars::SafeOption;
@@ -137,79 +136,59 @@ fn parse_args() -> Result<Options, String> {
     Ok(opts)
 }
 
-fn setup_arg_table(vm: &mut GlobalState, exe_path: &str, script_name: Option<&str>, args: &[String]) {
+fn setup_arg_table(vm: &mut Lua, exe_path: &str, script_name: Option<&str>, args: &[String]) {
     // Create arg table: arg[negative] = interpreter opts, arg[0] = script, arg[1..] = script args
-    let arg_table = vm.create_table(args.len(), 2).unwrap();
+    let arg_table = vm.create_table_with_capacity(args.len(), 2).unwrap();
 
     // arg[0] = script name (or nil)
     if let Some(name) = script_name {
-        let s = vm.create_string(name).unwrap();
-        vm.raw_seti(&arg_table, 0, s);
+        vm.table_seti(&arg_table, 0, name).unwrap();
     }
 
     // arg[-1] = interpreter executable path
-    let exe = vm.create_string(exe_path).unwrap();
-    vm.raw_seti(&arg_table, -1, exe);
+    vm.table_seti(&arg_table, -1, exe_path).unwrap();
 
     // arg[1], arg[2], ... = script arguments
     for (i, a) in args.iter().enumerate() {
-        let s = vm.create_string(a).unwrap();
-        vm.raw_seti(&arg_table, (i + 1) as i64, s);
+        vm.table_seti(&arg_table, (i + 1) as i64, a.as_str())
+            .unwrap();
     }
 
-    let _ = vm.set_global("arg", arg_table);
+    let _ = vm.set_global_table("arg", &arg_table);
 }
 
-fn require_module(vm: &mut GlobalState, module: &str) -> Result<(), String> {
+fn require_module(vm: &mut Lua, module: &str) -> Result<(), String> {
     let code = format!("{} = require('{}')", module, module);
-    match vm.compile(&code) {
-        Ok(chunk) => {
-            let proto = vm.create_proto(chunk).unwrap();
-            vm.execute_chunk(proto).map_err(|e| format!("{}", e))?;
-            Ok(())
-        }
-        Err(e) => Err(format!("failed to load module '{}': {}", module, e)),
-    }
+    vm.execute(&code).map_err(|e| {
+        format!(
+            "failed to load module '{}': {}",
+            module,
+            vm.get_error_message(e)
+        )
+    })
 }
 
-fn execute_file(vm: &mut GlobalState, filename: &str) -> Result<(), String> {
+fn execute_file(vm: &mut Lua, filename: &str) -> Result<(), String> {
     let code =
         fs::read_to_string(filename).map_err(|e| format!("cannot open {}: {}", filename, e))?;
 
-    match vm.compile_with_name(&code, &format!("@{}", filename)) {
-        Ok(chunk) => {
-            let proto = vm.create_proto(chunk).unwrap();
-            match vm.execute_chunk(proto) {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    // execute_chunk already generates traceback before unwinding,
-                    // so just retrieve the stored error message (which includes traceback).
-                    let error_msg = vm.get_error_message(e);
-                    Err(error_msg)
-                }
-            }
-        }
-        Err(e) => Err(format!("{}: {}: {}", filename, e, vm.get_error_message(e))),
-    }
+    vm.load(&code)
+        .set_name(format!("@{}", filename))
+        .exec()
+        .map_err(|e| vm.get_error_message(e).to_string())
 }
 
-fn execute_stdin(vm: &mut GlobalState) -> Result<(), String> {
+fn execute_stdin(vm: &mut Lua) -> Result<(), String> {
     let mut code = String::new();
     io::stdin()
         .read_to_string(&mut code)
         .map_err(|e| format!("error reading stdin: {}", e))?;
 
-    match vm.compile(&code) {
-        Ok(chunk) => {
-            let proto = vm.create_proto(chunk).unwrap();
-            vm.execute_chunk(proto).map_err(|e| format!("{}", e))?;
-            Ok(())
-        }
-        Err(e) => Err(format!("stdin: {}", e)),
-    }
+    vm.execute(&code)
+        .map_err(|e| format!("stdin: {}", vm.get_error_message(e)))
 }
 
-fn run_repl(vm: &mut GlobalState) {
+fn run_repl(vm: &mut Lua) {
     println!("{}", VERSION);
     println!("{}", COPYRIGHT);
     println!("Type Ctrl+C or Ctrl+Z to exit\n");
@@ -247,43 +226,27 @@ fn run_repl(vm: &mut GlobalState) {
 
         // Try to execute as expression first (for immediate values)
         let expr_code = format!("return {}", incomplete);
-        let try_expr = vm.compile(&expr_code);
-
-        let code_to_run = if try_expr.is_ok() {
+        let code_to_run = if vm.load(&expr_code).into_function().is_ok() {
             expr_code
         } else {
             incomplete.clone()
         };
 
-        // Try to compile and execute
-        match vm.compile(&code_to_run) {
-            Ok(chunk) => {
-                let proto = vm.create_proto(chunk).unwrap();
-                match vm.execute_chunk(proto) {
-                    Ok(results) => {
-                        // Print non-nil first result
-                        if let Some(first) = results.into_iter().next()
-                            && !first.is_nil()
-                        {
-                            // Use Debug format for display
-                            println!("{:?}", first);
-                        }
-                        incomplete.clear();
-                    }
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        incomplete.clear();
-                    }
+        match vm.load(&code_to_run).eval_multi::<Vec<LuaValue>>() {
+            Ok(results) => {
+                if let Some(first) = results.into_iter().next()
+                    && !first.is_nil()
+                {
+                    println!("{:?}", first);
                 }
+                incomplete.clear();
             }
             Err(e) => {
-                // Check if error is due to incomplete input
-                let error_msg = e.to_string();
+                let error_msg = vm.get_error_message(e).to_string();
                 if error_msg.contains("<eof>") || error_msg.contains("expected") {
-                    // Might be incomplete, keep accumulating
                     continue;
                 } else {
-                    eprintln!("{}", e);
+                    eprintln!("{}", error_msg);
                     incomplete.clear();
                 }
             }
@@ -412,9 +375,7 @@ fn lua_main() -> i32 {
         }
     }
 
-    // Create the high-level runtime first so library installation stays on the
-    // public embedding API. The CLI then reuses the underlying VM for its
-    // low-level compile/execute workflow.
+    // Create the high-level runtime first so the CLI stays on the public embedding API.
     let safe_option = default_safe_option();
 
     let mut lua = Lua::new(safe_option);
@@ -424,7 +385,7 @@ fn lua_main() -> i32 {
     lua.install_library(luars_debugger::Library::default())
         .unwrap();
 
-    let vm = lua.global_state();
+    let vm = &mut lua;
 
     if cfg!(debug_assertions) {
         let _ = vm.set_global("DEBUG", LuaValue::boolean(true));
@@ -443,10 +404,7 @@ fn lua_main() -> i32 {
                 "package.path = '{}'",
                 resolved.replace('\\', "\\\\").replace('\'', "\\'")
             );
-            if let Ok(chunk) = vm.compile(&code) {
-                let proto = vm.create_proto(chunk).unwrap();
-                let _ = vm.execute_chunk(proto);
-            }
+            let _ = vm.execute(&code);
         }
         // Override package.cpath from LUA_CPATH_5_5 or LUA_CPATH
         if let Some(env_cpath) = env::var("LUA_CPATH_5_5")
@@ -459,10 +417,7 @@ fn lua_main() -> i32 {
                 "package.cpath = '{}'",
                 resolved.replace('\\', "\\\\").replace('\'', "\\'")
             );
-            if let Ok(chunk) = vm.compile(&code) {
-                let proto = vm.create_proto(chunk).unwrap();
-                let _ = vm.execute_chunk(proto);
-            }
+            let _ = vm.execute(&code);
         }
     }
 
@@ -480,29 +435,17 @@ fn lua_main() -> i32 {
             }
         } else {
             // Execute string
-            match vm.compile(&init) {
-                Ok(chunk) => {
-                    let proto = vm.create_proto(chunk).unwrap();
-                    if let Err(e) = vm.execute_chunk(proto) {
-                        let error_msg = vm.get_error_message(e);
-                        eprintln!("lua: {}", error_msg);
-                        return 1;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("lua: {}", e);
-                    return 1;
-                }
+            if let Err(e) = vm.execute(&init) {
+                let error_msg = vm.get_error_message(e);
+                eprintln!("lua: {}", error_msg);
+                return 1;
             }
         }
     }
 
     // Handle -W: turn warnings on
-    if opts.warnings_on
-        && let Ok(chunk) = vm.compile("warn('@on')")
-    {
-        let proto = vm.create_proto(chunk).unwrap();
-        let _ = vm.execute_chunk(proto);
+    if opts.warnings_on {
+        let _ = vm.execute("warn('@on')");
     }
 
     // Setup arg table
@@ -524,19 +467,10 @@ fn lua_main() -> i32 {
 
     // Execute all -e strings in order (they share the same VM state)
     for code in &opts.execute_strings {
-        match vm.compile(code) {
-            Ok(chunk) => {
-                let proto = vm.create_proto(chunk).unwrap();
-                if let Err(e) = vm.execute_chunk(proto) {
-                    let error_msg = vm.get_error_message(e);
-                    eprintln!("lua: Runtime Error: {}", error_msg);
-                    return 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("lua: {}", e);
-                return 1;
-            }
+        if let Err(e) = vm.execute(code) {
+            let error_msg = vm.get_error_message(e);
+            eprintln!("lua: Runtime Error: {}", error_msg);
+            return 1;
         }
     }
 
@@ -555,10 +489,7 @@ fn lua_main() -> i32 {
                 "package.path = '{dir}/?.lua;{dir}/?/init.lua;' .. package.path",
                 dir = dir.replace('\\', "/")
             );
-            if let Ok(chunk) = vm.compile(&set_path) {
-                let proto = vm.create_proto(chunk).unwrap();
-                let _ = vm.execute_chunk(proto);
-            }
+            let _ = vm.execute(&set_path);
         }
         if let Err(e) = execute_file(vm, filename) {
             eprintln!("lua: {}", e);

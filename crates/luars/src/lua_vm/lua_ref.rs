@@ -10,7 +10,7 @@ use crate::lua_value::LuaValue;
 use crate::lua_value::LuaValueKind;
 use crate::lua_value::lua_convert::collect_into_lua_values;
 use crate::lua_value::lua_convert::{FromLua, FromLuaMulti, IntoLua};
-use crate::lua_vm::{GlobalState, GlobalStateHandle};
+use crate::lua_vm::{GlobalState, GlobalStateHandle, get_metatable};
 
 /// A reference ID in the registry.
 /// Similar to Lua's luaL_ref return value.
@@ -350,6 +350,42 @@ impl LuaTableRef {
         Ok(!value.is_nil())
     }
 
+    /// Returns true if this table currently has a metatable.
+    pub fn has_metatable(&self) -> bool {
+        self.inner
+            .to_value()
+            .as_table()
+            .is_some_and(|table| table.has_metatable())
+    }
+
+    /// Get the table's metatable, if present.
+    pub fn get_metatable(&self) -> Option<LuaTableRef> {
+        let vm = self.inner.vm_mut();
+        let value = self.inner.to_value();
+        let metatable = get_metatable(vm.main_state(), &value)?;
+        if !metatable.is_table() {
+            return None;
+        }
+        let ref_id = store_in_registry(vm, metatable);
+        Some(LuaTableRef::from_raw(ref_id, self.inner.vm))
+    }
+
+    /// Set or clear the table's metatable.
+    pub fn set_metatable(&self, metatable: Option<&LuaTableRef>) -> LuaResult<()> {
+        let vm = self.inner.vm_mut();
+        let value = self.inner.to_value();
+        let Some(table) = value.as_table_mut() else {
+            return Err(vm.error("LuaTableRef does not reference a table".to_string()));
+        };
+
+        table.set_metatable(metatable.map(LuaTableRef::to_value));
+        if let Some(gc_ptr) = value.as_gc_ptr() {
+            vm.main_state().gc_barrier_back(gc_ptr);
+        }
+        vm.gc.check_finalizer(&value);
+        Ok(())
+    }
+
     // ==================== Write ====================
 
     /// Set a string-keyed value.
@@ -510,7 +546,7 @@ impl LuaFunctionRef {
     pub fn call_raw(&self, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         let vm = self.inner.vm_mut();
         let func = self.inner.to_value();
-        vm.call(func, args)
+        vm.main_state().call(func, args)
     }
 
     /// Call the function and return the first result (or nil if no results).
@@ -524,7 +560,7 @@ impl LuaFunctionRef {
         let vm = self.inner.vm_mut();
         let args = collect_into_lua_values(vm.main_state(), args).map_err(|msg| vm.error(msg))?;
         let func = self.inner.to_value();
-        let results = vm.call_raw(func, args)?;
+        let results = vm.main_state().call(func, args)?;
         R::from_lua_multi(results, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
@@ -534,7 +570,8 @@ impl LuaFunctionRef {
         let args = collect_into_lua_values(vm.main_state(), args).map_err(|msg| vm.error(msg))?;
         let func = self.inner.to_value();
         let result = vm
-            .call_raw(func, args)?
+            .main_state()
+            .call(func, args)?
             .into_iter()
             .next()
             .unwrap_or(LuaValue::nil());
@@ -545,7 +582,7 @@ impl LuaFunctionRef {
     pub async fn call_async(&self, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         let vm = self.inner.vm_mut();
         let func = self.inner.to_value();
-        vm.call_async(func, args).await
+        vm.main_state().call_async(func, args).await
     }
 
     /// Get the underlying LuaValue.
@@ -888,6 +925,58 @@ impl LuaAnyRef {
     /// Get the value's type kind.
     pub fn kind(&self) -> LuaValueKind {
         self.inner.to_value().kind()
+    }
+
+    /// Get the referenced value's metatable, if present.
+    pub fn get_metatable(&self) -> Option<LuaTableRef> {
+        let vm = self.inner.vm_mut();
+        let value = self.inner.to_value();
+        let metatable = get_metatable(vm.main_state(), &value)?;
+        if !metatable.is_table() {
+            return None;
+        }
+        let ref_id = store_in_registry(vm, metatable);
+        Some(LuaTableRef::from_raw(ref_id, self.inner.vm))
+    }
+
+    /// Set or clear the referenced value's metatable.
+    pub fn set_metatable(&self, metatable: Option<&LuaTableRef>) -> LuaResult<()> {
+        let vm = self.inner.vm_mut();
+        let value = self.inner.to_value();
+        let mt_value = metatable.map(LuaTableRef::to_value);
+
+        if let Some(table) = value.as_table_mut() {
+            table.set_metatable(mt_value);
+            if let Some(gc_ptr) = value.as_gc_ptr() {
+                vm.main_state().gc_barrier_back(gc_ptr);
+            }
+            vm.gc.check_finalizer(&value);
+            return Ok(());
+        }
+
+        if let Some(userdata) = value.as_userdata_mut() {
+            userdata.set_metatable(mt_value.unwrap_or_else(LuaValue::nil));
+            if let Some(gc_ptr) = value.as_gc_ptr() {
+                vm.main_state().gc_barrier_back(gc_ptr);
+            }
+            vm.gc.check_finalizer(&value);
+            return Ok(());
+        }
+
+        match value.kind() {
+            LuaValueKind::String
+            | LuaValueKind::Integer
+            | LuaValueKind::Float
+            | LuaValueKind::Boolean
+            | LuaValueKind::Nil => {
+                vm.set_basic_metatable(value.kind(), mt_value);
+                Ok(())
+            }
+            _ => Err(vm.error(format!(
+                "metatables are not supported for {} values",
+                value.type_name()
+            ))),
+        }
     }
 
     /// Extract the value as a Rust type via `FromLua`.

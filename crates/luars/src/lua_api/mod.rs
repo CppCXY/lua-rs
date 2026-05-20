@@ -1,6 +1,9 @@
+use std::ffi::c_void;
+
 mod chunk;
 mod function;
 mod lua;
+mod lua_state;
 mod lua_string;
 mod scope;
 mod table;
@@ -16,18 +19,18 @@ pub use scope::{Scope, ScopedFunction, ScopedUserData};
 pub use table::Table;
 pub use value::Value;
 
-use crate::{
-    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
-    Stdlib, UserDataRef, UserDataTrait,
-    lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback},
-};
 #[cfg(feature = "sandbox")]
 use crate::SandboxConfig;
+use crate::{
+    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
+    LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
+    lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback},
+};
 
 /// High-level, embedding-oriented API shared by safe host-side Lua handles.
 ///
 /// This trait intentionally covers the typed, ergonomic surface. Low-level raw
-/// runtime escape hatches such as `vm_mut` stay on the concrete type.
+/// runtime escape hatches such as `global_state` stay on the concrete type.
 pub trait LuaApi {
     fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()>;
     fn load_stdlibs(&mut self, lib: Stdlib) -> LuaResult<()>;
@@ -52,13 +55,17 @@ pub trait LuaApi {
     fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()>;
     fn register_type<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table>;
     fn register_enum_of<T: LuaEnum>(&mut self, name: &str) -> LuaResult<()>;
-    fn load<'lua>(&'lua mut self, source: &str) -> Chunk<'lua>;
+    fn load<'lua>(&'lua mut self, source: &str) -> Chunk<'lua, Self>
+    where
+        Self: Sized + chunk::ChunkHost;
     fn load_function(&mut self, source: &str) -> LuaResult<Function>;
     fn create_string(&mut self, value: &str) -> LuaResult<LuaString>;
     fn create_table(&mut self) -> LuaResult<Table>;
     fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<Table>;
     fn create_userdata<T: UserDataTrait + 'static>(&mut self, data: T)
     -> LuaResult<UserDataRef<T>>;
+    /// # Safety
+    /// The caller must ensure that the provided reference is valid for the lifetime of the Lua value
     unsafe fn create_userdata_ref<T: UserDataTrait + 'static>(
         &mut self,
         reference: &mut T,
@@ -83,9 +90,24 @@ pub trait LuaApi {
     fn table_push<T: IntoLua>(&mut self, table: &Table, value: T) -> LuaResult<()>;
     fn table_pairs<K: FromLua, V: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<(K, V)>>;
     fn table_array<T: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<T>>;
+    fn get_metatable<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<Table>>;
+    fn set_metatable<T: IntoLua>(&mut self, value: T, metatable: Option<&Table>) -> LuaResult<()>;
     fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value>;
     fn unpack<T: FromLua>(&mut self, value: Value) -> LuaResult<T>;
     fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U>;
+    fn create_lightuserdata(&mut self, pointer: *mut c_void) -> Value;
+    fn to_pointer<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<*const c_void>>;
+    fn registry(&mut self) -> Table;
+    fn registry_get<T: FromLua>(&mut self, key: &str) -> LuaResult<Option<T>>;
+    fn registry_set<T: IntoLua>(&mut self, key: &str, value: T) -> LuaResult<()>;
+    fn registry_geti<T: FromLua>(&mut self, key: i64) -> LuaResult<Option<T>>;
+    fn registry_seti<T: IntoLua>(&mut self, key: i64, value: T) -> LuaResult<()>;
+    fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<Table>;
+    fn set_type_metatable(
+        &mut self,
+        kind: LuaValueKind,
+        metatable: Option<&Table>,
+    ) -> LuaResult<()>;
     fn get_error_message(&mut self, error: LuaError) -> LuaFullError;
     fn gc_stop(&mut self);
     fn gc_restart(&mut self);
@@ -122,20 +144,21 @@ pub trait LuaAsyncApi {
 /// Sandbox-oriented high-level API shared by safe host-side Lua handles.
 #[cfg(feature = "sandbox")]
 pub trait LuaSandboxApi {
-    fn load_sandboxed<'lua>(&'lua mut self, source: &str, config: &SandboxConfig) -> Chunk<'lua>;
+    fn load_sandboxed<'lua>(
+        &'lua mut self,
+        source: &str,
+        config: &SandboxConfig,
+    ) -> Chunk<'lua, Self>
+    where
+        Self: Sized + chunk::ChunkHost;
     fn execute_sandboxed(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<()>;
-    fn eval_sandboxed<R: FromLua>(&mut self, source: &str, config: &SandboxConfig)
-    -> LuaResult<R>;
+    fn eval_sandboxed<R: FromLua>(&mut self, source: &str, config: &SandboxConfig) -> LuaResult<R>;
     fn eval_multi_sandboxed<R: FromLuaMulti>(
         &mut self,
         source: &str,
         config: &SandboxConfig,
     ) -> LuaResult<R>;
-    fn sandbox_capture_global(
-        &mut self,
-        config: &mut SandboxConfig,
-        name: &str,
-    ) -> LuaResult<()>;
+    fn sandbox_capture_global(&mut self, config: &mut SandboxConfig, name: &str) -> LuaResult<()>;
     fn sandbox_insert_global<T: IntoLua>(
         &mut self,
         config: &mut SandboxConfig,
