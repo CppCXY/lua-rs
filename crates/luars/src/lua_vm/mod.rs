@@ -1136,18 +1136,6 @@ impl GlobalState {
         self.object_allocator.create_string_owned(&mut self.gc, s)
     }
 
-    /// Create substring (optimized for string.sub)
-    #[inline]
-    pub fn create_substring(
-        &mut self,
-        s_value: LuaValue,
-        start: usize,
-        end: usize,
-    ) -> CreateResult {
-        self.object_allocator
-            .create_substring(&mut self.gc, s_value, start, end)
-    }
-
     /// Create a new table
     #[inline(always)]
     pub fn create_table(&mut self, array_size: usize, hash_size: usize) -> CreateResult {

@@ -59,54 +59,6 @@ impl ObjectAllocator {
         self.strings.intern_bytes_owned(data, gc)
     }
 
-    /// Create a substring from an existing string (optimized for string.sub)
-    /// Returns the original string ID if the range covers the entire string.
-    /// With complete interning, substrings are automatically deduplicated.
-    ///
-    #[inline]
-    pub fn create_substring(
-        &mut self,
-        gc: &mut GC,
-        s_value: LuaValue,
-        start: usize,
-        end: usize,
-    ) -> CreateResult {
-        // TODO: performance optimizations:
-        let source_is_ascii = s_value.as_str().is_some_and(str::is_ascii);
-        let Some(bytes) = s_value.as_bytes() else {
-            return self.create_string(gc, "");
-        };
-
-        // Extract substring info
-        // Clamp indices
-        let start = start.min(bytes.len());
-        let end = end.min(bytes.len());
-
-        if start >= end {
-            return self.create_string(gc, "");
-        }
-
-        // Fast path: return original if full range
-        if start == 0 && end == bytes.len() {
-            return Ok(s_value);
-        }
-
-        // Extract the byte range
-        let substring_bytes = &bytes[start..end];
-
-        // If source is already a valid UTF-8 string, use unchecked conversion
-        // since a substring of valid UTF-8 at valid char boundaries is also valid.
-        // For arbitrary byte indices (Lua semantics), validate.
-        if source_is_ascii {
-            // SAFETY: a substring of ASCII bytes is always valid ASCII/UTF-8.
-            self.create_string(gc, unsafe {
-                std::str::from_utf8_unchecked(substring_bytes)
-            })
-        } else {
-            self.create_bytes(gc, substring_bytes)
-        }
-    }
-
     // ==================== Table Operations ====================
 
     #[inline(always)]

@@ -478,10 +478,13 @@ fn string_sub(l: &mut LuaState) -> LuaResult<usize> {
         }
     };
 
-    // Use optimized create_substring
-    let result_value = l
-        .global_state_mut()
-        .create_substring(s_value, start_byte, end_byte)?;
+    let result_value = if start_byte >= end_byte {
+        l.create_bytes(&[])?
+    } else if start_byte == 0 && end_byte == s_bytes.len() {
+        s_value
+    } else {
+        l.create_bytes(&s_bytes[start_byte..end_byte])?
+    };
     l.push_value(result_value)?;
     Ok(1)
 }
