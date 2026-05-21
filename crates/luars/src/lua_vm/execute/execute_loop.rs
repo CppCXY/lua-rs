@@ -25,6 +25,7 @@ use crate::{
     lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMFLT, LUA_VNUMINT, LuaProto},
     lua_vm::{
         LuaError, TmKind,
+        call_info::call_status,
         call_info::call_status::{CIST_C, CIST_CLSRET, CIST_PENDING_FINISH},
         execute::{
             call::{poscall, precall, pretailcall},
@@ -232,14 +233,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
             }
         }
 
-        /// Reload all cached frame state from the current top frame in call_stack.
-        /// Used instead of `break`-to-outer-loop for CALL/RETURN: reloads locals
-        /// so the inner dispatch loop can continue directly — mirrors C Lua's
-        /// `goto startfunc` / `goto returning` pattern.
-        /// NOTE: If target frame is a C function (CIST_C) or has pending finish
-        /// (CIST_PENDING_FINISH, e.g. after yield-in-__index resume), falls back
-        /// to break+outer-reload to avoid null chunk_ptr and handle pending ops.
-        macro_rules! reload_frame {
+        // Lean reload after RETURN (Return0/Return1/Return).
+        // We know: pc != 0 (returning to existing frame).
+        // Checks: depth guard, C frame / pending finish (caller might be C frame).
+        macro_rules! reload_after_return {
             () => {
                 let current_depth = lua_state.call_depth();
                 if current_depth <= target_depth {
@@ -248,24 +245,41 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 let frame_idx = current_depth - 1;
                 let ci = lua_state.get_call_info(frame_idx);
                 if ci.call_status & (CIST_C | CIST_PENDING_FINISH) != 0 {
-                    // C frame or pending finish: break to outer loop
                     break;
                 }
                 base = ci.base;
                 pc = ci.pc as usize;
                 chunk = unsafe { &*ci.chunk_ptr };
-                debug_assert!(lua_state.stack_len() >= base + chunk.max_stack_size + EXTRA_STACK);
                 code = &chunk.code;
                 constants = &chunk.constants;
                 active_frame.frame_idx = frame_idx;
                 active_frame.top = ci.top as usize;
                 active_frame.call_status = ci.call_status;
                 trap = current_trap(lua_state);
-                // CALL HOOK: fire when entering a new Lua function (pc == 0)
-                if pc == 0 && trap {
+                init_oldpc(lua_state, pc, chunk);
+            };
+        }
+
+        // Lean reload after CALL (entering new Lua function).
+        // We know: pc == 0, it's a fresh Lua frame (no CIST_C / PENDING_FINISH).
+        // Still need: hook_on_call for new function entry.
+        macro_rules! reload_after_call {
+            () => {
+                let frame_idx = lua_state.call_depth() - 1;
+                let ci = lua_state.get_call_info(frame_idx);
+                base = ci.base;
+                pc = 0;
+                chunk = unsafe { &*ci.chunk_ptr };
+                code = &chunk.code;
+                constants = &chunk.constants;
+                active_frame.frame_idx = frame_idx;
+                active_frame.top = ci.top as usize;
+                active_frame.call_status = ci.call_status;
+                trap = current_trap(lua_state);
+                if trap {
                     let hook_mask = lua_state.hook_mask;
                     if hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
-                        active_frame.flush(lua_state, pc);
+                        active_frame.flush(lua_state, 0);
                         hook_on_call(lua_state, hook_mask, active_frame.call_status, chunk)?;
                         active_frame.reload(lua_state);
                     }
@@ -273,7 +287,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state.hook_count = lua_state.base_hook_count;
                     }
                 }
-                init_oldpc(lua_state, pc, chunk);
+                init_oldpc(lua_state, 0, chunk);
             };
         }
 
@@ -2450,11 +2464,84 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     } else {
                         lua_state.get_top() - func_idx - 1
                     };
+
+                    // Fast path: peek at func to inline the exact-match Lua call.
+                    // Avoids the flush→precall→reload round-trip through CallInfo.
+                    let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
+                    if func.is_lua_function() {
+                        // Extract raw data before borrowing issues
+                        let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
+                            let lf = func.as_lua_function().unwrap();
+                            let c = lf.chunk();
+                            (
+                                c.param_count,
+                                c.max_stack_size,
+                                c as *const LuaProto,
+                                lf.upvalues().as_ptr(),
+                            )
+                        };
+                        let new_base = func_idx + 1;
+                        if nargs == param_count
+                            && lua_state.try_push_lua_frame_exact(
+                                new_base,
+                                nresults,
+                                max_stack_size,
+                                chunk_ptr,
+                                upvalue_ptrs,
+                            )?
+                        {
+                            // Save caller state to CallInfo
+                            active_frame.flush(lua_state, pc);
+                            // Set locals directly — no CallInfo read-back needed
+                            chunk = unsafe { &*chunk_ptr };
+                            base = new_base;
+                            pc = 0;
+                            code = &chunk.code;
+                            constants = &chunk.constants;
+                            let new_depth = lua_state.call_depth();
+                            active_frame.frame_idx = new_depth - 1;
+                            active_frame.top = new_base + max_stack_size;
+                            active_frame.call_status =
+                                call_status::with_nresults(0, nresults); // CIST_LUA = 0
+                            trap = current_trap(lua_state);
+                            if trap {
+                                let hook_mask = lua_state.hook_mask;
+                                if hook_mask & LUA_MASKCALL != 0 && lua_state.allow_hook {
+                                    active_frame.flush(lua_state, 0);
+                                    hook_on_call(
+                                        lua_state,
+                                        hook_mask,
+                                        active_frame.call_status,
+                                        chunk,
+                                    )?;
+                                    active_frame.reload(lua_state);
+                                }
+                                if hook_mask & LUA_MASKCOUNT != 0 {
+                                    lua_state.hook_count = lua_state.base_hook_count;
+                                }
+                            }
+                            init_oldpc(lua_state, 0, chunk);
+                            continue;
+                        }
+                        // Exact match failed (e.g. stack overflow), fall through
+                        active_frame.flush(lua_state, pc);
+                        lua_state.push_lua_frame(
+                            new_base,
+                            nargs,
+                            nresults,
+                            param_count,
+                            max_stack_size,
+                            chunk_ptr,
+                            upvalue_ptrs,
+                        )?;
+                        reload_after_call!();
+                        continue;
+                    }
+
+                    // Generic path: C function or metamethod
                     active_frame.flush(lua_state, pc);
                     if precall(lua_state, func_idx, nargs, nresults)? {
-                        // Lua call: reload callee frame, continue dispatch directly
-                        // Follows C Lua OP_CALL: ci = newci; goto startfunc
-                        reload_frame!();
+                        reload_after_call!();
                         continue;
                     }
                     active_frame.reload(lua_state);
@@ -2480,7 +2567,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     }
                     if pretailcall(lua_state, func_idx, b)? {
                         // Lua tail call: reload callee frame, continue dispatch directly
-                        reload_frame!();
+                        reload_after_call!();
                         continue;
                     }
                     active_frame.reload(lua_state);
@@ -2549,7 +2636,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     active_frame.flush(lua_state, pc);
                     poscall(lua_state, n as usize, pc)?;
                     // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
-                    reload_frame!();
+                    reload_after_return!();
                     continue;
                 }
                 OpCode::Return0 => {
@@ -2578,7 +2665,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         lua_state.set_top_raw(res + nresults as usize);
                     }
                     // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
-                    reload_frame!();
+                    reload_after_return!();
                     continue;
                 }
                 OpCode::Return1 => {
@@ -2618,7 +2705,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         }
                     }
                     // Reload caller frame and continue dispatch (avoid outer loop roundtrip)
-                    reload_frame!();
+                    reload_after_return!();
                     continue;
                 }
                 OpCode::ForLoop => {
@@ -2696,7 +2783,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     active_frame.flush(lua_state, pc);
                     if precall(lua_state, func_idx, 2, c as i32)? {
                         // Lua call in generic for: reload callee frame, continue dispatch directly
-                        reload_frame!();
+                        reload_after_call!();
                         continue;
                     }
                     active_frame.reload(lua_state);
