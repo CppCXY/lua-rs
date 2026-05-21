@@ -36,6 +36,7 @@ pub trait LuaApi {
     fn load_stdlibs(&mut self, lib: Stdlib) -> LuaResult<()>;
     fn collect_garbage(&mut self) -> LuaResult<()>;
     fn execute(&mut self, source: &str) -> LuaResult<()>;
+    fn dofile<R: FromLuaMulti>(&mut self, path: &str) -> LuaResult<R>;
     fn eval<R: FromLua>(&mut self, source: &str) -> LuaResult<R>;
     fn eval_multi<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R>;
     fn set_global<T: IntoLua>(&mut self, name: &str, value: T) -> LuaResult<()>;
@@ -95,6 +96,8 @@ pub trait LuaApi {
     fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value>;
     fn unpack<T: FromLua>(&mut self, value: Value) -> LuaResult<T>;
     fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U>;
+    fn set_extra_space(&mut self, pointer: *mut c_void);
+    fn extra_space(&self) -> *mut c_void;
     fn create_lightuserdata(&mut self, pointer: *mut c_void) -> Value;
     fn to_pointer<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<*const c_void>>;
     fn registry(&mut self) -> Table;

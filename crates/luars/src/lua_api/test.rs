@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::ffi::c_void;
+    use std::io::Write;
+    use std::path::PathBuf;
 
     #[cfg(feature = "serde")]
     use crate::lua_api::Value;
@@ -36,6 +39,12 @@ mod tests {
         pub fn get(&self) -> i64 {
             self.count
         }
+    }
+
+    fn test_temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join("luars_api_tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -252,6 +261,26 @@ mod tests {
     }
 
     #[test]
+    fn lua_api_extra_space_and_dofile_work() {
+        let dir = test_temp_dir();
+        let path = dir.join("lua_api_dofile.lua");
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            writeln!(file, "return 40 + 2").unwrap();
+        }
+
+        let mut lua = Lua::new(SafeOption::default());
+        let raw = 0x1234usize as *mut c_void;
+        lua.set_extra_space(raw);
+        assert_eq!(lua.extra_space(), raw);
+
+        let answer: i64 = lua.dofile(path.to_str().unwrap()).unwrap();
+        assert_eq!(answer, 42);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn lua_api_metatable_helpers_work() {
         let mut lua = Lua::new(SafeOption::default());
 
@@ -326,6 +355,27 @@ mod tests {
 
         let doubled: i64 = LuaApi::load(state, "return 21 * 2").eval().unwrap();
         assert_eq!(doubled, 42);
+    }
+
+    #[test]
+    fn lua_state_lua_api_supports_extra_space_and_dofile() {
+        let dir = test_temp_dir();
+        let path = dir.join("lua_state_api_dofile.lua");
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            writeln!(file, "return 6 * 7").unwrap();
+        }
+
+        let mut vm = GlobalState::new(SafeOption::default());
+        let state = vm.main_state();
+        let raw = 0x5678usize as *mut c_void;
+        state.set_extra_space(raw);
+        assert_eq!(state.extra_space(), raw);
+
+        let answer: i64 = LuaApi::dofile(state, path.to_str().unwrap()).unwrap();
+        assert_eq!(answer, 42);
+
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

@@ -70,6 +70,11 @@ impl LuaApi for LuaState {
         LuaState::execute(self, source).map(|_| ())
     }
 
+    fn dofile<R: FromLuaMulti>(&mut self, path: &str) -> LuaResult<R> {
+        let values = LuaState::dofile(self, path)?;
+        R::from_lua_multi(values, self).map_err(|msg| self.error(format!("dofile: {}", msg)))
+    }
+
     fn eval<R: FromLua>(&mut self, source: &str) -> LuaResult<R> {
         let value = LuaState::execute(self, source)?
             .into_iter()
@@ -316,6 +321,14 @@ impl LuaApi for LuaState {
     fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U> {
         let value = into_single_value(self, value, "convert")?;
         from_value(self, value, "convert")
+    }
+
+    fn set_extra_space(&mut self, pointer: *mut c_void) {
+        self.global_state_mut().set_extra_space(pointer);
+    }
+
+    fn extra_space(&self) -> *mut c_void {
+        self.global_state().extra_space()
     }
 
     fn create_lightuserdata(&mut self, pointer: *mut c_void) -> Value {

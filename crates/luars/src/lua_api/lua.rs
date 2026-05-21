@@ -222,6 +222,12 @@ impl LuaApi for Lua {
     }
 
     #[inline]
+    fn dofile<R: FromLuaMulti>(&mut self, path: &str) -> LuaResult<R> {
+        let values = self.global_state_owner.main_state().dofile(path)?;
+        self.unpack_multi_values(values, "dofile")
+    }
+
+    #[inline]
     fn eval<R: FromLua>(&mut self, source: &str) -> LuaResult<R> {
         let values = self.global_state_owner.main_state().execute(source)?;
         let value = values
@@ -494,6 +500,16 @@ impl LuaApi for Lua {
     fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U> {
         let value = into_single_value(&mut self.global_state_owner, value, "convert")?;
         self.unpack_value(value, "convert")
+    }
+
+    #[inline]
+    fn set_extra_space(&mut self, pointer: *mut c_void) {
+        self.global_state_owner.set_extra_space(pointer);
+    }
+
+    #[inline]
+    fn extra_space(&self) -> *mut c_void {
+        self.global_state_owner.extra_space()
     }
 
     #[inline]

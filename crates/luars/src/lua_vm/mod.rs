@@ -1,5 +1,8 @@
 // Lua Virtual Machine
 // Executes compiled bytecode with register-based architecture
+use std::ffi::c_void;
+use std::ptr::null_mut;
+
 pub mod async_thread;
 pub mod call_info;
 mod const_string;
@@ -245,6 +248,8 @@ pub struct GlobalState {
 
     pub(crate) const_strings: ConstString,
 
+    pub(crate) extra_space: *mut c_void,
+
     /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
     pub(crate) io_default_output: Option<LuaValue>,
     pub(crate) io_default_input: Option<LuaValue>,
@@ -280,6 +285,7 @@ impl GlobalState {
             // Record start time for os.clock()
             start_time: PlatformInstant::now(),
             const_strings: cs,
+            extra_space: null_mut(),
             io_default_output: None,
             io_default_input: None,
         });
@@ -316,6 +322,16 @@ impl GlobalState {
 
     pub(crate) fn main_state(&mut self) -> &mut LuaState {
         &mut self.main_state.as_mut_ref().data
+    }
+
+    #[inline]
+    pub fn set_extra_space(&mut self, pointer: *mut c_void) {
+        self.extra_space = pointer;
+    }
+
+    #[inline]
+    pub fn extra_space(&self) -> *mut c_void {
+        self.extra_space
     }
 
     /// Register a CFunction in package.preload\[name\].
