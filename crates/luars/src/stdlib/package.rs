@@ -83,7 +83,7 @@ pub fn init_package_fields(l: &mut LuaState) -> LuaResult<()> {
 fn get_package_from_registry(l: &mut LuaState) -> LuaResult<LuaValue> {
     let vm = l.global_state_mut();
     vm.registry_get("_PACKAGE")?
-        .ok_or_else(|| vm.main_state().error("package table not found".to_string()))
+        .ok_or_else(|| vm.error("package table not found".to_string()))
 }
 
 // Searcher 1: Check package.preload

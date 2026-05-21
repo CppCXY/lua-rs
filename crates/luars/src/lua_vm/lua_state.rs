@@ -64,12 +64,6 @@ pub struct LuaState {
     /// no hashing overhead and better cache locality. Matches C Lua's sorted list design.
     open_upvalues_list: Vec<UpvaluePtr>,
 
-    /// Error message storage (lightweight error handling)
-    pub(crate) error_msg: String,
-
-    /// Error object storage (preserves actual error value for pcall)
-    pub(crate) error_object: LuaValue,
-
     /// Yield values storage (for coroutine yield)
     yield_values: Vec<LuaValue>,
 
@@ -123,6 +117,13 @@ pub struct LuaState {
     /// matching C Lua's behavior.
     pub(crate) dead: bool,
 
+    /// Archived error for a dead coroutine.
+    /// Active runtime errors live in GlobalState, but dead coroutines must
+    /// preserve their own terminal error for coroutine.resume/close without
+    /// leaking that error into later unrelated calls.
+    dead_error_object: LuaValue,
+    dead_error_msg: String,
+
     /// Whether close_tbc_with_error is currently running on this thread.
     /// Used to detect re-entrant coroutine.close() calls from __close handlers.
     pub(crate) is_closing: bool,
@@ -162,8 +163,6 @@ impl LuaState {
             call_stack: Vec::with_capacity(call_stack_size),
             call_depth: 0,
             open_upvalues_list: Vec::new(),
-            error_msg: String::new(),
-            error_object: LuaValue::nil(),
             yield_values: Vec::new(),
             allow_hook: true,
             hook: LuaValue::nil(),
@@ -178,6 +177,8 @@ impl LuaState {
             tbc_list: Vec::new(),
             yielded: false,
             dead: false,
+            dead_error_object: LuaValue::nil(),
+            dead_error_msg: String::new(),
             is_closing: false,
             nny: if is_main { 1 } else { 0 },
             pending_future: None,
@@ -811,8 +812,8 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     pub fn error(&mut self, msg: String) -> LuaError {
-        self.error_msg = self.add_runtime_error_info(msg);
-        LuaError::RuntimeError
+        let msg = self.add_runtime_error_info(msg);
+        self.global_state_mut().error(msg)
     }
 
     #[inline(always)]
@@ -862,21 +863,61 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     pub fn error_with_object(&mut self, msg: String, obj: LuaValue) -> LuaError {
-        self.error_object = obj;
-        self.error(msg)
+        let msg = self.add_runtime_error_info(msg);
+        self.global_state_mut().error_with_object(msg, obj)
     }
 
     /// Clear error state
     #[inline(always)]
     pub fn clear_error(&mut self) {
-        self.error_msg.clear();
-        self.error_object = LuaValue::nil();
+        self.global_state_mut().clear_error();
         self.yield_values.clear();
     }
 
     /// Get the last error message (for debugging)
     pub fn last_error_msg(&self) -> &str {
-        &self.error_msg
+        self.global_state().last_error_msg()
+    }
+
+    #[inline(always)]
+    pub(crate) fn take_error_object(&mut self) -> LuaValue {
+        self.global_state_mut().take_error_object()
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_error_object(&mut self, value: LuaValue) {
+        self.global_state_mut().set_error_object(value);
+    }
+
+    #[inline(always)]
+    pub(crate) fn error_object(&self) -> LuaValue {
+        self.global_state().error_object()
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_error_msg_raw(&mut self, msg: String) {
+        self.global_state_mut().set_error_msg(msg);
+    }
+
+    #[inline(always)]
+    pub(crate) fn archive_dead_error(&mut self, value: LuaValue, msg: String) {
+        self.dead_error_object = value;
+        self.dead_error_msg = msg;
+    }
+
+    #[inline(always)]
+    pub(crate) fn dead_error_object(&self) -> LuaValue {
+        self.dead_error_object
+    }
+
+    #[inline(always)]
+    pub(crate) fn take_dead_error_object(&mut self) -> LuaValue {
+        std::mem::take(&mut self.dead_error_object)
+    }
+
+    #[inline(always)]
+    pub(crate) fn dead_error_msg(&self) -> &str {
+        &self.dead_error_msg
     }
 
     /// Generate a Lua-style stack traceback
@@ -1103,7 +1144,7 @@ impl LuaState {
         // Restore cascaded error from a previous yield (saved in error_object
         // before yielding when a prior __close had thrown).
         let mut current_error: Option<LuaValue> = {
-            let saved = std::mem::take(&mut self.error_object);
+            let saved = self.take_error_object();
             if saved.is_nil() { None } else { Some(saved) }
         };
 
@@ -1165,17 +1206,17 @@ impl LuaState {
                         // If a previous __close threw, persist the error in
                         // error_object so it survives the yield/resume cycle.
                         if let Some(err) = current_error {
-                            self.error_object = err;
+                            self.set_error_object(err);
                         }
                         return Err(LuaError::Yield);
                     }
                     Err(_) => {
                         // This __close threw an error — capture it as current error
-                        let err_obj = std::mem::take(&mut self.error_object);
+                        let err_obj = self.take_error_object();
                         if !err_obj.is_nil() {
                             current_error = Some(err_obj);
                         } else {
-                            let msg = self.error_msg.clone();
+                            let msg = self.last_error_msg().to_string();
                             if let Ok(s) = self.create_string(&msg) {
                                 current_error = Some(s);
                             }
@@ -1203,7 +1244,7 @@ impl LuaState {
 
         // If any __close threw, propagate the last error
         if let Some(err) = current_error {
-            self.error_object = err;
+            self.set_error_object(err);
             let msg = if let Some(s) = err.as_str() {
                 s.to_string()
             } else {
@@ -1291,11 +1332,11 @@ impl LuaState {
                     Err(_) => {
                         // This __close threw — capture as new current error
                         had_close_error = true;
-                        let err_obj = std::mem::take(&mut self.error_object);
+                        let err_obj = self.take_error_object();
                         if !err_obj.is_nil() {
                             current_error = err_obj;
                         } else {
-                            let msg = self.error_msg.clone();
+                            let msg = self.last_error_msg().to_string();
                             if let Ok(s) = self.create_string(&msg) {
                                 current_error = s;
                             }
@@ -1323,7 +1364,7 @@ impl LuaState {
 
         // Store the final cascaded error in error_object so pcall/xpcall can retrieve it
         if had_close_error {
-            self.error_object = current_error;
+            self.set_error_object(current_error);
         }
 
         self.is_closing = was_closing;
@@ -2663,7 +2704,7 @@ impl LuaState {
             _ => {
                 // Return just the error message without "Runtime Error: " prefix
                 // to match Lua 5.5 behavior (pcall returns the raw error message)
-                std::mem::take(&mut self.error_msg)
+                self.global_state_mut().take_error_msg()
             }
         }
     }
@@ -2963,7 +3004,7 @@ impl LuaState {
                 Err(LuaError::Yield) => Err(LuaError::Yield),
                 Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
                 Err(e) => {
-                    let err_obj = std::mem::take(&mut self.error_object);
+                    let err_obj = self.take_error_object();
                     let result_err = if !err_obj.is_nil() {
                         err_obj
                     } else {
@@ -3021,7 +3062,7 @@ impl LuaState {
                     // This ensures debug.getinfo(2) inside __close sees pcall's caller
 
                     // Get error object BEFORE closing TBC (close may modify it)
-                    let err_obj = std::mem::take(&mut self.error_object);
+                    let err_obj = self.take_error_object();
                     let error_msg_str = self.get_error_message(e);
 
                     // Get frame_base before popping frames
@@ -3045,7 +3086,7 @@ impl LuaState {
                     }
 
                     // Check if close_tbc_with_error updated error_object (from cascading __close errors)
-                    let cascaded_err = std::mem::take(&mut self.error_object);
+                    let cascaded_err = self.take_error_object();
                     let result_err = if !cascaded_err.is_nil() {
                         cascaded_err
                     } else if !err_obj.is_nil() {
@@ -3219,7 +3260,7 @@ impl LuaState {
                 // Lua 5.5 order: pop frames first, then close TBC
 
                 // Get error object BEFORE closing TBC
-                let err_obj = std::mem::take(&mut self.error_object);
+                let err_obj = self.take_error_object();
                 let error_msg_str = self.get_error_message(e);
 
                 // Get frame_base before popping frames
@@ -3250,12 +3291,12 @@ impl LuaState {
                                 ci.call_status |= CIST_YPCALL | CIST_RECST;
                             }
                             // Save error value (may have cascaded) for finish_c_frame
-                            let cascaded = std::mem::take(&mut self.error_object);
-                            self.error_object = if !cascaded.is_nil() {
+                            let cascaded = self.take_error_object();
+                            self.set_error_object(if !cascaded.is_nil() {
                                 cascaded
                             } else {
                                 err_obj
-                            };
+                            });
                             return Err(LuaError::Yield);
                         }
                         Err(_e2) => {
@@ -3266,7 +3307,7 @@ impl LuaState {
                 }
 
                 // Check if close_tbc_with_error updated error_object (cascading)
-                let cascaded_err = std::mem::take(&mut self.error_object);
+                let cascaded_err = self.take_error_object();
                 let result_err = if !cascaded_err.is_nil() {
                     cascaded_err
                 } else if !err_obj.is_nil() {
@@ -3366,7 +3407,7 @@ impl LuaState {
             }
             Err(e) => {
                 // Get error object BEFORE any cleanup
-                let err_obj = std::mem::take(&mut self.error_object);
+                let err_obj = self.take_error_object();
                 let error_msg_str = self.get_error_message(e);
 
                 let mut err_value = if !err_obj.is_nil() {
@@ -3465,7 +3506,7 @@ impl LuaState {
                         }
                         Err(LuaError::ErrorInErrorHandling) => {
                             handler_failed = true;
-                            self.error_object = LuaValue::nil();
+                            self.set_error_object(LuaValue::nil());
                             while self.call_depth() > handler_depth {
                                 self.pop_frame();
                             }
@@ -3474,7 +3515,7 @@ impl LuaState {
                         }
                         Err(_handler_err) => {
                             // Handler failed with normal error — retry with new error
-                            let new_err = std::mem::take(&mut self.error_object);
+                            let new_err = self.take_error_object();
                             while self.call_depth() > handler_depth {
                                 self.pop_frame();
                             }
@@ -3509,12 +3550,12 @@ impl LuaState {
                                 let ci = self.get_call_info_mut(pcall_ci_idx);
                                 ci.call_status |= CIST_YPCALL | CIST_RECST;
                             }
-                            let cascaded = std::mem::take(&mut self.error_object);
-                            self.error_object = if !cascaded.is_nil() {
+                            let cascaded = self.take_error_object();
+                            self.set_error_object(if !cascaded.is_nil() {
                                 cascaded
                             } else {
                                 err_value
-                            };
+                            });
                             return Err(LuaError::Yield);
                         }
                         Err(_e2) => {}
@@ -3702,7 +3743,7 @@ impl LuaState {
                 // (mirrors CLua's luaG_errormsg which calls handler before longjmp)
 
                 // Get error object BEFORE any cleanup
-                let err_obj = std::mem::take(&mut self.error_object);
+                let err_obj = self.take_error_object();
                 let error_msg_str = self.get_error_message(e);
 
                 // Prepare error value for the handler
@@ -3777,7 +3818,7 @@ impl LuaState {
                         Err(LuaError::ErrorInErrorHandling) => {
                             // Stack overflow in error handler zone — give up
                             handler_failed = true;
-                            self.error_object = LuaValue::nil();
+                            self.set_error_object(LuaValue::nil());
                             while self.call_depth() > handler_depth {
                                 self.pop_frame();
                             }
@@ -3788,7 +3829,7 @@ impl LuaState {
                             // Handler failed with a normal error.
                             // C Lua retries: luaG_errormsg calls errfunc again.
                             // Get the new error value and retry.
-                            let new_err = std::mem::take(&mut self.error_object);
+                            let new_err = self.take_error_object();
                             // Clean up handler frames before retrying
                             while self.call_depth() > handler_depth {
                                 self.pop_frame();
@@ -3821,7 +3862,7 @@ impl LuaState {
                 }
 
                 // Check for cascading error from TBC
-                let cascaded_err = std::mem::take(&mut self.error_object);
+                let cascaded_err = self.take_error_object();
                 if !cascaded_err.is_nil() && results.is_empty() {
                     if let Some(s) = cascaded_err.as_str() {
                         results.push(self.create_string(s)?);
@@ -3861,11 +3902,11 @@ impl LuaState {
             // Clear stale error_object so that this error uses the fresh
             // error_msg set by self.error(), rather than a leftover
             // error_object from a previous failed resume.
-            self.error_object = LuaValue::nil();
+            self.set_error_object(LuaValue::nil());
             return Err(self.error("cannot resume dead coroutine".to_string()));
         }
         if self.call_depth > 0 && !self.yielded {
-            self.error_object = LuaValue::nil();
+            self.set_error_object(LuaValue::nil());
             return Err(self.error("cannot resume non-suspended coroutine".to_string()));
         }
 
@@ -3877,7 +3918,7 @@ impl LuaState {
             // Initial resume - need to set up the function
             // The function should be at stack[0] (set by create_thread)
             if self.stack.is_empty() {
-                self.error_object = LuaValue::nil(); // clear stale error object
+                self.set_error_object(LuaValue::nil()); // clear stale error object
                 return Err(self.error("cannot resume dead coroutine".to_string()));
             }
 
@@ -4011,7 +4052,7 @@ impl LuaState {
                         self.pop_frame();
                     }
                     // Check if __close set an error
-                    let err_obj = std::mem::take(&mut self.error_object);
+                    let err_obj = self.take_error_object();
                     self.stack.clear();
                     self.stack_top = 0;
                     if err_obj.is_nil() {
@@ -4020,7 +4061,7 @@ impl LuaState {
                     } else {
                         // __close errored — coroutine dies with error.
                         // Store error back so coroutine_resume can retrieve it.
-                        self.error_object = err_obj;
+                        self.set_error_object(err_obj);
                         return Err(LuaError::RuntimeError);
                     }
                 }
@@ -4032,7 +4073,7 @@ impl LuaState {
                         // Keep stack and call frames intact for debug.traceback
                         // (matching C Lua behavior: dead coroutines retain their
                         // call stack for inspection).
-                        let err_obj = std::mem::take(&mut self.error_object);
+                        let err_obj = self.take_error_object();
                         let error_val = if !err_obj.is_nil() {
                             err_obj
                         } else {
@@ -4046,12 +4087,17 @@ impl LuaState {
                         // Restore error state: if close cascaded, error_object
                         // is already set by close_tbc_with_error. If not, restore
                         // the original error value and msg.
-                        if self.error_object.is_nil() {
-                            self.error_object = error_val;
+                        if self.error_object().is_nil() {
+                            self.set_error_object(error_val);
                         } else {
                             // Cascaded error — update error_msg to match
-                            self.error_msg = format!("{}", self.error_object);
+                            self.set_error_msg_raw(format!("{}", self.error_object()));
                         }
+
+                        self.archive_dead_error(
+                            self.error_object(),
+                            self.last_error_msg().to_string(),
+                        );
 
                         // Mark coroutine as dead but keep stack for debug.traceback
                         self.dead = true;
@@ -4075,11 +4121,11 @@ impl LuaState {
                     };
 
                     // Get error object
-                    let err_obj = std::mem::take(&mut self.error_object);
+                    let err_obj = self.take_error_object();
                     let error_val = if !err_obj.is_nil() {
                         err_obj
                     } else {
-                        let msg = self.error_msg.clone();
+                        let msg = self.last_error_msg().to_string();
                         self.create_string(&msg).unwrap_or_default()
                     };
                     self.clear_error();
@@ -4098,7 +4144,7 @@ impl LuaState {
                     match close_result {
                         Ok(()) => {
                             // Get the final error (might be cascaded from TBC closes)
-                            let final_err = std::mem::take(&mut self.error_object);
+                            let final_err = self.take_error_object();
                             let result_err = if !final_err.is_nil() {
                                 final_err
                             } else {
@@ -4180,7 +4226,7 @@ impl LuaState {
                                 ci.call_status |= CIST_RECST;
                             }
                             // Store the error value for finish_c_frame to retrieve later
-                            self.error_object = error_val;
+                            self.set_error_object(error_val);
 
                             // Mark coroutine as yielded so resume works
                             self.yielded = true;

@@ -155,7 +155,7 @@ impl Value {
         let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json(json)
-            .map_err(|msg| vm.main_state().error(msg))?;
+            .map_err(|msg| vm.error(msg))?;
         Ok(Value::new(vm.to_ref(value)))
     }
 
@@ -165,7 +165,7 @@ impl Value {
         let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json_string(json)
-            .map_err(|msg| vm.main_state().error(msg))?;
+            .map_err(|msg| vm.error(msg))?;
         Ok(Value::new(vm.to_ref(value)))
     }
 
@@ -176,7 +176,7 @@ impl Value {
             Ok(json) => json,
             Err(err) => {
                 let vm = lua.global_state_mut();
-                return Err(vm.main_state().error(err.to_string()));
+                return Err(vm.error(err.to_string()));
             }
         };
         Self::from_json_value(lua, &json)

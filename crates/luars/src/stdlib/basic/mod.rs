@@ -114,8 +114,8 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
                 let where_prefix = lua_where(l, 1);
                 let formatted = format!("{}{}", where_prefix, message);
                 let err_str = l.create_string(&formatted)?;
-                l.error_object = err_str;
-                l.error_msg = formatted;
+                l.set_error_object(err_str);
+                l.set_error_msg_raw(formatted);
                 return Err(LuaError::RuntimeError);
             } else {
                 // Non-string: raise as error object (like error(obj, 0))
@@ -128,8 +128,8 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
         let where_prefix = lua_where(l, 1);
         let formatted = format!("{}assertion failed!", where_prefix);
         let err_str = l.create_string(&formatted)?;
-        l.error_object = err_str;
-        l.error_msg = formatted;
+        l.set_error_object(err_str);
+        l.set_error_msg_raw(formatted);
         return Err(LuaError::RuntimeError);
     }
 
@@ -203,9 +203,9 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
 
         let formatted_msg = format!("{}{}", where_prefix, message);
         let err_str = l.create_string(&formatted_msg)?;
-        l.error_object = err_str;
+        l.set_error_object(err_str);
         // Set error_msg without adding another source prefix (we added it manually)
-        l.error_msg = formatted_msg;
+        l.set_error_msg_raw(formatted_msg);
         Err(LuaError::RuntimeError)
     } else {
         // Non-string error object or level 0: raise as-is

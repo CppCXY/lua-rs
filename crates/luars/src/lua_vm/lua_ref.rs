@@ -253,10 +253,10 @@ fn collect_single_value<T: IntoLua>(
     value: T,
     context: &str,
 ) -> LuaResult<LuaValue> {
-    let mut values = collect_into_lua_values(vm.main_state(), value)
-        .map_err(|msg| vm.main_state().error(msg))?;
+    let mut values =
+        collect_into_lua_values(vm.main_state(), value).map_err(|msg| vm.error(msg))?;
     if values.len() != 1 {
-        return Err(vm.main_state().error(format!(
+        return Err(vm.error(format!(
             "{} expects exactly one Lua value, got {}",
             context,
             values.len()
@@ -332,7 +332,7 @@ impl LuaTableRef {
     pub fn get_as<T: crate::FromLua>(&self, key: &str) -> LuaResult<T> {
         let val = self.get(key)?;
         let vm = self.inner.vm_mut();
-        T::from_lua(val, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
+        T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Get a value by arbitrary Rust-convertible key and convert it to `T`.
@@ -341,7 +341,7 @@ impl LuaTableRef {
         let key = collect_single_value(vm, key, "LuaTableRef::get_typed(key)")?;
         let table = self.inner.to_value();
         let value = vm.raw_get(&table, &key).unwrap_or_default();
-        T::from_lua(value, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
+        T::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Returns true if the table contains a non-nil value for the given key.
@@ -465,10 +465,8 @@ impl LuaTableRef {
         let vm = self.inner.vm_mut();
         let mut converted = Vec::with_capacity(pairs.len());
         for (key, value) in pairs {
-            let key =
-                K::from_lua(key, vm.main_state()).map_err(|msg| vm.main_state().error(msg))?;
-            let value =
-                V::from_lua(value, vm.main_state()).map_err(|msg| vm.main_state().error(msg))?;
+            let key = K::from_lua(key, vm.main_state()).map_err(|msg| vm.error(msg))?;
+            let value = V::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))?;
             converted.push((key, value));
         }
         Ok(converted)
@@ -485,8 +483,7 @@ impl LuaTableRef {
             if value.is_nil() {
                 break;
             }
-            let value =
-                V::from_lua(value, vm.main_state()).map_err(|msg| vm.main_state().error(msg))?;
+            let value = V::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))?;
             values.push(value);
             index += 1;
         }
@@ -563,18 +560,16 @@ impl LuaFunctionRef {
     /// Call the function with Rust arguments and convert all results into a Rust type.
     pub fn call<A: IntoLua, R: FromLuaMulti>(&self, args: A) -> LuaResult<R> {
         let vm = self.inner.vm_mut();
-        let args = collect_into_lua_values(vm.main_state(), args)
-            .map_err(|msg| vm.main_state().error(msg))?;
+        let args = collect_into_lua_values(vm.main_state(), args).map_err(|msg| vm.error(msg))?;
         let func = self.inner.to_value();
         let results = vm.main_state().call(func, args)?;
-        R::from_lua_multi(results, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
+        R::from_lua_multi(results, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Call the function with Rust arguments and convert the first result into a Rust type.
     pub fn call1<A: IntoLua, R: FromLua>(&self, args: A) -> LuaResult<R> {
         let vm = self.inner.vm_mut();
-        let args = collect_into_lua_values(vm.main_state(), args)
-            .map_err(|msg| vm.main_state().error(msg))?;
+        let args = collect_into_lua_values(vm.main_state(), args).map_err(|msg| vm.error(msg))?;
         let func = self.inner.to_value();
         let result = vm
             .main_state()
@@ -582,7 +577,7 @@ impl LuaFunctionRef {
             .into_iter()
             .next()
             .unwrap_or(LuaValue::nil());
-        R::from_lua(result, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
+        R::from_lua(result, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Call the function asynchronously.
@@ -733,7 +728,7 @@ impl<T: 'static> UserDataRef<T> {
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
             let vm = self.inner.vm_mut();
-            return Err(vm.main_state().error(format!(
+            return Err(vm.error(format!(
                 "expected userdata {}, got {}",
                 expected,
                 value.type_name()
@@ -743,9 +738,7 @@ impl<T: 'static> UserDataRef<T> {
         let Some(inner) = userdata.downcast_ref::<T>() else {
             let actual = userdata.type_name();
             let vm = self.inner.vm_mut();
-            return Err(vm
-                .main_state()
-                .error(format!("expected userdata {}, got {}", expected, actual)));
+            return Err(vm.error(format!("expected userdata {}, got {}", expected, actual)));
         };
 
         Ok(unsafe { &*(inner as *const T) })
@@ -757,7 +750,7 @@ impl<T: 'static> UserDataRef<T> {
         let expected = std::any::type_name::<T>();
         let Some(userdata) = value.as_userdata_mut() else {
             let vm = self.inner.vm_mut();
-            return Err(vm.main_state().error(format!(
+            return Err(vm.error(format!(
                 "expected userdata {}, got {}",
                 expected,
                 value.type_name()
@@ -767,9 +760,7 @@ impl<T: 'static> UserDataRef<T> {
         let Some(inner) = userdata.downcast_mut::<T>() else {
             let actual = userdata.type_name();
             let vm = self.inner.vm_mut();
-            return Err(vm
-                .main_state()
-                .error(format!("expected userdata {}, got {}", expected, actual)));
+            return Err(vm.error(format!("expected userdata {}, got {}", expected, actual)));
         };
 
         Ok(unsafe { &mut *(inner as *mut T) })
@@ -780,7 +771,7 @@ impl<T: 'static> UserDataRef<T> {
         let value = self.inner.to_value();
         let Some(userdata) = value.as_userdata_mut() else {
             let vm = self.inner.vm_mut();
-            return Err(vm.main_state().error(format!(
+            return Err(vm.error(format!(
                 "expected userdata {}, got {}",
                 std::any::type_name::<T>(),
                 value.type_name()
@@ -983,7 +974,7 @@ impl LuaAnyRef {
                 vm.set_basic_metatable(value.kind(), mt_value);
                 Ok(())
             }
-            _ => Err(vm.main_state().error(format!(
+            _ => Err(vm.error(format!(
                 "metatables are not supported for {} values",
                 value.type_name()
             ))),
@@ -994,7 +985,7 @@ impl LuaAnyRef {
     pub fn get_as<T: crate::FromLua>(&self) -> LuaResult<T> {
         let val = self.inner.to_value();
         let vm = self.inner.vm_mut();
-        T::from_lua(val, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
+        T::from_lua(val, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Get the registry reference ID.

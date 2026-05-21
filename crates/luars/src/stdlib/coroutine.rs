@@ -76,23 +76,40 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
         Err(e) => {
             // Error occurred during resume — return (false, error_object)
             // Like C Lua, return the actual error value (not a string conversion).
-            // Keep the error_object in the thread so coroutine.close can return it too.
+            // Dead coroutines archive their terminal error locally; clear the
+            // shared active error afterwards so later unrelated calls are not poisoned.
             let error_val = if let Some(thread) = thread_val.as_thread_mut() {
-                let err_obj = thread.error_object;
-                if !err_obj.is_nil() {
-                    err_obj
+                let active_err_obj = thread.error_object();
+                let active_msg = thread.get_error_msg(e);
+                if !active_err_obj.is_nil() {
+                    active_err_obj
+                } else if !active_msg.is_empty() {
+                    l.create_string(&active_msg)?
                 } else {
-                    // Fallback: create string from error message
-                    let msg = thread.get_error_msg(e);
-                    if msg.is_empty() {
-                        LuaValue::nil()
+                    let err_obj = if thread.dead {
+                        thread.dead_error_object()
                     } else {
-                        l.create_string(&msg)?
+                        LuaValue::nil()
+                    };
+                    if !err_obj.is_nil() {
+                        err_obj
+                    } else {
+                        let msg = if thread.dead {
+                            thread.dead_error_msg().to_string()
+                        } else {
+                            String::new()
+                        };
+                        if msg.is_empty() {
+                            LuaValue::nil()
+                        } else {
+                            l.create_string(&msg)?
+                        }
                     }
                 }
             } else {
                 LuaValue::nil()
             };
+            l.clear_error();
             l.push_value(LuaValue::boolean(false))?; // success=false
             l.push_value(error_val)?;
             Ok(2)
@@ -246,20 +263,7 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
             Ok(results.len())
         }
         Err(_e) => {
-            // Error occurred — propagate the error object from the child thread
-            // directly (like Lua 5.5's auxresume → lua_error).
-            if let Some(thread) = thread_val.as_thread_mut() {
-                // Get the error object from the child thread
-                let err_obj = std::mem::take(&mut thread.error_object);
-                if !err_obj.is_nil() {
-                    l.error_object = err_obj;
-                    let msg = std::mem::take(&mut thread.error_msg);
-                    l.error_msg = msg;
-                } else {
-                    let msg = std::mem::take(&mut thread.error_msg);
-                    l.error_msg = msg;
-                }
-            }
+            // Error state is already stored in the shared GlobalState.
             Err(LuaError::RuntimeError)
         }
     }
@@ -372,8 +376,14 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
             Ok(()) => {
                 // Check if coroutine had a pending error (dead-by-error)
                 // or if __close cascaded an error
-                if !thread.error_object.is_nil() {
-                    let err_obj = std::mem::take(&mut thread.error_object);
+                let archived_err = thread.dead_error_object();
+                if !archived_err.is_nil() {
+                    let err_obj = thread.take_dead_error_object();
+                    l.push_value(LuaValue::boolean(false))?;
+                    l.push_value(err_obj)?;
+                    Ok(2)
+                } else if !thread.error_object().is_nil() {
+                    let err_obj = thread.take_error_object();
                     l.push_value(LuaValue::boolean(false))?;
                     l.push_value(err_obj)?;
                     Ok(2)
@@ -388,11 +398,15 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
             }
             Err(_e) => {
                 // __close caused an error — return (false, error_value)
-                let err_obj = std::mem::take(&mut thread.error_object);
+                let err_obj = thread.take_error_object();
                 let error_val = if !err_obj.is_nil() {
                     err_obj
                 } else {
-                    let msg = std::mem::take(&mut thread.error_msg);
+                    let msg = if !thread.dead_error_msg().is_empty() {
+                        thread.dead_error_msg().to_string()
+                    } else {
+                        thread.last_error_msg().to_string()
+                    };
                     if msg.is_empty() {
                         LuaValue::nil()
                     } else {

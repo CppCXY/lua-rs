@@ -241,7 +241,7 @@ impl LuaApi for Lua {
     fn eval_multi<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R> {
         let values = self.global_state_owner.main_state().execute(source)?;
         R::from_lua_multi(values, self.global_state_owner.main_state())
-            .map_err(|msg| self.global_state_owner.main_state().error(msg))
+            .map_err(|msg| self.global_state_owner.error(msg))
     }
 
     #[inline]
@@ -318,7 +318,7 @@ impl LuaApi for Lua {
     fn register_type<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table> {
         self.global_state_owner.register_type_of::<T>(name)?;
         self.get_table(name)?.ok_or_else(|| {
-            self.global_state_owner.main_state().error(format!(
+            self.global_state_owner.error(format!(
                 "registered type '{}' did not produce a table",
                 name
             ))

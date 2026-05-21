@@ -218,3 +218,104 @@ fn test_coroutine_error_handling() {
 
     assert!(result.is_ok());
 }
+
+#[test]
+fn test_coroutine_thread_line_hook_fires_on_resume() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.main_state().execute(
+        r#"
+        local co = coroutine.create(function (x)
+            local a = 1
+            coroutine.yield(debug.getinfo(1, "l"))
+            coroutine.yield(debug.getinfo(1, "l").currentline)
+            return a
+        end)
+
+        local tr = {}
+        local foo = function (e, l) if l then table.insert(tr, l) end end
+        debug.sethook(co, foo, "lcr")
+
+        local ok, info = coroutine.resume(co, 10)
+        assert(ok)
+        assert(type(info) == "table")
+        assert(#tr == 2, #tr)
+        assert(tr[1] == info.currentline - 1 and tr[2] == info.currentline)
+    "#,
+    );
+
+    if let Err(e) = &result {
+        eprintln!(
+            "test_coroutine_thread_line_hook_fires_on_resume Error: {}",
+            e
+        );
+        eprintln!("Error message: {}", vm.main_state().get_error_message(*e));
+    }
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_coroutine_traceback_contains_suspend_and_recursive_frames() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    let result = vm.main_state().execute(
+        r#"
+        local function f(i)
+          if i == 0 then error(i)
+          else coroutine.yield(); f(i - 1) end
+        end
+
+        local co = coroutine.create(function (x) f(x) end)
+        local traces = {}
+
+        local ok, err = coroutine.resume(co, 3)
+        traces[#traces + 1] = debug.traceback(co)
+
+        ok, err = coroutine.resume(co)
+        traces[#traces + 1] = debug.traceback(co)
+
+        ok, err = coroutine.resume(co)
+        traces[#traces + 1] = debug.traceback(co)
+
+        ok, err = coroutine.resume(co)
+        traces[#traces + 1] = debug.traceback(co)
+
+        return traces[1], traces[2], traces[3], traces[4]
+    "#,
+    );
+
+    match result {
+        Ok(values) => {
+            let traces: Vec<String> = values
+                .into_iter()
+                .map(|value| value.as_str().unwrap_or_default().to_string())
+                .collect();
+            for (idx, trace) in traces.iter().enumerate() {
+                eprintln!("trace[{idx}] =\n{trace}\n---");
+            }
+            assert!(
+                traces[0].contains("yield"),
+                "first trace missing yield: {}",
+                traces[0]
+            );
+            assert!(
+                traces[0].contains("function <"),
+                "first trace missing function frame: {}",
+                traces[0]
+            );
+            assert!(
+                traces[3].contains("error"),
+                "final trace missing error: {}",
+                traces[3]
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "test_coroutine_traceback_contains_suspend_and_recursive_frames Error: {}",
+                e
+            );
+            eprintln!("Error message: {}", vm.main_state().get_error_message(e));
+            panic!("traceback capture script failed");
+        }
+    }
+}

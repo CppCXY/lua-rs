@@ -159,8 +159,8 @@ impl Table {
         let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json(json)
-            .map_err(|msg| vm.main_state().error(msg))?;
-        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
+            .map_err(|msg| vm.error(msg))?;
+        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Construct a Lua table from a JSON string inside the provided Lua runtime.
@@ -169,8 +169,8 @@ impl Table {
         let vm = lua.global_state_mut();
         let value = vm
             .deserialize_from_json_string(json)
-            .map_err(|msg| vm.main_state().error(msg))?;
-        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.main_state().error(msg))
+            .map_err(|msg| vm.error(msg))?;
+        Table::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))
     }
 
     /// Construct a Lua table from any serde-serializable Rust value.
@@ -180,7 +180,7 @@ impl Table {
             Ok(json) => json,
             Err(err) => {
                 let vm = lua.global_state_mut();
-                return Err(vm.main_state().error(err.to_string()));
+                return Err(vm.error(err.to_string()));
             }
         };
         Self::from_json_value(lua, &json)

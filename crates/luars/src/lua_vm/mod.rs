@@ -248,6 +248,12 @@ pub struct GlobalState {
 
     pub(crate) const_strings: ConstString,
 
+    /// Global error message storage shared by the single-threaded runtime.
+    pub(crate) error_msg: String,
+
+    /// Global error object storage used for pcall/xpcall/coroutine error returns.
+    pub(crate) error_object: LuaValue,
+
     pub(crate) extra_space: *mut c_void,
 
     /// Cached default I/O file handles for fast access (avoids registry lookup per io.write/read)
@@ -285,6 +291,8 @@ impl GlobalState {
             // Record start time for os.clock()
             start_time: PlatformInstant::now(),
             const_strings: cs,
+            error_msg: String::new(),
+            error_object: LuaValue::nil(),
             extra_space: null_mut(),
             io_default_output: None,
             io_default_input: None,
@@ -322,6 +330,56 @@ impl GlobalState {
 
     pub(crate) fn main_state(&mut self) -> &mut LuaState {
         &mut self.main_state.as_mut_ref().data
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub fn error(&mut self, msg: String) -> LuaError {
+        self.error_msg = msg;
+        LuaError::RuntimeError
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub fn error_with_object(&mut self, msg: String, obj: LuaValue) -> LuaError {
+        self.error_object = obj;
+        self.error(msg)
+    }
+
+    #[inline(always)]
+    pub fn clear_error(&mut self) {
+        self.error_msg.clear();
+        self.error_object = LuaValue::nil();
+    }
+
+    #[inline(always)]
+    pub fn take_error_object(&mut self) -> LuaValue {
+        std::mem::take(&mut self.error_object)
+    }
+
+    #[inline(always)]
+    pub fn set_error_object(&mut self, value: LuaValue) {
+        self.error_object = value;
+    }
+
+    #[inline(always)]
+    pub fn error_object(&self) -> LuaValue {
+        self.error_object
+    }
+
+    #[inline(always)]
+    pub fn take_error_msg(&mut self) -> String {
+        std::mem::take(&mut self.error_msg)
+    }
+
+    #[inline(always)]
+    pub fn set_error_msg(&mut self, msg: String) {
+        self.error_msg = msg;
+    }
+
+    #[inline(always)]
+    pub fn last_error_msg(&self) -> &str {
+        &self.error_msg
     }
 
     #[inline]
@@ -977,13 +1035,11 @@ impl GlobalState {
     ) -> LuaResult<(bool, Vec<LuaValue>)> {
         // Get ThreadId from LuaValue
         let Some(l) = thread_val.as_thread_mut() else {
-            return Err(self.main_state().error("invalid thread".to_string()));
+            return Err(self.error("invalid thread".to_string()));
         };
 
         if l.is_main_thread() {
-            return Err(self
-                .main_state()
-                .error("cannot resume main thread".to_string()));
+            return Err(self.error("cannot resume main thread".to_string()));
         }
 
         // Borrow mutably and delegate to LuaState::resume

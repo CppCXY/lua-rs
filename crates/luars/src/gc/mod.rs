@@ -2056,9 +2056,9 @@ impl GC {
             // for debug.traceback and will be fully traversed below.
             if stack.is_empty() {
                 // Still mark error_object if present (safety)
-                let err_obj = &state.error_object;
+                let err_obj = state.error_object();
                 if !err_obj.is_nil() {
-                    self.mark_value(l, err_obj);
+                    self.mark_value(l, &err_obj);
                 }
                 return 1;
             }
@@ -2103,9 +2103,9 @@ impl GC {
 
             // Mark the thread's error_object — it may be held during pcall
             // error recovery (between __close calls) and not on the stack.
-            let err_obj = &state.error_object;
+            let err_obj = state.error_object();
             if !err_obj.is_nil() {
-                self.mark_value(l, err_obj);
+                self.mark_value(l, &err_obj);
                 count += 1;
             }
 
@@ -3339,10 +3339,10 @@ impl GC {
                             );
                         }
                         // Check error_object
-                        let err = &state.error_object;
+                        let err = state.error_object();
                         if !err.is_nil() {
                             check_value(
-                                err,
+                                &err,
                                 &container_kind,
                                 container_ptr,
                                 container_age,

@@ -812,7 +812,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
 
             // Error recovery completed (or continuing) after yield.
             // Retrieve the saved error value and try to close remaining TBC entries.
-            let error_val = std::mem::take(&mut lua_state.error_object);
+            let error_val = lua_state.take_error_object();
             lua_state.clear_error();
             let close_level = pcall_func_pos + 1; // body's base position
 
@@ -822,7 +822,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
             match close_result {
                 Ok(()) => {
                     // All TBC entries closed. Set up (false, error) result.
-                    let final_err = std::mem::take(&mut lua_state.error_object);
+                    let final_err = lua_state.take_error_object();
                     let result_err = if !final_err.is_nil() {
                         final_err
                     } else {
@@ -883,12 +883,12 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                 }
                 Err(LuaError::Yield) => {
                     // Another TBC close method yielded. Save cascaded error and yield.
-                    let cascaded = std::mem::take(&mut lua_state.error_object);
-                    lua_state.error_object = if !cascaded.is_nil() {
+                    let cascaded = lua_state.take_error_object();
+                    lua_state.set_error_object(if !cascaded.is_nil() {
                         cascaded
                     } else {
                         error_val
-                    };
+                    });
                     Err(LuaError::Yield)
                 }
                 Err(e) => {
