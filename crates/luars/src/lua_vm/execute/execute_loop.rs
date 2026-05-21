@@ -22,7 +22,7 @@ use crate::{
     CallInfo, Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult,
     LuaState, LuaValue, OpCode,
     gc::{TablePtr, UpvaluePtr},
-    lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMINT, LuaProto},
+    lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMFLT, LUA_VNUMINT, LuaProto},
     lua_vm::{
         LuaError, TmKind,
         call_info::call_status::{CIST_C, CIST_CLSRET, CIST_PENDING_FINISH},
@@ -1245,16 +1245,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr)));
+                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMINT;
                             pc += 1;
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) + pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) + pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 + n2);
+                                (*ra_ptr).value.n = n1 + n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1274,14 +1277,14 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
                         // Fast path: integer (most common)
                         if pttisinteger(v1_ptr) {
-                            let iv1 = pivalue(v1_ptr);
-                            psetivalue(ra_ptr, iv1.wrapping_add(sc as i64));
+                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_add(sc as i64);
+                            (*ra_ptr).tt = LUA_VNUMINT;
                             pc += 1; // Skip metamethod on success
                         }
                         // Slow path: float
                         else if pttisfloat(v1_ptr) {
-                            let nb = pfltvalue(v1_ptr);
-                            psetfltvalue(ra_ptr, nb + (sc as f64));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) + (sc as f64);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1; // Skip metamethod on success
                         }
                         // else: fall through to MMBINI (next instruction)
@@ -1300,16 +1303,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
+                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMINT;
                             pc += 1;
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) - pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) - pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 - n2);
+                                (*ra_ptr).value.n = n1 - n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1328,16 +1334,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
+                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMINT;
                             pc += 1;
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) * pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) * pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 * n2);
+                                (*ra_ptr).value.n = n1 * n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1356,13 +1365,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) / pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) / pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 / n2);
+                                (*ra_ptr).value.n = n1 / n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1384,20 +1395,23 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let i1 = pivalue(v1_ptr);
                             let i2 = pivalue(v2_ptr);
                             if i2 != 0 {
-                                psetivalue(ra_ptr, lua_idiv(i1, i2));
+                                (*ra_ptr).value.i = lua_idiv(i1, i2);
+                                (*ra_ptr).tt = LUA_VNUMINT;
                                 pc += 1;
                             } else {
                                 active_frame.current_ci_mut(lua_state).save_pc(pc);
                                 return Err(error_div_by_zero(lua_state));
                             }
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor());
+                            (*ra_ptr).value.n = (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor();
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, (n1 / n2).floor());
+                                (*ra_ptr).value.n = (n1 / n2).floor();
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1419,20 +1433,23 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let i1 = pivalue(v1_ptr);
                             let i2 = pivalue(v2_ptr);
                             if i2 != 0 {
-                                psetivalue(ra_ptr, lua_imod(i1, i2));
+                                (*ra_ptr).value.i = lua_imod(i1, i2);
+                                (*ra_ptr).tt = LUA_VNUMINT;
                                 pc += 1;
                             } else {
                                 active_frame.current_ci_mut(lua_state).save_pc(pc);
                                 return Err(error_mod_by_zero(lua_state));
                             }
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            (*ra_ptr).value.n = lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, lua_fmod(n1, n2));
+                                (*ra_ptr).value.n = lua_fmod(n1, n2);
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1451,13 +1468,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            (*ra_ptr).value.n = luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, luai_numpow(n1, n2));
+                                (*ra_ptr).value.n = luai_numpow(n1, n2);
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1477,16 +1496,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr)));
+                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMINT;
                             pc += 1;
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) + pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) + pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 + n2);
+                                (*ra_ptr).value.n = n1 + n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1505,16 +1527,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr)));
+                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMINT;
                             pc += 1;
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) - pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) - pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 - n2);
+                                (*ra_ptr).value.n = n1 - n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1533,16 +1558,19 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            psetivalue(ra_ptr, pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr)));
+                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMINT;
                             pc += 1;
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) * pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) * pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 * n2);
+                                (*ra_ptr).value.n = n1 * n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1564,20 +1592,23 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let i1 = pivalue(v1_ptr);
                             let i2 = pivalue(v2_ptr);
                             if i2 != 0 {
-                                psetivalue(ra_ptr, lua_imod(i1, i2));
+                                (*ra_ptr).value.i = lua_imod(i1, i2);
+                                (*ra_ptr).tt = LUA_VNUMINT;
                                 pc += 1;
                             } else {
                                 active_frame.current_ci_mut(lua_state).save_pc(pc);
                                 return Err(error_mod_by_zero(lua_state));
                             }
                         } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            (*ra_ptr).value.n = lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, lua_fmod(n1, n2));
+                                (*ra_ptr).value.n = lua_fmod(n1, n2);
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1596,13 +1627,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr)));
+                            (*ra_ptr).value.n = luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, luai_numpow(n1, n2));
+                                (*ra_ptr).value.n = luai_numpow(n1, n2);
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
@@ -1621,13 +1654,15 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                         let ra_ptr = sp.add(base + a);
 
                         if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, pfltvalue(v1_ptr) / pfltvalue(v2_ptr));
+                            (*ra_ptr).value.n = pfltvalue(v1_ptr) / pfltvalue(v2_ptr);
+                            (*ra_ptr).tt = LUA_VNUMFLT;
                             pc += 1;
                         } else {
                             let mut n1 = 0.0;
                             let mut n2 = 0.0;
                             if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, n1 / n2);
+                                (*ra_ptr).value.n = n1 / n2;
+                                (*ra_ptr).tt = LUA_VNUMFLT;
                                 pc += 1;
                             }
                         }
