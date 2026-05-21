@@ -217,6 +217,8 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         let mut code: &[Instruction] = frame.code();
         let mut constants: &[LuaValue] = frame.constants();
+        let mut upvalue_ptrs: *const UpvaluePtr =
+            active_frame.current_ci(lua_state).upvalue_ptrs;
         frame.init_oldpc(lua_state);
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
@@ -252,6 +254,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 chunk = unsafe { &*ci.chunk_ptr };
                 code = &chunk.code;
                 constants = &chunk.constants;
+                upvalue_ptrs = ci.upvalue_ptrs;
                 active_frame.frame_idx = frame_idx;
                 active_frame.top = ci.top as usize;
                 active_frame.call_status = ci.call_status;
@@ -272,6 +275,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 chunk = unsafe { &*ci.chunk_ptr };
                 code = &chunk.code;
                 constants = &chunk.constants;
+                upvalue_ptrs = ci.upvalue_ptrs;
                 active_frame.frame_idx = frame_idx;
                 active_frame.top = ci.top as usize;
                 active_frame.call_status = ci.call_status;
@@ -403,13 +407,11 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := UpValue[B]
                     let a = instr.get_a();
                     let b = instr.get_b();
-                    let upvalue_ptr =
-                        unsafe { *active_frame.upvalue_ptrs(lua_state).add(b as usize) };
-                    let src = upvalue_ptr.as_ref().data.get_value_ref();
+                    let upvalue_ptr = unsafe { *upvalue_ptrs.add(b as usize) };
+                    let src = unsafe { &*upvalue_ptr.as_ref().data.get_v_ptr() };
                     let dest = stack_mut_ptr(lua_state.stack_mut(), stack_id!(a));
                     unsafe {
-                        (*dest).value = src.value;
-                        (*dest).tt = src.tt;
+                        *dest = *src;
                     }
                 }
                 OpCode::SetUpval => {
@@ -417,7 +419,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let a = instr.get_a();
                     let b = instr.get_b();
                     unsafe {
-                        let upvalue_ptr = *active_frame.upvalue_ptrs(lua_state).add(b as usize);
+                        let upvalue_ptr = *upvalue_ptrs.add(b as usize);
                         let value = stack_ref(lua_state.stack(), base + a as usize);
                         upvalue_ptr
                             .as_mut_ref()
@@ -2470,7 +2472,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let func = unsafe { *lua_state.stack().get_unchecked(func_idx) };
                     if func.is_lua_function() {
                         // Extract raw data before borrowing issues
-                        let (param_count, max_stack_size, chunk_ptr, upvalue_ptrs) = {
+                        let (param_count, max_stack_size, chunk_ptr, new_upvalue_ptrs) = {
                             let lf = func.as_lua_function().unwrap();
                             let c = lf.chunk();
                             (
@@ -2487,7 +2489,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 nresults,
                                 max_stack_size,
                                 chunk_ptr,
-                                upvalue_ptrs,
+                                new_upvalue_ptrs,
                             )?
                         {
                             // Save caller state to CallInfo
@@ -2498,6 +2500,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             pc = 0;
                             code = &chunk.code;
                             constants = &chunk.constants;
+                            upvalue_ptrs = new_upvalue_ptrs;
                             let new_depth = lua_state.call_depth();
                             active_frame.frame_idx = new_depth - 1;
                             active_frame.top = new_base + max_stack_size;
@@ -2531,7 +2534,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             param_count,
                             max_stack_size,
                             chunk_ptr,
-                            upvalue_ptrs,
+                            new_upvalue_ptrs,
                         )?;
                         reload_after_call!();
                         continue;
