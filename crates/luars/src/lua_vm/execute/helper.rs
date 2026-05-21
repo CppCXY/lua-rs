@@ -223,13 +223,17 @@ pub fn setnilvalue(v: &mut LuaValue) {
 #[inline(always)]
 pub fn setobjs2s(l: &mut LuaState, a: usize, b: usize) {
     let stack = l.stack_mut();
-    stack[a] = stack[b];
+    unsafe {
+        *stack.get_unchecked_mut(a) = *stack.get_unchecked(b);
+    }
 }
 
 #[inline(always)]
 pub fn setobj2s(l: &mut LuaState, a: usize, b: &LuaValue) {
     let stack = l.stack_mut();
-    stack[a] = *b;
+    unsafe {
+        *stack.get_unchecked_mut(a) = *b;
+    }
 }
 
 /// luaV_shiftl - Shift integer x left by y positions.
