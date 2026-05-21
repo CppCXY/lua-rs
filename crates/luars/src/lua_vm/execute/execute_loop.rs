@@ -217,8 +217,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
 
         let mut code: &[Instruction] = frame.code();
         let mut constants: &[LuaValue] = frame.constants();
-        let mut upvalue_ptrs: *const UpvaluePtr =
-            active_frame.current_ci(lua_state).upvalue_ptrs;
+        let mut upvalue_ptrs: *const UpvaluePtr = active_frame.current_ci(lua_state).upvalue_ptrs;
         frame.init_oldpc(lua_state);
 
         // CALL HOOK: fire when entering a new Lua function (pc == 0)
