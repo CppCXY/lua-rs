@@ -2501,8 +2501,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             let new_depth = lua_state.call_depth();
                             active_frame.frame_idx = new_depth - 1;
                             active_frame.top = new_base + max_stack_size;
-                            active_frame.call_status =
-                                call_status::with_nresults(0, nresults); // CIST_LUA = 0
+                            active_frame.call_status = call_status::with_nresults(0, nresults); // CIST_LUA = 0
                             trap = current_trap(lua_state);
                             if trap {
                                 let hook_mask = lua_state.hook_mask;
