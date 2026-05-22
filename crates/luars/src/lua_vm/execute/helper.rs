@@ -387,6 +387,7 @@ pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
 }
 
 /// tointeger - 从LuaValue引用获取整数 (用于常量)
+#[allow(unused)]
 #[inline(always)]
 pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
     if v.ttisinteger() {

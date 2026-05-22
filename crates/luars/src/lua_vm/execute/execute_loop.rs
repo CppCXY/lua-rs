@@ -22,7 +22,7 @@ use crate::{
     CallInfo, Instruction, LUA_MASKCALL, LUA_MASKCOUNT, LUA_MASKLINE, LUA_MASKRET, LuaResult,
     LuaState, LuaValue, OpCode,
     gc::{TablePtr, UpvaluePtr},
-    lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMFLT, LUA_VNUMINT, LuaProto},
+    lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMINT, LuaProto},
     lua_vm::{
         LuaError, TmKind,
         call_info::call_status,
@@ -40,8 +40,7 @@ use crate::{
                 return1_with_hook, self_shortstr_index_chain_fast, setbfvalue, setbtvalue,
                 setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s, stack_copy,
                 stack_mut_ptr, stack_mut_ref, stack_ptr, stack_ref, stack_val, stack_val_mut,
-                tointeger, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
-                unary_tm_fallback,
+                tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
             metamethod::call_newindex_tm_fast,
@@ -194,6 +193,224 @@ fn current_trap(lua_state: &LuaState) -> bool {
     {
         lua_state.has_active_instruction_watch()
     }
+}
+
+macro_rules! op_arithI {
+    ($instr:expr, $lua_state:expr, $base:expr, $pc:expr, $iop:expr, $fop:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let sc = $instr.get_sc();
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let ra_ptr = sp.add($base + a);
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+
+            if pttisinteger(v1_ptr) {
+                let iv1 = pivalue(v1_ptr);
+                $pc += 1;
+                psetivalue(ra_ptr, $iop(iv1, sc));
+            } else if pttisfloat(v1_ptr) {
+                let nb = pfltvalue(v1_ptr);
+                let fimm = sc as f64;
+                $pc += 1;
+                psetfltvalue(ra_ptr, $fop(nb, fimm));
+            }
+        }
+    }};
+}
+
+macro_rules! op_arithf_aux {
+    ($ra_ptr:expr, $pc:expr, $v1_ptr:expr, $v2_ptr:expr, $fop:expr) => {{
+        let mut n1 = 0.0;
+        let mut n2 = 0.0;
+        if ptonumberns($v1_ptr, &mut n1) && ptonumberns($v2_ptr, &mut n2) {
+            $pc += 1;
+            psetfltvalue($ra_ptr, $fop(n1, n2));
+        }
+    }};
+}
+
+macro_rules! op_arith {
+    ($instr:expr, $lua_state:expr, $base:expr, $pc:expr, $iop:expr, $fop:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = sp.add($base + c) as *const LuaValue;
+            let ra_ptr = sp.add($base + a);
+
+            if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                let i1 = pivalue(v1_ptr);
+                let i2 = pivalue(v2_ptr);
+                $pc += 1;
+                psetivalue(ra_ptr, $iop(i1, i2));
+            } else {
+                op_arithf_aux!(ra_ptr, $pc, v1_ptr, v2_ptr, $fop);
+            }
+        }
+    }};
+}
+
+macro_rules! op_arithf {
+    ($instr:expr, $lua_state:expr, $base:expr, $pc:expr, $fop:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = sp.add($base + c) as *const LuaValue;
+            let ra_ptr = sp.add($base + a);
+            op_arithf_aux!(ra_ptr, $pc, v1_ptr, v2_ptr, $fop);
+        }
+    }};
+}
+
+macro_rules! op_arithK {
+    ($instr:expr, $lua_state:expr, $base:expr, $pc:expr, $constants:expr, $iop:expr, $fop:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = $constants.as_ptr().add(c);
+            let ra_ptr = sp.add($base + a);
+
+            if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                let i1 = pivalue(v1_ptr);
+                let i2 = pivalue(v2_ptr);
+                $pc += 1;
+                psetivalue(ra_ptr, $iop(i1, i2));
+            } else {
+                op_arithf_aux!(ra_ptr, $pc, v1_ptr, v2_ptr, $fop);
+            }
+        }
+    }};
+}
+
+macro_rules! op_arithfK {
+    ($instr:expr, $lua_state:expr, $base:expr, $pc:expr, $constants:expr, $fop:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = $constants.as_ptr().add(c);
+            let ra_ptr = sp.add($base + a);
+            op_arithf_aux!(ra_ptr, $pc, v1_ptr, v2_ptr, $fop);
+        }
+    }};
+}
+
+macro_rules! op_arith_check_zero {
+    ($instr:expr, $lua_state:expr, $active_frame:expr, $base:expr, $pc:expr, $iop:expr, $fop:expr, $err_fn:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = sp.add($base + c) as *const LuaValue;
+            let ra_ptr = sp.add($base + a);
+
+            if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                let i1 = pivalue(v1_ptr);
+                let i2 = pivalue(v2_ptr);
+                if i2 != 0 {
+                    $pc += 1;
+                    psetivalue(ra_ptr, $iop(i1, i2));
+                } else {
+                    $active_frame.current_ci_mut($lua_state).save_pc($pc);
+                    return Err($err_fn($lua_state));
+                }
+            } else {
+                op_arithf_aux!(ra_ptr, $pc, v1_ptr, v2_ptr, $fop);
+            }
+        }
+    }};
+}
+
+macro_rules! op_arithK_check_zero {
+    ($instr:expr, $lua_state:expr, $active_frame:expr, $base:expr, $pc:expr, $constants:expr, $iop:expr, $fop:expr, $err_fn:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = $constants.as_ptr().add(c);
+            let ra_ptr = sp.add($base + a);
+
+            if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
+                let i1 = pivalue(v1_ptr);
+                let i2 = pivalue(v2_ptr);
+                if i2 != 0 {
+                    $pc += 1;
+                    psetivalue(ra_ptr, $iop(i1, i2));
+                } else {
+                    $active_frame.current_ci_mut($lua_state).save_pc($pc);
+                    return Err($err_fn($lua_state));
+                }
+            } else {
+                op_arithf_aux!(ra_ptr, $pc, v1_ptr, v2_ptr, $fop);
+            }
+        }
+    }};
+}
+
+macro_rules! op_bitwise {
+    ($instr:expr, $lua_state:expr, $base:expr, $pc:expr, $op:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = sp.add($base + c) as *const LuaValue;
+
+            let mut i1 = 0i64;
+            let mut i2 = 0i64;
+            if tointegerns(&*v1_ptr, &mut i1) && tointegerns(&*v2_ptr, &mut i2) {
+                let ra_ptr = sp.add($base + a);
+                $pc += 1;
+                psetivalue(ra_ptr, $op(i1, i2));
+            }
+        }
+    }};
+}
+
+macro_rules! op_bitwiseK {
+    ($instr:expr, $lua_state:expr, $base:expr, $pc:expr, $constants:expr, $op:expr) => {{
+        let a = $instr.get_a() as usize;
+        let b = $instr.get_b() as usize;
+        let c = $instr.get_c() as usize;
+
+        unsafe {
+            let sp = $lua_state.stack_mut().as_mut_ptr();
+            let v1_ptr = sp.add($base + b) as *const LuaValue;
+            let v2_ptr = $constants.as_ptr().add(c);
+
+            let mut i1 = 0i64;
+            let i2 = pivalue(v2_ptr);
+            if tointegerns(&*v1_ptr, &mut i1) {
+                let ra_ptr = sp.add($base + a);
+                $pc += 1;
+                psetivalue(ra_ptr, $op(i1, i2));
+            }
+        }
+    }};
 }
 
 /// Execute until call depth reaches target_depth
@@ -1248,608 +1465,199 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                 OpCode::Add => {
                     // op_arith(L, l_addi, luai_numadd)
                     // R[A] := R[B] + R[C]
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = sp.add(base + c) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMINT;
-                            pc += 1;
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) + pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 + n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arith!(
+                        instr,
+                        lua_state,
+                        base,
+                        pc,
+                        |i1: i64, i2: i64| i1.wrapping_add(i2),
+                        |n1: f64, n2: f64| n1 + n2
+                    );
                 }
                 OpCode::AddI => {
                     // op_arithI(L, l_addi, luai_numadd)
                     // R[A] := R[B] + sC
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let sc = instr.get_sc();
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        // Fast path: integer (most common)
-                        if pttisinteger(v1_ptr) {
-                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_add(sc as i64);
-                            (*ra_ptr).tt = LUA_VNUMINT;
-                            pc += 1; // Skip metamethod on success
-                        }
-                        // Slow path: float
-                        else if pttisfloat(v1_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) + (sc as f64);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1; // Skip metamethod on success
-                        }
-                        // else: fall through to MMBINI (next instruction)
-                    }
+                    op_arithI!(
+                        instr,
+                        lua_state,
+                        base,
+                        pc,
+                        |iv1: i64, sc: i32| iv1.wrapping_add(sc as i64),
+                        |nb: f64, fimm: f64| nb + fimm
+                    );
                 }
                 OpCode::Sub => {
                     // op_arith(L, l_subi, luai_numsub)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = sp.add(base + c) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMINT;
-                            pc += 1;
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) - pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 - n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arith!(
+                        instr,
+                        lua_state,
+                        base,
+                        pc,
+                        |i1: i64, i2: i64| i1.wrapping_sub(i2),
+                        |n1: f64, n2: f64| n1 - n2
+                    );
                 }
                 OpCode::Mul => {
                     // op_arith(L, l_muli, luai_nummul)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = sp.add(base + c) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMINT;
-                            pc += 1;
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) * pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 * n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arith!(
+                        instr,
+                        lua_state,
+                        base,
+                        pc,
+                        |i1: i64, i2: i64| i1.wrapping_mul(i2),
+                        |n1: f64, n2: f64| n1 * n2
+                    );
                 }
                 OpCode::Div => {
                     // op_arithf(L, luai_numdiv) - 浮点除法
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = sp.add(base + c) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) / pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 / n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithf!(instr, lua_state, base, pc, |n1: f64, n2: f64| n1 / n2);
                 }
                 OpCode::IDiv => {
                     // op_arith(L, luaV_idiv, luai_numidiv) - 整数除法
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = sp.add(base + c) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            let i1 = pivalue(v1_ptr);
-                            let i2 = pivalue(v2_ptr);
-                            if i2 != 0 {
-                                (*ra_ptr).value.i = lua_idiv(i1, i2);
-                                (*ra_ptr).tt = LUA_VNUMINT;
-                                pc += 1;
-                            } else {
-                                active_frame.current_ci_mut(lua_state).save_pc(pc);
-                                return Err(error_div_by_zero(lua_state));
-                            }
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor();
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = (n1 / n2).floor();
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arith_check_zero!(
+                        instr,
+                        lua_state,
+                        active_frame,
+                        base,
+                        pc,
+                        |i1: i64, i2: i64| lua_idiv(i1, i2),
+                        |n1: f64, n2: f64| (n1 / n2).floor(),
+                        error_div_by_zero
+                    );
                 }
                 OpCode::Mod => {
                     // op_arith(L, luaV_mod, luaV_modf)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = sp.add(base + c) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            let i1 = pivalue(v1_ptr);
-                            let i2 = pivalue(v2_ptr);
-                            if i2 != 0 {
-                                (*ra_ptr).value.i = lua_imod(i1, i2);
-                                (*ra_ptr).tt = LUA_VNUMINT;
-                                pc += 1;
-                            } else {
-                                active_frame.current_ci_mut(lua_state).save_pc(pc);
-                                return Err(error_mod_by_zero(lua_state));
-                            }
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = lua_fmod(n1, n2);
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arith_check_zero!(
+                        instr,
+                        lua_state,
+                        active_frame,
+                        base,
+                        pc,
+                        |i1: i64, i2: i64| lua_imod(i1, i2),
+                        |n1: f64, n2: f64| lua_fmod(n1, n2),
+                        error_mod_by_zero
+                    );
                 }
                 OpCode::Pow => {
                     // op_arithf(L, luai_numpow)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = sp.add(base + c) as *const LuaValue;
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = luai_numpow(n1, n2);
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithf!(instr, lua_state, base, pc, |n1: f64, n2: f64| luai_numpow(
+                        n1, n2
+                    ));
                 }
                 OpCode::AddK => {
                     // op_arithK(L, l_addi, luai_numadd)
                     // R[A] := R[B] + K[C]
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = constants.as_ptr().add(c);
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_add(pivalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMINT;
-                            pc += 1;
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) + pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 + n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithK!(
+                        instr,
+                        lua_state,
+                        base,
+                        pc,
+                        constants,
+                        |i1: i64, i2: i64| i1.wrapping_add(i2),
+                        |n1: f64, n2: f64| n1 + n2
+                    );
                 }
                 OpCode::SubK => {
                     // R[A] := R[B] - K[C]
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = constants.as_ptr().add(c);
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_sub(pivalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMINT;
-                            pc += 1;
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) - pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 - n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithK!(
+                        instr,
+                        lua_state,
+                        base,
+                        pc,
+                        constants,
+                        |i1: i64, i2: i64| i1.wrapping_sub(i2),
+                        |n1: f64, n2: f64| n1 - n2
+                    );
                 }
                 OpCode::MulK => {
                     // R[A] := R[B] * K[C]
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = constants.as_ptr().add(c);
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            (*ra_ptr).value.i = pivalue(v1_ptr).wrapping_mul(pivalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMINT;
-                            pc += 1;
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) * pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 * n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithK!(
+                        instr,
+                        lua_state,
+                        base,
+                        pc,
+                        constants,
+                        |i1: i64, i2: i64| i1.wrapping_mul(i2),
+                        |n1: f64, n2: f64| n1 * n2
+                    );
                 }
                 OpCode::ModK => {
                     // R[A] := R[B] % K[C]
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = constants.as_ptr().add(c);
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            let i1 = pivalue(v1_ptr);
-                            let i2 = pivalue(v2_ptr);
-                            if i2 != 0 {
-                                (*ra_ptr).value.i = lua_imod(i1, i2);
-                                (*ra_ptr).tt = LUA_VNUMINT;
-                                pc += 1;
-                            } else {
-                                active_frame.current_ci_mut(lua_state).save_pc(pc);
-                                return Err(error_mod_by_zero(lua_state));
-                            }
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = lua_fmod(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = lua_fmod(n1, n2);
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithK_check_zero!(
+                        instr,
+                        lua_state,
+                        active_frame,
+                        base,
+                        pc,
+                        constants,
+                        |i1: i64, i2: i64| lua_imod(i1, i2),
+                        |n1: f64, n2: f64| lua_fmod(n1, n2),
+                        error_mod_by_zero
+                    );
                 }
                 OpCode::PowK => {
                     // R[A] := R[B] ^ K[C] (always float)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = constants.as_ptr().add(c);
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = luai_numpow(pfltvalue(v1_ptr), pfltvalue(v2_ptr));
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = luai_numpow(n1, n2);
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithfK!(instr, lua_state, base, pc, constants, |n1: f64, n2: f64| {
+                        luai_numpow(n1, n2)
+                    });
                 }
                 OpCode::DivK => {
                     // R[A] := R[B] / K[C] (float division)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = constants.as_ptr().add(c);
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            (*ra_ptr).value.n = pfltvalue(v1_ptr) / pfltvalue(v2_ptr);
-                            (*ra_ptr).tt = LUA_VNUMFLT;
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                (*ra_ptr).value.n = n1 / n2;
-                                (*ra_ptr).tt = LUA_VNUMFLT;
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithfK!(instr, lua_state, base, pc, constants, |n1: f64, n2: f64| n1
+                        / n2);
                 }
                 OpCode::IDivK => {
                     // R[A] := R[B] // K[C] (floor division)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    unsafe {
-                        let sp = lua_state.stack_mut().as_mut_ptr();
-                        let v1_ptr = sp.add(base + b) as *const LuaValue;
-                        let v2_ptr = constants.as_ptr().add(c);
-                        let ra_ptr = sp.add(base + a);
-
-                        if pttisinteger(v1_ptr) && pttisinteger(v2_ptr) {
-                            let i1 = pivalue(v1_ptr);
-                            let i2 = pivalue(v2_ptr);
-                            if i2 != 0 {
-                                psetivalue(ra_ptr, lua_idiv(i1, i2));
-                                pc += 1;
-                            } else {
-                                active_frame.current_ci_mut(lua_state).save_pc(pc);
-                                return Err(error_div_by_zero(lua_state));
-                            }
-                        } else if pttisfloat(v1_ptr) && pttisfloat(v2_ptr) {
-                            psetfltvalue(ra_ptr, (pfltvalue(v1_ptr) / pfltvalue(v2_ptr)).floor());
-                            pc += 1;
-                        } else {
-                            let mut n1 = 0.0;
-                            let mut n2 = 0.0;
-                            if ptonumberns(v1_ptr, &mut n1) && ptonumberns(v2_ptr, &mut n2) {
-                                psetfltvalue(ra_ptr, (n1 / n2).floor());
-                                pc += 1;
-                            }
-                        }
-                    }
+                    op_arithK_check_zero!(
+                        instr,
+                        lua_state,
+                        active_frame,
+                        base,
+                        pc,
+                        constants,
+                        |i1: i64, i2: i64| lua_idiv(i1, i2),
+                        |n1: f64, n2: f64| (n1 / n2).floor(),
+                        error_div_by_zero
+                    );
                 }
                 OpCode::BAndK => {
                     // R[A] := R[B] & K[C]
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = k_val(constants, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), i1 & i2);
-                    }
+                    op_bitwiseK!(instr, lua_state, base, pc, constants, |i1: i64, i2: i64| i1
+                        & i2);
                 }
                 OpCode::BOrK => {
                     // R[A] := R[B] | K[C]
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = k_val(constants, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), i1 | i2);
-                    }
+                    op_bitwiseK!(instr, lua_state, base, pc, constants, |i1: i64, i2: i64| i1
+                        | i2);
                 }
                 OpCode::BXorK => {
                     // R[A] := R[B] ^ K[C] (bitwise xor)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = k_val(constants, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointeger(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), i1 ^ i2);
-                    }
+                    op_bitwiseK!(instr, lua_state, base, pc, constants, |i1: i64, i2: i64| i1
+                        ^ i2);
                 }
                 OpCode::BAnd => {
                     // op_bitwise(L, l_band)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = stack_val(lua_state.stack(), base, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), i1 & i2);
-                    }
+                    op_bitwise!(instr, lua_state, base, pc, |i1: i64, i2: i64| i1 & i2);
                 }
                 OpCode::BOr => {
                     // op_bitwise(L, l_bor)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = stack_val(lua_state.stack(), base, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), i1 | i2);
-                    }
+                    op_bitwise!(instr, lua_state, base, pc, |i1: i64, i2: i64| i1 | i2);
                 }
                 OpCode::BXor => {
                     // op_bitwise(L, l_bxor)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = stack_val(lua_state.stack(), base, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(stack_val_mut(lua_state.stack_mut(), base, a), i1 ^ i2);
-                    }
+                    op_bitwise!(instr, lua_state, base, pc, |i1: i64, i2: i64| i1 ^ i2);
                 }
                 OpCode::Shl => {
                     // op_bitwise(L, luaV_shiftl)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = stack_val(lua_state.stack(), base, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(
-                            stack_val_mut(lua_state.stack_mut(), base, a),
-                            lua_shiftl(i1, i2),
-                        );
-                    }
+                    op_bitwise!(instr, lua_state, base, pc, |i1: i64, i2: i64| lua_shiftl(
+                        i1, i2
+                    ));
                 }
                 OpCode::Shr => {
                     // op_bitwise(L, luaV_shiftr)
-                    let a = instr.get_a() as usize;
-                    let b = instr.get_b() as usize;
-                    let c = instr.get_c() as usize;
-
-                    let v1 = stack_val(lua_state.stack(), base, b);
-                    let v2 = stack_val(lua_state.stack(), base, c);
-
-                    let mut i1 = 0i64;
-                    let mut i2 = 0i64;
-                    if tointegerns(v1, &mut i1) && tointegerns(v2, &mut i2) {
-                        pc += 1;
-                        setivalue(
-                            stack_val_mut(lua_state.stack_mut(), base, a),
-                            lua_shiftr(i1, i2),
-                        );
-                    }
+                    op_bitwise!(instr, lua_state, base, pc, |i1: i64, i2: i64| lua_shiftr(
+                        i1, i2
+                    ));
                 }
                 OpCode::ShlI => {
                     // R[A] := sC << R[B]
