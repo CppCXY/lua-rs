@@ -139,7 +139,7 @@ pub fn compile_code_with_name(
     fs.chunk.upvalue_count = fs.upvalues.len();
 
     // Set source name and line info for main chunk
-    fs.chunk.source_name = Some(chunk_name.to_string());
+    fs.chunk.source_name = Some(fs.source_name.clone());
     fs.chunk.linedefined = 0; // Main function starts at line 0
     fs.chunk.lastlinedefined = 0; // Main function ends at line 0 (convention)
 

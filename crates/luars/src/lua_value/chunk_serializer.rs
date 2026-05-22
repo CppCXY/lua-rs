@@ -8,6 +8,7 @@ use crate::lua_vm::GlobalState;
 use crate::lua_vm::lua_limits::LUAI_MAXSHORTLEN;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::sync::Arc;
 
 fn detached_proto(chunk: LuaProto) -> ProtoPtr {
     let size = std::mem::size_of::<GcProto>() as u32 + chunk.proto_data_size;
@@ -218,7 +219,7 @@ fn write_chunk_with_dedup(
         write_u32(buf, 0); // no line info
     } else {
         if let Some(ref name) = chunk.source_name {
-            write_string_with_dedup(buf, name, string_table)?; // Use dedup for source name
+            write_string_with_dedup(buf, name.as_ref(), string_table)?; // Use dedup for source name
         } else {
             write_u32(buf, 0); // len = 0
             write_u32(buf, 0); // index = 0 means None
@@ -293,7 +294,7 @@ fn write_chunk_no_pool_with_dedup(
         write_u32(buf, 0);
     } else {
         if let Some(ref name) = chunk.source_name {
-            write_string_with_dedup(buf, name, string_table)?;
+            write_string_with_dedup(buf, name.as_ref(), string_table)?;
         } else {
             write_u32(buf, 0);
             write_u32(buf, 0);
@@ -363,7 +364,7 @@ fn write_chunk_no_pool(buf: &mut Vec<u8>, chunk: &LuaProto, strip: bool) -> Resu
         write_u32(buf, 0);
     } else {
         if let Some(ref name) = chunk.source_name {
-            write_string(buf, name);
+            write_string(buf, name.as_ref());
         } else {
             write_u32(buf, 0);
         }
@@ -431,7 +432,7 @@ fn read_chunk(cursor: &mut Cursor<&[u8]>) -> Result<LuaProto, String> {
     }
 
     // Read debug info
-    let source_name = read_optional_string(cursor)?;
+    let source_name = read_optional_string(cursor)?.map(Arc::<str>::from);
 
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
@@ -523,7 +524,7 @@ fn read_chunk_with_dedup(
     }
 
     // Read debug info with string deduplication
-    let source_name = read_optional_string_with_dedup(cursor, string_table)?;
+    let source_name = read_optional_string_with_dedup(cursor, string_table)?.map(Arc::<str>::from);
 
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
@@ -784,7 +785,7 @@ fn read_chunk_with_vm(
     }
 
     // Read debug info
-    let source_name = read_optional_string(cursor)?;
+    let source_name = read_optional_string(cursor)?.map(Arc::<str>::from);
 
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
@@ -899,7 +900,7 @@ fn read_chunk_with_vm_dedup(
     }
 
     // Read debug info with deduplication
-    let source_name = read_optional_string_with_dedup(cursor, string_table)?;
+    let source_name = read_optional_string_with_dedup(cursor, string_table)?.map(Arc::<str>::from);
 
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);
@@ -1022,7 +1023,7 @@ fn read_chunk_with_strings(
     }
 
     // Read debug info
-    let source_name = read_optional_string(cursor)?;
+    let source_name = read_optional_string(cursor)?.map(Arc::<str>::from);
 
     let locals_len = read_u32(cursor)? as usize;
     let mut locals = Vec::with_capacity(locals_len);

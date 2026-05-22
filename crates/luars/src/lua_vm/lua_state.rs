@@ -4605,7 +4605,11 @@ impl LuaState {
         let frame_idx = call_depth - 1 - level;
         let func = self.get_frame_func(frame_idx)?;
         let lua_func = func.as_lua_function()?;
-        lua_func.chunk().source_name.clone()
+        lua_func
+            .chunk()
+            .source_name
+            .as_ref()
+            .map(|name| name.as_ref().to_string())
     }
 
     /// Get a local variable name and value at the given stack level and index.

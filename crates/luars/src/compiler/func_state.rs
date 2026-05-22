@@ -3,6 +3,7 @@ use crate::compiler::{ExpDesc, ExpKind, ExpUnion, statement};
 use crate::lua_vm::GlobalState;
 use crate::lua_vm::lua_limits::{MAX_SRC_LEN, MAXCCALLS, MAXUPVAL, MAXVARS};
 use crate::{LuaValue, compiler::parser::LuaLexer};
+use std::sync::Arc;
 
 // Upvalue descriptor
 #[derive(Clone)]
@@ -41,7 +42,7 @@ pub struct FuncState<'a> {
     pub is_vararg: bool,               // true if function is vararg
     pub numparams: u8,                 // number of fixed parameters (excluding vararg parameter)
     pub first_local: usize,            // index of first local variable in prev
-    pub source_name: String,           // source file name for error messages
+    pub source_name: Arc<str>,         // source file name for error messages
     pub kcache: LuaValue, // cache table for constant deduplication (per-function, like Lua 5.5's fs->kcache)
     pub checklimit_error: Option<String>, // deferred error from checkstack/checklimit
 }
@@ -216,7 +217,7 @@ impl<'a> FuncState<'a> {
             needclose: false,
             is_vararg,
             numparams: 0,
-            source_name,
+            source_name: Arc::<str>::from(source_name),
             first_local: 0,
             kcache,
             checklimit_error: None,

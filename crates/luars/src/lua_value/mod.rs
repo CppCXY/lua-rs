@@ -12,6 +12,7 @@ pub mod userdata_trait;
 use self::lua_value::Value;
 use std::any::Any;
 use std::fmt;
+use std::sync::Arc;
 
 pub use lua_string::*;
 pub use userdata_builder::UserDataBuilder;
@@ -382,7 +383,7 @@ pub struct LuaProto {
     pub max_stack_size: usize,
     pub child_protos: Vec<ProtoPtr>,     // Nested function prototypes
     pub upvalue_descs: Vec<UpvalueDesc>, // Upvalue descriptors
-    pub source_name: Option<String>,     // Source file/chunk name for debugging
+    pub source_name: Option<Arc<str>>,   // Source file/chunk name for debugging
     pub line_info: Vec<u32>,             // Line number for each instruction (for debug)
     pub linedefined: usize,              // Line where function starts (0 for main)
     pub lastlinedefined: usize,          // Line where function ends (0 for main)

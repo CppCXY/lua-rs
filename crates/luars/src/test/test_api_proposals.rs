@@ -361,6 +361,27 @@ fn test_shared_proto_reloads_when_file_changes() {
     std::fs::remove_file(&path).ok();
 }
 
+#[test]
+fn test_load_reuses_source_name_across_child_protos() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(Stdlib::All).unwrap();
+
+    let source = r#"
+        local function a() return 1 end
+        local function b() return a() end
+        return b
+    "#;
+    let chunk = vm.compile_with_name(source, source).unwrap();
+    let root_source = chunk.source_name.as_ref().unwrap();
+    assert!(root_source.len() > 16);
+    assert_eq!(chunk.child_protos.len(), 2);
+
+    for child in &chunk.child_protos {
+        let child_source = child.as_ref().data.source_name.as_ref().unwrap();
+        assert!(std::sync::Arc::ptr_eq(root_source, child_source));
+    }
+}
+
 // ============================
 // P4: register_type_of on LuaVM (tested implicitly via existing userdata tests)
 // ============================
