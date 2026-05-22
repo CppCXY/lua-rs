@@ -70,6 +70,12 @@ impl Node {
         self.key_data = k.value;
         self.key_tt = k.tt;
     }
+
+    /// Extract the key's GcString pointer (caller must ensure key is a short string).
+    #[inline(always)]
+    fn key_string_ptr(&self) -> StringPtr {
+        StringPtr::new(unsafe { self.key_data.ptr as *const GcString })
+    }
 }
 
 /// Native Lua table implementation - mimics Lua 5.5's Table struct
@@ -260,12 +266,12 @@ impl NativeTable {
     /// Returns true if found and written.
     pub unsafe fn get_shortstr_into(&self, key: &LuaValue, dest: *mut LuaValue) -> bool {
         let mut node = self.mainposition_string(key);
-        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
+        let key_ptr = key.string_ptr_raw();
 
         unsafe {
             if (*node).key_tt == LUA_VSHRSTR
                 && short_string_ptr_eq(
-                    StringPtr::new((*node).key_data.ptr as *mut GcString),
+                    (*node).key_string_ptr(),
                     key_ptr,
                 )
             {
@@ -282,7 +288,7 @@ impl NativeTable {
                 node = node.offset(next as isize);
                 if (*node).key_tt == LUA_VSHRSTR
                     && short_string_ptr_eq(
-                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        (*node).key_string_ptr(),
                         key_ptr,
                     )
                 {
@@ -309,13 +315,13 @@ impl NativeTable {
         }
 
         let mut node = self.mainposition_string(key);
-        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
+        let key_ptr = key.string_ptr_raw();
 
         unsafe {
             loop {
                 if (*node).key_tt == LUA_VSHRSTR
                     && short_string_ptr_eq(
-                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        (*node).key_string_ptr(),
                         key_ptr,
                     )
                 {
@@ -387,123 +393,7 @@ impl NativeTable {
     /// completed on the fast path or must be finished through a C-Lua-like
     /// encoded continuation.
     pub fn pset_shortstr(&mut self, key: &LuaValue, value: LuaValue) -> ShortStrSetResult {
-        debug_assert!(key.is_short_string());
-
-        if self.node.is_null() {
-            return if value.is_nil() {
-                ShortStrSetResult::Done {
-                    new_key: false,
-                    mem_delta: 0,
-                }
-            } else {
-                ShortStrSetResult::FinishNewKey
-            };
-        }
-
-        let mp = self.mainposition_string(key);
-        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
-
-        unsafe {
-            let mut node = mp;
-            loop {
-                if (*node).key_tt == LUA_VSHRSTR
-                    && short_string_ptr_eq(
-                        StringPtr::new((*node).key_data.ptr as *mut GcString),
-                        key_ptr,
-                    )
-                {
-                    if (*node).val_tt != LUA_VNIL {
-                        (*node).set_value(value);
-                        return ShortStrSetResult::Done {
-                            new_key: false,
-                            mem_delta: 0,
-                        };
-                    }
-                    return if value.is_nil() {
-                        ShortStrSetResult::Done {
-                            new_key: false,
-                            mem_delta: 0,
-                        }
-                    } else {
-                        ShortStrSetResult::FinishNode {
-                            new_key: true,
-                            node_index: self.node_index(node),
-                        }
-                    };
-                }
-
-                let next = (*node).next;
-                if next == 0 {
-                    break;
-                }
-                node = node.offset(next as isize);
-            }
-
-            if value.is_nil() {
-                return ShortStrSetResult::Done {
-                    new_key: false,
-                    mem_delta: 0,
-                };
-            }
-
-            if (*mp).key_tt == LUA_VNIL {
-                (*mp).set_key(*key);
-                (*mp).set_value(value);
-                (*mp).next = 0;
-                return ShortStrSetResult::Done {
-                    new_key: true,
-                    mem_delta: 0,
-                };
-            }
-
-            if (*mp).val_tt == LUA_VNIL {
-                return ShortStrSetResult::FinishNode {
-                    new_key: true,
-                    node_index: self.node_index(mp),
-                };
-            }
-
-            let othern = self.mainposition_from_node(mp);
-            if othern != mp {
-                if let Some(free_node) = self.getfreepos() {
-                    let mut prev = othern;
-                    while prev.offset((*prev).next as isize) != mp {
-                        prev = prev.offset((*prev).next as isize);
-                    }
-                    (*prev).next = Self::node_offset(prev, free_node);
-                    *free_node = *mp;
-                    if (*free_node).next != 0 {
-                        (*free_node).next += Self::node_offset(free_node, mp);
-                    }
-                    (*mp).set_key(*key);
-                    (*mp).set_value(value);
-                    (*mp).next = 0;
-                    return ShortStrSetResult::Done {
-                        new_key: true,
-                        mem_delta: 0,
-                    };
-                }
-                return ShortStrSetResult::FinishNewKey;
-            }
-
-            if let Some(free_node) = self.getfreepos() {
-                (*free_node).set_key(*key);
-                (*free_node).set_value(value);
-                if (*mp).next != 0 {
-                    (*free_node).next =
-                        Self::node_offset(free_node, mp.offset((*mp).next as isize));
-                } else {
-                    (*free_node).next = 0;
-                }
-                (*mp).next = Self::node_offset(mp, free_node);
-                return ShortStrSetResult::Done {
-                    new_key: true,
-                    mem_delta: 0,
-                };
-            }
-        }
-
-        ShortStrSetResult::FinishNewKey
+        self.pset_shortstr_parts(key, value.value, value.tt)
     }
 
     pub fn pset_shortstr_parts(
@@ -526,14 +416,14 @@ impl NativeTable {
         }
 
         let mp = self.mainposition_string(key);
-        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
+        let key_ptr = key.string_ptr_raw();
 
         unsafe {
             let mut node = mp;
             loop {
                 if (*node).key_tt == LUA_VSHRSTR
                     && short_string_ptr_eq(
-                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        (*node).key_string_ptr(),
                         key_ptr,
                     )
                 {
@@ -1468,13 +1358,13 @@ impl NativeTable {
             return None;
         }
         let mut node = self.mainposition_string(key);
-        let key_ptr = StringPtr::new(unsafe { key.value.ptr as *mut GcString });
+        let key_ptr = key.string_ptr_raw();
 
         unsafe {
             // Unroll first iteration (most common case: found in main position)
             if (*node).key_tt == LUA_VSHRSTR
                 && short_string_ptr_eq(
-                    StringPtr::new((*node).key_data.ptr as *mut GcString),
+                    (*node).key_string_ptr(),
                     key_ptr,
                 )
             {
@@ -1487,7 +1377,7 @@ impl NativeTable {
                 node = node.offset(next as isize);
                 if (*node).key_tt == LUA_VSHRSTR
                     && short_string_ptr_eq(
-                        StringPtr::new((*node).key_data.ptr as *mut GcString),
+                        (*node).key_string_ptr(),
                         key_ptr,
                     )
                 {

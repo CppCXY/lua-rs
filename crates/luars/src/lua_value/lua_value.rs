@@ -285,7 +285,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    fn string_ptr_raw(&self) -> StringPtr {
+    pub(crate) fn string_ptr_raw(&self) -> StringPtr {
         StringPtr::new(self.raw_gc_mut::<GcString>())
     }
 

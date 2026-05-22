@@ -406,10 +406,10 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     // R[A] := UpValue[B]
                     let a = instr.get_a();
                     let b = instr.get_b();
-                    let upvalue_ptr = unsafe { *upvalue_ptrs.add(b as usize) };
-                    let src = unsafe { &*upvalue_ptr.as_ref().data.get_v_ptr() };
-                    let dest = stack_mut_ptr(lua_state.stack_mut(), stack_id!(a));
                     unsafe {
+                        let upvalue_ptr = *upvalue_ptrs.add(b as usize);
+                        let src = &*upvalue_ptr.as_ref().data.get_v_ptr();
+                        let dest = stack_mut_ptr(lua_state.stack_mut(), stack_id!(a));
                         *dest = *src;
                     }
                 }
