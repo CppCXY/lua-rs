@@ -220,6 +220,37 @@ fn test_coroutine_error_handling() {
 }
 
 #[test]
+fn test_coroutine_no_message_error_does_not_reuse_stale_message() {
+    let mut vm = GlobalState::new(SafeOption::default());
+    vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();
+    vm.register_function("raw_runtime_error", |_| Err(lua_vm::LuaError::RuntimeError))
+        .unwrap();
+
+    let result = vm.main_state().execute(
+        r#"
+        local co1 = coroutine.create(function()
+            error("first coroutine error")
+        end)
+
+        local ok1, err1 = coroutine.resume(co1)
+        assert(ok1 == false)
+        assert(type(err1) == "string")
+        assert(string.find(err1, "first coroutine error", 1, true) ~= nil)
+
+        local co2 = coroutine.create(function()
+            raw_runtime_error()
+        end)
+
+        local ok2, err2 = coroutine.resume(co2)
+        assert(ok2 == false)
+        assert(err2 == nil, tostring(err2))
+    "#,
+    );
+
+    assert!(result.is_ok(), "Test failed: {:?}", result);
+}
+
+#[test]
 fn test_coroutine_thread_line_hook_fires_on_resume() {
     let mut vm = GlobalState::new(SafeOption::default());
     vm.open_stdlib(crate::stdlib::Stdlib::All).unwrap();

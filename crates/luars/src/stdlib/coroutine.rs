@@ -405,7 +405,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
                     let msg = if !thread.dead_error_msg().is_empty() {
                         thread.dead_error_msg().to_string()
                     } else {
-                        thread.last_error_msg().to_string()
+                        thread.take_error_msg_raw()
                     };
                     if msg.is_empty() {
                         LuaValue::nil()

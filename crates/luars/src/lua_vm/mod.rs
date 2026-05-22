@@ -377,11 +377,6 @@ impl GlobalState {
         self.error_msg = msg;
     }
 
-    #[inline(always)]
-    pub fn last_error_msg(&self) -> &str {
-        &self.error_msg
-    }
-
     #[inline]
     pub fn set_extra_space(&mut self, pointer: *mut c_void) {
         self.extra_space = pointer;

@@ -874,11 +874,6 @@ impl LuaState {
         self.yield_values.clear();
     }
 
-    /// Get the last error message (for debugging)
-    pub fn last_error_msg(&self) -> &str {
-        self.global_state().last_error_msg()
-    }
-
     #[inline(always)]
     pub(crate) fn take_error_object(&mut self) -> LuaValue {
         self.global_state_mut().take_error_object()
@@ -897,6 +892,11 @@ impl LuaState {
     #[inline(always)]
     pub(crate) fn set_error_msg_raw(&mut self, msg: String) {
         self.global_state_mut().set_error_msg(msg);
+    }
+
+    #[inline(always)]
+    pub(crate) fn take_error_msg_raw(&mut self) -> String {
+        self.global_state_mut().take_error_msg()
     }
 
     #[inline(always)]
@@ -1216,7 +1216,7 @@ impl LuaState {
                         if !err_obj.is_nil() {
                             current_error = Some(err_obj);
                         } else {
-                            let msg = self.last_error_msg().to_string();
+                            let msg = self.take_error_msg_raw();
                             if let Ok(s) = self.create_string(&msg) {
                                 current_error = Some(s);
                             }
@@ -1336,7 +1336,7 @@ impl LuaState {
                         if !err_obj.is_nil() {
                             current_error = err_obj;
                         } else {
-                            let msg = self.last_error_msg().to_string();
+                            let msg = self.take_error_msg_raw();
                             if let Ok(s) = self.create_string(&msg) {
                                 current_error = s;
                             }
@@ -4094,10 +4094,8 @@ impl LuaState {
                             self.set_error_msg_raw(format!("{}", self.error_object()));
                         }
 
-                        self.archive_dead_error(
-                            self.error_object(),
-                            self.last_error_msg().to_string(),
-                        );
+                        let archived_msg = self.take_error_msg_raw();
+                        self.archive_dead_error(self.error_object(), archived_msg);
 
                         // Mark coroutine as dead but keep stack for debug.traceback
                         self.dead = true;
@@ -4125,7 +4123,7 @@ impl LuaState {
                     let error_val = if !err_obj.is_nil() {
                         err_obj
                     } else {
-                        let msg = self.last_error_msg().to_string();
+                        let msg = self.take_error_msg_raw();
                         self.create_string(&msg).unwrap_or_default()
                     };
                     self.clear_error();
