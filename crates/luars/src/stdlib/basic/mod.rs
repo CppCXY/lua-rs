@@ -1180,8 +1180,12 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     // Check if chunk is callable (function, cfunction, or table with __call metamethod)
     let is_reader = chunk_val.is_function() || chunk_val.is_table();
 
+    let text_source = if !is_reader { chunk_val.as_str() } else { None };
+
     // Get the chunk string or binary data
-    let (code_bytes, is_binary) = if is_reader {
+    let (code_bytes, is_binary) = if text_source.is_some() {
+        (Vec::new(), false)
+    } else if is_reader {
         // chunk is a reader function - call it repeatedly to get source
         let mut accumulated = Vec::new();
         let mut is_binary = false;
@@ -1270,6 +1274,8 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
     // If not provided and chunk is text, use the source code itself (or a prefix)
     let chunkname = if let Some(name) = chunkname_arg {
         name
+    } else if let Some(source) = text_source {
+        source.to_string()
     } else if !is_binary {
         // For text chunks, use the source code as chunk name (like Lua 5.5)
         // This allows the source to be preserved in the bytecode
@@ -1325,10 +1331,13 @@ fn lua_load(l: &mut LuaState) -> LuaResult<usize> {
             Ok(chunk) => Ok(chunk),
             Err(e) => Err(format!("binary load error: {}", e)),
         }
+    } else if let Some(source) = text_source {
+        l.compile_chunk_with_name(source, &chunkname)
+            .map_err(|e| l.get_error_msg(e))
     } else {
         // Compile text code using VM's string pool with chunk name
         // Source code should be valid UTF-8
-        let code_str = match String::from_utf8(code_bytes.clone()) {
+        let code_str = match String::from_utf8(code_bytes) {
             Ok(s) => s,
             Err(_) => return Err(l.error("source is not valid UTF-8".to_string())),
         };

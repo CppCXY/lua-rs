@@ -15,9 +15,13 @@ pub use crate::compiler::parser::{
 
 pub struct LuaLexer<'a> {
     text: &'a str,
-    tokens: Vec<LuaTokenData>,
+    tokenizer: LuaTokenize<'a>,
+    current: LuaTokenData,
+    next: LuaTokenData,
+    previous: Option<SourceRange>,
     token_index: usize,
     current_token: LuaTokenKind,
+    error: Option<String>,
     #[allow(unused)]
     pub level: LuaLanguageLevel,
     pub line: usize,          // current line number (linenumber in Lua)
@@ -27,35 +31,31 @@ pub struct LuaLexer<'a> {
 
 #[allow(unused)]
 impl<'a> LuaLexer<'a> {
-    pub fn new(text: &'a str, tokens: Vec<LuaTokenData>, level: LuaLanguageLevel) -> LuaLexer<'a> {
-        let mut parser = LuaLexer {
+    pub fn new(text: &'a str, level: LuaLanguageLevel) -> Result<LuaLexer<'a>, String> {
+        let mut tokenizer = LuaTokenize::new(
+            Reader::new(text),
+            TokensizeConfig {
+                language_level: level,
+            },
+        );
+
+        let current = tokenizer.next_token_data()?;
+        let next = tokenizer.next_token_data()?;
+
+        Ok(LuaLexer {
             text,
-            tokens,
+            tokenizer,
+            current_token: current.kind,
+            current,
+            next,
+            previous: None,
             token_index: 0,
-            current_token: LuaTokenKind::None,
+            error: None,
             level,
-            line: 1,
-            lastline: 1, // Initialize lastline to 1 (llex.c:176)
+            line: current.line,
+            lastline: 1,
             nesting_level: 0,
-        };
-
-        parser.init();
-        parser
-    }
-
-    fn init(&mut self) {
-        if self.tokens.is_empty() {
-            self.current_token = LuaTokenKind::TkEof;
-        } else {
-            // Initialize line from first token
-            self.line = self.tokens[0].line;
-            self.lastline = 1; // lastline starts at 1
-            self.current_token = self.tokens[0].kind;
-        }
-
-        if is_trivia_kind(self.current_token) {
-            self.bump();
-        }
+        })
     }
 
     pub fn origin_text(&self) -> &'a str {
@@ -71,56 +71,24 @@ impl<'a> LuaLexer<'a> {
     }
 
     pub fn current_token_range(&self) -> SourceRange {
-        if self.token_index >= self.tokens.len() {
-            if self.tokens.is_empty() {
-                return SourceRange::EMPTY;
-            } else {
-                return self.tokens[self.tokens.len() - 1].range;
-            }
-        }
-
-        self.tokens[self.token_index].range
+        self.current.range
     }
 
     pub fn previous_token_range(&self) -> SourceRange {
-        if self.token_index == 0 || self.tokens.is_empty() {
-            return SourceRange::EMPTY;
-        }
-
-        // Find the previous non-trivia token
-        let mut prev_index = self.token_index - 1;
-        while prev_index > 0 && is_trivia_kind(self.tokens[prev_index].kind) {
-            prev_index -= 1;
-        }
-
-        // If we found a non-trivia token or reached the first token
-        if prev_index < self.tokens.len() && !is_trivia_kind(self.tokens[prev_index].kind) {
-            self.tokens[prev_index].range
-        } else if prev_index == 0 {
-            // If the first token is also trivia, return its range anyway
-            self.tokens[0].range
-        } else {
-            SourceRange::EMPTY
-        }
+        self.previous.unwrap_or(SourceRange::EMPTY)
     }
 
     pub fn current_token_text(&self) -> &str {
         if self.current_token == LuaTokenKind::TkEof {
             return "<eof>";
         }
-        if self.token_index < self.tokens.len() {
-            let range = &self.tokens[self.token_index].range;
-            &self.text[range.start_offset..range.end_offset()]
-        } else {
-            "<eof>"
-        }
+        let range = &self.current.range;
+        &self.text[range.start_offset..range.end_offset()]
     }
 
     pub fn set_current_token_kind(&mut self, kind: LuaTokenKind) {
-        if self.token_index < self.tokens.len() {
-            self.tokens[self.token_index].kind = kind;
-            self.current_token = kind;
-        }
+        self.current.kind = kind;
+        self.current_token = kind;
     }
 
     pub fn bump(&mut self) {
@@ -128,57 +96,34 @@ impl<'a> LuaLexer<'a> {
         // Save current line before consuming next token
         self.lastline = self.line;
 
-        let mut next_index = self.token_index + 1;
-        // Skip trivia tokens to find next real token
-        self.skip_trivia(&mut next_index);
-        self.token_index = next_index;
+        self.previous = Some(self.current.range);
+        self.current = self.next;
+        self.current_token = self.current.kind;
+        self.line = self.current.line;
+        self.token_index += 1;
 
-        if self.token_index >= self.tokens.len() {
+        if self.current.kind == LuaTokenKind::TkEof {
             self.current_token = LuaTokenKind::TkEof;
             return;
         }
 
-        // CRITICAL FIX: Update line from token's ending line number
-        // This ensures multi-line tokens (long strings, multi-line comments)
-        // correctly update linenumber (matches Lua C's behavior in llex)
-        self.line = self.tokens[self.token_index].line;
-        self.current_token = self.tokens[self.token_index].kind;
+        match self.tokenizer.next_token_data() {
+            Ok(token) => self.next = token,
+            Err(err) => {
+                self.error = Some(err);
+                self.next =
+                    LuaTokenData::with_line(LuaTokenKind::TkEof, self.current.range, self.line);
+                self.current = self.next;
+                self.current_token = LuaTokenKind::TkEof;
+            }
+        }
     }
 
     pub fn peek_next_token(&self) -> LuaTokenKind {
-        let mut next_index = self.token_index + 1;
-        self.skip_trivia(&mut next_index);
-
-        if next_index >= self.tokens.len() {
-            LuaTokenKind::None
-        } else {
-            self.tokens[next_index].kind
-        }
+        self.next.kind
     }
 
-    fn skip_trivia(&self, index: &mut usize) {
-        if index >= &mut self.tokens.len() {
-            return;
-        }
-
-        let mut kind = self.tokens[*index].kind;
-        while is_trivia_kind(kind) {
-            *index += 1;
-            if *index >= self.tokens.len() {
-                break;
-            }
-            kind = self.tokens[*index].kind;
-        }
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.take()
     }
-}
-
-fn is_trivia_kind(kind: LuaTokenKind) -> bool {
-    matches!(
-        kind,
-        LuaTokenKind::TkShortComment
-            | LuaTokenKind::TkLongComment
-            | LuaTokenKind::TkEndOfLine
-            | LuaTokenKind::TkWhitespace
-            | LuaTokenKind::TkShebang
-    )
 }

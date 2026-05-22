@@ -235,8 +235,11 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
             LuaTokenKind::TkColon => {
                 // : NAME funcargs (method call)
                 fs.lexer.bump();
-                let method_name = fs.lexer.current_token_text().to_string();
+                let source_text = fs.lexer.origin_text();
+                let method_name_range = fs.lexer.current_token_range();
                 expect(fs, LuaTokenKind::TkName)?;
+                let method_name =
+                    &source_text[method_name_range.start_offset..method_name_range.end_offset()];
 
                 // self:method(...) is sugar for self.method(self, ...)
                 // Generate SELF instruction
@@ -244,7 +247,7 @@ pub fn suffixedexp(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
                 // This matches official Lua's codestring (lparser.c:160-164)
                 // which creates VKSTR without calling stringK immediately.
                 // The stringK call happens later in luaK_self via luaK_exp2K (lcode.c:1333)
-                let string = fs.vm.create_string(&method_name).unwrap();
+                let string = fs.vm.create_string(method_name).unwrap();
                 let mut key = ExpDesc::new_vkstr(string);
                 code::self_op(fs, v, &mut key);
 
@@ -293,7 +296,7 @@ fn funcargs(fs: &mut FuncState, f: &mut ExpDesc) -> Result<(), String> {
             let text = fs.lexer.current_token_text();
             let vec8 = parse_string_token_value(text, fs.lexer.current_token())?;
             let k_idx = match String::from_utf8(vec8) {
-                Ok(s) => string_k(fs, s),
+                Ok(s) => string_k(fs, &s),
                 Err(e) => binary_k(fs, e.into_bytes()),
             };
             fs.lexer.bump();
@@ -346,14 +349,16 @@ fn yindex(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
 
 // Port of singlevar/buildvar from lparser.c (lines 520-534)
 pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
-    let name = fs.lexer.current_token_text().to_string();
+    let source_text = fs.lexer.origin_text();
+    let name_range = fs.lexer.current_token_range();
     fs.lexer.bump();
+    let name = &source_text[name_range.start_offset..name_range.end_offset()];
 
     // lparser.c:522: global by default
     init_exp(v, ExpKind::VGLOBAL, -1);
 
     // lparser.c:523: Call singlevaraux with base=1
-    singlevaraux(fs, &name, v, true);
+    singlevaraux(fs, name, v, true);
 
     // lparser.c:524: If global name?
     if v.kind == ExpKind::VGLOBAL {
@@ -365,7 +370,7 @@ pub fn singlevar(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         }
 
         // lparser.c:528: buildglobal(ls, varname, var)
-        buildglobal(fs, &name, v)?;
+        buildglobal(fs, name, v)?;
 
         // lparser.c:529-531: check if it's a const global (in collective declaration scope)
         if info != -1 {
@@ -548,8 +553,10 @@ pub fn fieldsel(fs: &mut FuncState, v: &mut ExpDesc) -> Result<(), String> {
         return Err(fs.token_error("expected field name"));
     }
 
-    let field = fs.lexer.current_token_text().to_string();
+    let source_text = fs.lexer.origin_text();
+    let field_range = fs.lexer.current_token_range();
     fs.lexer.bump();
+    let field = &source_text[field_range.start_offset..field_range.end_offset()];
 
     // lparser.c:818: luaK_indexed(fs, v, &key);
     // Create a string constant key
@@ -703,9 +710,12 @@ fn field(fs: &mut FuncState, cc: &mut ConsControl) -> Result<(), String> {
             // Port of recfield from lparser.c:847-867
             let saved_freereg = fs.freereg;
 
-            let field_name = fs.lexer.current_token_text().to_string();
+            let source_text = fs.lexer.origin_text();
+            let field_name_range = fs.lexer.current_token_range();
             fs.lexer.bump();
             fs.lexer.bump(); // skip =
+            let field_name =
+                &source_text[field_name_range.start_offset..field_name_range.end_offset()];
 
             // Create key expression (string constant)
             let field_idx = string_k(fs, field_name);
@@ -833,18 +843,24 @@ pub fn body(fs: &mut FuncState, v: &mut ExpDesc, is_method: bool) -> Result<(), 
     if fs.lexer.current_token() != LuaTokenKind::TkRightParen {
         loop {
             if fs.lexer.current_token() == LuaTokenKind::TkName {
-                let param_name = fs.lexer.current_token_text().to_string();
+                let source_text = fs.lexer.origin_text();
+                let param_name_range = fs.lexer.current_token_range();
                 fs.lexer.bump();
-                params.push(param_name);
+                let param_name =
+                    &source_text[param_name_range.start_offset..param_name_range.end_offset()];
+                params.push(param_name.to_string());
                 param_kinds.push(VarKind::VDKREG);
             } else if fs.lexer.current_token() == LuaTokenKind::TkDots {
                 fs.lexer.bump();
                 is_vararg = true;
                 // Lua 5.5: Named vararg parameter (...name)
                 if fs.lexer.current_token() == LuaTokenKind::TkName {
-                    let vararg_name = fs.lexer.current_token_text().to_string();
+                    let source_text = fs.lexer.origin_text();
+                    let vararg_name_range = fs.lexer.current_token_range();
                     fs.lexer.bump();
-                    params.push(vararg_name);
+                    let vararg_name = &source_text
+                        [vararg_name_range.start_offset..vararg_name_range.end_offset()];
+                    params.push(vararg_name.to_string());
                     param_kinds.push(VarKind::RDKVAVAR);
                 } else {
                     // Anonymous vararg - use "(vararg table)" as marker (like Lua 5.5's lparser.c)

@@ -21,35 +21,38 @@ impl<'a> LuaTokenize<'a> {
         }
     }
 
-    pub fn tokenize(&mut self) -> Result<Vec<LuaTokenData>, String> {
-        let mut tokens = vec![];
-
-        while !self.reader.is_eof() {
-            let kind = self.lex();
-            if kind == LuaTokenKind::TkEof || self.error.is_some() {
-                break;
+    pub fn next_token_data(&mut self) -> Result<LuaTokenData, String> {
+        loop {
+            if self.reader.is_eof() {
+                return Ok(LuaTokenData::with_line(
+                    LuaTokenKind::TkEof,
+                    self.reader.current_range(),
+                    self.line,
+                ));
             }
 
-            // Save token with its ending line number (matches Lua's linenumber)
-            tokens.push(LuaTokenData::with_line(
+            let kind = self.lex();
+            if let Some(err) = &self.error {
+                return Err(err.clone());
+            }
+
+            if matches!(
+                kind,
+                LuaTokenKind::TkShortComment
+                    | LuaTokenKind::TkLongComment
+                    | LuaTokenKind::TkEndOfLine
+                    | LuaTokenKind::TkWhitespace
+                    | LuaTokenKind::TkShebang
+            ) {
+                continue;
+            }
+
+            return Ok(LuaTokenData::with_line(
                 kind,
                 self.reader.current_range(),
                 self.line,
             ));
         }
-
-        if let Some(err) = &self.error {
-            return Err(err.clone());
-        }
-
-        // Push EOF token with the final line number so error messages reference the correct line
-        tokens.push(LuaTokenData::with_line(
-            LuaTokenKind::TkEof,
-            self.reader.current_range(),
-            self.line,
-        ));
-
-        Ok(tokens)
     }
 
     fn name_to_kind(&self, name: &str) -> LuaTokenKind {

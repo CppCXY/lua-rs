@@ -169,9 +169,10 @@ pub fn check_match(
 // Port of str_checkname from lparser.c
 fn str_checkname(fs: &mut FuncState) -> Result<String, String> {
     check(fs, LuaTokenKind::TkName)?;
-    let name = fs.lexer.current_token_text().to_string();
+    let source_text = fs.lexer.origin_text();
+    let name_range = fs.lexer.current_token_range();
     fs.lexer.bump();
-    Ok(name)
+    Ok(source_text[name_range.start_offset..name_range.end_offset()].to_string())
 }
 
 // Port of enterblock from lparser.c:640-651
@@ -1088,8 +1089,10 @@ fn getvarattribute(fs: &mut FuncState, default: VarKind) -> Result<VarKind, Stri
             return Err("expected attribute name".to_string());
         }
 
-        let attr = fs.lexer.current_token_text().to_string();
+        let source_text = fs.lexer.origin_text();
+        let attr_range = fs.lexer.current_token_range();
         fs.lexer.bump();
+        let attr = &source_text[attr_range.start_offset..attr_range.end_offset()];
 
         check(fs, LuaTokenKind::TkGt)?;
         fs.lexer.bump(); // skip '>'
@@ -1837,14 +1840,16 @@ fn globalnames(fs: &mut FuncState, defkind: VarKind) -> Result<(), String> {
         }
 
         // Get variable name
-        let vname = fs.lexer.current_token_text().to_string();
+        let source_text = fs.lexer.origin_text();
+        let vname_range = fs.lexer.current_token_range();
         fs.lexer.bump();
+        let vname = &source_text[vname_range.start_offset..vname_range.end_offset()];
 
         // Get postfixed attribute (if any)
         let kind = getglobalattribute(fs, defkind)?;
 
         // Create the global variable entry and save last index for initialization
-        lastidx = fs.new_localvar(vname, kind);
+        lastidx = fs.new_localvar(vname.to_string(), kind);
         nvars += 1;
 
         if !testnext(fs, LuaTokenKind::TkComma) {
@@ -1908,22 +1913,24 @@ fn globalfunc(fs: &mut FuncState, line: usize) -> Result<(), String> {
         return Err(fs.syntax_error("function name expected"));
     }
 
-    let fname = fs.lexer.current_token_text().to_string();
+    let source_text = fs.lexer.origin_text();
+    let fname_range = fs.lexer.current_token_range();
     fs.lexer.bump();
+    let fname = &source_text[fname_range.start_offset..fname_range.end_offset()];
 
     // Declare as global variable (GDKREG)
-    fs.new_localvar(fname.clone(), VarKind::GDKREG);
+    fs.new_localvar(fname.to_string(), VarKind::GDKREG);
     fs.nactvar += 1; // Enter its scope
 
     // Build global variable expression
     let mut var = ExpDesc::new_void();
-    buildglobal(fs, &fname, &mut var)?;
+    buildglobal(fs, fname, &mut var)?;
 
     // Parse function body
     let mut b = ExpDesc::new_void();
     body(fs, &mut b, false)?;
 
-    checkglobal(fs, &fname, line)?;
+    checkglobal(fs, fname, line)?;
 
     // Store function in global variable
     storevar(fs, &var, &mut b);

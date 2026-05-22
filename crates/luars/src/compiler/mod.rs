@@ -12,7 +12,7 @@ mod statement; // Statement parsing (lparser.c)
 
 // Re-exports
 pub use crate::compiler::parser::LuaLanguageLevel;
-use crate::compiler::parser::{LuaLexer, LuaTokenKind, LuaTokenize, Reader, TokensizeConfig};
+use crate::compiler::parser::{LuaLexer, LuaTokenKind};
 use crate::lua_value::{LuaProto, UpvalueDesc};
 use crate::lua_vm::GlobalState;
 use crate::lua_vm::OpCode;
@@ -33,24 +33,12 @@ pub fn compile_code_with_name(
     chunk_name: &str,
 ) -> Result<LuaProto, String> {
     let level = vm.version;
-    let tokenize_result = {
-        let mut lexer = LuaTokenize::new(
-            Reader::new(source),
-            TokensizeConfig {
-                language_level: level,
-            },
-        );
-        lexer.tokenize()
-    };
-
-    let tokens = match tokenize_result {
-        Ok(tokens) => tokens,
+    let mut lexer = match LuaLexer::new(source, level) {
+        Ok(lexer) => lexer,
         Err(err) => {
             return Err(format!("{}:{}", func_state::format_source(chunk_name), err));
         }
     };
-
-    let mut lexer = LuaLexer::new(source, tokens, level);
     // Check for lexer errors before parsing
     let mut compiler_state = CompilerState::new();
     let mut fs = FuncState::new(
@@ -105,11 +93,28 @@ pub fn compile_code_with_name(
     fs.block_cnt_id = Some(block_id);
 
     // Parse statements (statlist)
-    statement::statlist(&mut fs)?;
+    if let Err(err) = statement::statlist(&mut fs) {
+        if let Some(lex_err) = fs.lexer.take_error() {
+            return Err(format!(
+                "{}:{}",
+                func_state::format_source(chunk_name),
+                lex_err
+            ));
+        }
+        return Err(err);
+    }
 
     // Check for proper ending
     if fs.lexer.current_token() != LuaTokenKind::TkEof {
         return Err(fs.token_error("expected end of file"));
+    }
+
+    if let Some(lex_err) = fs.lexer.take_error() {
+        return Err(format!(
+            "{}:{}",
+            func_state::format_source(chunk_name),
+            lex_err
+        ));
     }
 
     // Generate final RETURN (return with 0 values)

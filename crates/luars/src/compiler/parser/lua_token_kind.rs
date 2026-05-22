@@ -1,9 +1,9 @@
 use core::fmt;
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
 pub enum LuaTokenKind {
-    None,
     // KeyWord
     TkAnd,
     TkBreak,
