@@ -270,10 +270,7 @@ impl NativeTable {
 
         unsafe {
             if (*node).key_tt == LUA_VSHRSTR
-                && short_string_ptr_eq(
-                    (*node).key_string_ptr(),
-                    key_ptr,
-                )
+                && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
             {
                 if (*node).val_tt != LUA_VNIL {
                     (*dest).tt = (*node).val_tt;
@@ -287,10 +284,7 @@ impl NativeTable {
             while next != 0 {
                 node = node.offset(next as isize);
                 if (*node).key_tt == LUA_VSHRSTR
-                    && short_string_ptr_eq(
-                        (*node).key_string_ptr(),
-                        key_ptr,
-                    )
+                    && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
                 {
                     if (*node).val_tt != LUA_VNIL {
                         (*dest).tt = (*node).val_tt;
@@ -320,10 +314,7 @@ impl NativeTable {
         unsafe {
             loop {
                 if (*node).key_tt == LUA_VSHRSTR
-                    && short_string_ptr_eq(
-                        (*node).key_string_ptr(),
-                        key_ptr,
-                    )
+                    && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
                 {
                     if (*node).val_tt != LUA_VNIL {
                         (*node).set_value(value);
@@ -422,10 +413,7 @@ impl NativeTable {
             let mut node = mp;
             loop {
                 if (*node).key_tt == LUA_VSHRSTR
-                    && short_string_ptr_eq(
-                        (*node).key_string_ptr(),
-                        key_ptr,
-                    )
+                    && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
                 {
                     if (*node).val_tt != LUA_VNIL {
                         (*node).set_value_parts(value, tt);
@@ -1363,10 +1351,7 @@ impl NativeTable {
         unsafe {
             // Unroll first iteration (most common case: found in main position)
             if (*node).key_tt == LUA_VSHRSTR
-                && short_string_ptr_eq(
-                    (*node).key_string_ptr(),
-                    key_ptr,
-                )
+                && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
             {
                 let val = (*node).value();
                 return if val.is_nil() { None } else { Some(val) };
@@ -1376,10 +1361,7 @@ impl NativeTable {
             while next != 0 {
                 node = node.offset(next as isize);
                 if (*node).key_tt == LUA_VSHRSTR
-                    && short_string_ptr_eq(
-                        (*node).key_string_ptr(),
-                        key_ptr,
-                    )
+                    && short_string_ptr_eq((*node).key_string_ptr(), key_ptr)
                 {
                     let val = (*node).value();
                     return if val.is_nil() { None } else { Some(val) };

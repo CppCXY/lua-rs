@@ -280,7 +280,7 @@ impl LuaValue {
     }
 
     #[inline(always)]
-    fn table_ptr_raw(&self) -> TablePtr {
+    pub(crate) fn table_ptr_raw(&self) -> TablePtr {
         TablePtr::new(self.raw_gc_mut::<GcTable>())
     }
 

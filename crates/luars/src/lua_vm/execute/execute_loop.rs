@@ -33,15 +33,15 @@ use crate::{
             concat::{concat, try_concat_pair_utf8},
             helper::{
                 bin_tm_fallback, eq_fallback, error_div_by_zero, error_global, error_mod_by_zero,
-                finishget_fallback, finishset_fallback, finishset_fallback_known_miss,
-                float_for_loop, fltvalue, forprep, handle_pending_ops, instr_at, ivalue, k_val,
-                lua_fmod, lua_idiv, lua_imod, lua_shiftl, lua_shiftr, luai_numpow, objlen,
-                order_tm_fallback, pfltvalue, pivalue, psetfltvalue, psetivalue, ptonumberns,
-                pttisfloat, pttisinteger, return0_with_hook, return1_with_hook,
-                self_shortstr_index_chain_fast, setbfvalue, setbtvalue, setfltvalue, setivalue,
-                setnilvalue, setobj2s, setobjs2s, stack_copy, stack_mut_ptr, stack_mut_ref,
-                stack_ptr, stack_ref, stack_val, stack_val_mut, tointeger, tointegerns, tonumberns,
-                ttisfloat, ttisinteger, ttisstring, unary_tm_fallback,
+                finishget_fallback, finishset_fallback, float_for_loop, fltvalue, forprep,
+                handle_pending_ops, instr_at, ivalue, k_val, lua_fmod, lua_idiv, lua_imod,
+                lua_shiftl, lua_shiftr, luai_numpow, objlen, order_tm_fallback, pfltvalue, pivalue,
+                psetfltvalue, psetivalue, ptonumberns, pttisfloat, pttisinteger, return0_with_hook,
+                return1_with_hook, self_shortstr_index_chain_fast, setbfvalue, setbtvalue,
+                setfltvalue, setivalue, setnilvalue, setobj2s, setobjs2s, stack_copy,
+                stack_mut_ptr, stack_mut_ref, stack_ptr, stack_ref, stack_val, stack_val_mut,
+                tointeger, tointegerns, tonumberns, ttisfloat, ttisinteger, ttisstring,
+                unary_tm_fallback,
             },
             hook::{hook_check_instruction, hook_on_call},
             metamethod::call_newindex_tm_fast,
@@ -710,12 +710,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             updatetrap!();
                             continue;
                         }
-                        finishset_fallback_known_miss(
+                        finishset_fallback(
                             lua_state,
                             active_frame.frame_idx,
                             &upval_value,
                             key,
                             rc,
+                            true,
                         )?;
                     } else {
                         finishset_fallback(
@@ -724,6 +725,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             &upval_value,
                             key,
                             rc,
+                            false,
                         )?;
                     }
                     updatetrap!();
@@ -823,7 +825,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 }
                                 continue;
                             }
-                            // Fall through to finishset_fallback_known_miss
+                            // Fall through to finishset fallback (known miss)
                             let ra = unsafe { *ra_ptr };
                             let rb = unsafe { *rb_ptr };
                             let rc = if instr.get_k() {
@@ -843,12 +845,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(
+                            finishset_fallback(
                                 lua_state,
                                 active_frame.frame_idx,
                                 &ra,
                                 &rb,
                                 rc,
+                                true,
                             )?;
                             updatetrap!();
                             continue;
@@ -958,19 +961,20 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(
+                            finishset_fallback(
                                 lua_state,
                                 active_frame.frame_idx,
                                 &ra,
                                 &rb,
                                 rc,
+                                true,
                             )?;
                             updatetrap!();
                             continue;
                         }
                     }
                     savestate!();
-                    finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
+                    finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc, false)?;
                     updatetrap!();
                 }
                 OpCode::SetI => {
@@ -1040,7 +1044,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 }
                                 continue;
                             }
-                            // Fall through to finishset_fallback_known_miss
+                            // Fall through to finishset fallback (known miss)
                             let ra = *ra;
                             let rb = LuaValue::integer(b);
                             savestate!();
@@ -1055,12 +1059,13 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                                 updatetrap!();
                                 continue;
                             }
-                            finishset_fallback_known_miss(
+                            finishset_fallback(
                                 lua_state,
                                 active_frame.frame_idx,
                                 &ra,
                                 &rb,
                                 rc,
+                                true,
                             )?;
                             updatetrap!();
                             continue;
@@ -1074,7 +1079,7 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                     let ra = *ra;
                     let rb = LuaValue::integer(b);
                     savestate!();
-                    finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
+                    finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc, false)?;
                     updatetrap!();
                 }
                 OpCode::SetField => {
@@ -1172,15 +1177,9 @@ pub fn lua_execute(lua_state: &mut LuaState, target_depth: usize) -> LuaResult<(
                             updatetrap!();
                             continue;
                         }
-                        finishset_fallback_known_miss(
-                            lua_state,
-                            active_frame.frame_idx,
-                            &ra,
-                            &rb,
-                            rc,
-                        )?;
+                        finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc, true)?;
                     } else {
-                        finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc)?;
+                        finishset_fallback(lua_state, active_frame.frame_idx, &ra, &rb, rc, false)?;
                     }
                     updatetrap!();
                 }

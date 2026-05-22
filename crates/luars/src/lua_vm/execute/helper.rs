@@ -630,7 +630,7 @@ pub(crate) fn get_metamethod_from_meta_ptr(
 ///   luaG_runerror(L, "'__newindex' chain too long; possible loop");
 /// }
 /// ```
-fn finishset_inner(
+pub(crate) fn finishset(
     lua_state: &mut LuaState,
     obj: &LuaValue,
     key: &LuaValue,
@@ -722,24 +722,6 @@ fn finishset_inner(
 
     // Too many iterations - possible loop
     Err(lua_state.error("'__newindex' chain too long; possible loop".to_string()))
-}
-
-pub fn finishset(
-    lua_state: &mut LuaState,
-    obj: &LuaValue,
-    key: &LuaValue,
-    value: LuaValue,
-) -> LuaResult<bool> {
-    finishset_inner(lua_state, obj, key, value, false)
-}
-
-pub fn finishset_known_miss(
-    lua_state: &mut LuaState,
-    obj: &LuaValue,
-    key: &LuaValue,
-    value: LuaValue,
-) -> LuaResult<bool> {
-    finishset_inner(lua_state, obj, key, value, true)
 }
 
 pub fn get_metamethod_event(
@@ -1691,26 +1673,9 @@ pub fn finishset_fallback(
     obj: &LuaValue,
     key: &LuaValue,
     value: LuaValue,
+    known_miss: bool,
 ) -> LuaResult<()> {
-    match finishset(lua_state, obj, key, value) {
-        Ok(_) => Ok(()),
-        Err(LuaError::Yield) => {
-            mark_pending_finish(lua_state, frame_idx, -2);
-            Err(LuaError::Yield)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-#[inline(never)]
-pub fn finishset_fallback_known_miss(
-    lua_state: &mut LuaState,
-    frame_idx: usize,
-    obj: &LuaValue,
-    key: &LuaValue,
-    value: LuaValue,
-) -> LuaResult<()> {
-    match finishset_known_miss(lua_state, obj, key, value) {
+    match finishset(lua_state, obj, key, value, known_miss) {
         Ok(_) => Ok(()),
         Err(LuaError::Yield) => {
             mark_pending_finish(lua_state, frame_idx, -2);

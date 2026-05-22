@@ -2604,7 +2604,7 @@ impl LuaState {
 
     /// Set value in table with metamethod support (__newindex)
     pub fn table_set(&mut self, table: &LuaValue, key: LuaValue, value: LuaValue) -> LuaResult<()> {
-        execute::helper::finishset(self, table, &key, value)?;
+        execute::helper::finishset(self, table, &key, value, false)?;
         Ok(())
     }
 
