@@ -262,8 +262,54 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
             }
             Ok(results.len())
         }
-        Err(_e) => {
-            // Error state is already stored in the shared GlobalState.
+        Err(e) => {
+            // Match Lua's coroutine.wrap semantics: propagate the wrapped
+            // coroutine's actual error value, including dead-coroutine errors
+            // archived on the thread after resume_thread unwinds.
+            if let Some(thread) = thread_val.as_thread_mut() {
+                let active_err_obj = thread.error_object();
+                if !active_err_obj.is_nil() {
+                    let active_msg = thread.get_error_msg(e);
+                    if let Some(s) = active_err_obj.as_str() {
+                        thread.set_error_msg_raw(s.to_string());
+                    } else if !active_msg.is_empty() {
+                        thread.set_error_msg_raw(active_msg);
+                    } else {
+                        thread.set_error_msg_raw(format!("{}", active_err_obj));
+                    }
+                    return Err(LuaError::RuntimeError);
+                }
+
+                let active_msg = thread.get_error_msg(e);
+                if !active_msg.is_empty() {
+                    let err_str = l.create_string(&active_msg)?;
+                    thread.set_error_object(err_str);
+                    thread.set_error_msg_raw(active_msg);
+                    return Err(LuaError::RuntimeError);
+                }
+
+                let dead_err_obj = thread.dead_error_object();
+                if !dead_err_obj.is_nil() {
+                    thread.set_error_object(dead_err_obj);
+                    if let Some(s) = dead_err_obj.as_str() {
+                        thread.set_error_msg_raw(s.to_string());
+                    } else if !thread.dead_error_msg().is_empty() {
+                        thread.set_error_msg_raw(thread.dead_error_msg().to_string());
+                    } else {
+                        thread.set_error_msg_raw(format!("{}", dead_err_obj));
+                    }
+                    return Err(LuaError::RuntimeError);
+                }
+
+                if !thread.dead_error_msg().is_empty() {
+                    let msg = thread.dead_error_msg().to_string();
+                    let err_str = l.create_string(&msg)?;
+                    thread.set_error_object(err_str);
+                    thread.set_error_msg_raw(msg);
+                    return Err(LuaError::RuntimeError);
+                }
+            }
+
             Err(LuaError::RuntimeError)
         }
     }
