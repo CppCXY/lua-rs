@@ -1041,6 +1041,11 @@ fn str2k(fs: &mut FuncState, e: &mut ExpDesc) -> usize {
 // Port of k2proto from lcode.c:565-575 (with separate key)
 // static int k2proto (FuncState *fs, TValue *key, TValue *v)
 fn add_constant_with_key(fs: &mut FuncState, key: LuaValue, value: LuaValue) -> usize {
+    // Lazy-init kcache table (only when first constant needs deduplication)
+    if fs.kcache.is_nil() {
+        fs.kcache = fs.vm.create_table(0, 0).unwrap();
+    }
+
     // Query kcache table with key (lcode.c:567)
     let found_idx: Option<usize> = {
         if let Some(kcache_table) = fs.kcache.as_table_mut() {

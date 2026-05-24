@@ -195,8 +195,7 @@ impl<'a> FuncState<'a> {
         is_vararg: bool,
         source_name: String,
     ) -> Self {
-        // Create kcache table for constant deduplication (like Lua 5.5's open_func)
-        let kcache = vm.create_table(0, 0).unwrap();
+        // kcache table created lazily in addk (only when constants need deduplication)
         FuncState {
             chunk: LuaProto::new(),
             prev: None,
@@ -219,7 +218,7 @@ impl<'a> FuncState<'a> {
             numparams: 0,
             source_name: Arc::<str>::from(source_name),
             first_local: 0,
-            kcache,
+            kcache: LuaValue::nil(),
             checklimit_error: None,
         }
     }
@@ -339,7 +338,6 @@ impl<'a> FuncState<'a> {
         // outlives the child. The function body creates the child on its stack
         // (strictly nested), so the parent lives until after the child is dropped.
         let parent_ref = unsafe { &mut *parent };
-        let kcache = parent_ref.vm.create_table(0, 0).unwrap();
         FuncState {
             chunk: LuaProto::new(),
             prev: Some(parent),
@@ -362,7 +360,7 @@ impl<'a> FuncState<'a> {
             numparams: 0,
             first_local: parent_ref.actvar.len(),
             source_name: parent_ref.source_name.clone(),
-            kcache,
+            kcache: LuaValue::nil(),
             checklimit_error: None,
         }
     }
