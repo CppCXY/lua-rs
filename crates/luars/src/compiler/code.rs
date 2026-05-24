@@ -7,7 +7,7 @@ use crate::compiler::parser::BinaryOperator;
 use crate::compiler::{ExpUnion, IndVars};
 use crate::lua_value::LuaValueKind;
 use crate::lua_vm::lua_limits::{MAXINDEXRK, NO_REG};
-use crate::lua_vm::{Instruction, OpCode, TmKind};
+use crate::lua_vm::{Instruction, OpCode, TmKind, lua_shiftl, luai_numpow};
 
 // Port of int2sC from lcode.c (macro)
 // Convert integer to sC format (with OFFSET_sC = 128)
@@ -1508,29 +1508,6 @@ fn validop(op: BinaryOperator, e1: &ExpDesc, e2: &ExpDesc) -> bool {
 
 /// Lua shift left for constant folding - matches luaV_shiftl behavior
 #[inline]
-fn fold_shiftl(x: i64, y: i64) -> i64 {
-    if y < 0 {
-        if y <= -64 {
-            0
-        } else {
-            ((x as u64) >> ((-y) as u32)) as i64
-        }
-    } else if y >= 64 {
-        0
-    } else {
-        ((x as u64) << (y as u32)) as i64
-    }
-}
-
-#[inline]
-fn fold_numpow(a: f64, b: f64) -> f64 {
-    if b == 2.0 {
-        a * a
-    } else {
-        a.powf(b)
-    }
-}
-
 // Try to constant-fold a binary operation
 // Port of constfolding from lcode.c:1337-1356
 // Mimics luaO_rawarith: if both operands are INTEGER type, result is INTEGER; otherwise FLOAT
@@ -1633,7 +1610,7 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
             e1.kind = VKINT;
             // Use lua_shiftl for both: shl(x,y) = shiftl(x,y), shr(x,y) = shiftl(x,-y)
             let shift_y = if op == OpShr { i2.wrapping_neg() } else { i2 };
-            e1.u = ExpUnion::IVal(fold_shiftl(i1, shift_y));
+            e1.u = ExpUnion::IVal(lua_shiftl(i1, shift_y));
             return true;
         }
         _ => {}
@@ -1646,7 +1623,7 @@ fn constfolding(_fs: &FuncState, op: BinaryOperator, e1: &mut ExpDesc, e2: &ExpD
             // These operations always produce float results
             let result = match op {
                 OpDiv => v1 / v2,
-                OpPow => fold_numpow(v1, v2),
+                OpPow => luai_numpow(v1, v2),
                 _ => unreachable!(),
             };
 

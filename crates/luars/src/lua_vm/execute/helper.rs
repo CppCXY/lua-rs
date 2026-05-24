@@ -167,11 +167,7 @@ pub fn setivalue(v: &mut LuaValue, i: i64) {
 ///   #define luai_numpow(L,a,b)  ((b)==2 ? (a)*(a) : pow(a,b))
 #[inline(always)]
 pub fn luai_numpow(a: f64, b: f64) -> f64 {
-    if b == 2.0 {
-        a * a
-    } else {
-        a.powf(b)
-    }
+    if b == 2.0 { a * a } else { a.powf(b) }
 }
 
 /// setfltvalue - 设置浮点值  
