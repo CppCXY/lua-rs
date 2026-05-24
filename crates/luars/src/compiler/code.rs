@@ -1524,23 +1524,7 @@ fn fold_shiftl(x: i64, y: i64) -> i64 {
 
 #[inline]
 fn fold_numpow(a: f64, b: f64) -> f64 {
-    if b >= 0.0 && b.fract() == 0.0 && b <= u64::MAX as f64 {
-        let mut base = a;
-        let mut exp = b as u64;
-        let mut result = 1.0;
-
-        while exp != 0 {
-            if exp & 1 == 1 {
-                result *= base;
-            }
-            exp >>= 1;
-            if exp != 0 {
-                base *= base;
-            }
-        }
-
-        result
-    } else if b == 2.0 {
+    if b == 2.0 {
         a * a
     } else {
         a.powf(b)
