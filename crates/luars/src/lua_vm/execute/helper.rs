@@ -1,3 +1,4 @@
+use crate::lua_value::{LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT, LUA_VNUMINT, LUA_VTRUE, LuaInnerValue};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::stdlib::debug::{objtypename, ordererror, typeerror};
 use crate::{
@@ -150,14 +151,16 @@ pub fn chgfltvalue(v: &mut LuaValue, n: f64) {
 #[inline(always)]
 pub unsafe fn psetivalue(v: *mut LuaValue, i: i64) {
     unsafe {
-        *v = LuaValue::integer(i);
+        (*v).tt = LUA_VNUMINT;
+        (*v).value.i = i;
     }
 }
 
 /// setivalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setivalue(v: &mut LuaValue, i: i64) {
-    *v = LuaValue::integer(i);
+    v.tt = LUA_VNUMINT;
+    v.value.i = i;
 }
 
 /// luai_numpow - Power operation matching Lua 5.5's luai_numpow macro
@@ -192,32 +195,40 @@ pub fn luai_numpow(a: f64, b: f64) -> f64 {
 #[inline(always)]
 pub unsafe fn psetfltvalue(v: *mut LuaValue, n: f64) {
     unsafe {
-        *v = LuaValue::float(n);
+        (*v).tt = LUA_VNUMFLT; // Lua 5.5's LUA_TNUMFLT is one more than LUA_VNUMINT
+        (*v).value.n = n;
     }
 }
 
 /// setfltvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setfltvalue(v: &mut LuaValue, n: f64) {
-    *v = LuaValue::float(n);
+    v.tt = LUA_VNUMFLT; // Lua 5.5's LUA_TNUMFLT is one more than LUA_VNUMINT
+    v.value.n = n;
 }
 
 /// setbfvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setbfvalue(v: &mut LuaValue) {
-    *v = LuaValue::boolean(false);
+    // *v = LuaValue::boolean(false);
+    v.tt = LUA_VFALSE;
+    v.value = LuaInnerValue::NIL;
 }
 
 /// setbtvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setbtvalue(v: &mut LuaValue) {
-    *v = LuaValue::boolean(true);
+    // *v = LuaValue::boolean(true);
+    v.tt = LUA_VTRUE;
+    v.value = LuaInnerValue::NIL;
 }
 
 /// setnilvalue_ref - 引用版本（保留兼容性）
 #[inline(always)]
 pub fn setnilvalue(v: &mut LuaValue) {
-    *v = LuaValue::nil();
+    // *v = LuaValue::nil();
+    v.tt = LUA_VNIL;
+    v.value = LuaInnerValue::NIL;
 }
 
 #[inline(always)]
@@ -381,28 +392,6 @@ pub fn tonumberns(v: &LuaValue, out: &mut f64) -> bool {
     } else if v.ttisinteger() {
         *out = v.ivalue() as f64;
         true
-    } else {
-        false
-    }
-}
-
-/// tointeger - 从LuaValue引用获取整数 (用于常量)
-#[allow(unused)]
-#[inline(always)]
-pub fn tointeger(v: &LuaValue, out: &mut i64) -> bool {
-    if v.ttisinteger() {
-        *out = v.ivalue();
-        true
-    } else if v.ttisfloat() {
-        // Try converting integral-valued floats (e.g. 5.0 -> 5)
-        // Range check: f must be in [i64::MIN, 2^63) — see tointegerns for details.
-        let f = v.fltvalue();
-        if f >= (i64::MIN as f64) && f < -(i64::MIN as f64) && f == (f as i64 as f64) {
-            *out = f as i64;
-            true
-        } else {
-            false
-        }
     } else {
         false
     }

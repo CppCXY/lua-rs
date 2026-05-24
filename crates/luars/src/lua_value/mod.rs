@@ -20,8 +20,10 @@ pub use userdata_trait::{UserDataTrait, lua_value_to_udvalue, udvalue_to_lua_val
 
 // Re-export the optimized LuaValue and type enum for pattern matching
 pub use lua_table::LuaTable;
-pub use lua_value::{BIT_ISCOLLECTABLE, LUA_VNUMINT};
+pub use lua_value::{BIT_ISCOLLECTABLE, LUA_VFALSE, LUA_VNIL, LUA_VNUMFLT, LUA_VNUMINT, LUA_VTRUE};
 pub use lua_value::{LuaValue, LuaValueKind};
+
+pub(crate) type LuaInnerValue = Value; // For internal use within LuaValue implementation
 
 use crate::gc::{ProtoPtr, TablePtr, UpvaluePtr};
 use crate::lua_vm::CFunction;

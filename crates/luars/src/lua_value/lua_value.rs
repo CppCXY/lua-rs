@@ -116,10 +116,7 @@ pub union Value {
 }
 
 impl Value {
-    #[inline(always)]
-    pub const fn nil() -> Self {
-        Value { i: 0 }
-    }
+    pub const NIL: Self = Value { i: 0 };
 
     #[inline(always)]
     pub const fn integer(i: i64) -> Self {
@@ -331,31 +328,15 @@ impl LuaValue {
     #[inline(always)]
     pub const fn nil() -> Self {
         Self {
-            value: Value::nil(),
+            value: Value::NIL,
             tt: LUA_VNIL,
-        }
-    }
-
-    #[inline(always)]
-    pub const fn empty() -> Self {
-        Self {
-            value: Value::nil(),
-            tt: LUA_VEMPTY,
-        }
-    }
-
-    #[inline(always)]
-    pub const fn abstkey() -> Self {
-        Self {
-            value: Value::nil(),
-            tt: LUA_VABSTKEY,
         }
     }
 
     #[inline(always)]
     pub const fn boolean(b: bool) -> Self {
         Self {
-            value: Value::nil(),
+            value: Value::NIL,
             tt: if b { LUA_VTRUE } else { LUA_VFALSE },
         }
     }
@@ -1435,14 +1416,6 @@ mod tests {
         assert!(v.ttisstrictnil());
         assert!(v.is_falsy());
         assert_eq!(v.type_name(), "nil");
-    }
-
-    #[test]
-    fn test_empty() {
-        let v = LuaValue::empty();
-        assert!(v.ttisnil()); // empty is a nil variant
-        assert!(v.ttisempty());
-        assert!(!v.ttisstrictnil());
     }
 
     #[test]
