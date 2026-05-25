@@ -99,6 +99,11 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
 
     - name: Publish luars
-      run: cargo publish --package luars
+      run: |
+        for dir in luars{,_debugger}; do
+          pushd "crates/$dir"
+          cargo publish --allow-dirty
+          popd
+        done
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
