@@ -44,7 +44,7 @@ use std::collections::HashSet;
 use crate::{
     LuaResult, LuaTable,
     lua_value::LuaValue,
-    lua_vm::{LuaError, LuaState, SafeOption, TmKind},
+    lua_vm::{ErrorMsg, LuaError, LuaState, SafeOption, TmKind},
 };
 pub use gc_kind::*;
 pub use gc_object::*;
@@ -2060,6 +2060,9 @@ impl GC {
                 if !err_obj.is_nil() {
                     self.mark_value(l, &err_obj);
                 }
+                if let ErrorMsg::Object(dead_err_obj) = state.dead_error() {
+                    self.mark_value(l, dead_err_obj);
+                }
                 return 1;
             }
 
@@ -2106,6 +2109,13 @@ impl GC {
             let err_obj = state.error_object();
             if !err_obj.is_nil() {
                 self.mark_value(l, &err_obj);
+                count += 1;
+            }
+
+            // Dead coroutines archive their terminal error locally instead of
+            // leaving it in the shared current-error slot.
+            if let ErrorMsg::Object(dead_err_obj) = state.dead_error() {
+                self.mark_value(l, dead_err_obj);
                 count += 1;
             }
 
@@ -3348,6 +3358,16 @@ impl GC {
                                 container_age,
                                 container_marked,
                                 "error_object",
+                            );
+                        }
+                        if let ErrorMsg::Object(dead_err) = state.dead_error() {
+                            check_value(
+                                dead_err,
+                                &container_kind,
+                                container_ptr,
+                                container_age,
+                                container_marked,
+                                "dead_error",
                             );
                         }
                         // Check open upvalues

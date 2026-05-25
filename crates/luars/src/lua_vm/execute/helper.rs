@@ -853,12 +853,9 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                 }
                 Err(LuaError::Yield) => {
                     // Another TBC close method yielded. Save cascaded error and yield.
+                    let had_cascaded = lua_state.has_error_object();
                     let cascaded = lua_state.take_error_object();
-                    lua_state.set_error_object(if !cascaded.is_nil() {
-                        cascaded
-                    } else {
-                        error_val
-                    });
+                    lua_state.set_error_object(if had_cascaded { cascaded } else { error_val });
                     Err(LuaError::Yield)
                 }
                 Err(e) => {

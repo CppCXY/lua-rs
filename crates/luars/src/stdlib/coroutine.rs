@@ -3,7 +3,7 @@
 
 use crate::lib_registry::LibraryModule;
 use crate::lua_value::LuaValue;
-use crate::lua_vm::{LuaError, LuaResult, LuaState};
+use crate::lua_vm::{ErrorMsg, LuaError, LuaResult, LuaState};
 
 pub fn create_coroutine_lib() -> LibraryModule {
     crate::lib_module!("coroutine", {
@@ -86,24 +86,10 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
                 } else if !active_msg.is_empty() {
                     l.create_string(&active_msg)?
                 } else {
-                    let err_obj = if thread.dead {
-                        thread.dead_error_object()
-                    } else {
-                        LuaValue::nil()
-                    };
-                    if !err_obj.is_nil() {
-                        err_obj
-                    } else {
-                        let msg = if thread.dead {
-                            thread.dead_error_msg().to_string()
-                        } else {
-                            String::new()
-                        };
-                        if msg.is_empty() {
-                            LuaValue::nil()
-                        } else {
-                            l.create_string(&msg)?
-                        }
+                    match thread.dead_error() {
+                        ErrorMsg::Object(obj) => *obj,
+                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_string(msg)?,
+                        _ => LuaValue::nil(),
                     }
                 }
             } else {
@@ -267,46 +253,26 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
             // coroutine's actual error value, including dead-coroutine errors
             // archived on the thread after resume_thread unwinds.
             if let Some(thread) = thread_val.as_thread_mut() {
+                let has_active_err_obj = thread.has_error_object();
                 let active_err_obj = thread.error_object();
-                if !active_err_obj.is_nil() {
-                    let active_msg = thread.get_error_msg(e);
-                    if let Some(s) = active_err_obj.as_str() {
-                        thread.set_error_msg_raw(s.to_string());
-                    } else if !active_msg.is_empty() {
-                        thread.set_error_msg_raw(active_msg);
-                    } else {
-                        thread.set_error_msg_raw(format!("{}", active_err_obj));
-                    }
-                    return Err(LuaError::RuntimeError);
+                if has_active_err_obj {
+                    let _ = thread.get_error_msg(e);
+                    return Err(l.error_with_object(active_err_obj));
                 }
 
                 let active_msg = thread.get_error_msg(e);
                 if !active_msg.is_empty() {
                     let err_str = l.create_string(&active_msg)?;
-                    thread.set_error_object(err_str);
-                    thread.set_error_msg_raw(active_msg);
-                    return Err(LuaError::RuntimeError);
+                    return Err(l.error_with_object(err_str));
                 }
 
-                let dead_err_obj = thread.dead_error_object();
-                if !dead_err_obj.is_nil() {
-                    thread.set_error_object(dead_err_obj);
-                    if let Some(s) = dead_err_obj.as_str() {
-                        thread.set_error_msg_raw(s.to_string());
-                    } else if !thread.dead_error_msg().is_empty() {
-                        thread.set_error_msg_raw(thread.dead_error_msg().to_string());
-                    } else {
-                        thread.set_error_msg_raw(format!("{}", dead_err_obj));
+                match thread.dead_error() {
+                    ErrorMsg::Object(obj) => return Err(l.error_with_object(*obj)),
+                    ErrorMsg::Msg(msg) if !msg.is_empty() => {
+                        let err_str = l.create_string(msg)?;
+                        return Err(l.error_with_object(err_str));
                     }
-                    return Err(LuaError::RuntimeError);
-                }
-
-                if !thread.dead_error_msg().is_empty() {
-                    let msg = thread.dead_error_msg().to_string();
-                    let err_str = l.create_string(&msg)?;
-                    thread.set_error_object(err_str);
-                    thread.set_error_msg_raw(msg);
-                    return Err(LuaError::RuntimeError);
+                    _ => {}
                 }
             }
 
@@ -428,11 +394,14 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
             Ok(()) => {
                 // Check if coroutine had a pending error (dead-by-error)
                 // or if __close cascaded an error
-                let archived_err = thread.dead_error_object();
-                if !archived_err.is_nil() {
-                    let err_obj = thread.take_dead_error_object();
+                if !matches!(thread.dead_error(), ErrorMsg::None) {
+                    let err_val = match thread.take_dead_error() {
+                        ErrorMsg::Object(obj) => obj,
+                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_string(&msg)?,
+                        _ => LuaValue::nil(),
+                    };
                     l.push_value(LuaValue::boolean(false))?;
-                    l.push_value(err_obj)?;
+                    l.push_value(err_val)?;
                     Ok(2)
                 } else if !thread.error_object().is_nil() {
                     let err_obj = thread.take_error_object();
@@ -454,15 +423,17 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
                 let error_val = if !err_obj.is_nil() {
                     err_obj
                 } else {
-                    let msg = if !thread.dead_error_msg().is_empty() {
-                        thread.dead_error_msg().to_string()
-                    } else {
-                        thread.take_error_msg_raw()
-                    };
-                    if msg.is_empty() {
-                        LuaValue::nil()
-                    } else {
-                        l.create_string(&msg)?
+                    match thread.take_dead_error() {
+                        ErrorMsg::Object(obj) => obj,
+                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_string(&msg)?,
+                        _ => {
+                            let msg = thread.take_error_msg_raw();
+                            if msg.is_empty() {
+                                LuaValue::nil()
+                            } else {
+                                l.create_string(&msg)?
+                            }
+                        }
                     }
                 };
                 l.push_value(LuaValue::boolean(false))?;

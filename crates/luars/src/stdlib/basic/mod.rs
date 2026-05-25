@@ -108,19 +108,18 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
         let msg_arg = l.get_arg(2);
 
         if let Some(msg) = msg_arg {
-            if msg.is_string() {
+            if msg.is_nil() {
+                // assert(cond, nil) uses the default assertion message.
+            } else if msg.is_string() {
                 // String message: add source:line prefix like error() does
                 let message = l.to_string(&msg)?;
                 let where_prefix = lua_where(l, 1);
                 let formatted = format!("{}{}", where_prefix, message);
                 let err_str = l.create_string(&formatted)?;
-                l.set_error_object(err_str);
-                l.set_error_msg_raw(formatted);
-                return Err(LuaError::RuntimeError);
+                return Err(l.error_with_object(err_str));
             } else {
                 // Non-string: raise as error object (like error(obj, 0))
-                let message = l.to_string(&msg)?;
-                return Err(l.error_with_object(message, msg));
+                return Err(l.error_with_object(msg));
             }
         }
 
@@ -128,9 +127,7 @@ fn lua_assert(l: &mut LuaState) -> LuaResult<usize> {
         let where_prefix = lua_where(l, 1);
         let formatted = format!("{}assertion failed!", where_prefix);
         let err_str = l.create_string(&formatted)?;
-        l.set_error_object(err_str);
-        l.set_error_msg_raw(formatted);
-        return Err(LuaError::RuntimeError);
+        return Err(l.error_with_object(err_str));
     }
 
     // Return all arguments - they are already on stack
@@ -188,10 +185,12 @@ fn lua_where(l: &LuaState, level: usize) -> String {
 fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
     let arg = l.get_arg(1).unwrap_or_default();
 
-    // error() with nil or no argument: Lua 5.5 raises nil as the error object
-    // The error message becomes "<no error object>" when formatted
+    // Match the bundled Lua tests: error() / error(nil) becomes the
+    // literal string object "<no error object>".
     if arg.is_nil() {
-        return Err(l.error_with_object("<no error object>".to_string(), LuaValue::nil()));
+        let msg = "<no error object>".to_string();
+        let err_str = l.create_string(&msg)?;
+        return Err(l.error_with_object(err_str));
     }
 
     let level = l.get_arg(2).and_then(|v| v.as_integer()).unwrap_or(1);
@@ -203,15 +202,11 @@ fn lua_error(l: &mut LuaState) -> LuaResult<usize> {
 
         let formatted_msg = format!("{}{}", where_prefix, message);
         let err_str = l.create_string(&formatted_msg)?;
-        l.set_error_object(err_str);
-        // Set error_msg without adding another source prefix (we added it manually)
-        l.set_error_msg_raw(formatted_msg);
-        Err(LuaError::RuntimeError)
+        Err(l.error_with_object(err_str))
     } else {
         // Non-string error object or level 0: raise as-is
         // Preserve the original error value
-        let message = l.to_string(&arg)?;
-        Err(l.error_with_object(message, arg))
+        Err(l.error_with_object(arg))
     }
 }
 

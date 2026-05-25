@@ -7,6 +7,7 @@ pub mod async_thread;
 pub mod call_info;
 mod const_string;
 pub mod debug_info;
+mod error_msg;
 mod execute;
 mod file_layout;
 pub mod lua_error;
@@ -22,7 +23,6 @@ mod sandbox;
 mod shared_proto;
 mod string_arth;
 pub mod table_builder;
-mod error_msg;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::{
@@ -36,7 +36,7 @@ use crate::lua_value::{
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
-use crate::lua_vm::error_msg::ErrorMsg;
+pub(crate) use crate::lua_vm::error_msg::ErrorMsg;
 use crate::lua_vm::file_layout::inspect_file_chunk_layout;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;

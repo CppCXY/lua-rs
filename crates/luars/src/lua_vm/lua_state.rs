@@ -13,6 +13,7 @@ use crate::lua_vm::async_thread::AsyncFuture;
 use crate::lua_vm::call_info::call_status::{
     self, CIST_C, CIST_HOOKED, CIST_RECST, CIST_XPCALL, CIST_YPCALL,
 };
+use crate::lua_vm::error_msg::ErrorMsg;
 use crate::lua_vm::execute::call::{call_c_function, resolve_call_chain};
 use crate::lua_vm::execute::{self, lua_execute};
 use crate::lua_vm::lua_limits::{BASIC_STACK_SIZE, CSTACKERR, EXTRA_STACK, LUAI_MAXCSTACK};
@@ -121,8 +122,7 @@ pub struct LuaState {
     /// Active runtime errors live in GlobalState, but dead coroutines must
     /// preserve their own terminal error for coroutine.resume/close without
     /// leaking that error into later unrelated calls.
-    dead_error_object: LuaValue,
-    dead_error_msg: String,
+    dead_error: ErrorMsg,
 
     /// Whether close_tbc_with_error is currently running on this thread.
     /// Used to detect re-entrant coroutine.close() calls from __close handlers.
@@ -177,8 +177,7 @@ impl LuaState {
             tbc_list: Vec::new(),
             yielded: false,
             dead: false,
-            dead_error_object: LuaValue::nil(),
-            dead_error_msg: String::new(),
+            dead_error: ErrorMsg::None,
             is_closing: false,
             nny: if is_main { 1 } else { 0 },
             pending_future: None,
@@ -859,11 +858,78 @@ impl LuaState {
         })
     }
 
-    /// Set error message with preserved error object (for pcall to return)
+    /// Set the current error object for protected calls to retrieve.
     #[cold]
     #[inline(never)]
-    pub fn error_with_object(&mut self, msg: String, obj: LuaValue) -> LuaError {
+    pub fn error_with_object(&mut self, obj: LuaValue) -> LuaError {
         self.global_state_mut().error_with_object(obj)
+    }
+
+    #[inline(always)]
+    pub fn error_object(&self) -> LuaValue {
+        self.global_state()
+            .get_error_object_ref()
+            .copied()
+            .unwrap_or(LuaValue::nil())
+    }
+
+    #[inline(always)]
+    pub fn has_error_object(&self) -> bool {
+        self.global_state().get_error_object_ref().is_some()
+    }
+
+    #[inline(always)]
+    pub fn set_error_object(&mut self, obj: LuaValue) {
+        let _ = self.global_state_mut().error_with_object(obj);
+    }
+
+    #[inline(always)]
+    pub fn take_error_object(&mut self) -> LuaValue {
+        match self.global_state_mut().take_error() {
+            ErrorMsg::Object(obj) => obj,
+            ErrorMsg::Msg(msg) => {
+                let _ = self.global_state_mut().error(msg);
+                LuaValue::nil()
+            }
+            ErrorMsg::None => LuaValue::nil(),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn take_error_msg_raw(&mut self) -> String {
+        match self.global_state_mut().take_error() {
+            ErrorMsg::Msg(msg) => msg,
+            ErrorMsg::Object(obj) => {
+                let _ = self.global_state_mut().error_with_object(obj);
+                String::new()
+            }
+            ErrorMsg::None => String::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear_error(&mut self) {
+        let _ = self.global_state_mut().take_error();
+    }
+
+    #[inline(always)]
+    pub fn archive_dead_error(&mut self, err: ErrorMsg) {
+        self.dead_error = err;
+    }
+
+    #[inline(always)]
+    pub fn dead_error(&self) -> &ErrorMsg {
+        &self.dead_error
+    }
+
+    #[inline(always)]
+    pub fn take_dead_error(&mut self) -> ErrorMsg {
+        std::mem::take(&mut self.dead_error)
+    }
+
+    #[inline(always)]
+    pub fn clear_dead_error(&mut self) {
+        self.dead_error = ErrorMsg::None;
     }
 
     /// Generate a Lua-style stack traceback
@@ -1191,12 +1257,7 @@ impl LuaState {
         // If any __close threw, propagate the last error
         if let Some(err) = current_error {
             self.set_error_object(err);
-            let msg = if let Some(s) = err.as_str() {
-                s.to_string()
-            } else {
-                format!("{:?}", err)
-            };
-            return Err(self.error(msg));
+            return Err(LuaError::RuntimeError);
         }
 
         Ok(())
@@ -1253,9 +1314,6 @@ impl LuaState {
             if let Some(close_fn) = close_method {
                 // Match C Lua's prepcallclosemth: set L->top to just past the
                 // TBC variable + error slot.  This ensures ALL stack positions
-                // below (including pending TBC vars) are within the GC scan
-                // range (0..stack_top).  Place error on the stack at tbc_idx+1
-                // so it is also a GC root (not just a Rust local).
                 let err_slot = tbc_idx + 1;
                 let needed = err_slot + 1; // need at least tbc_idx + 2
                 if needed > self.stack.len() {
@@ -1263,8 +1321,6 @@ impl LuaState {
                 }
                 self.stack[err_slot] = current_error;
                 self.set_top_raw(err_slot + 1);
-
-                // Call __close(obj, err) with 2 arguments.
                 // call_close_method_with_error will place the call starting at
                 // get_top() == tbc_idx + 2, right after the error slot.
                 let result = self.call_close_method_with_error(&close_fn, &value, current_error);
@@ -1308,17 +1364,17 @@ impl LuaState {
             }
         }
 
+        self.is_closing = was_closing;
+
         // Store the final cascaded error in error_object so pcall/xpcall can retrieve it
         if had_close_error {
             self.set_error_object(current_error);
+            return Err(LuaError::RuntimeError);
         }
 
-        self.is_closing = was_closing;
         Ok(())
     }
 
-    /// Call __close(obj) for normal block exit — 1 argument only
-    /// Lua 5.5: normal close passes errobj=NULL, so callclosemethod only pushes self
     fn call_close_method_normal(&mut self, close_fn: &LuaValue, obj: &LuaValue) -> LuaResult<()> {
         use crate::lua_vm::execute::{call, lua_execute};
 
@@ -2647,11 +2703,19 @@ impl LuaState {
                     self.global_state_mut().gc.get_error_message()
                 )
             }
-            _ => {
-                // Return just the error message without "Runtime Error: " prefix
-                // to match Lua 5.5 behavior (pcall returns the raw error message)
-                self.global_state_mut().take_error()
-            }
+            _ => match self.global_state_mut().take_error() {
+                ErrorMsg::Msg(msg) => msg,
+                ErrorMsg::Object(obj) => {
+                    if let Some(s) = obj.as_str() {
+                        s.to_string()
+                    } else if obj.is_nil() {
+                        "<no error object>".to_string()
+                    } else {
+                        format!("{}", obj)
+                    }
+                }
+                ErrorMsg::None => String::new(),
+            },
         }
     }
 
@@ -2950,8 +3014,9 @@ impl LuaState {
                 Err(LuaError::Yield) => Err(LuaError::Yield),
                 Err(LuaError::CloseThread) => Err(LuaError::CloseThread),
                 Err(e) => {
+                    let had_err_object = self.has_error_object();
                     let err_obj = self.take_error_object();
-                    let result_err = if !err_obj.is_nil() {
+                    let result_err = if had_err_object {
                         err_obj
                     } else {
                         let error_msg = self.get_error_message(e);
@@ -3008,6 +3073,7 @@ impl LuaState {
                     // This ensures debug.getinfo(2) inside __close sees pcall's caller
 
                     // Get error object BEFORE closing TBC (close may modify it)
+                    let had_err_object = self.has_error_object();
                     let err_obj = self.take_error_object();
                     let error_msg_str = self.get_error_message(e);
 
@@ -3032,10 +3098,11 @@ impl LuaState {
                     }
 
                     // Check if close_tbc_with_error updated error_object (from cascading __close errors)
+                    let had_cascaded_err = self.has_error_object();
                     let cascaded_err = self.take_error_object();
-                    let result_err = if !cascaded_err.is_nil() {
+                    let result_err = if had_cascaded_err {
                         cascaded_err
-                    } else if !err_obj.is_nil() {
+                    } else if had_err_object {
                         err_obj
                     } else {
                         self.create_string(&error_msg_str)?
@@ -3206,6 +3273,7 @@ impl LuaState {
                 // Lua 5.5 order: pop frames first, then close TBC
 
                 // Get error object BEFORE closing TBC
+                let had_err_object = self.has_error_object();
                 let err_obj = self.take_error_object();
                 let error_msg_str = self.get_error_message(e);
 
@@ -3237,12 +3305,9 @@ impl LuaState {
                                 ci.call_status |= CIST_YPCALL | CIST_RECST;
                             }
                             // Save error value (may have cascaded) for finish_c_frame
+                            let had_cascaded = self.has_error_object();
                             let cascaded = self.take_error_object();
-                            self.set_error_object(if !cascaded.is_nil() {
-                                cascaded
-                            } else {
-                                err_obj
-                            });
+                            self.set_error_object(if had_cascaded { cascaded } else { err_obj });
                             return Err(LuaError::Yield);
                         }
                         Err(_e2) => {
@@ -3253,10 +3318,11 @@ impl LuaState {
                 }
 
                 // Check if close_tbc_with_error updated error_object (cascading)
+                let had_cascaded_err = self.has_error_object();
                 let cascaded_err = self.take_error_object();
-                let result_err = if !cascaded_err.is_nil() {
+                let result_err = if had_cascaded_err {
                     cascaded_err
-                } else if !err_obj.is_nil() {
+                } else if had_err_object {
                     err_obj
                 } else {
                     self.create_string(&error_msg_str)?
@@ -3353,10 +3419,11 @@ impl LuaState {
             }
             Err(e) => {
                 // Get error object BEFORE any cleanup
+                let had_err_object = self.has_error_object();
                 let err_obj = self.take_error_object();
                 let error_msg_str = self.get_error_message(e);
 
-                let mut err_value = if !err_obj.is_nil() {
+                let mut err_value = if had_err_object {
                     err_obj
                 } else {
                     self.create_string(&error_msg_str)?
@@ -3452,7 +3519,7 @@ impl LuaState {
                         }
                         Err(LuaError::ErrorInErrorHandling) => {
                             handler_failed = true;
-                            self.set_error_object(LuaValue::nil());
+                            self.clear_error();
                             while self.call_depth() > handler_depth {
                                 self.pop_frame();
                             }
@@ -3461,12 +3528,13 @@ impl LuaState {
                         }
                         Err(_handler_err) => {
                             // Handler failed with normal error — retry with new error
+                            let had_new_err = self.has_error_object();
                             let new_err = self.take_error_object();
                             while self.call_depth() > handler_depth {
                                 self.pop_frame();
                             }
                             self.set_top(current_top)?;
-                            if new_err.is_nil() {
+                            if !had_new_err {
                                 handler_failed = true;
                                 break;
                             }
@@ -3496,12 +3564,9 @@ impl LuaState {
                                 let ci = self.get_call_info_mut(pcall_ci_idx);
                                 ci.call_status |= CIST_YPCALL | CIST_RECST;
                             }
+                            let had_cascaded = self.has_error_object();
                             let cascaded = self.take_error_object();
-                            self.set_error_object(if !cascaded.is_nil() {
-                                cascaded
-                            } else {
-                                err_value
-                            });
+                            self.set_error_object(if had_cascaded { cascaded } else { err_value });
                             return Err(LuaError::Yield);
                         }
                         Err(_e2) => {}
@@ -3689,11 +3754,12 @@ impl LuaState {
                 // (mirrors CLua's luaG_errormsg which calls handler before longjmp)
 
                 // Get error object BEFORE any cleanup
+                let had_err_object = self.has_error_object();
                 let err_obj = self.take_error_object();
                 let error_msg_str = self.get_error_message(e);
 
                 // Prepare error value for the handler
-                let mut err_value = if !err_obj.is_nil() {
+                let mut err_value = if had_err_object {
                     err_obj
                 } else {
                     self.create_string(&error_msg_str)?
@@ -3764,7 +3830,7 @@ impl LuaState {
                         Err(LuaError::ErrorInErrorHandling) => {
                             // Stack overflow in error handler zone — give up
                             handler_failed = true;
-                            self.set_error_object(LuaValue::nil());
+                            self.clear_error();
                             while self.call_depth() > handler_depth {
                                 self.pop_frame();
                             }
@@ -3775,6 +3841,7 @@ impl LuaState {
                             // Handler failed with a normal error.
                             // C Lua retries: luaG_errormsg calls errfunc again.
                             // Get the new error value and retry.
+                            let had_new_err = self.has_error_object();
                             let new_err = self.take_error_object();
                             // Clean up handler frames before retrying
                             while self.call_depth() > handler_depth {
@@ -3782,7 +3849,7 @@ impl LuaState {
                             }
                             // Reset stack top to before handler push
                             self.set_top(current_top)?;
-                            if new_err.is_nil() {
+                            if !had_new_err {
                                 // No error object — can't retry, treat as failure
                                 handler_failed = true;
                                 break;
@@ -3848,11 +3915,11 @@ impl LuaState {
             // Clear stale error_object so that this error uses the fresh
             // error_msg set by self.error(), rather than a leftover
             // error_object from a previous failed resume.
-            self.set_error_object(LuaValue::nil());
+            self.clear_error();
             return Err(self.error("cannot resume dead coroutine".to_string()));
         }
         if self.call_depth > 0 && !self.yielded {
-            self.set_error_object(LuaValue::nil());
+            self.clear_error();
             return Err(self.error("cannot resume non-suspended coroutine".to_string()));
         }
 
@@ -3864,7 +3931,7 @@ impl LuaState {
             // Initial resume - need to set up the function
             // The function should be at stack[0] (set by create_thread)
             if self.stack.is_empty() {
-                self.set_error_object(LuaValue::nil()); // clear stale error object
+                self.clear_error(); // clear stale error object
                 return Err(self.error("cannot resume dead coroutine".to_string()));
             }
 
@@ -4019,29 +4086,34 @@ impl LuaState {
                         // Keep stack and call frames intact for debug.traceback
                         // (matching C Lua behavior: dead coroutines retain their
                         // call stack for inspection).
+                        let had_err_object = self.has_error_object();
                         let err_obj = self.take_error_object();
-                        let error_val = if !err_obj.is_nil() {
+                        let error_val = if had_err_object {
                             err_obj
                         } else {
-                            LuaValue::nil()
+                            let msg = self.take_error_msg_raw();
+                            if msg.is_empty() {
+                                LuaValue::nil()
+                            } else {
+                                self.create_string(&msg).unwrap_or_default()
+                            }
                         };
 
                         // Close all upvalues and TBC variables from level 0
                         self.close_upvalues(0);
                         let _ = self.close_tbc_with_error(0, error_val);
 
-                        // Restore error state: if close cascaded, error_object
-                        // is already set by close_tbc_with_error. If not, restore
-                        // the original error value and msg.
-                        if self.error_object().is_nil() {
-                            self.set_error_object(error_val);
+                        let archived_error = if self.has_error_object() {
+                            ErrorMsg::Object(self.take_error_object())
                         } else {
-                            // Cascaded error — update error_msg to match
-                            self.set_error_msg_raw(format!("{}", self.error_object()));
-                        }
-
-                        let archived_msg = self.take_error_msg_raw();
-                        self.archive_dead_error(self.error_object(), archived_msg);
+                            let msg = self.take_error_msg_raw();
+                            if msg.is_empty() {
+                                ErrorMsg::Object(error_val)
+                            } else {
+                                ErrorMsg::Msg(msg)
+                            }
+                        };
+                        self.archive_dead_error(archived_error);
 
                         // Mark coroutine as dead but keep stack for debug.traceback
                         self.dead = true;
@@ -4065,8 +4137,9 @@ impl LuaState {
                     };
 
                     // Get error object
+                    let had_err_object = self.has_error_object();
                     let err_obj = self.take_error_object();
-                    let error_val = if !err_obj.is_nil() {
+                    let error_val = if had_err_object {
                         err_obj
                     } else {
                         let msg = self.take_error_msg_raw();
