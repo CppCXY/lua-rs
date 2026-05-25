@@ -58,8 +58,11 @@ impl LuaApi for LuaState {
         self.global_state_mut().open_stdlib(lib)
     }
 
-    fn load_stdlibs(&mut self, lib: Stdlib) -> LuaResult<()> {
-        self.open_stdlib(lib)
+    fn open_stdlibs(&mut self, libs: &[Stdlib]) -> LuaResult<()> {
+        for lib in libs {
+            self.open_stdlib(*lib)?;
+        }
+        Ok(())
     }
 
     fn collect_garbage(&mut self) -> LuaResult<()> {

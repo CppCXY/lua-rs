@@ -204,8 +204,11 @@ impl LuaApi for Lua {
     }
 
     #[inline]
-    fn load_stdlibs(&mut self, lib: Stdlib) -> LuaResult<()> {
-        self.open_stdlib(lib)
+    fn open_stdlibs(&mut self, libs: &[Stdlib]) -> LuaResult<()> {
+        for lib in libs {
+            self.global_state_owner.open_stdlib(*lib)?;
+        }
+        Ok(())
     }
 
     #[inline]

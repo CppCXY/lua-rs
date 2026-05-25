@@ -33,7 +33,7 @@ use crate::{
 /// runtime escape hatches such as `global_state` stay on the concrete type.
 pub trait LuaApi {
     fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()>;
-    fn load_stdlibs(&mut self, lib: Stdlib) -> LuaResult<()>;
+    fn open_stdlibs(&mut self, libs: &[Stdlib]) -> LuaResult<()>;
     fn collect_garbage(&mut self) -> LuaResult<()>;
     fn execute(&mut self, source: &str) -> LuaResult<()>;
     fn dofile<R: FromLuaMulti>(&mut self, path: &str) -> LuaResult<R>;
