@@ -46,6 +46,8 @@ Benchmark commands are part of the repository:
 
 One important caveat for the Windows numbers: the coroutine result is unusually strong partly because native Lua's coroutine implementation on Windows pays heavily for `longjmp`-based control transfer, which triggers unwind-related overhead. luars does not inherit that exact cost model, so the Windows coroutine gap is real in measurement but should not be over-generalized into a platform-independent "always faster" claim.
 
+Performance tests on macOS generally show that it outperforms native Lua. On one hand, this may be due to Apple's M-series chips being better at branch prediction and optimization, as well as more mature LLVM optimizations on the Apple platform. On the other hand, it could be because the ARM architecture offers more registers, and LuaRS caches more register states than native Lua. On x86-64, which has fewer registers, this may lead to increased memory access and reduced performance. However, this is only a speculation, and more in-depth analysis and testing are needed to verify it.
+
 ### Safety And Audit Posture
 
 luars is implemented in Rust, but it does not pretend that "written in Rust" automatically means the whole runtime is safe by default. The project keeps `unsafe` under active review and pushes non-critical paths back to safe Rust when that does not cost hot-path performance.
