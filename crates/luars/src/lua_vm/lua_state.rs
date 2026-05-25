@@ -863,61 +863,7 @@ impl LuaState {
     #[cold]
     #[inline(never)]
     pub fn error_with_object(&mut self, msg: String, obj: LuaValue) -> LuaError {
-        let msg = self.add_runtime_error_info(msg);
-        self.global_state_mut().error_with_object(msg, obj)
-    }
-
-    /// Clear error state
-    #[inline(always)]
-    pub fn clear_error(&mut self) {
-        self.global_state_mut().clear_error();
-        self.yield_values.clear();
-    }
-
-    #[inline(always)]
-    pub(crate) fn take_error_object(&mut self) -> LuaValue {
-        self.global_state_mut().take_error_object()
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_error_object(&mut self, value: LuaValue) {
-        self.global_state_mut().set_error_object(value);
-    }
-
-    #[inline(always)]
-    pub(crate) fn error_object(&self) -> LuaValue {
-        self.global_state().error_object()
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_error_msg_raw(&mut self, msg: String) {
-        self.global_state_mut().set_error_msg(msg);
-    }
-
-    #[inline(always)]
-    pub(crate) fn take_error_msg_raw(&mut self) -> String {
-        self.global_state_mut().take_error_msg()
-    }
-
-    #[inline(always)]
-    pub(crate) fn archive_dead_error(&mut self, value: LuaValue, msg: String) {
-        self.dead_error_object = value;
-        self.dead_error_msg = msg;
-    }
-
-    #[inline(always)]
-    pub(crate) fn dead_error_object(&self) -> LuaValue {
-        self.dead_error_object
-    }
-
-    #[inline(always)]
-    pub(crate) fn take_dead_error_object(&mut self) -> LuaValue {
-        std::mem::take(&mut self.dead_error_object)
-    }
-
-    #[inline(always)]
-    pub(crate) fn dead_error_msg(&self) -> &str {
-        &self.dead_error_msg
+        self.global_state_mut().error_with_object(obj)
     }
 
     /// Generate a Lua-style stack traceback
@@ -2704,7 +2650,7 @@ impl LuaState {
             _ => {
                 // Return just the error message without "Runtime Error: " prefix
                 // to match Lua 5.5 behavior (pcall returns the raw error message)
-                self.global_state_mut().take_error_msg()
+                self.global_state_mut().take_error()
             }
         }
     }

@@ -22,6 +22,7 @@ mod sandbox;
 mod shared_proto;
 mod string_arth;
 pub mod table_builder;
+mod error_msg;
 
 use crate::compiler::{LuaLanguageLevel, compile_code, compile_code_with_name};
 use crate::gc::{
@@ -35,6 +36,7 @@ use crate::lua_value::{
 pub use crate::lua_vm::call_info::CallInfo;
 use crate::lua_vm::const_string::ConstString;
 pub use crate::lua_vm::debug_info::DebugInfo;
+use crate::lua_vm::error_msg::ErrorMsg;
 use crate::lua_vm::file_layout::inspect_file_chunk_layout;
 pub use crate::lua_vm::lua_error::LuaError;
 use crate::lua_vm::lua_ref::RefManager;
@@ -250,10 +252,7 @@ pub struct GlobalState {
     pub(crate) const_strings: ConstString,
 
     /// Global error message storage shared by the single-threaded runtime.
-    pub(crate) error_msg: String,
-
-    /// Global error object storage used for pcall/xpcall/coroutine error returns.
-    pub(crate) error_object: LuaValue,
+    pub(crate) error_msg: ErrorMsg,
 
     pub(crate) extra_space: *mut c_void,
 
@@ -292,8 +291,7 @@ impl GlobalState {
             // Record start time for os.clock()
             start_time: PlatformInstant::now(),
             const_strings: cs,
-            error_msg: String::new(),
-            error_object: LuaValue::nil(),
+            error_msg: ErrorMsg::None,
             extra_space: null_mut(),
             io_default_output: None,
             io_default_input: None,
@@ -336,46 +334,29 @@ impl GlobalState {
     #[cold]
     #[inline(never)]
     pub fn error(&mut self, msg: String) -> LuaError {
-        self.error_msg = msg;
+        self.error_msg = ErrorMsg::Msg(msg);
         LuaError::RuntimeError
     }
 
     #[cold]
     #[inline(never)]
-    pub fn error_with_object(&mut self, msg: String, obj: LuaValue) -> LuaError {
-        self.error_object = obj;
-        self.error(msg)
+    pub fn error_with_object(&mut self, obj: LuaValue) -> LuaError {
+        self.error_msg = ErrorMsg::Object(obj);
+        LuaError::RuntimeError
     }
 
     #[inline(always)]
-    pub fn clear_error(&mut self) {
-        self.error_msg.clear();
-        self.error_object = LuaValue::nil();
-    }
-
-    #[inline(always)]
-    pub fn take_error_object(&mut self) -> LuaValue {
-        std::mem::take(&mut self.error_object)
-    }
-
-    #[inline(always)]
-    pub fn set_error_object(&mut self, value: LuaValue) {
-        self.error_object = value;
-    }
-
-    #[inline(always)]
-    pub fn error_object(&self) -> LuaValue {
-        self.error_object
-    }
-
-    #[inline(always)]
-    pub fn take_error_msg(&mut self) -> String {
+    pub fn take_error(&mut self) -> ErrorMsg {
         std::mem::take(&mut self.error_msg)
     }
 
-    #[inline(always)]
-    pub fn set_error_msg(&mut self, msg: String) {
-        self.error_msg = msg;
+    #[inline]
+    pub(crate) fn get_error_object_ref(&self) -> Option<&LuaValue> {
+        if let ErrorMsg::Object(ref obj) = self.error_msg {
+            Some(obj)
+        } else {
+            None
+        }
     }
 
     #[inline]

@@ -332,6 +332,13 @@ fn coroutine_isyieldable(l: &mut LuaState) -> LuaResult<usize> {
     Ok(1)
 }
 
+enum CloseStatus {
+    Dead = 0,
+    Suspended = 1,
+    Normal = 2,
+    Running = 3,
+}
+
 /// coroutine.close([co]) - Close a coroutine, marking it as dead
 /// If no argument, closes the calling thread (self).
 /// Calls __close on any pending to-be-closed variables, then kills the thread.
@@ -354,29 +361,29 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
         // Determine status (matches C Lua's auxstatus)
         let is_self = std::ptr::eq(l as *const LuaState, thread as *const LuaState);
         // 0 = dead, 1 = suspended, 2 = normal, 3 = running
-        let status: u8 = if is_self {
-            3 // COS_RUN: L == co
+        let status: CloseStatus = if is_self {
+            CloseStatus::Running
         } else if thread.dead {
-            0 // COS_DEAD: dead by error
+            CloseStatus::Dead
         } else if thread.is_yielded() {
-            1 // COS_YIELD
+            CloseStatus::Suspended
         } else if thread.call_depth() > 0 {
-            2 // COS_NORM: has active frames, not yielded, not self
+            CloseStatus::Normal
         } else if !thread.stack().is_empty() {
-            1 // Initial state (not started)
+            CloseStatus::Suspended
         } else {
-            0 // COS_DEAD
+            CloseStatus::Dead
         };
 
         match status {
-            0 | 1 => {
+            CloseStatus::Dead | CloseStatus::Suspended => {
                 // OK to close dead or suspended coroutines.
                 // For dead-by-error coroutines, preserve the error.
             }
-            2 => {
+            CloseStatus::Normal => {
                 return Err(l.error("cannot close a normal coroutine".to_string()));
             }
-            3 => {
+            CloseStatus::Running => {
                 if thread.is_main_thread() {
                     return Err(l.error("cannot close main thread".to_string()));
                 }
@@ -400,7 +407,6 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
                 // CloseThread bypasses pcall and propagates to resume.
                 return Err(LuaError::CloseThread);
             }
-            _ => unreachable!(),
         }
 
         // Close all pending to-be-closed variables (calls __close metamethods
