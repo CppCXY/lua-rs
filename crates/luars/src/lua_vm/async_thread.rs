@@ -395,7 +395,7 @@ pub struct AsyncThread {
 
     /// Handle to the owning global state (for resume and registry access).
     /// Not `Send`/`Sync` — this is intentional.
-    vm: GlobalStateHandle,
+    global_state: GlobalStateHandle,
 
     /// Registry reference ID that keeps the thread alive against GC.
     /// Released on drop.
@@ -417,20 +417,24 @@ impl AsyncThread {
     ///
     /// # Arguments
     /// - `thread_val` — A `LuaValue` of type Thread (from `create_thread`)
-    /// - `vm` — Handle to the owning global state
+    /// - `global_state` — Handle to the owning global state
     /// - `args` — Arguments passed to the coroutine's first resume
-    pub(crate) fn new(thread_val: LuaValue, vm: GlobalStateHandle, args: Vec<LuaValue>) -> Self {
+    pub(crate) fn new(
+        thread_val: LuaValue,
+        global_state: GlobalStateHandle,
+        args: Vec<LuaValue>,
+    ) -> Self {
         // Root the thread in the registry so GC won't collect it
         let ref_id = {
-            let vm_ref = vm.as_mut();
-            let lua_ref = vm_ref.create_ref(thread_val);
+            let global_state_ref = global_state.as_mut();
+            let lua_ref = global_state_ref.create_ref(thread_val);
             // Extract the RefId; for threads (GC objects) this will be Registry variant
-            lua_ref.ref_id().unwrap_or(0)
+            lua_ref.ref_id()
         };
 
         AsyncThread {
             thread_val,
-            vm,
+            global_state,
             ref_id,
             pending: None,
             initial_args: Some(args),
@@ -443,7 +447,7 @@ impl AsyncThread {
             Some(state) => state,
             None => {
                 return ResumeResult::Finished(Err(self
-                    .vm
+                    .global_state
                     .as_mut()
                     .main_state()
                     .error("AsyncThread: invalid thread value".to_string())));
@@ -488,7 +492,7 @@ impl AsyncThread {
                         let resume_args = match result {
                             Ok(async_values) => {
                                 // Convert AsyncReturnValues to LuaValues using the VM
-                                let vm = self.vm.as_mut();
+                                let vm = self.global_state.as_mut();
                                 match materialize_values(vm, async_values) {
                                     Ok(values) => values,
                                     Err(e) => return Poll::Ready(Err(e)),
@@ -518,7 +522,7 @@ impl AsyncThread {
             } else {
                 // No pending future — should not reach here
                 return Poll::Ready(Err(self
-                    .vm
+                    .global_state
                     .as_mut()
                     .main_state()
                     .error("AsyncThread: no pending future to poll".to_string())));
@@ -559,7 +563,7 @@ impl Drop for AsyncThread {
     fn drop(&mut self) {
         // Release the registry reference to allow the thread to be GC'd
         if self.ref_id > 0 {
-            let vm = self.vm.as_mut();
+            let vm = self.global_state.as_mut();
             vm.release_ref_id(self.ref_id);
         }
     }
@@ -650,7 +654,7 @@ pub struct AsyncCallHandle {
     /// The runner coroutine thread value.
     thread_val: LuaValue,
     /// Handle to the owning global state.
-    vm: GlobalStateHandle,
+    global_state: GlobalStateHandle,
     /// Registry reference that keeps the thread alive against GC.
     ref_id: RefId,
     /// Whether the handle is still usable.
@@ -664,18 +668,18 @@ impl AsyncCallHandle {
     /// resume. After initialization, the handle is ready for [`call`](Self::call).
     pub(crate) fn new(
         thread_val: LuaValue,
-        vm: GlobalStateHandle,
+        global_state: GlobalStateHandle,
         func: LuaValue,
     ) -> LuaResult<Self> {
         let ref_id = {
-            let vm_ref = vm.as_mut();
-            let lua_ref = vm_ref.create_ref(thread_val);
-            lua_ref.ref_id().unwrap_or(0)
+            let global_state_ref = global_state.as_mut();
+            let lua_ref = global_state_ref.create_ref(thread_val);
+            lua_ref.ref_id()
         };
 
         let handle = AsyncCallHandle {
             thread_val,
-            vm,
+            global_state,
             ref_id,
             alive: true,
         };
@@ -683,7 +687,8 @@ impl AsyncCallHandle {
         // First resume: pass the target function to the runner.
         // The runner captures it via `...` and yields, waiting for call args.
         let thread_state = handle.thread_val.as_thread_mut().ok_or_else(|| {
-            vm.as_mut()
+            global_state
+                .as_mut()
                 .main_state()
                 .error("invalid thread value".to_string())
         })?;
@@ -710,7 +715,7 @@ impl AsyncCallHandle {
             Some(state) => state,
             None => {
                 return ResumeResult::Finished(Err(self
-                    .vm
+                    .global_state
                     .as_mut()
                     .main_state()
                     .error("invalid thread value".to_string())));
@@ -748,7 +753,7 @@ impl AsyncCallHandle {
     pub async fn call(&mut self, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         if !self.alive {
             return Err(self
-                .vm
+                .global_state
                 .as_mut()
                 .main_state()
                 .error("async call handle is no longer alive".to_string()));
@@ -762,7 +767,7 @@ impl AsyncCallHandle {
                     match result {
                         Ok(_) => {
                             return Err(self
-                                .vm
+                                .global_state
                                 .as_mut()
                                 .main_state()
                                 .error("runner coroutine finished unexpectedly".to_string()));
@@ -772,7 +777,7 @@ impl AsyncCallHandle {
                 }
                 ResumeResult::AsyncYield(fut) => match fut.await {
                     Ok(async_values) => {
-                        let vm = self.vm.as_mut();
+                        let vm = self.global_state.as_mut();
                         resume_args = materialize_values(vm, async_values)?;
                     }
                     Err(e) => {
@@ -807,7 +812,7 @@ impl AsyncCallHandle {
 impl Drop for AsyncCallHandle {
     fn drop(&mut self) {
         if self.ref_id > 0 {
-            let vm = self.vm.as_mut();
+            let vm = self.global_state.as_mut();
             vm.release_ref_id(self.ref_id);
         }
     }

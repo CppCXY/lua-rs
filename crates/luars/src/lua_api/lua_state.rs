@@ -152,7 +152,7 @@ impl LuaApi for LuaState {
         self.global_state_mut().register_type_of::<T>(name)
     }
 
-    fn register_type<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table> {
+    fn create_type_register_table<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table> {
         self.register_type_of::<T>(name)?;
         self.get_table(name)?.ok_or_else(|| {
             self.error(format!(
@@ -367,12 +367,6 @@ impl LuaApi for LuaState {
             return Ok(None);
         };
         from_value(self, value, "registry_geti").map(Some)
-    }
-
-    fn registry_seti<T: IntoLua>(&mut self, key: i64, value: T) -> LuaResult<()> {
-        let value = into_single_value(self, value, "registry_seti")?;
-        self.global_state_mut().registry_seti(key, value);
-        Ok(())
     }
 
     fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<Table> {

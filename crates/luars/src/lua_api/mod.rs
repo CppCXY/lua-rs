@@ -54,8 +54,8 @@ pub trait LuaApi {
     where
         F: LuaTypedAsyncCallback<Args, R>;
     fn register_type_of<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<()>;
-    fn register_type<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table>;
     fn register_enum_of<T: LuaEnum>(&mut self, name: &str) -> LuaResult<()>;
+    fn create_type_register_table<T: LuaRegistrable>(&mut self, name: &str) -> LuaResult<Table>;
     fn load<'lua>(&'lua mut self, source: &str) -> Chunk<'lua, Self>
     where
         Self: Sized + chunk::ChunkHost;
@@ -91,6 +91,7 @@ pub trait LuaApi {
     fn table_push<T: IntoLua>(&mut self, table: &Table, value: T) -> LuaResult<()>;
     fn table_pairs<K: FromLua, V: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<(K, V)>>;
     fn table_array<T: FromLua>(&mut self, table: &Table) -> LuaResult<Vec<T>>;
+
     fn get_metatable<T: IntoLua>(&mut self, value: T) -> LuaResult<Option<Table>>;
     fn set_metatable<T: IntoLua>(&mut self, value: T, metatable: Option<&Table>) -> LuaResult<()>;
     fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value>;
@@ -104,7 +105,7 @@ pub trait LuaApi {
     fn registry_get<T: FromLua>(&mut self, key: &str) -> LuaResult<Option<T>>;
     fn registry_set<T: IntoLua>(&mut self, key: &str, value: T) -> LuaResult<()>;
     fn registry_geti<T: FromLua>(&mut self, key: i64) -> LuaResult<Option<T>>;
-    fn registry_seti<T: IntoLua>(&mut self, key: i64, value: T) -> LuaResult<()>;
+
     fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<Table>;
     fn set_type_metatable(
         &mut self,

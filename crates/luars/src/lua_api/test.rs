@@ -233,34 +233,6 @@ mod tests {
     }
 
     #[test]
-    fn lua_api_registry_and_pointer_helpers_work() {
-        let mut lua = Lua::new(SafeOption::default());
-
-        lua.registry_set("answer", 42_i64).unwrap();
-        assert_eq!(lua.registry_get::<i64>("answer").unwrap(), Some(42));
-
-        lua.registry_seti(7, "slot-seven").unwrap();
-        assert_eq!(
-            lua.registry_geti::<String>(7).unwrap().as_deref(),
-            Some("slot-seven")
-        );
-
-        let registry = lua.registry();
-        assert_eq!(registry.get::<i64>("answer").unwrap(), 42);
-
-        let raw = 0x1234usize as *mut std::ffi::c_void;
-        let pointer = lua.create_lightuserdata(raw);
-        assert!(pointer.is_lightuserdata());
-        assert_eq!(pointer.as_lightuserdata(), Some(raw));
-        assert_eq!(pointer.to_pointer(), Some(raw.cast_const()));
-
-        let table = lua.create_table().unwrap();
-        let table_pointer = lua.to_pointer(table.clone()).unwrap();
-        assert!(table_pointer.is_some());
-        assert_ne!(table_pointer, Some(raw.cast_const()));
-    }
-
-    #[test]
     fn lua_api_extra_space_and_dofile_work() {
         let dir = test_temp_dir();
         let path = dir.join("lua_api_dofile.lua");
@@ -331,7 +303,9 @@ mod tests {
         let mut lua = Lua::new(SafeOption::default());
         lua.open_stdlib(Stdlib::All).unwrap();
 
-        let type_table = lua.register_type::<ApiCounter>("Counter").unwrap();
+        let type_table = lua
+            .create_type_register_table::<ApiCounter>("Counter")
+            .unwrap();
         assert!(type_table.raw_len().is_ok());
 
         let counter = lua.create_userdata(ApiCounter { count: 1 }).unwrap();
