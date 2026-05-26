@@ -1399,6 +1399,51 @@ impl GlobalState {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct GlobalStateHandle(NonNull<GlobalState>);
+
+impl GlobalStateHandle {
+    pub(crate) fn from_global(state: &mut GlobalState) -> Self {
+        Self(NonNull::from(state))
+    }
+
+    pub(crate) fn as_ref<'a>(self) -> &'a GlobalState {
+        unsafe { self.0.as_ref() }
+    }
+
+    pub(crate) fn as_mut<'a>(mut self) -> &'a mut GlobalState {
+        unsafe { self.0.as_mut() }
+    }
+
+    pub(crate) fn gc_debt(self) -> isize {
+        self.as_ref().gc.gc_debt
+    }
+
+    pub(crate) fn gc_barrier(
+        self,
+        state: *mut LuaState,
+        owner_ptr: GcObjectPtr,
+        value_gc_ptr: GcObjectPtr,
+    ) {
+        self.as_mut()
+            .gc
+            .barrier(unsafe { &mut *state }, owner_ptr, value_gc_ptr);
+    }
+
+    pub(crate) fn check_gc(self, state: *mut LuaState) -> bool {
+        self.as_mut().check_gc(unsafe { &mut *state })
+    }
+
+    pub(crate) fn full_gc(self, state: *mut LuaState, emergency: bool) {
+        self.as_mut().full_gc(unsafe { &mut *state }, emergency);
+    }
+
+    pub(crate) fn change_gc_mode(self, state: *mut LuaState, kind: GcKind) {
+        self.as_mut().gc.change_mode(unsafe { &mut *state }, kind);
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1598,49 +1643,5 @@ mod tests {
         assert_eq!(type_name1, type_name2);
         assert!(gc_tm1.as_ref().header.is_shared());
         assert!(type_name1.as_ref().header.is_shared());
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct GlobalStateHandle(NonNull<GlobalState>);
-
-impl GlobalStateHandle {
-    pub(crate) fn from_global(state: &mut GlobalState) -> Self {
-        Self(NonNull::from(state))
-    }
-
-    pub(crate) fn as_ref<'a>(self) -> &'a GlobalState {
-        unsafe { self.0.as_ref() }
-    }
-
-    pub(crate) fn as_mut<'a>(mut self) -> &'a mut GlobalState {
-        unsafe { self.0.as_mut() }
-    }
-
-    pub(crate) fn gc_debt(self) -> isize {
-        self.as_ref().gc.gc_debt
-    }
-
-    pub(crate) fn gc_barrier(
-        self,
-        state: *mut LuaState,
-        owner_ptr: GcObjectPtr,
-        value_gc_ptr: GcObjectPtr,
-    ) {
-        self.as_mut()
-            .gc
-            .barrier(unsafe { &mut *state }, owner_ptr, value_gc_ptr);
-    }
-
-    pub(crate) fn check_gc(self, state: *mut LuaState) -> bool {
-        self.as_mut().check_gc(unsafe { &mut *state })
-    }
-
-    pub(crate) fn full_gc(self, state: *mut LuaState, emergency: bool) {
-        self.as_mut().full_gc(unsafe { &mut *state }, emergency);
-    }
-
-    pub(crate) fn change_gc_mode(self, state: *mut LuaState, kind: GcKind) {
-        self.as_mut().gc.change_mode(unsafe { &mut *state }, kind);
     }
 }

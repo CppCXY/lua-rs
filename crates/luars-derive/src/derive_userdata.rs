@@ -31,7 +31,7 @@ fn gen_lua_convert_impls(name: &Ident) -> proc_macro2::TokenStream {
         impl luars::IntoLua for #name {
             fn into_lua(self, state: &mut luars::LuaState) -> Result<usize, String> {
                 let userdata = state
-                    .create_userdata(luars::LuaUserdata::new(self))
+                    .create_raw_userdata(luars::LuaUserdata::new(self))
                     .map_err(|e| format!("{:?}", e))?;
                 state.push_value(userdata).map_err(|e| format!("{:?}", e))?;
                 Ok(1)

@@ -8,7 +8,7 @@ mod tests {
     #[cfg(feature = "serde")]
     use crate::lua_api::Value;
     use crate::{
-        GlobalState, LuaApi, LuaAsyncApi, LuaUserData, LuaValueKind, SafeOption, Stdlib,
+        GlobalState, LuaApi, LuaAsyncApi, LuaUserData, LuaValueKind, SafeOption, StackApi, Stdlib,
         lua_api::{Function, Lua, Table},
         lua_methods,
     };
@@ -623,6 +623,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn stack_api_uses_lua_c_api_push_names() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        {
+            let state = vm.main_state();
+            let base_top = state.checkpoint();
+
+            state.lua_pushnil().unwrap();
+            state.lua_pushboolean(true).unwrap();
+            state.lua_pushinteger(42).unwrap();
+            state.lua_pushnumber(3.5).unwrap();
+            state.lua_pushstring("hello").unwrap();
+            state.lua_pushvalue(crate::LuaValue::integer(7)).unwrap();
+
+            assert_eq!(state.get_top(), base_top + 6);
+            assert!(state.stack_get(base_top).unwrap().is_nil());
+            assert_eq!(
+                state.stack_get(base_top + 1).unwrap().as_boolean(),
+                Some(true)
+            );
+            assert_eq!(
+                state.stack_get(base_top + 2).unwrap().as_integer(),
+                Some(42)
+            );
+            assert_eq!(
+                state.stack_get(base_top + 3).unwrap().as_number(),
+                Some(3.5)
+            );
+            assert_eq!(state.stack_get(base_top + 4).unwrap().to_string(), "hello");
+            assert_eq!(state.stack_get(base_top + 5).unwrap().as_integer(), Some(7));
+
+            state.restore(base_top);
+        }
+
+        {
+            let state = vm.main_state();
+            let base_top = state.checkpoint();
+
+            state.lua_pushinteger(99).unwrap();
+            state.lua_pushstring("world").unwrap();
+
+            assert_eq!(state.value_at(base_top).unwrap().as_integer(), Some(99));
+            assert_eq!(state.value_at(base_top + 1).unwrap().to_string(), "world");
+
+            state.restore(base_top);
+        }
     }
 
     #[cfg(feature = "serde")]

@@ -4,70 +4,8 @@ use crate::lua_api::{Chunk, Function, LuaApi, LuaString, Table, Value};
 use crate::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
 use crate::{
     FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
-    LuaState, LuaUserdata, LuaValue, LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
+    LuaState, LuaUserdata, LuaValue, LuaValueKind, StackApi, Stdlib, UserDataRef, UserDataTrait,
 };
-
-fn collect_values<T: IntoLua>(state: &mut LuaState, value: T) -> LuaResult<Vec<LuaValue>> {
-    let base_top = state.get_top();
-
-    let pushed = match value.into_lua(state) {
-        Ok(pushed) => pushed,
-        Err(err) => {
-            state.set_top_raw(base_top);
-            return Err(state.error(err));
-        }
-    };
-
-    let mut values = Vec::with_capacity(pushed);
-    for index in base_top..base_top + pushed {
-        let Some(value) = state.stack_get(index) else {
-            state.set_top_raw(base_top);
-            return Err(
-                state.error("internal error: failed to collect Lua values from stack".to_owned())
-            );
-        };
-        values.push(value);
-    }
-    state.set_top_raw(base_top);
-
-    Ok(values)
-}
-
-fn into_single_value<T: IntoLua>(
-    state: &mut LuaState,
-    value: T,
-    api_name: &str,
-) -> LuaResult<LuaValue> {
-    let base_top = state.get_top();
-
-    let pushed = match value.into_lua(state) {
-        Ok(pushed) => pushed,
-        Err(err) => {
-            state.set_top_raw(base_top);
-            return Err(state.error(err));
-        }
-    };
-
-    if pushed != 1 {
-        state.set_top_raw(base_top);
-        return Err(state.error(format!(
-            "{} expects exactly one Lua value, got {}",
-            api_name,
-            pushed
-        )));
-    }
-
-    let Some(value) = state.stack_get(base_top) else {
-        state.set_top_raw(base_top);
-        return Err(state.error("internal error: failed to collect Lua value from stack".to_owned()));
-    };
-    state.set_top_raw(base_top);
-    Ok(value)
-}
-
-fn from_value<T: FromLua>(state: &mut LuaState, value: LuaValue, api_name: &str) -> LuaResult<T> {
-    T::from_lua(value, state).map_err(|msg| state.error(format!("{}: {}", api_name, msg)))
-}
 
 impl LuaApi for LuaState {
     fn open_stdlib(&mut self, lib: Stdlib) -> LuaResult<()> {
@@ -99,7 +37,7 @@ impl LuaApi for LuaState {
             .into_iter()
             .next()
             .unwrap_or_else(LuaValue::nil);
-        from_value(self, value, "eval")
+        self.from_value(value, "eval")
     }
 
     fn eval_multi<R: FromLuaMulti>(&mut self, source: &str) -> LuaResult<R> {
@@ -108,7 +46,7 @@ impl LuaApi for LuaState {
     }
 
     fn set_global<T: IntoLua>(&mut self, name: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(self, value, "set_global")?;
+        let value = self.collect_single_value(value, "set_global")?;
         LuaState::set_global(self, name, value)
     }
 
@@ -125,18 +63,18 @@ impl LuaApi for LuaState {
     }
 
     fn call_global<A: IntoLua, R: FromLuaMulti>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        let args = collect_values(self, args)?;
+        let args = self.collect_values(args, "call_global")?;
         let values = LuaState::call_global(self, name, args)?;
         R::from_lua_multi(values, self).map_err(|msg| self.error(format!("call_global: {}", msg)))
     }
 
     fn call_global1<A: IntoLua, R: FromLua>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        let args = collect_values(self, args)?;
+        let args = self.collect_values(args, "call_global1")?;
         let value = LuaState::call_global(self, name, args)?
             .into_iter()
             .next()
             .unwrap_or_else(LuaValue::nil);
-        from_value(self, value, "call_global1")
+        self.from_value(value, "call_global1")
     }
 
     fn register_function<F, Args, R>(&mut self, name: &str, f: F) -> LuaResult<()>
@@ -284,27 +222,27 @@ impl LuaApi for LuaState {
     }
 
     fn table_set<T: IntoLua>(&mut self, table: &Table, key: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(self, value, "table_set")?;
+        let value = self.collect_single_value(value, "table_set")?;
         table.inner.set(key, value)
     }
 
     fn table_seti<T: IntoLua>(&mut self, table: &Table, key: i64, value: T) -> LuaResult<()> {
-        let value = into_single_value(self, value, "table_seti")?;
+        let value = self.collect_single_value(value, "table_seti")?;
         table.inner.seti(key, value)
     }
 
     fn table_get<T: FromLua>(&mut self, table: &Table, key: &str) -> LuaResult<T> {
         let value = table.inner.get(key)?;
-        from_value(self, value, "table_get")
+        self.from_value(value, "table_get")
     }
 
     fn table_geti<T: FromLua>(&mut self, table: &Table, key: i64) -> LuaResult<T> {
         let value = table.inner.geti(key)?;
-        from_value(self, value, "table_geti")
+        self.from_value(value, "table_geti")
     }
 
     fn table_push<T: IntoLua>(&mut self, table: &Table, value: T) -> LuaResult<()> {
-        let value = into_single_value(self, value, "table_push")?;
+        let value = self.collect_single_value(value, "table_push")?;
         table.inner.push(value)
     }
 
@@ -329,17 +267,17 @@ impl LuaApi for LuaState {
     }
 
     fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value> {
-        let value = into_single_value(self, value, "pack")?;
+        let value = self.collect_single_value(value, "pack")?;
         Ok(Value::new(self.to_any_ref(value)))
     }
 
     fn unpack<T: FromLua>(&mut self, value: Value) -> LuaResult<T> {
-        from_value(self, value.to_value(), "unpack")
+        self.from_value(value.to_value(), "unpack")
     }
 
     fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U> {
-        let value = into_single_value(self, value, "convert")?;
-        from_value(self, value, "convert")
+        let value = self.collect_single_value(value, "convert")?;
+        self.from_value(value, "convert")
     }
 
     fn set_extra_space(&mut self, pointer: *mut c_void) {
@@ -370,11 +308,11 @@ impl LuaApi for LuaState {
         let Some(value) = self.global_state_mut().registry_get(key)? else {
             return Ok(None);
         };
-        from_value(self, value, "registry_get").map(Some)
+        self.from_value(value, "registry_get").map(Some)
     }
 
     fn registry_set<T: IntoLua>(&mut self, key: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(self, value, "registry_set")?;
+        let value = self.collect_single_value(value, "registry_set")?;
         self.global_state_mut().registry_set(key, value)
     }
 
@@ -382,7 +320,7 @@ impl LuaApi for LuaState {
         let Some(value) = self.global_state().registry_geti(key) else {
             return Ok(None);
         };
-        from_value(self, value, "registry_geti").map(Some)
+        self.from_value(value, "registry_geti").map(Some)
     }
 
     fn get_type_metatable(&mut self, kind: LuaValueKind) -> Option<Table> {
@@ -411,5 +349,120 @@ impl LuaApi for LuaState {
     fn gc_restart(&mut self) {
         self.global_state_mut().gc.gc_stopped = false;
         self.global_state_mut().gc.set_debt(0);
+    }
+}
+
+impl StackApi for LuaState {
+    #[inline]
+    fn checkpoint(&self) -> usize {
+        self.get_top()
+    }
+
+    #[inline]
+    fn restore(&mut self, top: usize) {
+        self.set_top_raw(top);
+    }
+
+    #[inline]
+    fn value_at(&self, index: usize) -> Option<LuaValue> {
+        self.stack_get(index)
+    }
+
+    #[inline]
+    fn lua_pushvalue(&mut self, value: LuaValue) -> LuaResult<()> {
+        self.push_value(value)
+    }
+
+    #[inline]
+    fn lua_pushnil(&mut self) -> LuaResult<()> {
+        self.push_value(LuaValue::nil())
+    }
+
+    #[inline]
+    fn lua_pushboolean(&mut self, value: bool) -> LuaResult<()> {
+        self.push_value(LuaValue::boolean(value))
+    }
+
+    #[inline]
+    fn lua_pushinteger(&mut self, value: i64) -> LuaResult<()> {
+        self.push_value(LuaValue::integer(value))
+    }
+
+    #[inline]
+    fn lua_pushnumber(&mut self, value: f64) -> LuaResult<()> {
+        self.push_value(LuaValue::number(value))
+    }
+
+    #[inline]
+    fn lua_pushstring(&mut self, value: &str) -> LuaResult<()> {
+        let value = self.create_raw_string(value)?;
+        self.push_value(value)
+    }
+
+    fn collect_values<T: IntoLua>(&mut self, value: T, api_name: &str) -> LuaResult<Vec<LuaValue>> {
+        let base_top = self.checkpoint();
+
+        let pushed = match value.into_lua(self) {
+            Ok(pushed) => pushed,
+            Err(err) => {
+                self.restore(base_top);
+                return Err(self.error(format!("{}: {}", api_name, err)));
+            }
+        };
+
+        let mut values = Vec::with_capacity(pushed);
+        for index in base_top..base_top + pushed {
+            let Some(value) = self.value_at(index) else {
+                self.restore(base_top);
+                return Err(self.error(format!(
+                    "{}: internal error: failed to collect Lua values from stack",
+                    api_name
+                )));
+            };
+            values.push(value);
+        }
+        self.restore(base_top);
+
+        Ok(values)
+    }
+
+    fn collect_single_value<T: IntoLua>(
+        &mut self,
+        value: T,
+        api_name: &str,
+    ) -> LuaResult<LuaValue> {
+        let base_top = self.checkpoint();
+
+        let pushed = match value.into_lua(self) {
+            Ok(pushed) => pushed,
+            Err(err) => {
+                self.restore(base_top);
+                return Err(self.error(format!("{}: {}", api_name, err)));
+            }
+        };
+
+        if pushed != 1 {
+            self.restore(base_top);
+            return Err(self.error(format!(
+                "{} expects exactly one Lua value, got {}",
+                api_name, pushed
+            )));
+        }
+
+        let Some(value) = self.value_at(base_top) else {
+            self.restore(base_top);
+            return Err(self.error(format!(
+                "{}: internal error: failed to collect Lua value from stack",
+                api_name
+            )));
+        };
+        self.restore(base_top);
+
+        Ok(value)
+    }
+
+    #[inline]
+    fn from_value<T: FromLua>(&mut self, value: LuaValue, api_name: &str) -> LuaResult<T> {
+        T::from_lua(value, self).map_err(|msg| self.error(format!("{}: {}", api_name, msg)))
     }
 }

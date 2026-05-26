@@ -8,7 +8,6 @@ mod lua_string;
 mod scope;
 mod table;
 mod test;
-mod util;
 mod value;
 
 pub use chunk::Chunk;
@@ -22,8 +21,8 @@ pub use value::Value;
 #[cfg(feature = "sandbox")]
 use crate::SandboxConfig;
 use crate::{
-    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
-    LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
+    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable,
+    LuaResult, LuaValue, LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
     lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback},
 };
 
@@ -115,6 +114,25 @@ pub trait LuaApi {
     fn get_error_message(&mut self, error: LuaError) -> LuaFullError;
     fn gc_stop(&mut self);
     fn gc_restart(&mut self);
+}
+
+pub trait StackApi {
+    fn checkpoint(&self) -> usize;
+    fn restore(&mut self, top: usize);
+    fn value_at(&self, index: usize) -> Option<LuaValue>;
+    fn lua_pushvalue(&mut self, value: LuaValue) -> LuaResult<()>;
+    fn lua_pushnil(&mut self) -> LuaResult<()>;
+    fn lua_pushboolean(&mut self, value: bool) -> LuaResult<()>;
+    fn lua_pushinteger(&mut self, value: i64) -> LuaResult<()>;
+    fn lua_pushnumber(&mut self, value: f64) -> LuaResult<()>;
+    fn lua_pushstring(&mut self, value: &str) -> LuaResult<()>;
+    fn collect_values<T: IntoLua>(&mut self, value: T, api_name: &str) -> LuaResult<Vec<LuaValue>>;
+    fn collect_single_value<T: IntoLua>(
+        &mut self,
+        value: T,
+        api_name: &str,
+    ) -> LuaResult<LuaValue>;
+    fn from_value<T: FromLua>(&mut self, value: LuaValue, api_name: &str) -> LuaResult<T>;
 }
 
 /// Async high-level API shared by safe host-side Lua handles.

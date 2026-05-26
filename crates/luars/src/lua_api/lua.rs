@@ -12,9 +12,8 @@ use luars::{
 
 #[cfg(feature = "sandbox")]
 use crate::LuaSandboxApi;
-use crate::lua_api::util::{collect_values, from_value, into_single_value};
 use crate::lua_api::{Chunk, Function, LuaString, Scope, Table, Value};
-use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError};
+use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError, StackApi};
 
 /// Safe, embedding-oriented Lua runtime.
 ///
@@ -110,9 +109,9 @@ impl Lua {
     pub(crate) fn pack_multi<T: IntoLua>(
         &mut self,
         value: T,
-        _api_name: &str,
+        api_name: &str,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        collect_values(&mut self.global_state_owner, value)
+        self.global_state_owner.main_state().collect_values(value, api_name)
     }
 
     #[cfg(feature = "sandbox")]
@@ -155,7 +154,7 @@ impl Lua {
         value: luars::LuaValue,
         api_name: &str,
     ) -> LuaResult<T> {
-        from_value(&mut self.global_state_owner, value, api_name)
+        self.global_state_owner.main_state().from_value(value, api_name)
     }
 
     /// Run a lexical scope that can create non-`'static` Lua callbacks and borrowed userdata.
@@ -237,7 +236,7 @@ impl LuaApi for Lua {
             .into_iter()
             .next()
             .unwrap_or_else(luars::LuaValue::nil);
-        from_value(&mut self.global_state_owner, value, "eval")
+        self.global_state_owner.main_state().from_value(value, "eval")
     }
 
     #[inline]
@@ -249,7 +248,10 @@ impl LuaApi for Lua {
 
     #[inline]
     fn set_global<T: IntoLua>(&mut self, name: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.global_state_owner, value, "set_global")?;
+        let value = self
+            .global_state_owner
+            .main_state()
+            .collect_single_value(value, "set_global")?;
         self.global_state_owner.set_global(name, value)
     }
 
@@ -265,7 +267,10 @@ impl LuaApi for Lua {
 
     #[inline]
     fn call_global<A: IntoLua, R: FromLuaMulti>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        let values = collect_values(&mut self.global_state_owner, args)?;
+        let values = self
+            .global_state_owner
+            .main_state()
+            .collect_values(args, "call_global")?;
         self.global_state_owner
             .main_state()
             .call_global(name, values)
@@ -274,7 +279,10 @@ impl LuaApi for Lua {
 
     #[inline]
     fn call_global1<A: IntoLua, R: FromLua>(&mut self, name: &str, args: A) -> LuaResult<R> {
-        let args = collect_values(&mut self.global_state_owner, args)?;
+        let args = self
+            .global_state_owner
+            .main_state()
+            .collect_values(args, "call_global1")?;
         let values = self
             .global_state_owner
             .main_state()
@@ -436,31 +444,40 @@ impl LuaApi for Lua {
 
     #[inline]
     fn table_set<T: IntoLua>(&mut self, table: &Table, key: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.global_state_owner, value, "table_set")?;
+        let value = self
+            .global_state_owner
+            .main_state()
+            .collect_single_value(value, "table_set")?;
         table.inner.set(key, value)
     }
 
     #[inline]
     fn table_seti<T: IntoLua>(&mut self, table: &Table, key: i64, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.global_state_owner, value, "table_seti")?;
+        let value = self
+            .global_state_owner
+            .main_state()
+            .collect_single_value(value, "table_seti")?;
         table.inner.seti(key, value)
     }
 
     #[inline]
     fn table_get<T: FromLua>(&mut self, table: &Table, key: &str) -> LuaResult<T> {
         let value = table.inner.get(key)?;
-        from_value(&mut self.global_state_owner, value, "table_get")
+        self.global_state_owner.main_state().from_value(value, "table_get")
     }
 
     #[inline]
     fn table_geti<T: FromLua>(&mut self, table: &Table, key: i64) -> LuaResult<T> {
         let value = table.inner.geti(key)?;
-        from_value(&mut self.global_state_owner, value, "table_geti")
+        self.global_state_owner.main_state().from_value(value, "table_geti")
     }
 
     #[inline]
     fn table_push<T: IntoLua>(&mut self, table: &Table, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.global_state_owner, value, "table_push")?;
+        let value = self
+            .global_state_owner
+            .main_state()
+            .collect_single_value(value, "table_push")?;
         table.inner.push(value)
     }
 
@@ -490,7 +507,10 @@ impl LuaApi for Lua {
 
     #[inline]
     fn pack<T: IntoLua>(&mut self, value: T) -> LuaResult<Value> {
-        let value = into_single_value(&mut self.global_state_owner, value, "pack")?;
+        let value = self
+            .global_state_owner
+            .main_state()
+            .collect_single_value(value, "pack")?;
         Ok(Value::new(self.global_state_owner.to_ref(value)))
     }
 
@@ -501,7 +521,10 @@ impl LuaApi for Lua {
 
     #[inline]
     fn convert<T: IntoLua, U: FromLua>(&mut self, value: T) -> LuaResult<U> {
-        let value = into_single_value(&mut self.global_state_owner, value, "convert")?;
+        let value = self
+            .global_state_owner
+            .main_state()
+            .collect_single_value(value, "convert")?;
         self.unpack_value(value, "convert")
     }
 
@@ -548,7 +571,10 @@ impl LuaApi for Lua {
 
     #[inline]
     fn registry_set<T: IntoLua>(&mut self, key: &str, value: T) -> LuaResult<()> {
-        let value = into_single_value(&mut self.global_state_owner, value, "registry_set")?;
+        let value = self
+            .global_state_owner
+            .main_state()
+            .collect_single_value(value, "registry_set")?;
         self.global_state_owner.registry_set(key, value)
     }
 
@@ -719,8 +745,9 @@ impl LuaSandboxApi for Lua {
         name: &str,
         value: T,
     ) -> LuaResult<()> {
-        let value =
-            into_single_value(&mut self.global_state_owner, value, "sandbox_insert_global")?;
+        let value = self
+            .global_state_owner
+            .collect_single_value(value, "sandbox_insert_global")?;
         config.insert_global(name, value);
         Ok(())
     }

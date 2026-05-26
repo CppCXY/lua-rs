@@ -1,4 +1,4 @@
-use crate::{FromLua, FromLuaMulti, Function, IntoLua, Lua, LuaResult, LuaState};
+use crate::{FromLua, FromLuaMulti, Function, IntoLua, Lua, LuaResult, LuaState, StackApi};
 #[cfg(feature = "sandbox")]
 use luars::SandboxConfig;
 
@@ -313,28 +313,7 @@ impl ChunkHost for LuaState {
         value: T,
         api_name: &str,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        let base_top = self.get_top();
-        let pushed = match value.into_lua(self) {
-            Ok(pushed) => pushed,
-            Err(err) => {
-                self.set_top_raw(base_top);
-                return Err(self.error(format!("{}: {}", api_name, err)));
-            }
-        };
-
-        let mut values = Vec::with_capacity(pushed);
-        for index in base_top..base_top + pushed {
-            let Some(value) = self.stack_get(index) else {
-                self.set_top_raw(base_top);
-                return Err(self.error(format!(
-                    "{}: internal error: failed to collect Lua values from stack",
-                    api_name
-                )));
-            };
-            values.push(value);
-        }
-        self.set_top_raw(base_top);
-        Ok(values)
+        self.collect_values(value, api_name)
     }
 
     fn unpack_multi_values<R: FromLuaMulti>(
@@ -346,6 +325,6 @@ impl ChunkHost for LuaState {
     }
 
     fn unpack_value<T: FromLua>(&mut self, value: luars::LuaValue, api_name: &str) -> LuaResult<T> {
-        T::from_lua(value, self).map_err(|msg| self.error(format!("{}: {}", api_name, msg)))
+        self.from_value(value, api_name)
     }
 }

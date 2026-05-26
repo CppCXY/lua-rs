@@ -1992,7 +1992,7 @@ impl LuaState {
     /// This keeps the low-level stack API interoperable with high-level handle
     /// types like `Table`, `LuaString`, `Function`, and `Value`.
     #[inline]
-    pub fn push_into_value<T: IntoLua>(&mut self, value: T) -> LuaResult<()> {
+    pub fn push<T: IntoLua>(&mut self, value: T) -> LuaResult<()> {
         let pushed = value.into_lua(self).map_err(|msg| self.error(msg))?;
         if pushed != 1 {
             return Err(self.error(format!(

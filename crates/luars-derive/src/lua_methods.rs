@@ -392,7 +392,7 @@ fn gen_return_push(
                 // Self → wrap in LuaUserdata and push
                 quote! {
                     let __ud = luars::LuaUserdata::new(__result);
-                    let __ud_val = __l.create_userdata(__ud)?;
+                    let __ud_val = __l.create_raw_userdata(__ud)?;
                     __l.push_value(__ud_val)?;
                     Ok(1)
                 }
