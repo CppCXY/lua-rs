@@ -202,16 +202,41 @@ fn collect_single_value<T: IntoLua>(
     value: T,
     context: &str,
 ) -> LuaResult<LuaValue> {
-    let mut values = collect_into_lua_values(global_state.main_state(), value)
-        .map_err(|msg| global_state.error(msg))?;
-    if values.len() != 1 {
+    let base_top = global_state.main_state().get_top();
+
+    let pushed = {
+        let state = global_state.main_state();
+        match value.into_lua(state) {
+            Ok(pushed) => pushed,
+            Err(err) => {
+                state.set_top_raw(base_top);
+                return Err(global_state.error(err));
+            }
+        }
+    };
+
+    if pushed != 1 {
+        global_state.main_state().set_top_raw(base_top);
         return Err(global_state.error(format!(
             "{} expects exactly one Lua value, got {}",
             context,
-            values.len()
+            pushed
         )));
     }
-    Ok(values.pop().unwrap())
+
+    let result = {
+        let state = global_state.main_state();
+        let Some(value) = state.stack_get(base_top) else {
+            state.set_top_raw(base_top);
+            return Err(global_state.error(
+                "internal error: failed to collect Lua value from stack".to_owned(),
+            ));
+        };
+        state.set_top_raw(base_top);
+        value
+    };
+
+    Ok(result)
 }
 
 /// Store a LuaValue in the VM registry and return its RefId.
@@ -247,9 +272,9 @@ pub struct LuaTableRef {
 impl LuaTableRef {
     /// Create from an already-registered ref id. The caller guarantees the
     /// value at `ref_id` is a table.
-    pub(crate) fn from_raw(ref_id: RefId, vm: GlobalStateHandle) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, global_state: GlobalStateHandle) -> Self {
         LuaTableRef {
-            inner: RefInner::new(ref_id, vm),
+            inner: RefInner::new(ref_id, global_state),
         }
     }
 
@@ -573,9 +598,9 @@ pub struct LuaStringRef {
 }
 
 impl LuaStringRef {
-    pub(crate) fn from_raw(ref_id: RefId, vm: GlobalStateHandle) -> Self {
+    pub(crate) fn from_raw(ref_id: RefId, global_state: GlobalStateHandle) -> Self {
         LuaStringRef {
-            inner: RefInner::new(ref_id, vm),
+            inner: RefInner::new(ref_id, global_state),
         }
     }
 

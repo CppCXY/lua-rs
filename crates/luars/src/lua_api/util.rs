@@ -5,15 +5,40 @@ pub(crate) fn into_single_value<T: IntoLua>(
     value: T,
     api_name: &str,
 ) -> LuaResult<luars::LuaValue> {
-    let mut values = collect_values(vm, value)?;
-    if values.len() != 1 {
+    let base_top = vm.main_state().get_top();
+
+    let pushed = {
+        let state = vm.main_state();
+        match value.into_lua(state) {
+            Ok(pushed) => pushed,
+            Err(err) => {
+                state.set_top_raw(base_top);
+                return Err(state.error(err));
+            }
+        }
+    };
+
+    if pushed != 1 {
+        vm.main_state().set_top_raw(base_top);
         return Err(vm.error(format!(
             "{} expects exactly one Lua value, got {}",
-            api_name,
-            values.len()
+            api_name, pushed
         )));
     }
-    Ok(values.pop().unwrap())
+
+    let result = {
+        let state = vm.main_state();
+        let Some(value) = state.stack_get(base_top) else {
+            state.set_top_raw(base_top);
+            return Err(state.error(
+                "internal error: failed to collect Lua value from stack".to_owned(),
+            ));
+        };
+        state.set_top_raw(base_top);
+        value
+    };
+
+    Ok(result)
 }
 
 pub(crate) fn collect_values<T: IntoLua>(

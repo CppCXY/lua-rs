@@ -1609,10 +1609,6 @@ impl GlobalStateHandle {
         Self(NonNull::from(state))
     }
 
-    pub(crate) fn dangling() -> Self {
-        Self(NonNull::dangling())
-    }
-
     pub(crate) fn as_ref<'a>(self) -> &'a GlobalState {
         unsafe { self.0.as_ref() }
     }

@@ -38,15 +38,31 @@ fn into_single_value<T: IntoLua>(
     value: T,
     api_name: &str,
 ) -> LuaResult<LuaValue> {
-    let mut values = collect_values(state, value)?;
-    if values.len() != 1 {
+    let base_top = state.get_top();
+
+    let pushed = match value.into_lua(state) {
+        Ok(pushed) => pushed,
+        Err(err) => {
+            state.set_top_raw(base_top);
+            return Err(state.error(err));
+        }
+    };
+
+    if pushed != 1 {
+        state.set_top_raw(base_top);
         return Err(state.error(format!(
             "{} expects exactly one Lua value, got {}",
             api_name,
-            values.len()
+            pushed
         )));
     }
-    Ok(values.pop().unwrap())
+
+    let Some(value) = state.stack_get(base_top) else {
+        state.set_top_raw(base_top);
+        return Err(state.error("internal error: failed to collect Lua value from stack".to_owned()));
+    };
+    state.set_top_raw(base_top);
+    Ok(value)
 }
 
 fn from_value<T: FromLua>(state: &mut LuaState, value: LuaValue, api_name: &str) -> LuaResult<T> {

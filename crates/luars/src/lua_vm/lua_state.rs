@@ -4753,13 +4753,3 @@ impl LuaState {
     }
 }
 
-impl Default for LuaState {
-    fn default() -> Self {
-        Self::new(
-            1,
-            GlobalStateHandle::dangling(),
-            false,
-            SafeOption::default(),
-        )
-    }
-}
