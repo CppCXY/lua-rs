@@ -42,7 +42,7 @@ mod string_interner;
 use std::collections::HashSet;
 
 use crate::{
-    LuaResult, LuaRawTable,
+    LuaRawTable, LuaResult,
     lua_value::LuaValue,
     lua_vm::{ErrorMsg, LuaError, LuaState, SafeOption, TmKind},
 };

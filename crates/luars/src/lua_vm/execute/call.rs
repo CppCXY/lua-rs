@@ -156,11 +156,9 @@ pub fn call_c_function(
     // Pop frame
     lua_state.pop_c_frame();
 
-    // Move results + restore caller top
-    // call_depth >= 1 guaranteed: call_c_function is always called from
-    // within a Lua frame (precall / dispatch), so popping the C frame
-    // leaves at least the caller Lua frame.
-    debug_assert!(lua_state.call_depth() > 0);
+    // Move results + restore caller top. Top-level host calls can invoke a
+    // C function without any enclosing Lua frame, so after popping the C frame
+    // call_depth may be zero here.
     {
         let stack = lua_state.stack_mut();
         match nresults {
@@ -192,6 +190,15 @@ pub fn call_c_function(
     }
 
     // Restore caller top
+    if lua_state.call_depth() == 0 {
+        if nresults >= 0 {
+            lua_state.set_top_raw(func_idx + nresults as usize);
+        } else {
+            lua_state.set_top_raw(func_idx + n);
+        }
+        return Ok(());
+    }
+
     let ci_idx = lua_state.call_depth() - 1;
     if nresults >= 0 {
         // Fixed results: restore caller's frame top

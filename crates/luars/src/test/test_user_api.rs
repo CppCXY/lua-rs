@@ -120,7 +120,9 @@ fn test_lua_state_create_userdata_handle_survives_gc() {
     let mut vm = GlobalState::new(SafeOption::default());
     let state = vm.main_state();
 
-    let mut counter = state.create_userdata_handle(ApiCounter { count: 7 }).unwrap();
+    let mut counter = state
+        .create_userdata_handle(ApiCounter { count: 7 })
+        .unwrap();
     state.collect_garbage().unwrap();
 
     assert_eq!(counter.get().unwrap().count, 7);

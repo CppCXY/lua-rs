@@ -2,6 +2,7 @@
 ///
 /// This module provides a way to store Lua values in the registry and get a stable reference to them.
 /// This is useful for keeping values alive across GC cycles and for passing values between Rust and Lua.
+use std::ffi::c_void;
 use std::marker::PhantomData;
 
 use crate::LuaResult;
@@ -219,8 +220,7 @@ fn collect_single_value<T: IntoLua>(
         global_state.main_state().set_top_raw(base_top);
         return Err(global_state.error(format!(
             "{} expects exactly one Lua value, got {}",
-            context,
-            pushed
+            context, pushed
         )));
     }
 
@@ -228,9 +228,8 @@ fn collect_single_value<T: IntoLua>(
         let state = global_state.main_state();
         let Some(value) = state.stack_get(base_top) else {
             state.set_top_raw(base_top);
-            return Err(global_state.error(
-                "internal error: failed to collect Lua value from stack".to_owned(),
-            ));
+            return Err(global_state
+                .error("internal error: failed to collect Lua value from stack".to_owned()));
         };
         state.set_top_raw(base_top);
         value
@@ -516,6 +515,205 @@ impl LuaFunctionRef {
         LuaFunctionRef {
             inner: RefInner::new(ref_id, vm),
         }
+    }
+
+    /// Return the number of upvalues captured by this function.
+    pub fn upvalue_count(&self) -> usize {
+        let func = self.inner.to_value();
+
+        if let Some(lua_func) = func.as_lua_function() {
+            return lua_func.upvalues().len();
+        }
+
+        if let Some(cclosure) = func.as_cclosure() {
+            return cclosure.upvalues().len();
+        }
+
+        if let Some(rclosure) = func.as_rclosure() {
+            return rclosure.upvalues().len();
+        }
+
+        0
+    }
+
+    /// Read an upvalue as a raw Lua value.
+    pub fn get_upvalue_value(&self, n: usize) -> Option<(String, LuaValue)> {
+        if n == 0 {
+            return None;
+        }
+
+        let func = self.inner.to_value();
+        let up_idx = n - 1;
+
+        if let Some(lua_func) = func.as_lua_function() {
+            let upvalue_ptr = *lua_func.upvalues().get(up_idx)?;
+            let name = lua_func
+                .chunk()
+                .upvalue_descs
+                .get(up_idx)
+                .map(|desc| desc.name.to_string())
+                .unwrap_or_default();
+            let value = upvalue_ptr.as_ref().data.get_value();
+            return Some((name, value));
+        }
+
+        if let Some(cclosure) = func.as_cclosure() {
+            let value = *cclosure.upvalues().get(up_idx)?;
+            return Some((String::new(), value));
+        }
+
+        if let Some(rclosure) = func.as_rclosure() {
+            let value = *rclosure.upvalues().get(up_idx)?;
+            return Some((String::new(), value));
+        }
+
+        None
+    }
+
+    /// Read and convert an upvalue.
+    pub fn get_upvalue<T: FromLua>(&self, n: usize) -> LuaResult<Option<(String, T)>> {
+        let Some((name, value)) = self.get_upvalue_value(n) else {
+            return Ok(None);
+        };
+
+        let vm = self.inner.global_state_mut();
+        let value = T::from_lua(value, vm.main_state()).map_err(|msg| vm.error(msg))?;
+        Ok(Some((name, value)))
+    }
+
+    /// Replace an upvalue with a raw Lua value.
+    pub fn set_upvalue_value(&self, n: usize, value: LuaValue) -> LuaResult<Option<String>> {
+        if n == 0 {
+            return Ok(None);
+        }
+
+        let vm = self.inner.global_state_mut();
+        let state = vm.main_state();
+        let func = self.inner.to_value();
+        let up_idx = n - 1;
+
+        if let Some(lua_func) = func.as_lua_function() {
+            let Some(upvalue_ptr) = lua_func.upvalues().get(up_idx).copied() else {
+                return Ok(None);
+            };
+            let name = lua_func
+                .chunk()
+                .upvalue_descs
+                .get(up_idx)
+                .map(|desc| desc.name.to_string())
+                .unwrap_or_default();
+
+            upvalue_ptr.as_mut_ref().data.set_value(value);
+            if value.is_collectable()
+                && let Some(value_gc_ptr) = value.as_gc_ptr()
+            {
+                state.gc_barrier(upvalue_ptr, value_gc_ptr);
+            }
+            return Ok(Some(name));
+        }
+
+        let cclosure_owner = func.as_cclosure_ptr();
+        if let Some(cclosure) = func.as_cclosure_mut() {
+            let Some(slot) = cclosure.upvalues_mut().get_mut(up_idx) else {
+                return Ok(None);
+            };
+            *slot = value;
+            if value.is_collectable()
+                && let Some(owner) = cclosure_owner
+            {
+                state.gc_barrier_back(owner.into());
+            }
+            return Ok(Some(String::new()));
+        }
+
+        let rclosure_owner = func.as_rclosure_ptr();
+        if let Some(rclosure) = func.as_rclosure_mut() {
+            let Some(slot) = rclosure.upvalues_mut().get_mut(up_idx) else {
+                return Ok(None);
+            };
+            *slot = value;
+            if value.is_collectable()
+                && let Some(owner) = rclosure_owner
+            {
+                state.gc_barrier_back(owner.into());
+            }
+            return Ok(Some(String::new()));
+        }
+
+        Ok(None)
+    }
+
+    /// Replace an upvalue with a Rust value.
+    pub fn set_upvalue<T: IntoLua>(&self, n: usize, value: T) -> LuaResult<Option<String>> {
+        let vm = self.inner.global_state_mut();
+        let value = collect_single_value(vm, value, "LuaFunctionRef::set_upvalue(value)")?;
+        self.set_upvalue_value(n, value)
+    }
+
+    /// Return an opaque identity for the requested upvalue.
+    pub fn upvalue_id(&self, n: usize) -> Option<*mut c_void> {
+        if n == 0 {
+            return None;
+        }
+
+        let func = self.inner.to_value();
+        let up_idx = n - 1;
+
+        if let Some(lua_func) = func.as_lua_function() {
+            let upvalue = lua_func.upvalues().get(up_idx)?;
+            return Some(upvalue.as_ptr() as *mut c_void);
+        }
+
+        if let Some(cclosure) = func.as_cclosure() {
+            let upvalue = cclosure.upvalues().get(up_idx)?;
+            return Some(upvalue as *const _ as *mut c_void);
+        }
+
+        if let Some(rclosure) = func.as_rclosure() {
+            let upvalue = rclosure.upvalues().get(up_idx)?;
+            return Some(upvalue as *const _ as *mut c_void);
+        }
+
+        None
+    }
+
+    /// Make two Lua function upvalues share the same storage.
+    pub fn join_upvalue(&self, n1: usize, other: &LuaFunctionRef, n2: usize) -> LuaResult<bool> {
+        if n1 == 0 || n2 == 0 {
+            return Ok(false);
+        }
+
+        let vm = self.inner.global_state_mut();
+        if !std::ptr::eq(self.inner.global_state(), other.inner.global_state()) {
+            return Err(vm.error(
+                "LuaFunctionRef::join_upvalue requires functions from the same Lua VM".to_string(),
+            ));
+        }
+
+        let func1 = self.inner.to_value();
+        let func2 = other.inner.to_value();
+
+        let Some(lua_func2) = func2.as_lua_function() else {
+            return Err(vm.error("LuaFunctionRef::join_upvalue expects Lua functions".to_string()));
+        };
+        let Some(shared_upvalue) = lua_func2.upvalues().get(n2 - 1).copied() else {
+            return Ok(false);
+        };
+
+        let func1_owner = func1.as_function_ptr();
+        let Some(lua_func1) = func1.as_lua_function_mut() else {
+            return Err(vm.error("LuaFunctionRef::join_upvalue expects Lua functions".to_string()));
+        };
+        let Some(slot) = lua_func1.upvalues_mut().get_mut(n1 - 1) else {
+            return Ok(false);
+        };
+        *slot = shared_upvalue;
+
+        if let Some(owner) = func1_owner {
+            vm.main_state().gc_barrier_back(owner.into());
+        }
+
+        Ok(true)
     }
 
     /// Call the function synchronously.

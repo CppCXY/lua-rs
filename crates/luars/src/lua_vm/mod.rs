@@ -1455,7 +1455,6 @@ impl GlobalStateHandle {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

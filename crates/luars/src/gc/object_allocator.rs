@@ -5,7 +5,7 @@ use crate::lua_value::{
 };
 use crate::lua_vm::{CFunction, LuaState};
 use crate::{
-    LuaRawFunction, LuaResult, LuaRawTable, LuaValue,
+    LuaRawFunction, LuaRawTable, LuaResult, LuaValue,
     gc::{
         GC, GcCClosure, GcFunction, GcObjectOwner, GcProto, GcRClosure, GcTable, GcThread,
         GcUpvalue, GcUserdata, ProtoPtr, StringPtr, UpvaluePtr,

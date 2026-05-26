@@ -21,8 +21,8 @@ pub use value::Value;
 #[cfg(feature = "sandbox")]
 use crate::SandboxConfig;
 use crate::{
-    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable,
-    LuaResult, LuaValue, LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
+    FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
+    LuaValue, LuaValueKind, Stdlib, UserDataRef, UserDataTrait,
     lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback},
 };
 
@@ -105,18 +105,38 @@ pub trait LuaApi {
 
 pub(crate) trait StackValueApi {
     fn collect_values<T: IntoLua>(&mut self, value: T, api_name: &str) -> LuaResult<Vec<LuaValue>>;
-    fn collect_single_value<T: IntoLua>(
-        &mut self,
-        value: T,
-        api_name: &str,
-    ) -> LuaResult<LuaValue>;
+    fn collect_single_value<T: IntoLua>(&mut self, value: T, api_name: &str)
+    -> LuaResult<LuaValue>;
     fn from_value<T: FromLua>(&mut self, value: LuaValue, api_name: &str) -> LuaResult<T>;
+}
+
+pub const LUA_REGISTRYINDEX: isize = -1001000;
+pub const LUA_GLOBALSINDEX: isize = LUA_REGISTRYINDEX - 2;
+pub const LUA_MULTRET: isize = -1;
+
+#[inline]
+pub const fn lua_upvalueindex(n: usize) -> isize {
+    LUA_GLOBALSINDEX - n as isize
 }
 
 pub trait LuaStackApi {
     fn lua_gettop(&self) -> isize;
     fn lua_settop(&mut self, idx: isize) -> LuaResult<()>;
     fn lua_absindex(&self, idx: isize) -> Option<isize>;
+    fn lua_rotate(&mut self, idx: isize, n: isize) -> LuaResult<()>;
+    #[inline]
+    fn lua_insert(&mut self, idx: isize) -> LuaResult<()> {
+        self.lua_rotate(idx, 1)
+    }
+    #[inline]
+    fn lua_remove(&mut self, idx: isize) -> LuaResult<()> {
+        self.lua_rotate(idx, -1)?;
+        self.lua_pop(1)
+    }
+    #[inline]
+    fn lua_pop(&mut self, n: usize) -> LuaResult<()> {
+        self.lua_settop(-(n as isize) - 1)
+    }
     fn lua_type(&self, idx: isize) -> Option<LuaValueKind>;
     fn lua_typename(&self, idx: isize) -> Option<&'static str>;
     fn lua_isnone(&self, idx: isize) -> bool;
@@ -140,12 +160,20 @@ pub trait LuaStackApi {
     fn lua_pushstring(&mut self, value: &str) -> LuaResult<()>;
     fn lua_pushlstring(&mut self, value: &[u8]) -> LuaResult<()>;
     fn lua_pushlightuserdata(&mut self, value: *mut c_void) -> LuaResult<()>;
+    fn lua_pushcclosure(&mut self, func: crate::lua_vm::CFunction, n: usize) -> LuaResult<()>;
+    #[inline]
+    fn lua_pushcfunction(&mut self, func: crate::lua_vm::CFunction) -> LuaResult<()> {
+        self.lua_pushcclosure(func, 0)
+    }
+    fn lua_pushrclosure<F>(&mut self, func: F, n: usize) -> LuaResult<()>
+    where
+        F: Fn(&mut crate::LuaState) -> LuaResult<usize> + 'static;
     fn lua_argcount(&self) -> isize;
     fn lua_toboolean(&self, idx: isize) -> bool;
     fn lua_tointegerx(&self, idx: isize) -> Option<i64>;
     fn lua_tonumberx(&self, idx: isize) -> Option<f64>;
-    fn lua_tostring<'a>(&'a self, idx: isize) -> Option<&'a str>;
-    fn lua_tolstring<'a>(&'a self, idx: isize) -> Option<&'a [u8]>;
+    fn lua_tostring(&self, idx: isize) -> Option<&str>;
+    fn lua_tolstring(&self, idx: isize) -> Option<&[u8]>;
     fn lua_tostring_handle(&mut self, idx: isize) -> Option<LuaString>;
     fn lua_l_checkany(&mut self, idx: isize) -> LuaResult<()>;
     fn lua_l_checkinteger(&mut self, idx: isize) -> LuaResult<i64>;
@@ -162,6 +190,8 @@ pub trait LuaStackApi {
     fn lua_getupvalue(&mut self, func_idx: isize, n: usize) -> Option<String>;
     fn lua_setupvalue(&mut self, func_idx: isize, n: usize) -> LuaResult<Option<String>>;
     fn lua_pushuserdata<T: UserDataTrait + 'static>(&mut self, data: T) -> LuaResult<()>;
+    /// # Safety
+    /// The caller must ensure that the provided reference is valid for the lifetime of the Lua value
     unsafe fn lua_pushuserdata_ref<T: UserDataTrait + 'static>(
         &mut self,
         reference: &mut T,
@@ -169,15 +199,38 @@ pub trait LuaStackApi {
     fn lua_touserdata_ref<T: 'static>(&mut self, idx: isize) -> Option<UserDataRef<T>>;
     fn lua_createthread(&mut self, func_idx: isize) -> LuaResult<()>;
     fn lua_pushthread(&mut self) -> LuaResult<bool>;
+    fn lua_pushglobaltable(&mut self) -> LuaResult<()>;
+    fn lua_call(&mut self, nargs: usize, nresults: isize) -> LuaResult<()>;
+    fn lua_pcall(&mut self, nargs: usize, nresults: isize) -> LuaResult<bool>;
+    fn lua_rawlen(&mut self, idx: isize) -> LuaResult<usize>;
     fn lua_len(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_next(&mut self, idx: isize) -> LuaResult<bool>;
+    fn lua_getglobal(&mut self, name: &str) -> LuaResult<()>;
+    fn lua_setglobal(&mut self, name: &str) -> LuaResult<()>;
+    fn lua_rawgetglobal(&mut self, name: &str) -> LuaResult<()>;
+    fn lua_rawsetglobal(&mut self, name: &str) -> LuaResult<()>;
+    fn lua_registry_geti(&mut self, index: i64) -> LuaResult<()>;
+    fn lua_registry_seti(&mut self, index: i64) -> LuaResult<()>;
     fn lua_gettable(&mut self, idx: isize) -> LuaResult<()>;
     fn lua_settable(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_getfield(&mut self, idx: isize, key: &str) -> LuaResult<()>;
+    fn lua_setfield(&mut self, idx: isize, key: &str) -> LuaResult<()>;
     fn lua_geti(&mut self, idx: isize, key: i64) -> LuaResult<()>;
     fn lua_seti(&mut self, idx: isize, key: i64) -> LuaResult<()>;
     fn lua_rawget(&mut self, idx: isize) -> LuaResult<()>;
     fn lua_rawset(&mut self, idx: isize) -> LuaResult<()>;
     fn lua_rawgeti(&mut self, idx: isize, index: i64) -> LuaResult<()>;
     fn lua_rawseti(&mut self, idx: isize, index: i64) -> LuaResult<()>;
+    fn lua_copy(&mut self, from_idx: isize, to_idx: isize) -> LuaResult<()>;
+    fn lua_replace(&mut self, idx: isize) -> LuaResult<()>;
+    fn lua_upvalueid(&mut self, func_idx: isize, n: usize) -> Option<*mut c_void>;
+    fn lua_upvaluejoin(
+        &mut self,
+        func1_idx: isize,
+        n1: usize,
+        func2_idx: isize,
+        n2: usize,
+    ) -> LuaResult<bool>;
 }
 
 /// Async high-level API shared by safe host-side Lua handles.

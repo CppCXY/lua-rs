@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+
 use crate::{FromLua, FromLuaMulti, IntoLua, LuaFunctionRef, LuaResult, LuaValue};
 
 /// Safe wrapper around a callable Lua function handle.
@@ -9,6 +11,36 @@ pub struct LuaFunction {
 impl LuaFunction {
     pub(crate) fn new(inner: LuaFunctionRef) -> Self {
         LuaFunction { inner }
+    }
+
+    /// Return the number of upvalues captured by this function.
+    #[inline]
+    pub fn upvalue_count(&self) -> usize {
+        self.inner.upvalue_count()
+    }
+
+    /// Read and convert one upvalue.
+    #[inline]
+    pub fn get_upvalue<T: FromLua>(&self, n: usize) -> LuaResult<Option<(String, T)>> {
+        self.inner.get_upvalue(n)
+    }
+
+    /// Replace one upvalue.
+    #[inline]
+    pub fn set_upvalue<T: IntoLua>(&self, n: usize, value: T) -> LuaResult<Option<String>> {
+        self.inner.set_upvalue(n, value)
+    }
+
+    /// Return an opaque identity for the requested upvalue.
+    #[inline]
+    pub fn upvalue_id(&self, n: usize) -> Option<*mut c_void> {
+        self.inner.upvalue_id(n)
+    }
+
+    /// Make two Lua function upvalues share the same storage.
+    #[inline]
+    pub fn join_upvalue(&self, n1: usize, other: &LuaFunction, n2: usize) -> LuaResult<bool> {
+        self.inner.join_upvalue(n1, &other.inner, n2)
     }
 
     /// Call the function and convert all returned values.

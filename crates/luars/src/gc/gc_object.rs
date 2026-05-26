@@ -1,5 +1,5 @@
 use crate::{
-    LuaRawFunction, LuaProto, LuaRawTable,
+    LuaProto, LuaRawFunction, LuaRawTable,
     gc::GcObjectKind,
     lua_value::{CClosureFunction, LuaString, LuaUpvalue, LuaUserdata, RClosureFunction},
     lua_vm::LuaState,

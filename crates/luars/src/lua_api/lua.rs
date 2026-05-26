@@ -12,7 +12,7 @@ use luars::{
 
 #[cfg(feature = "sandbox")]
 use crate::LuaSandboxApi;
-use crate::lua_api::{Chunk, LuaFunction, LuaString, Scope, LuaTable, Value};
+use crate::lua_api::{Chunk, LuaFunction, LuaString, LuaTable, Scope, Value};
 use crate::{LuaApi, LuaAsyncApi, LuaError, LuaFullError, StackValueApi};
 
 /// Safe, embedding-oriented Lua runtime.
@@ -111,7 +111,9 @@ impl Lua {
         value: T,
         api_name: &str,
     ) -> LuaResult<Vec<luars::LuaValue>> {
-        self.global_state_owner.main_state().collect_values(value, api_name)
+        self.global_state_owner
+            .main_state()
+            .collect_values(value, api_name)
     }
 
     #[cfg(feature = "sandbox")]
@@ -154,7 +156,9 @@ impl Lua {
         value: luars::LuaValue,
         api_name: &str,
     ) -> LuaResult<T> {
-        self.global_state_owner.main_state().from_value(value, api_name)
+        self.global_state_owner
+            .main_state()
+            .from_value(value, api_name)
     }
 
     /// Run a lexical scope that can create non-`'static` Lua callbacks and borrowed userdata.
@@ -236,7 +240,9 @@ impl LuaApi for Lua {
             .into_iter()
             .next()
             .unwrap_or_else(luars::LuaValue::nil);
-        self.global_state_owner.main_state().from_value(value, "eval")
+        self.global_state_owner
+            .main_state()
+            .from_value(value, "eval")
     }
 
     #[inline]

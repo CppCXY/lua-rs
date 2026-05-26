@@ -8,9 +8,12 @@ mod tests {
     #[cfg(feature = "serde")]
     use crate::lua_api::Value;
     use crate::{
-        GlobalState, LuaApi, LuaAsyncApi, LuaUserData, LuaValue, LuaValueKind, SafeOption,
-        LuaStackApi, Stdlib,
-        lua_api::{LuaFunction, Lua, LuaTable},
+        GlobalState, LuaApi, LuaAsyncApi, LuaStackApi, LuaUserData, LuaValue, LuaValueKind,
+        SafeOption, Stdlib,
+        lua_api::{
+            LUA_GLOBALSINDEX, LUA_MULTRET, LUA_REGISTRYINDEX, Lua, LuaFunction, LuaTable,
+            lua_upvalueindex,
+        },
         lua_methods,
     };
     #[cfg(feature = "sandbox")]
@@ -46,6 +49,15 @@ mod tests {
         let dir = std::env::temp_dir().join("luars_api_tests");
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn stack_api_add_with_upvalue(state: &mut crate::LuaState) -> crate::LuaResult<usize> {
+        let arg = state.lua_l_checkinteger(1)?;
+        let upvalue = state
+            .lua_tointegerx(lua_upvalueindex(1))
+            .unwrap_or_default();
+        state.lua_pushinteger(arg + upvalue)?;
+        Ok(1)
     }
 
     #[test]
@@ -165,6 +177,58 @@ mod tests {
         assert_eq!(unpacked, "42");
         assert_eq!(converted, 123);
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn safe_function_upvalue_helpers_work() {
+        let mut lua = Lua::new(SafeOption::default());
+
+        let first: LuaFunction = lua
+            .load(
+                r#"
+                local value = 40
+                return function(x)
+                    return value + x
+                end
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        let second: LuaFunction = lua
+            .load(
+                r#"
+                local value = 10
+                return function(x)
+                    return value + x
+                end
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(first.upvalue_count(), 1);
+        let (name, current) = first.get_upvalue::<i64>(1).unwrap().unwrap();
+        assert_eq!(name, "value");
+        assert_eq!(current, 40);
+        assert!(first.get_upvalue::<i64>(2).unwrap().is_none());
+
+        let first_id = first.upvalue_id(1).unwrap();
+        let second_id = second.upvalue_id(1).unwrap();
+        assert_ne!(first_id, second_id);
+
+        assert_eq!(
+            first.set_upvalue(1, 41_i64).unwrap().as_deref(),
+            Some("value")
+        );
+        assert_eq!(first.call1::<_, i64>(1_i64).unwrap(), 42);
+
+        assert!(first.join_upvalue(1, &second, 1).unwrap());
+        assert_eq!(first.upvalue_id(1).unwrap(), second_id);
+
+        second.set_upvalue(1, 39_i64).unwrap();
+        assert_eq!(first.call1::<_, i64>(3_i64).unwrap(), 42);
+        assert_eq!(second.call1::<_, i64>(3_i64).unwrap(), 42);
     }
 
     #[test]
@@ -700,7 +764,10 @@ mod tests {
         })
         .unwrap();
 
-        let results = vm.main_state().execute("return stack_api_probe(40, 2.5, 'abc')").unwrap();
+        let results = vm
+            .main_state()
+            .execute("return stack_api_probe(40, 2.5, 'abc')")
+            .unwrap();
         assert_eq!(results[0].as_integer(), Some(42));
         assert_eq!(results[1].as_bytes(), Some(&b"abc"[..]));
 
@@ -812,6 +879,138 @@ mod tests {
     }
 
     #[test]
+    fn stack_api_supports_stack_rearrangement_helpers() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        let state = vm.main_state();
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushinteger(1).unwrap();
+        state.lua_pushinteger(2).unwrap();
+        state.lua_pushinteger(3).unwrap();
+        state.lua_pushinteger(4).unwrap();
+
+        state.lua_rotate(2, 1).unwrap();
+        assert_eq!(state.lua_tointegerx(1), Some(1));
+        assert_eq!(state.lua_tointegerx(2), Some(4));
+        assert_eq!(state.lua_tointegerx(3), Some(2));
+        assert_eq!(state.lua_tointegerx(4), Some(3));
+
+        state.lua_rotate(2, -1).unwrap();
+        assert_eq!(state.lua_tointegerx(1), Some(1));
+        assert_eq!(state.lua_tointegerx(2), Some(2));
+        assert_eq!(state.lua_tointegerx(3), Some(3));
+        assert_eq!(state.lua_tointegerx(4), Some(4));
+
+        state.lua_insert(2).unwrap();
+        assert_eq!(state.lua_tointegerx(1), Some(1));
+        assert_eq!(state.lua_tointegerx(2), Some(4));
+        assert_eq!(state.lua_tointegerx(3), Some(2));
+        assert_eq!(state.lua_tointegerx(4), Some(3));
+
+        state.lua_remove(3).unwrap();
+        assert_eq!(state.lua_gettop(), 3);
+        assert_eq!(state.lua_tointegerx(1), Some(1));
+        assert_eq!(state.lua_tointegerx(2), Some(4));
+        assert_eq!(state.lua_tointegerx(3), Some(3));
+
+        state.lua_pop(2).unwrap();
+        assert_eq!(state.lua_gettop(), 1);
+        assert_eq!(state.lua_tointegerx(1), Some(1));
+
+        state.lua_pop(1).unwrap();
+        assert_eq!(state.lua_gettop(), 0);
+    }
+
+    #[test]
+    fn stack_api_supports_call_pcall_closures_and_rawlen() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        let add_sub = vm
+            .main_state()
+            .execute("return function(a, b) return a + b, a - b end")
+            .unwrap()[0];
+        let fail = vm
+            .main_state()
+            .execute("return function() error('boom') end")
+            .unwrap()[0];
+
+        let state = vm.main_state();
+        state.lua_settop(0).unwrap();
+
+        state.push_value(add_sub).unwrap();
+        state.lua_pushinteger(40).unwrap();
+        state.lua_pushinteger(2).unwrap();
+        state.lua_call(2, 1).unwrap();
+        assert_eq!(state.lua_gettop(), 1);
+        assert_eq!(state.lua_tointegerx(1), Some(42));
+
+        state.lua_settop(0).unwrap();
+        state.push_value(add_sub).unwrap();
+        state.lua_pushinteger(40).unwrap();
+        state.lua_pushinteger(2).unwrap();
+        assert!(state.lua_pcall(2, LUA_MULTRET).unwrap());
+        assert_eq!(state.lua_gettop(), 2);
+        assert_eq!(state.lua_tointegerx(1), Some(42));
+        assert_eq!(state.lua_tointegerx(2), Some(38));
+
+        state.lua_settop(0).unwrap();
+        state.push_value(fail).unwrap();
+        assert!(!state.lua_pcall(0, 1).unwrap());
+        assert_eq!(state.lua_gettop(), 1);
+        assert!(!state.lua_isnil(1));
+        assert!(!state.lua_isfunction(1));
+
+        state.lua_settop(0).unwrap();
+        state.lua_pushinteger(2).unwrap();
+        state
+            .lua_pushcclosure(stack_api_add_with_upvalue, 1)
+            .unwrap();
+        state.lua_pushinteger(40).unwrap();
+        state.lua_call(1, 1).unwrap();
+        assert_eq!(state.lua_tointegerx(1), Some(42));
+
+        state.lua_settop(0).unwrap();
+        state.lua_pushinteger(39).unwrap();
+        state
+            .lua_pushrclosure(
+                |state| {
+                    let arg = state.lua_l_checkinteger(1)?;
+                    let upvalue = state
+                        .lua_tointegerx(lua_upvalueindex(1))
+                        .unwrap_or_default();
+                    state.lua_pushinteger(arg + upvalue)?;
+                    Ok(1)
+                },
+                1,
+            )
+            .unwrap();
+        state.lua_pushinteger(3).unwrap();
+        state.lua_call(1, 1).unwrap();
+        assert_eq!(state.lua_tointegerx(1), Some(42));
+
+        state.lua_settop(0).unwrap();
+        state.lua_pushcfunction(stack_api_add_with_upvalue).unwrap();
+        assert!(state.lua_iscfunction(1));
+        assert_eq!(state.lua_upvaluecount(1), 0);
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushstring("hello").unwrap();
+        assert_eq!(state.lua_rawlen(1).unwrap(), 5);
+        state.lua_settop(0).unwrap();
+
+        state.lua_newtable().unwrap();
+        state.lua_pushinteger(1).unwrap();
+        state.lua_seti(1, 1).unwrap();
+        state.lua_pushinteger(2).unwrap();
+        state.lua_seti(1, 2).unwrap();
+        assert_eq!(state.lua_rawlen(1).unwrap(), 2);
+        state.lua_len(1).unwrap();
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 2);
+        state.lua_settop(0).unwrap();
+    }
+
+    #[test]
     fn stack_api_supports_predicates_optargs_and_runtime_objects() {
         let mut vm = GlobalState::new(SafeOption::default());
 
@@ -903,6 +1102,167 @@ mod tests {
 
             state.lua_settop(0).unwrap();
         }
+    }
+
+    #[test]
+    fn stack_api_supports_next_fields_and_pseudo_indices() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        let state = vm.main_state();
+        state.lua_settop(0).unwrap();
+
+        state.lua_newtable().unwrap();
+        state.lua_pushinteger(10).unwrap();
+        state.lua_setfield(1, "answer").unwrap();
+        state.lua_getfield(1, "answer").unwrap();
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 10);
+        state.lua_settop(1).unwrap();
+
+        state.lua_pushinteger(1).unwrap();
+        state.lua_pushstring("first").unwrap();
+        state.lua_settable(1).unwrap();
+        state.lua_pushinteger(2).unwrap();
+        state.lua_pushstring("second").unwrap();
+        state.lua_settable(1).unwrap();
+
+        state.lua_pushnil().unwrap();
+        assert!(state.lua_next(1).unwrap());
+        assert!(state.lua_type(-2).is_some());
+        assert!(state.lua_type(-1).is_some());
+        state.lua_settop(1).unwrap();
+
+        state.lua_pushstring("missing").unwrap();
+        assert!(state.lua_gettable(1).is_ok());
+        assert!(state.lua_isnil(-1));
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushinteger(42).unwrap();
+        state
+            .lua_setfield(LUA_GLOBALSINDEX, "stack_api_global")
+            .unwrap();
+        state
+            .lua_getfield(LUA_GLOBALSINDEX, "stack_api_global")
+            .unwrap();
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 42);
+        assert_eq!(state.lua_absindex(LUA_GLOBALSINDEX), Some(LUA_GLOBALSINDEX));
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushinteger(77).unwrap();
+        state.lua_setglobal("stack_api_global2").unwrap();
+        state.lua_getglobal("stack_api_global2").unwrap();
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 77);
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushglobaltable().unwrap();
+        assert!(state.lua_istable(-1));
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushinteger(88).unwrap();
+        state.lua_rawsetglobal("stack_api_global3").unwrap();
+        state.lua_rawgetglobal("stack_api_global3").unwrap();
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 88);
+        state.lua_settop(0).unwrap();
+
+        state.lua_pushstring("stored").unwrap();
+        state
+            .lua_setfield(LUA_REGISTRYINDEX, "stack_api_registry_key")
+            .unwrap();
+        state
+            .lua_getfield(LUA_REGISTRYINDEX, "stack_api_registry_key")
+            .unwrap();
+        assert_eq!(state.lua_l_checkstring(-1).unwrap(), "stored");
+        assert!(state.lua_istable(LUA_REGISTRYINDEX));
+        assert_eq!(
+            state.lua_absindex(LUA_REGISTRYINDEX),
+            Some(LUA_REGISTRYINDEX)
+        );
+
+        state.lua_settop(0).unwrap();
+        state.lua_pushinteger(1234).unwrap();
+        state.lua_registry_seti(17).unwrap();
+        state.lua_registry_geti(17).unwrap();
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 1234);
+        state.lua_settop(0).unwrap();
+    }
+
+    #[test]
+    fn stack_api_supports_upvalue_ids_and_join() {
+        let mut vm = GlobalState::new(SafeOption::default());
+
+        let func1 = vm
+            .main_state()
+            .execute("local value = 10; return function() return value end")
+            .unwrap()[0];
+        let func2 = vm
+            .main_state()
+            .execute("local value = 20; return function() return value end")
+            .unwrap()[0];
+
+        let state = vm.main_state();
+        state.lua_settop(0).unwrap();
+        state.push_value(func1).unwrap();
+        state.push_value(func2).unwrap();
+
+        let id1 = state.lua_upvalueid(1, 1).unwrap();
+        let id2 = state.lua_upvalueid(2, 1).unwrap();
+        assert_ne!(id1, id2);
+
+        assert!(state.lua_upvaluejoin(1, 1, 2, 1).unwrap());
+        let joined = state.lua_upvalueid(1, 1).unwrap();
+        let shared = state.lua_upvalueid(2, 1).unwrap();
+        assert_eq!(joined, shared);
+
+        let name = state.lua_getupvalue(1, 1).unwrap();
+        assert_eq!(name, "value");
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 20);
+        state.lua_settop(2).unwrap();
+
+        state.lua_pushinteger(99).unwrap();
+        state.lua_setupvalue(1, 1).unwrap();
+        let name = state.lua_getupvalue(2, 1).unwrap();
+        assert_eq!(name, "value");
+        assert_eq!(state.lua_l_checkinteger(-1).unwrap(), 99);
+        state.lua_settop(0).unwrap();
+    }
+
+    #[test]
+    fn stack_api_supports_upvalueindex_pseudo_index() {
+        let mut vm = GlobalState::new(SafeOption::default());
+        let call_count = Cell::new(0);
+
+        let probe = vm
+            .create_closure_with_upvalues(
+                move |state| {
+                    let up_idx = lua_upvalueindex(1);
+                    let next_call = call_count.get() + 1;
+                    call_count.set(next_call);
+                    assert_eq!(state.lua_absindex(up_idx), Some(up_idx));
+                    let expected = if next_call == 1 { 123 } else { 789 };
+                    assert_eq!(state.lua_tointegerx(up_idx), Some(expected));
+                    state.lua_pushinteger(456)?;
+                    state.lua_replace(up_idx)?;
+                    assert_eq!(state.lua_tointegerx(up_idx), Some(456));
+
+                    state.lua_pushinteger(789)?;
+                    state.lua_copy(-1, up_idx)?;
+                    state.lua_settop(0)?;
+                    assert_eq!(state.lua_tointegerx(up_idx), Some(789));
+
+                    state.lua_pushvalue(up_idx)?;
+                    Ok(1)
+                },
+                vec![LuaValue::integer(123)],
+            )
+            .unwrap();
+
+        let state = vm.main_state();
+        state.set_global_value("upvalue_probe", probe).unwrap();
+
+        let results = state.execute("return upvalue_probe()").unwrap();
+        assert_eq!(results[0].as_integer(), Some(789));
+
+        let results = state.execute("return upvalue_probe()").unwrap();
+        assert_eq!(results[0].as_integer(), Some(789));
     }
 
     #[cfg(feature = "serde")]
