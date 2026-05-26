@@ -1224,7 +1224,7 @@ impl LuaState {
                             current_error = Some(err_obj);
                         } else {
                             let msg = self.take_error_msg_raw();
-                            if let Ok(s) = self.create_raw_string(&msg) {
+                            if let Ok(s) = self.create_string(&msg) {
                                 current_error = Some(s);
                             }
                         }
@@ -1243,7 +1243,7 @@ impl LuaState {
                 } else {
                     "attempt to close variable (no metamethod 'close')".to_string()
                 };
-                if let Ok(s) = self.create_raw_string(&msg) {
+                if let Ok(s) = self.create_string(&msg) {
                     current_error = Some(s);
                 }
             }
@@ -1334,7 +1334,7 @@ impl LuaState {
                             current_error = err_obj;
                         } else {
                             let msg = self.take_error_msg_raw();
-                            if let Ok(s) = self.create_raw_string(&msg) {
+                            if let Ok(s) = self.create_string(&msg) {
                                 current_error = s;
                             }
                         }
@@ -1353,7 +1353,7 @@ impl LuaState {
                 } else {
                     "attempt to close variable (no metamethod 'close')".to_string()
                 };
-                if let Ok(s) = self.create_raw_string(&msg) {
+                if let Ok(s) = self.create_string(&msg) {
                     current_error = s;
                 }
             }
@@ -1975,18 +1975,6 @@ impl LuaState {
         top.saturating_sub(base)
     }
 
-    /// Read a stack slot and convert it using the regular `FromLua` bridge.
-    #[inline]
-    pub fn stack_get_as<T: FromLua>(&mut self, index: usize) -> LuaResult<Option<T>> {
-        let Some(value) = self.stack_get(index) else {
-            return Ok(None);
-        };
-
-        T::from_lua(value, self)
-            .map(Some)
-            .map_err(|msg| self.error(msg))
-    }
-
     /// Push one Rust value through the `IntoLua` bridge.
     ///
     /// This keeps the low-level stack API interoperable with high-level handle
@@ -2056,7 +2044,7 @@ impl LuaState {
     ///
     /// For host-facing code, prefer LuaState::create_table_ref.
     #[inline(always)]
-    pub fn create_raw_table(&mut self, narr: usize, nrec: usize) -> CreateResult {
+    pub fn create_table(&mut self, narr: usize, nrec: usize) -> CreateResult {
         self.global_state_mut().create_table(narr, nrec)
     }
 
@@ -2068,17 +2056,17 @@ impl LuaState {
     /// For host-facing code, prefer LuaState::create_closure_ref or
     /// LuaState::create_function_typed.
     #[inline]
-    pub fn create_raw_function(&mut self, chunk: ProtoPtr, upvalues: UpvalueStore) -> CreateResult {
+    pub fn create_function(&mut self, chunk: ProtoPtr, upvalues: UpvalueStore) -> CreateResult {
         self.global_state_mut().create_function(chunk, upvalues)
     }
 
     #[inline]
-    pub fn create_raw_upvalue_closed(&mut self, value: LuaValue) -> LuaResult<UpvaluePtr> {
+    pub fn create_upvalue_closed(&mut self, value: LuaValue) -> LuaResult<UpvaluePtr> {
         self.global_state_mut().create_upvalue_closed(value)
     }
 
     #[inline]
-    pub fn create_raw_upvalue_open(
+    pub fn create_upvalue_open(
         &mut self,
         stack_index: usize,
         stack_ptr: LuaValuePtr,
@@ -2094,32 +2082,14 @@ impl LuaState {
     ///
     /// For host-facing code, prefer LuaState::create_string_ref.
     #[inline]
-    pub fn create_raw_string(&mut self, s: &str) -> CreateResult {
+    pub fn create_string(&mut self, s: &str) -> CreateResult {
         self.global_state_mut().create_string(s)
     }
 
     /// Create a registry-rooted string handle.
     #[inline]
     pub fn create_string_ref(&mut self, s: &str) -> LuaResult<LuaStringRef> {
-        let value = self.create_raw_string(s)?;
-        Ok(self.to_string_ref(value).unwrap())
-    }
-
-    /// Create a raw string value from owned String.
-    ///
-    /// The returned LuaValue is not rooted by the API itself. Callers must root
-    /// it before any subsequent allocation or GC step.
-    ///
-    /// For host-facing code, prefer LuaState::create_string_owned_ref.
-    #[inline]
-    pub fn create_raw_string_owned(&mut self, s: String) -> CreateResult {
-        self.global_state_mut().create_string_owned(s)
-    }
-
-    /// Create a registry-rooted string handle from owned String.
-    #[inline]
-    pub fn create_string_owned_ref(&mut self, s: String) -> LuaResult<LuaStringRef> {
-        let value = self.create_raw_string_owned(s)?;
+        let value = self.create_string(s)?;
         Ok(self.to_string_ref(value).unwrap())
     }
 
@@ -2130,14 +2100,14 @@ impl LuaState {
     ///
     /// For host-facing code, prefer LuaState::create_binary_ref.
     #[inline]
-    pub fn create_raw_binary(&mut self, data: Vec<u8>) -> CreateResult {
+    pub fn create_binary(&mut self, data: Vec<u8>) -> CreateResult {
         self.global_state_mut().create_binary(data)
     }
 
     /// Create a registry-rooted binary/string handle.
     #[inline]
     pub fn create_binary_ref(&mut self, data: Vec<u8>) -> LuaResult<LuaStringRef> {
-        let value = self.create_raw_binary(data)?;
+        let value = self.create_binary(data)?;
         Ok(self.to_string_ref(value).unwrap())
     }
 
@@ -2148,14 +2118,14 @@ impl LuaState {
     ///
     /// For host-facing code, prefer LuaState::create_bytes_ref.
     #[inline]
-    pub fn create_raw_bytes(&mut self, bytes: &[u8]) -> CreateResult {
+    pub fn create_bytes(&mut self, bytes: &[u8]) -> CreateResult {
         self.global_state_mut().create_bytes(bytes)
     }
 
     /// Create a registry-rooted string handle from bytes.
     #[inline]
     pub fn create_bytes_ref(&mut self, bytes: &[u8]) -> LuaResult<LuaStringRef> {
-        let value = self.create_raw_bytes(bytes)?;
+        let value = self.create_bytes(bytes)?;
         Ok(self.to_string_ref(value).unwrap())
     }
 
@@ -2166,7 +2136,7 @@ impl LuaState {
     ///
     /// For host-facing code, prefer LuaState::create_userdata_handle.
     #[inline]
-    pub fn create_raw_userdata(&mut self, data: LuaUserdata) -> CreateResult {
+    pub fn create_userdata(&mut self, data: LuaUserdata) -> CreateResult {
         self.global_state_mut().create_userdata(data)
     }
 
@@ -2176,7 +2146,7 @@ impl LuaState {
         &mut self,
         data: T,
     ) -> LuaResult<UserDataRef<T>> {
-        let value = self.create_raw_userdata(LuaUserdata::new(data))?;
+        let value = self.create_userdata(LuaUserdata::new(data))?;
         Ok(self.to_userdata_ref(value).unwrap())
     }
 
@@ -2216,7 +2186,7 @@ impl LuaState {
     ///
     /// For host-facing code, prefer LuaState::create_closure_ref.
     #[inline]
-    pub fn create_raw_closure<F>(&mut self, func: F) -> CreateResult
+    pub fn create_closure<F>(&mut self, func: F) -> CreateResult
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
@@ -2229,13 +2199,13 @@ impl LuaState {
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
-        let value = self.create_raw_closure(func)?;
+        let value = self.create_closure(func)?;
         Ok(self.to_function_ref(value).unwrap())
     }
 
     /// Create an RClosure with upvalues.
     #[inline]
-    pub fn create_raw_closure_with_upvalues<F>(
+    pub fn create_closure_with_upvalues<F>(
         &mut self,
         func: F,
         upvalues: Vec<LuaValue>,
@@ -2249,14 +2219,14 @@ impl LuaState {
 
     /// Create a raw thread value with an empty stack.
     #[inline]
-    pub fn create_raw_thread(&mut self) -> CreateResult {
+    pub fn create_thread(&mut self) -> CreateResult {
         self.global_state_mut().create_empty_thread()
     }
 
     /// Create a registry-rooted table handle.
     #[inline]
     pub fn create_table_ref(&mut self, narr: usize, nrec: usize) -> LuaResult<LuaTableRef> {
-        let value = self.create_raw_table(narr, nrec)?;
+        let value = self.create_table(narr, nrec)?;
         Ok(self.to_table_ref(value).unwrap())
     }
 
@@ -2264,13 +2234,13 @@ impl LuaState {
 
     /// Get global variable
     #[inline]
-    pub fn get_global(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
+    pub fn get_global_value(&mut self, name: &str) -> LuaResult<Option<LuaValue>> {
         self.global_state_mut().get_global(name)
     }
 
     /// Set global variable
     #[inline]
-    pub fn set_global(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
+    pub fn set_global_value(&mut self, name: &str, value: LuaValue) -> LuaResult<()> {
         self.global_state_mut().set_global(name, value)
     }
 
@@ -2347,7 +2317,7 @@ impl LuaState {
     /// Safe to call from within a CFunction — operates on the current state.
     pub fn call_global(&mut self, name: &str, args: Vec<LuaValue>) -> LuaResult<Vec<LuaValue>> {
         let func = self
-            .get_global(name)?
+            .get_global_value(name)?
             .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
         self.call(func, args)
     }
@@ -2359,8 +2329,8 @@ impl LuaState {
     where
         F: Fn(&mut LuaState) -> LuaResult<usize> + 'static,
     {
-        let closure_val = self.create_raw_closure(f)?;
-        self.set_global(name, closure_val)
+        let closure_val = self.create_closure(f)?;
+        self.set_global_value(name, closure_val)
     }
 
     /// Create a typed Rust closure as a standalone rooted function handle.
@@ -2392,8 +2362,8 @@ impl LuaState {
             Ok(0)
         };
 
-        let closure_val = self.create_raw_closure(wrapper)?;
-        self.set_global(name, closure_val)
+        let closure_val = self.create_closure(wrapper)?;
+        self.set_global_value(name, closure_val)
     }
 
     // ===== Async Support =====
@@ -2407,8 +2377,8 @@ impl LuaState {
         Fut: std::future::Future<Output = LuaResult<Vec<AsyncReturnValue>>> + 'static,
     {
         let wrapper = async_thread::wrap_async_function(f);
-        let closure_val = self.create_raw_closure(wrapper)?;
-        self.set_global(name, closure_val)
+        let closure_val = self.create_closure(wrapper)?;
+        self.set_global_value(name, closure_val)
     }
 
     pub fn create_async_thread(
@@ -2486,7 +2456,7 @@ impl LuaState {
     }
 
     pub fn get_global_as<T: FromLua>(&mut self, name: &str) -> LuaResult<Option<T>> {
-        match self.get_global(name)? {
+        match self.get_global_value(name)? {
             None => Ok(None),
             Some(val) => {
                 let converted = T::from_lua(val, self).map_err(|msg| self.error(msg))?;
@@ -2538,20 +2508,20 @@ impl LuaState {
 
     fn render_error_message(&mut self, error_msg: &str) -> String {
         let result = (|| -> LuaResult<String> {
-            let debug_table = match self.get_global("debug")? {
+            let debug_table = match self.get_global_value("debug")? {
                 Some(v) if v.is_table() => v,
                 _ => return Ok(String::new()),
             };
 
             let traceback_func = {
-                let traceback_key = self.create_raw_string("traceback")?;
+                let traceback_key = self.create_string("traceback")?;
                 match self.raw_get(&debug_table, &traceback_key) {
                     Some(v) if v.is_function() => v,
                     _ => return Ok(String::new()),
                 }
             };
 
-            let msg_val = self.create_raw_string(error_msg)?;
+            let msg_val = self.create_string(error_msg)?;
             let level_val = LuaValue::integer(1);
             let (success, results) = self.pcall(traceback_func, vec![msg_val, level_val])?;
 
@@ -2608,7 +2578,7 @@ impl LuaState {
         args: Vec<LuaValue>,
     ) -> LuaResult<Vec<LuaValue>> {
         let func = self
-            .get_global(name)?
+            .get_global_value(name)?
             .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
         self.call_async(func, args).await
     }
@@ -2636,7 +2606,7 @@ impl LuaState {
         name: &str,
     ) -> LuaResult<async_thread::AsyncCallHandle> {
         let func = self
-            .get_global(name)?
+            .get_global_value(name)?
             .ok_or_else(|| self.error(format!("global '{}' not found", name)))?;
         self.create_async_call_handle(func)
     }
@@ -2661,20 +2631,20 @@ impl LuaState {
     /// print(p.x, p.y)      -- 3.0  4.0
     /// print(p:distance())   -- 5.0
     /// ```
-    pub fn register_type(
+    pub(crate) fn register_type(
         &mut self,
         name: &str,
         static_methods: &[(&str, super::CFunction)],
     ) -> LuaResult<()> {
-        let class_table = self.create_raw_table(0, static_methods.len())?;
+        let class_table = self.create_table(0, static_methods.len())?;
 
         for &(method_name, func) in static_methods {
-            let key = self.create_raw_string(method_name)?;
+            let key = self.create_string(method_name)?;
             let value = LuaValue::cfunction(func);
             self.raw_set(&class_table, key, value);
         }
 
-        self.set_global(name, class_table)
+        self.set_global_value(name, class_table)
     }
 
     /// Register a UserData type by its generic type parameter.
@@ -3050,7 +3020,7 @@ impl LuaState {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 self.stack_top = saved_stack_top;
                 return Ok((false, vec![err_str]));
             }
@@ -3069,7 +3039,7 @@ impl LuaState {
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
 
@@ -3128,7 +3098,7 @@ impl LuaState {
                         err_obj
                     } else {
                         let error_msg = self.get_error_message(e);
-                        self.create_raw_string(&error_msg)?
+                        self.create_string(&error_msg)?
                     };
                     self.stack_top = saved_stack_top;
                     Ok((false, vec![result_err]))
@@ -3141,7 +3111,7 @@ impl LuaState {
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.stack_top = saved_stack_top;
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
 
@@ -3213,7 +3183,7 @@ impl LuaState {
                     } else if had_err_object {
                         err_obj
                     } else {
-                        self.create_raw_string(&error_msg_str)?
+                        self.create_string(&error_msg_str)?
                     };
 
                     // Clean up stack
@@ -3290,7 +3260,7 @@ impl LuaState {
             Err(e) => {
                 // __call resolution failed - return error
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 self.stack_set(func_idx, err_str)?;
                 self.set_top(func_idx + 1)?;
                 return Ok((false, 1));
@@ -3371,7 +3341,7 @@ impl LuaState {
                     self.close_upvalues(base);
                     let _ = self.close_tbc_with_error(base, LuaValue::nil());
                 }
-                let err_msg = self.create_raw_string("error in error handling")?;
+                let err_msg = self.create_string("error in error handling")?;
                 self.stack_set(func_idx, err_msg)?;
                 self.set_top(func_idx + 1)?;
                 Ok((false, 1))
@@ -3433,7 +3403,7 @@ impl LuaState {
                 } else if had_err_object {
                     err_obj
                 } else {
-                    self.create_raw_string(&error_msg_str)?
+                    self.create_string(&error_msg_str)?
                 };
 
                 // Set error at func_idx and update stack top
@@ -3461,7 +3431,7 @@ impl LuaState {
             Ok((count, depth)) => (count, depth),
             Err(e) => {
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 self.stack_set(func_idx, err_str)?;
                 self.set_top(func_idx + 1)?;
                 return Ok((false, 1));
@@ -3520,7 +3490,7 @@ impl LuaState {
                     self.close_upvalues(base);
                     let _ = self.close_tbc_with_error(base, LuaValue::nil());
                 }
-                let err_msg = self.create_raw_string("error in error handling")?;
+                let err_msg = self.create_string("error in error handling")?;
                 self.stack_set(func_idx, err_msg)?;
                 self.set_top(func_idx + 1)?;
                 Ok((false, 1))
@@ -3534,7 +3504,7 @@ impl LuaState {
                 let mut err_value = if had_err_object {
                     err_obj
                 } else {
-                    self.create_raw_string(&error_msg_str)?
+                    self.create_string(&error_msg_str)?
                 };
 
                 let frame_base = if self.call_depth() > initial_depth {
@@ -3590,7 +3560,7 @@ impl LuaState {
 
                     // Soft limit: generate "C stack overflow" error for handler
                     if retry_count > depth_budget {
-                        let overflow_str = self.create_raw_string("C stack overflow")?;
+                        let overflow_str = self.create_string("C stack overflow")?;
                         err_value = overflow_str;
                     }
 
@@ -3683,7 +3653,7 @@ impl LuaState {
 
                 // Determine final error value
                 let final_error = if handler_failed {
-                    self.create_raw_string("error in error handling")?
+                    self.create_string("error in error handling")?
                 } else {
                     transformed_error
                 };
@@ -3725,7 +3695,7 @@ impl LuaState {
             Err(e) => {
                 self.set_top(handler_idx)?;
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
         };
@@ -3744,7 +3714,7 @@ impl LuaState {
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.set_top(handler_idx)?;
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
 
@@ -3794,7 +3764,7 @@ impl LuaState {
             if let Err(e) = self.push_frame(&func, base, actual_arg_count, -1) {
                 self.set_top(handler_idx)?;
                 let error_msg = self.get_error_message(e);
-                let err_str = self.create_raw_string(&error_msg)?;
+                let err_str = self.create_string(&error_msg)?;
                 return Ok((false, vec![err_str]));
             }
 
@@ -3853,7 +3823,7 @@ impl LuaState {
                     self.close_upvalues(base);
                     let _ = self.close_tbc_with_error(base, LuaValue::nil());
                 }
-                let results = vec![self.create_raw_string("error in error handling")?];
+                let results = vec![self.create_string("error in error handling")?];
                 self.set_top(handler_idx)?;
                 Ok((false, results))
             }
@@ -3870,7 +3840,7 @@ impl LuaState {
                 let mut err_value = if had_err_object {
                     err_obj
                 } else {
-                    self.create_raw_string(&error_msg_str)?
+                    self.create_string(&error_msg_str)?
                 };
 
                 // Get frame_base for later cleanup (upvalues/TBC)
@@ -3986,7 +3956,7 @@ impl LuaState {
                 let cascaded_err = self.take_error_object();
                 if !cascaded_err.is_nil() && results.is_empty() {
                     if let Some(s) = cascaded_err.as_str() {
-                        results.push(self.create_raw_string(s)?);
+                        results.push(self.create_string(s)?);
                     } else {
                         results.push(cascaded_err);
                     }
@@ -3994,9 +3964,9 @@ impl LuaState {
 
                 if results.is_empty() {
                     if handler_failed {
-                        results.push(self.create_raw_string("error in error handling")?);
+                        results.push(self.create_string("error in error handling")?);
                     } else {
-                        results.push(self.create_raw_string(&error_msg_str)?);
+                        results.push(self.create_string(&error_msg_str)?);
                     }
                 }
 
@@ -4203,7 +4173,7 @@ impl LuaState {
                             if msg.is_empty() {
                                 LuaValue::nil()
                             } else {
-                                self.create_raw_string(&msg).unwrap_or_default()
+                                self.create_string(&msg).unwrap_or_default()
                             }
                         };
 
@@ -4251,7 +4221,7 @@ impl LuaState {
                         err_obj
                     } else {
                         let msg = self.take_error_msg_raw();
-                        self.create_raw_string(&msg).unwrap_or_default()
+                        self.create_string(&msg).unwrap_or_default()
                     };
                     self.clear_error();
 
@@ -4286,7 +4256,7 @@ impl LuaState {
                                     Ok((true, results)) => {
                                         results.into_iter().next().unwrap_or(LuaValue::nil())
                                     }
-                                    _ => self.create_raw_string("error in error handling")?,
+                                    _ => self.create_string("error in error handling")?,
                                 }
                             } else {
                                 result_err

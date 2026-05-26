@@ -5,7 +5,7 @@ use crate::lua_vm::{LuaTypedAsyncCallback, LuaTypedCallback};
 use crate::stdlib::basic::parse_number::parse_lua_number;
 use crate::{
     FromLua, FromLuaMulti, IntoLua, LuaEnum, LuaError, LuaFullError, LuaRegistrable, LuaResult,
-    LuaState, LuaUserdata, LuaValue, LuaValueKind, StackApi, StackValueApi, Stdlib, UserDataRef,
+    LuaState, LuaUserdata, LuaValue, LuaValueKind, LuaStackApi, StackValueApi, Stdlib, UserDataRef,
     UserDataTrait,
 };
 
@@ -138,7 +138,7 @@ impl LuaApi for LuaState {
 
     fn set_global<T: IntoLua>(&mut self, name: &str, value: T) -> LuaResult<()> {
         let value = self.collect_single_value(value, "set_global")?;
-        LuaState::set_global(self, name, value)
+        LuaState::set_global_value(self, name, value)
     }
 
     fn globals(&mut self) -> LuaTable {
@@ -179,7 +179,7 @@ impl LuaApi for LuaState {
     where
         F: LuaTypedCallback<Args, R>,
     {
-        let closure = self.create_raw_closure(move |state| f.invoke_typed(state))?;
+        let closure = self.create_closure(move |state| f.invoke_typed(state))?;
         let function = self
             .to_function_ref(closure)
             .expect("created closure must be a function");
@@ -227,7 +227,7 @@ impl LuaApi for LuaState {
     }
 
     fn create_string(&mut self, value: &str) -> LuaResult<LuaString> {
-        let value = LuaState::create_raw_string(self, value)?;
+        let value = LuaState::create_string(self, value)?;
         let string = self
             .global_state_mut()
             .to_string_ref(value)
@@ -240,7 +240,7 @@ impl LuaApi for LuaState {
     }
 
     fn create_table_with_capacity(&mut self, narr: usize, nrec: usize) -> LuaResult<LuaTable> {
-        let table = LuaState::create_raw_table(self, narr, nrec)?;
+        let table = LuaState::create_table(self, narr, nrec)?;
         Ok(LuaTable::new(
             self.to_table_ref(table)
                 .expect("created table must be a table"),
@@ -251,7 +251,7 @@ impl LuaApi for LuaState {
         &mut self,
         data: T,
     ) -> LuaResult<UserDataRef<T>> {
-        let value = LuaState::create_raw_userdata(self, LuaUserdata::new(data))?;
+        let value = LuaState::create_userdata(self, LuaUserdata::new(data))?;
         self.to_userdata_ref(value)
             .ok_or_else(|| self.error("value is not the expected userdata type".to_string()))
     }
@@ -376,7 +376,7 @@ impl LuaApi for LuaState {
     }
 }
 
-impl StackApi for LuaState {
+impl LuaStackApi for LuaState {
     #[inline]
     fn lua_gettop(&self) -> isize {
         stack_api_len(self) as isize
@@ -516,13 +516,13 @@ impl StackApi for LuaState {
 
     #[inline]
     fn lua_pushstring(&mut self, value: &str) -> LuaResult<()> {
-        let value = self.create_raw_string(value)?;
+        let value = self.create_string(value)?;
         self.push_value(value)
     }
 
     #[inline]
     fn lua_pushlstring(&mut self, value: &[u8]) -> LuaResult<()> {
-        let value = self.create_raw_bytes(value)?;
+        let value = self.create_bytes(value)?;
         self.push_value(value)
     }
 
@@ -668,7 +668,7 @@ impl StackApi for LuaState {
     }
 
     fn lua_createtable(&mut self, narr: usize, nrec: usize) -> LuaResult<()> {
-        let value = self.create_raw_table(narr, nrec)?;
+        let value = self.create_table(narr, nrec)?;
         self.push_value(value)
     }
 
@@ -780,7 +780,7 @@ impl StackApi for LuaState {
     }
 
     fn lua_pushuserdata<T: UserDataTrait + 'static>(&mut self, data: T) -> LuaResult<()> {
-        let value = self.create_raw_userdata(LuaUserdata::new(data))?;
+        let value = self.create_userdata(LuaUserdata::new(data))?;
         self.push_value(value)
     }
 

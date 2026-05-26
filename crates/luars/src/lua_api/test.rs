@@ -9,7 +9,7 @@ mod tests {
     use crate::lua_api::Value;
     use crate::{
         GlobalState, LuaApi, LuaAsyncApi, LuaUserData, LuaValue, LuaValueKind, SafeOption,
-        StackApi, Stdlib,
+        LuaStackApi, Stdlib,
         lua_api::{LuaFunction, Lua, LuaTable},
         lua_methods,
     };
@@ -609,8 +609,8 @@ mod tests {
         lua.open_stdlib(Stdlib::All).unwrap();
 
         lua.install_library(crate::lua_preload_module!("test_install_module" => |l| {
-            let table = l.create_raw_table(0, 1)?;
-            let key = l.create_raw_string("value")?;
+            let table = l.create_table(0, 1)?;
+            let key = l.create_string("value")?;
             l.global_state_mut().raw_set(&table, key, crate::LuaValue::integer(42));
             l.push_value(table)?;
             Ok(1)
@@ -707,7 +707,7 @@ mod tests {
         {
             let state = vm.main_state();
             state.lua_settop(0).unwrap();
-            let table = state.create_raw_table(0, 2).unwrap();
+            let table = state.create_table(0, 2).unwrap();
             state.push_value(table).unwrap();
 
             state.lua_pushstring("name").unwrap();

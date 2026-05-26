@@ -44,7 +44,7 @@ fn os_time(l: &mut LuaState) -> LuaResult<usize> {
         // os.time(table) - convert table to timestamp
         if let Some(_tbl) = table_val.as_table() {
             let get_field = |l: &mut LuaState, name: &str| -> Result<Option<i64>, String> {
-                let key = l.create_raw_string(name).unwrap();
+                let key = l.create_string(name).unwrap();
                 let val = table_val.as_table().unwrap().raw_get(&key);
                 match val {
                     Some(v) => {
@@ -236,25 +236,25 @@ fn normalize_time_table(
     table_val: &LuaValue,
     dt: &DateTime<Local>,
 ) -> LuaResult<()> {
-    let year_key = l.create_raw_string("year")?;
+    let year_key = l.create_string("year")?;
     l.raw_set(table_val, year_key, LuaValue::integer(dt.year() as i64));
-    let month_key = l.create_raw_string("month")?;
+    let month_key = l.create_string("month")?;
     l.raw_set(table_val, month_key, LuaValue::integer(dt.month() as i64));
-    let day_key = l.create_raw_string("day")?;
+    let day_key = l.create_string("day")?;
     l.raw_set(table_val, day_key, LuaValue::integer(dt.day() as i64));
-    let hour_key = l.create_raw_string("hour")?;
+    let hour_key = l.create_string("hour")?;
     l.raw_set(table_val, hour_key, LuaValue::integer(dt.hour() as i64));
-    let min_key = l.create_raw_string("min")?;
+    let min_key = l.create_string("min")?;
     l.raw_set(table_val, min_key, LuaValue::integer(dt.minute() as i64));
-    let sec_key = l.create_raw_string("sec")?;
+    let sec_key = l.create_string("sec")?;
     l.raw_set(table_val, sec_key, LuaValue::integer(dt.second() as i64));
-    let wday_key = l.create_raw_string("wday")?;
+    let wday_key = l.create_string("wday")?;
     l.raw_set(
         table_val,
         wday_key,
         LuaValue::integer(dt.weekday().number_from_sunday() as i64),
     );
-    let yday_key = l.create_raw_string("yday")?;
+    let yday_key = l.create_string("yday")?;
     l.raw_set(table_val, yday_key, LuaValue::integer(dt.ordinal() as i64));
 
     Ok(())
@@ -314,38 +314,38 @@ fn os_date(l: &mut LuaState) -> LuaResult<usize> {
     match actual_format {
         "*t" => {
             // Return table with date components
-            let table = l.create_raw_table(0, 9)?;
+            let table = l.create_table(0, 9)?;
 
-            let year_key = l.create_raw_string("year")?;
+            let year_key = l.create_string("year")?;
             l.raw_set(&table, year_key, LuaValue::integer(dt.year() as i64));
 
-            let month_key = l.create_raw_string("month")?;
+            let month_key = l.create_string("month")?;
             l.raw_set(&table, month_key, LuaValue::integer(dt.month() as i64));
 
-            let day_key = l.create_raw_string("day")?;
+            let day_key = l.create_string("day")?;
             l.raw_set(&table, day_key, LuaValue::integer(dt.day() as i64));
 
-            let hour_key = l.create_raw_string("hour")?;
+            let hour_key = l.create_string("hour")?;
             l.raw_set(&table, hour_key, LuaValue::integer(dt.hour() as i64));
 
-            let min_key = l.create_raw_string("min")?;
+            let min_key = l.create_string("min")?;
             l.raw_set(&table, min_key, LuaValue::integer(dt.minute() as i64));
 
-            let sec_key = l.create_raw_string("sec")?;
+            let sec_key = l.create_string("sec")?;
             l.raw_set(&table, sec_key, LuaValue::integer(dt.second() as i64));
 
             // wday: weekday (Sunday is 1)
-            let wday_key = l.create_raw_string("wday")?;
+            let wday_key = l.create_string("wday")?;
             let wday = dt.weekday().number_from_sunday();
             l.raw_set(&table, wday_key, LuaValue::integer(wday as i64));
 
             // yday: day of year (1-366)
-            let yday_key = l.create_raw_string("yday")?;
+            let yday_key = l.create_string("yday")?;
             let yday = dt.ordinal();
             l.raw_set(&table, yday_key, LuaValue::integer(yday as i64));
 
             // isdst: daylight saving time flag (TODO: implement properly)
-            let isdst_key = l.create_raw_string("isdst")?;
+            let isdst_key = l.create_string("isdst")?;
             l.raw_set(&table, isdst_key, LuaValue::boolean(false));
 
             l.push_value(table)?;
@@ -354,7 +354,7 @@ fn os_date(l: &mut LuaState) -> LuaResult<usize> {
         _ => {
             // Use strftime-style format string
             let date_str = format_date_string(dt, actual_format).map_err(|e| l.error(e))?;
-            let result = l.create_raw_string(&date_str)?;
+            let result = l.create_string(&date_str)?;
             l.push_value(result)?;
             Ok(1)
         }
@@ -560,13 +560,13 @@ fn os_execute(l: &mut LuaState) -> LuaResult<usize> {
             } else {
                 l.push_value(LuaValue::nil())?;
             }
-            let exit_str = l.create_raw_string("exit")?;
+            let exit_str = l.create_string("exit")?;
             l.push_value(exit_str)?;
             l.push_value(LuaValue::integer(exit_code as i64))?;
             Ok(3)
         }
         Err(error) => {
-            let msg = l.create_raw_string(&error.to_string())?;
+            let msg = l.create_string(&error.to_string())?;
             l.push_value(LuaValue::nil())?;
             l.push_value(msg)?;
             l.push_value(LuaValue::integer(error.raw_os_error().unwrap_or(0) as i64))?;
@@ -583,7 +583,7 @@ fn os_getenv(l: &mut LuaState) -> LuaResult<usize> {
 
     match std::env::var(&varname) {
         Ok(value) => {
-            let result = l.create_raw_string(&value)?;
+            let result = l.create_string(&value)?;
             l.push_value(result)?;
             Ok(1)
         }
@@ -606,7 +606,7 @@ fn os_remove(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         Err(e) => {
-            let err_msg = l.create_raw_string(&format!("{}", e))?;
+            let err_msg = l.create_string(&format!("{}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -630,7 +630,7 @@ fn os_rename(l: &mut LuaState) -> LuaResult<usize> {
             Ok(1)
         }
         Err(e) => {
-            let err_msg = l.create_raw_string(&format!("{}", e))?;
+            let err_msg = l.create_string(&format!("{}", e))?;
             l.push_value(LuaValue::nil())?;
             l.push_value(err_msg)?;
             Ok(2)
@@ -645,7 +645,7 @@ fn os_setlocale(l: &mut LuaState) -> LuaResult<usize> {
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "C".to_string());
 
-    let result = l.create_raw_string(&locale)?;
+    let result = l.create_string(&locale)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -654,7 +654,7 @@ fn os_tmpname(l: &mut LuaState) -> LuaResult<usize> {
     let timestamp = platform_time::unix_nanos();
 
     let tmpname = format!("/tmp/lua_tmp_{}", timestamp);
-    let result = l.create_raw_string(&tmpname)?;
+    let result = l.create_string(&tmpname)?;
     l.push_value(result)?;
     Ok(1)
 }

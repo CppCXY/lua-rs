@@ -15,7 +15,7 @@ pub fn objtypename(l: &mut LuaState, v: &LuaValue) -> String {
         && let Some(mt_table) = mt.as_table()
     {
         // Create a string key for __name lookup
-        if let Ok(key) = l.create_raw_string("__name")
+        if let Ok(key) = l.create_string("__name")
             && let Some(name_val) = mt_table.raw_get(&key)
             && let Some(s) = name_val.as_str()
         {
@@ -739,18 +739,18 @@ pub fn create_debug_lib() -> LibraryModule {
 /// This matches C Lua's luaopen_debug which creates a hook table for per-thread hooks.
 fn debug_lib_init(l: &mut LuaState) -> LuaResult<()> {
     // Create the hook table
-    let hook_table = l.create_raw_table(0, 0)?;
+    let hook_table = l.create_table(0, 0)?;
     // Create its metatable with __mode = "k" (weak keys)
-    let meta = l.create_raw_table(0, 1)?;
-    let mode_key = l.create_raw_string("__mode")?;
-    let mode_val = l.create_raw_string("k")?;
+    let meta = l.create_table(0, 1)?;
+    let mode_key = l.create_string("__mode")?;
+    let mode_val = l.create_string("k")?;
     l.raw_set(&meta, mode_key, mode_val);
     if let Some(hook_tbl) = hook_table.as_table_mut() {
         hook_tbl.set_metatable(Some(meta));
     }
     // Store in registry as _HOOKKEY
     let reg = l.global_state_mut().registry;
-    let hook_key = l.create_raw_string("_HOOKKEY")?;
+    let hook_key = l.create_string("_HOOKKEY")?;
     l.raw_set(&reg, hook_key, hook_table);
     Ok(())
 }
@@ -891,7 +891,7 @@ fn debug_traceback(l: &mut LuaState) -> LuaResult<usize> {
         }
     }
 
-    let result = l.create_raw_string(&trace)?;
+    let result = l.create_string(&trace)?;
     l.push_value(result)?;
     Ok(1)
 }
@@ -957,93 +957,93 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
     };
 
     // Convert DebugInfo to Lua table
-    let info_table = l.create_raw_table(0, 12)?;
+    let info_table = l.create_table(0, 12)?;
 
     // 'S' fields
     if let Some(ref source) = info.source {
-        let k = l.create_raw_string("source")?;
-        let v = l.create_raw_string(source)?;
+        let k = l.create_string("source")?;
+        let v = l.create_string(source)?;
         l.raw_set(&info_table, k, v);
     }
     if let Some(ref short_src) = info.short_src {
-        let k = l.create_raw_string("short_src")?;
-        let v = l.create_raw_string(short_src)?;
+        let k = l.create_string("short_src")?;
+        let v = l.create_string(short_src)?;
         l.raw_set(&info_table, k, v);
     }
     if let Some(linedefined) = info.linedefined {
-        let k = l.create_raw_string("linedefined")?;
+        let k = l.create_string("linedefined")?;
         l.raw_set(&info_table, k, LuaValue::integer(linedefined as i64));
     }
     if let Some(lastlinedefined) = info.lastlinedefined {
-        let k = l.create_raw_string("lastlinedefined")?;
+        let k = l.create_string("lastlinedefined")?;
         l.raw_set(&info_table, k, LuaValue::integer(lastlinedefined as i64));
     }
     if let Some(what) = info.what {
-        let k = l.create_raw_string("what")?;
-        let v = l.create_raw_string(what)?;
+        let k = l.create_string("what")?;
+        let v = l.create_string(what)?;
         l.raw_set(&info_table, k, v);
     }
 
     // 'l' field
     if let Some(currentline) = info.currentline {
-        let k = l.create_raw_string("currentline")?;
+        let k = l.create_string("currentline")?;
         l.raw_set(&info_table, k, LuaValue::integer(currentline as i64));
     }
 
     // 'u' fields
     if let Some(nups) = info.nups {
-        let k = l.create_raw_string("nups")?;
+        let k = l.create_string("nups")?;
         l.raw_set(&info_table, k, LuaValue::integer(nups as i64));
     }
     if let Some(nparams) = info.nparams {
-        let k = l.create_raw_string("nparams")?;
+        let k = l.create_string("nparams")?;
         l.raw_set(&info_table, k, LuaValue::integer(nparams as i64));
     }
     if let Some(isvararg) = info.isvararg {
-        let k = l.create_raw_string("isvararg")?;
+        let k = l.create_string("isvararg")?;
         l.raw_set(&info_table, k, LuaValue::boolean(isvararg));
     }
 
     // 'n' fields
     if info.namewhat.is_some() {
-        let k = l.create_raw_string("name")?;
+        let k = l.create_string("name")?;
         let v = if let Some(ref name) = info.name {
-            l.create_raw_string(name)?
+            l.create_string(name)?
         } else {
             LuaValue::nil()
         };
         l.raw_set(&info_table, k, v);
 
-        let k2 = l.create_raw_string("namewhat")?;
-        let v2 = l.create_raw_string(info.namewhat.as_deref().unwrap_or(""))?;
+        let k2 = l.create_string("namewhat")?;
+        let v2 = l.create_string(info.namewhat.as_deref().unwrap_or(""))?;
         l.raw_set(&info_table, k2, v2);
     }
 
     // 't' fields
     if let Some(istailcall) = info.istailcall {
-        let k = l.create_raw_string("istailcall")?;
+        let k = l.create_string("istailcall")?;
         l.raw_set(&info_table, k, LuaValue::boolean(istailcall));
     }
     if let Some(extraargs) = info.extraargs {
-        let k = l.create_raw_string("extraargs")?;
+        let k = l.create_string("extraargs")?;
         l.raw_set(&info_table, k, LuaValue::integer(extraargs as i64));
     }
 
     // 'r' fields
     if let Some(ftransfer) = info.ftransfer {
-        let k = l.create_raw_string("ftransfer")?;
+        let k = l.create_string("ftransfer")?;
         l.raw_set(&info_table, k, LuaValue::integer(ftransfer as i64));
     }
     if let Some(ntransfer) = info.ntransfer {
-        let k = l.create_raw_string("ntransfer")?;
+        let k = l.create_string("ntransfer")?;
         l.raw_set(&info_table, k, LuaValue::integer(ntransfer as i64));
     }
 
     // 'L' field
     if what_str.contains('L') {
-        let k = l.create_raw_string("activelines")?;
+        let k = l.create_string("activelines")?;
         if let Some(ref lines) = info.activelines {
-            let lines_table = l.create_raw_table(0, lines.len())?;
+            let lines_table = l.create_table(0, lines.len())?;
             for &line in lines {
                 l.raw_set(
                     &lines_table,
@@ -1059,7 +1059,7 @@ fn debug_getinfo(l: &mut LuaState) -> LuaResult<usize> {
 
     // 'f' field
     if let Some(func) = info.func {
-        let k = l.create_raw_string("func")?;
+        let k = l.create_string("func")?;
         l.raw_set(&info_table, k, func);
     }
 
@@ -1145,7 +1145,7 @@ fn debug_gethook(l: &mut LuaState) -> LuaResult<usize> {
     if mask & LUA_MASKLINE != 0 {
         mask_str.push('l');
     }
-    let mask_val = l.create_raw_string(&mask_str)?;
+    let mask_val = l.create_string(&mask_str)?;
     l.push_value(mask_val)?;
 
     // Push count
@@ -1294,7 +1294,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
                     if name.is_empty() || name.starts_with('(') {
                         return Ok(0);
                     }
-                    let name_str = l.create_raw_string(name)?;
+                    let name_str = l.create_string(name)?;
                     l.push_value(name_str)?;
                     return Ok(1);
                 }
@@ -1328,7 +1328,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
             return Ok(0);
         }
         let val = target.stack_get(base + local_index - 1).unwrap_or_default();
-        let name_str = l.create_raw_string("(C temporary)")?;
+        let name_str = l.create_string("(C temporary)")?;
         l.push_value(name_str)?;
         l.push_value(val)?;
         return Ok(2);
@@ -1373,7 +1373,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
 
             if value_idx < target.stack_len() {
                 let value = target.stack_get(value_idx).unwrap_or_default();
-                let name_str = l.create_raw_string("(vararg)")?;
+                let name_str = l.create_string("(vararg)")?;
                 l.push_value(name_str)?;
                 l.push_value(value)?;
                 return Ok(2);
@@ -1419,7 +1419,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
             };
             if value_idx < limit {
                 let value = target.stack_get(value_idx).unwrap_or_default();
-                let name_str = l.create_raw_string(name)?;
+                let name_str = l.create_string(name)?;
                 l.push_value(name_str)?;
                 l.push_value(value)?;
                 return Ok(2);
@@ -1436,7 +1436,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
             if (limit as isize - base as isize) >= n as isize && n > 0 {
                 let value_idx = base + n - 1;
                 let value = target.stack_get(value_idx).unwrap_or_default();
-                let name_str = l.create_raw_string("(temporary)")?;
+                let name_str = l.create_string("(temporary)")?;
                 l.push_value(name_str)?;
                 l.push_value(value)?;
                 return Ok(2);
@@ -1456,7 +1456,7 @@ fn debug_getlocal(l: &mut LuaState) -> LuaResult<usize> {
             if (limit as isize - base as isize) >= local_index as isize {
                 let value_idx = base + local_index - 1;
                 let value = target.stack_get(value_idx).unwrap_or_default();
-                let name_str = l.create_raw_string("(C temporary)")?;
+                let name_str = l.create_string("(C temporary)")?;
                 l.push_value(name_str)?;
                 l.push_value(value)?;
                 return Ok(2);
@@ -1553,7 +1553,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
 
             if value_idx < target.stack_len() {
                 target.stack_set(value_idx, value)?;
-                let name_str = l.create_raw_string("(vararg)")?;
+                let name_str = l.create_string("(vararg)")?;
                 l.push_value(name_str)?;
                 return Ok(1);
             }
@@ -1597,7 +1597,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
             };
             if value_idx < limit {
                 target.stack_set(value_idx, value)?;
-                let name_str = l.create_raw_string(name)?;
+                let name_str = l.create_string(name)?;
                 l.push_value(name_str)?;
                 return Ok(1);
             }
@@ -1614,7 +1614,7 @@ fn debug_setlocal(l: &mut LuaState) -> LuaResult<usize> {
             if (limit as isize - base as isize) >= n as isize && n > 0 {
                 let value_idx = base + n - 1;
                 target.stack_set(value_idx, value)?;
-                let name_str = l.create_raw_string("(temporary)")?;
+                let name_str = l.create_string("(temporary)")?;
                 l.push_value(name_str)?;
                 return Ok(1);
             }
@@ -1660,7 +1660,7 @@ fn debug_getupvalue(l: &mut LuaState) -> LuaResult<usize> {
                 } else {
                     name.as_str()
                 };
-                let name_str = l.create_raw_string(display_name)?;
+                let name_str = l.create_string(display_name)?;
 
                 // Get the value
                 let value = upvalue.as_ref().data.get_value();
@@ -1674,7 +1674,7 @@ fn debug_getupvalue(l: &mut LuaState) -> LuaResult<usize> {
         let upvalues = cclosure.upvalues();
         if up_index > 0 && up_index <= upvalues.len() {
             let value = upvalues[up_index - 1];
-            let name_str = l.create_raw_string("")?;
+            let name_str = l.create_string("")?;
             l.push_value(name_str)?;
             l.push_value(value)?;
             return Ok(2);
@@ -1684,7 +1684,7 @@ fn debug_getupvalue(l: &mut LuaState) -> LuaResult<usize> {
         let upvalues = rclosure.upvalues();
         if up_index > 0 && up_index <= upvalues.len() {
             let value = upvalues[up_index - 1];
-            let name_str = l.create_raw_string("")?;
+            let name_str = l.create_string("")?;
             l.push_value(name_str)?;
             l.push_value(value)?;
             return Ok(2);
@@ -1748,7 +1748,7 @@ fn debug_setupvalue(l: &mut LuaState) -> LuaResult<usize> {
             } else {
                 upvalue_name
             };
-            let name_val = l.create_raw_string(&display_name)?;
+            let name_val = l.create_string(&display_name)?;
             l.push_value(name_val)?;
             return Ok(1);
         }

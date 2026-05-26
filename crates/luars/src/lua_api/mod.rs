@@ -113,7 +113,7 @@ pub(crate) trait StackValueApi {
     fn from_value<T: FromLua>(&mut self, value: LuaValue, api_name: &str) -> LuaResult<T>;
 }
 
-pub trait StackApi {
+pub trait LuaStackApi {
     fn lua_gettop(&self) -> isize;
     fn lua_settop(&mut self, idx: isize) -> LuaResult<()>;
     fn lua_absindex(&self, idx: isize) -> Option<isize>;

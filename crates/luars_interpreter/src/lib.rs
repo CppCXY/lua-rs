@@ -142,19 +142,18 @@ fn setup_arg_table(vm: &mut Lua, exe_path: &str, script_name: Option<&str>, args
 
     // arg[0] = script name (or nil)
     if let Some(name) = script_name {
-        vm.table_seti(&arg_table, 0, name).unwrap();
+        arg_table.set(0_i64, name).unwrap();
     }
 
     // arg[-1] = interpreter executable path
-    vm.table_seti(&arg_table, -1, exe_path).unwrap();
+    arg_table.set(-1_i64, exe_path).unwrap();
 
     // arg[1], arg[2], ... = script arguments
     for (i, a) in args.iter().enumerate() {
-        vm.table_seti(&arg_table, (i + 1) as i64, a.as_str())
-            .unwrap();
+        arg_table.set((i + 1) as i64, a.as_str()).unwrap();
     }
 
-    let _ = vm.set_global_table("arg", &arg_table);
+    let _ = vm.globals().set("arg", &arg_table);
 }
 
 fn require_module(vm: &mut Lua, module: &str) -> Result<(), String> {

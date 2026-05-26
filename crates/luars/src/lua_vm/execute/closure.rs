@@ -47,7 +47,7 @@ pub fn push_closure(
     };
 
     // Create the function with the proto and upvalues
-    let closure_value = lua_state.create_raw_function(proto, upvalue_store)?;
+    let closure_value = lua_state.create_function(proto, upvalue_store)?;
 
     // Store in R[A]
     lua_state.stack_mut()[base + a] = closure_value;

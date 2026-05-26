@@ -84,11 +84,11 @@ fn coroutine_resume(l: &mut LuaState) -> LuaResult<usize> {
                 if !active_err_obj.is_nil() {
                     active_err_obj
                 } else if !active_msg.is_empty() {
-                    l.create_raw_string(&active_msg)?
+                    l.create_string(&active_msg)?
                 } else {
                     match thread.dead_error() {
                         ErrorMsg::Object(obj) => *obj,
-                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_raw_string(msg)?,
+                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_string(msg)?,
                         _ => LuaValue::nil(),
                     }
                 }
@@ -262,14 +262,14 @@ fn coroutine_wrap_call(l: &mut LuaState) -> LuaResult<usize> {
 
                 let active_msg = thread.get_error_msg(e);
                 if !active_msg.is_empty() {
-                    let err_str = l.create_raw_string(&active_msg)?;
+                    let err_str = l.create_string(&active_msg)?;
                     return Err(l.error_with_object(err_str));
                 }
 
                 match thread.dead_error() {
                     ErrorMsg::Object(obj) => return Err(l.error_with_object(*obj)),
                     ErrorMsg::Msg(msg) if !msg.is_empty() => {
-                        let err_str = l.create_raw_string(msg)?;
+                        let err_str = l.create_string(msg)?;
                         return Err(l.error_with_object(err_str));
                     }
                     _ => {}
@@ -397,7 +397,7 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
                 if !matches!(thread.dead_error(), ErrorMsg::None) {
                     let err_val = match thread.take_dead_error() {
                         ErrorMsg::Object(obj) => obj,
-                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_raw_string(&msg)?,
+                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_string(&msg)?,
                         _ => LuaValue::nil(),
                     };
                     l.push_value(LuaValue::boolean(false))?;
@@ -425,13 +425,13 @@ fn coroutine_close(l: &mut LuaState) -> LuaResult<usize> {
                 } else {
                     match thread.take_dead_error() {
                         ErrorMsg::Object(obj) => obj,
-                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_raw_string(&msg)?,
+                        ErrorMsg::Msg(msg) if !msg.is_empty() => l.create_string(&msg)?,
                         _ => {
                             let msg = thread.take_error_msg_raw();
                             if msg.is_empty() {
                                 LuaValue::nil()
                             } else {
-                                l.create_raw_string(&msg)?
+                                l.create_string(&msg)?
                             }
                         }
                     }

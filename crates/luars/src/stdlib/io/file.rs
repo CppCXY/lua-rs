@@ -739,57 +739,57 @@ impl UserDataTrait for LuaFile {
 
 /// Create file metatable with methods
 pub fn create_file_metatable(l: &mut LuaState) -> LuaResult<LuaValue> {
-    let mt = l.create_raw_table(0, 1)?;
+    let mt = l.create_table(0, 1)?;
 
     // Create __index table with methods
-    let index_table = l.create_raw_table(0, 7)?;
+    let index_table = l.create_table(0, 7)?;
 
     // file:read([format])
-    let read_key = l.create_raw_string("read")?;
+    let read_key = l.create_string("read")?;
     l.raw_set(&index_table, read_key, LuaValue::cfunction(file_read));
 
     // file:write(...)
-    let write_key = l.create_raw_string("write")?;
+    let write_key = l.create_string("write")?;
     l.raw_set(&index_table, write_key, LuaValue::cfunction(file_write));
 
     // file:flush()
-    let flush_key = l.create_raw_string("flush")?;
+    let flush_key = l.create_string("flush")?;
     l.raw_set(&index_table, flush_key, LuaValue::cfunction(file_flush));
 
     // file:close()
-    let close_key = l.create_raw_string("close")?;
+    let close_key = l.create_string("close")?;
     l.raw_set(&index_table, close_key, LuaValue::cfunction(file_close));
 
     // file:lines([formats])
-    let lines_key = l.create_raw_string("lines")?;
+    let lines_key = l.create_string("lines")?;
     l.raw_set(&index_table, lines_key, LuaValue::cfunction(file_lines));
 
     // file:seek([whence [, offset]])
-    let seek_key = l.create_raw_string("seek")?;
+    let seek_key = l.create_string("seek")?;
     l.raw_set(&index_table, seek_key, LuaValue::cfunction(file_seek));
 
     // file:setvbuf(mode [, size])
-    let setvbuf_key = l.create_raw_string("setvbuf")?;
+    let setvbuf_key = l.create_string("setvbuf")?;
     l.raw_set(&index_table, setvbuf_key, LuaValue::cfunction(file_setvbuf));
 
-    let index_key = l.create_raw_string("__index")?;
+    let index_key = l.create_string("__index")?;
     l.raw_set(&mt, index_key, index_table);
 
     // Set __close = file_gc_close (for <close> variables) - silently handles already-closed files
-    let close_mm_key = l.create_raw_string("__close")?;
+    let close_mm_key = l.create_string("__close")?;
     l.raw_set(&mt, close_mm_key, LuaValue::cfunction(file_gc_close));
 
     // Set __gc = file_gc_close (for garbage collection) - silently handles already-closed files
-    let gc_key = l.create_raw_string("__gc")?;
+    let gc_key = l.create_string("__gc")?;
     l.raw_set(&mt, gc_key, LuaValue::cfunction(file_gc_close));
 
     // Set __tostring for file objects
-    let tostring_key = l.create_raw_string("__tostring")?;
+    let tostring_key = l.create_string("__tostring")?;
     l.raw_set(&mt, tostring_key, LuaValue::cfunction(file_tostring));
 
     // Set __name = "FILE*" for type identification (luaT_objtypename)
-    let name_key = l.create_raw_string("__name")?;
-    let name_val = l.create_raw_string("FILE*")?;
+    let name_key = l.create_string("__name")?;
+    let name_val = l.create_string("FILE*")?;
     l.raw_set(&mt, name_key, name_val);
 
     Ok(mt)
@@ -864,7 +864,7 @@ fn file_write(l: &mut LuaState) -> LuaResult<usize> {
                 if let Err(e) = write_result {
                     // Return (nil, errmsg, errno) like C Lua
                     l.push_value(LuaValue::nil())?;
-                    let msg = l.create_raw_string(&format!("{}", e))?;
+                    let msg = l.create_string(&format!("{}", e))?;
                     l.push_value(msg)?;
                     let errno = e.raw_os_error().unwrap_or(0);
                     l.push_value(LuaValue::integer(errno as i64))?;
@@ -898,7 +898,7 @@ fn file_flush(l: &mut LuaState) -> LuaResult<usize> {
                 l.push_value(LuaValue::nil())?;
                 let msg = format!("{}", e);
                 let errno = e.raw_os_error().unwrap_or(0) as i64;
-                let err_str = l.create_raw_string(&msg)?;
+                let err_str = l.create_string(&msg)?;
                 l.push_value(err_str)?;
                 l.push_value(LuaValue::integer(errno))?;
                 return Ok(3);
@@ -956,7 +956,7 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
             // Cannot close standard streams - return nil, msg
             if lua_file.is_std_stream() {
                 l.push_value(LuaValue::nil())?;
-                let msg = l.create_raw_string("cannot close standard file")?;
+                let msg = l.create_string("cannot close standard file")?;
                 l.push_value(msg)?;
                 return Ok(2);
             }
@@ -971,7 +971,7 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
                     } else {
                         l.push_value(LuaValue::nil())?;
                     }
-                    let kind = l.create_raw_string(status.kind)?;
+                    let kind = l.create_string(status.kind)?;
                     l.push_value(kind)?;
                     l.push_value(LuaValue::integer(status.code as i64))?;
                     return Ok(3);
@@ -980,7 +980,7 @@ fn file_close(l: &mut LuaState) -> LuaResult<usize> {
                     l.push_value(LuaValue::nil())?;
                     let msg = format!("{}", e);
                     let errno = e.raw_os_error().unwrap_or(0) as i64;
-                    let err_str = l.create_raw_string(&msg)?;
+                    let err_str = l.create_string(&msg)?;
                     l.push_value(err_str)?;
                     l.push_value(LuaValue::integer(errno))?;
                     return Ok(3);
@@ -1008,13 +1008,13 @@ fn file_tostring(l: &mut LuaState) -> LuaResult<usize> {
             } else {
                 format!("file ({:p})", ud as *const _)
             };
-            let val = l.create_raw_string(&s)?;
+            let val = l.create_string(&s)?;
             l.push_value(val)?;
             return Ok(1);
         }
     }
 
-    let val = l.create_raw_string("file (closed)")?;
+    let val = l.create_string("file (closed)")?;
     l.push_value(val)?;
     Ok(1)
 }
@@ -1036,22 +1036,22 @@ fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
 
     // Create a callable state table with __call metamethod
     // file:lines() does NOT close the file when iteration ends
-    let state_table = l.create_raw_table(0, 5)?;
-    let file_key = l.create_raw_string("file")?;
+    let state_table = l.create_table(0, 5)?;
+    let file_key = l.create_string("file")?;
     l.raw_set(&state_table, file_key, file_val);
-    let closed_key = l.create_raw_string("closed")?;
+    let closed_key = l.create_string("closed")?;
     l.raw_set(&state_table, closed_key, LuaValue::boolean(false));
-    let noclose_key = l.create_raw_string("noclose")?;
+    let noclose_key = l.create_string("noclose")?;
     l.raw_set(&state_table, noclose_key, LuaValue::boolean(true));
 
     // Store formats
-    let fmts_table = l.create_raw_table(formats.len(), 0)?;
+    let fmts_table = l.create_table(formats.len(), 0)?;
     for (idx, fmt) in formats.iter().enumerate() {
         l.raw_seti(&fmts_table, (idx + 1) as i64, *fmt);
     }
-    let fmts_key = l.create_raw_string("fmts")?;
+    let fmts_key = l.create_string("fmts")?;
     l.raw_set(&state_table, fmts_key, fmts_table);
-    let nfmts_key = l.create_raw_string("nfmts")?;
+    let nfmts_key = l.create_string("nfmts")?;
     l.raw_set(
         &state_table,
         nfmts_key,
@@ -1059,8 +1059,8 @@ fn file_lines(l: &mut LuaState) -> LuaResult<usize> {
     );
 
     // Create metatable with __call using the shared io_lines_call
-    let mt = l.create_raw_table(0, 1)?;
-    let call_key = l.create_raw_string("__call")?;
+    let mt = l.create_table(0, 1)?;
+    let call_key = l.create_string("__call")?;
     l.raw_set(&mt, call_key, LuaValue::cfunction(super::io_lines_call));
     if let Some(t) = state_table.as_table_mut() {
         t.set_metatable(Some(mt));
@@ -1102,7 +1102,7 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
                 #[cfg(not(target_arch = "wasm32"))]
                 FileInner::PopenRead(_) | FileInner::PopenWrite(_) => {
                     l.push_value(LuaValue::nil())?;
-                    let msg = l.create_raw_string("cannot seek on piped stream")?;
+                    let msg = l.create_string("cannot seek on piped stream")?;
                     l.push_value(msg)?;
                     l.push_value(LuaValue::integer(29))?;
                     return Ok(3);
@@ -1113,7 +1113,7 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
                 FileInner::Stdin | FileInner::Stdout | FileInner::Stderr => {
                     // Seeking on std streams fails - return nil, msg, errno
                     l.push_value(LuaValue::nil())?;
-                    let msg = l.create_raw_string("cannot seek on standard stream")?;
+                    let msg = l.create_string("cannot seek on standard stream")?;
                     l.push_value(msg)?;
                     l.push_value(LuaValue::integer(29))?; // ESPIPE
                     return Ok(3);
@@ -1128,7 +1128,7 @@ fn file_seek(l: &mut LuaState) -> LuaResult<usize> {
                 Err(e) => {
                     // Return nil, msg, errno
                     l.push_value(LuaValue::nil())?;
-                    let msg = l.create_raw_string(&e.to_string())?;
+                    let msg = l.create_string(&e.to_string())?;
                     l.push_value(msg)?;
                     let errno = e.raw_os_error().unwrap_or(0) as i64;
                     l.push_value(LuaValue::integer(errno))?;

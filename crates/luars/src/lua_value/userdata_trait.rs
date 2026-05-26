@@ -505,12 +505,12 @@ pub fn udvalue_to_lua_value(lua_state: &mut LuaState, udv: UdValue) -> LuaResult
         UdValue::Boolean(b) => Ok(LuaValue::boolean(b)),
         UdValue::Integer(i) => Ok(LuaValue::integer(i)),
         UdValue::Number(n) => Ok(LuaValue::float(n)),
-        UdValue::Str(s) => lua_state.create_raw_string(&s),
+        UdValue::Str(s) => lua_state.create_string(&s),
         UdValue::Function(f) => Ok(LuaValue::cfunction(f)),
         UdValue::UserdataRef(_) => Ok(LuaValue::nil()), // should not be returned
         UdValue::UserdataOwned(ud) => {
             let userdata = LuaUserdata::from_boxed(ud);
-            lua_state.create_raw_userdata(userdata)
+            lua_state.create_userdata(userdata)
         }
     }
 }

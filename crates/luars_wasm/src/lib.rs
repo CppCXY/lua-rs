@@ -1,4 +1,4 @@
-use luars::{Lua, LuaApi, LuaValue, SafeOption, Stdlib};
+use luars::{Lua, LuaApi, LuaFunction, LuaValue, SafeOption, Stdlib};
 use wasm_bindgen::prelude::*;
 
 mod conversion;
@@ -208,7 +208,7 @@ impl LuaWasm {
         // Lookup the function by name, then call it
         let func = self
             .lua
-            .get_function(func_name)
+            .get_global::<LuaFunction>(func_name)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?
             .ok_or_else(|| JsValue::from_str(&format!("global '{}' not found", func_name)))?;
         let lua_args = self.js_array_to_lua_args(args)?;

@@ -2,8 +2,8 @@
 use crate::*;
 
 fn luaopen_test_install_module(l: &mut LuaState) -> LuaResult<usize> {
-    let table = l.create_raw_table(0, 1)?;
-    let key = l.create_raw_string("value")?;
+    let table = l.create_table(0, 1)?;
+    let key = l.create_string("value")?;
     l.global_state_mut()
         .raw_set(&table, key, LuaValue::integer(42));
     l.push_value(table)?;

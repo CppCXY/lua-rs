@@ -47,7 +47,7 @@ pub fn lua_require(l: &mut LuaState) -> LuaResult<usize> {
     }
 
     // Get package.searchers from the original package table (stored in registry)
-    let searchers_key = l.create_raw_string("searchers")?;
+    let searchers_key = l.create_string("searchers")?;
     let Some(package_table) = package_table_value.as_table() else {
         return Err(l.error("package must be a table".to_string()));
     };

@@ -809,7 +809,7 @@ fn finish_c_frame(lua_state: &mut LuaState, frame_idx: usize) -> LuaResult<()> {
                             Ok((true, results)) => {
                                 results.into_iter().next().unwrap_or(LuaValue::nil())
                             }
-                            _ => lua_state.create_raw_string("error in error handling")?,
+                            _ => lua_state.create_string("error in error handling")?,
                         }
                     } else {
                         result_err
